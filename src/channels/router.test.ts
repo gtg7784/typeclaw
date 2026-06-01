@@ -1417,6 +1417,25 @@ describe('ChannelRouter auto-react on engage', () => {
     })
     expect(result).toEqual({ ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' })
   })
+
+  test('react() converts a throwing callback into a transient failure result, not a rejection', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerReaction('discord-bot', async () => {
+      throw new Error('reaction api exploded')
+    })
+
+    const result = await router.react({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      reactionRef: REACTION_REF,
+      emoji: 'eyes',
+    })
+
+    expect(result).toEqual({ ok: false, error: 'reaction api exploded', code: 'transient' })
+  })
 })
 
 describe('ChannelRouter channel-turn protocol', () => {

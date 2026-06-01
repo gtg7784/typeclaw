@@ -1986,7 +1986,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
     let lastError: ReactionResult | undefined
     for (const cb of Array.from(callbacks)) {
-      const result = await cb(req)
+      // A ReactionCallback that throws must not reject this promise: react() is
+      // called both fire-and-forget (autoReactOnEngage) and awaited by the
+      // channel_react tool, and neither should have to wrap it in try/catch. A
+      // throw is converted to a transient failure result so every caller gets a
+      // uniform { ok: false } instead of an exception.
+      const result = await cb(req).catch(
+        (err): ReactionResult => ({ ok: false, error: describe(err), code: 'transient' }),
+      )
       if (result.ok) return result
       lastError = result
     }
