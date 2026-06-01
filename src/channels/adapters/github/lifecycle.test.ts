@@ -1134,4 +1134,70 @@ describe('createGithubAdapter lifecycle', () => {
     expect(calls.some((c) => c.url.endsWith('/access_tokens'))).toBe(false)
     await adapter.stop()
   })
+
+  describe('App-auth token bridge repo allowlist', () => {
+    function mintingFetch(): { fetch: typeof fetch; calls: Call[] } {
+      return fakeFetchRecording(({ url, method }) => {
+        if (url.endsWith('/app') && method === 'GET') return Response.json({ slug: 'mybot' })
+        if (url.includes('/users/') && method === 'GET') return Response.json({ id: 1, login: 'mybot[bot]' })
+        const install = url.match(/\/repos\/([^/]+)\/([^/]+)\/installation$/)
+        if (install && method === 'GET') return Response.json({ id: 777 })
+        if (url.endsWith('/app/installations/777/access_tokens') && method === 'POST') {
+          return Response.json({ token: 'ghs_minted', expires_at: '2099-01-01T00:00:00Z' }, { status: 201 })
+        }
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      })
+    }
+
+    test('mints for a repo in repos[]', async () => {
+      const { createGithubTokenBridge } = await import('@/channels/github-token-bridge')
+      const bridge = createGithubTokenBridge()
+      const { fetch: fetchImpl } = mintingFetch()
+      const adapter = createGithubAdapter({
+        router: freshRouter(),
+        configRef: () => githubConfig(['acme/widgets']),
+        secrets: appSecrets(),
+        agentDir: '/tmp/agent',
+        logger: silentLogger(),
+        fetchImpl,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+        githubTokenBridge: bridge,
+      })
+
+      await adapter.start()
+      const result = await bridge.resolveTokenForRepo('acme/widgets')
+      await adapter.stop()
+
+      expect(result).toEqual({ kind: 'token', token: 'ghs_minted' })
+    })
+
+    test('refuses to mint for a repo not in repos[] (blocks cross-repo token minting)', async () => {
+      const { createGithubTokenBridge } = await import('@/channels/github-token-bridge')
+      const bridge = createGithubTokenBridge()
+      const { fetch: fetchImpl, calls } = mintingFetch()
+      const adapter = createGithubAdapter({
+        router: freshRouter(),
+        configRef: () => githubConfig(['acme/widgets']),
+        secrets: appSecrets(),
+        agentDir: '/tmp/agent',
+        logger: silentLogger(),
+        fetchImpl,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+        githubTokenBridge: bridge,
+      })
+
+      await adapter.start()
+      const result = await bridge.resolveTokenForRepo('victim/private')
+      await adapter.stop()
+
+      expect(result.kind).toBe('unavailable')
+      if (result.kind === 'unavailable') expect(result.reason).toContain('not in this agent')
+      // The disallowed repo is never even looked up — the allowlist rejects it
+      // before any GitHub API call. (The configured repo IS minted during
+      // start()'s seed/preflight, so we assert on the victim repo specifically.)
+      expect(calls.some((c) => c.url.includes('/repos/victim/private/'))).toBe(false)
+    })
+  })
 })
