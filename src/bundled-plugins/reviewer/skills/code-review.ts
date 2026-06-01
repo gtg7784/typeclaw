@@ -64,6 +64,14 @@ Prioritize in this order:
 - **request-changes** — At least one blocker, OR a load-bearing concern that needs an answer before this lands.
 - **comment** — Mixed signal: useful observations without a clear approve/reject. Common on large refactors where you reviewed part of the change, or on early-draft PRs where the author asked for direction more than approval.
 
+### Re-reviews must re-decide, not observe
+
+When the payload tells you this is a **re-review** — you (or this agent) previously requested changes on this PR and the author has pushed fixes and asked again — your verdict's whole purpose is to **re-decide the blocking state**, so:
+
+- Return **approve** if the blockers that drove the prior \`request-changes\` are resolved (leftover nits do not block — \`approve\` with inline nits is correct).
+- Return **request-changes** if any blocker remains or a new one appeared.
+- **Do NOT return \`comment\` on a re-review.** \`comment\` is for ambiguous partial reviews with no accept/reject signal; a re-review is the opposite — it is precisely an accept/reject decision. A \`comment\` verdict here leaves the PR's \`REQUEST_CHANGES\` state stuck (a plain comment does not clear it on GitHub), which is the exact failure a re-review exists to resolve. The only escape hatch is the same one that always applies: if you genuinely cannot reach the diff or the prior context, return one \`blocker\` finding stating what you need and a \`comment\` verdict — but a reachable, reviewable re-review must end in \`approve\` or \`request-changes\`.
+
 ## Line-anchor every finding
 
 Code review is line-level work, and your findings are meant to land as **inline comments on the exact lines they describe**. The parent agent posts them that way — it reads the \`location\` on each \`<finding>\` and attaches your \`<issue>\`/\`<evidence>\`/\`<suggestion>\` to that line. A finding with no line anchor cannot be posted inline; the parent can only fold it into a top-level summary, which strips the one thing that made it actionable.

@@ -42,13 +42,23 @@ A `review_request_removed` inbound ("removed your review request on PR #N") is t
 
 The `reviewer` subagent is the analyst; you are the integration layer between its output and GitHub's review API. It loads the `code-review` skill on demand and returns line-anchored findings inside a `<review>` block. Your job is mechanics: spawn, wait, translate, post.
 
-1. **Confirm the target.** Capture the PR number, the repo, and the head SHA — you may need the SHA to read files at the revision the reviewer analyzed.
+1. **Confirm the target, and check whether you already reviewed it.** Capture the PR number, the repo, and the head SHA — you may need the SHA to read files at the revision the reviewer analyzed.
 
    ```sh
    gh pr view <N> --repo owner/repo --json title,body,baseRefName,headRefOid,files
    ```
 
+   Then check for a **prior review by you** — this is what makes the current request a _re-review_ (the author pushed fixes and re-requested you after you previously blocked the PR):
+
+   ```sh
+   gh api /repos/owner/repo/pulls/<N>/reviews --jq '[.[] | select(.user.login == "<your-login>")] | last | {state, submitted_at}'
+   ```
+
+   If that returns a prior review whose `state` is `CHANGES_REQUESTED` (or `COMMENTED`), treat the current request as a **re-review** and carry that fact into the spawn in step 2. (`<your-login>` is your GitHub App login, typically `name[bot]`.)
+
 2. **Spawn the `reviewer` subagent with the PR target.** Use `run_in_background: true` so you stay responsive while the deep model works. Pass the PR URL (or `owner/repo#N`) plus any context the requester gave you (focus areas, specific files, etc.). The reviewer fetches the diff itself (`gh pr diff`, `gh api /repos/.../pulls/<n>`), loads the `code-review` skill, and returns a `<review>` block whose code findings carry `location="path:line"`.
+
+   **If step 1 found a prior `CHANGES_REQUESTED` review, say so in the spawn payload** — e.g. _"This is a re-review: you previously requested changes on this PR (the prior blockers were …). Verify they are resolved and return `approve` or `request-changes` — a re-review must re-decide the blocking state, not return `comment`."_ The reviewer's `code-review` skill enforces the same rule, but telling it the prior verdict is what lets it apply that rule; a fresh reviewer session has no memory of your earlier review.
 
    Do **not** post an "on it" acknowledgement comment before spawning the reviewer — the runtime already adds an :eyes: reaction to the PR the moment it engages, so a "looking into this" comment is redundant noise. Just spawn the reviewer with `run_in_background: true` and keep working; the formal review is your reply. If you want to acknowledge explicitly, use `channel_react({ emoji: "eyes" })`, which reacts without posting a comment.
 
@@ -81,6 +91,8 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    | `comment`         | `COMMENT`         |
 
    **Operator approval policy.** If the inbound carries a note that PR approval is disabled (`channels.github.review.approve: false` — the adapter appends "Operator policy: PR approval is disabled for this agent" to the message), you must **not** submit an `APPROVE`. Map an `approve` verdict to `COMMENT` instead: post the same `<summary>` and all inline `comments[]` as a `COMMENT` review, just without the formal approval. `request-changes` and `comment` verdicts are unaffected (they never approve). Absent that note, approval is enabled and the table above applies unchanged.
+
+   **Re-review.** If step 1 established this is a re-review (you previously submitted a `CHANGES_REQUESTED` review), the result MUST be a formal review carrying an `approve` or `request-changes` verdict — never a top-level PR comment. On GitHub, `REQUEST_CHANGES` is a sticky blocking state: a plain issue comment does **not** clear it, only a fresh `APPROVE` (or, under the operator policy above, a `COMMENT` review) does. So even if the reviewer returns zero actionable findings, do **not** take the `comment` → top-level-comment branch below for a re-review; submit a formal review with the `<summary>` as the body so the prior block is resolved. The reviewer's skill is instructed not to return `comment` on a re-review; if it does anyway despite a reachable diff, prefer `approve` when the prior blockers are visibly resolved in the diff, otherwise `request-changes` — and say which in your reasoning.
 
    Then submit the review. **Write the JSON payload to a file with the `write` tool, then run a single bare `gh api --input <file>`** — two steps:
 
@@ -129,7 +141,7 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
 A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. The inline-review post in step 4 applies whenever the actionable count is **at least one**. When the reviewer returns **exactly zero** actionable findings (only `praise`, or none), there is nothing to anchor inline — handle by verdict:
 
 - `approve` → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array). **If the operator approval policy above disabled approval, submit a `COMMENT` review instead — same `<summary>` as the review body, `event: "COMMENT"`, no `comments[]` array. Keep it a formal review, not a top-level issue comment, so the review metadata and flow are preserved.**
-- `comment` → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review.
+- `comment` → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review. **Exception — re-reviews:** if this is a re-review (you previously submitted `CHANGES_REQUESTED`), a top-level comment does not clear the sticky block. Do not use this branch; submit a formal review instead (`APPROVE` if the prior blockers are resolved, `REQUEST_CHANGES` if not), with the `<summary>` as the body. See the "Re-review" note in step 4.
 - `request-changes` → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern); if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
 
 The bundled `agent-browser` is **not** for PR reviews — `gh api` is faster and more reliable. Only use the browser when the API genuinely can't reach what you need.
