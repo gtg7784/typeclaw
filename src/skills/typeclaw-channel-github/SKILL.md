@@ -80,6 +80,8 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    | `request-changes` | `REQUEST_CHANGES` |
    | `comment`         | `COMMENT`         |
 
+   **Operator approval policy.** If the inbound carries a note that PR approval is disabled (`channels.github.review.approve: false` — the adapter appends "Operator policy: PR approval is disabled for this agent" to the message), you must **not** submit an `APPROVE`. Map an `approve` verdict to `COMMENT` instead: post the same `<summary>` and all inline `comments[]` as a `COMMENT` review, just without the formal approval. `request-changes` and `comment` verdicts are unaffected (they never approve). Absent that note, approval is enabled and the table above applies unchanged.
+
    Then submit the review. **Write the JSON payload to a file with the `write` tool, then run a single bare `gh api --input <file>`** — two steps:
 
    First write `/tmp/review.json` (via the `write` tool, not bash):
@@ -126,7 +128,7 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
 
 A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. The inline-review post in step 4 applies whenever the actionable count is **at least one**. When the reviewer returns **exactly zero** actionable findings (only `praise`, or none), there is nothing to anchor inline — handle by verdict:
 
-- `approve` → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array).
+- `approve` → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array). **If the operator approval policy above disabled approval, submit a `COMMENT` review instead — same `<summary>` as the review body, `event: "COMMENT"`, no `comments[]` array. Keep it a formal review, not a top-level issue comment, so the review metadata and flow are preserved.**
 - `comment` → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review.
 - `request-changes` → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern); if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
 

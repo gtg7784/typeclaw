@@ -131,6 +131,23 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
   'pull_request_review.submitted',
 ] as const
 
+// PR-review policy knobs. Grouped under `review` so future toggles
+// (`requestChanges`, auto-review-on-request, severity thresholds) cluster
+// here instead of flattening onto the channel root.
+//
+// `approve` gates whether the agent may submit a formal review with
+// `event: APPROVE`. When `false`, the adapter appends an operator-policy note
+// to inbounds and the `typeclaw-channel-github` skill downgrades an `approve`
+// verdict to a `COMMENT` review (findings still posted, no formal approval).
+// Enforced in the inbound text rather than at the bash layer because the
+// review posts via `gh api --input <file>`, so the `event` value lives in a
+// temp file the command interceptor never sees.
+const githubReviewSchema = z
+  .object({
+    approve: z.boolean().default(true),
+  })
+  .default({ approve: true })
+
 const githubChannelSchema = adapterSchema.extend({
   // Optional now (PR 2): when omitted and a `tunnels[]` entry with
   // `for: { kind: 'channel', name: 'github' }` exists, the runtime resolves
@@ -146,6 +163,7 @@ const githubChannelSchema = adapterSchema.extend({
   // this session is deleted so a restart with a different webhookUrl (e.g.
   // a tunnel reassigning a URL) doesn't leave orphaned hooks on GitHub.
   repos: z.array(z.string()).default([]),
+  review: githubReviewSchema,
 })
 
 // KakaoTalk uses the same shape as every other adapter. There used to be an

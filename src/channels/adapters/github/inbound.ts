@@ -19,6 +19,10 @@ export type GithubWebhookHandlerOptions = {
   // Defaults to 'pat' when omitted. In 'app' mode classifyReviewRequest also
   // matches the App's decoy reviewer login; see resolveDecoyReviewerLogin.
   authType?: () => 'pat' | 'app'
+  // Defaults to true when omitted. When it returns false, every inbound carries
+  // an appended operator-policy note telling the agent not to submit an APPROVE
+  // review; the github skill keys off that note to downgrade approve→COMMENT.
+  allowApprove?: () => boolean
   route: (message: InboundMessage) => void
   logger: GithubInboundLogger
   // Optional: resolves whether the bot is a member of the given team. When
@@ -75,9 +79,27 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     if (classified === null) return ok()
 
     if (delivery !== '') options.dedup.add(delivery)
-    options.route(classified)
+    options.route(withApprovalPolicy(classified, options.allowApprove?.() ?? true))
     return ok()
   }
+}
+
+export const PR_APPROVAL_DISABLED_NOTE =
+  'Operator policy: PR approval is disabled for this agent ' +
+  '(`channels.github.review.approve: false`). If you review a PR and the ' +
+  'verdict is `approve`, submit a `COMMENT` review instead of `APPROVE` — post ' +
+  'the findings, but never formally approve.'
+
+// Gating PR approval lives here (inbound text), not at the bash layer: the
+// review is posted via `gh api --input <file>`, so the `event: APPROVE` value
+// sits in a temp file the gh-cli-auth command interceptor never inspects. The
+// note rides on every inbound (cheap: one line, only when an operator has
+// opted out) so it reaches the agent for both webhook review requests and
+// plain-language "@bot review this" asks, which arrive on arbitrary inbounds.
+function withApprovalPolicy(message: InboundMessage, allowApprove: boolean): InboundMessage {
+  if (allowApprove) return message
+  const text = message.text === '' ? PR_APPROVAL_DISABLED_NOTE : `${message.text}\n\n${PR_APPROVAL_DISABLED_NOTE}`
+  return { ...message, text }
 }
 
 // GitHub auto-records the App as a reviewer the moment its review posts, but
