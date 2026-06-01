@@ -19,6 +19,10 @@ export type LiveSubagent = {
   sessionId: string
   subagentName: string
   parentSessionId?: string
+  // Role that resolved at spawn time, captured for the provenance cap on
+  // subagent_output/subagent_cancel. Absent when no permission service was
+  // active at spawn, in which case the cap fails closed.
+  spawnedByRole?: string
   startedAt: number
   status: SubagentStatus
   completion?: SubagentCompletion
