@@ -14,7 +14,14 @@ import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
 import { formatChannelCommandHelp } from './commands'
-import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
+import {
+  countEffectiveHumans,
+  decideEngagement,
+  grantStickyForReplyTargets,
+  isMultiHumanGroup,
+  StickyLedger,
+  type EngagementDecision,
+} from './engagement'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
   type MembershipCount,
@@ -430,6 +437,10 @@ type LiveSession = {
   recentEngagedPeerBotTurns: { authorId: string; ts: number }[]
   consecutiveEngagedPeerBotTurns: number
   loopGuardActive: boolean
+  // Set in route() from the same membership+participants the engagement
+  // decision used, so the prompt nudge and sticky suppression agree on
+  // "is this a multi-human group". Read by composeTurnPrompt().
+  multiHumanGroup: boolean
   membershipFetch: Promise<MembershipCount | null> | null
   destroyed: boolean
   unsubProviderErrors: (() => void) | null
@@ -1106,6 +1117,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
         loopGuardActive: false,
+        multiHumanGroup: false,
         membershipFetch,
         destroyed: false,
         unsubProviderErrors: null,
@@ -1519,6 +1531,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const text = composeTurnPrompt(observed, batch, {
           adapter: live.key.adapter,
           loopGuardActive: live.loopGuardActive,
+          groupChatNudge: live.multiHumanGroup,
           systemReminders: reminders,
           role: liveRole,
         })
@@ -1776,6 +1789,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     const membership = await membershipForEngagement(live)
+
+    live.multiHumanGroup = isMultiHumanGroup(event.isDm, countEffectiveHumans(live.participants, membership, now()))
 
     const decision: EngagementDecision = decideEngagement({
       message: event,
@@ -2692,6 +2707,7 @@ function composeTurnPrompt(
   state: {
     adapter?: AdapterId
     loopGuardActive: boolean
+    groupChatNudge?: boolean
     systemReminders?: readonly string[]
     now?: Date
     role?: string
@@ -2760,6 +2776,32 @@ function composeTurnPrompt(
       '- If continuing would add noise, reply with `NO_REPLY` to stay silent this turn.',
       '',
       'This notice clears automatically once a human posts again.',
+      '',
+      '---',
+      '',
+    )
+  }
+  // Group-chat nudge: same SYSTEM MESSAGE convention as the loop guard. We
+  // engaged this turn (explicit mention/reply/alias, or a fresh trigger),
+  // but the room has multiple humans, so the default "answer everything"
+  // posture is wrong. The engagement gate already stopped sticky credit
+  // from waking us on every follow-up; this tells the model to be
+  // selective on the turns it IS woken for. Cache-neutral (user-turn
+  // suffix), and skipped when the loop guard already fired to avoid
+  // stacking two silence notices in one turn.
+  if (state.groupChatNudge === true && !state.loopGuardActive) {
+    parts.push(
+      '---',
+      '**[SYSTEM MESSAGE — not from a human]**',
+      '',
+      'You are in a group chat with multiple people. This is an automated',
+      'signal from the channel router, not a message from anyone in the chat.',
+      '**Do not acknowledge or reply to this notice.**',
+      '',
+      'Guidance:',
+      '- Reply only if the current message is addressed to you or clearly needs your input.',
+      '- For chatter between others, side-conversation, or messages that do not need you,',
+      '  reply with `NO_REPLY` (or call `skip_response`) to stay silent and just keep watching.',
       '',
       '---',
       '',

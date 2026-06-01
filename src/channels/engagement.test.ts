@@ -251,6 +251,11 @@ describe('decideEngagement (alias)', () => {
 })
 
 describe('decideEngagement (sticky)', () => {
+  // These cases isolate the sticky mechanic itself, so they run in a
+  // one-human channel where sticky force-engages. Multi-human group
+  // suppression is covered in the `(group-aware sticky)` block below.
+  const solo: readonly ChannelParticipant[] = [participant('alice')]
+
   test('sticky credit consumed engages a follow-up message', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 1000)
@@ -260,7 +265,7 @@ describe('decideEngagement (sticky)', () => {
       key: KEY,
       ledger,
       now: 500,
-      participants: crowded,
+      participants: solo,
     })
     expect(decision).toBe('engage')
   })
@@ -268,14 +273,14 @@ describe('decideEngagement (sticky)', () => {
   test('sticky credit is consumed (single message)', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 1000)
-    decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 100, participants: crowded })
+    decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 100, participants: solo })
     const second = decideEngagement({
-      message: inbound(),
+      message: inbound({ mentionsOthers: true }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 200,
-      participants: crowded,
+      participants: solo,
     })
     expect(second).toBe('observe')
   })
@@ -284,12 +289,12 @@ describe('decideEngagement (sticky)', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 1000)
     const decision = decideEngagement({
-      message: inbound(),
+      message: inbound({ mentionsOthers: true }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 5000,
-      participants: crowded,
+      participants: solo,
     })
     expect(decision).toBe('observe')
     expect(ledger.has(KEY, 'alice', 5000)).toBe(false)
@@ -568,7 +573,9 @@ describe('decideEngagement (solo-human fallback)', () => {
     expect(decision).toBe('observe')
   })
 
-  test('sticky credit still bypasses high membership counts', () => {
+  test('sticky credit bypasses high membership when only one human is present', () => {
+    // Solo-human channel (one persisted speaker, membership confirms one
+    // human among many bots): sticky still force-engages the follow-up.
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     const decision = decideEngagement({
@@ -578,10 +585,138 @@ describe('decideEngagement (solo-human fallback)', () => {
       ledger,
       now: 1000,
       participants: [participant('alice')],
-      membership: { humans: 50, bots: 5, fetchedAt: 1000, truncated: false },
+      membership: { humans: 1, bots: 5, fetchedAt: 1000, truncated: false },
     })
 
     expect(decision).toBe('engage')
+  })
+})
+
+describe('decideEngagement (group-aware sticky)', () => {
+  test('sticky credit force-engages in a DM', () => {
+    const ledger = new StickyLedger()
+    ledger.grant('discord-bot:@dm:d1:', 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ isDm: true, workspace: '@dm' }),
+      config: baseConfig,
+      key: 'discord-bot:@dm:d1:',
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('sticky credit force-engages when at most one human is present', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('sticky credit does NOT engage in a multi-human group, but IS consumed', () => {
+    // given a multi-human group and a held credit for alice
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+
+    // when alice posts plain chatter (no mention/reply/alias)
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+
+    // then we observe, and the one-shot credit is spent regardless
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+  })
+
+  test('a consumed-in-group credit does not resurrect a later follow-up', () => {
+    // given a credit consumed by a group message (observed above)
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 1000, participants: crowded })
+
+    // when alice posts again with no fresh trigger
+    const second = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 2000,
+      participants: crowded,
+    })
+
+    // then still observe — the spent credit cannot wake us
+    expect(second).toBe('observe')
+  })
+
+  test('explicit mention still engages in a multi-human group despite suppressed sticky', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ isBotMention: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('alias still engages in a multi-human group despite suppressed sticky', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ text: '봉봉아 deploy please' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('peer bot sticky still engages in a one-human channel but observes in a multi-human group', () => {
+    // given a peer bot holding a credit
+    const soloLedger = new StickyLedger()
+    soloLedger.grant(KEY, 'peer1', 10_000)
+    const solo = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger: soloLedger,
+      now: 1000,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(solo).toBe('engage')
+
+    // when the same peer bot holds a credit in a two-human group
+    const groupLedger = new StickyLedger()
+    groupLedger.grant(KEY, 'peer1', 10_000)
+    const group = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger: groupLedger,
+      now: 1000,
+      participants: [participant('alice'), participant('bob'), { ...participant('peer1'), isBot: true }],
+    })
+
+    // then symmetric with humans — sticky alone no longer wakes us
+    expect(group).toBe('observe')
   })
 })
 
