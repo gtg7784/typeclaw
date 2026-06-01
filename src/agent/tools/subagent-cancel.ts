@@ -5,7 +5,7 @@ import type { PermissionService } from '@/permissions'
 
 import type { LiveSubagentRegistry } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
-import { denySubagentAccess } from './subagent-access'
+import { authorizeLiveSubagentAccess } from './subagent-access'
 
 export type SubagentCancelToolDetails =
   | { ok: true; taskId: string; subagent: string; alreadyDone: boolean }
@@ -34,14 +34,17 @@ export function createSubagentCancelTool(options: CreateSubagentCancelToolOption
     }),
 
     async execute(_toolCallId, params): Promise<ToolReturn> {
-      const live = liveRegistry.get(params.task_id)
-      if (live === undefined) {
-        return errorResult(`Unknown task_id: ${params.task_id}.`)
+      const access = authorizeLiveSubagentAccess({
+        permissions,
+        origin: getOrigin(),
+        liveRegistry,
+        taskId: params.task_id,
+        permission: 'subagent.cancel',
+      })
+      if (!access.ok) {
+        return errorResult(access.message)
       }
-      const denial = denySubagentAccess(permissions, getOrigin(), live, 'subagent.cancel')
-      if (denial !== null) {
-        return errorResult(denial)
-      }
+      const live = access.live
       if (live.status !== 'running') {
         const details: SubagentCancelToolDetails = {
           ok: true,

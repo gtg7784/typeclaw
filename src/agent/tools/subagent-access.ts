@@ -1,37 +1,67 @@
 import type { PermissionService } from '@/permissions'
 
-import type { LiveSubagent } from '../live-subagents'
+import type { LiveSubagent, LiveSubagentRegistry } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
 
 export type SubagentAccessPermission = 'subagent.output' | 'subagent.cancel'
 
-// Caps subagent_output/subagent_cancel to the requester's role: the caller
-// must hold the permission AND resolve to a role at least as high as the
-// role that spawned the subagent. Returns a denial reason string, or null
-// when access is allowed. Fails closed — a missing spawn role or an
-// unknown role on either side denies rather than allows.
-export function denySubagentAccess(
-  permissions: PermissionService | undefined,
-  origin: SessionOrigin | undefined,
-  live: Pick<LiveSubagent, 'spawnedByRole'>,
-  permission: SubagentAccessPermission,
-): string | null {
-  if (permissions === undefined) return null
+export type SubagentAccessResult = { ok: true; live: LiveSubagent } | { ok: false; message: string }
+
+export type AuthorizeLiveSubagentAccessArgs = {
+  permissions: PermissionService | undefined
+  origin: SessionOrigin | undefined
+  liveRegistry: LiveSubagentRegistry
+  taskId: string
+  permission: SubagentAccessPermission
+}
+
+// Authorizes a single subagent_output/subagent_cancel call and resolves the
+// live entry in one place so the two tools cannot drift. Caps access to the
+// requester's role: the caller must hold the permission AND resolve to a role
+// at least as high as the role that spawned the subagent.
+//
+// The ordering closes an existence oracle: the task-independent base-permission
+// check runs BEFORE any registry lookup, and for non-owner callers an absent
+// task, a capped task, and a task with missing provenance all collapse to one
+// identical denial — so a lower-role caller cannot probe which task IDs are
+// live. Only `owner` (the trust root, which outranks every spawner) learns the
+// truthful `Unknown task_id` for a genuine miss. The cap fails closed.
+export function authorizeLiveSubagentAccess(args: AuthorizeLiveSubagentAccessArgs): SubagentAccessResult {
+  const { permissions, origin, liveRegistry, taskId, permission } = args
+
+  if (permissions === undefined) {
+    const live = liveRegistry.get(taskId)
+    if (live === undefined) {
+      return { ok: false, message: `Unknown task_id: ${taskId}.` }
+    }
+    return { ok: true, live }
+  }
 
   if (!permissions.has(origin, permission)) {
-    return `${permission} denied: insufficient permissions`
+    return { ok: false, message: `${permission} denied: insufficient permissions` }
+  }
+
+  const requesterRole = permissions.resolveRole(origin)
+  const accessAll = requesterRole === 'owner'
+  const opaqueDenial = `${permission} denied: unknown task_id or insufficient role`
+
+  const live = liveRegistry.get(taskId)
+  if (live === undefined) {
+    return { ok: false, message: accessAll ? `Unknown task_id: ${taskId}.` : opaqueDenial }
+  }
+  if (accessAll) {
+    return { ok: true, live }
   }
 
   const spawnedByRole = live.spawnedByRole
   if (spawnedByRole === undefined) {
-    return `${permission} denied: subagent spawn role unavailable`
+    return { ok: false, message: opaqueDenial }
   }
 
-  const requesterRole = permissions.resolveRole(origin)
   const cmp = permissions.compareRoleSeverity(requesterRole, spawnedByRole)
   if (cmp === undefined || cmp < 0) {
-    return `${permission} denied: requester role cannot access subagent spawned by higher role`
+    return { ok: false, message: opaqueDenial }
   }
 
-  return null
+  return { ok: true, live }
 }

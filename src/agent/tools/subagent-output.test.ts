@@ -16,11 +16,13 @@ const guestOrigin: SessionOrigin = {
   thread: null,
 }
 
-// guest is granted subagent.output explicitly, while a member match rule
-// covers author U_MEMBER — so the only thing that can deny a granted guest
-// is the provenance cap, not a missing permission.
+// guest is granted subagent.output explicitly so the only thing that can deny
+// a granted guest is the provenance cap, not a missing permission. member and
+// owner match rules cover specific authors so role-scoped behavior can be
+// exercised through the real permission service.
 function capPermissions() {
   const roles = rolesConfigSchema.parse({
+    owner: { match: ['slack:T0123 author:U_OWNER'] },
     guest: { match: [], permissions: ['subagent.output', 'subagent.cancel'] },
     member: { match: ['slack:T0123 author:U_MEMBER'], permissions: ['subagent.output', 'subagent.cancel'] },
   })
@@ -28,6 +30,7 @@ function capPermissions() {
 }
 
 const memberOrigin: SessionOrigin = { ...guestOrigin, lastInboundAuthorId: 'U_MEMBER' }
+const ownerOrigin: SessionOrigin = { ...guestOrigin, lastInboundAuthorId: 'U_OWNER' }
 
 function makeLive(overrides: Partial<LiveSubagent> = {}): LiveSubagent {
   return {
@@ -212,64 +215,95 @@ describe('createSubagentOutputTool — permissions', () => {
 })
 
 describe('createSubagentOutputTool — provenance cap', () => {
+  const OPAQUE = 'subagent.output denied: unknown task_id or insufficient role'
+
   function makeTool(registry: LiveSubagentRegistry, origin: SessionOrigin) {
     return createSubagentOutputTool({ liveRegistry: registry, getOrigin: () => origin, permissions: capPermissions() })
   }
 
-  test('guest cannot read a member-spawned subagent even when granted subagent.output', async () => {
-    const registry = new LiveSubagentRegistry()
-    registry.register(makeLive({ spawnedByRole: 'member' }))
-    const result = await makeTool(registry, guestOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+  async function errorFor(origin: SessionOrigin, registry: LiveSubagentRegistry, taskId: string): Promise<string> {
+    const result = await makeTool(registry, origin).execute('c', { task_id: taskId }, undefined, undefined, ctx)
     const details = result.details as { ok: boolean; error?: string }
     expect(details.ok).toBe(false)
-    expect(details.error).toContain('higher role')
-  })
+    return details.error ?? ''
+  }
 
   test('member can read a member-spawned subagent', async () => {
     const registry = new LiveSubagentRegistry()
     registry.register(makeLive({ spawnedByRole: 'member' }))
     const result = await makeTool(registry, memberOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
-    const details = result.details as { ok: boolean }
-    expect(details.ok).toBe(true)
+    expect((result.details as { ok: boolean }).ok).toBe(true)
   })
 
   test('member can read a guest-spawned subagent (same-or-lower spawner allowed)', async () => {
     const registry = new LiveSubagentRegistry()
     registry.register(makeLive({ spawnedByRole: 'guest' }))
     const result = await makeTool(registry, memberOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
-    const details = result.details as { ok: boolean }
-    expect(details.ok).toBe(true)
+    expect((result.details as { ok: boolean }).ok).toBe(true)
   })
 
-  test('missing spawn role fails closed', async () => {
+  test('a low-role caller cannot distinguish absent, capped, or missing-provenance tasks', async () => {
+    const capped = new LiveSubagentRegistry()
+    capped.register(makeLive({ spawnedByRole: 'member' }))
+    const noProvenance = new LiveSubagentRegistry()
+    noProvenance.register(makeLive())
+    const empty = new LiveSubagentRegistry()
+
+    const absentMsg = await errorFor(guestOrigin, empty, 'bg_o1')
+    const cappedMsg = await errorFor(guestOrigin, capped, 'bg_o1')
+    const noProvenanceMsg = await errorFor(guestOrigin, noProvenance, 'bg_o1')
+
+    expect(absentMsg).toBe(OPAQUE)
+    expect(cappedMsg).toBe(OPAQUE)
+    expect(noProvenanceMsg).toBe(OPAQUE)
+  })
+
+  test('owner gets a truthful Unknown task_id for an absent task', async () => {
     const registry = new LiveSubagentRegistry()
-    registry.register(makeLive())
-    const result = await makeTool(registry, memberOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
-    const details = result.details as { ok: boolean; error?: string }
-    expect(details.ok).toBe(false)
-    expect(details.error).toContain('spawn role unavailable')
+    const msg = await errorFor(ownerOrigin, registry, 'bg_missing')
+    expect(msg).toContain('Unknown task_id')
   })
 
-  test('no permission service preserves open behavior', async () => {
+  test('owner bypasses the cap and missing-provenance fail-closed', async () => {
+    const higher = new LiveSubagentRegistry()
+    higher.register(makeLive({ spawnedByRole: 'member' }))
+    const noProvenance = new LiveSubagentRegistry()
+    noProvenance.register(makeLive())
+
+    const r1 = await makeTool(higher, ownerOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const r2 = await makeTool(noProvenance, ownerOrigin).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    expect((r1.details as { ok: boolean }).ok).toBe(true)
+    expect((r2.details as { ok: boolean }).ok).toBe(true)
+  })
+
+  test('a caller lacking the base permission gets the same denial whether the task exists or not', async () => {
+    const denyBase = createPermissionService({
+      roles: rolesConfigSchema.parse({ guest: { match: [], permissions: [] } }),
+    })
+    const present = new LiveSubagentRegistry()
+    present.register(makeLive({ spawnedByRole: 'member' }))
+    const absent = new LiveSubagentRegistry()
+    const tool = (registry: LiveSubagentRegistry) =>
+      createSubagentOutputTool({ liveRegistry: registry, getOrigin: () => guestOrigin, permissions: denyBase })
+
+    const presentRes = await tool(present).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const absentRes = await tool(absent).execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const presentErr = (presentRes.details as { error?: string }).error
+    const absentErr = (absentRes.details as { error?: string }).error
+    expect(presentErr).toBe('subagent.output denied: insufficient permissions')
+    expect(absentErr).toBe(presentErr)
+  })
+
+  test('no permission service preserves truthful unknown and open access', async () => {
     const registry = new LiveSubagentRegistry()
     registry.register(makeLive({ spawnedByRole: 'owner' }))
-    const tool = createSubagentOutputTool({ liveRegistry: registry, getOrigin: () => guestOrigin })
-    const result = await tool.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
-    const details = result.details as { ok: boolean }
-    expect(details.ok).toBe(true)
-  })
+    const empty = new LiveSubagentRegistry()
+    const allow = createSubagentOutputTool({ liveRegistry: registry, getOrigin: () => guestOrigin })
+    const miss = createSubagentOutputTool({ liveRegistry: empty, getOrigin: () => guestOrigin })
 
-  test('unknown task_id is reported before the cap, regardless of role', async () => {
-    const registry = new LiveSubagentRegistry()
-    const result = await makeTool(registry, guestOrigin).execute(
-      'c',
-      { task_id: 'bg_missing' },
-      undefined,
-      undefined,
-      ctx,
-    )
-    const details = result.details as { ok: boolean; error?: string }
-    expect(details.ok).toBe(false)
-    expect(details.error).toContain('Unknown task_id')
+    const allowRes = await allow.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const missRes = await miss.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    expect((allowRes.details as { ok: boolean }).ok).toBe(true)
+    expect((missRes.details as { error?: string }).error).toContain('Unknown task_id')
   })
 })

@@ -5,7 +5,7 @@ import type { PermissionService } from '@/permissions'
 
 import type { LiveSubagentRegistry, StatusSnapshot, SubagentProgressEvent } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
-import { denySubagentAccess } from './subagent-access'
+import { authorizeLiveSubagentAccess } from './subagent-access'
 
 export type SubagentOutputToolDetails =
   | {
@@ -65,13 +65,15 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
     }),
 
     async execute(_toolCallId, params) {
-      const live = liveRegistry.get(params.task_id)
-      if (live === undefined) {
-        return errorResult(`Unknown task_id: ${params.task_id}.`)
-      }
-      const denial = denySubagentAccess(permissions, getOrigin(), live, 'subagent.output')
-      if (denial !== null) {
-        return errorResult(denial)
+      const access = authorizeLiveSubagentAccess({
+        permissions,
+        origin: getOrigin(),
+        liveRegistry,
+        taskId: params.task_id,
+        permission: 'subagent.output',
+      })
+      if (!access.ok) {
+        return errorResult(access.message)
       }
       const snap = liveRegistry.snapshot(params.task_id, now())
       if (snap === undefined) {
