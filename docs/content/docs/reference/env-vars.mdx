@@ -37,6 +37,16 @@ Set in the host stage; injected into the container via `--env-file .env`.
 
 Custom env-var names are supported via the `Secret`'s `env` field — `{ "key": { "env": "MY_OPENAI" } }`. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for resolution order.
 
+## Provider endpoint overrides
+
+Set in the host stage; injected into the container via `--env-file .env`.
+
+| Variable             | Provider    | Default                     | Effect                                                            |
+| -------------------- | ----------- | --------------------------- | ----------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL` | `anthropic` | `https://api.anthropic.com` | Point the Anthropic provider at an Anthropic-compatible endpoint. |
+
+`ANTHROPIC_BASE_URL` routes the `anthropic` provider through a proxy that speaks the **native Anthropic Messages protocol** (`/v1/messages`, `x-api-key` or OAuth Bearer) — e.g. LiteLLM, Cloudflare AI Gateway, or a corporate gateway. It is a base-URL swap only; it does **not** enable raw AWS Bedrock, which requires SigV4 signing and a different request path. Trailing slashes are stripped; a non-http(s) value fails the agent at boot. The same endpoint is used by `typeclaw init`'s API-key validation probe.
+
 ## Channel credentials (env-wins)
 
 | Variable             | Adapter        | Field      |
