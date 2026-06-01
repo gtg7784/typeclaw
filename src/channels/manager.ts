@@ -12,6 +12,7 @@ import { createGithubAdapter, type GithubAdapter } from './adapters/github'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
+import type { GithubTokenBridge } from './github-token-bridge'
 import { createChannelRouter, type ChannelRouter, type ClaimHandler, type CreateSessionForChannel } from './router'
 import {
   ADAPTER_IDS,
@@ -84,6 +85,10 @@ export type ChannelManagerOptions = {
   // Production wiring (`src/run/index.ts`) always passes the agent's
   // Stream; tests typically omit it.
   stream?: Stream
+  // Write-side of the GithubTokenBridge. The github adapter publishes its
+  // per-repo App token minter here on start (App auth only) so plugin hooks
+  // can resolve a token for ad-hoc `gh` commands. Tests omit it.
+  githubTokenBridge?: GithubTokenBridge
 }
 
 export type ChannelManager = {
@@ -199,6 +204,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         logger,
         tunnelUrl: () => options.tunnelUrlForChannel?.('github') ?? null,
         tunnelConfiguredForChannel: () => options.tunnelConfiguredForChannel?.('github') ?? false,
+        ...(options.githubTokenBridge !== undefined ? { githubTokenBridge: options.githubTokenBridge } : {}),
       })
     }
     if (name === 'telegram-bot') {
