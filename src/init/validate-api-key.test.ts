@@ -105,6 +105,46 @@ describe('validateApiKey', () => {
     expect(seenHeaders!.Authorization).toBeUndefined()
   })
 
+  test('probes api.anthropic.com by default', async () => {
+    const prev = process.env.ANTHROPIC_BASE_URL
+    delete process.env.ANTHROPIC_BASE_URL
+    try {
+      let seenUrl: string | null = null
+      await validateApiKey(
+        'anthropic',
+        'sk-ant-test',
+        fakeFetch((url) => {
+          seenUrl = url
+          return new Response(okBody, { status: 200 })
+        }),
+      )
+      expect(seenUrl!).toBe('https://api.anthropic.com/v1/models')
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_BASE_URL
+      else process.env.ANTHROPIC_BASE_URL = prev
+    }
+  })
+
+  test('probes the proxy endpoint when ANTHROPIC_BASE_URL is set', async () => {
+    const prev = process.env.ANTHROPIC_BASE_URL
+    process.env.ANTHROPIC_BASE_URL = 'https://gateway.example.com/anthropic/'
+    try {
+      let seenUrl: string | null = null
+      await validateApiKey(
+        'anthropic',
+        'sk-ant-test',
+        fakeFetch((url) => {
+          seenUrl = url
+          return new Response(okBody, { status: 200 })
+        }),
+      )
+      expect(seenUrl!).toBe('https://gateway.example.com/anthropic/v1/models')
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_BASE_URL
+      else process.env.ANTHROPIC_BASE_URL = prev
+    }
+  })
+
   test('skips OAuth-only providers without contacting the network', async () => {
     let called = false
     const result = await validateApiKey('openai-codex', 'whatever', async () => {

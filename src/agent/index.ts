@@ -26,6 +26,7 @@ import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import type { LiveSubagentRegistry } from './live-subagents'
+import { applyModelRuntimeOverrides } from './model-overrides'
 import { createChannelLookAtTool, lookAtTool } from './multimodal'
 import {
   buildBuiltinPiToolOverrides,
@@ -357,7 +358,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       ? customToolsPreBudget.map((t) => wrapToolDefinitionWithBudget(t, sessionBudget, sessionBudgetState))
       : customToolsPreBudget
 
-  const model = resolveModel(activeRef)
+  const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
   const thinkingLevel = defaultThinkingLevelForRef(activeRef)
   const { session } = await createAgentSession({
     model,

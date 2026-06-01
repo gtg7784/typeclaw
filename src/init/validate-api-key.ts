@@ -1,3 +1,4 @@
+import { effectiveAnthropicBaseUrl } from '@/agent/model-overrides'
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 
 const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader: 'bearer' | 'x-api-key' }>> = {
@@ -6,6 +7,14 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   fireworks: { url: 'https://api.fireworks.ai/inference/v1/models', authHeader: 'bearer' },
   zai: { url: 'https://api.z.ai/api/paas/v4/models', authHeader: 'bearer' },
   'zai-coding': { url: 'https://api.z.ai/api/coding/paas/v4/models', authHeader: 'bearer' },
+}
+
+// When ANTHROPIC_BASE_URL points at a proxy, probe THAT endpoint — validating
+// the key against api.anthropic.com would test the wrong gateway (and may
+// reject a proxy-only credential). The proxy must expose `/v1/models`.
+function probeUrlFor(providerId: KnownProviderId, defaultUrl: string): string {
+  if (providerId !== 'anthropic') return defaultUrl
+  return `${effectiveAnthropicBaseUrl(KNOWN_PROVIDERS.anthropic.baseUrl)}/v1/models`
 }
 
 export type KeyValidationResult =
@@ -36,7 +45,7 @@ export async function validateApiKey(
   }
 
   try {
-    const res = await fetchImpl(probe.url, {
+    const res = await fetchImpl(probeUrlFor(providerId, probe.url), {
       method: 'GET',
       headers,
       signal: AbortSignal.timeout(TIMEOUT_MS),
