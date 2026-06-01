@@ -849,6 +849,21 @@ describe('decoy reviewer drop on self-review', () => {
     expect(warns).toHaveLength(1)
     expect(warns[0]).toContain('failed to drop decoy reviewer @typeclaw-bot')
   })
+
+  it('warns when minting the App token throws (failure must not be swallowed)', async () => {
+    const warns: string[] = []
+    const { handler, tasks } = decoyDropHandler({
+      warns,
+      authToken: async () => {
+        throw new Error('installation lookup failed')
+      },
+    })
+    await handler(signedRequest(JSON.stringify(selfReviewPayload()), 'pull_request_review', 'self-review-token-throw'))
+    await tasks[0]?.()
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('failed to drop decoy reviewer @typeclaw-bot')
+    expect(warns[0]).toContain('installation lookup failed')
+  })
 })
 
 function fakeFetch(fn: (input: string, init?: RequestInit) => Response): typeof fetch {

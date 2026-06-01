@@ -109,19 +109,27 @@ function maybeScheduleDecoyReviewerDrop(input: {
 
   const fetchImpl = options.fetchImpl ?? fetch
   const schedule = options.scheduleBackgroundTask ?? defaultScheduleBackgroundTask
+  const target = `${repository.owner}/${repository.name}#${pullNumber}`
   schedule(async () => {
-    const token = await authToken({ repoSlug: `${repository.owner}/${repository.name}` })
-    const result = await removeRequestedReviewer({
-      fetchImpl,
-      token,
-      owner: repository.owner,
-      repo: repository.name,
-      pullNumber,
-      reviewerLogin: decoyLogin,
-    })
-    if (result.kind === 'failed') {
+    // authToken can throw (installation lookup / token mint), and a thrown
+    // failure must still warn — the default scheduler swallows rejections, so
+    // catching here is the only place the failure is observable.
+    try {
+      const token = await authToken({ repoSlug: `${repository.owner}/${repository.name}` })
+      const result = await removeRequestedReviewer({
+        fetchImpl,
+        token,
+        owner: repository.owner,
+        repo: repository.name,
+        pullNumber,
+        reviewerLogin: decoyLogin,
+      })
+      if (result.kind === 'failed') {
+        options.logger.warn(`[github] failed to drop decoy reviewer @${decoyLogin} from ${target}: ${result.reason}`)
+      }
+    } catch (err) {
       options.logger.warn(
-        `[github] failed to drop decoy reviewer @${decoyLogin} from ${repository.owner}/${repository.name}#${pullNumber}: ${result.reason}`,
+        `[github] failed to drop decoy reviewer @${decoyLogin} from ${target}: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   })
