@@ -372,18 +372,16 @@ export default function Home() {
                 className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
               />
               <h1 className="text-balance text-5xl font-semibold tracking-tight sm:text-6xl lg:text-7xl">
-                A TypeScript agent
+                The agent that
                 <br />
                 <span className="bg-gradient-to-br from-brand-700 to-brand-500 bg-clip-text text-transparent dark:from-brand-200 dark:to-brand-400">
-                  Well-organized.
-                  <br />
-                  Self-improving.
+                  keeps its nest tidy.
                 </span>
               </h1>
             </div>
             <p className="mx-auto mt-7 max-w-xl text-balance text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
-              A local AI agent that lives in your repo. Sandboxed, plugin-driven, hot-reloaded — and it watches its own
-              work, distilling what it learned into skills you can read.
+              A TypeScript agent that lives in one folder, distills its own work into long-term memory, and gets sharper
+              the longer it runs.
             </p>
             <div className="mt-10">
               <HeroInstall />
