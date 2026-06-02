@@ -43,6 +43,7 @@ import {
   type SlackInboundMessageEvent,
 } from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
+import { enrichSlackReferenceContext } from './slack-bot-reference'
 import {
   buildSlashAckPayload,
   commandResultReply,
@@ -261,6 +262,7 @@ export type SlackBotAdapterOptions = {
   // classifier behaves as before (no alias-driven thread anchoring), so
   // tests and ad-hoc adapter constructions stay backwards-compatible.
   selfAliasesRef?: () => readonly string[]
+  fetchImpl?: typeof fetch
 }
 
 export type SlackBotAdapter = {
@@ -902,9 +904,46 @@ export function createFetchAttachmentCallback(deps: {
   }
 }
 
+function createSlackReferenceFetch(deps: { token: string; fetchImpl: typeof fetch }) {
+  return async (channelId: string, messageTs: string) => {
+    const url = new URL('https://slack.com/api/conversations.replies')
+    url.searchParams.set('channel', channelId)
+    url.searchParams.set('ts', messageTs)
+    url.searchParams.set('limit', '1')
+    const response = await deps.fetchImpl(url, { headers: { Authorization: `Bearer ${deps.token}` } })
+    if (!response.ok) return null
+    const body = recordValue(await response.json())
+    if (body === null || body.ok !== true) return null
+    const messages = arrayField(body, 'messages')
+    const first = recordValue(messages[0])
+    if (first === null) return null
+    const authorId = stringField(first, 'user') ?? stringField(first, 'bot_id')
+    const text = stringField(first, 'text')
+    if (authorId === null || text === null) return null
+    return { authorId, authorName: authorId, text }
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function arrayField(record: Record<string, unknown>, key: string): readonly unknown[] {
+  const value = record[key]
+  return Array.isArray(value) ? value : []
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
 export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new SlackBotClient()
+  const fetchImpl = options.fetchImpl ?? fetch
   let listener: SlackBotListener | null = null
   let botUserId: string | null = null
   let teamId: string | null = null
@@ -1058,7 +1097,22 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       }
 
       dedupe.mark(event)
-      const enriched = { ...verdict.payload, authorName: resolvedUserName }
+      const slackAttachments = Array.isArray(event.attachments) ? event.attachments : undefined
+      const referenceResult = await enrichSlackReferenceContext({
+        text: verdict.payload.text,
+        channelId: event.channel,
+        ...(event.thread_ts !== undefined ? { threadTs: event.thread_ts } : {}),
+        messageTs: event.ts,
+        ...(slackAttachments !== undefined ? { attachments: slackAttachments } : {}),
+        fetchMessage: createSlackReferenceFetch({ token: options.token, fetchImpl }),
+      })
+      const enriched = {
+        ...verdict.payload,
+        authorName: resolvedUserName,
+        ...(referenceResult.referenceContext !== undefined
+          ? { referenceContext: referenceResult.referenceContext }
+          : {}),
+      }
       const routedTag = await formatChannelTag(enriched.workspace, enriched.chat)
       logger.info(
         `[slack-bot] routed ts=${event.ts} ${routedTag} mention=${enriched.isBotMention} reply=${enriched.replyToBotMessageId !== null}`,

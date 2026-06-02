@@ -161,6 +161,137 @@ describe('classifyInbound', () => {
     expect(verdict.payload.attachments).toBe(attachments)
   })
 
+  test('keeps raw text and sets referenceContext for replies to the bot', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'yes, please',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'BOT-L1',
+          src_userId: 999,
+          src_message: 'Do you want me to summarize this?',
+          src_type: 1,
+        },
+      }),
+      dmConfig(),
+      { selfUserId: '999', lookupChat: dmLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.text).toBe('yes, please')
+    expect(verdict.payload.referenceContext).toEqual({
+      kind: 'reply',
+      sources: [
+        { adapter: 'kakaotalk', authorId: '999', authorName: '999', text: 'Do you want me to summarize this?' },
+      ],
+    })
+    expect(verdict.payload.replyToBotMessageId).toBe('BOT-L1')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
+  })
+
+  test('keeps raw text and sets referenceContext for replies to another user', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'I agree with this',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'USER-L1',
+          src_userId: 333,
+          src_message: 'We should ship the smaller fix first.',
+          src_type: 1,
+        },
+      }),
+      groupConfig(),
+      { selfUserId: '999', lookupChat: groupLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.text).toBe('I agree with this')
+    expect(verdict.payload.referenceContext).toEqual({
+      kind: 'reply',
+      sources: [
+        { adapter: 'kakaotalk', authorId: '333', authorName: '333', text: 'We should ship the smaller fix first.' },
+      ],
+    })
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBe('USER-L1')
+  })
+
+  test('sets reply ids but skips the quote block when quoted text is empty', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'what was attached?',
+        message_type: 26,
+        attachment: {
+          attach_only: true,
+          src_logId: 'BOT-L2',
+          src_userId: 999,
+          src_message: '',
+          src_type: 2,
+        },
+      }),
+      dmConfig(),
+      { selfUserId: '999', lookupChat: dmLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.text).toBe('what was attached?')
+    expect(verdict.payload.referenceContext).toBeUndefined()
+    expect(verdict.payload.replyToBotMessageId).toBe('BOT-L2')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
+  })
+
+  test('keeps full quoted text in referenceContext without adapter-side truncation', () => {
+    const longQuote = `${'a'.repeat(280)}${'b'.repeat(20)}`
+    const verdict = classifyInbound(
+      event({
+        message: 'short answer',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'USER-L2',
+          src_userId: 333,
+          src_message: longQuote,
+          src_type: 1,
+        },
+      }),
+      groupConfig(),
+      { selfUserId: '999', lookupChat: groupLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.text).toBe('short answer')
+    expect(verdict.payload.referenceContext?.sources[0]?.text).toBe(longQuote)
+  })
+
+  test('does not treat aliases inside the quoted text as a fresh mention', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'following up',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'USER-L3',
+          src_userId: 333,
+          src_message: 'claudie should look at this',
+          src_type: 1,
+        },
+      }),
+      groupConfig(),
+      { selfUserId: '999', lookupChat: groupLookup, selfAliases: ['claudie'] },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.isBotMention).toBe(false)
+  })
+
   test('absent alias keeps isBotMention=false on plain message', () => {
     const verdict = classifyInbound(event({ message: 'random thought' }), dmConfig(), {
       selfUserId: '999',

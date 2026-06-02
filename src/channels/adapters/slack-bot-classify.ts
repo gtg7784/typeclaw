@@ -4,6 +4,7 @@ import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
+import { hasSlackMessageShareAttachments } from './slack-bot-reference'
 import { slackTsToMillis } from './slack-bot-time'
 
 export type SlackInboundMessageEvent = SlackSocketModeMessageEvent
@@ -62,7 +63,8 @@ export function classifyInbound(
 
   const rawText = event.text ?? ''
   const { text, attachments } = splitInbound(event)
-  if (text === '') return { kind: 'drop', reason: 'empty_text' }
+  const slackAttachments = Array.isArray(event.attachments) ? event.attachments : undefined
+  if (text === '' && !hasSlackMessageShareAttachments(slackAttachments)) return { kind: 'drop', reason: 'empty_text' }
 
   const isDm = event.channel_type === 'im'
   const workspace = isDm ? '@dm' : context.teamId

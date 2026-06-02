@@ -53,6 +53,7 @@ import type {
   HistoryCallback,
   InboundAttachment,
   InboundMessage,
+  InboundReferenceContext,
   RemoveReactionCallback,
   RemoveReactionRequest,
   OutboundCallback,
@@ -280,6 +281,7 @@ export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapte
 
 type QueuedInbound = {
   text: string
+  referenceContext?: InboundReferenceContext
   attachments?: readonly InboundAttachment[]
   authorId: string
   authorName: string
@@ -302,6 +304,7 @@ type QueuedInbound = {
 
 type ObservedInbound = {
   text: string
+  referenceContext?: InboundReferenceContext
   attachments?: readonly InboundAttachment[]
   authorId: string
   authorName: string
@@ -1315,6 +1318,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (item.kind === 'message') {
         observed.push({
           text: item.message.text,
+          ...(item.message.referenceContext !== undefined ? { referenceContext: item.message.referenceContext } : {}),
           authorId: item.message.authorId,
           authorName: item.message.authorName,
           authorIsBot: item.message.isBot,
@@ -2025,6 +2029,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const observe = (live: LiveSession, event: InboundMessage): void => {
     live.contextBuffer.push({
       text: event.text,
+      ...(event.referenceContext !== undefined ? { referenceContext: event.referenceContext } : {}),
       ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
       authorId: event.authorId,
       authorName: event.authorName,
@@ -2045,6 +2050,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   ): void => {
     live.promptQueue.push({
       text: event.text,
+      ...(event.referenceContext !== undefined ? { referenceContext: event.referenceContext } : {}),
       ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
       authorId: event.authorId,
       authorName: event.authorName,
@@ -3156,7 +3162,7 @@ function composeTurnPrompt(
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(formatAuthorLine(o.ts, adapter, o.authorId, o.authorName, o.authorIsBot, o.text))
+      parts.push(formatInboundPromptLines(o, adapter))
     }
     parts.push('')
   }
@@ -3174,7 +3180,7 @@ function composeTurnPrompt(
       )
     }
     for (const b of batch) {
-      parts.push(formatAuthorLine(b.ts, adapter, b.authorId, b.authorName, b.authorIsBot, b.text))
+      parts.push(formatInboundPromptLines(b, adapter))
     }
   }
   return parts.join('\n')
@@ -3191,6 +3197,24 @@ function formatAuthorLine(
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
   return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${text}`
+}
+
+function formatInboundPromptLines(
+  inbound: {
+    ts: number
+    authorId: string
+    authorName: string
+    authorIsBot: boolean
+    text: string
+    referenceContext?: InboundReferenceContext
+  },
+  adapter: AdapterId,
+): string {
+  const lines = inbound.referenceContext?.sources.map(renderQuoteAnchor) ?? []
+  lines.push(
+    formatAuthorLine(inbound.ts, adapter, inbound.authorId, inbound.authorName, inbound.authorIsBot, inbound.text),
+  )
+  return lines.join('\n')
 }
 
 export type { QuoteAnchorSource } from './types'

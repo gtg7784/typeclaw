@@ -904,19 +904,25 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       }
 
       const replyMessageId = event.message_reference?.message_id
-      const enrichedText = await enrichDiscordMessageReferences({
+      const referenceResult = await enrichDiscordMessageReferences({
         text: verdict.payload.text,
         ...(replyMessageId !== undefined
           ? { reply: { channelId: event.message_reference?.channel_id ?? event.channel_id, messageId: replyMessageId } }
           : {}),
         fetchMessage: async (channelId, messageId) => {
-          const message: { author: { username: string; global_name?: string | null }; content: string } =
+          const message: { author: { id: string; username: string; global_name?: string | null }; content: string } =
             await client.getMessage(channelId, messageId)
-          return { authorName: message.author.global_name ?? message.author.username, text: message.content }
+          return {
+            authorId: message.author.id,
+            authorName: message.author.global_name ?? message.author.username,
+            text: message.content,
+          }
         },
       })
       const payload =
-        enrichedText === verdict.payload.text ? verdict.payload : { ...verdict.payload, text: enrichedText }
+        referenceResult.referenceContext === undefined
+          ? verdict.payload
+          : { ...verdict.payload, referenceContext: referenceResult.referenceContext }
 
       const routedTag = await formatChannelTag(payload.workspace, payload.chat)
       logger.info(
