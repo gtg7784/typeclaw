@@ -1,9 +1,38 @@
 import { describe, expect, test } from 'bun:test'
+import { EventEmitter } from 'node:events'
 
-import { createEscController } from './inspect-controller'
+import { createEscController, createTailScope } from './inspect-controller'
 
 function tick(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+class FakeTty extends EventEmitter {
+  isTTY = true
+  rawMode = false
+  resumed = false
+  pauseCalls = 0
+  setRawMode(value: boolean): this {
+    this.rawMode = value
+    return this
+  }
+  resume(): this {
+    this.resumed = true
+    return this
+  }
+  pause(): this {
+    this.pauseCalls += 1
+    this.resumed = false
+    return this
+  }
+  feed(bytes: number[]): void {
+    this.emit('data', Buffer.from(bytes))
+  }
+}
+
+const fakeProc = {
+  once: () => fakeProc,
+  off: () => fakeProc,
 }
 
 describe('createEscController', () => {
@@ -89,5 +118,57 @@ describe('createEscController', () => {
     expect(sigint).toBe(false)
     await tick(30)
     expect(signal.aborted).toBe(false)
+  })
+})
+
+describe('createTailScope', () => {
+  test('q quits the tail viewer', () => {
+    const tty = new FakeTty()
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x71])
+      expect(scope.intent()).toBe('exit')
+      expect(scope.signal.aborted).toBe(true)
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  test('Ctrl-C still exits', () => {
+    const tty = new FakeTty()
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x03])
+      expect(scope.intent()).toBe('exit')
+      expect(scope.signal.aborted).toBe(true)
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  test('bare ESC returns back, not exit', async () => {
+    const tty = new FakeTty()
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x1b])
+      await tick(80)
+      expect(scope.intent()).toBe('back')
+      expect(scope.signal.aborted).toBe(true)
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  test('q on a non-TTY input is a no-op', () => {
+    const tty = new FakeTty()
+    tty.isTTY = false
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x71])
+      expect(scope.intent()).toBeNull()
+      expect(scope.signal.aborted).toBe(false)
+    } finally {
+      scope.dispose()
+    }
   })
 })

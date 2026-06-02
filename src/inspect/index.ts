@@ -34,6 +34,7 @@ export type RunInspectOptions = {
   // caller's loop inspects its own scope intent to tell back from exit.
   signal?: AbortSignal
   liveHint?: string
+  interactive?: boolean
 }
 
 export type SelectSessionOptions = {
@@ -81,6 +82,7 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
     ...(opts.liveSource !== undefined ? { liveSource: opts.liveSource } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     ...(opts.liveHint !== undefined ? { liveHint: opts.liveHint } : {}),
+    ...(opts.interactive === true ? { interactive: true } : {}),
   })
   if (streamResult.escToPicker) return { ok: true, exitCode: 0, escToPicker: true }
   return { ok: true, exitCode: 0 }
@@ -146,6 +148,7 @@ async function streamSession(opts: {
   liveSource?: LiveSourceFactory
   signal?: AbortSignal
   liveHint?: string
+  interactive?: boolean
 }): Promise<{ escToPicker: boolean }> {
   if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
   const emit = (event: InspectEvent): void => {
@@ -167,6 +170,18 @@ async function streamSession(opts: {
 
   if (opts.liveSource === undefined) {
     if (!opts.json) opts.stdout('─── end of transcript ───')
+    // Already aborted during replay (user pressed esc/q): honor it, don't lose the keystroke.
+    if (aborted()) return { escToPicker: true }
+    // Interactive replay-only: hold a stable viewer like `dreams` instead of
+    // bouncing straight back to the picker. Block until the tail scope aborts
+    // (esc → back, q/ctrl-c → exit). Never block without a signal (non-TTY has
+    // no listener and would hang) or in json/non-interactive mode (scriptability).
+    if (opts.interactive === true && !opts.json && opts.signal !== undefined) {
+      if (opts.liveHint !== undefined && opts.liveHint !== '') {
+        opts.stdout(divider(opts.color, opts.liveHint))
+      }
+      await waitForAbort(opts.signal)
+    }
     return { escToPicker: aborted() }
   }
 
@@ -206,6 +221,13 @@ async function streamSession(opts: {
 function divider(color: boolean, text: string): string {
   if (color) return `\u001b[2m${text}\u001b[0m`
   return text
+}
+
+export async function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return
+  await new Promise<void>((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true })
+  })
 }
 
 function writeHeader(summary: SessionSummary, color: boolean, stdout: (line: string) => void): void {

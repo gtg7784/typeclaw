@@ -58,6 +58,7 @@ export const inspectCommand = defineCommand({
       selectSession: (sessions, selectOpts) => clackSelect(sessions, selectOpts?.initialSessionId),
       ...(liveSource !== undefined ? { liveSource } : {}),
       createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
+      ...(interactive ? { interactive: true } : {}),
       ...(liveHint !== undefined ? { liveHint } : {}),
       stdout: (line) => process.stdout.write(`${line}\n`),
       stderr: (line) => process.stderr.write(`${line}\n`),
@@ -93,7 +94,7 @@ async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefin
 }
 
 function escHintLine(color: boolean): string {
-  const text = '(press esc to return to session list)'
+  const text = '(esc to return to session list · q to quit)'
   return color ? `\u001b[2m${text}\u001b[0m` : text
 }
 

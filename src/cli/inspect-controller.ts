@@ -14,6 +14,8 @@ export type EscController = {
   dispose: () => void
 }
 
+const QUIT_KEY = 0x71
+
 export function createEscController({ debounceMs }: { debounceMs: number }): EscController {
   let currentCtrl: AbortController | null = null
   let pendingEsc: ReturnType<typeof setTimeout> | null = null
@@ -111,6 +113,11 @@ export function createTailScope(opts: { debounceMs: number; input?: RawInput; pr
 
   const onData = (chunk: Buffer): void => {
     if (esc === null) return
+    if (chunk[0] === QUIT_KEY) {
+      // q mirrors dreams' quit key and is symmetric with Ctrl-C in live tail.
+      settle('exit')
+      return
+    }
     const { sigint } = esc.onChunk(chunk)
     if (sigint) settle('exit')
   }
