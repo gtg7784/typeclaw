@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-github
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues or PRs with `gh`, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as an inline review via `gh api`. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. When a review comment **you authored** gets addressed — the author pushed a fix or replied that resolves it — verify the fix at the PR's head SHA and then resolve the thread with the `resolveReviewThread` GraphQL mutation (see "Resolving review threads you authored" below); resolving is the close-out that tells the author the concern is settled. To open new issues or PRs use the `gh` CLI — `GH_TOKEN` is pre-set by the adapter. Read this skill before composing anything on GitHub.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues or PRs with `gh`, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as an inline review via `gh api`. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. When a review comment **you authored** gets addressed — the author pushed a fix or replied that resolves it — verify the fix at the PR's head SHA and then resolve the thread by acknowledging with `channel_reply({ …, resolve_review_thread: true })`, which resolves the thread before posting the reply (see "Resolving review threads you authored" below); resolving is the close-out that tells the author the concern is settled. To open new issues or PRs use the `gh` CLI — `GH_TOKEN` is pre-set by the adapter. Read this skill before composing anything on GitHub.
 ---
 
 GitHub renders normal Markdown in issues, PRs, discussions, and review comments. Use headings, lists, tables, fenced code blocks, links, and inline code when they improve clarity.
@@ -8,7 +8,7 @@ GitHub renders normal Markdown in issues, PRs, discussions, and review comments.
 - Do not send attachments on GitHub chats; the adapter rejects them.
 - There is no typing indicator.
 - For PR review threads, keep `thread` set to reply in-place. Omit `thread` for a top-level PR/issue comment.
-- When a review comment **you authored** has been addressed, resolve its thread — see "Resolving review threads you authored" below. The base principle is **whoever opened the thread closes it**: you resolve only the threads you started, never a human's.
+- When a review comment **you authored** has been addressed, resolve its thread by replying with `channel_reply({ …, resolve_review_thread: true })` — see "Resolving review threads you authored" below. The base principle is **whoever opened the thread closes it**: you resolve only the threads you started, never a human's (the runtime enforces this).
 
 ## Mid-turn status replies need `continue: true`
 
@@ -182,11 +182,28 @@ Do not resolve on a bare "done" claim. A reply that says "fixed" is a prompt to 
 2. Read the lines your comment anchored to, at that SHA: `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>` (or `gh pr diff <N>` to see what the new push changed). Confirm the change actually addresses the concern your comment raised — not a different line, not a partial fix.
 3. Only when the code at head genuinely resolves the finding do you resolve the thread. If the fix is partial or misses the point, **reply in the thread** explaining what's still open and leave it unresolved.
 
-If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed" — **resolve first, then optionally leave a one-line acknowledgement.** Order matters: a bare `channel_reply` ends your turn (see "Mid-turn status replies need `continue: true`" above), so acknowledging _before_ you resolve would stop the turn and the `resolveReviewThread` mutation would never run, leaving the thread open. Resolve, then reply. If you genuinely want to acknowledge before resolving, the acknowledgement must use `channel_reply({ …, continue: true })` so the turn survives long enough to resolve. If their reasoning does **not** settle it, keep the thread open and answer.
+If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed". If their reasoning does **not** settle it, keep the thread open and answer instead.
 
-### How to resolve — `resolveReviewThread` GraphQL mutation
+### How to resolve — `channel_reply({ resolve_review_thread: true })`
 
-There is no REST endpoint for this. Resolution is a GraphQL mutation that takes the thread's **node id** (`PRRT_…`), not the comment's numeric id. Two steps: find the thread id, then resolve it.
+Once you have verified the fix, **acknowledge and resolve in one call**: pass `resolve_review_thread: true` to your `channel_reply`. The runtime resolves the thread you're replying in **before** it posts your acknowledgement, then posts the reply:
+
+```
+channel_reply({ text: "Verified — the fix addresses the concern. Thanks!", resolve_review_thread: true })
+```
+
+This is the correct path and it removes a footgun. A bare `channel_reply` ends your turn the moment it lands, so a resolve attempted _after_ the acknowledgement would never run — the thread would stay open even though you "handled" it. The flag resolves first, so a normal final reply still closes the thread. You do **not** need `continue: true` for this: resolution happens inside the same call, before the turn ends.
+
+Two guarantees make the flag safe to use as your default:
+
+- **Author check is enforced in code.** The runtime only resolves a thread whose root comment **you** authored; a request to resolve a human reviewer's thread is refused, and the reply is **not** posted. You cannot accidentally close someone else's open question.
+- **A failed resolve blocks the reply.** If the resolve fails (permission denied, wrong author, the fix doesn't verify on the API side), `channel_reply` is denied and posts nothing — so you never end up with a cheerful "looks resolved" comment sitting next to a still-open thread. Read the denial, fix the cause, and retry.
+
+The flag is valid only on a github session replying inside a thread (`thread` set on the origin). It is ignored — and denied — elsewhere. If the thread is already resolved or already gone, the reply still posts (nothing left to close).
+
+### Fallback — the raw `resolveReviewThread` GraphQL mutation
+
+Prefer the flag above. Reach for the raw mutation only when you need to resolve a thread you are **not** currently replying in, or to debug. There is no REST endpoint for this. Resolution is a GraphQL mutation that takes the thread's **node id** (`PRRT_…`), not the comment's numeric id. Two steps: find the thread id, then resolve it.
 
 1. **Find the node id of the thread you authored.** Query the PR's review threads and pick the one whose root comment is yours and matches the `thread` you're replying in:
 

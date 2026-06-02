@@ -340,6 +340,48 @@ export type FetchAttachmentResult =
 
 export type FetchAttachmentCallback = (args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
 
+// A request to resolve (close out) a review-comment thread the bot itself
+// opened, after the author addressed it. Adapter-specific: only the github
+// adapter registers a resolver today. The router carries the request through
+// to that resolver, which is responsible for the platform-side authorship
+// check — `resolveReviewThread` MUST only close a thread whose root comment
+// the bot authored, never a human reviewer's thread. The address fields below
+// are the same ones a `channel_reply` origin carries: `workspace` is the repo
+// slug `owner/name`, `chat` is `pr:<N>`, and `rootCommentId` is the numeric id
+// of the thread's root comment (the `thread` value the inbound carried).
+export type ReviewThreadResolveRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  rootCommentId: string
+}
+
+// `already-resolved` is a success-shaped no-op: the thread was closed before we
+// got here (a duplicate turn, a manual resolve), so the desired end state holds
+// and the caller should treat it like `ok: true`. `not-author` is a hard
+// refusal: the root comment is not the bot's, so resolving would erase a
+// human's open question — the caller must NOT proceed as if it closed the loop.
+//
+// `no-match` is the ONLY non-blocking failure: the PR's threads listed cleanly
+// but none is rooted at this comment (already deleted, or the wrong target),
+// so there is genuinely nothing to close and an acknowledgement may still post.
+// Every other code is a hard failure — `not-found` here means an HTTP 404 from
+// the API (a real problem, e.g. wrong repo/PR), NOT "no such thread"; a caller
+// must treat it as blocking so it never claims a thread is settled on a failed
+// or misdirected lookup.
+export type ReviewThreadResolveResult =
+  | { ok: true; alreadyResolved?: boolean }
+  | {
+      ok: false
+      error: string
+      code?: 'not-author' | 'no-match' | 'not-found' | 'unsupported' | 'permission-denied' | 'transient'
+    }
+
+// Registered per-adapter on the ChannelRouter, last-write-wins like the
+// self-identity resolver (one bot account per adapter). Adapters that do not
+// support review threads never register one; the router answers `unsupported`.
+export type ReviewThreadResolver = (req: ReviewThreadResolveRequest) => Promise<ReviewThreadResolveResult>
+
 export function channelKeyId(key: ChannelKey): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }

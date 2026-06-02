@@ -80,6 +80,14 @@ export function createChannelReplyTool({
             'Do not set it just to seem responsive; only when genuine multi-step work follows in the same turn.',
         }),
       ),
+      resolve_review_thread: Type.Optional(
+        Type.Boolean({
+          description:
+            'GitHub only. Set `true` when this reply acknowledges that a review-comment thread YOU authored has been addressed, to resolve (close) that thread atomically with the reply. ' +
+            'The thread is resolved BEFORE the acknowledgement is posted, and only if its root comment is yours — so it never closes a human reviewer\'s thread, and a failed resolve blocks the misleading "looks resolved" reply. ' +
+            'Valid only on a github session replying inside a thread (the origin must carry a `thread`). Ignored elsewhere.',
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params) {
@@ -120,6 +128,22 @@ export function createChannelReplyTool({
         return {
           content: [{ type: 'text' as const, text: `channel_reply denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
+        }
+      }
+
+      // Resolve BEFORE posting: a successful channel_reply ends the turn, so a
+      // resolve attempted "after" the ack would never run (the exact bug this
+      // flag fixes). Resolve-failure blocks the reply so the agent never posts
+      // a "looks resolved" ack next to a still-open thread; the router enforces
+      // that only the bot's own threads can be resolved.
+      if (params.resolve_review_thread === true) {
+        const resolveError = await resolveReviewThreadBeforeReply(router, origin)
+        if (resolveError !== null) {
+          logger.warn(formatChannelToolFailure('channel_reply', resolveError))
+          return {
+            content: [{ type: 'text' as const, text: `channel_reply denied: ${resolveError}` }],
+            details: { ok: false, error: resolveError },
+          }
         }
       }
 
@@ -190,6 +214,33 @@ export function createChannelReplyTool({
       }
     },
   })
+}
+
+// Returns an error string when the resolve should block the reply, or null
+// when it's safe to proceed. Only `no-match` (the thread is already gone, so
+// there's nothing to close) joins success as non-blocking; every hard failure
+// — wrong author, permission denial, HTTP 404 on a misdirected lookup,
+// transient API error — blocks, so the agent never claims a thread is settled
+// when the resolve did not actually run.
+async function resolveReviewThreadBeforeReply(
+  router: ChannelRouter,
+  origin: ChannelReplyOrigin,
+): Promise<string | null> {
+  if (origin.adapter !== 'github') {
+    return 'resolve_review_thread is only supported on github sessions.'
+  }
+  if (origin.thread === null) {
+    return 'resolve_review_thread requires replying inside a review thread (no thread on this origin).'
+  }
+  const result = await router.resolveReviewThread({
+    adapter: origin.adapter,
+    workspace: origin.workspace,
+    chat: origin.chat,
+    rootCommentId: origin.thread,
+  })
+  if (result.ok) return null
+  if (result.code === 'no-match') return null
+  return `could not resolve review thread: ${result.error}`
 }
 
 // Tool results reach the model as USER-role messages (OpenAI / Anthropic

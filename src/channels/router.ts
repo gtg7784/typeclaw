@@ -64,6 +64,9 @@ import type {
   ReactionRequest,
   ReactionResult,
   ResolvedChannelNames,
+  ReviewThreadResolveRequest,
+  ReviewThreadResolveResult,
+  ReviewThreadResolver,
   SendErrorCode,
   SendResult,
   TypingCallback,
@@ -579,6 +582,14 @@ export type ChannelRouter = {
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
+  // Review-thread resolution is opt-in per adapter and last-write-wins (one
+  // bot account per adapter, like self-identity). An adapter that never calls
+  // registerReviewThreadResolver makes `resolveReviewThread` answer
+  // `unsupported`. Kept off the outbound path: resolving is a side-effect close-
+  // out, not a message, so it bypasses send()'s flood/cap/dup/sticky guards.
+  registerReviewThreadResolver: (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver) => void
+  unregisterReviewThreadResolver: (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver) => void
+  resolveReviewThread: (req: ReviewThreadResolveRequest) => Promise<ReviewThreadResolveResult>
   lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
   listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
   // Execute a command by name against an existing live session, bypassing
@@ -807,6 +818,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const membershipCaches = new Map<ChannelKey['adapter'], MembershipCache>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
+  const reviewThreadResolvers = new Map<ChannelKey['adapter'], ReviewThreadResolver>()
   const stickyLedger = new StickyLedger()
   // The /help handler reads the live registry to enumerate commands, so it
   // forward-references `commands`. Safe at runtime — the handler only runs on
@@ -2351,6 +2363,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return lastError
   }
 
+  const registerReviewThreadResolver = (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver): void => {
+    reviewThreadResolvers.set(adapter, resolver)
+  }
+
+  const unregisterReviewThreadResolver = (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver): void => {
+    if (reviewThreadResolvers.get(adapter) === resolver) {
+      reviewThreadResolvers.delete(adapter)
+    }
+  }
+
+  const resolveReviewThread = async (req: ReviewThreadResolveRequest): Promise<ReviewThreadResolveResult> => {
+    const resolver = reviewThreadResolvers.get(req.adapter)
+    if (resolver === undefined) {
+      return {
+        ok: false,
+        error: `adapter "${req.adapter}" does not support review-thread resolution`,
+        code: 'unsupported',
+      }
+    }
+    return await resolver(req).catch(
+      (err): ReviewThreadResolveResult => ({ ok: false, error: describe(err), code: 'transient' }),
+    )
+  }
+
   const lookupInboundAttachment = (args: ChannelKey & { id: number }): InboundAttachment | null => {
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return null
@@ -2952,6 +2988,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,
+    registerReviewThreadResolver,
+    unregisterReviewThreadResolver,
+    resolveReviewThread,
     lookupInboundAttachment,
     listInboundAttachmentIds,
     executeCommand,
