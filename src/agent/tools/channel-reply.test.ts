@@ -14,7 +14,10 @@ import {
 
 function fakeRouter(
   handler: (msg: OutboundMessage) => Promise<SendResult>,
-  options: { consecutiveCount?: number } = {},
+  options: {
+    consecutiveCount?: number
+    resolveReviewThread?: ChannelRouter['resolveReviewThread']
+  } = {},
 ): ChannelRouter {
   return {
     route: async () => {},
@@ -43,6 +46,9 @@ function fakeRouter(
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment callback registered for "slack-bot"' }),
+    registerReviewThreadResolver: () => {},
+    unregisterReviewThreadResolver: () => {},
+    resolveReviewThread: options.resolveReviewThread ?? (async () => ({ ok: true })),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],
@@ -656,5 +662,169 @@ describe('renderOutboundEcho', () => {
   test('empty input renders a sentinel', () => {
     expect(renderOutboundEcho(undefined, undefined)).toBe('(empty)')
     expect(renderOutboundEcho('', [])).toBe('(empty)')
+  })
+})
+
+const githubThreadOrigin: ChannelReplyOrigin = {
+  adapter: 'github',
+  workspace: 'acme/widgets',
+  chat: 'pr:585',
+  thread: '3343107661',
+}
+
+describe('channel_reply resolve_review_thread', () => {
+  test('resolves the thread before posting the acknowledgement', async () => {
+    const order: string[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async () => {
+          order.push('send')
+          return { ok: true }
+        },
+        {
+          resolveReviewThread: async (req) => {
+            order.push(`resolve:${req.rootCommentId}`)
+            return { ok: true }
+          },
+        },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Verified — fix looks solid.', resolve_review_thread: true })
+
+    expect(order).toEqual(['resolve:3343107661', 'send'])
+    expect(result.details).toEqual({ ok: true })
+  })
+
+  test('blocks the reply when the resolve fails', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { resolveReviewThread: async () => ({ ok: false, error: 'GitHub GraphQL 403', code: 'permission-denied' }) },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Looks resolved.', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details).toEqual({ ok: false, error: 'could not resolve review thread: GitHub GraphQL 403' })
+  })
+
+  test('refuses to resolve a thread the bot did not author and does not post', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        {
+          resolveReviewThread: async () => ({
+            ok: false,
+            error: 'refusing to resolve thread authored by @human (not @bot[bot])',
+            code: 'not-author',
+          }),
+        },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Thanks!', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details.ok).toBe(false)
+  })
+
+  test('still posts when the thread is already gone (no-match is non-blocking)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { resolveReviewThread: async () => ({ ok: false, error: 'no thread', code: 'no-match' }) },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Done.', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details.ok).toBe(true)
+  })
+
+  test('blocks the reply on an HTTP 404 lookup (not-found is NOT no-match)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { resolveReviewThread: async () => ({ ok: false, error: 'GitHub GraphQL 404', code: 'not-found' }) },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Done.', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details.ok).toBe(false)
+  })
+
+  test('rejects the flag on a non-github origin without posting', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: slackThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'hi', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details.ok).toBe(false)
+  })
+
+  test('rejects the flag when the github origin has no thread', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: { adapter: 'github', workspace: 'acme/widgets', chat: 'pr:585', thread: null },
+    })
+
+    const result = await runTool(tool, { text: 'hi', resolve_review_thread: true })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details.ok).toBe(false)
+  })
+
+  test('does not attempt resolution when the flag is omitted', async () => {
+    let resolveCalled = false
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true }), {
+        resolveReviewThread: async () => {
+          resolveCalled = true
+          return { ok: true }
+        },
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    await runTool(tool, { text: 'plain reply' })
+
+    expect(resolveCalled).toBe(false)
   })
 })
