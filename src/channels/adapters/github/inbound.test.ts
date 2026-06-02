@@ -409,6 +409,151 @@ describe('classifyGithubInbound', () => {
   })
 })
 
+describe('classifyGithubInbound — empty-body handling', () => {
+  it('drops a pull_request_review_comment with an empty body', () => {
+    const payload = reviewCommentPayload()
+    ;(payload.comment as Record<string, unknown>).body = ''
+    expect(classifyGithubInbound('pull_request_review_comment', payload, 'typeclaw-bot')).toBe(null)
+  })
+
+  it('drops an issue_comment with a whitespace-only body', () => {
+    const payload = issueCommentPayload({ pullRequest: true })
+    ;(payload.comment as Record<string, unknown>).body = '   \n  '
+    expect(classifyGithubInbound('issue_comment', payload, 'typeclaw-bot')).toBe(null)
+  })
+
+  describe('pull_request_review.submitted with empty body', () => {
+    const reviewSubmitted = (state: string, body = ''): Record<string, unknown> => ({
+      action: 'submitted',
+      repository: repo(),
+      pull_request: { number: 7, id: 700, title: 'Add the thing', user: user() },
+      review: { id: 5002, body, state, submitted_at: '2026-01-01T00:00:00Z', user: user() },
+    })
+
+    it('synthesizes neutral text from an APPROVED state', () => {
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('APPROVED'), 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice approved PR #7: "Add the thing".')
+      expect(msg?.isBotMention).toBe(false)
+    })
+
+    it('synthesizes neutral text from a CHANGES_REQUESTED state', () => {
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('CHANGES_REQUESTED'), 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice requested changes on PR #7: "Add the thing".')
+    })
+
+    it('synthesizes neutral text for a body-less COMMENTED review without implying a review was requested', () => {
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('COMMENTED'), 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice submitted a review on PR #7: "Add the thing".')
+      expect(msg?.text).not.toContain('Please review')
+    })
+
+    it('matches the state case-insensitively (REST returns uppercase, some payloads lowercase)', () => {
+      const upper = classifyGithubInbound('pull_request_review', reviewSubmitted('APPROVED'), 'typeclaw-bot')
+      const lower = classifyGithubInbound('pull_request_review', reviewSubmitted('approved'), 'typeclaw-bot')
+      expect(lower?.text).toBe(upper?.text)
+      expect(lower?.text).toBe('@alice approved PR #7: "Add the thing".')
+    })
+
+    it('keeps the real body when the review has one', () => {
+      const msg = classifyGithubInbound(
+        'pull_request_review',
+        reviewSubmitted('COMMENTED', 'looks good'),
+        'typeclaw-bot',
+      )
+      expect(msg?.text).toBe('looks good')
+    })
+  })
+
+  describe('body-less opened events synthesize a title line', () => {
+    it('issues.opened with no body', () => {
+      const payload = {
+        action: 'opened',
+        repository: repo(),
+        issue: {
+          number: 7,
+          id: 700,
+          title: 'Broken login',
+          body: '',
+          created_at: '2026-01-01T00:00:00Z',
+          user: user(),
+        },
+      }
+      const msg = classifyGithubInbound('issues', payload, 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice opened issue #7: "Broken login".')
+      expect(msg?.isBotMention).toBe(false)
+    })
+
+    it('pull_request.opened with no body (awareness fallthrough, reviewOn defaults to review_requested)', () => {
+      const payload = {
+        action: 'opened',
+        repository: repo(),
+        pull_request: {
+          number: 7,
+          id: 700,
+          title: 'Add the thing',
+          body: '',
+          created_at: '2026-01-01T00:00:00Z',
+          user: user(),
+        },
+      }
+      const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice opened PR #7: "Add the thing".')
+    })
+
+    it('discussion.created with no body', () => {
+      const payload = {
+        action: 'created',
+        repository: repo(),
+        discussion: {
+          number: 7,
+          id: 700,
+          title: 'RFC: caching',
+          body: '',
+          created_at: '2026-01-01T00:00:00Z',
+          user: user(),
+        },
+      }
+      const msg = classifyGithubInbound('discussion', payload, 'typeclaw-bot')
+      expect(msg?.text).toBe('@alice opened discussion #7: "RFC: caching".')
+    })
+  })
+
+  it('drops a non-opened pull_request action with an empty body (e.g. edited)', () => {
+    const payload = {
+      action: 'edited',
+      repository: repo(),
+      pull_request: {
+        number: 7,
+        id: 700,
+        title: 'Add the thing',
+        body: '',
+        created_at: '2026-01-01T00:00:00Z',
+        user: user(),
+      },
+    }
+    expect(classifyGithubInbound('pull_request', payload, 'typeclaw-bot')).toBe(null)
+  })
+
+  it('drops a non-opened issues action with an empty body (only issues.opened synthesizes a title)', () => {
+    const payload = {
+      action: 'edited',
+      repository: repo(),
+      issue: { number: 7, id: 700, title: 'Broken login', body: '', created_at: '2026-01-01T00:00:00Z', user: user() },
+    }
+    expect(classifyGithubInbound('issues', payload, 'typeclaw-bot')).toBe(null)
+  })
+
+  it('still routes review_requested through the synthesized review trigger (not affected by the empty-body drop)', () => {
+    const msg = classifyGithubInbound(
+      'pull_request',
+      reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
+      'typeclaw-bot',
+    )
+    expect(msg?.isBotMention).toBe(true)
+    expect(msg?.text).toContain('requested your review on PR #7')
+  })
+})
+
 describe('createGithubWebhookHandler — review.on wiring', () => {
   const baseOptions = (routed: InboundMessage[], reviewOn?: () => 'review_requested' | 'opened' | 'off') => ({
     webhookSecret: 'secret',
