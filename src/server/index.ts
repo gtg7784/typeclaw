@@ -19,6 +19,7 @@ import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from 
 import type { CreateSessionForSubagent } from '@/agent/subagents'
 import { TODO_CONTINUATION_SOURCE } from '@/agent/todo/continuation'
 import {
+  armRestartKickForOrigin,
   extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
@@ -557,6 +558,17 @@ export function createServer({
             // wired (state.unsubPrompts above) so the kick is enqueued, not
             // dropped on the floor.
             if (resumed !== null && stream) {
+              // Arm the one-shot restart-kick suppressor BEFORE publishing the
+              // kick: the kick owns the first post-restart turn ("I'm back"),
+              // so the first idle after it must not also fire a todo
+              // continuation. The flag is consumed by that first idle. Best-
+              // effort: a failure here only risks one redundant nudge, which
+              // the episode budget still bounds.
+              if (agentDir !== undefined) {
+                await armRestartKickForOrigin(agentDir, origin).catch((err) =>
+                  logger.error(`[server] ${sessionFileId}: arm restart-kick suppression failed: ${describeErr(err)}`),
+                )
+              }
               stream.publish({
                 target: { kind: 'session', sessionId: sessionFileId },
                 payload: { kind: 'prompt', text: ' ', delivery: 'queue' },

@@ -94,6 +94,27 @@ describe('runBackup', () => {
     expect(addF?.args).toEqual(['add', '-f', '--', 'sessions/a.jsonl'])
   })
 
+  test('force-adds todo/ paths so continuation state survives across restarts', async () => {
+    const cwd = await makeRepo()
+    await mkdir(join(cwd, 'todo'))
+    await writeFile(join(cwd, 'todo', 'tui.json'), '{}')
+    const status = '?? todo/tui.json\n M src/foo.ts\n'
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') return okResult(status)
+      if (args[0] === 'add' && args[1] === '--') return okResult()
+      if (args[0] === 'add' && args[1] === '-f') return okResult()
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'diff' && args[2] === '--stat') return okResult('foo.ts | 1 +')
+      if (args[0] === 'commit') return okResult()
+      if (args[0] === 'rev-parse') return failResult('no upstream', 128)
+      return okResult()
+    })
+    const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
+    expect(result).toEqual({ ok: true, kind: 'committed' })
+    const addF = calls.find((c) => c.args[0] === 'add' && c.args[1] === '-f')
+    expect(addF?.args).toEqual(['add', '-f', '--', 'todo/tui.json'])
+  })
+
   test('re-stages sessions/ paths that appeared during pickCommitMessage', async () => {
     // given: pickCommitMessage simulates spawning a `backup-message` subagent
     // that writes a NEW session JSONL into sessions/ after the initial status.

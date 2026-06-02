@@ -5,7 +5,7 @@ export const COMMIT_TIMEOUT_MS = 30_000
 export const NETWORK_TIMEOUT_MS = 60_000
 
 const RUNTIME_OWNED_PREFIXES = ['memory/'] as const
-const FORCE_ADD_PREFIXES = ['sessions/'] as const
+const FORCE_ADD_PREFIXES = ['sessions/', 'todo/'] as const
 
 const NONINTERACTIVE_ENV = {
   GIT_TERMINAL_PROMPT: '0',

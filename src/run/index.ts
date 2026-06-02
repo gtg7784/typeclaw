@@ -16,6 +16,7 @@ import {
   type SubagentRegistry,
   type SubagentShared,
 } from '@/agent/subagents'
+import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
   createChannelManager,
@@ -434,6 +435,13 @@ export async function startAgent({
         // marker so the audit trail records "user edited cron.json".
         scheduledByOrigin: (job.scheduledByOrigin as SessionOrigin | undefined) ?? { kind: 'config-file' },
       }
+      // Cron todos are per-fire ephemeral by default: each scheduled run starts
+      // with a clean list so an incomplete item from a prior fire cannot
+      // resurrect indefinitely on every tick. (A future opt-in could carry them
+      // forward; until then, clearing is the safe default.)
+      await clearTodosForOrigin(cwd, cronOrigin).catch((err) =>
+        console.error(`[cron] ${job.id}: clear todos failed: ${err instanceof Error ? err.message : String(err)}`),
+      )
       const session = await createSession({
         reloadRegistry,
         sessionManager,

@@ -43,7 +43,9 @@ export function renderSubagentCompletionReminder(args: CompletionReminderArgs): 
   return (
     `<system-reminder>\n` +
     `Subagent \`${args.subagent}\` (${args.taskId}) FAILED after ${durationStr}: ${err}. ` +
-    `Use subagent_output to inspect.${channelTail}\n` +
+    `Use subagent_output to inspect. If this work was tracked in your todo list, ` +
+    `keep the item pending (or add a recovery item) via todo_write so it is not ` +
+    `dropped.${channelTail}\n` +
     `</system-reminder>`
   )
 }

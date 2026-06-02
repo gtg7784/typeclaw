@@ -34,6 +34,7 @@ describe('renderSubagentCompletionReminder', () => {
     expect(text).toContain('FAILED')
     expect(text).toContain('provider rate limit')
     expect(text).toContain('subagent_output')
+    expect(text).toContain('todo_write')
   })
 
   test('ok=false without error string falls back to "unknown error"', () => {
