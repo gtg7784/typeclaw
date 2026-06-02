@@ -828,6 +828,72 @@ describe('startSubagent', () => {
     }
   })
 
+  test('timeoutMs settles completion with ok=false when prompt wedges (parent gets woken, not stranded)', async () => {
+    // given: a session whose prompt never resolves, and a subagent with a tiny timeout
+    let abortCount = 0
+    const session = {
+      prompt: () => new Promise<void>(() => {}),
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {
+        abortCount += 1
+      },
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_timeout',
+    })
+    const result = await completion
+
+    // then: the spawn fails (so spawn_subagent fires the FAILED broadcast) and the session is aborted
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('timed out')
+    }
+    expect(abortCount).toBe(1)
+  })
+
+  test('without timeoutMs a slow prompt keeps completion pending (legacy unbounded behavior preserved)', async () => {
+    // given: a session whose prompt has not resolved yet, and no timeout declared
+    let resolvePrompt: () => void = () => {}
+    const session = {
+      prompt: () =>
+        new Promise<void>((r) => {
+          resolvePrompt = r
+        }),
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_unbounded',
+    })
+    let settled = false
+    void completion.then(() => {
+      settled = true
+    })
+    await new Promise((r) => setTimeout(r, 30))
+
+    // then: still pending — no ceiling fired
+    expect(settled).toBe(false)
+    resolvePrompt()
+    await completion
+    expect(settled).toBe(true)
+  })
+
   test('onSession fires once with the live session and abort handle', async () => {
     // given
     const { session } = subscribableFakeSession()
