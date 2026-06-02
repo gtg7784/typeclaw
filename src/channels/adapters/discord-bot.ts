@@ -19,6 +19,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
@@ -823,6 +824,9 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
   const channelResolver = createDiscordChannelResolver({ token: options.token })
 
+  // Discord mentions by snowflake id (`<@id>`/`<@!id>`), so no username form.
+  const selfIdentityResolver: ChannelSelfIdentityResolver = () => (botUserId !== null ? { id: botUserId } : null)
+
   const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
     const names = await channelResolver({ adapter: 'discord-bot', workspace, chat, thread: null }).catch(
       () => ({}) as ResolvedChannelNames,
@@ -975,6 +979,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerOutbound('discord-bot', outboundCallback)
       options.router.registerTyping('discord-bot', typingCallback)
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
+      options.router.registerSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.registerHistory('discord-bot', historyCallback)
       options.router.registerFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.registerMembership('discord-bot', membershipResolver)
@@ -994,6 +999,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterOutbound('discord-bot', outboundCallback)
       options.router.unregisterTyping('discord-bot', typingCallback)
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
+      options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.unregisterHistory('discord-bot', historyCallback)
       options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('discord-bot', membershipResolver)

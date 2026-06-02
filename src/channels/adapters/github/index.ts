@@ -1,6 +1,7 @@
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
+import type { ChannelSelfIdentityResolver } from '@/channels/types'
 import { resolveSecret } from '@/secrets/resolve'
 import type { GithubSecretsBlock } from '@/secrets/schema'
 
@@ -137,6 +138,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   })
   const membership = createGithubMembershipResolver({ token: authToken, fetchImpl })
   const channelNameResolver = createGithubChannelNameResolver({ token: authToken, fetchImpl })
+  // GitHub addresses by `@login`, not the numeric id, so `username` carries
+  // the login the model should type; the id is kept for completeness.
+  const selfIdentityResolver: ChannelSelfIdentityResolver = () =>
+    selfLogin !== null ? { id: selfId ?? selfLogin, username: selfLogin } : null
   const fetchAttachment = createGithubFetchAttachmentCallback()
   // No-op typing callback: GitHub has no typing indicator API.
   const typing = async (): Promise<void> => {}
@@ -181,6 +186,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.registerHistory('github', history)
       options.router.registerMembership('github', membership)
       options.router.registerChannelNameResolver('github', channelNameResolver)
+      options.router.registerSelfIdentity('github', selfIdentityResolver)
       options.router.registerFetchAttachment('github', fetchAttachment)
       try {
         server = (options.httpListenImpl ?? listenWithBun)(options.configRef().webhookPort, handler)
@@ -194,6 +200,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         options.router.unregisterHistory('github', history)
         options.router.unregisterMembership('github', membership)
         options.router.unregisterChannelNameResolver('github', channelNameResolver)
+        options.router.unregisterSelfIdentity('github', selfIdentityResolver)
         options.router.unregisterFetchAttachment('github', fetchAttachment)
         await auth.dispose()
         delete process.env.GH_TOKEN
@@ -316,6 +323,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.unregisterHistory('github', history)
       options.router.unregisterMembership('github', membership)
       options.router.unregisterChannelNameResolver('github', channelNameResolver)
+      options.router.unregisterSelfIdentity('github', selfIdentityResolver)
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
       // Detach hooks AFTER closing the listener so any in-flight deliveries

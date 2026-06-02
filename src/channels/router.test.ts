@@ -323,6 +323,30 @@ describe('ChannelRouter session lifecycle', () => {
     expect(router.liveCount()).toBe(1)
   })
 
+  test('includes registered self-identity in the session-creation origin', async () => {
+    const dir = await tempDir()
+    const { router, origins } = makeRouter(dir)
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const channelOrigin = origins.find((o) => o.kind === 'channel')
+    expect(channelOrigin?.kind).toBe('channel')
+    expect(channelOrigin?.kind === 'channel' ? channelOrigin.self : undefined).toEqual({ id: 'BOT_SELF_ID' })
+  })
+
+  test('omits self from the origin when no identity resolver is registered', async () => {
+    const dir = await tempDir()
+    const { router, origins } = makeRouter(dir)
+
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const channelOrigin = origins.find((o) => o.kind === 'channel')
+    expect(channelOrigin?.kind === 'channel' ? channelOrigin.self : undefined).toBeUndefined()
+  })
+
   test('emits ordered ensureLive phase logs bracketing each await', async () => {
     // given a fresh router and a captured log buffer
     const dir = await tempDir()

@@ -1,6 +1,6 @@
 import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import type { AdapterId } from '@/channels/schema'
-import type { ReactionRef } from '@/channels/types'
+import type { ChannelSelfIdentity, ReactionRef } from '@/channels/types'
 
 export type ChannelParticipant = {
   authorId: string
@@ -42,6 +42,7 @@ export type SessionOrigin =
       reactionRef?: ReactionRef
       participants?: readonly ChannelParticipant[]
       membership?: MembershipCount
+      self?: ChannelSelfIdentity
     }
   | {
       kind: 'subagent'
@@ -262,6 +263,7 @@ function renderChannelOrigin(
     thread: string | null
     participants?: readonly ChannelParticipant[]
     membership?: MembershipCount
+    self?: ChannelSelfIdentity
   },
   now: number,
 ): string {
@@ -398,7 +400,7 @@ function renderChannelOrigin(
     "matching the channel's `allow` rules are accepted (the tool returns",
     '`{ ok: false }` otherwise).',
     '',
-    ...renderMentionGuidance(platformInfo, origin.participants ?? [], now),
+    ...renderMentionGuidance(platformInfo, origin.participants ?? [], now, origin.self),
   )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], platformInfo, now)
@@ -437,6 +439,7 @@ function renderMentionGuidance(
   platformInfo: PlatformInfo,
   participants: readonly ChannelParticipant[],
   now: number,
+  self?: ChannelSelfIdentity,
 ): string[] {
   const cutoff = now - PARTICIPANTS_MAX_AGE_MS
   const fresh = [...participants]
@@ -454,6 +457,7 @@ function renderMentionGuidance(
         `For example, to address ${exampleName} in this conversation, write \`<@${exampleId}> hello\` —`,
         `**not** "${exampleName} hello". Plain-text names do not notify the recipient on ${platformInfo.displayName},`,
         'and other bots in this channel will not see the message as addressed to them.',
+        ...renderSelfMention(platformInfo, self),
       ]
     case 'at-username':
       return [
@@ -462,6 +466,7 @@ function renderMentionGuidance(
         'block below are a typeclaw convention for parsing inbound mentions — do not echo them back as outbound mentions.',
         'If you only know an author by their display name and they have no `@username`, address them by display name',
         'and they will see the message via the reply context.',
+        ...renderSelfMention(platformInfo, self),
       ]
     case 'alias':
       return [
@@ -471,6 +476,40 @@ function renderMentionGuidance(
         `The \`<@id>\` tokens in the participants block below are a typeclaw convention for parsing inbound mentions —`,
         'do not echo them back as outbound mentions; KakaoTalk would render them as literal text.',
       ]
+  }
+}
+
+// The model knows its NAME from identity files but not its platform user
+// id, so a message addressed to its own id reads as "addressed to someone
+// else" and it wrongly skips the turn (issue: skipped_by_tool "Message
+// addressed to @U…, not to <name>"). This line closes that gap by stating
+// the bot's own addressing token explicitly. Empty for the alias platform
+// (KakaoTalk has no in-band mention token to recognize) and when identity
+// has not resolved yet — both fall through to "omit the line".
+function renderSelfMention(platformInfo: PlatformInfo, self: ChannelSelfIdentity | undefined): string[] {
+  if (self === undefined) return []
+  switch (platformInfo.mentionMode) {
+    case 'angle-id': {
+      const forms =
+        platformInfo.displayName === 'Discord' ? `\`<@${self.id}>\` (also \`<@!${self.id}>\`)` : `\`<@${self.id}>\``
+      return [
+        '',
+        `**You are ${forms} on this ${platformInfo.displayName} workspace.** When a message`,
+        `contains your id, it is addressed to YOU — treat it as a mention of yourself, not of`,
+        'someone else, and do not skip the turn as "addressed to another user".',
+      ]
+    }
+    case 'at-username': {
+      if (self.username === undefined || self.username === '') return []
+      return [
+        '',
+        `**You are \`@${self.username}\` on ${platformInfo.displayName}.** A message mentioning`,
+        `\`@${self.username}\` is addressed to YOU — treat it as a mention of yourself, not of`,
+        'someone else.',
+      ]
+    }
+    case 'alias':
+      return []
   }
 }
 

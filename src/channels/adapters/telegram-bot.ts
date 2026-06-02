@@ -6,6 +6,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelNameResolver,
+  ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
   OutboundCallback,
   OutboundMessage,
@@ -384,6 +385,13 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
 
   const channelResolver = createChannelNameResolver({ client })
 
+  // Telegram addresses by `@username`, not by the numeric id, so surface
+  // `username` when the bot has one; the id is kept for completeness.
+  const selfIdentityResolver: ChannelSelfIdentityResolver = () =>
+    botUser !== null
+      ? { id: String(botUser.id), ...(botUser.username !== undefined ? { username: botUser.username } : {}) }
+      : null
+
   const formatChannelTag = async (chat: string): Promise<string> => {
     const names = await channelResolver({
       adapter: 'telegram-bot',
@@ -522,6 +530,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.registerOutbound('telegram-bot', outboundCallback)
       options.router.registerTyping('telegram-bot', typingCallback)
       options.router.registerChannelNameResolver('telegram-bot', channelResolver)
+      options.router.registerSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.registerFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.registerMembership('telegram-bot', membershipResolver)
 
@@ -529,6 +538,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         options.router.unregisterOutbound('telegram-bot', outboundCallback)
         options.router.unregisterTyping('telegram-bot', typingCallback)
         options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
+        options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
         options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('telegram-bot', membershipResolver)
         listener?.stop()
@@ -556,6 +566,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.unregisterOutbound('telegram-bot', outboundCallback)
       options.router.unregisterTyping('telegram-bot', typingCallback)
       options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
+      options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('telegram-bot', membershipResolver)
       // Stop the listener BEFORE waiting for inflight handlers. The SDK's

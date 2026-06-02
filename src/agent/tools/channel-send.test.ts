@@ -27,6 +27,8 @@ function fakeRouter(
     unregisterTyping: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
+    registerSelfIdentity: () => {},
+    unregisterSelfIdentity: () => {},
     registerMembership: () => {},
     unregisterMembership: () => {},
     registerHistory: () => {},
