@@ -131,11 +131,26 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
   'pull_request_review.submitted',
 ] as const
 
+// Which pull_request webhook action triggers an agent code review. The two
+// event values are GitHub's bare PR action names (the `pull_request.` event
+// prefix is implied by this field living under the review config); `off` is the
+// disable sentinel, matching the `engagement.stickiness: 'off'` convention:
+//   - 'review_requested' — review only when the bot is requested (default)
+//   - 'opened'           — review every PR as soon as it opens
+//   - 'off'              — disable code review entirely
+export const GITHUB_REVIEW_ON_VALUES = ['review_requested', 'opened', 'off'] as const
+
+export type GithubReviewOn = (typeof GITHUB_REVIEW_ON_VALUES)[number]
+
+export const DEFAULT_GITHUB_REVIEW_ON: GithubReviewOn = 'review_requested'
+
 // PR-review policy knobs. Grouped under `review` so future toggles
-// (`requestChanges`, auto-review-on-request, severity thresholds) cluster
-// here instead of flattening onto the channel root.
+// (`requestChanges`, severity thresholds) cluster here instead of flattening
+// onto the channel root.
 //
-// `approve` gates whether the agent may submit a formal review with
+// `on` gates which pull_request action triggers a code review (see values above).
+//
+// `approve` gates *whether* the agent may submit a formal review with
 // `event: APPROVE`. When `false`, the adapter appends an operator-policy note
 // to inbounds and the `typeclaw-channel-github` skill downgrades an `approve`
 // verdict to a `COMMENT` review (findings still posted, no formal approval).
@@ -144,9 +159,10 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
 // temp file the command interceptor never sees.
 const githubReviewSchema = z
   .object({
+    on: z.enum(GITHUB_REVIEW_ON_VALUES).default(DEFAULT_GITHUB_REVIEW_ON),
     approve: z.boolean().default(true),
   })
-  .default({ approve: true })
+  .default({ on: DEFAULT_GITHUB_REVIEW_ON, approve: true })
 
 const githubChannelSchema = adapterSchema.extend({
   // Optional now (PR 2): when omitted and a `tunnels[]` entry with
