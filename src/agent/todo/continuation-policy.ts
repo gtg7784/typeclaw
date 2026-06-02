@@ -44,6 +44,11 @@ export type TurnOutcome = {
   turnId: string
   stopReason: 'stop' | 'aborted' | 'error' | 'unknown'
   endedAt: number
+  // Total tokens the just-completed turn consumed (from the assistant
+  // message's usage). Accumulated into the episode's cumulativeTokens so the
+  // token ceiling reflects real spend. Optional for older state files and for
+  // turns whose usage was unavailable; missing counts as 0.
+  tokens?: number
 }
 
 export type ContinuationState = {
@@ -116,7 +121,12 @@ function parseOutcome(value: unknown): TurnOutcome | null {
   if (typeof o.turnId !== 'string') return null
   if (typeof o.stopReason !== 'string' || !STOP_REASONS.has(o.stopReason as TurnOutcome['stopReason'])) return null
   if (!isFiniteNumber(o.endedAt)) return null
-  return { turnId: o.turnId, stopReason: o.stopReason as TurnOutcome['stopReason'], endedAt: o.endedAt }
+  return {
+    turnId: o.turnId,
+    stopReason: o.stopReason as TurnOutcome['stopReason'],
+    endedAt: o.endedAt,
+    ...(isFiniteNumber(o.tokens) ? { tokens: o.tokens } : {}),
+  }
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -193,7 +203,7 @@ export function decideContinuation(args: {
   }
 
   const hash = hashIncomplete(todos)
-  const episode: ContinuationEpisode = state.episode ?? {
+  const base: ContinuationEpisode = state.episode ?? {
     episodeId: args.newEpisodeId(),
     startedAt: now,
     autoTurnCount: 0,
@@ -201,6 +211,15 @@ export function decideContinuation(args: {
     failureCount: 0,
     stagnationCount: 0,
     lastIncompleteHash: null,
+  }
+
+  // Fold the just-completed turn's token spend into the episode BEFORE checking
+  // the ceiling, so the budget reflects what the previous auto-turn actually
+  // cost. `lastTurnOutcome.tokens` is the spend of the turn that drove this
+  // idle; missing usage counts as 0.
+  const episode: ContinuationEpisode = {
+    ...base,
+    cumulativeTokens: base.cumulativeTokens + (outcome.tokens ?? 0),
   }
 
   if (episode.autoTurnCount >= limits.maxAutoTurns) return { kind: 'skip', reason: 'max-auto-turns' }

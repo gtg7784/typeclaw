@@ -19,7 +19,7 @@ import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from 
 import type { CreateSessionForSubagent } from '@/agent/subagents'
 import { TODO_CONTINUATION_SOURCE } from '@/agent/todo/continuation'
 import {
-  extractStopReason,
+  extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
   runIdleContinuation,
@@ -895,11 +895,15 @@ function subscribeTurnOutcome(
   logger: ServerLogger,
 ): Unsubscribe {
   return session.subscribe((event) => {
-    const stopReason = extractStopReason(event)
-    if (stopReason === null) return
-    void recordTurnOutcome({ agentDir, origin, turnId: sessionFileId, stopReason }).catch((err) =>
-      logger.error(`[server] ${sessionFileId}: todo outcome capture failed: ${describeErr(err)}`),
-    )
+    const usage = extractTurnUsage(event)
+    if (usage === null) return
+    void recordTurnOutcome({
+      agentDir,
+      origin,
+      turnId: sessionFileId,
+      stopReason: usage.stopReason,
+      ...(usage.tokens !== undefined ? { tokens: usage.tokens } : {}),
+    }).catch((err) => logger.error(`[server] ${sessionFileId}: todo outcome capture failed: ${describeErr(err)}`))
   })
 }
 

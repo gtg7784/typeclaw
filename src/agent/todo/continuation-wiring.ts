@@ -13,13 +13,24 @@ export function classifyStopReason(raw: unknown): TurnOutcome['stopReason'] {
   return 'unknown'
 }
 
-export function extractStopReason(event: unknown): TurnOutcome['stopReason'] | null {
+// Extract the stopReason and token usage from a pi `message_end` event.
+// Returns null for any event that is not an assistant message_end. `tokens`
+// comes from the assistant message's `usage.totalTokens`; it is undefined when
+// the provider did not report usage.
+export function extractTurnUsage(event: unknown): { stopReason: TurnOutcome['stopReason']; tokens?: number } | null {
   if (typeof event !== 'object' || event === null) return null
   const e = event as { type?: unknown; message?: unknown }
   if (e.type !== 'message_end') return null
-  const message = e.message as { role?: unknown; stopReason?: unknown } | undefined
+  const message = e.message as { role?: unknown; stopReason?: unknown; usage?: unknown } | undefined
   if (message?.role !== 'assistant') return null
-  return classifyStopReason(message.stopReason)
+  const usage = message.usage as { totalTokens?: unknown } | undefined
+  const total = usage?.totalTokens
+  const tokens = typeof total === 'number' && Number.isFinite(total) ? total : undefined
+  return { stopReason: classifyStopReason(message.stopReason), ...(tokens !== undefined ? { tokens } : {}) }
+}
+
+export function extractStopReason(event: unknown): TurnOutcome['stopReason'] | null {
+  return extractTurnUsage(event)?.stopReason ?? null
 }
 
 // Persist the just-completed turn's outcome for a scope. No-op for origins
@@ -30,12 +41,18 @@ export async function recordTurnOutcome(args: {
   origin: SessionOrigin
   turnId: string
   stopReason: TurnOutcome['stopReason']
+  tokens?: number
   now?: number
 }): Promise<void> {
   const scope = resolveTodoScope(args.origin)
   if (scope === null) return
   const state = await readContinuationState(args.agentDir, scope)
-  const outcome: TurnOutcome = { turnId: args.turnId, stopReason: args.stopReason, endedAt: args.now ?? Date.now() }
+  const outcome: TurnOutcome = {
+    turnId: args.turnId,
+    stopReason: args.stopReason,
+    endedAt: args.now ?? Date.now(),
+    ...(args.tokens !== undefined ? { tokens: args.tokens } : {}),
+  }
   await writeContinuationState(args.agentDir, scope, onTurnOutcome(state, outcome))
 }
 
