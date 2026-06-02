@@ -2,7 +2,7 @@ import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import type { SessionOrigin } from '@/agent/session-origin'
-import { resolveTodoScope } from '@/agent/todo/scope'
+import { resolveTodoScope, type TodoScope } from '@/agent/todo/scope'
 import { incompleteTodos, type Todo, TODO_PRIORITIES, TODO_STATUSES, readTodos, writeTodos } from '@/agent/todo/store'
 
 export type CreateTodoToolsOptions = {
@@ -10,15 +10,24 @@ export type CreateTodoToolsOptions = {
   getOrigin: () => SessionOrigin | undefined
 }
 
-const SUBAGENT_NOTICE =
-  'Todos are owned by the originating session, not by subagents. This call was a no-op. ' +
-  'Report your result to the parent instead.'
+const NO_SCOPE_NOTICE =
+  'Todos are owned by the originating session. This session (a subagent, system task, or one ' +
+  'with no resolvable origin) does not own a todo list, so the call was a no-op.'
 
 type TodoToolDetails = {
   ok: boolean
   reason?: string
   total?: number
   remaining?: number
+}
+
+// Resolve the scope for the current origin, or null when this session owns no
+// todo list. An UNDEFINED origin is treated as no-scope, NOT defaulted to the
+// shared TUI scope — defaulting would fail open, silently routing an unknown
+// actor's todos into the operator's global `tui` list.
+function scopeForOrigin(getOrigin: () => SessionOrigin | undefined): TodoScope | null {
+  const origin = getOrigin()
+  return origin === undefined ? null : resolveTodoScope(origin)
 }
 
 const TODO_ITEM = Type.Object({
@@ -46,10 +55,10 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
       todos: Type.Array(TODO_ITEM, { description: 'The complete todo list. Replaces any prior list.' }),
     }),
     async execute(_toolCallId, params) {
-      const scope = resolveTodoScope(getOrigin() ?? { kind: 'tui', sessionId: 'unknown' })
+      const scope = scopeForOrigin(getOrigin)
       if (scope === null) {
         const details: TodoToolDetails = { ok: false, reason: 'no-scope' }
-        return { content: [{ type: 'text' as const, text: SUBAGENT_NOTICE }], details }
+        return { content: [{ type: 'text' as const, text: NO_SCOPE_NOTICE }], details }
       }
       const todos = params.todos as Todo[]
       await writeTodos(agentDir, scope, todos)
@@ -73,10 +82,10 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
     description: 'Return your current todo list for this session. Use it to re-sync after an interruption.',
     parameters: Type.Object({}),
     async execute() {
-      const scope = resolveTodoScope(getOrigin() ?? { kind: 'tui', sessionId: 'unknown' })
+      const scope = scopeForOrigin(getOrigin)
       if (scope === null) {
         const details: TodoToolDetails = { ok: false, reason: 'no-scope' }
-        return { content: [{ type: 'text' as const, text: SUBAGENT_NOTICE }], details }
+        return { content: [{ type: 'text' as const, text: NO_SCOPE_NOTICE }], details }
       }
       const todos = await readTodos(agentDir, scope)
       const details: TodoToolDetails = { ok: true, total: todos.length }
@@ -95,10 +104,10 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
       'task was abandoned, so the runtime stops tracking pending work.',
     parameters: Type.Object({}),
     async execute() {
-      const scope = resolveTodoScope(getOrigin() ?? { kind: 'tui', sessionId: 'unknown' })
+      const scope = scopeForOrigin(getOrigin)
       if (scope === null) {
         const details: TodoToolDetails = { ok: false, reason: 'no-scope' }
-        return { content: [{ type: 'text' as const, text: SUBAGENT_NOTICE }], details }
+        return { content: [{ type: 'text' as const, text: NO_SCOPE_NOTICE }], details }
       }
       await writeTodos(agentDir, scope, [])
       const details: TodoToolDetails = { ok: true }

@@ -106,4 +106,18 @@ describe('todo tools', () => {
     )
     expect(res.details).toMatchObject({ ok: false, reason: 'no-scope' })
   })
+
+  test('undefined origin no-ops (does not fall back to the shared tui scope)', async () => {
+    const { write } = toolsFor(undefined)
+    const res = await write.execute(
+      'c1',
+      { todos: [{ content: 'x', status: 'pending' }] },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(res.details).toMatchObject({ ok: false, reason: 'no-scope' })
+    // The tui scope must remain untouched — no cross-scope leak.
+    expect(await readTodos(agentDir, resolveTodoScope(TUI)!)).toEqual([])
+  })
 })
