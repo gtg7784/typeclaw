@@ -78,8 +78,31 @@ describe('channelsSchema', () => {
     expect(parsed.github?.review.approve).toBe(false)
   })
 
-  test('github review defaults to { approve: true } when omitted', () => {
+  test('github review defaults to { on: review_requested, approve: true } when omitted', () => {
     const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
-    expect(parsed.github?.review).toEqual({ approve: true })
+    expect(parsed.github?.review).toEqual({ on: 'review_requested', approve: true })
+  })
+
+  test('github review.on defaults to review_requested', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
+    expect(parsed.github?.review.on).toBe('review_requested')
+  })
+
+  test('github review.on accepts off', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'], review: { on: 'off' } } })
+    expect(parsed.github?.review.on).toBe('off')
+  })
+
+  test('github review.on accepts opened', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'], review: { on: 'opened' } } })
+    expect(parsed.github?.review.on).toBe('opened')
+  })
+
+  test('github review.on rejects unknown values', () => {
+    expect(() =>
+      channelsSchema.parse({
+        github: { repos: ['owner/repo'], review: { on: 'closed' } },
+      } as unknown as Parameters<typeof channelsSchema.parse>[0]),
+    ).toThrow()
   })
 })
