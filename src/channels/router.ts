@@ -43,6 +43,8 @@ import type {
   ChannelHistoryMessage,
   ChannelKey,
   ChannelNameResolver,
+  ChannelSelfIdentity,
+  ChannelSelfIdentityResolver,
   FetchAttachmentArgs,
   FetchAttachmentCallback,
   FetchAttachmentResult,
@@ -553,6 +555,13 @@ export type ChannelRouter = {
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
+  // Self-identity is a per-adapter singleton (one bot account per adapter),
+  // so unlike the multi-resolver registries above this is last-write-wins:
+  // register overwrites, unregister clears only if the current resolver is
+  // the one being removed (guards against a late stop() of a replaced adapter
+  // wiping a fresh registration).
+  registerSelfIdentity: (adapter: ChannelKey['adapter'], resolver: ChannelSelfIdentityResolver) => void
+  unregisterSelfIdentity: (adapter: ChannelKey['adapter'], resolver: ChannelSelfIdentityResolver) => void
   registerMembership: (adapter: ChannelKey['adapter'], resolver: MembershipResolver) => void
   unregisterMembership: (adapter: ChannelKey['adapter'], resolver: MembershipResolver) => void
   registerHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
@@ -785,6 +794,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
+  const selfIdentityResolvers = new Map<ChannelKey['adapter'], ChannelSelfIdentityResolver>()
   const membershipCaches = new Map<ChannelKey['adapter'], MembershipCache>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
@@ -1088,6 +1098,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // channel.respond gate just admitted on. Per-turn updates after this
       // point are handled by `originRef.current = buildLiveOrigin(live)`
       // before each prompt() call.
+      const self = resolveSelfIdentity(key)
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -1099,6 +1110,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         ...(triggeringAuthorId !== undefined ? { lastInboundAuthorId: triggeringAuthorId } : {}),
         participants,
         ...(membership !== null ? { membership } : {}),
+        ...(self !== undefined ? { self } : {}),
       }
 
       const isColdStart = resolvedRecord?.sessionId === undefined
@@ -1522,6 +1534,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const buildLiveOrigin = (live: LiveSession): SessionOrigin => {
     const membership = readMembership(live.key)
+    const self = resolveSelfIdentity(live.key)
     return {
       kind: 'channel',
       adapter: live.key.adapter,
@@ -1534,6 +1547,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(live.currentTurnReactionRef !== null ? { reactionRef: live.currentTurnReactionRef } : {}),
       participants: live.participants,
       ...(membership !== null ? { membership } : {}),
+      ...(self !== undefined ? { self } : {}),
     }
   }
 
@@ -2199,6 +2213,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const unregisterChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
     channelNameResolvers.get(adapter)?.delete(resolver)
+  }
+
+  const registerSelfIdentity = (adapter: ChannelKey['adapter'], resolver: ChannelSelfIdentityResolver): void => {
+    selfIdentityResolvers.set(adapter, resolver)
+  }
+
+  const unregisterSelfIdentity = (adapter: ChannelKey['adapter'], resolver: ChannelSelfIdentityResolver): void => {
+    if (selfIdentityResolvers.get(adapter) === resolver) {
+      selfIdentityResolvers.delete(adapter)
+    }
+  }
+
+  const resolveSelfIdentity = (key: ChannelKey): ChannelSelfIdentity | undefined => {
+    const resolver = selfIdentityResolvers.get(key.adapter)
+    if (resolver === undefined) return undefined
+    return resolver(key.workspace) ?? undefined
   }
 
   const registerMembership = (adapter: ChannelKey['adapter'], resolver: MembershipResolver): void => {
@@ -2882,6 +2912,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     unregisterTyping,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
+    registerSelfIdentity,
+    unregisterSelfIdentity,
     registerMembership,
     unregisterMembership,
     registerHistory,

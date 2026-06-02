@@ -821,3 +821,97 @@ describe('renderSessionOrigin', () => {
     expect(telegram).toContain('@username')
   })
 })
+
+describe('renderSessionOrigin channel self-identity', () => {
+  // Regression: a message addressed to the bot's own id (`<@U0ABFG8TYN7>`)
+  // was skipped by the model as "addressed to someone else" because the
+  // prompt never told it its own platform id. These assert the self-mention
+  // line is present so the model recognizes mentions of itself.
+  test('slack origin tells the bot its own <@id> so it recognizes self-mentions', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+      self: { id: 'U0ABFG8TYN7' },
+    })
+    expect(out).toContain('<@U0ABFG8TYN7>')
+    expect(out).toMatch(/You are `<@U0ABFG8TYN7>` on this Slack workspace/)
+    expect(out).toMatch(/addressed to YOU/)
+  })
+
+  test('discord origin surfaces both <@id> and <@!id> self-mention forms', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '111',
+      chat: '222',
+      thread: null,
+      self: { id: '987654321' },
+    })
+    expect(out).toContain('<@987654321>')
+    expect(out).toContain('<@!987654321>')
+  })
+
+  test('telegram origin tells the bot its own @username', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'telegram-bot',
+      workspace: '-100',
+      chat: '-100',
+      thread: null,
+      self: { id: '42', username: 'dobby_bot' },
+    })
+    expect(out).toMatch(/You are `@dobby_bot` on Telegram/)
+    expect(out).toContain('addressed to YOU')
+  })
+
+  test('github origin tells the bot its own @login', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme',
+      chat: 'acme/repo#1',
+      thread: null,
+      self: { id: '555', username: 'dobby' },
+    })
+    expect(out).toMatch(/You are `@dobby` on GitHub/)
+  })
+
+  test('kakaotalk origin renders no self-mention line (no in-band mention syntax)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'kakaotalk',
+      workspace: 'ws',
+      chat: 'room',
+      thread: null,
+      self: { id: 'kakao-self-id' },
+    })
+    expect(out).not.toContain('addressed to YOU')
+    expect(out).not.toContain('kakao-self-id')
+  })
+
+  test('omits the self-mention line entirely when identity is unresolved', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).not.toContain('addressed to YOU')
+  })
+
+  test('telegram with no username omits the self-mention line', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'telegram-bot',
+      workspace: '-100',
+      chat: '-100',
+      thread: null,
+      self: { id: '42' },
+    })
+    expect(out).not.toContain('addressed to YOU')
+  })
+})

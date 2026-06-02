@@ -243,6 +243,33 @@ export type ResolvedChannelNames = {
 
 export type ChannelNameResolver = (key: ChannelKey) => Promise<ResolvedChannelNames>
 
+// The bot's OWN identity on a platform, surfaced into the channel system
+// prompt so the model recognizes mentions of itself. The engagement gate
+// already knows this id (it sets `isBotMention`), but the model only knows
+// its NAME (from identity files) — not its platform user id. Without this,
+// a message addressed to `<@U0ABFG8TYN7>` (the bot's own Slack id) reads to
+// the model as "addressed to someone else" and it skips a turn it was
+// correctly engaged for.
+//
+// - `id` is the raw platform user id (Slack `U…`, Discord snowflake,
+//   Telegram numeric id as string, GitHub numeric id as string). For
+//   angle-id platforms this is what appears inside `<@…>`.
+// - `username` is the human-typed handle used for at-mentions on platforms
+//   where the id is NOT what gets typed (Telegram `@username`, GitHub
+//   `@login`). Omitted when the platform mentions by id, or when the
+//   account simply has no username.
+export type ChannelSelfIdentity = {
+  id: string
+  username?: string
+}
+
+// Resolves the bot's own identity for a given workspace. `workspace` is
+// passed because identity is conceptually per-workspace (Slack team); most
+// adapters serve a single identity and ignore the argument. Returns null
+// when identity is not yet resolved (startup race) or unknown — callers
+// MUST treat null as "omit the self-mention prompt line", never as an error.
+export type ChannelSelfIdentityResolver = (workspace: string) => ChannelSelfIdentity | null
+
 // History entries are intentionally distinct from InboundMessage:
 // `InboundMessage` carries router-classification fields (`isBotMention`,
 // `isDm`) that are turn-delivery concerns, not history concerns. History
