@@ -109,4 +109,26 @@ describe('hasSlackMessageShareAttachments', () => {
     expect(hasSlackMessageShareAttachments([{ author_id: 'UBOB', text: 'shared text' }])).toBe(true)
     expect(hasSlackMessageShareAttachments([{ text: 'missing author' }])).toBe(false)
   })
+
+  test('falls back to author_subname for the source name but still requires an author id', async () => {
+    const withSubname = await enrichSlackReferenceContext({
+      text: '',
+      channelId: 'C1',
+      messageTs: '1700.000002',
+      attachments: [{ user_id: 'UEVE', author_subname: 'Eve', text: 'forwarded note' }],
+      fetchMessage: async () => null,
+    })
+    expect(withSubname.referenceContext?.sources).toEqual([
+      { adapter: 'slack-bot', authorId: 'UEVE', authorName: 'Eve', text: 'forwarded note' },
+    ])
+
+    const idless = await enrichSlackReferenceContext({
+      text: '',
+      channelId: 'C1',
+      messageTs: '1700.000002',
+      attachments: [{ author_subname: 'Eve', text: 'forwarded note' }],
+      fetchMessage: async () => null,
+    })
+    expect(idless).toEqual({ text: '' })
+  })
 })

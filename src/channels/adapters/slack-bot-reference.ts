@@ -77,6 +77,11 @@ function extractSlackMessageLinks(text: string): SlackMessagePointer[] {
   return links
 }
 
+// A stable author id is required because the quote renders as `<@id>`
+// downstream; a name-only source would emit `<@unknown>`, worse than omitting
+// the context. Forwarded message-shares put it under `author_id`, classic
+// shares under `user`/`user_id`. `author_subname` is Slack's display-name
+// fallback on forwarded messages — used for the name only, never the id.
 function extractSlackShareSources(attachments: readonly unknown[]): QuoteAnchorSource[] {
   const sources: QuoteAnchorSource[] = []
   for (const attachment of attachments) {
@@ -86,10 +91,11 @@ function extractSlackShareSources(attachments: readonly unknown[]): QuoteAnchorS
     if (text === null || text.trim() === '') continue
     const authorId = stringField(record, 'author_id') ?? stringField(record, 'user') ?? stringField(record, 'user_id')
     if (authorId === null) continue
+    const authorName = stringField(record, 'author_name') ?? stringField(record, 'author_subname') ?? authorId
     sources.push({
       adapter: 'slack-bot',
       authorId,
-      authorName: stringField(record, 'author_name') ?? authorId,
+      authorName,
       text,
     })
   }
