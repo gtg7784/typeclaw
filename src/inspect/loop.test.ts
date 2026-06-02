@@ -258,13 +258,13 @@ describe('runInspectLoop', () => {
         return fakeLive()
       },
       createTailScope: () => fakeScope(),
-      liveHint: '(press esc to return to session list)',
+      liveHint: '(esc to return to session list · q to quit)',
       ...sink.push,
     })
 
     expect(result.ok).toBe(true)
     const dividerIdx = sink.out.findIndex((l) => l.includes('─── live ───'))
-    const hintIdx = sink.out.findIndex((l) => l.includes('press esc to return to session list'))
+    const hintIdx = sink.out.findIndex((l) => l.includes('esc to return to session list'))
     expect(dividerIdx).toBeGreaterThanOrEqual(0)
     expect(hintIdx).toBe(dividerIdx + 1)
   })

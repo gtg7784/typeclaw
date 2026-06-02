@@ -94,7 +94,7 @@ async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefin
 }
 
 function escHintLine(color: boolean): string {
-  const text = '(press esc to return to session list)'
+  const text = '(esc to return to session list · q to quit)'
   return color ? `\u001b[2m${text}\u001b[0m` : text
 }
 
