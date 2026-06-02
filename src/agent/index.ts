@@ -80,6 +80,11 @@ export { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
 
+// pi 0.67.3's default active built-in tools when a session declares no `tools:`
+// filter (see pi `createAgentSession`'s `defaultActiveToolNames`). Mirrored here
+// because pi does not export it; keep in sync if pi's default changes.
+const DEFAULT_PI_BUILTIN_TOOL_NAMES = ['read', 'bash', 'edit', 'write']
+
 export type PluginSessionWiring = {
   registry: PluginRegistry
   hooks: HookBus
@@ -386,25 +391,33 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
 
+  // The names the session actually exposes to the model: pi's active base set
+  // (the caller's `tools:` filter, or pi's default builtins when unset) union
+  // the typeclaw/plugin custom tools. Deliberately EXCLUDES
+  // `builtinPiToolOverrides` — those replace builtin implementations by name,
+  // they are not additional callable names. This is the single source of truth
+  // for both the active-set re-narrowing below and the tool-not-found nudge
+  // vocabulary, so the two never drift (a divergence would make the nudge miss
+  // real tools or suggest tools the session deliberately did not expose).
+  const intendedActiveToolNames = [
+    ...new Set([
+      ...(tools !== undefined ? tools.map((t) => t.name) : DEFAULT_PI_BUILTIN_TOOL_NAMES),
+      ...[...wrappedCustomSystemTools, ...pluginCustomTools].map((t) => t.name),
+    ]),
+  ]
+
   // Re-narrow the active tool set after `createAgentSession`. pi 0.67.3's
   // `_refreshToolRegistry` runs with `includeAllExtensionTools: true` and
   // pushes every customTool name into the active set, which would widen
   // a subagent's declared `[edit]` to all 7 builtin overrides plus every
-  // typeclaw custom tool. The intended active set is the names the caller
-  // would have gotten WITHOUT the builtin overrides: pi's `initialActiveToolNames`
-  // (derived from `tools:`) union the names from typeclaw/plugin customTools.
-  // `builtinPiToolOverrides` are implementation overrides, never additions.
+  // typeclaw custom tool.
   if (builtinPiToolOverrides.length > 0) {
-    const baseActiveNames = tools !== undefined ? tools.map((t) => t.name) : ['read', 'bash', 'edit', 'write']
-    const customToolActiveNames = [...wrappedCustomSystemTools, ...pluginCustomTools].map((t) => t.name)
-    const intendedActive = [...new Set([...baseActiveNames, ...customToolActiveNames])]
-    session.setActiveToolsByName(intendedActive)
+    session.setActiveToolsByName(intendedActiveToolNames)
   }
 
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
 
-  const knownToolNames = [...(tools ?? []).map((t) => t.name), ...customTools.map((t) => t.name)]
-  const unsubToolNudge = attachToolNotFoundNudge(session, knownToolNames)
+  const unsubToolNudge = attachToolNotFoundNudge(session, intendedActiveToolNames)
 
   const dispose = async () => {
     unsubRestart?.()
