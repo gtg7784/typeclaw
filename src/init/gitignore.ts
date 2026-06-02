@@ -37,11 +37,13 @@ Dockerfile
 .DS_Store
 
 # System-managed: gitignored by default so the agent never stages them by hand,
-# but TypeClaw force-commits them on its own schedule (sessions/ via auto-backup,
-# memory/ via the dreaming subagent). Treat them as runtime-owned, not agent-owned.
+# but TypeClaw force-commits them on its own schedule (sessions/ + todo/ via
+# auto-backup, memory/ via the dreaming subagent). Treat them as runtime-owned,
+# not agent-owned.
 sessions/
 memory/
 channels/
+todo/
 `
 }
 
