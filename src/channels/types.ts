@@ -94,6 +94,15 @@ export type InboundMessage = {
   // means "unknown" — the formatter renders such lines without a
   // timestamp prefix instead of stamping them with the wrong clock.
   ts: number
+  // Platform-native anchor for showing a typing/status indicator, kept
+  // SEPARATE from `thread` on purpose: `thread` drives reply threading,
+  // this drives ONLY the typing surface. Slack's `assistant.threads.
+  // setStatus` (the bot's only typing signal) requires a real message ts
+  // even in a flat DM, where `thread` is null because replies stay top-
+  // level. The classifier sets this to the inbound message ts for DMs so
+  // the status can render without forcing the reply into a thread. Omitted
+  // for non-DM inbounds, where the typing path falls back to `thread`.
+  typingThread?: string
   // Opaque, adapter-owned handle for the entity an emoji reaction would
   // attach to. The classifier stamps it because only there is the platform-
   // side target type still known (GitHub: issue body vs issue-comment vs
@@ -183,6 +192,10 @@ export type OutboundMessage = {
   // `uploadFile` does not accept a content body or a thread id, see the
   // adapter for the workaround details.
   attachments?: OutboundAttachment[]
+  // Typing-only anchor (see InboundMessage.typingThread), stamped by the
+  // router from the live session so the adapter can CLEAR the status after a
+  // flat DM send — where `thread` is null and would otherwise no-op the clear.
+  typingThread?: string
   // Set by the router (native render mode + anchor fired) so an adapter can
   // reply to the inbound it answers. Telegram/Discord consume `externalMessageId`;
   // `quote`-mode adapters never see this (the router prepends the blockquote into
@@ -224,6 +237,10 @@ export type TypingTarget = {
   workspace: string
   chat: string
   thread?: string | null
+  // Typing-only anchor (see InboundMessage.typingThread). An adapter whose
+  // typing surface needs a message ts even when `thread` is null (Slack DMs)
+  // reads this first and falls back to `thread`. Never used for reply routing.
+  typingThread?: string
   // 'tick' is the heartbeat fired during debouncing/generation; adapters
   // should set the indicator visible. 'stop' is fired exactly once when the
   // router decides the turn is over (drain finally, /stop command, or

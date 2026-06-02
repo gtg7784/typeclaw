@@ -290,6 +290,7 @@ type QueuedInbound = {
   isBotMention: boolean
   replyToBotMessageId: string | null
   isDm: boolean
+  typingThread?: string
   receivedAt: number
   // Original platform timestamp (Slack/Discord), in ms since epoch. Used
   // by composeTurnPrompt to render an ISO 8601 prefix on each line so the
@@ -358,6 +359,11 @@ type LiveSession = {
   // origin so `channel_react` reacts to the triggering message, not whichever
   // inbound happens to be latest in the queue. Null on reminder-only turns.
   currentTurnReactionRef: ReactionRef | null
+  // Typing-status anchor of the inbound that triggered THIS turn (last item in
+  // the drained batch, mirroring `currentTurnReactionRef`). Adapter-opaque ts
+  // carried only to the typing path; null when the triggering inbound supplied
+  // none (every non-DM inbound, and reminder-only turns).
+  currentTurnTypingThread: string | null
   // One engage-:eyes:-add promise per inbound coalesced into THIS turn, each
   // resolving to its removable per-instance ref (or null). A debounced turn can
   // batch several inbounds that each got their own :eyes:, so every entry is
@@ -1181,6 +1187,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
+        currentTurnTypingThread: null,
         currentTurnEngageReactions: [],
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
@@ -1366,6 +1373,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       workspace: live.key.workspace,
       chat: live.key.chat,
       thread: live.key.thread,
+      ...(live.currentTurnTypingThread !== null ? { typingThread: live.currentTurnTypingThread } : {}),
       phase,
     }
     await Promise.all(
@@ -1595,6 +1603,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
+          live.currentTurnTypingThread = batch[batch.length - 1]!.typingThread ?? null
           live.currentTurnEngageReactions = batch.flatMap((m) =>
             m.engageReaction !== undefined ? [m.engageReaction] : [],
           )
@@ -1677,7 +1686,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnReactionRef = null
       live.currentTurnEngageReactions = []
       live.currentTurnAttachments = []
+      // Reset AFTER stopTypingHeartbeat: its final 'stop' tick reads the anchor
+      // to clear a flat-DM status; clearing it first would strand the indicator.
       await stopTypingHeartbeat(live)
+      live.currentTurnTypingThread = null
     }
   }
 
@@ -2043,9 +2055,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       isBotMention: event.isBotMention,
       replyToBotMessageId: event.replyToBotMessageId,
       isDm: event.isDm,
+      ...(event.typingThread !== undefined ? { typingThread: event.typingThread } : {}),
       receivedAt: now(),
       ts: event.ts,
     })
+    // Make the typing anchor live BEFORE startTypingHeartbeat fires (route()
+    // starts the heartbeat right after enqueue, ahead of drain). drain() later
+    // refreshes it to the last inbound of a coalesced batch.
+    if (event.typingThread !== undefined) live.currentTurnTypingThread = event.typingThread
   }
 
   const registerOutbound = (adapter: ChannelKey['adapter'], cb: OutboundCallback): void => {
@@ -2480,6 +2497,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (text !== undefined) live.lastSentText.set(sendKey, text)
       live.inFlightToolSends.set(sendKey, (live.inFlightToolSends.get(sendKey) ?? 0) + 1)
       reserved = true
+    }
+
+    // The adapter needs the typing anchor to clear a flat-DM status (msg.thread
+    // is null there, so a thread-keyed clear would no-op). Kept off msg.thread
+    // to leave reply threading untouched.
+    if (live?.currentTurnTypingThread != null && msg.typingThread === undefined) {
+      msg = { ...msg, typingThread: live.currentTurnTypingThread }
     }
 
     // Snapshot the callbacks before iterating so a callback that mutates the
