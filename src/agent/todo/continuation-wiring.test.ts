@@ -7,14 +7,16 @@ import type { SessionOrigin } from '@/agent/session-origin'
 
 import { readContinuationState } from './continuation-state'
 import {
+  armRestartKickForOrigin,
   classifyStopReason,
+  clearTodosForOrigin,
   extractStopReason,
   recordTurnOutcome,
   recordTurnStart,
   runIdleContinuation,
 } from './continuation-wiring'
 import { resolveTodoScope } from './scope'
-import { writeTodos } from './store'
+import { readTodos, writeTodos } from './store'
 
 const TUI: SessionOrigin = { kind: 'tui', sessionId: 'ses_x' }
 const SCOPE = resolveTodoScope(TUI)!
@@ -93,5 +95,25 @@ describe('runIdleContinuation', () => {
     const ok = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => (delivered = true) })
     expect(ok).toBe(false)
     expect(delivered).toBe(false)
+  })
+
+  test('clearTodosForOrigin empties a scope (cron per-fire reset)', async () => {
+    const cron: SessionOrigin = { kind: 'cron', jobId: 'daily', jobKind: 'prompt' }
+    const cronScope = resolveTodoScope(cron)!
+    await writeTodos(agentDir, cronScope, [{ content: 'leftover', status: 'pending' }])
+    await clearTodosForOrigin(agentDir, cron)
+    expect(await readTodos(agentDir, cronScope)).toEqual([])
+  })
+
+  test('an armed restart-kick suppresses the first post-restart idle', async () => {
+    await writeTodos(agentDir, SCOPE, [{ content: 'task', status: 'pending' }])
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 't1', stopReason: 'stop' })
+    await armRestartKickForOrigin(agentDir, TUI)
+    let count = 0
+    const first = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => count++ })
+    expect(first).toBe(false)
+    const second = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => count++ })
+    expect(second).toBe(true)
+    expect(count).toBe(1)
   })
 })

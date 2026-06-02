@@ -2,8 +2,15 @@ import type { SessionOrigin } from '@/agent/session-origin'
 
 import { maybeInjectContinuation } from './continuation'
 import { type TurnOutcome } from './continuation-policy'
-import { onTurnOutcome, onTurnStart, readContinuationState, writeContinuationState } from './continuation-state'
+import {
+  armRestartKickSuppression,
+  onTurnOutcome,
+  onTurnStart,
+  readContinuationState,
+  writeContinuationState,
+} from './continuation-state'
 import { resolveTodoScope } from './scope'
+import { writeTodos } from './store'
 
 // Map a pi `message_end` event's stopReason onto the TurnOutcome stopReason
 // space. Anything we don't recognize collapses to 'unknown' so the idle path
@@ -52,6 +59,23 @@ export async function recordTurnStart(args: {
   const state = await readContinuationState(args.agentDir, scope)
   const next = onTurnStart(state, args.isRealUserTurn)
   if (next !== state) await writeContinuationState(args.agentDir, scope, next)
+}
+
+// Arm the one-shot restart-kick suppressor for an origin's scope, so the first
+// idle after a restart skips exactly one continuation injection (the restart
+// kick prompt owns that turn). No-op for scopeless origins.
+export async function armRestartKickForOrigin(agentDir: string, origin: SessionOrigin): Promise<void> {
+  const scope = resolveTodoScope(origin)
+  if (scope === null) return
+  const state = await readContinuationState(agentDir, scope)
+  await writeContinuationState(agentDir, scope, armRestartKickSuppression(state))
+}
+
+// Empty the todo list for an origin's scope. No-op for scopeless origins.
+export async function clearTodosForOrigin(agentDir: string, origin: SessionOrigin): Promise<void> {
+  const scope = resolveTodoScope(origin)
+  if (scope === null) return
+  await writeTodos(agentDir, scope, [])
 }
 
 export type DeliverContinuation = (text: string) => void
