@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { runInspectLoop } from './loop'
+import { runInspectLoop, type TailController } from './loop'
 import type { InspectEvent } from './types'
 
 let agentDir: string
@@ -46,6 +46,29 @@ function captureSink(): {
   return { out, err, push: { stdout: (l) => out.push(l), stderr: (l) => err.push(l) } }
 }
 
+type FakeScope = TailController & { back: () => void; exit: () => void }
+
+function fakeScope(onDispose?: () => void): FakeScope {
+  const ctrl = new AbortController()
+  let intent: 'back' | 'exit' | null = null
+  return {
+    signal: ctrl.signal,
+    intent: () => intent,
+    dispose: () => {
+      onDispose?.()
+      ctrl.abort()
+    },
+    back: () => {
+      if (intent === null) intent = 'back'
+      ctrl.abort()
+    },
+    exit: () => {
+      if (intent === null) intent = 'exit'
+      ctrl.abort()
+    },
+  }
+}
+
 const ID_LOOP_A = '019ee000-aaaa-7000-9000-00000000aaaa'
 const ID_LOOP_B = '019ee000-bbbb-7000-9000-00000000bbbb'
 const ID_LOOP_C = '019ee000-cccc-7000-9000-00000000cccc'
@@ -57,7 +80,7 @@ describe('runInspectLoop', () => {
     await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
     const sink = captureSink()
 
-    let escController: AbortController | null = null
+    let scope: FakeScope | null = null
     let liveCallCount = 0
 
     async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
@@ -83,14 +106,14 @@ describe('runInspectLoop', () => {
       liveSource: (o) => {
         liveCallCount++
         if (liveCallCount === 1) {
-          queueMicrotask(() => escController?.abort())
+          queueMicrotask(() => scope?.back())
           return awaitableLive(o.signal)
         }
         return finiteLive()
       },
-      newEscSignal: () => {
-        escController = new AbortController()
-        return escController.signal
+      createTailScope: () => {
+        scope = fakeScope()
+        return scope
       },
       ...sink.push,
     })
@@ -105,7 +128,7 @@ describe('runInspectLoop', () => {
   test('picker cancel after esc returns ok with exit 130 (picker null is final)', async () => {
     await seedSession(`a_${ID_LOOP_C}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
-    let escController: AbortController | null = null
+    let scope: FakeScope | null = null
 
     async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'ev' } }
@@ -121,12 +144,12 @@ describe('runInspectLoop', () => {
       color: false,
       selectSession: async () => null,
       liveSource: (o) => {
-        queueMicrotask(() => escController?.abort())
+        queueMicrotask(() => scope?.back())
         return awaitableLive(o.signal)
       },
-      newEscSignal: () => {
-        escController = new AbortController()
-        return escController.signal
+      createTailScope: () => {
+        scope = fakeScope()
+        return scope
       },
       ...sink.push,
     })
@@ -154,7 +177,7 @@ describe('runInspectLoop', () => {
         liveCallCount++
         return fakeLive()
       },
-      newEscSignal: () => new AbortController().signal,
+      createTailScope: () => fakeScope(),
       ...sink.push,
     })
 
@@ -178,7 +201,7 @@ describe('runInspectLoop', () => {
         o.onSubscribed?.(true)
         return fakeLive()
       },
-      newEscSignal: () => new AbortController().signal,
+      createTailScope: () => fakeScope(),
       liveHint: '(press esc to return to session list)',
       ...sink.push,
     })
@@ -196,7 +219,7 @@ describe('runInspectLoop', () => {
     await seedSession(`c_${ID_LOOP_C}.jsonl`, [metaLine({ kind: 'tui' }), userLine('third')], 3000)
     const sink = captureSink()
 
-    let escController: AbortController | null = null
+    let scope: FakeScope | null = null
     let liveCallCount = 0
     const pickerHints: (string | undefined)[] = []
 
@@ -226,14 +249,14 @@ describe('runInspectLoop', () => {
       liveSource: (o) => {
         liveCallCount++
         if (liveCallCount === 1) {
-          queueMicrotask(() => escController?.abort())
+          queueMicrotask(() => scope?.back())
           return awaitableLive(o.signal)
         }
         return finiteLive()
       },
-      newEscSignal: () => {
-        escController = new AbortController()
-        return escController.signal
+      createTailScope: () => {
+        scope = fakeScope()
+        return scope
       },
       ...sink.push,
     })
@@ -244,17 +267,18 @@ describe('runInspectLoop', () => {
     expect(pickerHints[1]).toBe(ID_LOOP_A)
   })
 
-  test('afterEscStream fires after the esc-aborted tail and before the picker re-opens', async () => {
+  test('scope is disposed after the esc-aborted tail and before the picker re-opens', async () => {
     // Regression: pressing ESC during the live tail froze the CLI over SSH/Bun
     // because the raw-mode ESC listener stayed armed across the abort, so clack
-    // inherited a flowing raw stdin it could not own. The loop must disarm the
-    // listener (afterEscStream) after the tail settles and before re-selecting.
+    // inherited a flowing raw stdin it could not own. The loop must dispose the
+    // scope (tearing the listener down) after the tail settles and before the
+    // picker re-opens.
     await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
     await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
     const sink = captureSink()
 
     const trace: string[] = []
-    let escController: AbortController | null = null
+    let scope: FakeScope | null = null
     let liveCallCount = 0
 
     async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
@@ -279,33 +303,28 @@ describe('runInspectLoop', () => {
       liveSource: (o) => {
         liveCallCount++
         if (liveCallCount === 1) {
-          queueMicrotask(() => escController?.abort())
+          queueMicrotask(() => scope?.back())
           return awaitableLive(o.signal)
         }
         return finiteLive()
       },
-      newEscSignal: () => {
-        escController = new AbortController()
-        return escController.signal
-      },
-      afterEscStream: () => {
-        trace.push('teardown')
+      createTailScope: () => {
+        scope = fakeScope(() => trace.push('dispose'))
+        return scope
       },
       ...sink.push,
     })
 
     expect(result.ok).toBe(true)
-    // teardown runs after the aborted first tail, then the picker opens, then
-    // teardown runs again after the second (finite) tail settles.
-    expect(trace).toEqual(['teardown', 'select', 'teardown'])
+    expect(trace).toEqual(['dispose', 'select', 'dispose'])
   })
 
-  test('afterEscStream fires on a non-esc early return (bad filter)', async () => {
-    // The teardown hook must run on every loop exit path, not just esc-to-picker,
-    // so an interrupted run can never leave the listener armed.
+  test('scope is disposed on a non-esc early return (bad filter)', async () => {
+    // Dispose must run on every loop exit path, not just esc-to-picker, so an
+    // interrupted run can never leave the listener armed.
     await seedSession(`a_${ID_LOOP_D}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
-    let torn = 0
+    let disposed = 0
 
     const result = await runInspectLoop({
       agentDir,
@@ -313,30 +332,26 @@ describe('runInspectLoop', () => {
       filter: 'not-a-real-category',
       color: false,
       selectSession: async () => null,
-      newEscSignal: () => new AbortController().signal,
-      afterEscStream: () => {
-        torn++
-      },
+      createTailScope: () => fakeScope(() => disposed++),
       ...sink.push,
     })
 
     expect(result.ok).toBe(false)
-    expect(torn).toBe(1)
+    expect(disposed).toBe(1)
   })
 
-  test('ctrl-c (sigint signal) during the tail exits without re-opening the picker', async () => {
+  test('ctrl-c (exit intent) during the tail exits without re-opening the picker', async () => {
     // Ctrl-C must terminate inspect, not loop back to the session list. The exit
-    // signal (process SIGINT) aborts the same tail as ESC, but streamSession
-    // reports escToPicker=false when opts.signal is aborted, so the loop returns.
-    // afterEscStream still tears the listener down exactly once on the way out.
+    // intent aborts the same tail as ESC, but the loop reads scope.intent()==='exit'
+    // and returns before re-opening the picker. The scope is disposed exactly once.
     await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
     await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
     const sink = captureSink()
 
-    const sigint = new AbortController()
+    let scope: FakeScope | null = null
     let liveCallCount = 0
     let pickerCalls = 0
-    let torn = 0
+    let disposed = 0
 
     async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'hello' } }
@@ -350,20 +365,18 @@ describe('runInspectLoop', () => {
       agentDir,
       sessionIdOrPrefix: ID_LOOP_A,
       color: false,
-      signal: sigint.signal,
       selectSession: async (sessions) => {
         pickerCalls++
         return sessions.find((s) => s.sessionId === ID_LOOP_B) ?? null
       },
       liveSource: (o) => {
         liveCallCount++
-        // Ctrl-C: abort the SIGINT signal mid-tail (esc was never pressed).
-        queueMicrotask(() => sigint.abort())
+        queueMicrotask(() => scope?.exit())
         return awaitableLive(o.signal)
       },
-      newEscSignal: () => new AbortController().signal,
-      afterEscStream: () => {
-        torn++
+      createTailScope: () => {
+        scope = fakeScope(() => disposed++)
+        return scope
       },
       ...sink.push,
     })
@@ -371,6 +384,6 @@ describe('runInspectLoop', () => {
     expect(result.ok).toBe(true)
     expect(pickerCalls).toBe(0)
     expect(liveCallCount).toBe(1)
-    expect(torn).toBe(1)
+    expect(disposed).toBe(1)
   })
 })

@@ -10,7 +10,10 @@ export type StreamLiveOptions = {
   WebSocketImpl?: typeof WebSocket
   onSubscribed?: (live: boolean) => void
   onError?: (message: string) => void
+  connectTimeoutMs?: number
 }
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 5_000
 
 export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<InspectEvent> {
   const WS = opts.WebSocketImpl ?? WebSocket
@@ -63,9 +66,11 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
     }
   })
 
-  // Settle on open OR on any terminal condition (error/close/abort). Resolving
-  // false here is what unblocks the connect gate when esc aborts mid-connect —
-  // otherwise `await onOpen` would hang forever and freeze the inspect CLI.
+  // Settle on open OR on any terminal condition (error/close/abort/timeout).
+  // Resolving false on abort/close/timeout is what unblocks the connect gate —
+  // otherwise `await onOpen` would hang forever and freeze the inspect CLI. The
+  // timeout bounds Bun/websocket states that neither open nor error promptly.
+  let connectTimer: ReturnType<typeof setTimeout> | null = null
   const onOpen = new Promise<boolean>((resolve, reject) => {
     ws.addEventListener('open', () => resolve(true), { once: true })
     ws.addEventListener('error', () => reject(new Error('websocket connection failed')), { once: true })
@@ -74,6 +79,8 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
       if (opts.signal.aborted) resolve(false)
       else opts.signal.addEventListener('abort', () => resolve(false), { once: true })
     }
+    const timeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
+    connectTimer = setTimeout(() => reject(new Error('websocket connect timed out')), timeoutMs)
   })
   ws.addEventListener('close', () => {
     closed = true
@@ -109,7 +116,14 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
     opened = await onOpen
   } catch (err) {
     closed = true
+    try {
+      ws.close()
+    } catch {
+      /* ignore */
+    }
     throw err
+  } finally {
+    if (connectTimer !== null) clearTimeout(connectTimer)
   }
   if (!opened || closed || opts.signal?.aborted === true) return
 

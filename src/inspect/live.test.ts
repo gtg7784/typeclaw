@@ -444,6 +444,27 @@ describe('streamLive — live session events', () => {
     expect(events).toEqual([])
   })
 
+  test('connect timeout ends the generator when the socket never opens or aborts', async () => {
+    // Without an abort, a socket stuck in CONNECTING would hang `await onOpen`
+    // forever. A bounded connect timeout throws so the tail ends and the CLI
+    // can recover instead of freezing.
+    const FakeWS = makeNeverOpeningWebSocket()
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      WebSocketImpl: FakeWS,
+      connectTimeoutMs: 20,
+    })
+
+    const drained = (async () => {
+      for await (const _ev of gen) {
+        /* never reached */
+      }
+    })()
+
+    await expect(drained).rejects.toThrow('websocket connect timed out')
+  })
+
   test('unknown server message types are ignored without crashing', async () => {
     // Forward-compat: a future server may add new top-level message `type`
     // values. The client must not crash when it sees one — especially since

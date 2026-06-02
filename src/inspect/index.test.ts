@@ -332,9 +332,12 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     expect(sink.out.at(-1)!).toContain('end of transcript')
   })
 
-  test('escSignal abort sets escToPicker=true; process signal abort does not', async () => {
+  test('signal abort during live stream sets escToPicker=true', async () => {
+    // runInspect no longer distinguishes esc from exit: any signal abort during
+    // the tail yields escToPicker=true. The caller's loop reads its scope intent
+    // to decide whether to re-open the picker (esc) or exit (q/ctrl-c).
     await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
-    const escCtrl = new AbortController()
+    const ctrl = new AbortController()
     const sink = captureSink()
     async function* live(signal: AbortSignal | undefined): AsyncGenerator<import('./types').InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'tick' } }
@@ -343,14 +346,14 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
         signal.addEventListener('abort', () => resolve(), { once: true })
       })
     }
-    queueMicrotask(() => escCtrl.abort())
+    queueMicrotask(() => ctrl.abort())
     const result = await runInspect({
       agentDir,
       sessionIdOrPrefix: ID_LIVET,
       color: false,
       selectSession: neverPick,
       liveSource: (o) => live(o.signal),
-      escSignal: escCtrl.signal,
+      signal: ctrl.signal,
       ...sink.push,
     })
     expect(result.ok).toBe(true)
@@ -358,25 +361,19 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     expect(result.escToPicker).toBe(true)
   })
 
-  test('signal abort during live stream does NOT set escToPicker (process-exit path)', async () => {
+  test('finite live stream that ends on its own does not set escToPicker', async () => {
     await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
-    const sigCtrl = new AbortController()
     const sink = captureSink()
-    async function* live(signal: AbortSignal | undefined): AsyncGenerator<import('./types').InspectEvent> {
+    async function* live(): AsyncGenerator<import('./types').InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'tick' } }
-      await new Promise<void>((resolve) => {
-        if (signal === undefined || signal.aborted) return resolve()
-        signal.addEventListener('abort', () => resolve(), { once: true })
-      })
     }
-    queueMicrotask(() => sigCtrl.abort())
     const result = await runInspect({
       agentDir,
       sessionIdOrPrefix: ID_LIVET,
       color: false,
       selectSession: neverPick,
-      liveSource: (o) => live(o.signal),
-      signal: sigCtrl.signal,
+      liveSource: () => live(),
+      signal: new AbortController().signal,
       ...sink.push,
     })
     expect(result.ok).toBe(true)
