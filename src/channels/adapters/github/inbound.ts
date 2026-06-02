@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 
+import type { GithubReviewOn } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import type { GithubAuthContext } from './auth'
@@ -23,6 +24,14 @@ export type GithubWebhookHandlerOptions = {
   // an appended operator-policy note telling the agent not to submit an APPROVE
   // review; the github skill keys off that note to downgrade approve→COMMENT.
   allowApprove?: () => boolean
+  // Which pull_request action triggers an agent code review. Defaults to
+  // 'review_requested' when omitted, preserving the request-driven behavior.
+  // 'opened' additionally wakes the bot to review every PR the moment it opens;
+  // 'off' suppresses the dedicated review-trigger synthesis entirely (an
+  // explicit review_requested no longer wakes a session). Orthogonal to the
+  // eventAllowlist (the outer "process this webhook?" gate) — this is the inner
+  // "does an admitted pull_request event become a review-trigger inbound?" gate.
+  reviewOn?: () => GithubReviewOn
   route: (message: InboundMessage) => void
   logger: GithubInboundLogger
   // Optional: resolves whether the bot is a member of the given team. When
@@ -75,6 +84,7 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     const classified = classifyGithubInbound(event, payload, selfLogin, {
       teamIsBotMember,
       authType: options.authType?.() ?? 'pat',
+      reviewOn: options.reviewOn?.() ?? 'review_requested',
     })
     if (classified === null) return ok()
 
@@ -173,7 +183,7 @@ export function classifyGithubInbound(
   event: string,
   payload: Record<string, unknown>,
   selfLogin: string | null,
-  options?: { teamIsBotMember?: boolean; authType?: 'pat' | 'app' },
+  options?: { teamIsBotMember?: boolean; authType?: 'pat' | 'app'; reviewOn?: GithubReviewOn },
 ): InboundMessage | null {
   const repository = readRepository(payload)
   if (repository === null) return null
@@ -266,7 +276,12 @@ export function classifyGithubInbound(
     const id = readNumber(pr, 'id') ?? number
     if (number === null || id === null) return null
     const action = readString(payload, 'action')
+    const reviewOn = options?.reviewOn ?? 'review_requested'
     if (action === 'review_requested' || action === 'review_request_removed') {
+      // `off` disables the dedicated review trigger: these two actions exist
+      // only to drive review-request behavior here, so under `off` they wake no
+      // session rather than falling through to awareness-only context.
+      if (reviewOn === 'off') return null
       return classifyReviewRequest({
         action,
         payload,
@@ -277,6 +292,17 @@ export function classifyGithubInbound(
         authType: options?.authType ?? 'pat',
         teamIsBotMember: options?.teamIsBotMember,
       })
+    }
+    if (action === 'opened' && reviewOn === 'opened') {
+      const trigger = classifyOpenedReviewTrigger({
+        payload,
+        pr,
+        number,
+        base,
+        selfLogin,
+        authType: options?.authType ?? 'pat',
+      })
+      if (trigger !== null) return trigger
     }
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
@@ -402,6 +428,53 @@ function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null
   const updatedAt = readString(pr, 'updated_at') ?? ''
   const prId = readNumber(pr, 'id') ?? number
   const externalMessageId = `pr-${prId}-${action}-${updatedAt}`
+
+  return {
+    ...base,
+    chat: `pr:${number}`,
+    thread: null,
+    text,
+    externalMessageId,
+    authorId: String(sender.id),
+    authorName: sender.login,
+    authorIsBot: sender.type === 'Bot',
+    isBotMention: true,
+    replyToBotMessageId: null,
+    ts: updatedAt !== '' ? Date.parse(updatedAt) || 0 : 0,
+  }
+}
+
+type OpenedReviewTriggerInput = {
+  payload: Record<string, unknown>
+  pr: Record<string, unknown>
+  number: number
+  base: Pick<InboundMessage, 'adapter' | 'workspace' | 'isDm' | 'mentionsOthers' | 'replyToOtherMessageId'>
+  selfLogin: string | null
+  authType: 'pat' | 'app'
+}
+
+function classifyOpenedReviewTrigger(input: OpenedReviewTriggerInput): InboundMessage | null {
+  const { payload, pr, number, base, selfLogin, authType } = input
+  if (selfLogin === null) return null
+  const sender = readUser(payload.sender) ?? readUser(pr.user)
+  if (sender === null) return null
+  // Defensive self-loop guard mirroring classifyReviewRequest: the handler-level
+  // self-author drop already discards bot-opened PRs, but the decoy account is a
+  // distinct login, so a decoy-opened PR would otherwise wake a self-review.
+  const decoyLogin = resolveDecoyReviewerLogin(selfLogin, authType)
+  if (sender.login === selfLogin || (decoyLogin !== null && sender.login === decoyLogin)) return null
+
+  const title = readString(pr, 'title') ?? `#${number}`
+  const head = readString(readRecord(pr.head), 'ref')
+  const baseRef = readString(readRecord(pr.base), 'ref')
+  const branchSegment = head !== null && baseRef !== null ? ` Branch: ${head} → ${baseRef}.` : ''
+  const text =
+    `@${sender.login} opened PR #${number}: "${title}".${branchSegment}` +
+    ' Please review the changes line-by-line and post your feedback.'
+
+  const updatedAt = readString(pr, 'updated_at') ?? ''
+  const prId = readNumber(pr, 'id') ?? number
+  const externalMessageId = `pr-${prId}-opened-${updatedAt}`
 
   return {
     ...base,
