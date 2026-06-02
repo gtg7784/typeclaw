@@ -50,6 +50,7 @@ import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
 import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
+import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import {
   createBudgetState,
   type ToolResultBudget,
@@ -402,8 +403,12 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
 
+  const knownToolNames = [...(tools ?? []).map((t) => t.name), ...customTools.map((t) => t.name)]
+  const unsubToolNudge = attachToolNotFoundNudge(session, knownToolNames)
+
   const dispose = async () => {
     unsubRestart?.()
+    unsubToolNudge()
     if (materializedSkills) await materializedSkills.dispose()
   }
   return { session, dispose }
