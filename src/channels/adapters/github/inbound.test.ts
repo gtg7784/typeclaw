@@ -534,6 +534,15 @@ describe('classifyGithubInbound — empty-body handling', () => {
     expect(classifyGithubInbound('pull_request', payload, 'typeclaw-bot')).toBe(null)
   })
 
+  it('drops a non-opened issues action with an empty body (only issues.opened synthesizes a title)', () => {
+    const payload = {
+      action: 'edited',
+      repository: repo(),
+      issue: { number: 7, id: 700, title: 'Broken login', body: '', created_at: '2026-01-01T00:00:00Z', user: user() },
+    }
+    expect(classifyGithubInbound('issues', payload, 'typeclaw-bot')).toBe(null)
+  })
+
   it('still routes review_requested through the synthesized review trigger (not affected by the empty-body drop)', () => {
     const msg = classifyGithubInbound(
       'pull_request',

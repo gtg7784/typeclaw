@@ -258,17 +258,22 @@ export function classifyGithubInbound(
     const number = readNumber(issue, 'number')
     const id = readNumber(issue, 'id') ?? number
     if (number === null || id === null) return null
+    const action = readString(payload, 'action')
     const opener = readUser(issue.user)
     const hasBody = readString(issue, 'body')?.trim() ? true : false
+    const text =
+      action === 'opened'
+        ? bodyOrOpenedTitle(issue.body, opener, 'issue', number, readString(issue, 'title'))
+        : issue.body
     return buildInbound(
       { ...base, chat: `issue:${number}`, thread: null },
-      bodyOrOpenedTitle(issue.body, opener, 'issue', number, readString(issue, 'title')),
+      text,
       id,
       opener,
       selfLogin,
       issue.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
-      !hasBody,
+      action === 'opened' && !hasBody,
     )
   }
 
