@@ -7,6 +7,7 @@ import {
   emptyContinuationState,
   hasRealProgress,
   hashIncomplete,
+  parseContinuationState,
   type TurnOutcome,
 } from './continuation-policy'
 import type { Todo } from './store'
@@ -70,6 +71,61 @@ describe('hasRealProgress', () => {
     ]
     expect(hasRealProgress(before, fewer)).toBe(true)
     expect(hasRealProgress(before, reworded)).toBe(false)
+  })
+})
+
+describe('parseContinuationState (fail-closed validation)', () => {
+  test('round-trips a fully valid state', () => {
+    const state: ContinuationState = {
+      episode: {
+        episodeId: 'e',
+        startedAt: 1,
+        autoTurnCount: 2,
+        cumulativeTokens: 100,
+        failureCount: 0,
+        stagnationCount: 1,
+        lastIncompleteHash: 'abc',
+      },
+      lastTurnOutcome: { turnId: 't', stopReason: 'stop', endedAt: 9 },
+      suppressNextIdleNudgeReason: 'restart-kick',
+      autoResumeBlockedUntilRealUserTurn: true,
+    }
+    expect(parseContinuationState(state)).toEqual(state)
+  })
+
+  test('non-object input falls back to empty', () => {
+    expect(parseContinuationState(null)).toEqual(emptyContinuationState())
+    expect(parseContinuationState('nope')).toEqual(emptyContinuationState())
+  })
+
+  test('a malformed episode with missing counters collapses to null (no ceiling bypass)', () => {
+    const corrupt = { episode: { episodeId: 'e', startedAt: 1 }, lastTurnOutcome: null }
+    expect(parseContinuationState(corrupt).episode).toBeNull()
+  })
+
+  test('an episode counter that is NaN collapses to null', () => {
+    const corrupt = {
+      episode: {
+        episodeId: 'e',
+        startedAt: 1,
+        autoTurnCount: Number.NaN,
+        cumulativeTokens: 0,
+        failureCount: 0,
+        stagnationCount: 0,
+        lastIncompleteHash: null,
+      },
+    }
+    expect(parseContinuationState(corrupt).episode).toBeNull()
+  })
+
+  test('an unknown stopReason collapses the outcome to null (idle then fails closed)', () => {
+    const corrupt = { lastTurnOutcome: { turnId: 't', stopReason: 'length', endedAt: 1 } }
+    expect(parseContinuationState(corrupt).lastTurnOutcome).toBeNull()
+  })
+
+  test('an unknown suppressor value is dropped', () => {
+    const corrupt = { suppressNextIdleNudgeReason: 'something-else' }
+    expect(parseContinuationState(corrupt).suppressNextIdleNudgeReason).toBeNull()
   })
 })
 

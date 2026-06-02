@@ -39,7 +39,7 @@ export function resolveTodoScope(origin: SessionOrigin): TodoScope | null {
     case 'channel':
       return { kind: 'channel', key: channelScopeKey(origin) }
     case 'cron':
-      return { kind: 'cron', key: `cron/${sanitizeSegment(origin.jobId)}` }
+      return { kind: 'cron', key: `cron/${encodeSegment(origin.jobId)}` }
     case 'subagent':
     case 'system':
       return null
@@ -52,17 +52,22 @@ export function resolveTodoScope(origin: SessionOrigin): TodoScope | null {
 }
 
 function channelScopeKey(origin: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
-  const parts = [origin.adapter, origin.workspace, origin.chat, origin.thread ?? '_root']
-  return `channel/${parts.map(sanitizeSegment).join(':')}`
+  // A null thread (channel-root session) is tagged distinctly from any real
+  // thread id: `0:` vs `1:<encoded>`. A real thread whose literal text is
+  // `_root` (or anything else) can never collide with the null-thread case,
+  // because the discriminant prefix differs.
+  const thread = origin.thread === null ? '0:' : `1:${encodeSegment(origin.thread)}`
+  const parts = [encodeSegment(origin.adapter), encodeSegment(origin.workspace), encodeSegment(origin.chat), thread]
+  return `channel/${parts.join(':')}`
 }
 
-// Collapse anything that is not a safe filename character to `-`. Channel ids
-// can contain slashes, colons, spaces, and other separators (Slack thread ids,
-// KakaoTalk chat ids), any of which would otherwise escape the todo/ directory
-// or collide path segments. The mapping is not reversible — it does not need to
-// be, since the scope key is only ever compared for equality and used as a
-// filename, never parsed back into its parts.
-function sanitizeSegment(value: string): string {
-  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '-')
-  return cleaned === '' ? '_' : cleaned
+// Encode a scope component collision-free. `encodeURIComponent` is injective
+// and its output is filesystem-safe (it never emits `/` or `:` and percent-
+// escapes everything outside an unreserved set), so distinct origin components
+// can never alias to the same path — `a/b`, `a-b`, and `a:b` all map to
+// distinct encodings. Reversibility is not required; injectivity is, because
+// the key identifies which conversation's todo file is read or written.
+function encodeSegment(value: string): string {
+  const encoded = encodeURIComponent(value)
+  return encoded === '' ? '_empty' : encoded
 }

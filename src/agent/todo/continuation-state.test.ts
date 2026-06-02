@@ -64,6 +64,19 @@ describe('continuation-state persistence', () => {
     await writeFile(continuationStatePath(agentDir, SCOPE), 'not json{{', 'utf8')
     expect(await readContinuationState(agentDir, SCOPE)).toEqual(emptyContinuationState())
   })
+
+  test('a partially-written episode is dropped on read, not trusted', async () => {
+    const { writeFile } = await import('node:fs/promises')
+    const { continuationStatePath } = await import('./continuation-state')
+    const { mkdir } = await import('node:fs/promises')
+    const { dirname } = await import('node:path')
+    const path = continuationStatePath(agentDir, SCOPE)
+    await mkdir(dirname(path), { recursive: true })
+    // valid JSON, but episode is missing its numeric counters
+    await writeFile(path, JSON.stringify({ version: 1, state: { episode: { episodeId: 'e' } } }), 'utf8')
+    const loaded = await readContinuationState(agentDir, SCOPE)
+    expect(loaded.episode).toBeNull()
+  })
 })
 
 describe('onTurnStart', () => {
