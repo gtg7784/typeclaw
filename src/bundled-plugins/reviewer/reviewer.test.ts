@@ -175,6 +175,18 @@ describe('reviewer subagent declaration', () => {
     expect(budget).toBeLessThan(1_000_000)
   })
 
+  test('declares a spawn timeout so a stalled review fails the parent loudly instead of hanging forever', () => {
+    const sub = createReviewerSubagent()
+    expect(sub.timeoutMs).toBeGreaterThan(0)
+  })
+
+  test('spawn timeout is generous enough for a deep-model review but not unbounded', () => {
+    const sub = createReviewerSubagent()
+    const timeout = sub.timeoutMs ?? 0
+    expect(timeout).toBeGreaterThanOrEqual(60_000)
+    expect(timeout).toBeLessThanOrEqual(1_800_000)
+  })
+
   test('inFlightKey returns distinct values for distinct requestId payloads (parallel spawns must not coalesce)', () => {
     const sub = createReviewerSubagent()
     const k1 = sub.inFlightKey?.({ requestId: 'bg_a' })

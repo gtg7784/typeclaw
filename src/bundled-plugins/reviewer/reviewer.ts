@@ -26,6 +26,19 @@ import { GENERAL_REVIEW_SKILL } from './skills/general'
 // no runtime change required.
 export const REVIEWER_SKILLS: readonly LoadableSkill[] = [CODE_REVIEW_SKILL, GENERAL_REVIEW_SKILL]
 
+// Without a ceiling, a reviewer whose `session.prompt` stalls mid-turn (model
+// wedges after a tool error, never emits a terminal message) leaves `completion`
+// pending forever: the `subagent.completed` broadcast never fires and the parent
+// channel session is never woken to post the review — the spawn hangs silently.
+// The ceiling makes `awaitWithSubagentTimeout` settle with SubagentTimeoutError,
+// surfacing to the parent as a FAILED completion reminder so the request fails
+// loudly instead of vanishing. Sized for a thorough `deep`-model review (large
+// diff + a few web lookups), well above the typical sub-minute review. This is
+// liveness for the parent, not hard cancellation: pi's `session.prompt` takes no
+// AbortSignal, so the LLM stream may run until the OS reaps it. See
+// src/agent/subagents.ts `timeoutMs`.
+export const REVIEWER_SPAWN_TIMEOUT_MS = 600_000
+
 // TODO(#452): Restrict the reviewer's `bash` to git and a curated set of
 // read-only `gh` subcommands once per-subagent bash allowlist support lands.
 // Today the read-only contract is enforced only by this system prompt, the
@@ -159,6 +172,7 @@ If none of the listed skills fit the target, load \`general\` and explain in \`<
     customTools: [loadSkillTool],
     payloadSchema: reviewerPayloadSchema,
     visibility: 'public',
+    timeoutMs: REVIEWER_SPAWN_TIMEOUT_MS,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       // Higher than explorer (256KB) because a reviewer typically reads larger
