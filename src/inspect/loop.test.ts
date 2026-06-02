@@ -125,6 +125,62 @@ describe('runInspectLoop', () => {
     expect(sink.out.some((l) => l.includes(ID_LOOP_B.slice(0, 12)))).toBe(true)
   })
 
+  test('replay-only interactive mode blocks until esc, then re-opens the picker', async () => {
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    const sink = captureSink()
+
+    const scopes: FakeScope[] = []
+    const trace: string[] = []
+    let scopeCalls = 0
+    let pickerCalls = 0
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_A,
+      interactive: true,
+      color: false,
+      selectSession: async (sessions) => {
+        pickerCalls++
+        trace.push('select')
+        return sessions.find((s) => s.sessionId === ID_LOOP_B) ?? null
+      },
+      createTailScope: () => {
+        const scope = fakeScope(() => trace.push('dispose'))
+        scopes.push(scope)
+        scopeCalls++
+        if (scopeCalls === 1) queueMicrotask(() => scope.back())
+        else queueMicrotask(() => scope.exit())
+        return scope
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(pickerCalls).toBe(1)
+    expect(scopes).toHaveLength(2)
+    expect(trace).toEqual(['dispose', 'select', 'dispose'])
+    expect(sink.out.some((l) => l.includes(ID_LOOP_A.slice(0, 12)))).toBe(true)
+    expect(sink.out.some((l) => l.includes(ID_LOOP_B.slice(0, 12)))).toBe(true)
+  })
+
+  test('replay-only non-interactive mode returns immediately without blocking', async () => {
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    const sink = captureSink()
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_A,
+      color: false,
+      selectSession: async () => null,
+      createTailScope: () => fakeScope(),
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(sink.out.some((l) => l.includes(ID_LOOP_A.slice(0, 12)))).toBe(true)
+  })
+
   test('picker cancel after esc returns ok with exit 130 (picker null is final)', async () => {
     await seedSession(`a_${ID_LOOP_C}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()

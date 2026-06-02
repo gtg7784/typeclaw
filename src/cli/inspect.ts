@@ -58,6 +58,7 @@ export const inspectCommand = defineCommand({
       selectSession: (sessions, selectOpts) => clackSelect(sessions, selectOpts?.initialSessionId),
       ...(liveSource !== undefined ? { liveSource } : {}),
       createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
+      ...(interactive ? { interactive: true } : {}),
       ...(liveHint !== undefined ? { liveHint } : {}),
       stdout: (line) => process.stdout.write(`${line}\n`),
       stderr: (line) => process.stderr.write(`${line}\n`),
