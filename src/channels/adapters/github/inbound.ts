@@ -258,14 +258,17 @@ export function classifyGithubInbound(
     const number = readNumber(issue, 'number')
     const id = readNumber(issue, 'id') ?? number
     if (number === null || id === null) return null
+    const opener = readUser(issue.user)
+    const hasBody = readString(issue, 'body')?.trim() ? true : false
     return buildInbound(
       { ...base, chat: `issue:${number}`, thread: null },
-      issue.body,
+      bodyOrOpenedTitle(issue.body, opener, 'issue', number, readString(issue, 'title')),
       id,
-      readUser(issue.user),
+      opener,
       selfLogin,
       issue.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
+      !hasBody,
     )
   }
 
@@ -304,14 +307,19 @@ export function classifyGithubInbound(
       })
       if (trigger !== null) return trigger
     }
+    const opener = readUser(pr.user)
+    const hasBody = readString(pr, 'body')?.trim() ? true : false
+    const prText =
+      action === 'opened' ? bodyOrOpenedTitle(pr.body, opener, 'PR', number, readString(pr, 'title')) : pr.body
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
-      pr.body,
+      prText,
       id,
-      readUser(pr.user),
+      opener,
       selfLogin,
       pr.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
+      action === 'opened' && !hasBody,
     )
   }
 
@@ -322,14 +330,23 @@ export function classifyGithubInbound(
     const number = readNumber(pr, 'number')
     const id = readNumber(review, 'id')
     if (number === null || id === null) return null
+    const reviewer = readUser(review.user)
+    const body = readString(review, 'body')
+    const hasBody = body !== null && body.trim() !== ''
+    const text = hasBody
+      ? body
+      : reviewer !== null
+        ? synthesizeReviewStateText(reviewer.login, number, readString(pr, 'title'), readString(review, 'state'))
+        : ''
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
-      review.body,
+      text,
       id,
-      readUser(review.user),
+      reviewer,
       selfLogin,
       review.submitted_at,
       null,
+      !hasBody,
     )
   }
 
@@ -339,14 +356,22 @@ export function classifyGithubInbound(
     const number = readNumber(discussion, 'number')
     const id = readNumber(discussion, 'id') ?? number
     if (number === null || id === null) return null
+    const action = readString(payload, 'action')
+    const opener = readUser(discussion.user)
+    const hasBody = readString(discussion, 'body')?.trim() ? true : false
+    const text =
+      action === 'created'
+        ? bodyOrOpenedTitle(discussion.body, opener, 'discussion', number, readString(discussion, 'title'))
+        : discussion.body
     return buildInbound(
       { ...base, chat: `discussion:${number}`, thread: null },
-      discussion.body,
+      text,
       id,
-      readUser(discussion.user),
+      opener,
       selfLogin,
       discussion.created_at,
       null,
+      action === 'created' && !hasBody,
     )
   }
 
@@ -513,9 +538,21 @@ function buildInbound(
   selfLogin: string | null,
   rawTs: unknown,
   reactionTarget: GithubReactionTarget | null,
+  synthesizedAwareness = false,
 ): InboundMessage | null {
   if (user === null) return null
   const text = typeof rawText === 'string' ? rawText : ''
+  // A body-less inbound reaches engagement as contentless text; in a solo-human
+  // channel the fallback engages on it and the agent replies with a generic
+  // greeting. The other adapters drop empty text at their classifier — this is
+  // the matching guard. Events whose empty body still carries signal (review
+  // state, opened-PR/issue title) synthesize non-empty text upstream and so
+  // never reach this drop.
+  if (text.trim() === '') return null
+  // Synthesized awareness lines carry an `@author` prefix describing who acted;
+  // that handle is the author, never a third-party mention of the bot, so the
+  // body-text mention heuristic must not fire on it.
+  const isBotMention = !synthesizedAwareness && selfLogin !== null && text.includes(`@${selfLogin}`)
   return {
     ...key,
     text,
@@ -524,10 +561,38 @@ function buildInbound(
     authorId: String(user.id),
     authorName: user.login,
     authorIsBot: user.type === 'Bot',
-    isBotMention: selfLogin !== null && text.includes(`@${selfLogin}`),
+    isBotMention,
     replyToBotMessageId: null,
     ts: typeof rawTs === 'string' ? Date.parse(rawTs) || 0 : 0,
   }
+}
+
+function bodyOrOpenedTitle(
+  rawBody: unknown,
+  opener: GithubUser | null,
+  kind: 'issue' | 'PR' | 'discussion',
+  number: number,
+  title: string | null,
+): string {
+  const body = typeof rawBody === 'string' ? rawBody : ''
+  if (body.trim() !== '' || opener === null) return body
+  const label = title !== null && title.trim() !== '' ? `: "${title}"` : ''
+  return `@${opener.login} opened ${kind} #${number}${label}.`
+}
+
+// Neutral phrasing per review state — must never imply a review was requested
+// or that action is needed; a COMMENTED review in particular must not read as
+// "please review", which is the review-request path's wording.
+function synthesizeReviewStateText(
+  reviewer: string,
+  number: number,
+  title: string | null,
+  state: string | null,
+): string {
+  const label = title !== null && title.trim() !== '' ? `: "${title}"` : ''
+  const verb =
+    state === 'approved' ? 'approved' : state === 'changes_requested' ? 'requested changes on' : 'submitted a review on'
+  return `@${reviewer} ${verb} PR #${number}${label}.`
 }
 
 async function resolveTeamMembership(
