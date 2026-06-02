@@ -17,6 +17,13 @@ import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-hand
 import type { SessionOrigin } from '@/agent/session-origin'
 import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import type { CreateSessionForSubagent } from '@/agent/subagents'
+import { TODO_CONTINUATION_SOURCE } from '@/agent/todo/continuation'
+import {
+  extractStopReason,
+  recordTurnOutcome,
+  recordTurnStart,
+  runIdleContinuation,
+} from '@/agent/todo/continuation-wiring'
 import type { ChannelRouter } from '@/channels/router'
 import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
 import type { McpManager } from '@/mcp'
@@ -155,6 +162,7 @@ type QueuedPrompt = {
   text: string
   delivery: PromptDelivery
   ts: number
+  source?: string
 }
 
 type SessionState = {
@@ -172,6 +180,7 @@ type SessionState = {
   // generation that ran session.start. A plugin reload mid-connection does
   // not re-target this session's lifecycle hooks.
   runtimeSnapshot: PluginRuntimeState | null
+  unsubTurnOutcome: Unsubscribe | null
   dispose: () => Promise<void>
 }
 
@@ -497,6 +506,7 @@ export function createServer({
               unsubClaim: null,
               activeClaimCode: null,
               runtimeSnapshot: runtimeSnapshot ?? null,
+              unsubTurnOutcome: null,
               dispose,
             }
             sessionStates.set(ws, state)
@@ -505,12 +515,16 @@ export function createServer({
               await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
             }
 
+            if (agentDir !== undefined) {
+              state.unsubTurnOutcome = subscribeTurnOutcome(session, agentDir, origin, sessionFileId, logger)
+            }
+
             liveSessionRegistry?.register({ sessionId: sessionFileId, session })
             forwardSessionEvents(ws, session, logger, sessionFileId)
 
             if (stream) {
               state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
-                enqueuePrompt(ws, state, msg, agentDir, logger),
+                enqueuePrompt(ws, state, msg, agentDir, logger, stream),
               )
 
               state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -798,6 +812,7 @@ export function createServer({
             }
           } finally {
             if (state) {
+              state.unsubTurnOutcome?.()
               state.session.dispose()
               await state.dispose()
               liveSessionRegistry?.unregister(state.sessionFileId)
@@ -867,6 +882,27 @@ function forwardSessionEvents(ws: Ws, session: AgentSession, logger: ServerLogge
   })
 }
 
+// Record each completed turn's stopReason for the todo-continuation guard.
+// Ordering-independent by design: this writes the outcome from `message_end`,
+// and the idle path only reads the stored outcome — it never assumes the
+// event arrived before idle fired. An unrecognized stopReason classifies as
+// 'unknown', which the idle path treats as not-safe-to-continue (fail closed).
+function subscribeTurnOutcome(
+  session: AgentSession,
+  agentDir: string,
+  origin: SessionOrigin,
+  sessionFileId: string,
+  logger: ServerLogger,
+): Unsubscribe {
+  return session.subscribe((event) => {
+    const stopReason = extractStopReason(event)
+    if (stopReason === null) return
+    void recordTurnOutcome({ agentDir, origin, turnId: sessionFileId, stopReason }).catch((err) =>
+      logger.error(`[server] ${sessionFileId}: todo outcome capture failed: ${describeErr(err)}`),
+    )
+  })
+}
+
 function forwardAssistantError(ws: Ws, message: unknown, logger: ServerLogger, sessionFileId: string): void {
   const detected = detectProviderError(message)
   if (detected === null) return
@@ -895,6 +931,7 @@ function enqueuePrompt(
   msg: StreamMessage,
   agentDir: string | undefined,
   logger: ServerLogger,
+  stream: Stream | undefined,
 ): void {
   const payload = msg.payload as { kind?: string; text?: string; delivery?: PromptDelivery }
   if (payload?.kind !== 'prompt' || typeof payload.text !== 'string') return
@@ -904,14 +941,16 @@ function enqueuePrompt(
       send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
     })
   }
+  const source = (msg.meta as { source?: unknown } | undefined)?.source
   state.drainQueue.push({
     streamMessageId: msg.id,
     text: payload.text,
     delivery,
     ts: msg.ts,
+    ...(typeof source === 'string' ? { source } : {}),
   })
   pushQueueState(ws, state)
-  void drain(ws, state, agentDir, logger)
+  void drain(ws, state, agentDir, logger, stream)
 }
 
 // `session.idle` semantically means "the agent finished a prompt and is now
@@ -948,7 +987,13 @@ function makeTurnHookCallers(
   }
 }
 
-async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, logger: ServerLogger): Promise<void> {
+async function drain(
+  ws: Ws,
+  state: SessionState,
+  agentDir: string | undefined,
+  logger: ServerLogger,
+  stream: Stream | undefined,
+): Promise<void> {
   if (state.draining) return
   state.draining = true
   const fireIdle = makeIdleHookCaller(state)
@@ -959,6 +1004,14 @@ async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, 
       if (!item) break
       pushQueueState(ws, state)
       send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
+
+      if (agentDir !== undefined) {
+        await recordTurnStart({
+          agentDir,
+          origin: state.origin,
+          isRealUserTurn: item.source !== TODO_CONTINUATION_SOURCE,
+        }).catch((err) => logger.error(`[server] ${state.sessionFileId}: todo turn-start failed: ${describeErr(err)}`))
+      }
 
       await fireTurnStart(item.text)
       try {
@@ -972,9 +1025,45 @@ async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, 
       await fireTurnEnd()
       await fireIdle()
     }
+    await maybeContinueTodos(state, agentDir, logger, stream)
   } finally {
     state.draining = false
   }
+}
+
+// After the drain queue empties, if incomplete todos remain and all guards
+// pass, publish a single continuation prompt back into this session. It
+// re-enters the same queue tagged with TODO_CONTINUATION_SOURCE so the next
+// drain treats it as an injected (non-user) turn and does not reset the
+// episode budget. Delivered as 'queue' (the session is idle here, so there is
+// no in-flight turn to interrupt).
+async function maybeContinueTodos(
+  state: SessionState,
+  agentDir: string | undefined,
+  logger: ServerLogger,
+  stream: Stream | undefined,
+): Promise<void> {
+  if (agentDir === undefined || stream === undefined) return
+  if (state.drainQueue.length > 0) return
+  try {
+    await runIdleContinuation({
+      agentDir,
+      origin: state.origin,
+      deliver: (text) => {
+        stream.publish({
+          target: { kind: 'session', sessionId: state.sessionFileId },
+          payload: { kind: 'prompt', text, delivery: 'queue' },
+          meta: { source: TODO_CONTINUATION_SOURCE },
+        })
+      },
+    })
+  } catch (err) {
+    logger.error(`[server] ${state.sessionFileId}: todo continuation failed: ${describeErr(err)}`)
+  }
+}
+
+function describeErr(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 function pushQueueState(ws: Ws, state: SessionState): void {

@@ -7,6 +7,12 @@ import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSe
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
+import {
+  extractStopReason,
+  recordTurnOutcome,
+  recordTurnStart,
+  runIdleContinuation,
+} from '@/agent/todo/continuation-wiring'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
@@ -474,6 +480,7 @@ type LiveSession = {
   destroyed: boolean
   unsubProviderErrors: (() => void) | null
   unsubTypingActivity: (() => void) | null
+  unsubTodoOutcome: (() => void) | null
 }
 
 // `event` is null for command invocations that originated outside the inbound
@@ -1213,9 +1220,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         destroyed: false,
         unsubProviderErrors: null,
         unsubTypingActivity: null,
+        unsubTodoOutcome: null,
       }
       live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
+      })
+      live.unsubTodoOutcome = created.session.subscribe((event: unknown) => {
+        const stopReason = extractStopReason(event)
+        if (stopReason === null) return
+        void recordTurnOutcome({
+          agentDir: options.agentDir,
+          origin: buildLiveOrigin(live),
+          turnId: live.sessionId,
+          stopReason,
+        }).catch((err) => logger.error(`[channels] ${live.keyId}: todo outcome capture failed: ${describe(err)}`))
       })
       live.unsubTypingActivity = subscribeTypingActivity(created.session, live)
       installChannelReplyTerminalHook(live)
@@ -1505,6 +1523,36 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const recordTodoTurnStart = async (live: LiveSession, isRealUserTurn: boolean): Promise<void> => {
+    try {
+      await recordTurnStart({ agentDir: options.agentDir, origin: buildLiveOrigin(live), isRealUserTurn })
+    } catch (err) {
+      logger.warn(`[channels] ${live.keyId}: todo turn-start failed: ${describe(err)}`)
+    }
+  }
+
+  // After the drain queue empties, push at most one continuation reminder into
+  // pendingSystemReminders. The enclosing drain `while` re-checks that array,
+  // so the reminder is picked up as a batch-empty (injected, non-user) turn in
+  // the same drain pass. The episode guard bounds how many times this can
+  // re-fire; a reminder-only turn records isRealUserTurn=false so it never
+  // resets the budget.
+  const maybeContinueTodosChannel = async (live: LiveSession): Promise<void> => {
+    if (live.destroyed) return
+    if (live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) return
+    try {
+      await runIdleContinuation({
+        agentDir: options.agentDir,
+        origin: buildLiveOrigin(live),
+        deliver: (text) => {
+          live.pendingSystemReminders.push(text)
+        },
+      })
+    } catch (err) {
+      logger.warn(`[channels] ${live.keyId}: todo continuation failed: ${describe(err)}`)
+    }
+  }
+
   const fireSessionTurnStart = async (live: LiveSession, userPrompt: string): Promise<void> => {
     if (!live.hooks) return
     try {
@@ -1649,6 +1697,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.policyDeniedToolSendsThisTurn.clear()
+        const isRealUserTurn = batch.length > 0
         await fireSessionTurnStart(live, text)
         try {
           await live.session.prompt(text)
@@ -1665,6 +1714,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
+        await recordTodoTurnStart(live, isRealUserTurn)
+        await maybeContinueTodosChannel(live)
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
         if (live.currentTurnAuthorId !== null) {
           live.lastTurnAuthorId = live.currentTurnAuthorId
@@ -2695,6 +2746,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.unsubProviderErrors = null
     live.unsubTypingActivity?.()
     live.unsubTypingActivity = null
+    live.unsubTodoOutcome?.()
+    live.unsubTodoOutcome = null
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
