@@ -457,9 +457,25 @@ type LiveSession = {
   // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
   // if it matches the just-completed turn, recovery is skipped entirely
   // (no NO_REPLY check, no Kimi leak check, no assistant-text recovery).
-  // The model has explicitly opted out of this turn and we honor that
-  // unconditionally. `null` when no skip has been recorded.
+  // The model has explicitly opted out of this turn and we honor that —
+  // UNLESS the model also tried a tool-source send this turn (see
+  // `skipLockedSendTurn`), in which case the skip was contested and we let
+  // recovery run so the contested reply isn't silently dropped. `null` when
+  // no skip has been recorded.
   skippedTurn: { turnSeq: number; reason: string } | null
+  // Stamped by `send()` with the current `turnSeq` when a tool-source send is
+  // DENIED by the skip lock (the model called `skip_response` first, then
+  // changed its mind and tried `channel_reply`). The send still stays denied —
+  // "commit to silence" is binding for the live send path — but a contested
+  // skip must NOT also suppress the post-turn recovery net: the model produced
+  // user-facing reply text that the skip short-circuit would otherwise drop on
+  // the floor with no retry (the inbound is already drained). When this matches
+  // the just-completed turn, `validateChannelTurn` falls through to the normal
+  // `recoverableAssistantText` path, which posts the reply via `source:'system'`
+  // (subject to the existing NO_REPLY / leak guards). `null` when no skip-locked
+  // send was attempted. Compared by `turnSeq` so a stale value can't leak across
+  // turns.
+  skipLockedSendTurn: number | null
   // Captured by drain() at batch dequeue; read+cleared by send() on the
   // first tool-source send of the turn. The anchor decision (delay
   // threshold + intervening-observed check) is evaluated at SEND time
@@ -1226,6 +1242,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
         skippedTurn: null,
+        skipLockedSendTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -1673,6 +1690,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const engageAddPromises = live.currentTurnEngageReactions
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
+        live.skipLockedSendTurn = null
         live.policyDeniedToolSendsThisTurn.clear()
         await fireSessionTurnStart(live, text)
         try {
@@ -2518,7 +2536,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // violation: the model already committed to silence. Reject before any
       // state mutation so the model gets a clear error and the channel stays
       // silent. System-source sends (recovery, role-claim) are not affected.
+      // Record the contested skip so `validateChannelTurn` doesn't ALSO drop the
+      // reply text on the floor — the live send stays denied, but the post-turn
+      // recovery net must still surface what the model wanted to say.
       if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
+        live.skipLockedSendTurn = live.turnSeq
         return denyPolicyToolSend(SKIP_RESPONSE_LOCK_ERROR, 'skip-locked')
       }
       const currentCount = live.consecutiveSends.get(sendKey) ?? 0
@@ -2627,18 +2649,29 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const validateChannelTurn = async (live: LiveSession, successfulSendsBeforePrompt: number): Promise<void> => {
-    // `skip_response` short-circuit. Must run before the `successfulChannelSends`
-    // check so a model that called both `skip_response` and a channel tool in
-    // the same turn still resolves as "skipped" — the rejection inside `send()`
-    // means the channel tool returned an error and never actually delivered.
+    // `skip_response` short-circuit. Honoring it bypasses recovery entirely.
     // Stale-flag protection: only honor when stamped on the just-completed
     // turn. A flag set by a previous turn that crashed before validation
     // would otherwise drop the next legitimate user-facing reply.
-    if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
+    //
+    // Contested-skip carve-out: if the model ALSO attempted a tool-source send
+    // this turn (denied `skip-locked` in `send()`, stamped on `skipLockedSendTurn`),
+    // the skip is no longer a clean opt-out — the model produced reply text it
+    // wanted delivered. The live send stays denied, but we must NOT also suppress
+    // recovery, or the reply is silently dropped with nothing to retry it (the
+    // inbound is already drained). Fall through to the normal recovery path, which
+    // posts it via `source:'system'` under the existing NO_REPLY / leak guards.
+    const skipContested = live.skipLockedSendTurn === live.turnSeq
+    if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq && !skipContested) {
       const { reason } = live.skippedTurn
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skipped_by_tool reason=${JSON.stringify(reason)}`)
       return
+    }
+    if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
+      // Clear the now-contested skip so it can't leak into a later turn's check.
+      live.skippedTurn = null
+      logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
     if (live.successfulChannelSends > successfulSendsBeforePrompt) return
 

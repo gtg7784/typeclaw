@@ -1974,10 +1974,13 @@ describe('ChannelRouter channel-turn protocol', () => {
     }
     await router.__testing!.flushDebounce(KEY)
 
+    // The live tool send stays denied (commit-to-silence is binding for the
+    // live path). With no recoverable assistant text in the branch, the
+    // contested-skip fall-through finds nothing to surface, so nothing is sent.
     expect(sendResult?.ok).toBe(false)
     expect(sendResult?.ok === false ? sendResult.code : '').toBe('skip-locked')
     expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('skip_contested_by_send'))).toBe(true)
   })
 
   test('skip_response: system-source sends (recovery, role-claim) bypass the skip lock', async () => {
@@ -2100,6 +2103,105 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(turn2Result?.kind).toBe('recorded')
     expect(sent).toHaveLength(0)
+  })
+
+  test('skip_response then contested channel_reply: send stays denied but reply is recovered, not dropped', async () => {
+    // Regression for the production drop: the model called skip_response first,
+    // then changed its mind and called channel_reply. The send is denied
+    // skip-locked (commit-to-silence is binding for the live path), but the
+    // reply text must NOT be silently dropped — recovery posts it via system.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'please review again' }))
+    let sendResult: SendResult | undefined
+    sessions[0]!.onPrompt = async () => {
+      // given: silence-first skip, then a contested reply attempt
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'on second thought' })
+      sendResult = await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'On it — reviewing now.',
+      })
+      sessions[0]!.setAssistantText('On it — reviewing now.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the live tool send is still denied skip-locked...
+    expect(sendResult?.ok).toBe(false)
+    expect(sendResult?.ok === false ? sendResult.code : '').toBe('skip-locked')
+    // ...but recovery surfaces the reply via a system-source send
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('On it — reviewing now.')
+    expect(logs.some((m) => m.includes('skip_contested_by_send'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(false)
+  })
+
+  test('skip_response then contested reply with NO_REPLY text: stays silent (recovery guards still apply)', async () => {
+    // A contested skip falls through to recovery, but recovery's existing
+    // NO_REPLY guard must still suppress: nothing user-facing to surface.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'anything to add?' }))
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing actionable' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'NO_REPLY' })
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('contested-skip flag does not leak: a clean skip-only turn after a contested turn still stays silent', async () => {
+    // Per-turn reset guard: the skipLockedSendTurn flag from a contested turn
+    // must not cause a later skip-only turn to bypass its short-circuit.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn 1: contested skip (recovers a reply)
+    await router.route(inbound({ text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'changed mind' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'turn-1 reply' })
+      sessions[0]!.setAssistantText('turn-1 reply')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(1)
+
+    // turn 2: clean skip-only — must short-circuit, no recovery, no leak
+    sessions[0]!.onPrompt = () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing to add' })
+      sessions[0]!.setAssistantText('this text should NOT be recovered')
+    }
+    await router.route(inbound({ text: 'second', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(true)
   })
 
   test('policy-denial loop: repeated skip-locked sends (silence-first) abort the run instead of looping', async () => {
