@@ -20,7 +20,7 @@ import type { CreateSessionForSubagent } from '@/agent/subagents'
 import { TODO_CONTINUATION_SOURCE } from '@/agent/todo/continuation'
 import {
   armRestartKickForOrigin,
-  extractStopReason,
+  extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
   runIdleContinuation,
@@ -907,11 +907,15 @@ function subscribeTurnOutcome(
   logger: ServerLogger,
 ): Unsubscribe {
   return session.subscribe((event) => {
-    const stopReason = extractStopReason(event)
-    if (stopReason === null) return
-    void recordTurnOutcome({ agentDir, origin, turnId: sessionFileId, stopReason }).catch((err) =>
-      logger.error(`[server] ${sessionFileId}: todo outcome capture failed: ${describeErr(err)}`),
-    )
+    const usage = extractTurnUsage(event)
+    if (usage === null) return
+    void recordTurnOutcome({
+      agentDir,
+      origin,
+      turnId: sessionFileId,
+      stopReason: usage.stopReason,
+      ...(usage.tokens !== undefined ? { tokens: usage.tokens } : {}),
+    }).catch((err) => logger.error(`[server] ${sessionFileId}: todo outcome capture failed: ${describeErr(err)}`))
   })
 }
 
@@ -1036,36 +1040,45 @@ async function drain(
       }
       await fireTurnEnd()
       await fireIdle()
+
+      // Idle-continuation runs INSIDE the loop and enqueues directly onto
+      // drainQueue (not via stream.publish). Publishing would re-enter drain()
+      // through the session subscriber while `state.draining` is still true, so
+      // the nested call would no-op and the continuation would stall until some
+      // unrelated event woke the loop again. Enqueuing here lets the same `while`
+      // consume it on the next iteration. Only fires when the queue is otherwise
+      // empty so a real user turn is never preempted by a continuation.
+      if (state.drainQueue.length === 0) {
+        await maybeContinueTodos(state, agentDir, logger)
+      }
     }
-    await maybeContinueTodos(state, agentDir, logger, stream)
   } finally {
     state.draining = false
   }
 }
 
-// After the drain queue empties, if incomplete todos remain and all guards
-// pass, publish a single continuation prompt back into this session. It
-// re-enters the same queue tagged with TODO_CONTINUATION_SOURCE so the next
-// drain treats it as an injected (non-user) turn and does not reset the
-// episode budget. Delivered as 'queue' (the session is idle here, so there is
-// no in-flight turn to interrupt).
+// If incomplete todos remain and all guards pass, push a single continuation
+// prompt directly onto this session's drainQueue, tagged TODO_CONTINUATION_SOURCE
+// so the next drain iteration treats it as an injected (non-user) turn that does
+// not reset the episode budget. The enclosing drain loop consumes it; this never
+// calls drain() itself.
 async function maybeContinueTodos(
   state: SessionState,
   agentDir: string | undefined,
   logger: ServerLogger,
-  stream: Stream | undefined,
 ): Promise<void> {
-  if (agentDir === undefined || stream === undefined) return
-  if (state.drainQueue.length > 0) return
+  if (agentDir === undefined) return
   try {
     await runIdleContinuation({
       agentDir,
       origin: state.origin,
       deliver: (text) => {
-        stream.publish({
-          target: { kind: 'session', sessionId: state.sessionFileId },
-          payload: { kind: 'prompt', text, delivery: 'queue' },
-          meta: { source: TODO_CONTINUATION_SOURCE },
+        state.drainQueue.push({
+          streamMessageId: `todo-continuation-${crypto.randomUUID()}` as StreamMessageId,
+          text,
+          delivery: 'queue',
+          ts: Date.now(),
+          source: TODO_CONTINUATION_SOURCE,
         })
       },
     })

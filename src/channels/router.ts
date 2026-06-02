@@ -8,7 +8,7 @@ import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import {
-  extractStopReason,
+  extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
   runIdleContinuation,
@@ -1226,13 +1226,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
       })
       live.unsubTodoOutcome = created.session.subscribe((event: unknown) => {
-        const stopReason = extractStopReason(event)
-        if (stopReason === null) return
+        const usage = extractTurnUsage(event)
+        if (usage === null) return
         void recordTurnOutcome({
           agentDir: options.agentDir,
           origin: buildLiveOrigin(live),
           turnId: live.sessionId,
-          stopReason,
+          stopReason: usage.stopReason,
+          ...(usage.tokens !== undefined ? { tokens: usage.tokens } : {}),
         }).catch((err) => logger.error(`[channels] ${live.keyId}: todo outcome capture failed: ${describe(err)}`))
       })
       live.unsubTypingActivity = subscribeTypingActivity(created.session, live)

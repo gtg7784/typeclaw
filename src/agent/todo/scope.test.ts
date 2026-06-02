@@ -14,7 +14,7 @@ describe('resolveTodoScope', () => {
 
   test('cron resolves to a jobId-keyed scope', () => {
     const scope = resolveTodoScope({ kind: 'cron', jobId: 'daily-standup', jobKind: 'prompt' })
-    expect(scope).toEqual({ kind: 'cron', key: 'cron/daily-standup' })
+    expect(scope).toEqual({ kind: 'cron', key: 'cron/sdaily-standup' })
   })
 
   test('channel resolves to an adapter:workspace:chat:thread tuple', () => {
@@ -25,7 +25,7 @@ describe('resolveTodoScope', () => {
       chat: 'C456',
       thread: '1700000000.0001',
     })
-    expect(scope).toEqual({ kind: 'channel', key: 'channel/slack-bot:T123:C456:1:1700000000.0001' })
+    expect(scope).toEqual({ kind: 'channel', key: 'channel/sslack-bot:sT123:sC456:s1700000000.0001' })
   })
 
   test('channel with null thread uses the distinct null-thread tag', () => {
@@ -36,7 +36,7 @@ describe('resolveTodoScope', () => {
       chat: 'C1',
       thread: null,
     })
-    expect(scope).toEqual({ kind: 'channel', key: 'channel/discord-bot:G1:C1:0:' })
+    expect(scope).toEqual({ kind: 'channel', key: 'channel/sdiscord-bot:sG1:sC1:n' })
   })
 
   test('channel ids with path-unsafe characters are encoded, not escaping the todo dir', () => {
@@ -66,11 +66,21 @@ describe('resolveTodoScope', () => {
     expect(keyFor('a/b')).not.toBe(keyFor('a:b'))
   })
 
-  test('a null thread never collides with a literal "_root" thread id', () => {
+  test('a null thread never collides with a literal "_root" or "n" thread id', () => {
     const base = { kind: 'channel', adapter: 'slack-bot', workspace: 'w', chat: 'c' } as const
     const nullThread = resolveTodoScope({ ...base, thread: null })?.key
-    const rootLiteral = resolveTodoScope({ ...base, thread: '_root' })?.key
-    expect(nullThread).not.toBe(rootLiteral)
+    expect(nullThread).not.toBe(resolveTodoScope({ ...base, thread: '_root' })?.key)
+    expect(nullThread).not.toBe(resolveTodoScope({ ...base, thread: 'n' })?.key)
+  })
+
+  test('an empty component never collides with a literal "_empty" component', () => {
+    const keyFor = (workspace: string) =>
+      resolveTodoScope({ kind: 'channel', adapter: 'slack-bot', workspace, chat: 'c', thread: null })?.key
+    expect(keyFor('')).not.toBe(keyFor('_empty'))
+    // cron jobId path too
+    const cronEmpty = resolveTodoScope({ kind: 'cron', jobId: '', jobKind: 'prompt' })?.key
+    const cronLiteral = resolveTodoScope({ kind: 'cron', jobId: '_empty', jobKind: 'prompt' })?.key
+    expect(cronEmpty).not.toBe(cronLiteral)
   })
 
   test('cron jobIds are encoded injectively too', () => {

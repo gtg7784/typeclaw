@@ -408,6 +408,46 @@ describe('createServer tool event forwarding', () => {
   })
 })
 
+describe('createServer todo continuation (drain re-entrancy)', () => {
+  test('consumes an idle continuation in the same drain pass instead of stalling', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'server-todo-cont-'))
+    const { writeTodos } = await import('@/agent/todo/store')
+    const { resolveTodoScope } = await import('@/agent/todo/scope')
+    const { recordTurnOutcome } = await import('@/agent/todo/continuation-wiring')
+    const origin = { kind: 'tui', sessionId: 'x' } as const
+    const scope = resolveTodoScope(origin)!
+    // Pre-seed an incomplete todo AND a safe (stop) turn outcome so the idle
+    // path is eligible to inject. This isolates the property under test — that
+    // the drain loop CONSUMES the continuation — from the async outcome-capture
+    // timing, which is exercised separately at the unit layer.
+    await writeTodos(agentDir, scope, [{ content: 'finish the work', status: 'pending' }])
+    await recordTurnOutcome({ agentDir, origin, turnId: 'seed', stopReason: 'stop' })
+
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      stream,
+      sessionFactory: createSessionFactory({ agentDir }),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'do thing' }))
+    await waitForState(() => session.promptCalls.length === 1)
+    session.resolvePrompt()
+
+    // The continuation must be consumed by the SAME drain loop — a second
+    // prompt() call lands without any further user input. If the old
+    // publish-through-stream path were still in place, draining would already
+    // be true and this would hang until timeout.
+    await waitForState(() => session.promptCalls.length === 2, { timeoutMs: 2000 })
+    expect(session.promptCalls[1]).toContain('Incomplete todo items remain')
+    session.resolvePrompt()
+    ws.close()
+  })
+})
+
 describe('createServer abort handling (no stream — fallback path)', () => {
   test('client { type: "abort" } invokes session.abort()', async () => {
     const session = createFakeSession()
