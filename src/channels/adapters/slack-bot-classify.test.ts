@@ -53,6 +53,28 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'empty_text' })
   })
 
+  test('routes share-only messages so reference enrichment can surface the quoted attachment text', () => {
+    const event = buildEvent({
+      text: '',
+      attachments: [
+        {
+          is_share: true,
+          author_id: 'UALICE',
+          author_name: 'Alice',
+          channel_name: 'general',
+          ts: '1700000000.000050',
+          text: 'shared context',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe('')
+  })
+
   test('routes file-only uploads (empty text) with attachment summary so the agent sees the upload', () => {
     const event = buildEvent({
       text: '',
