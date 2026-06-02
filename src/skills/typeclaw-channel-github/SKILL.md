@@ -43,6 +43,8 @@ A `review_request_removed` inbound ("removed your review request on PR #N") is t
 
 The `reviewer` subagent is the analyst; you are the integration layer between its output and GitHub's review API. It loads the `code-review` skill on demand and returns line-anchored findings inside a `<review>` block. Your job is mechanics: spawn, wait, translate, post.
 
+**The reviewer's `<review>` block is the only source of the verdict and the findings.** You do not review the PR yourself. Between spawning the reviewer and reading its result you do **no analysis of this PR** — do not run `gh pr diff`, do not read the changed files to form an opinion, do not draft a verdict. The reviewer runs on the `deep` model precisely so this judgment is not yours to make on the parent model. If you analyze the diff and post your own assessment while the reviewer is still running, you will post one verdict now and the reviewer's (often different) verdict when it completes — **two contradictory reviews on the same PR**, the exact failure this flow exists to prevent. Wait for the reviewer; post what it returns; nothing before that.
+
 1. **Confirm the target, and check whether you already reviewed it.** Capture the PR number, the repo, and the head SHA — you may need the SHA to read files at the revision the reviewer analyzed.
 
    ```sh
@@ -65,9 +67,15 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
 
    **If step 1 found a prior `CHANGES_REQUESTED` review, say so in the spawn payload** — e.g. _"This is a re-review: you previously requested changes on this PR (the prior blockers were …). Verify they are resolved and return `approve` or `request-changes` — a re-review must re-decide the blocking state, not return `comment`."_ The reviewer's `code-review` skill enforces the same rule, but telling it the prior verdict is what lets it apply that rule; a fresh reviewer session has no memory of your earlier review.
 
-   Do **not** post an "on it" acknowledgement comment before spawning the reviewer — the runtime already adds an :eyes: reaction to the PR the moment it engages, so a "looking into this" comment is redundant noise. Just spawn the reviewer with `run_in_background: true` and keep working; the formal review is your reply. If you want to acknowledge explicitly, use `channel_react({ emoji: "eyes" })`, which reacts without posting a comment.
+   Do **not** post an "on it" acknowledgement comment before spawning the reviewer — the runtime already adds an :eyes: reaction to the PR the moment it engages, so a "looking into this" comment is redundant noise. Just spawn the reviewer with `run_in_background: true`; the formal review is your reply. If you want to acknowledge explicitly, use `channel_react({ emoji: "eyes" })`, which reacts without posting a comment.
 
-3. **Wait for the completion `<system-reminder>`,** then call `subagent_output({ task_id })` to read the reviewer's final assistant message. The structured payload looks like:
+   After spawning, **end your turn** — the background reviewer wakes you with a completion `<system-reminder>` (step 3). "Stay responsive" means you remain free to handle _other_ chats meanwhile; it does **not** license you to keep working _this_ PR. Do not poll `subagent_output` in a busy-wait, and do not fill the wait by reviewing the diff yourself (see the exclusivity rule at the top of this flow). The next thing you do on this PR is read the reviewer's `<review>` block when the reminder arrives.
+
+3. **On the completion `<system-reminder>`, first check you have not already posted — then** call `subagent_output({ task_id })` to read the reviewer's final assistant message.
+
+   **One verdict per PR per request — guard this before you read or post anything.** The completion reminder is not a license to post; it is a wake-up. The very first thing you do on this turn is ask: have I **already posted a review or verdict on this PR during this engagement**? If yes, stop here — do not fetch the reviewer output, do not translate, do not post. Call `skip_response({ reason: "review already posted for this PR" })` and end the turn. Posting the reminder's result on top of a verdict you already shipped is how a PR ends up with two reviews — and if the two disagree (because the earlier one was your own premature take), it contradicts you in public. Only when no review has gone out yet do you proceed to read and post below — which is the normal path, since you waited for the reviewer instead of reviewing it yourself.
+
+   With that confirmed, read the reviewer's final assistant message. The structured payload looks like:
 
    ```xml
    <review>
