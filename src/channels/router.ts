@@ -3842,10 +3842,10 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
   return KIMI_CHANNEL_TOOL_ID_RE.test(text)
 }
 
-// Detects the *plain-text* shape of a leaked channel-tool invocation — the
-// model serialized the tool call as ordinary prose instead of producing a
-// real tool call. Observed against Kimi-family deployments on KakaoTalk:
-// the entire assistant message body is literally
+// Detects the *plain-text* shape of a leaked tool invocation — the model
+// serialized a tool call as ordinary prose instead of producing a real tool
+// call. Observed against Kimi-family deployments on KakaoTalk: the entire
+// assistant message body is literally
 //
 //   channel_reply({"text":"<the user-facing greeting the bot meant to send>"})
 //
@@ -3855,18 +3855,27 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 // serialization straight to the channel, which is exactly what
 // users see in the reported screenshots.
 //
+// `skip_response` belongs here too, and is the more insidious case: the model
+// means to *decline* the turn but serializes the decision as prose —
+//
+//   skip_response({ reason: "Empty messages, no content to respond to" })
+//
+// Because the recovery path treats this as ordinary assistant text, the bot
+// posts its own "I'm staying silent" plumbing to the channel, the exact
+// opposite of the intended no-op. It is never a legitimate user-facing reply.
+//
 // Structural-only detection (NOT a substring search): the trimmed text must
-// *start* with `channel_reply(` or `channel_send(`, and that opening paren
-// must enclose at least one `"` (the JSON argument). This deliberately
-// matches the leak shape while letting prose that merely *mentions* the
-// tool name (e.g. "I would normally call channel_reply here but...") reach
-// the user — that false-positive class is already locked in by the
-// `still recovers legit prose that happens to mention "channel_reply"` test.
+// *start* with `channel_reply(`, `channel_send(`, or `skip_response(`, and
+// that opening paren must enclose at least one `"` (the serialized argument).
+// This deliberately matches the leak shape while letting prose that merely
+// *mentions* a tool name (e.g. "I would normally call channel_reply here
+// but...") reach the user — that false-positive class is already locked in by
+// the `still recovers prose that mentions channel_reply` test.
 //
 // The trailing close paren is NOT required: the model sometimes truncates
 // mid-serialization, and a half-leaked `channel_reply({"text":"..."` is
 // just as user-hostile as the full shape.
-const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^channel_(?:reply|send)\s*\(\s*[^)]*"/
+const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(?:channel_(?:reply|send)|skip_response)\s*\(\s*[^)]*"/
 
 export function isLikelyPlainTextChannelToolCall(text: string): boolean {
   return PLAIN_TEXT_CHANNEL_TOOL_CALL_RE.test(text.trim())

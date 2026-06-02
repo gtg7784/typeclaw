@@ -2411,6 +2411,48 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
   })
 
+  test('suppresses leaked plain-text skip_response(...) serialization instead of posting it to the channel', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('skip_response({ reason: "Empty messages, no content to respond to" })')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('still recovers prose that mentions skip_response in a non-call shape', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'how do you decline a turn?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('I call the skip_response tool when there is nothing worth replying to.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('skip_response tool')
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(false)
+  })
+
   test('still recovers prose that mentions channel_reply in a non-call shape', async () => {
     const dir = await tempDir()
     const logs: string[] = []
