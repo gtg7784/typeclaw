@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-import { type ContinuationState, emptyContinuationState, type TurnOutcome } from './continuation-policy'
+import {
+  type ContinuationState,
+  emptyContinuationState,
+  parseContinuationState,
+  type TurnOutcome,
+} from './continuation-policy'
 import type { TodoScope } from './scope'
 import { todoDir } from './store'
 
@@ -26,7 +31,7 @@ export async function readContinuationState(agentDir: string, scope: TodoScope):
   }
   try {
     const parsed = JSON.parse(raw) as Partial<StateFile>
-    return parsed.state ?? emptyContinuationState()
+    return parseContinuationState(parsed.state)
   } catch {
     return emptyContinuationState()
   }

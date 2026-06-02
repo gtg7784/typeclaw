@@ -68,6 +68,61 @@ export function emptyContinuationState(): ContinuationState {
   }
 }
 
+const STOP_REASONS = new Set<TurnOutcome['stopReason']>(['stop', 'aborted', 'error', 'unknown'])
+
+// Validate a persisted state object field-by-field and fail closed: any field
+// that does not match the expected shape is dropped to its empty value rather
+// than trusted. A partially-written file or a newer/older schema must never
+// surface a malformed `episode` whose `undefined`/`NaN` counters would compare
+// false against the ceilings and so bypass the token-burst guard. A malformed
+// episode collapses to `null` (a fresh episode opens on the next decision); a
+// malformed outcome collapses to `null` (the idle path then fails closed, not
+// auto-injecting).
+export function parseContinuationState(value: unknown): ContinuationState {
+  if (typeof value !== 'object' || value === null) return emptyContinuationState()
+  const v = value as Record<string, unknown>
+  return {
+    episode: parseEpisode(v.episode),
+    lastTurnOutcome: parseOutcome(v.lastTurnOutcome),
+    suppressNextIdleNudgeReason: v.suppressNextIdleNudgeReason === 'restart-kick' ? 'restart-kick' : null,
+    autoResumeBlockedUntilRealUserTurn: v.autoResumeBlockedUntilRealUserTurn === true,
+  }
+}
+
+function parseEpisode(value: unknown): ContinuationEpisode | null {
+  if (typeof value !== 'object' || value === null) return null
+  const e = value as Record<string, unknown>
+  if (typeof e.episodeId !== 'string') return null
+  if (!isFiniteNumber(e.startedAt)) return null
+  if (!isFiniteNumber(e.autoTurnCount)) return null
+  if (!isFiniteNumber(e.cumulativeTokens)) return null
+  if (!isFiniteNumber(e.failureCount)) return null
+  if (!isFiniteNumber(e.stagnationCount)) return null
+  if (e.lastIncompleteHash !== null && typeof e.lastIncompleteHash !== 'string') return null
+  return {
+    episodeId: e.episodeId,
+    startedAt: e.startedAt,
+    autoTurnCount: e.autoTurnCount,
+    cumulativeTokens: e.cumulativeTokens,
+    failureCount: e.failureCount,
+    stagnationCount: e.stagnationCount,
+    lastIncompleteHash: e.lastIncompleteHash,
+  }
+}
+
+function parseOutcome(value: unknown): TurnOutcome | null {
+  if (typeof value !== 'object' || value === null) return null
+  const o = value as Record<string, unknown>
+  if (typeof o.turnId !== 'string') return null
+  if (typeof o.stopReason !== 'string' || !STOP_REASONS.has(o.stopReason as TurnOutcome['stopReason'])) return null
+  if (!isFiniteNumber(o.endedAt)) return null
+  return { turnId: o.turnId, stopReason: o.stopReason as TurnOutcome['stopReason'], endedAt: o.endedAt }
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
 // Canonical hash of the INCOMPLETE todos only. Normalization (sort by id or
 // normalized text, collapse whitespace, include status) makes the hash stable
 // under reordering and cosmetic edits so it is a usable stagnation heuristic.
