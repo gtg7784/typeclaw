@@ -590,8 +590,16 @@ function synthesizeReviewStateText(
   state: string | null,
 ): string {
   const label = title !== null && title.trim() !== '' ? `: "${title}"` : ''
+  // GitHub's pull_request_review webhook can send the state in either case
+  // depending on the source (webhook payload vs REST), so normalize before
+  // matching — an unmatched state would silently fall back to the neutral verb.
+  const normalized = state?.toLowerCase() ?? null
   const verb =
-    state === 'approved' ? 'approved' : state === 'changes_requested' ? 'requested changes on' : 'submitted a review on'
+    normalized === 'approved'
+      ? 'approved'
+      : normalized === 'changes_requested'
+        ? 'requested changes on'
+        : 'submitted a review on'
   return `@${reviewer} ${verb} PR #${number}${label}.`
 }
 

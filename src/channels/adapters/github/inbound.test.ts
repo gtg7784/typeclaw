@@ -431,26 +431,33 @@ describe('classifyGithubInbound — empty-body handling', () => {
     })
 
     it('synthesizes neutral text from an APPROVED state', () => {
-      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('approved'), 'typeclaw-bot')
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('APPROVED'), 'typeclaw-bot')
       expect(msg?.text).toBe('@alice approved PR #7: "Add the thing".')
       expect(msg?.isBotMention).toBe(false)
     })
 
     it('synthesizes neutral text from a CHANGES_REQUESTED state', () => {
-      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('changes_requested'), 'typeclaw-bot')
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('CHANGES_REQUESTED'), 'typeclaw-bot')
       expect(msg?.text).toBe('@alice requested changes on PR #7: "Add the thing".')
     })
 
     it('synthesizes neutral text for a body-less COMMENTED review without implying a review was requested', () => {
-      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('commented'), 'typeclaw-bot')
+      const msg = classifyGithubInbound('pull_request_review', reviewSubmitted('COMMENTED'), 'typeclaw-bot')
       expect(msg?.text).toBe('@alice submitted a review on PR #7: "Add the thing".')
       expect(msg?.text).not.toContain('Please review')
+    })
+
+    it('matches the state case-insensitively (REST returns uppercase, some payloads lowercase)', () => {
+      const upper = classifyGithubInbound('pull_request_review', reviewSubmitted('APPROVED'), 'typeclaw-bot')
+      const lower = classifyGithubInbound('pull_request_review', reviewSubmitted('approved'), 'typeclaw-bot')
+      expect(lower?.text).toBe(upper?.text)
+      expect(lower?.text).toBe('@alice approved PR #7: "Add the thing".')
     })
 
     it('keeps the real body when the review has one', () => {
       const msg = classifyGithubInbound(
         'pull_request_review',
-        reviewSubmitted('commented', 'looks good'),
+        reviewSubmitted('COMMENTED', 'looks good'),
         'typeclaw-bot',
       )
       expect(msg?.text).toBe('looks good')
