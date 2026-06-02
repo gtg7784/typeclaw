@@ -7180,3 +7180,47 @@ describe('ChannelRouter inbound attachment lookup', () => {
     expect(router.listInboundAttachmentIds(KEY)).toEqual([])
   })
 })
+
+describe('review-thread resolver registry', () => {
+  const req = { adapter: 'github' as const, workspace: 'acme/p', chat: 'pr:1', rootCommentId: '1' }
+
+  test('answers unsupported when no resolver is registered', async () => {
+    const { router } = await makeRouter(await tempDir())
+
+    const result = await router.resolveReviewThread(req)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('unsupported')
+  })
+
+  test('dispatches to the registered resolver', async () => {
+    const { router } = await makeRouter(await tempDir())
+    router.registerReviewThreadResolver('github', async () => ({ ok: true }))
+
+    expect((await router.resolveReviewThread(req)).ok).toBe(true)
+  })
+
+  test('last-write-wins and a stale unregister does not wipe a fresh resolver', async () => {
+    const { router } = await makeRouter(await tempDir())
+    const first = async () => ({ ok: false as const, error: 'first', code: 'transient' as const })
+    const second = async () => ({ ok: true as const })
+    router.registerReviewThreadResolver('github', first)
+    router.registerReviewThreadResolver('github', second)
+
+    router.unregisterReviewThreadResolver('github', first)
+
+    expect((await router.resolveReviewThread(req)).ok).toBe(true)
+  })
+
+  test('a thrown resolver becomes a transient failure, not a rejection', async () => {
+    const { router } = await makeRouter(await tempDir())
+    router.registerReviewThreadResolver('github', async () => {
+      throw new Error('boom')
+    })
+
+    const result = await router.resolveReviewThread(req)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('transient')
+  })
+})
