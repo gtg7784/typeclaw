@@ -70,6 +70,67 @@ describe('slack-bot createTypingCallback', () => {
     expect(calls).toEqual([{ channel: 'C0CHANNEL', threadTs: '1700000000.000100', status: 'is typing...' }])
   })
 
+  test('calls setStatus on a flat DM using typingThread when thread is null', async () => {
+    // given
+    const { tracker, calls } = makeFakeTracker()
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({
+      adapter: 'slack-bot',
+      workspace: '@dm',
+      chat: 'D0DM',
+      thread: null,
+      typingThread: '1700000000.000100',
+      phase: 'tick',
+    })
+    // then
+    expect(calls).toEqual([{ channel: 'D0DM', threadTs: '1700000000.000100', status: 'is typing...' }])
+  })
+
+  test('phase=stop on a flat DM clears using typingThread', async () => {
+    // given
+    const { tracker, calls, clears } = makeFakeTracker()
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({
+      adapter: 'slack-bot',
+      workspace: '@dm',
+      chat: 'D0DM',
+      thread: null,
+      typingThread: '1700000000.000100',
+      phase: 'stop',
+    })
+    // then
+    expect(calls).toHaveLength(0)
+    expect(clears).toEqual([{ chat: 'D0DM', thread: '1700000000.000100' }])
+  })
+
+  test('typingThread takes precedence over thread when both are present', async () => {
+    // given
+    const { tracker, calls } = makeFakeTracker()
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({
+      adapter: 'slack-bot',
+      workspace: '@dm',
+      chat: 'D0DM',
+      thread: '1700000000.000999',
+      typingThread: '1700000000.000100',
+      phase: 'tick',
+    })
+    // then
+    expect(calls).toEqual([{ channel: 'D0DM', threadTs: '1700000000.000100', status: 'is typing...' }])
+  })
+
   test('is a no-op (logs info, no API call) for top-level chats without a thread', async () => {
     // given
     const { tracker, calls } = makeFakeTracker()
@@ -1463,6 +1524,30 @@ describe('slack-bot createOutboundCallback', () => {
     })
     await cb(makeMsg({ text: 'hello' }))
     expect(clearCalls).toEqual([{ chat: 'C0', thread: undefined }])
+  })
+
+  test('flat DM send posts top-level but clears the status on typingThread', async () => {
+    // given
+    const { client, posts } = makeFakeClient()
+    const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
+    const cb = createOutboundCallback({
+      client,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+      typingTracker: {
+        clearAfterSend: async (chat, thread) => {
+          clearCalls.push({ chat, thread })
+        },
+      },
+    })
+    // when
+    const result = await cb(makeMsg({ chat: 'D0', text: 'hi', thread: null, typingThread: '1700.000100' }))
+    // then
+    expect(result.ok).toBe(true)
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.options?.thread_ts).toBeUndefined()
+    expect(clearCalls).toEqual([{ chat: 'D0', thread: '1700.000100' }])
   })
 
   test('threaded uploadFile triggers clearAfterSend after the LAST attachment', async () => {

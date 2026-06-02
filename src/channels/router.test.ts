@@ -1348,6 +1348,23 @@ describe('ChannelRouter outbound', () => {
     expect(captured).toEqual({ chat: 'c-99', text: 'announcement' })
   })
 
+  test('stamps the turn typingThread onto a DM send so the adapter can clear the status', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let capturedTypingThread: string | undefined
+    let capturedThread: string | null | undefined
+    router.registerOutbound('discord-bot', async (msg) => {
+      capturedTypingThread = msg.typingThread
+      capturedThread = msg.thread
+      return { ok: true }
+    })
+    await router.route(inbound({ isDm: true, thread: null, typingThread: 'dm-ts-1', text: 'hi bot' }))
+    const result = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    expect(result.ok).toBe(true)
+    expect(capturedTypingThread).toBe('dm-ts-1')
+    expect(capturedThread).toBeUndefined()
+  })
+
   test('returns ok:false with adapter error when callback denies', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
@@ -3726,6 +3743,17 @@ describe('ChannelRouter typing indicator', () => {
     })
     await router.route(inbound({ thread: 'thread-7', text: 'hi bot' }))
     expect(calls[0]).toEqual({ chat: 'c1', thread: 'thread-7' })
+  })
+
+  test('forwards typingThread for a flat DM while the session thread stays null', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: Array<{ chat: string; thread: string | null | undefined; typingThread: string | undefined }> = []
+    router.registerTyping('discord-bot', async (target) => {
+      calls.push({ chat: target.chat, thread: target.thread, typingThread: target.typingThread })
+    })
+    await router.route(inbound({ isDm: true, thread: null, typingThread: 'dm-ts-1', text: 'hi bot' }))
+    expect(calls[0]).toEqual({ chat: 'c1', thread: null, typingThread: 'dm-ts-1' })
   })
 
   test('typing-callback rejection does not crash route', async () => {
