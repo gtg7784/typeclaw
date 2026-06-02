@@ -325,6 +325,20 @@ export type StartSubagentOptions = InvokeSubagentOptions & {
 // The two promises share a single underlying invokeSubagent invocation;
 // `completion` settles after dispose, so the session reference exposed via
 // `handle.abort` becomes a no-op once `completion` resolves.
+//
+// `timeoutMs` enforcement: the `spawn_subagent` tool drives its background
+// `subagent.completed` broadcast off this `completion` promise, so an
+// unbounded `invokeSubagent` (a wedged `session.prompt` that never settles)
+// would leave `completion` pending forever and the parent never woken. When
+// the subagent declares `timeoutMs`, we race the work against a ceiling and
+// settle `completion` with `ok: false` on expiry — which fires the FAILED
+// broadcast so the parent learns the spawn died instead of hanging silently.
+// This mirrors `awaitWithSubagentTimeout` on the SubagentConsumer path; here
+// the timeout resolves (rather than rejects) because `completion` already maps
+// failures to `{ ok: false }`. Cancellation is best-effort: pi's
+// `session.prompt` takes no AbortSignal, so we call the session `abort` handle
+// (which the handle resolution captured) to tear down what we can; the LLM
+// stream may keep running until the OS reaps it.
 export function startSubagent(name: string, options: StartSubagentOptions): StartSubagentResult {
   let resolveHandle: (h: SubagentHandle) => void
   let rejectHandle: (err: Error) => void
@@ -334,11 +348,13 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
   })
   let handleSettled = false
   let finalMessage: string | undefined
+  let abortSession: (() => Promise<void>) | undefined
 
-  const completion = invokeSubagent(name, {
+  const work = invokeSubagent(name, {
     ...options,
     onSessionCreated: (event) => {
       handleSettled = true
+      abortSession = event.abort
       resolveHandle({ taskId: options.taskId, sessionId: event.sessionId, abort: event.abort })
       if (options.onSession !== undefined) {
         options.onSession(event)
@@ -357,7 +373,34 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
       return { ok: false as const, error }
     })
 
+  const timeoutMs = options.registry[name]?.timeoutMs
+  const completion = timeoutMs === undefined ? work : raceSubagentCompletion(work, name, options.taskId, timeoutMs)
+
+  void completion.then(() => {
+    if (timeoutMs !== undefined) void abortSession?.()
+  })
+
   return { handle, completion }
+}
+
+type SubagentCompletion = { ok: true; finalMessage?: string } | { ok: false; error: string }
+
+function raceSubagentCompletion(
+  work: Promise<SubagentCompletion>,
+  name: string,
+  taskId: string,
+  timeoutMs: number,
+): Promise<SubagentCompletion> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<SubagentCompletion>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, error: new SubagentTimeoutError(name, taskId, timeoutMs).message }),
+      timeoutMs,
+    )
+  })
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer !== null) clearTimeout(timer)
+  })
 }
 
 function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
