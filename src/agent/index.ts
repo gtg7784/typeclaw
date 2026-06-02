@@ -70,6 +70,7 @@ import { createSpawnSubagentTool } from './tools/spawn-subagent'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { createSubagentCancelTool } from './tools/subagent-cancel'
 import { createSubagentOutputTool } from './tools/subagent-output'
+import { createTodoTools } from './tools/todo'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
 
@@ -357,6 +358,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
               permissions: options.permissions,
               reloadRoles: options.reloadRoles,
             }),
+            ...buildTodoTools(options.plugins?.agentDir, getOrigin),
           ]
   // Hook coverage for pi's builtin coding tools (read/bash/edit/write/grep/
   // find/ls) — pi 0.67.3 ignores `tools:` for implementation, so the only
@@ -681,6 +683,14 @@ export function buildRoleGrantTools(opts: {
       reloadRoles: opts.reloadRoles,
     }),
   ]
+}
+
+export function buildTodoTools(
+  agentDir: string | undefined,
+  getOrigin: () => SessionOrigin | undefined,
+): ToolDefinition[] {
+  if (agentDir === undefined) return []
+  return createTodoTools({ agentDir, getOrigin })
 }
 
 function wrapRegistryTools(
