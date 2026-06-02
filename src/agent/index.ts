@@ -257,6 +257,13 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const getOrigin: () => SessionOrigin | undefined =
     options.originRef !== undefined ? () => options.originRef!.current : () => options.origin
 
+  // Holds the session's signal-only abort once `createAgentSession` resolves.
+  // Tools are wrapped BEFORE the session exists, so the loop guard reaches the
+  // abort through this lazily-resolved getter. See `fireLoopAbort` in
+  // plugin-tools.ts for why aborting (not throwing) is what stops the loop.
+  const abortHolder: { abort?: () => void } = {}
+  const getAbort: () => (() => void) | undefined = () => abortHolder.abort
+
   // Subagent built-in tool refs are dual-routed (see BUILTIN_TOOL_DEFINITION
   // dual-map in plugin-tools.ts): pi-side coding tools go to `tools:` so they
   // become the strict base set, typeclaw-side web tools go to `customTools:`.
@@ -268,8 +275,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
     : { agentTools: [], toolDefinitions: [] }
   const pluginCustomTools = options.pluginSubagent
-    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin)
-    : wrapRegistryTools(options.plugins, getOrigin)
+    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin, getAbort)
+    : wrapRegistryTools(options.plugins, getOrigin, getAbort)
 
   // Per-run budget state for the tool-result byte ceiling. Allocated once per
   // session creation and threaded into every wrapped tool so they share the
@@ -285,7 +292,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const effectiveTools =
     options.tools ?? (options.pluginSubagent ? (resolvedSubagentBuiltins.agentTools as AgentSessionTools) : undefined)
-  const hookWrappedTools = wrapSystemAgentTools(effectiveTools, options.plugins, getOrigin)
+  const hookWrappedTools = wrapSystemAgentTools(effectiveTools, options.plugins, getOrigin, getAbort)
   const tools =
     sessionBudget && sessionBudgetState && hookWrappedTools
       ? (hookWrappedTools.map((t) =>
@@ -370,10 +377,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           sessionId: options.plugins.sessionId,
           hooks: options.plugins.hooks,
           getOrigin,
+          getAbort,
           ...(options.permissions ? { permissions: options.permissions } : {}),
         })
       : []
-  const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin)
+  const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin, getAbort)
   const customToolsPreBudget = [...wrappedCustomSystemTools, ...pluginCustomTools, ...builtinPiToolOverrides]
   const customTools =
     sessionBudget && sessionBudgetState
@@ -393,6 +401,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+
+  abortHolder.abort = () => {
+    if (session.agent.signal?.aborted !== true) session.agent.abort()
+  }
 
   // The names the session actually exposes to the model: pi's active base set
   // (the caller's `tools:` filter, or pi's default builtins when unset) union
@@ -686,6 +698,7 @@ export function buildRoleGrantTools(opts: {
 function wrapRegistryTools(
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
+  getAbort: () => (() => void) | undefined,
 ): ToolDefinition[] {
   if (!plugins) return []
   return plugins.registry.tools.map((t: PluginRegisteredTool) =>
@@ -697,6 +710,7 @@ function wrapRegistryTools(
       logger: t.logger,
       hooks: plugins.hooks,
       getOrigin,
+      getAbort,
     }),
   )
 }
@@ -705,6 +719,7 @@ function wrapSystemAgentTools(
   tools: AgentSessionTools | undefined,
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
+  getAbort: () => (() => void) | undefined,
 ): AgentSessionTools | undefined {
   if (!tools || !hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -713,6 +728,7 @@ function wrapSystemAgentTools(
       sessionId: plugins.sessionId,
       hooks: plugins.hooks,
       getOrigin,
+      getAbort,
     }),
   )
 }
@@ -721,6 +737,7 @@ function wrapSystemTools(
   tools: ToolDefinition[],
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
+  getAbort: () => (() => void) | undefined,
 ): ToolDefinition[] {
   if (!hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -729,6 +746,7 @@ function wrapSystemTools(
       sessionId: plugins.sessionId,
       hooks: plugins.hooks,
       getOrigin,
+      getAbort,
     }),
   )
 }
@@ -742,6 +760,7 @@ function wrapSubagentCustomTools(
   selection: PluginSubagentSelection,
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
+  getAbort: () => (() => void) | undefined,
 ): ToolDefinition[] {
   if (!selection.customTools || !plugins) return []
   const logger = makePluginLogger(selection.pluginName)
@@ -754,6 +773,7 @@ function wrapSubagentCustomTools(
       logger,
       hooks: plugins.hooks,
       getOrigin,
+      getAbort,
     }),
   )
 }

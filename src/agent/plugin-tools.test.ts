@@ -1330,4 +1330,90 @@ describe('loop guard integration', () => {
     const bFirst = (await wB.execute('b1', {}, undefined, undefined, {} as never)) as { isError?: boolean }
     expect(bFirst.isError).not.toBe(true)
   })
+
+  test('aborts the turn when a plugin tool is blocked so the model cannot keep retrying', async () => {
+    let aborts = 0
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-abort-plugin',
+      logger: noopLogger,
+      hooks: createHookBus(),
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { q: 'a' }, undefined, undefined, {} as never)
+    }
+    expect(aborts).toBe(0)
+    await wrapped.execute('c5', { q: 'a' }, undefined, undefined, {} as never)
+    expect(aborts).toBe(1)
+  })
+
+  test('aborts the turn when a system tool is blocked, alongside the thrown loop error', async () => {
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'webfetch',
+      label: 'webfetch',
+      description: '',
+      parameters: Type.Object({ url: Type.String() }),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, {
+      agentDir: '/agent',
+      sessionId: 'loop-abort-sys',
+      hooks: createHookBus(),
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { url: 'https://example.com' }, undefined, undefined, {} as never)
+    }
+    expect(aborts).toBe(0)
+    await expect(
+      wrapped.execute('c5', { url: 'https://example.com' }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/loop-guard/)
+    expect(aborts).toBe(1)
+  })
+
+  test('does not abort while calls are still under the block threshold', async () => {
+    let aborts = 0
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-abort-warn-only',
+      logger: noopLogger,
+      hooks: createHookBus(),
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { q: 'a' }, undefined, undefined, {} as never)
+    }
+    expect(aborts).toBe(0)
+  })
 })

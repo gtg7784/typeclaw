@@ -163,6 +163,10 @@ export type WrapToolOptions = {
   // origin mutates per turn surface the current-turn `lastInboundAuthorId`
   // to `tool.before`. Sessions with a fixed origin can pass `() => origin`.
   getOrigin?: () => SessionOrigin | undefined
+  // Resolves the current turn's abort handle. Resolved lazily (not at wrap
+  // time) because tools are wrapped BEFORE `createAgentSession` returns the
+  // session whose `agent.abort` this points at. See `fireLoopAbort`.
+  getAbort?: () => (() => void) | undefined
 }
 
 export type WrapSystemToolOptions = {
@@ -170,6 +174,7 @@ export type WrapSystemToolOptions = {
   sessionId: string
   hooks: HookBus
   getOrigin?: () => SessionOrigin | undefined
+  getAbort?: () => (() => void) | undefined
   // When present, the bash builtin is rewritten through the per-tool bwrap
   // sandbox with role-derived path masks. Absent (or no masks for the role)
   // runs bash unchanged — preserving today's behavior for trusted+ and for
@@ -228,6 +233,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
 
       const loopDecision = sharedLoopGuard.check(opts.sessionId, opts.toolName, before.args)
       if (loopDecision.kind === 'block') {
+        fireLoopAbort(opts.getAbort)
         return errorResult(loopDecision.message)
       }
 
@@ -287,6 +293,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       }
       const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
       if (loopDecision.kind === 'block') {
+        fireLoopAbort(opts.getAbort)
         throw new Error(loopDecision.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -349,6 +356,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       }
       const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
       if (loopDecision.kind === 'block') {
+        fireLoopAbort(opts.getAbort)
         throw new Error(loopDecision.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -426,6 +434,7 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
       const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
       if (loopDecision.kind === 'block') {
+        fireLoopAbort(opts.getAbort)
         throw new Error(loopDecision.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -523,6 +532,18 @@ function appendLoopWarning(result: ToolResult, message: string): ToolResult {
 // long-running processes.
 export function __resetSharedLoopGuardForTests(): void {
   sharedLoopGuard = createLoopGuard()
+}
+
+// A loop-guard `block` verdict returned/thrown from a tool's execute() is
+// caught by pi-agent-core and surfaced to the model as an `isError` result,
+// which the model simply retries — the loop never ends. Aborting the run's
+// AbortSignal is the only thing that actually stops the in-flight turn (the
+// next assistant stream sees the aborted signal and ends with stopReason
+// 'aborted'). We use the signal-only `agent.abort`, never `session.abort`,
+// which would deadlock awaiting the very run this tool call belongs to. See
+// the matching pattern in src/channels/router.ts (policy-denied send cap).
+function fireLoopAbort(getAbort: (() => (() => void) | undefined) | undefined): void {
+  getAbort?.()?.()
 }
 
 function errorResult(message: string) {
