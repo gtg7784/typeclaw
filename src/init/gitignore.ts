@@ -32,6 +32,7 @@ auth.json
 node_modules/
 packages/*/node_modules/
 workspace/
+public/
 mounts/
 Dockerfile
 .DS_Store
