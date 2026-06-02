@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   createAgentSession,
+  createCodingTools,
   DefaultResourceLoader,
   defineTool as definePiTool,
   SessionManager,
@@ -80,10 +81,12 @@ export { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
 
-// pi 0.67.3's default active built-in tools when a session declares no `tools:`
-// filter (see pi `createAgentSession`'s `defaultActiveToolNames`). Mirrored here
-// because pi does not export it; keep in sync if pi's default changes.
-const DEFAULT_PI_BUILTIN_TOOL_NAMES = ['read', 'bash', 'edit', 'write']
+// pi's default active built-in tools when a session declares no `tools:` filter
+// (pi `createAgentSession` falls back to `defaultActiveToolNames`, which is the
+// name set of `codingTools`). Derived from pi's own `createCodingTools()` rather
+// than hardcoded so the list can't silently drift if pi adds/removes/renames a
+// default builtin; `default-pi-builtins match pi's coding tool set` pins it.
+const DEFAULT_PI_BUILTIN_TOOL_NAMES = createCodingTools(process.cwd()).map((t) => t.name)
 
 export type PluginSessionWiring = {
   registry: PluginRegistry
