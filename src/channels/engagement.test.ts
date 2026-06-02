@@ -214,6 +214,46 @@ describe('decideEngagement (alias)', () => {
     expect(decision).toBe('engage')
   })
 
+  test('observes when alias appears only in referenceContext source text', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        text: 'following up on this',
+        referenceContext: {
+          kind: 'reply',
+          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: '봉봉아 please check' }],
+        },
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('engages when alias appears in raw message text even with referenceContext present', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        text: '봉봉아 following up',
+        referenceContext: {
+          kind: 'reply',
+          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: 'unrelated parent' }],
+        },
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('engage')
+  })
+
   test('alias engagement runs after explicit triggers (mention still wins for sticky-credit grant)', () => {
     // Sanity: alias path doesn't break existing trigger ordering. A
     // message with both <@id> mention AND alias text engages, same as
@@ -427,6 +467,31 @@ describe('decideEngagement (solo-human fallback)', () => {
 
     // then we observe — the fallback is for humans, not bots
     expect(decision).toBe('observe')
+  })
+
+  test('peer bot name inside referenceContext does not suppress solo-human fallback', () => {
+    const ledger = new StickyLedger()
+    const participants: ChannelParticipant[] = [
+      participant('alice'),
+      { ...participant('peer1'), authorName: 'Winky', isBot: true },
+    ]
+
+    const decision = decideEngagement({
+      message: inbound({
+        text: 'what do you think?',
+        referenceContext: {
+          kind: 'reply',
+          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: 'Winky should answer' }],
+        },
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+    })
+
+    expect(decision).toBe('engage')
   })
 
   test('peer bot still engages on explicit mention even in solo-human channel', () => {

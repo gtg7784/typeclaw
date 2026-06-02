@@ -52,6 +52,9 @@ export type InboundMessage = {
   chat: string
   thread: string | null
   text: string
+  // Prompt-only context for replied-to / quoted / linked messages. Kept out
+  // of `text` so the engagement gate sees only the human-authored body.
+  referenceContext?: InboundReferenceContext
   // Non-text attachments the user sent on this inbound. Empty / omitted
   // when the message is text-only. The router carries these through to
   // the live session's promptQueue/contextBuffer so channel tools can
@@ -220,6 +223,11 @@ export type QuoteAnchorSource = {
   text: string
 }
 
+export type InboundReferenceContext = {
+  kind: 'reply' | 'quote' | 'link'
+  sources: readonly QuoteAnchorSource[]
+}
+
 export type SendErrorCode =
   | 'duplicate'
   | 'turn-cap'
@@ -297,6 +305,7 @@ export type ChannelHistoryMessage = {
   authorId: string
   authorName: string
   text: string
+  referenceContext?: InboundReferenceContext
   attachments?: readonly InboundAttachment[]
   ts: number
   isBot: boolean

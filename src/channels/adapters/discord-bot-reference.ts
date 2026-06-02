@@ -1,4 +1,7 @@
+import type { InboundReferenceContext, QuoteAnchorSource } from '@/channels/types'
+
 export type DiscordResolvedReference = {
+  authorId: string
   authorName: string
   text: string
 }
@@ -15,31 +18,26 @@ export async function enrichDiscordMessageReferences(args: {
   reply?: DiscordMessagePointer
   fetchMessage: DiscordReferenceFetch
   linkLimit?: number
-  textLimit?: number
-}): Promise<string> {
-  const textLimit = args.textLimit ?? 280
-  const parts: string[] = []
+}): Promise<{ text: string; referenceContext?: InboundReferenceContext }> {
+  const sources: QuoteAnchorSource[] = []
+  let hasReply = false
 
   if (args.reply !== undefined) {
     const parent = await fetchSafely(args.fetchMessage, args.reply)
-    if (parent !== null) parts.push(renderReply(parent, textLimit))
+    if (parent !== null) {
+      sources.push(toSource(parent))
+      hasReply = true
+    }
   }
-
-  parts.push(args.text)
 
   const links = extractDiscordMessageLinks(args.text).slice(0, args.linkLimit ?? 3)
-  const linkBlocks: string[] = []
   for (const link of links) {
     const message = await fetchSafely(args.fetchMessage, link)
-    if (message !== null) linkBlocks.push(renderLink(message, textLimit))
+    if (message !== null) sources.push(toSource(message))
   }
 
-  if (linkBlocks.length > 0) parts.push(linkBlocks.join('\n'))
-
-  return parts.join('\n\n').replace(/^(.+)\n\n(.*)$/s, (all, first: string, rest: string) => {
-    if (!first.startsWith('> ↩ Reply to ')) return all
-    return `${first}\n${rest}`
-  })
+  if (sources.length === 0) return { text: args.text }
+  return { text: args.text, referenceContext: { kind: hasReply ? 'reply' : 'link', sources } }
 }
 
 const DISCORD_MESSAGE_LINK = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/channels\/(\d+|@me)\/(\d+)\/(\d+)/g
@@ -70,19 +68,11 @@ async function fetchSafely(
   }
 }
 
-function renderReply(message: DiscordResolvedReference, textLimit: number): string {
-  return `> ↩ Reply to ${singleLine(message.authorName)}: ${truncate(singleLine(message.text), textLimit)}`
-}
-
-function renderLink(message: DiscordResolvedReference, textLimit: number): string {
-  return `> 🔗 Discord message from ${singleLine(message.authorName)}: ${truncate(singleLine(message.text), textLimit)}`
-}
-
-function singleLine(value: string): string {
-  return value.replace(/\s+/g, ' ').trim()
-}
-
-function truncate(value: string, limit: number): string {
-  if (value.length <= limit) return value
-  return `${value.slice(0, limit)}…`
+function toSource(message: DiscordResolvedReference): QuoteAnchorSource {
+  return {
+    adapter: 'discord-bot',
+    authorId: message.authorId,
+    authorName: message.authorName,
+    text: message.text,
+  }
 }

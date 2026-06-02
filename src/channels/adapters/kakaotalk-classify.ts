@@ -1,8 +1,8 @@
-import type { KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
+import { KAKAO_MESSAGE_TYPE, type KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
 
 import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundAttachment, InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage, InboundReferenceContext } from '@/channels/types'
 
 export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect' | 'bot_message'
 
@@ -49,7 +49,9 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'bot_message' }
   }
 
-  const text = event.message ?? ''
+  const rawText = event.message ?? ''
+  const replyContext = parseReplyContext(event, context.selfUserId)
+  const text = rawText
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
 
   const chatInfo = context.lookupChat(event.chat_id)
@@ -64,7 +66,7 @@ export function classifyInbound(
   // mention (see engagement.ts: alias is unconditional and ranks alongside
   // explicit triggers). Without aliases configured, only `reply` and `dm`
   // triggers can fire on KakaoTalk.
-  const aliasMatched = matchesAnyAlias(text, context.selfAliases ?? [])
+  const aliasMatched = matchesAnyAlias(rawText, context.selfAliases ?? [])
 
   return {
     kind: 'route',
@@ -74,6 +76,7 @@ export function classifyInbound(
       chat: event.chat_id,
       thread: null,
       text,
+      ...referenceContextPayload(replyContext),
       ...(context.attachments !== undefined && context.attachments.length > 0
         ? { attachments: context.attachments }
         : {}),
@@ -82,9 +85,9 @@ export function classifyInbound(
       authorName: event.author_name ?? String(event.author_id),
       authorIsBot: false,
       isBotMention: aliasMatched,
-      replyToBotMessageId: null,
+      replyToBotMessageId: replyContext?.target === 'bot' ? replyContext.logId : null,
       mentionsOthers: false,
-      replyToOtherMessageId: null,
+      replyToOtherMessageId: replyContext?.target === 'other' ? replyContext.logId : null,
       isDm: chatInfo.isDm,
       // SDK delivers `sent_at` in Unix seconds (LOCO `sendAt`); contract
       // wants ms (see `src/channels/types.ts`). Without `* 1000`, ms-based
@@ -92,4 +95,62 @@ export function classifyInbound(
       ts: event.sent_at * 1000,
     },
   }
+}
+
+type ParsedReplyContext = {
+  logId: string
+  authorId: string
+  authorName: string
+  quotedText: string | null
+  target: 'bot' | 'other'
+}
+
+function parseReplyContext(event: KakaoTalkPushMessageEvent, selfUserId: string): ParsedReplyContext | null {
+  if (event.message_type !== KAKAO_MESSAGE_TYPE.REPLY) return null
+  if (event.attachment === null) return null
+
+  const logId = stringField(event.attachment, 'src_logId')
+  const sourceUserId = numericField(event.attachment, 'src_userId')
+  if (logId === null || sourceUserId === null) return null
+
+  const sourceAuthorId = String(sourceUserId)
+  const quotedText = stringField(event.attachment, 'src_message')
+  return {
+    logId,
+    authorId: sourceAuthorId,
+    // classifyInbound is synchronous and has no cheap author resolver access;
+    // fall back to Kakao's stable source user id rather than fetching.
+    authorName: sourceAuthorId,
+    quotedText,
+    target: sourceAuthorId === selfUserId ? 'bot' : 'other',
+  }
+}
+
+function referenceContextPayload(
+  replyContext: ParsedReplyContext | null,
+): { referenceContext: InboundReferenceContext } | Record<string, never> {
+  if (replyContext === null || replyContext.quotedText === null || replyContext.quotedText.trim() === '') return {}
+  return {
+    referenceContext: {
+      kind: 'reply',
+      sources: [
+        {
+          adapter: 'kakaotalk',
+          authorId: replyContext.authorId,
+          authorName: replyContext.authorName,
+          text: replyContext.quotedText,
+        },
+      ],
+    },
+  }
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function numericField(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }

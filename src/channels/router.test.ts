@@ -32,7 +32,7 @@ import {
   type ChannelRouter,
   type ClaimHandler,
 } from './router'
-import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
+import { defaultHistoryConfig, QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -6354,6 +6354,61 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(reminderPrompt).toContain('## Recent context')
     expect(reminderPrompt).toContain('side chatter')
     expect(reminderPrompt).not.toContain('## Current message')
+  })
+
+  test('referenceContext renders quote lines above the current author line and truncates at render time', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const longQuote = `${'x'.repeat(QUOTED_REPLY_EXCERPT_MAX_CHARS)}tail`
+
+    await router.route(
+      inbound({
+        text: 'actual reply',
+        referenceContext: {
+          kind: 'reply',
+          sources: [
+            { adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: longQuote },
+            { adapter: 'discord-bot', authorId: 'carol', authorName: 'Carol', text: 'linked context' },
+          ],
+        },
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0] ?? ''
+    expect(prompt).toContain(`> <@bob>: ${'x'.repeat(QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`)
+    expect(prompt).not.toContain('tail')
+    expect(prompt).toContain('> <@carol>: linked context')
+    expect(prompt.indexOf('> <@bob>:')).toBeLessThan(prompt.indexOf(`<@alice> (alice): actual reply`))
+  })
+
+  test('share-only Slack referenceContext renders even when raw text is empty', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(
+      inbound({
+        adapter: 'slack-bot',
+        workspace: 'T0ACME',
+        chat: 'C0CHANNEL',
+        text: '',
+        referenceContext: {
+          kind: 'quote',
+          sources: [{ adapter: 'slack-bot', authorId: 'UBOB', authorName: 'Bob', text: 'shared message body' }],
+        },
+      }),
+    )
+    await router.__testing!.flushDebounce({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: null,
+    })
+
+    const prompt = sessions[0]!.prompts[0] ?? ''
+    expect(prompt).toContain('> <@UBOB>: shared message body')
+    expect(prompt).toContain('<@alice> (alice): ')
+    expect(prompt.indexOf('> <@UBOB>: shared message body')).toBeLessThan(prompt.indexOf('<@alice> (alice): '))
   })
 
   test("reminder lookup skips destroyed sessions (channels GC'd while subagent was running drops the reminder)", async () => {
