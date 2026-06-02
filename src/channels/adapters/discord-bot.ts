@@ -39,6 +39,7 @@ import {
   type InboundDropReason,
   renderPlaceholder,
 } from './discord-bot-classify'
+import { enrichDiscordMessageReferences } from './discord-bot-reference'
 import {
   ackInteraction,
   parseInteractionAsCommand,
@@ -902,11 +903,26 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         return
       }
 
-      const routedTag = await formatChannelTag(verdict.payload.workspace, verdict.payload.chat)
+      const replyMessageId = event.message_reference?.message_id
+      const enrichedText = await enrichDiscordMessageReferences({
+        text: verdict.payload.text,
+        ...(replyMessageId !== undefined
+          ? { reply: { channelId: event.message_reference?.channel_id ?? event.channel_id, messageId: replyMessageId } }
+          : {}),
+        fetchMessage: async (channelId, messageId) => {
+          const message: { author: { username: string; global_name?: string | null }; content: string } =
+            await client.getMessage(channelId, messageId)
+          return { authorName: message.author.global_name ?? message.author.username, text: message.content }
+        },
+      })
+      const payload =
+        enrichedText === verdict.payload.text ? verdict.payload : { ...verdict.payload, text: enrichedText }
+
+      const routedTag = await formatChannelTag(payload.workspace, payload.chat)
       logger.info(
-        `[discord-bot] routed id=${event.id} ${routedTag} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
+        `[discord-bot] routed id=${event.id} ${routedTag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
       )
-      await options.router.route(verdict.payload)
+      await options.router.route(payload)
     } catch (err) {
       logger.error(`[discord-bot] handleInbound failed: ${describe(err)}`)
     } finally {
