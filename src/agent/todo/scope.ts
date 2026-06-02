@@ -39,7 +39,7 @@ export function resolveTodoScope(origin: SessionOrigin): TodoScope | null {
     case 'channel':
       return { kind: 'channel', key: channelScopeKey(origin) }
     case 'cron':
-      return { kind: 'cron', key: `cron/${encodeSegment(origin.jobId)}` }
+      return { kind: 'cron', key: `cron/${encodeComponent(origin.jobId)}` }
     case 'subagent':
     case 'system':
       return null
@@ -52,22 +52,26 @@ export function resolveTodoScope(origin: SessionOrigin): TodoScope | null {
 }
 
 function channelScopeKey(origin: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
-  // A null thread (channel-root session) is tagged distinctly from any real
-  // thread id: `0:` vs `1:<encoded>`. A real thread whose literal text is
-  // `_root` (or anything else) can never collide with the null-thread case,
-  // because the discriminant prefix differs.
-  const thread = origin.thread === null ? '0:' : `1:${encodeSegment(origin.thread)}`
-  const parts = [encodeSegment(origin.adapter), encodeSegment(origin.workspace), encodeSegment(origin.chat), thread]
+  const parts = [
+    encodeComponent(origin.adapter),
+    encodeComponent(origin.workspace),
+    encodeComponent(origin.chat),
+    encodeComponent(origin.thread),
+  ]
   return `channel/${parts.join(':')}`
 }
 
-// Encode a scope component collision-free. `encodeURIComponent` is injective
-// and its output is filesystem-safe (it never emits `/` or `:` and percent-
-// escapes everything outside an unreserved set), so distinct origin components
-// can never alias to the same path — `a/b`, `a-b`, and `a:b` all map to
-// distinct encodings. Reversibility is not required; injectivity is, because
-// the key identifies which conversation's todo file is read or written.
-function encodeSegment(value: string): string {
-  const encoded = encodeURIComponent(value)
-  return encoded === '' ? '_empty' : encoded
+// Encode one scope component injectively. Every component is emitted as a
+// discriminant prefix plus its `encodeURIComponent` form:
+//   - null          → `n`        (the channel-root / no-thread case)
+//   - any string s  → `s<encoded>`
+// The prefix makes the three cases pairwise distinguishable that lossy schemes
+// confused: a null thread vs a literal "n" string, an empty string vs a
+// literal "_empty" string, and any value vs another whose unsafe chars happen
+// to map together. `encodeURIComponent` is itself injective and never emits
+// `/` or `:`, so the joined key is both a single filesystem-safe path segment
+// and a collision-free identity for the conversation whose todo file it names.
+function encodeComponent(value: string | null): string {
+  if (value === null) return 'n'
+  return `s${encodeURIComponent(value)}`
 }
