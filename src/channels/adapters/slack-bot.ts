@@ -18,6 +18,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
@@ -909,6 +910,11 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   const authorResolver = createSlackAuthorResolver({ token: options.token })
   const channelResolver = createSlackChannelResolver({ token: options.token })
 
+  // Slack mentions by id (`<@U…>`), so no username form. Read live off the
+  // closure so a reconnect re-running auth.test stays reflected; one team
+  // per token in practice, so `workspace` is ignored.
+  const selfIdentityResolver: ChannelSelfIdentityResolver = () => (botUserId !== null ? { id: botUserId } : null)
+
   const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
     const names = await channelResolver({ adapter: 'slack-bot', workspace, chat, thread: null }).catch(
       () => ({}) as ResolvedChannelNames,
@@ -1143,6 +1149,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerOutbound('slack-bot', outboundCallback)
       options.router.registerTyping('slack-bot', typingCallback)
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
+      options.router.registerSelfIdentity('slack-bot', selfIdentityResolver)
       options.router.registerHistory('slack-bot', historyCallback)
       options.router.registerFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.registerMembership('slack-bot', membershipResolver)
@@ -1162,6 +1169,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterOutbound('slack-bot', outboundCallback)
       options.router.unregisterTyping('slack-bot', typingCallback)
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
+      options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)
       options.router.unregisterHistory('slack-bot', historyCallback)
       options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('slack-bot', membershipResolver)
