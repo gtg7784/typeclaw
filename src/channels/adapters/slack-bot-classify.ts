@@ -92,6 +92,11 @@ export function classifyInbound(
   // found, keeping the cost negligible in mention-heavy channels.
   const aliasMatched = !isBotMention && matchesAnyAlias(rawText, context.selfAliases ?? [])
   const thread = event.thread_ts ?? (!isDm && (isBotMention || aliasMatched) ? event.ts : null)
+  // DMs stay flat (`thread` null), but Slack's typing status still needs a real
+  // message ts; anchor it on the inbound so the indicator renders without
+  // threading the reply. `assistant.threads.setStatus` accepts any live channel
+  // message ts, confirmed against the API.
+  const typingThread = isDm && thread === null ? event.ts : undefined
 
   // A reply is "to the bot" only when the thread parent was authored by the
   // bot. Slack surfaces the parent author via `parent_user_id` on every
@@ -130,6 +135,7 @@ export function classifyInbound(
       workspace,
       chat: event.channel,
       thread,
+      ...(typingThread !== undefined ? { typingThread } : {}),
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.ts,

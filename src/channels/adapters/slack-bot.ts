@@ -351,18 +351,23 @@ export function createTypingCallback(deps: {
   const { typingTracker, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'slack-bot') return
+    // DMs are flat (thread null) but setStatus still needs a real message ts;
+    // `typingThread` carries the inbound ts for exactly that case. Real channel
+    // threads keep using `thread`. Either way the status is keyed on one ts.
+    const statusThread =
+      target.typingThread !== undefined && target.typingThread !== '' ? target.typingThread : target.thread
     const tag = formatChannelTag
-      ? await formatChannelTag(target.workspace, target.thread ?? target.chat)
-      : `channel=${target.thread ?? target.chat}`
-    if (target.thread === undefined || target.thread === null || target.thread === '') {
+      ? await formatChannelTag(target.workspace, statusThread ?? target.chat)
+      : `channel=${statusThread ?? target.chat}`
+    if (statusThread === undefined || statusThread === null || statusThread === '') {
       if (target.phase === 'tick') logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
       return
     }
     if (target.phase === 'stop') {
-      await typingTracker.clearAfterSend(target.chat, target.thread)
+      await typingTracker.clearAfterSend(target.chat, statusThread)
       return
     }
-    await typingTracker.setStatus(target.chat, target.thread, 'is typing...')
+    await typingTracker.setStatus(target.chat, statusThread, 'is typing...')
   }
 }
 
@@ -823,7 +828,7 @@ export function createOutboundCallback(deps: {
           // top-level posts.
           if (threadTs === null && chunks.length > 1) threadTs = sent.ts
         }
-        if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.thread)
+        if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.typingThread ?? msg.thread)
         return { ok: true }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -856,7 +861,7 @@ export function createOutboundCallback(deps: {
         return { ok: false, error: `uploadFile failed: ${message}` }
       }
     }
-    if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.thread)
+    if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.typingThread ?? msg.thread)
     return { ok: true }
   }
 }

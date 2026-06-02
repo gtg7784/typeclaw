@@ -344,6 +344,44 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.payload.thread).toBeNull()
   })
 
+  test('a flat DM anchors typingThread on the inbound ts so the status can render', () => {
+    const event = buildEvent({ channel_type: 'im', channel: 'D0DM', text: 'private hi' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBeNull()
+    expect(verdict.payload.typingThread).toBe('1700000000.000100')
+  })
+
+  test('a non-DM message carries no typingThread (the channel typing path uses thread)', () => {
+    const event = buildEvent({ text: 'just chatting' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.typingThread).toBeUndefined()
+  })
+
+  test('a DM already in a thread does not override typingThread (thread drives status)', () => {
+    const event = buildEvent({
+      channel_type: 'im',
+      channel: 'D0DM',
+      text: 'in a thread',
+      ts: '1700000010.000200',
+      thread_ts: '1700000000.000100',
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.typingThread).toBeUndefined()
+  })
+
   test('non-mention team message with no alias match leaves thread null (existing behavior)', () => {
     const event = buildEvent({ text: 'just chatting' })
 
