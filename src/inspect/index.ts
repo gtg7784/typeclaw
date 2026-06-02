@@ -30,10 +30,9 @@ export type RunInspectOptions = {
   stdout: (line: string) => void
   stderr: (line: string) => void
   liveSource?: LiveSourceFactory
+  // Aborting this signal stops the live tail and returns escToPicker=true; the
+  // caller's loop inspects its own scope intent to tell back from exit.
   signal?: AbortSignal
-  // Aborting escSignal (and only escSignal) returns escToPicker=true so a
-  // caller-side loop can re-open the picker; signal still means process exit.
-  escSignal?: AbortSignal
   liveHint?: string
 }
 
@@ -81,7 +80,6 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
     stderr: opts.stderr,
     ...(opts.liveSource !== undefined ? { liveSource: opts.liveSource } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    ...(opts.escSignal !== undefined ? { escSignal: opts.escSignal } : {}),
     ...(opts.liveHint !== undefined ? { liveHint: opts.liveHint } : {}),
   })
   if (streamResult.escToPicker) return { ok: true, exitCode: 0, escToPicker: true }
@@ -147,7 +145,6 @@ async function streamSession(opts: {
   stderr: (line: string) => void
   liveSource?: LiveSourceFactory
   signal?: AbortSignal
-  escSignal?: AbortSignal
   liveHint?: string
 }): Promise<{ escToPicker: boolean }> {
   if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
@@ -161,26 +158,25 @@ async function streamSession(opts: {
     }
   }
 
-  const escAborted = (): boolean => opts.escSignal?.aborted === true
+  const aborted = (): boolean => opts.signal?.aborted === true
 
   for await (const event of replayJsonl(opts.summary.sessionFile, { onWarn: opts.stderr })) {
-    if (escAborted()) return { escToPicker: true }
+    if (aborted()) return { escToPicker: true }
     emit(event)
   }
 
   if (opts.liveSource === undefined) {
     if (!opts.json) opts.stdout('─── end of transcript ───')
-    return { escToPicker: escAborted() }
+    return { escToPicker: aborted() }
   }
 
-  if (escAborted()) return { escToPicker: true }
+  if (aborted()) return { escToPicker: true }
 
-  const combinedSignal = combineSignals(opts.signal, opts.escSignal)
   let sessionLive = false
   const liveIter = opts.liveSource({
     sessionId: opts.summary.sessionId,
     ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
-    ...(combinedSignal !== undefined ? { signal: combinedSignal } : {}),
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     onSubscribed: (live) => {
       sessionLive = live
     },
@@ -204,21 +200,7 @@ async function streamSession(opts: {
     opts.stderr(`live tail ended: ${err instanceof Error ? err.message : String(err)}`)
   }
   if (!opts.json) opts.stdout('─── end of transcript ───')
-  return { escToPicker: escAborted() && opts.signal?.aborted !== true }
-}
-
-function combineSignals(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal | undefined {
-  if (a === undefined) return b
-  if (b === undefined) return a
-  if (a.aborted) return a
-  if (b.aborted) return b
-  const ctrl = new AbortController()
-  const onAbort = (): void => {
-    ctrl.abort()
-  }
-  a.addEventListener('abort', onAbort, { once: true })
-  b.addEventListener('abort', onAbort, { once: true })
-  return ctrl.signal
+  return { escToPicker: aborted() }
 }
 
 function divider(color: boolean, text: string): string {

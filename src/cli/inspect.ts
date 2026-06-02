@@ -5,10 +5,10 @@ import { findAgentDir } from '@/init'
 import { runInspectLoop, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
 import { originLabel, shortSessionId } from '@/inspect/label'
 
-import { createEscController } from './inspect-controller'
+import { createTailScope } from './inspect-controller'
 import { cancel, c, errorLine, isCancel, prepareStdinForClack } from './ui'
 
-const ESC_LISTEN_DELAY_MS = 50
+const ESC_DEBOUNCE_MS = 50
 
 export const inspectCommand = defineCommand({
   meta: {
@@ -45,46 +45,23 @@ export const inspectCommand = defineCommand({
 
     const isJson = args.json === true
     const liveSource = isJson ? undefined : await buildLiveSource(cwd)
-    const signalCtrl = installSigintAbort()
-    const signal = signalCtrl.signal
-    // Raw-mode Ctrl-C arrives as byte 0x03 and must abort the exit controller
-    // directly: under Bun a self-issued process.kill(SIGINT) does not reliably
-    // re-enter our process.once('SIGINT') handler, so the live tail never exits.
-    const escListener = isJson ? null : createEscListener(() => signalCtrl.abort())
-    const liveHint = escListener === null ? undefined : escHintLine(color)
+    const interactive = !isJson && Boolean(process.stdin.isTTY)
+    const liveHint = interactive ? escHintLine(color) : undefined
 
-    // try/finally so a thrown loop never leaves the terminal stuck in raw mode.
-    let result: Awaited<ReturnType<typeof runInspectLoop>>
-    try {
-      result = await runInspectLoop({
-        agentDir: cwd,
-        ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
-        ...(filterArg !== undefined ? { filter: filterArg } : {}),
-        ...(sinceArg !== undefined ? { since: sinceArg } : {}),
-        json: isJson,
-        color,
-        selectSession: (sessions, selectOpts) => {
-          escListener?.pause()
-          return clackSelect(sessions, selectOpts?.initialSessionId).finally(() => {
-            escListener?.resume()
-          })
-        },
-        ...(liveSource !== undefined ? { liveSource } : {}),
-        signal,
-        newEscSignal: () => {
-          if (escListener === null) return new AbortController().signal
-          return escListener.armForStream()
-        },
-        afterEscStream: () => {
-          escListener?.pause()
-        },
-        ...(liveHint !== undefined ? { liveHint } : {}),
-        stdout: (line) => process.stdout.write(`${line}\n`),
-        stderr: (line) => process.stderr.write(`${line}\n`),
-      })
-    } finally {
-      escListener?.stop()
-    }
+    const result = await runInspectLoop({
+      agentDir: cwd,
+      ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
+      ...(filterArg !== undefined ? { filter: filterArg } : {}),
+      ...(sinceArg !== undefined ? { since: sinceArg } : {}),
+      json: isJson,
+      color,
+      selectSession: (sessions, selectOpts) => clackSelect(sessions, selectOpts?.initialSessionId),
+      ...(liveSource !== undefined ? { liveSource } : {}),
+      createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
+      ...(liveHint !== undefined ? { liveHint } : {}),
+      stdout: (line) => process.stdout.write(`${line}\n`),
+      stderr: (line) => process.stderr.write(`${line}\n`),
+    })
 
     if (!result.ok) {
       process.stderr.write(`${errorLine(result.reason)}\n`)
@@ -113,86 +90,6 @@ async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefin
       ...(signal !== undefined ? { signal } : {}),
       ...(onSubscribed !== undefined ? { onSubscribed } : {}),
     })
-}
-
-function installSigintAbort(): AbortController {
-  const ctrl = new AbortController()
-  const onSig = (): void => {
-    ctrl.abort()
-  }
-  process.once('SIGINT', onSig)
-  process.once('SIGTERM', onSig)
-  return ctrl
-}
-
-type EscListener = {
-  armForStream: () => AbortSignal
-  pause: () => void
-  resume: () => void
-  stop: () => void
-}
-
-type RawInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume' | 'pause' | 'on' | 'off'>
-
-export function createEscListener(onSigint: () => void, input: RawInput = process.stdin): EscListener | null {
-  const stdin = input
-  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return null
-
-  const ctrl = createEscController({ debounceMs: ESC_LISTEN_DELAY_MS })
-  let active = false
-
-  const onData = (chunk: Buffer): void => {
-    const { sigint } = ctrl.onChunk(chunk)
-    if (sigint) onSigint()
-  }
-
-  const start = (): void => {
-    if (active) return
-    active = true
-    stdin.setRawMode(true)
-    // Attach the data handler before resume() so no raw-mode keystroke can slip
-    // through between resuming the stream and registering the listener.
-    stdin.on('data', onData)
-    stdin.resume()
-  }
-  const stop = (): void => {
-    if (!active) return
-    active = false
-    stdin.off('data', onData)
-    try {
-      stdin.setRawMode(false)
-    } catch {
-      /* terminal already torn down */
-    }
-    // Do NOT pause stdin here: this teardown hands control to the clack picker,
-    // and under Bun clack does not reliably re-flow a previously paused
-    // process.stdin, so its keypresses never arrive and arrow keys echo as raw
-    // bytes. Leaving the stream flowing lets clack own raw mode during the picker.
-    ctrl.clearPending()
-  }
-
-  return {
-    armForStream: () => {
-      const signal = ctrl.armForStream()
-      start()
-      return signal
-    },
-    pause: () => {
-      stop()
-    },
-    resume: () => {
-      // Resume the listener WITHOUT replacing the AbortController.
-      // The signal returned by armForStream() is held by the live source
-      // through streamSession's combinedSignal; replacing the controller
-      // here would orphan that signal so a subsequent ESC press could
-      // not abort the live tail.
-      start()
-    },
-    stop: () => {
-      ctrl.dispose()
-      stop()
-    },
-  }
 }
 
 function escHintLine(color: boolean): string {

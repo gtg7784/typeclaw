@@ -1,20 +1,21 @@
 import { runInspect, type RunInspectOptions, type RunInspectResult } from './index'
 
-export type RunInspectLoopOptions = Omit<RunInspectOptions, 'escSignal'> & {
-  newEscSignal: () => AbortSignal
-  // Runs after every runInspect attempt settles. The caller disarms the raw-mode
-  // ESC listener here so the live tail releases stdin before clack re-opens the
-  // picker: an ESC-aborted tail leaves the listener armed (raw mode on, 'data'
-  // handler attached), and handing clack that flowing stream freezes the picker
-  // on SSH/Bun pseudo-TTYs.
-  afterEscStream?: () => void
+export type TailController = {
+  signal: AbortSignal
+  intent: () => 'back' | 'exit' | null
+  dispose: () => void
+}
+
+export type RunInspectLoopOptions = Omit<RunInspectOptions, 'signal'> & {
+  // Builds a fresh interaction scope for ONE live-tail attempt: a new
+  // AbortController plus a temporary raw-mode listener. The loop disposes it
+  // before the picker re-opens so clack always owns a clean, non-raw stdin —
+  // this is what replaces the old pause/resume-same-controller model.
+  createTailScope: () => TailController
 }
 
 export async function runInspectLoop(opts: RunInspectLoopOptions): Promise<RunInspectResult> {
   let sessionArg = opts.sessionIdOrPrefix
-  // Remember the last session the user picked from the interactive picker so
-  // an ESC-back-to-picker re-opens with that row pre-selected. The picker
-  // receives this through the `initialSessionId` hint on its second arg.
   let lastPickedId: string | undefined
   const wrappedSelectSession: typeof opts.selectSession = async (sessions, selectOpts) => {
     const hint = selectOpts?.initialSessionId ?? lastPickedId
@@ -24,18 +25,23 @@ export async function runInspectLoop(opts: RunInspectLoopOptions): Promise<RunIn
   }
 
   while (true) {
-    const escSignal = opts.newEscSignal()
-    const callOpts: RunInspectOptions = { ...opts, escSignal, selectSession: wrappedSelectSession }
-    if (sessionArg !== undefined) callOpts.sessionIdOrPrefix = sessionArg
-    else delete (callOpts as { sessionIdOrPrefix?: string }).sessionIdOrPrefix
-
+    const scope = opts.createTailScope()
     let result: RunInspectResult
     try {
+      const callOpts: RunInspectOptions = {
+        ...opts,
+        selectSession: wrappedSelectSession,
+        signal: scope.signal,
+      }
+      if (sessionArg !== undefined) callOpts.sessionIdOrPrefix = sessionArg
+      else delete (callOpts as { sessionIdOrPrefix?: string }).sessionIdOrPrefix
       result = await runInspect(callOpts)
     } finally {
-      opts.afterEscStream?.()
+      scope.dispose()
     }
+
     if (!result.ok) return result
+    if (scope.intent() === 'exit') return result
     if (result.escToPicker !== true) return result
     sessionArg = undefined
   }
