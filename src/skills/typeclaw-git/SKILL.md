@@ -10,7 +10,7 @@ Your agent folder is a git repo. Almost every file in it (`typeclaw.json`, `cron
 The contents of `.gitignore` split into two distinct categories — the distinction matters for this skill:
 
 - **Truly ignored** (`secrets.json`, `.env`, `node_modules/`, `workspace/`, `mounts/`, `Dockerfile`, `.DS_Store`) — never in history, ever. Secrets, runtime junk, your free-write zone, and regenerated-on-start system files.
-- **System-managed** (`sessions/`, `memory/`, `channels/`) — gitignored so _you_ don't stage them, but TypeClaw force-commits them on its own schedule. `sessions/` is auto-backed up by the runtime; `memory/` is committed by the dreaming subagent; `channels/` is runtime-owned channel state. Treat them as runtime-owned: do not `git add` them, do not write commit messages about them, and do not be alarmed when they appear in `git log`.
+- **System-managed** (`sessions/`, `memory/`) — gitignored so _you_ don't stage them, but TypeClaw force-commits them on its own schedule. `sessions/` is auto-backed up by the runtime; `memory/` is committed by the dreaming subagent. Treat them as runtime-owned: do not `git add` them, do not write commit messages about them, and do not be alarmed when they appear in `git log`. (`channels/` is also gitignored, but it is _not_ force-committed — it's runtime-owned local state that stays out of history entirely.)
 
 Everything not in either bucket is yours to commit.
 
