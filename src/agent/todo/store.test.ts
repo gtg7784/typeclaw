@@ -63,6 +63,56 @@ describe('todo store', () => {
   })
 })
 
+describe('readTodos validation (corrupt / hand-edited files)', () => {
+  async function writeRaw(scope: TodoScope, body: string): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { dirname } = await import('node:path')
+    const path = todoContentPath(agentDir, scope)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, body, 'utf8')
+  }
+
+  test('drops malformed items instead of crashing or surfacing them', async () => {
+    await writeRaw(
+      TUI_SCOPE,
+      JSON.stringify({
+        version: 1,
+        todos: [
+          { content: 'good', status: 'pending' },
+          null,
+          { content: '', status: 'pending' },
+          { content: 'bad-status', status: 'frozen' },
+          { content: 'ok2', status: 'completed', priority: 'high' },
+          { content: 'bad-priority', status: 'pending', priority: 'urgent' },
+        ],
+      }),
+    )
+    const todos = await readTodos(agentDir, TUI_SCOPE)
+    expect(todos.map((t) => t.content)).toEqual(['good', 'ok2'])
+  })
+
+  test('invalid JSON reads as empty rather than throwing', async () => {
+    await writeRaw(TUI_SCOPE, 'not json{{')
+    expect(await readTodos(agentDir, TUI_SCOPE)).toEqual([])
+  })
+
+  test('a non-array todos field reads as empty', async () => {
+    await writeRaw(TUI_SCOPE, JSON.stringify({ version: 1, todos: 'nope' }))
+    expect(await readTodos(agentDir, TUI_SCOPE)).toEqual([])
+  })
+})
+
+describe('todoContentPath traversal guard', () => {
+  test('throws when a hand-built scope key would escape the todo directory', () => {
+    expect(() => todoContentPath(agentDir, { kind: 'tui', key: '../sessions/x' })).toThrow(/escapes the todo directory/)
+  })
+
+  test('accepts a normal nested key', () => {
+    const path = todoContentPath(agentDir, { kind: 'channel', key: 'channel/sslack:sw:sc:n' })
+    expect(path.endsWith('todo/channel/sslack:sw:sc:n.json')).toBe(true)
+  })
+})
+
 describe('incompleteTodos', () => {
   test('excludes completed and cancelled, keeps pending and in_progress', () => {
     const todos: Todo[] = [

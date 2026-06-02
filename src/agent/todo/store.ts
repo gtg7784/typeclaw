@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative } from 'node:path'
 
 import type { TodoScope } from './scope'
 
@@ -26,8 +26,19 @@ export function todoDir(agentDir: string): string {
   return join(agentDir, 'todo')
 }
 
+// Defense-in-depth: the resolved file must stay inside todo/. Scope keys from
+// resolveTodoScope are already collision- and traversal-safe, but this function
+// is an exported primitive — a future caller passing a hand-built scope like
+// `{ key: '../sessions/x' }` would otherwise escape. We assert here rather than
+// trust every caller to use resolveTodoScope.
 export function todoContentPath(agentDir: string, scope: TodoScope): string {
-  return join(todoDir(agentDir), `${scope.key}.json`)
+  const dir = todoDir(agentDir)
+  const path = join(dir, `${scope.key}.json`)
+  const rel = relative(dir, path)
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`todo scope key escapes the todo directory: ${JSON.stringify(scope.key)}`)
+  }
+  return path
 }
 
 export async function readTodos(agentDir: string, scope: TodoScope): Promise<Todo[]> {
@@ -39,8 +50,28 @@ export async function readTodos(agentDir: string, scope: TodoScope): Promise<Tod
     if (isEnoent(err)) return []
     throw err
   }
-  const parsed = JSON.parse(raw) as Partial<TodoFile>
-  return Array.isArray(parsed.todos) ? parsed.todos : []
+  let parsed: Partial<TodoFile>
+  try {
+    parsed = JSON.parse(raw) as Partial<TodoFile>
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed.todos)) return []
+  // The file is force-committed and hand-editable, so a corrupt or partially
+  // edited entry can appear. Drop anything that is not a well-formed Todo
+  // rather than let a `null`/malformed item crash incompleteTodos (`t.status`)
+  // or surface as trusted state to the model.
+  return parsed.todos.filter(isValidTodo)
+}
+
+function isValidTodo(value: unknown): value is Todo {
+  if (typeof value !== 'object' || value === null) return false
+  const t = value as Record<string, unknown>
+  if (typeof t.content !== 'string' || t.content.length === 0) return false
+  if (typeof t.status !== 'string' || !(TODO_STATUSES as readonly string[]).includes(t.status)) return false
+  if (t.priority !== undefined && !(TODO_PRIORITIES as readonly string[]).includes(t.priority as string)) return false
+  if (t.id !== undefined && typeof t.id !== 'string') return false
+  return true
 }
 
 // Write is atomic (temp file + rename) so a crash mid-write can never leave a
