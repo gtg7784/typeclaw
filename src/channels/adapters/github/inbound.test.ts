@@ -306,6 +306,152 @@ describe('classifyGithubInbound', () => {
       expect(msg?.isBotMention).toBe(false)
     })
   })
+
+  describe('review.on gating', () => {
+    it('defaults to review_requested when reviewOn is omitted: opened stays awareness-only', () => {
+      const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot')
+      expect(msg?.isBotMention).toBe(false)
+      expect(msg?.text).not.toContain('Please review the changes line-by-line')
+    })
+
+    it('defaults to review_requested when reviewOn is omitted: review_requested triggers a review', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
+        'typeclaw-bot',
+      )
+      expect(msg?.isBotMention).toBe(true)
+      expect(msg?.text).toContain('requested your review on PR #7')
+    })
+
+    describe("reviewOn: 'opened'", () => {
+      it('synthesizes a review trigger for an opened PR', () => {
+        const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { reviewOn: 'opened' })
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.text).toContain('@alice opened PR #7: "Add the thing"')
+        expect(msg?.text).toContain('feat-branch → main')
+        expect(msg?.text).toContain('Please review the changes line-by-line and post your feedback.')
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.authorName).toBe('alice')
+      })
+
+      it('falls back to PR id and omits the branch when title/branch info is absent', () => {
+        const payload = openedPayload()
+        delete (payload.pull_request as Record<string, unknown>).title
+        delete (payload.pull_request as Record<string, unknown>).head
+        delete (payload.pull_request as Record<string, unknown>).base
+        const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot', { reviewOn: 'opened' })
+        expect(msg?.text).toContain('opened PR #7')
+        expect(msg?.text).not.toContain('Branch:')
+      })
+
+      it('still triggers a review on an explicit review_requested (opened is a superset)', () => {
+        const msg = classifyGithubInbound(
+          'pull_request',
+          reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
+          'typeclaw-bot',
+          { reviewOn: 'opened' },
+        )
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.text).toContain('requested your review on PR #7')
+      })
+
+      it('suppresses the review trigger when the bot opened its own PR (handler drops the self-authored event)', () => {
+        const payload = openedPayload()
+        ;(payload.sender as Record<string, unknown>).login = 'typeclaw-bot'
+        ;(payload.pull_request as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 99, type: 'Bot' }
+        const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot', { reviewOn: 'opened' })
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+
+      it('suppresses the review trigger when the App decoy opened the PR', () => {
+        const payload = openedPayload()
+        ;(payload.sender as Record<string, unknown>).login = 'typeclaw'
+        ;(payload.pull_request as Record<string, unknown>).user = { login: 'typeclaw', id: 42, type: 'User' }
+        const msg = classifyGithubInbound('pull_request', payload, 'typeclaw[bot]', {
+          reviewOn: 'opened',
+          authType: 'app',
+        })
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+    })
+
+    describe("reviewOn: 'off'", () => {
+      it('drops a review_requested event entirely', () => {
+        const msg = classifyGithubInbound(
+          'pull_request',
+          reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
+          'typeclaw-bot',
+          { reviewOn: 'off' },
+        )
+        expect(msg).toBe(null)
+      })
+
+      it('drops a review_request_removed event entirely', () => {
+        const msg = classifyGithubInbound(
+          'pull_request',
+          reviewRequestRemovedPayload({ reviewerLogin: 'typeclaw-bot' }),
+          'typeclaw-bot',
+          { reviewOn: 'off' },
+        )
+        expect(msg).toBe(null)
+      })
+
+      it('leaves an opened PR as awareness-only context (review trigger suppressed, engagement untouched)', () => {
+        const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { reviewOn: 'off' })
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+    })
+  })
+})
+
+describe('createGithubWebhookHandler — review.on wiring', () => {
+  const baseOptions = (routed: InboundMessage[], reviewOn?: () => 'review_requested' | 'opened' | 'off') => ({
+    webhookSecret: 'secret',
+    dedup: createDeliveryDedup(),
+    allowlist: () => ['pull_request.opened', 'pull_request.review_requested'],
+    selfId: () => '99',
+    selfLogin: () => 'typeclaw-bot',
+    logger,
+    route: (msg: InboundMessage) => {
+      routed.push(msg)
+    },
+    ...(reviewOn !== undefined ? { reviewOn } : {}),
+  })
+
+  it("routes an opened PR as a review trigger when reviewOn is 'opened'", async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed, () => 'opened'))
+    await handler(signedRequest(JSON.stringify(openedPayload()), 'pull_request', 'on-opened-1'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.isBotMention).toBe(true)
+    expect(routed[0]?.text).toContain('Please review the changes line-by-line')
+  })
+
+  it("drops a review_requested event when reviewOn is 'off'", async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed, () => 'off'))
+    await handler(
+      signedRequest(
+        JSON.stringify(reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' })),
+        'pull_request',
+        'on-off-1',
+      ),
+    )
+    expect(routed).toHaveLength(0)
+  })
+
+  it('preserves request-driven behavior when reviewOn is omitted', async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed))
+    await handler(signedRequest(JSON.stringify(openedPayload()), 'pull_request', 'on-default-1'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.isBotMention).toBe(false)
+  })
 })
 
 describe('createGithubWebhookHandler — pull_request.opened lands as context', () => {

@@ -155,6 +155,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     selfLogin: () => selfLogin,
     authType: () => options.secrets.auth.type,
     allowApprove: () => options.configRef().review.approve,
+    reviewOn: () => options.configRef().review.on,
     isBotInTeam,
     authToken,
     fetchImpl,
