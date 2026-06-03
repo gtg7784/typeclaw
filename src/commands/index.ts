@@ -25,6 +25,13 @@ export type Command<Context> = {
   description: string
   permission?: CommandPermission
   requiresLiveSession?: boolean
+  // Resolve an existing live session into the handler context WITHOUT failing
+  // when none exists (distinct from `requiresLiveSession`, which aborts the
+  // command if no session is live). Used by /restart: it must bounce the
+  // container even from a cold channel, but when a session IS live it needs
+  // that session's identity to write a resume handoff. Ignored when
+  // `requiresLiveSession` is true (that path already resolves the session).
+  wantsLiveSession?: boolean
   handler: CommandHandler<Context>
 }
 
@@ -42,6 +49,7 @@ export type CommandInfo = {
   description: string
   permission: CommandPermission
   requiresLiveSession: boolean
+  wantsLiveSession: boolean
 }
 
 export type CommandResult =
@@ -74,6 +82,7 @@ export function createCommandRegistry<Context>(commands: readonly Command<Contex
     description: command.description,
     permission: command.permission ?? 'session.control',
     requiresLiveSession: command.requiresLiveSession ?? true,
+    wantsLiveSession: command.wantsLiveSession ?? false,
   })
 
   return {

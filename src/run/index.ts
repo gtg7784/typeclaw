@@ -284,18 +284,31 @@ export async function startAgent({
     // `typeclaw run` outside Docker), the handler reports that instead of the
     // command resolving as unknown, which would make the advertised contract
     // depend on the runtime environment.
-    onRestart: async (): Promise<string> => {
+    onRestart: async (ctx): Promise<string> => {
       if (containerName === undefined) {
         return 'Restart is unavailable: this agent is not running inside a typeclaw container.'
       }
-      // The /restart admin COMMAND writes no handoff: unlike the `restart`
-      // tool (which runs inside a specific session and resumes that exact
-      // conversation), this command is a fire-and-forget admin action with no
-      // originating session id/file to reopen. The container bounces; the next
-      // real inbound rehydrates the channel and resumes any pending todos via
-      // the normal idle continuation. Wiring command-initiated resume is
-      // tracked separately (see #291).
-      const result = await requestContainerRestart({ containerName })
+      // When the /restart command resolved a live channel session, ctx carries
+      // its identity: pass stream + session id/file + channel handoffOrigin so
+      // the dying container appends the `typeclaw.restart-self` entry (via the
+      // broadcast) and writes a channel-origin handoff. On the next boot the
+      // channel resume path reopens that exact conversation. With no live
+      // session (cold channel / native slash), ctx is undefined and the
+      // container just bounces — the next inbound resumes pending todos.
+      const result = await requestContainerRestart({
+        containerName,
+        ...(ctx !== undefined
+          ? {
+              stream,
+              agentDir: cwd,
+              originatingSessionId: ctx.originatingSessionId,
+              ...(ctx.originatingSessionFile !== undefined
+                ? { originatingSessionFile: ctx.originatingSessionFile }
+                : {}),
+              handoffOrigin: ctx.handoffOrigin,
+            }
+          : {}),
+      })
       return result.ok ? 'Restart scheduled; the container will bounce shortly.' : `Restart denied: ${result.reason}`
     },
   })

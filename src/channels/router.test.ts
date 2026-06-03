@@ -32,6 +32,7 @@ import {
   TURN_CAP_ERROR,
   type ChannelRouter,
   type ClaimHandler,
+  type RestartCommandContext,
 } from './router'
 import { defaultHistoryConfig, QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
 import type {
@@ -211,7 +212,7 @@ function makeRouter(
     claimHandler?: ClaimHandler
     hooks?: HookBus
     onReload?: () => Promise<string>
-    onRestart?: () => Promise<string>
+    onRestart?: (ctx?: RestartCommandContext) => Promise<string>
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -6161,6 +6162,61 @@ describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
     const allowed = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
     expect(allowed).toEqual({ kind: 'handled', name: 'restart', reply: 'Restart scheduled.' })
     expect(calls).toBe(1)
+  })
+
+  test('/restart passes the live channel session context to onRestart', async () => {
+    // given: a live session for the channel and a permissive owner
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    let invoked = false
+    let captured: RestartCommandContext | undefined
+    const { router } = makeRouter(dir, {
+      permissions,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-01-01T00-00-00-000Z_${sessionId}.jsonl`,
+      onRestart: async (ctx) => {
+        invoked = true
+        captured = ctx
+        return 'restarting'
+      },
+    })
+    await router.route(inbound({ authorId: 'owner', authorName: 'owner' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    // when
+    const result = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+
+    // then: ctx carries the originating session's identity + channel handoff key
+    expect(result).toEqual({ kind: 'handled', name: 'restart', reply: 'restarting' })
+    expect(invoked).toBe(true)
+    expect(captured?.originatingSessionId).toBe('ses_fake_1')
+    expect(captured?.originatingSessionFile).toBe('/tmp/fake/2026-01-01T00-00-00-000Z_ses_fake_1.jsonl')
+    expect(captured?.handoffOrigin).toEqual({ kind: 'channel', key: KEY })
+  })
+
+  test('/restart passes undefined context when no session is live', async () => {
+    // given: no live session for the channel
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    let invoked = false
+    let captured: RestartCommandContext | undefined
+    const { router } = makeRouter(dir, {
+      permissions,
+      onRestart: async (ctx) => {
+        invoked = true
+        captured = ctx
+        return 'restarting'
+      },
+    })
+    expect(router.liveCount()).toBe(0)
+
+    // when
+    const result = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+
+    // then: still handled, but with no resume context
+    expect(result).toEqual({ kind: 'handled', name: 'restart', reply: 'restarting' })
+    expect(invoked).toBe(true)
+    expect(captured).toBeUndefined()
   })
 
   test('/reload and /restart do not require a live session', async () => {

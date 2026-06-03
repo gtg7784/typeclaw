@@ -812,7 +812,18 @@ export type CreateChannelRouterOptions = {
   // confirmation string (the container exits shortly after, so the reply is
   // best-effort).
   onReload?: () => Promise<string>
-  onRestart?: () => Promise<string>
+  // `ctx` is present only when the /restart command resolved a live session for
+  // the invoking channel (wantsLiveSession). When present, the handler should
+  // write a channel-origin resume handoff so the originating conversation
+  // resumes on the next boot; when absent (cold channel / native slash with no
+  // session) it should just bounce the container with no handoff.
+  onRestart?: (ctx?: RestartCommandContext) => Promise<string>
+}
+
+export type RestartCommandContext = {
+  originatingSessionId: string
+  originatingSessionFile?: string
+  handoffOrigin: { kind: 'channel'; key: ChannelKey }
 }
 
 export type ClaimHandlerInput = {
@@ -934,7 +945,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       description: 'Restart the typeclaw container.',
       permission: 'session.admin',
       requiresLiveSession: false,
-      handler: async () => ({ reply: await onRestart() }),
+      // Resolve the live session when one exists so the restart can write a
+      // resume handoff for this conversation; still bounces from a cold channel.
+      wantsLiveSession: true,
+      handler: async ({ live }) => ({
+        reply: await onRestart(
+          live !== null
+            ? {
+                originatingSessionId: live.sessionId,
+                ...(live.getTranscriptPath?.() !== undefined
+                  ? { originatingSessionFile: live.getTranscriptPath!()! }
+                  : {}),
+                handoffOrigin: { kind: 'channel', key: live.key },
+              }
+            : undefined,
+        ),
+      }),
     })
   }
   const commands = createCommandRegistry<ChannelCommandContext>(channelCommands)
@@ -2030,6 +2056,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
       // Session-less commands (e.g. /help) are informational and run without a
       // live session; their handler reply is posted straight back to the channel.
+      // `wantsLiveSession` commands (/restart) resolve an existing session when
+      // present but do not abort when absent.
       let existingLive: LiveSession | null = null
       if (commandInfo.requiresLiveSession) {
         existingLive = liveSessions.get(keyId) ?? null
@@ -2037,6 +2065,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.info(`[channels] ${keyId}: ignoring command /${parsedCommand.name} with no live session`)
           return
         }
+      } else if (commandInfo.wantsLiveSession) {
+        const candidate = liveSessions.get(keyId) ?? null
+        existingLive = candidate !== null && !candidate.destroyed ? candidate : null
       }
       const commandResult = await runChannelCommand(event, existingLive)
       if (commandResult.kind !== 'not-command') return
@@ -3170,6 +3201,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return { kind: 'ambiguous', matchCount: resolved.count }
       }
       live = resolved.session
+    } else if (commandInfo.wantsLiveSession) {
+      // Best-effort: resolve a session if exactly one matches, but never fail
+      // the command when absent or ambiguous — /restart still bounces.
+      const resolved = resolveLiveSessionForCommand(liveSessions, key)
+      live = resolved.kind === 'found' ? resolved.session : null
     }
     const result = await commands.execute(`/${lowered}`, { live, event: null })
     if (result.kind === 'handled') {
