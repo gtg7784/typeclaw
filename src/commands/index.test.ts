@@ -74,6 +74,14 @@ describe('createCommandRegistry', () => {
         requiresLiveSession: false,
         handler: () => {},
       },
+      {
+        name: 'restart',
+        description: 'Restart the container',
+        permission: 'session.admin',
+        requiresLiveSession: false,
+        wantsLiveSession: true,
+        handler: () => {},
+      },
     ])
 
     expect(registry.list()).toEqual([
@@ -83,8 +91,24 @@ describe('createCommandRegistry', () => {
         description: 'Stop the turn',
         permission: 'session.control',
         requiresLiveSession: true,
+        wantsLiveSession: false,
       },
-      { name: 'help', aliases: [], description: 'List commands', permission: 'none', requiresLiveSession: false },
+      {
+        name: 'help',
+        aliases: [],
+        description: 'List commands',
+        permission: 'none',
+        requiresLiveSession: false,
+        wantsLiveSession: false,
+      },
+      {
+        name: 'restart',
+        aliases: [],
+        description: 'Restart the container',
+        permission: 'session.admin',
+        requiresLiveSession: false,
+        wantsLiveSession: true,
+      },
     ])
   })
 
