@@ -8,6 +8,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from '@/agent'
+import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
@@ -7366,5 +7367,84 @@ describe('review-thread resolver registry', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('transient')
+  })
+})
+
+describe('resumeRestartHandoff', () => {
+  async function seedMapping(dir: string, sessionId: string, sessionFile: string): Promise<void> {
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await saveChannelSessions(dir, [
+      {
+        adapter: KEY.adapter,
+        workspace: KEY.workspace,
+        chat: KEY.chat,
+        thread: KEY.thread,
+        sessionId,
+        sessionFile,
+        lastInboundAt: 0,
+        participants: [],
+      },
+    ])
+  }
+
+  function channelHandoff(over: Partial<RestartHandoff> = {}): RestartHandoff {
+    return {
+      schemaVersion: 2,
+      restartedAt: new Date().toISOString(),
+      originatingSessionId: 'ses_origin',
+      originatingSessionFile: '2026-05-02T16-56-52-380Z_ses_origin.jsonl',
+      origin: { kind: 'channel', key: { ...KEY } },
+      ...over,
+    }
+  }
+
+  test('reopens the exact originating session and wakes it (drains a turn)', async () => {
+    // given: a persisted mapping for the channel naming the originating session
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, {
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+    await waitFor(() => sessions.length > 0 && sessions[0]!.prompts.length > 0)
+
+    // then: reopened the same session id + file, and a turn fired
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    expect(sessions[0]?.prompts.length).toBe(1)
+  })
+
+  test('skips when the persisted mapping no longer names the handoff session', async () => {
+    // given: the channel rolled over to a different session since the restart
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_other', '2026-05-02T16-56-52-380Z_ses_other.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { factoryCalls, logs })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: no reopen, logged the skip
+    expect(factoryCalls).toHaveLength(0)
+    expect(sessions).toHaveLength(0)
+    expect(logs.some((l) => l.includes('restart-resume skipped'))).toBe(true)
+  })
+
+  test('is a no-op for a tui-origin handoff', async () => {
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, { factoryCalls })
+
+    await router.resumeRestartHandoff(channelHandoff({ origin: { kind: 'tui' } }))
+
+    expect(factoryCalls).toHaveLength(0)
+    expect(sessions).toHaveLength(0)
   })
 })

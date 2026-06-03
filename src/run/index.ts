@@ -4,6 +4,7 @@ import { createSession, createSessionWithDispose } from '@/agent'
 import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { requestContainerRestart } from '@/agent/restart'
+import { consumeRestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
   awaitWithSubagentTimeout,
@@ -516,6 +517,17 @@ export async function startAgent({
 
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
+
+  // Resume a channel-origin restart now that adapters + outbound callbacks are
+  // registered. Claims ONLY channel handoffs (tui handoffs are owned by the
+  // websocket open handler in src/server/index.ts); a tui handoff left on disk
+  // is restored for that path to claim. Best-effort: any failure leaves the
+  // pending todo to resume on the next real inbound.
+  void consumeRestartHandoff(cwd, { accept: (h) => h.origin.kind === 'channel' })
+    .then(async (handoff) => {
+      if (handoff !== null) await channelManager.router.resumeRestartHandoff(handoff)
+    })
+    .catch((err) => console.warn(`[run] channel restart-resume failed: ${err instanceof Error ? err.message : err}`))
 
   // Captured separately from setSpawnSubagent so both the plugin context and
   // the plugin-command runner can dispatch through the same path. The setter

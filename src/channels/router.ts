@@ -5,9 +5,11 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
 import { subscribeProviderErrors } from '@/agent/provider-error'
+import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import {
+  armRestartKickForOrigin,
   extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
@@ -127,6 +129,23 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 // recovery paths (`source: 'system'`) bypass.
 export const MAX_CHANNEL_SENDS_PER_TURN = 10
 export const ENGAGE_REACTION_EMOJI = 'eyes'
+
+// Wake nudge pushed into a resumed channel session at boot so drain() has a
+// non-empty batch and fires a turn. The substantive instruction the model acts
+// on is the `typeclaw.restart-self` entry already in the reopened JSONL (pi
+// hydrates it as a user message); this nudge only triggers the turn. Uses the
+// repo's SYSTEM MESSAGE framing (see composeTurnPrompt) so persona-rich models
+// do not reply to it as if a human wrote it.
+export const RESTART_RESUME_WAKE_REMINDER = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'The container just restarted and this session was resumed. Act on the',
+  'restart instructions already in your context. Do not acknowledge or reply to',
+  'this notice itself.',
+  '',
+  '---',
+].join('\n')
 // Ceiling on tool-source channel sends that a same-turn router policy DENIED
 // without delivering — `skip-locked`, `turn-cap`, or `duplicate`. Such denials
 // return a soft error and do NOT increment `consecutiveSends`, so a model that
@@ -678,6 +697,12 @@ export type ChannelRouter = {
     | { kind: 'recorded'; keyId: string }
     | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
+  // Reopen and wake the channel session that fired a restart, so the agent
+  // produces its post-restart turn and resumes pending todos. Called once at
+  // boot from src/run/index.ts after channel adapters have registered. No-op
+  // for non-channel handoffs. Safe to call with a stale/missing mapping — it
+  // logs and skips, leaving the todo to resume on the next real inbound.
+  resumeRestartHandoff: (handoff: RestartHandoff) => Promise<void>
   stop: () => Promise<void>
   tearDownAllLive: () => Promise<void>
   liveCount: () => number
@@ -2925,6 +2950,80 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // Boot-time resume for a restart that originated from a channel session.
+  // The dying container appended a `typeclaw.restart-self` entry to the
+  // originating session's JSONL and wrote a handoff naming it; this reopens
+  // that exact session and wakes it so the model produces the "I'm back" turn
+  // and the post-turn idle resumes any pending todos.
+  //
+  // The handoff's channel key is reverse-validated against the persisted
+  // mapping: the record is repaired to point at `originatingSessionFile` with a
+  // fresh `lastInboundAt` so `ensureLive` rehydrates the exact session via its
+  // normal rehydrate path instead of stale-rolling it into a fresh one (a
+  // restart easily outlasts SESSION_FRESHNESS_TTL_MS). If the mapping is gone,
+  // the adapter is unconfigured, or reopen fails, resume is skipped — the
+  // pending todo still resumes on the next real inbound's drain.
+  const resumeRestartHandoff = async (handoff: RestartHandoff): Promise<void> => {
+    if (handoff.origin.kind !== 'channel') return
+    const key: ChannelKey = {
+      adapter: handoff.origin.key.adapter,
+      workspace: handoff.origin.key.workspace,
+      chat: handoff.origin.key.chat,
+      thread: handoff.origin.key.thread,
+    }
+    const keyId = channelKeyId(key)
+
+    if (options.configForAdapter(key.adapter) === undefined) {
+      logger.warn(`[channels] ${keyId}: restart-resume skipped — adapter not configured`)
+      return
+    }
+
+    await ensureLoaded()
+    const record = mappings ? findRecord(mappings, key) : undefined
+    if (record?.sessionId !== handoff.originatingSessionId) {
+      logger.warn(
+        `[channels] ${keyId}: restart-resume skipped — persisted session ` +
+          `${record?.sessionId ?? '<none>'} no longer matches handoff ${handoff.originatingSessionId}`,
+      )
+      return
+    }
+
+    const idx = mappings!.findIndex(
+      (s) =>
+        s.adapter === key.adapter &&
+        s.workspace === key.workspace &&
+        s.chat === key.chat &&
+        (s.thread ?? null) === (key.thread ?? null),
+    )
+    if (idx >= 0) {
+      mappings![idx] = { ...mappings![idx]!, sessionFile: handoff.originatingSessionFile, lastInboundAt: now() }
+      await persist()
+    }
+
+    let live: LiveSession
+    try {
+      live = await ensureLive(key)
+    } catch (err) {
+      logger.warn(`[channels] ${keyId}: restart-resume ensureLive failed: ${describe(err)}`)
+      return
+    }
+    if (live.sessionId !== handoff.originatingSessionId) {
+      logger.warn(
+        `[channels] ${keyId}: restart-resume reopened a different session ` +
+          `(${live.sessionId} != ${handoff.originatingSessionId}); skipping wake`,
+      )
+      return
+    }
+
+    await armRestartKickForOrigin(options.agentDir, buildLiveOrigin(live)).catch((err) =>
+      logger.error(`[channels] ${keyId}: restart-resume arm restart-kick failed: ${describe(err)}`),
+    )
+
+    live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
+    logger.info(`[channels] ${keyId}: restart-resume waking session ${live.sessionId}`)
+    void drain(live)
+  }
+
   const executeCommand = async (
     key: ChannelKey,
     name: string,
@@ -3084,6 +3183,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
     markTurnSkipped,
+    resumeRestartHandoff,
     stop,
     tearDownAllLive,
     liveCount: () => liveSessions.size,
