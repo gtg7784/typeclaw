@@ -149,17 +149,18 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 
 The architecture reference lives in the published docs under [Internals](https://typeclaw.dev/docs/internals). It's terse, file-path-heavy, and aimed at the same audience as this file — someone about to edit `src/`.
 
-| Subsystem                                                                                     | Where                                                                                |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Skills loading sources, naming, lazy semantics                                                | [/docs/internals/skills](https://typeclaw.dev/docs/internals/skills)                 |
-| `.env` / `secrets.json`, the `Secret` shape, bridge idempotency, KakaoTalk encryption-at-rest | [/docs/internals/secrets](https://typeclaw.dev/docs/internals/secrets)               |
-| Roles, match-rule DSL, cron/subagent provenance, security guard tiers                         | [/docs/internals/permissions](https://typeclaw.dev/docs/internals/permissions)       |
-| `src/hostd/`, three trust channels, control protocol, portbroker                              | [/docs/internals/hostd](https://typeclaw.dev/docs/internals/hostd)                   |
-| `src/tunnels/`, providers, channel-adapter integration                                        | [/docs/internals/tunnels](https://typeclaw.dev/docs/internals/tunnels)               |
-| `src/stream/` targets, subagent dispatch, cron split, TUI wire-protocol                       | [/docs/internals/message-stream](https://typeclaw.dev/docs/internals/message-stream) |
-| `src/channels/` engage/observe decision, context buffer, suppressors, peer-bot loop guard     | [/docs/internals/engagement](https://typeclaw.dev/docs/internals/engagement)         |
-| `websearch` tool, `curl-impersonate` pin, DDG failure modes                                   | [/docs/internals/web-search](https://typeclaw.dev/docs/internals/web-search)         |
-| Xvfb, NET_ADMIN drop, persistent-`$HOME` overlay, agent-browser headed-mode wrapper           | [/docs/internals/xvfb](https://typeclaw.dev/docs/internals/xvfb)                     |
-| `bwrap` per-tool sandbox, `seccomp=unconfined` rationale, OrbStack `/proc` workaround         | [/docs/internals/sandbox](https://typeclaw.dev/docs/internals/sandbox)               |
+| Subsystem                                                                                     | Where                                                                                      |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Skills loading sources, naming, lazy semantics                                                | [/docs/internals/skills](https://typeclaw.dev/docs/internals/skills)                       |
+| `.env` / `secrets.json`, the `Secret` shape, bridge idempotency, KakaoTalk encryption-at-rest | [/docs/internals/secrets](https://typeclaw.dev/docs/internals/secrets)                     |
+| Roles, match-rule DSL, cron/subagent provenance, security guard tiers                         | [/docs/internals/permissions](https://typeclaw.dev/docs/internals/permissions)             |
+| `src/hostd/`, three trust channels, control protocol, portbroker                              | [/docs/internals/hostd](https://typeclaw.dev/docs/internals/hostd)                         |
+| `src/tunnels/`, providers, channel-adapter integration                                        | [/docs/internals/tunnels](https://typeclaw.dev/docs/internals/tunnels)                     |
+| `src/stream/` targets, subagent dispatch, cron split, TUI wire-protocol                       | [/docs/internals/message-stream](https://typeclaw.dev/docs/internals/message-stream)       |
+| `src/channels/` engage/observe decision, context buffer, suppressors, peer-bot loop guard     | [/docs/internals/engagement](https://typeclaw.dev/docs/internals/engagement)               |
+| `src/agent/todo/` tools, durable scope resolution, fail-closed auto-continuation budgets      | [/docs/internals/todo-continuation](https://typeclaw.dev/docs/internals/todo-continuation) |
+| `websearch` tool, `curl-impersonate` pin, DDG failure modes                                   | [/docs/internals/web-search](https://typeclaw.dev/docs/internals/web-search)               |
+| Xvfb, NET_ADMIN drop, persistent-`$HOME` overlay, agent-browser headed-mode wrapper           | [/docs/internals/xvfb](https://typeclaw.dev/docs/internals/xvfb)                           |
+| `bwrap` per-tool sandbox, `seccomp=unconfined` rationale, OrbStack `/proc` workaround         | [/docs/internals/sandbox](https://typeclaw.dev/docs/internals/sandbox)                     |
 
 The source for these pages is `docs/content/docs/internals/*.mdx` in this repo. Edit there when subsystem behavior changes — the published site rebuilds from the same files.

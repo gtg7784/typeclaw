@@ -1,0 +1,106 @@
+---
+title: Todo continuation
+description: The todo tools, durable scope resolution, and the fail-closed auto-continuation engine that resumes interrupted work
+icon: ListChecks
+---
+
+The agent keeps a todo list per workstream and the runtime auto-resumes it. When a turn ends with incomplete todos, the idle path injects a continuation prompt so the next pending item gets worked without the operator re-asking. The tools live in `src/agent/tools/todo/index.ts`; the engine that decides whether to nudge lives in `src/agent/todo/`. This page documents the load-bearing invariants — the operator never configures any of this, and there is intentionally no knob.
+
+## The three tools
+
+`createTodoTools` (`src/agent/tools/todo/index.ts`) returns three tools the model sees:
+
+| Tool         | Shape               | Notes                                                             |
+| ------------ | ------------------- | ----------------------------------------------------------------- |
+| `todo_write` | `{ todos: Todo[] }` | **Full replace**, not a merge. The model re-sends the whole list. |
+| `todo_read`  | `{}`                | Returns the current list — used to re-sync after an interruption. |
+| `todo_clear` | `{}`                | Empties the list so the runtime stops tracking pending work.      |
+
+A `Todo` is `{ content, status, priority?, id? }` where `status ∈ {pending, in_progress, completed, cancelled}` and `priority ∈ {high, medium, low}` (`src/agent/todo/store.ts`). "Incomplete" means `status` is neither `completed` nor `cancelled` (`incompleteTodos`); that set is what the engine counts.
+
+Every tool resolves a scope first and **fails closed**: a session with no resolvable scope (subagent, system task, or undefined origin) gets a no-op plus the `NO_SCOPE_NOTICE`, never a write into someone else's list. An **undefined** origin is treated as no-scope — it is deliberately _not_ defaulted to the shared `tui` list, because defaulting would fail open and route an unknown actor's todos into the operator's global workstream.
+
+## Scope: the durable identity a list hangs off
+
+A todo list is not keyed on `sessionId`. SessionIds churn — every TUI reconnect, every cron fire, and a channel session can roll to a fresh id on stale-rollover (`SESSION_FRESHNESS_TTL_MS`, `src/channels/router.ts`). Keying on the **origin identity** instead lets a list survive those transitions so interrupted work resumes. `resolveTodoScope` (`src/agent/todo/scope.ts`) maps a `SessionOrigin` to a `TodoScope` or `null`:
+
+| Origin     | Scope                                           | Why                                                                                                      |
+| ---------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `tui`      | singleton `tui`                                 | No stable per-operator identity; modeled as one global workstream. Concurrent attaches share it (below). |
+| `channel`  | `channel/<adapter>:<workspace>:<chat>:<thread>` | Matches how `channels/sessions.json` identifies a conversation. Survives restart and stale-rollover.     |
+| `cron`     | `cron/<jobId>`                                  | The sessionId is fresh every fire; the job is the durable identity.                                      |
+| `subagent` | `null`                                          | Subagents do not own continuation — their parent does.                                                   |
+| `system`   | `null`                                          | Runtime infrastructure (memory/backup) is not user-delegated work and must never auto-continue.          |
+
+The `key` is a single filesystem-safe path segment. `encodeComponent` emits a discriminant prefix (`n` for null, `s<encodeURIComponent(value)>` for strings) so the cases lossy schemes confused stay pairwise distinguishable: a null thread vs a literal `"n"`, an empty string vs `"_empty"`, and any two values whose unsafe chars would otherwise collide. `encodeURIComponent` never emits `/` or `:`, so the joined key is both a valid path segment and a collision-free conversation identity.
+
+### Storage
+
+`todoContentPath` writes to `<agentDir>/todo/<scope.key>.json`; continuation state goes to `<agentDir>/todo/.state/<scope.key>.json` (`continuation-state.ts`). Both writers are atomic (temp file + `rename`), mirroring `channels/sessions.json`, so a crash mid-write can't leave half-serialized JSON the next read throws on. `todoContentPath` re-asserts the resolved path stays inside `todo/` as defense-in-depth — even though `resolveTodoScope` already produces traversal-safe keys, the path builder is an exported primitive and must not trust a hand-built scope like `{ key: '../sessions/x' }`.
+
+The `todo/` directory is **system-managed**: gitignored so the agent doesn't stage it by hand, but force-committed by typeclaw on its own schedule (`src/init/gitignore.ts`), same category as `sessions/` and `memory/`. Because the files are force-committed and hand-editable, `readTodos` drops any malformed entry rather than trust it — a corrupt item never crashes `incompleteTodos` or surfaces as trusted state to the model.
+
+## The continuation engine
+
+`decideContinuation` (`src/agent/todo/continuation-policy.ts`) is a pure function: given the persisted state, the current todos, the last turn outcome, and `now`, it returns `inject` (with the episode to persist) or `skip` (with a reason). It **fails closed on every ambiguity**.
+
+### Episodes and budgets
+
+A continuation **episode** is the unit a budget applies to. It opens when the first auto-nudge fires after a real user turn (or restart recovery) and resets **only on the next real user prompt** — never on the runtime's own injected prompts. The episode is persisted so budgets survive a restart: a crash-loop cannot reset the ceiling. Four budgets, all defaults in `continuation-policy.ts`:
+
+| Budget                | Default  | Skip reason      |
+| --------------------- | -------- | ---------------- |
+| `maxAutoTurns`        | `3`      | `max-auto-turns` |
+| `maxCumulativeTokens` | `25_000` | `max-tokens`     |
+| `maxWallClockMs`      | `30 min` | `max-wall-clock` |
+| `stagnationLimit`     | `2`      | `stagnation`     |
+
+The just-completed turn's token spend (`lastTurnOutcome.tokens`, from the assistant message's `usage.totalTokens`) is folded into `cumulativeTokens` **before** the ceiling check, so the budget reflects real spend; missing usage counts as 0.
+
+### Stagnation: "the hash changed" is not "progress"
+
+`hashIncomplete` canonicalizes the incomplete set (sort by id-or-text, collapse whitespace, include status) into a stable SHA-256. It is a stagnation _heuristic_ only — deliberately **not** proof of progress. `hasRealProgress` is the stricter test: the incomplete set must **shrink**. Reword / reorder / split churn changes the hash but does not count as progress, which closes the fake-progress loophole — only a drop in the number of incomplete items resets the stagnation counter. Two consecutive stagnant turns (`stagnationLimit`) end the episode.
+
+### The skip ladder
+
+`decideContinuation` checks in order, first match wins:
+
+1. **`no-incomplete-todos`** — nothing left to do.
+2. **`restart-kick-suppressed`** — the one-shot restart suppressor is armed (below).
+3. **`user-abort-blocked`** — the durable user-abort suppressor is set (policy D1).
+4. **`turn-not-safe`** — the last outcome is missing, `unknown`, or `aborted`. `unknown` is the fail-closed value: an idle that can't classify the prior turn does **not** auto-inject.
+5. **`max-auto-turns` / `max-tokens` / `max-wall-clock`** — a budget ceiling tripped.
+6. **`stagnation`** — `stagnationCount` hit the limit.
+
+Only after all six pass does it return `inject` with `autoTurnCount + 1`.
+
+### Suppressors
+
+Two suppressors live in `ContinuationState` and gate injection independent of budget:
+
+- **Restart-kick** (`suppressNextIdleNudgeReason: 'restart-kick'`) — a one-shot. The post-restart kick prompt owns the first idle, so the first idle after a restart consumes this and skips exactly one injection. It is consumed even on a skip, so the suppressor always burns exactly once (`maybeInjectContinuation`, `consumeRestartKickSuppression`).
+- **User-abort** (`autoResumeBlockedUntilRealUserTurn`) — durable. Set when a turn ends via explicit user abort (`onTurnOutcome` on `stopReason: 'aborted'`); cleared only by the next real user turn (`onTurnStart`). While set, no auto-continuation fires regardless of budget. A user who hits stop is not second-guessed by the runtime.
+
+### Fail-closed state parsing
+
+`parseContinuationState` validates the persisted file field-by-field and collapses anything malformed to its empty value rather than trusting it. A partially-written file or a schema skew must never surface an `episode` whose `undefined`/`NaN` counters would compare false against the ceilings and bypass the token-burst guard: a malformed episode collapses to `null` (a fresh episode opens next decision); a malformed outcome collapses to `null` (the idle path then fails closed).
+
+## Wiring
+
+`src/agent/todo/continuation-wiring.ts` is the seam between the engine and the per-origin drain loop:
+
+- **`recordTurnStart`** resets the episode at the start of a **real** user turn. Injected continuation turns pass `isRealUserTurn=false` so the budget keeps counting down. No-op for scopeless origins.
+- **`recordTurnOutcome`** persists the just-completed turn's `stopReason` + `tokens` from a pi `message_end` event. `classifyStopReason` maps anything unrecognized to `unknown` so the idle path fails closed; `extractTurnUsage` only reads assistant `message_end` events.
+- **`armRestartKickForOrigin`** arms the one-shot before a restart kick.
+- **`runIdleContinuation`** is the idle-path entry: it calls `maybeInjectContinuation` (decide + persist) and, on `injected`, delivers the `CONTINUATION_PROMPT` via the origin-appropriate mechanism the caller supplies (TUI `stream.publish`; channel `pendingSystemReminders` + drain).
+
+The episode mutation is persisted **before** delivery, so a crash between persist and deliver can only **under**-count — a missed delivery wastes one budget slot, never an unbounded loop. The injected `CONTINUATION_PROMPT` (`continuation.ts`) is a fenced `**[SYSTEM MESSAGE — not from a human]**` block — the same convention as the [engagement](/docs/internals/engagement) loop-guard and group-chat notices — that tells the model to work the next item, verify completed work skeptically before asserting done, and call `todo_clear` when genuinely finished.
+
+## Rules of thumb
+
+- **`decideContinuation` is pure and fails closed.** Every ambiguous input yields `skip`. If you add a budget or a suppressor, add it to the skip ladder _and_ to `parseContinuationState`, or a malformed state file will bypass it.
+- **Only a real user turn resets the episode.** The runtime's own injected prompts pass `isRealUserTurn=false`. Reset on an injected turn and the budget never counts down — the crash-loop ceiling is gone.
+- **Progress means the incomplete set shrinks.** Rewording or reordering todos is not progress. Don't weaken `hasRealProgress` back to "the hash changed."
+- **No-scope is a no-op, not a default.** Subagent / system / undefined origins own no list. Never default an unknown origin into the `tui` scope.
+- **Persist before deliver.** The under-count failure mode (one wasted slot) is the safe one. Never reorder to deliver-then-persist, which can double-inject after a crash.
+- **TUI is a documented singleton.** Concurrent TUI attaches share one `tui` scope; last-writer-wins on the atomic rename is accepted (no lock for a todo list).
