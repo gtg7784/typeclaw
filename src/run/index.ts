@@ -519,15 +519,20 @@ export async function startAgent({
   await channelManager.start()
 
   // Resume a channel-origin restart now that adapters + outbound callbacks are
-  // registered. Claims ONLY channel handoffs (tui handoffs are owned by the
-  // websocket open handler in src/server/index.ts); a tui handoff left on disk
-  // is restored for that path to claim. Best-effort: any failure leaves the
-  // pending todo to resume on the next real inbound.
-  void consumeRestartHandoff(cwd, { accept: (h) => h.origin.kind === 'channel' })
-    .then(async (handoff) => {
-      if (handoff !== null) await channelManager.router.resumeRestartHandoff(handoff)
-    })
-    .catch((err) => console.warn(`[run] channel restart-resume failed: ${err instanceof Error ? err.message : err}`))
+  // registered, and AWAIT it: resumeRestartHandoff reopens the originating
+  // session and enqueues the synthetic wake before it resolves (the LLM turn
+  // itself runs async via its fire-and-forget drain). Awaiting here orders the
+  // wake ahead of any real same-channel inbound the server may accept once
+  // boot continues. Claims ONLY channel handoffs — tui handoffs are left on
+  // disk (peek-then-delete never removes an unclaimed handoff) for the
+  // websocket open handler in src/server/index.ts to claim. Best-effort: any
+  // failure leaves the pending todo to resume on the next real inbound.
+  try {
+    const handoff = await consumeRestartHandoff(cwd, { accept: (h) => h.origin.kind === 'channel' })
+    if (handoff !== null) await channelManager.router.resumeRestartHandoff(handoff)
+  } catch (err) {
+    console.warn(`[run] channel restart-resume failed: ${err instanceof Error ? err.message : err}`)
+  }
 
   // Captured separately from setSpawnSubagent so both the plugin context and
   // the plugin-command runner can dispatch through the same path. The setter
