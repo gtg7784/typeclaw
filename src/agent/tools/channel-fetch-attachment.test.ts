@@ -55,6 +55,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     getSelfAliases: () => [],
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
     markTurnSkipped: () => ({ kind: 'no-live-session' }),
+    reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},
     stop: async () => {},
     tearDownAllLive: async () => {},

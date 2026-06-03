@@ -697,11 +697,16 @@ export type ChannelRouter = {
     | { kind: 'recorded'; keyId: string }
     | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
-  // Reopen and wake the channel session that fired a restart, so the agent
-  // produces its post-restart turn and resumes pending todos. Called once at
-  // boot from src/run/index.ts after channel adapters have registered. No-op
-  // for non-channel handoffs. Safe to call with a stale/missing mapping — it
+  // Two-phase boot restart-resume. Call `reserveRestartHandoff(handoff)` BEFORE
+  // `channelManager.start()` to install a per-key gate so an inbound that races
+  // the adapters coming online coalesces onto the resume instead of competing
+  // with it; then `await reservation.resume()` AFTER start so the reopen + wake
+  // reply have registered adapters. Returns null for non-channel handoffs or an
+  // unconfigured adapter. `resume()` is safe on a stale/missing mapping — it
   // logs and skips, leaving the todo to resume on the next real inbound.
+  reserveRestartHandoff: (handoff: RestartHandoff) => RestartReservation | null
+  // Reserve + resume in one call (reserve, then immediately resume). For
+  // callers already past adapter startup; prefer the two-phase form at boot.
   resumeRestartHandoff: (handoff: RestartHandoff) => Promise<void>
   stop: () => Promise<void>
   tearDownAllLive: () => Promise<void>
@@ -824,6 +829,16 @@ export type ClaimHandlerOutcome =
   | { kind: 'fail'; reply: string }
   | { kind: 'fallthrough' }
 
+// A boot-time restart-resume reservation for one channel key. `resume()` runs
+// the real reopen after adapters are ready; `sawInbound` records whether a real
+// inbound coalesced onto it in the meantime (in which case the synthetic wake
+// is skipped — the inbound already triggers the turn).
+export type RestartReservation = {
+  keyId: string
+  sawInbound: boolean
+  resume: () => Promise<void>
+}
+
 export type ClaimHandler = (input: ClaimHandlerInput) => Promise<ClaimHandlerOutcome>
 
 const GRANT_ALL_PERMISSIONS: PermissionService = {
@@ -848,6 +863,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const onRestart = options.onRestart
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
+  // Restart-resume reservations, keyed by channelKeyId. Installed by
+  // reserveRestartHandoff BEFORE channel adapters start receiving, so an
+  // inbound that races the boot resume coalesces onto the reservation (via the
+  // `creating` entry it seeds) instead of stale-rolling the mapping or
+  // creating a competing session. `sawInbound` is flipped by route() when an
+  // inbound waited on it, which suppresses the synthetic wake (the real inbound
+  // is the wake). Cleared when the reservation resolves.
+  const restartReservations = new Map<string, RestartReservation>()
   // Bumped by tearDownAllLive() and stop() before they tear sessions down. An
   // in-flight ensureLive() captures the value at creation start and re-checks
   // it right before installing into liveSessions; if it changed, a teardown
@@ -2019,6 +2042,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (commandResult.kind !== 'not-command') return
     }
 
+    // If a boot restart-resume reservation is pending for this key, mark that a
+    // real inbound arrived: ensureLive below will coalesce onto the reservation
+    // (via its `creating` seed), and the reservation's resume() will skip the
+    // synthetic wake since this inbound already triggers the turn.
+    const reservation = restartReservations.get(channelKeyId(key))
+    if (reservation !== undefined) reservation.sawInbound = true
+
     const live = await ensureLive(key, event.externalMessageId, event.authorId)
 
     const isNewAuthor = !live.participants.some((p) => p.authorId === event.authorId)
@@ -2976,27 +3006,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
-  // Boot-time resume for a restart that originated from a channel session.
-  // The dying container appended a `typeclaw.restart-self` entry to the
-  // originating session's JSONL and wrote a handoff naming it; this reopens
-  // that exact session and wakes it so the model produces the "I'm back" turn
-  // and the post-turn idle resumes any pending todos.
+  // Boot-time resume for a restart that originated from a channel session, in
+  // two phases to close the race with adapters that begin receiving inbounds.
   //
-  // The handoff's channel key is reverse-validated against the persisted
-  // mapping (it must still name the originating session), then `ensureLive` is
-  // called with a `resumeTarget` so it rehydrates that exact session and
-  // bypasses stale-rollover WITHOUT any pre-mutation of the durable mapping —
-  // ensureLive persists only on a successful reopen. If the mapping no longer
-  // matches, the adapter is unconfigured, or reopen fails, resume is skipped
-  // and the durable mapping is left untouched; the pending todo still resumes
-  // on the next real inbound's drain.
+  // PHASE 1 — reserveRestartHandoff(handoff): called BEFORE the adapters start.
+  // It seeds a per-key entry in `creating` so any inbound that arrives during
+  // boot coalesces onto the (not-yet-run) resume instead of stale-rolling the
+  // mapping or creating a competing session. It does NOT touch resolvers or
+  // outbound callbacks (not registered yet) — it only installs the gate.
   //
-  // The wake is enqueued (pendingSystemReminders + drain) before this resolves,
-  // so a caller that awaits resumeRestartHandoff has ordered the synthetic wake
-  // ahead of any real same-channel inbound; the LLM turn itself runs async via
-  // the fire-and-forget drain.
-  const resumeRestartHandoff = async (handoff: RestartHandoff): Promise<void> => {
-    if (handoff.origin.kind !== 'channel') return
+  // PHASE 2 — reservation.resume(): called AFTER channelManager.start(), when
+  // adapters (and thus resolvers + the outbound callback the wake reply needs)
+  // are ready. It removes its own `creating` seed, reopens the exact session
+  // via ensureLive(resumeTarget) (bypassing stale-rollover, persisting only on
+  // success), and — only if no real inbound coalesced in the meantime — arms
+  // the restart-kick suppressor and enqueues the synthetic wake. If an inbound
+  // did arrive, that inbound is the wake, so the synthetic one is skipped to
+  // avoid a duplicate/spurious "I'm back" turn.
+  //
+  // The `typeclaw.restart-self` entry is already in the reopened JSONL (the
+  // dying container appended it on the restart broadcast), so reopening the
+  // file is what produces the greeting; adapter readiness only matters for
+  // delivering the eventual reply.
+  const reserveRestartHandoff = (handoff: RestartHandoff): RestartReservation | null => {
+    if (handoff.origin.kind !== 'channel') return null
     const key: ChannelKey = {
       adapter: handoff.origin.key.adapter,
       workspace: handoff.origin.key.workspace,
@@ -3007,44 +3040,91 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     if (options.configForAdapter(key.adapter) === undefined) {
       logger.warn(`[channels] ${keyId}: restart-resume skipped — adapter not configured`)
-      return
+      return null
     }
 
-    await ensureLoaded()
-    const record = mappings ? findRecord(mappings, key) : undefined
-    if (record?.sessionId !== handoff.originatingSessionId) {
-      logger.warn(
-        `[channels] ${keyId}: restart-resume skipped — persisted session ` +
-          `${record?.sessionId ?? '<none>'} no longer matches handoff ${handoff.originatingSessionId}`,
-      )
-      return
-    }
+    let resolveGate!: (live: LiveSession) => void
+    let rejectGate!: (err: unknown) => void
+    const gate = new Promise<LiveSession>((res, rej) => {
+      resolveGate = res
+      rejectGate = rej
+    })
+    // Seed `creating` so a racing inbound's ensureLive awaits this gate rather
+    // than starting its own create. Suppress an unhandled-rejection warning on
+    // the skip/failure paths that never get an inbound waiter.
+    creating.set(keyId, gate)
+    gate.catch(() => undefined)
 
-    let live: LiveSession
-    try {
-      live = await ensureLive(key, undefined, undefined, {
-        sessionId: handoff.originatingSessionId,
-        sessionFile: handoff.originatingSessionFile,
-      })
-    } catch (err) {
-      logger.warn(`[channels] ${keyId}: restart-resume ensureLive failed: ${describe(err)}`)
-      return
-    }
-    if (live.sessionId !== handoff.originatingSessionId) {
-      logger.warn(
-        `[channels] ${keyId}: restart-resume reopened a different session ` +
-          `(${live.sessionId} != ${handoff.originatingSessionId}); skipping wake`,
-      )
-      return
-    }
+    const reservation: RestartReservation = {
+      keyId,
+      sawInbound: false,
+      resume: async () => {
+        // Drop our own seed BEFORE calling ensureLive, or ensureLive would
+        // await the gate we are about to resolve and deadlock.
+        if (creating.get(keyId) === gate) creating.delete(keyId)
+        restartReservations.delete(keyId)
 
-    await armRestartKickForOrigin(options.agentDir, buildLiveOrigin(live)).catch((err) =>
-      logger.error(`[channels] ${keyId}: restart-resume arm restart-kick failed: ${describe(err)}`),
-    )
+        await ensureLoaded()
+        const record = mappings ? findRecord(mappings, key) : undefined
+        if (record?.sessionId !== handoff.originatingSessionId) {
+          logger.warn(
+            `[channels] ${keyId}: restart-resume skipped — persisted session ` +
+              `${record?.sessionId ?? '<none>'} no longer matches handoff ${handoff.originatingSessionId}`,
+          )
+          rejectGate(new StaleLiveSessionError(keyId))
+          return
+        }
 
-    live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
-    logger.info(`[channels] ${keyId}: restart-resume waking session ${live.sessionId}`)
-    void drain(live)
+        let live: LiveSession
+        try {
+          live = await ensureLive(key, undefined, undefined, {
+            sessionId: handoff.originatingSessionId,
+            sessionFile: handoff.originatingSessionFile,
+          })
+        } catch (err) {
+          logger.warn(`[channels] ${keyId}: restart-resume ensureLive failed: ${describe(err)}`)
+          rejectGate(err)
+          return
+        }
+        resolveGate(live)
+
+        if (live.sessionId !== handoff.originatingSessionId) {
+          logger.warn(
+            `[channels] ${keyId}: restart-resume reopened a different session ` +
+              `(${live.sessionId} != ${handoff.originatingSessionId}); skipping wake`,
+          )
+          return
+        }
+
+        // A real inbound coalesced onto the reservation during boot: it is the
+        // wake. Adding the synthetic "I'm back" turn on top would duplicate
+        // work / stack a spurious turn, so skip it and let the inbound drain.
+        if (reservation.sawInbound) {
+          logger.info(`[channels] ${keyId}: restart-resume coalesced with a real inbound; skipping synthetic wake`)
+          return
+        }
+
+        await armRestartKickForOrigin(options.agentDir, buildLiveOrigin(live)).catch((err) =>
+          logger.error(`[channels] ${keyId}: restart-resume arm restart-kick failed: ${describe(err)}`),
+        )
+
+        live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
+        logger.info(`[channels] ${keyId}: restart-resume waking session ${live.sessionId}`)
+        void drain(live)
+      },
+    }
+    restartReservations.set(keyId, reservation)
+    return reservation
+  }
+
+  // Reserve + resume in one call, for callers (and tests) that run after the
+  // adapters are already started and so don't need the pre-start gate. Still
+  // benefits from the reservation's sawInbound suppression for inbounds that
+  // race between reserve and resume.
+  const resumeRestartHandoff = async (handoff: RestartHandoff): Promise<void> => {
+    const reservation = reserveRestartHandoff(handoff)
+    if (reservation === null) return
+    await reservation.resume()
   }
 
   const executeCommand = async (
@@ -3206,6 +3286,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
     markTurnSkipped,
+    reserveRestartHandoff,
     resumeRestartHandoff,
     stop,
     tearDownAllLive,

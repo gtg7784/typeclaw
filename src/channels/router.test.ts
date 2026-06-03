@@ -7518,4 +7518,74 @@ describe('resumeRestartHandoff', () => {
     expect(after[0]).toMatchObject({ sessionFile: 'OLD_ses_origin.jsonl', lastInboundAt: 5 })
     expect(logs.some((l) => l.includes('restart-resume ensureLive failed'))).toBe(true)
   })
+
+  test('reserve then a racing inbound coalesces onto one session (no rival create)', async () => {
+    // given: a reservation installed BEFORE any inbound (the boot ordering)
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, {
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())
+    expect(reservation).not.toBeNull()
+
+    // when: a real inbound races in, then the reservation resumes
+    const inboundDone = router.route(inbound({ authorId: 'alice', authorName: 'alice' }))
+    await reservation!.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: exactly ONE session was created (the inbound coalesced onto the
+    // reserved resume, not a rival), reopening the originating session
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(sessions).toHaveLength(1)
+  })
+
+  test('skips the synthetic wake when a real inbound coalesced during boot', async () => {
+    // given: a reservation, then a racing inbound (sawInbound becomes true)
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())!
+    // Fire the inbound WITHOUT awaiting: route() coalesces onto the reserved
+    // resume (awaits its `creating` gate), so it cannot complete until resume()
+    // runs — mirroring the boot window where the inbound arrives first.
+    const inboundDone = router.route(inbound({ authorId: 'alice', authorName: 'alice', text: 'hi there' }))
+    await waitFor(() => reservation.sawInbound)
+
+    // when
+    await reservation.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the only prompt is the real inbound's turn — no extra synthetic
+    // wake turn was stacked on top
+    expect(sessions).toHaveLength(1)
+    const prompts = sessions[0]!.prompts
+    expect(prompts.some((p) => p.includes('hi there'))).toBe(true)
+    expect(prompts.some((p) => p.includes('container just restarted'))).toBe(false)
+  })
+
+  test('still wakes when no inbound races during boot', async () => {
+    // given: a reservation with no racing inbound
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())!
+
+    // when
+    await reservation.resume()
+    await waitFor(() => sessions.length > 0 && sessions[0]!.prompts.length > 0)
+
+    // then: the synthetic wake turn fired
+    expect(reservation.sawInbound).toBe(false)
+    expect(sessions[0]?.prompts.some((p) => p.includes('container just restarted'))).toBe(true)
+  })
 })
