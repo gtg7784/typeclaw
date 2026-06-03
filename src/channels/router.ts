@@ -1066,10 +1066,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     key: ChannelKey,
     triggeringMessageId?: string,
     triggeringAuthorId?: string,
+    // Restart-resume only: force rehydration of this exact (sessionId,
+    // sessionFile) and bypass stale-rollover, so the originating session's
+    // `typeclaw.restart-self` entry is reopened rather than rolled into a fresh
+    // session (a restart easily outlasts SESSION_FRESHNESS_TTL_MS). The mapping
+    // is persisted only through the normal success path below — no pre-mutation
+    // — so a reopen failure leaves the durable mapping untouched.
+    resumeTarget?: { sessionId: string; sessionFile: string },
   ): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
     if (existing && !existing.destroyed) {
+      // A resume that finds the key already live is a no-op for reopening: the
+      // session is up, so just hand it back and let the caller enqueue the wake.
+      if (resumeTarget !== undefined) return existing
       const idleMs = now() - existing.lastInboundAt
       // `lastInboundAt` is only bumped on engaged inbounds (see route()),
       // so a session whose drain loop has been compiling a slow reply for
@@ -1124,6 +1134,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const record = mappings ? findRecord(mappings, key) : undefined
       let resolvedRecord = record
       if (
+        resumeTarget === undefined &&
         record?.sessionId !== undefined &&
         existing === undefined &&
         now() - (record.lastInboundAt ?? 0) > SESSION_FRESHNESS_TTL_MS
@@ -1150,6 +1161,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             mappings[idx] = resolvedRecord
             await persist()
           }
+        }
+      }
+      if (resumeTarget !== undefined) {
+        // Reopen the exact originating session in-memory only; the success
+        // path below persists it. Carry the prior record's participants when
+        // present so the reopened session keeps its roster.
+        resolvedRecord = {
+          adapter: key.adapter,
+          workspace: key.workspace,
+          chat: key.chat,
+          thread: key.thread,
+          sessionId: resumeTarget.sessionId,
+          sessionFile: resumeTarget.sessionFile,
+          participants: (record?.participants ?? []) as ChannelParticipant[],
+          lastInboundAt: now(),
         }
       }
       const phase = resolvedRecord?.sessionId === undefined ? 'cold-start' : 'rehydrate'
@@ -2957,12 +2983,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // and the post-turn idle resumes any pending todos.
   //
   // The handoff's channel key is reverse-validated against the persisted
-  // mapping: the record is repaired to point at `originatingSessionFile` with a
-  // fresh `lastInboundAt` so `ensureLive` rehydrates the exact session via its
-  // normal rehydrate path instead of stale-rolling it into a fresh one (a
-  // restart easily outlasts SESSION_FRESHNESS_TTL_MS). If the mapping is gone,
-  // the adapter is unconfigured, or reopen fails, resume is skipped — the
-  // pending todo still resumes on the next real inbound's drain.
+  // mapping (it must still name the originating session), then `ensureLive` is
+  // called with a `resumeTarget` so it rehydrates that exact session and
+  // bypasses stale-rollover WITHOUT any pre-mutation of the durable mapping —
+  // ensureLive persists only on a successful reopen. If the mapping no longer
+  // matches, the adapter is unconfigured, or reopen fails, resume is skipped
+  // and the durable mapping is left untouched; the pending todo still resumes
+  // on the next real inbound's drain.
+  //
+  // The wake is enqueued (pendingSystemReminders + drain) before this resolves,
+  // so a caller that awaits resumeRestartHandoff has ordered the synthetic wake
+  // ahead of any real same-channel inbound; the LLM turn itself runs async via
+  // the fire-and-forget drain.
   const resumeRestartHandoff = async (handoff: RestartHandoff): Promise<void> => {
     if (handoff.origin.kind !== 'channel') return
     const key: ChannelKey = {
@@ -2988,21 +3020,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    const idx = mappings!.findIndex(
-      (s) =>
-        s.adapter === key.adapter &&
-        s.workspace === key.workspace &&
-        s.chat === key.chat &&
-        (s.thread ?? null) === (key.thread ?? null),
-    )
-    if (idx >= 0) {
-      mappings![idx] = { ...mappings![idx]!, sessionFile: handoff.originatingSessionFile, lastInboundAt: now() }
-      await persist()
-    }
-
     let live: LiveSession
     try {
-      live = await ensureLive(key)
+      live = await ensureLive(key, undefined, undefined, {
+        sessionId: handoff.originatingSessionId,
+        sessionFile: handoff.originatingSessionFile,
+      })
     } catch (err) {
       logger.warn(`[channels] ${keyId}: restart-resume ensureLive failed: ${describe(err)}`)
       return

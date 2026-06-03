@@ -7447,4 +7447,75 @@ describe('resumeRestartHandoff', () => {
     expect(factoryCalls).toHaveLength(0)
     expect(sessions).toHaveLength(0)
   })
+
+  test('reopens even when the persisted mapping is far past the freshness TTL (bypasses stale-rollover)', async () => {
+    // given: a mapping whose lastInboundAt is well beyond SESSION_FRESHNESS_TTL_MS
+    const dir = await tempDir()
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await saveChannelSessions(dir, [
+      {
+        adapter: KEY.adapter,
+        workspace: KEY.workspace,
+        chat: KEY.chat,
+        thread: KEY.thread,
+        sessionId: 'ses_origin',
+        sessionFile: '2026-05-02T16-56-52-380Z_ses_origin.jsonl',
+        lastInboundAt: 1,
+        participants: [],
+      },
+    ])
+    const nowRef = { value: SESSION_FRESHNESS_TTL_MS * 100 }
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router } = makeRouter(dir, {
+      nowRef,
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: rehydrated the exact session rather than cold-starting a fresh one
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+  })
+
+  test('leaves the durable mapping untouched when reopen fails (lossless skip)', async () => {
+    // given: a router whose session factory throws, so ensureLive fails
+    const dir = await tempDir()
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    const seeded = {
+      adapter: KEY.adapter,
+      workspace: KEY.workspace,
+      chat: KEY.chat,
+      thread: KEY.thread,
+      sessionId: 'ses_origin',
+      sessionFile: 'OLD_ses_origin.jsonl',
+      lastInboundAt: 5,
+      participants: [],
+    }
+    await saveChannelSessions(dir, [seeded])
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      permissions: grantAllPermissions,
+      logger: { info: (m) => logs.push(`info:${m}`), warn: (m) => logs.push(`warn:${m}`), error: () => {} },
+      createSessionForChannel: async () => {
+        throw new Error('reopen boom')
+      },
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: the persisted record is byte-for-byte unchanged (no repointed
+    // sessionFile, no refreshed lastInboundAt), so the next inbound still
+    // stale-rolls into a clean session
+    const after = await loadChannelSessions(dir)
+    expect(after).toHaveLength(1)
+    expect(after[0]).toMatchObject({ sessionFile: 'OLD_ses_origin.jsonl', lastInboundAt: 5 })
+    expect(logs.some((l) => l.includes('restart-resume ensureLive failed'))).toBe(true)
+  })
 })
