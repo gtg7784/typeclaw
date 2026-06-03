@@ -267,7 +267,7 @@ export function createServer({
       handoffPending = false
       return null
     }
-    handoffInFlight = consumeRestartHandoff(agentDir).catch(() => null)
+    handoffInFlight = consumeRestartHandoff(agentDir, { accept: (h) => h.origin.kind === 'tui' }).catch(() => null)
     const result = await handoffInFlight
     handoffPending = false
     handoffInFlight = null

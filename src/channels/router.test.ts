@@ -8,6 +8,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from '@/agent'
+import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
@@ -7366,5 +7367,225 @@ describe('review-thread resolver registry', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('transient')
+  })
+})
+
+describe('resumeRestartHandoff', () => {
+  async function seedMapping(dir: string, sessionId: string, sessionFile: string): Promise<void> {
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await saveChannelSessions(dir, [
+      {
+        adapter: KEY.adapter,
+        workspace: KEY.workspace,
+        chat: KEY.chat,
+        thread: KEY.thread,
+        sessionId,
+        sessionFile,
+        lastInboundAt: 0,
+        participants: [],
+      },
+    ])
+  }
+
+  function channelHandoff(over: Partial<RestartHandoff> = {}): RestartHandoff {
+    return {
+      schemaVersion: 2,
+      restartedAt: new Date().toISOString(),
+      originatingSessionId: 'ses_origin',
+      originatingSessionFile: '2026-05-02T16-56-52-380Z_ses_origin.jsonl',
+      origin: { kind: 'channel', key: { ...KEY } },
+      ...over,
+    }
+  }
+
+  test('reopens the exact originating session and wakes it (drains a turn)', async () => {
+    // given: a persisted mapping for the channel naming the originating session
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, {
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+    await waitFor(() => sessions.length > 0 && sessions[0]!.prompts.length > 0)
+
+    // then: reopened the same session id + file, and a turn fired
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    expect(sessions[0]?.prompts.length).toBe(1)
+  })
+
+  test('skips when the persisted mapping no longer names the handoff session', async () => {
+    // given: the channel rolled over to a different session since the restart
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_other', '2026-05-02T16-56-52-380Z_ses_other.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { factoryCalls, logs })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: no reopen, logged the skip
+    expect(factoryCalls).toHaveLength(0)
+    expect(sessions).toHaveLength(0)
+    expect(logs.some((l) => l.includes('restart-resume skipped'))).toBe(true)
+  })
+
+  test('is a no-op for a tui-origin handoff', async () => {
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, { factoryCalls })
+
+    await router.resumeRestartHandoff(channelHandoff({ origin: { kind: 'tui' } }))
+
+    expect(factoryCalls).toHaveLength(0)
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('reopens even when the persisted mapping is far past the freshness TTL (bypasses stale-rollover)', async () => {
+    // given: a mapping whose lastInboundAt is well beyond SESSION_FRESHNESS_TTL_MS
+    const dir = await tempDir()
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await saveChannelSessions(dir, [
+      {
+        adapter: KEY.adapter,
+        workspace: KEY.workspace,
+        chat: KEY.chat,
+        thread: KEY.thread,
+        sessionId: 'ses_origin',
+        sessionFile: '2026-05-02T16-56-52-380Z_ses_origin.jsonl',
+        lastInboundAt: 1,
+        participants: [],
+      },
+    ])
+    const nowRef = { value: SESSION_FRESHNESS_TTL_MS * 100 }
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router } = makeRouter(dir, {
+      nowRef,
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: rehydrated the exact session rather than cold-starting a fresh one
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+  })
+
+  test('leaves the durable mapping untouched when reopen fails (lossless skip)', async () => {
+    // given: a router whose session factory throws, so ensureLive fails
+    const dir = await tempDir()
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    const seeded = {
+      adapter: KEY.adapter,
+      workspace: KEY.workspace,
+      chat: KEY.chat,
+      thread: KEY.thread,
+      sessionId: 'ses_origin',
+      sessionFile: 'OLD_ses_origin.jsonl',
+      lastInboundAt: 5,
+      participants: [],
+    }
+    await saveChannelSessions(dir, [seeded])
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      permissions: grantAllPermissions,
+      logger: { info: (m) => logs.push(`info:${m}`), warn: (m) => logs.push(`warn:${m}`), error: () => {} },
+      createSessionForChannel: async () => {
+        throw new Error('reopen boom')
+      },
+    })
+
+    // when
+    await router.resumeRestartHandoff(channelHandoff())
+
+    // then: the persisted record is byte-for-byte unchanged (no repointed
+    // sessionFile, no refreshed lastInboundAt), so the next inbound still
+    // stale-rolls into a clean session
+    const after = await loadChannelSessions(dir)
+    expect(after).toHaveLength(1)
+    expect(after[0]).toMatchObject({ sessionFile: 'OLD_ses_origin.jsonl', lastInboundAt: 5 })
+    expect(logs.some((l) => l.includes('restart-resume ensureLive failed'))).toBe(true)
+  })
+
+  test('reserve then a racing inbound coalesces onto one session (no rival create)', async () => {
+    // given: a reservation installed BEFORE any inbound (the boot ordering)
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router, sessions } = makeRouter(dir, {
+      factoryCalls,
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())
+    expect(reservation).not.toBeNull()
+
+    // when: a real inbound races in, then the reservation resumes
+    const inboundDone = router.route(inbound({ authorId: 'alice', authorName: 'alice' }))
+    await reservation!.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: exactly ONE session was created (the inbound coalesced onto the
+    // reserved resume, not a rival), reopening the originating session
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_origin')
+    expect(sessions).toHaveLength(1)
+  })
+
+  test('skips the synthetic wake when a real inbound coalesced during boot', async () => {
+    // given: a reservation, then a racing inbound (sawInbound becomes true)
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())!
+    // Fire the inbound WITHOUT awaiting: route() coalesces onto the reserved
+    // resume (awaits its `creating` gate), so it cannot complete until resume()
+    // runs — mirroring the boot window where the inbound arrives first.
+    const inboundDone = router.route(inbound({ authorId: 'alice', authorName: 'alice', text: 'hi there' }))
+    await waitFor(() => reservation.sawInbound)
+
+    // when
+    await reservation.resume()
+    await inboundDone
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the only prompt is the real inbound's turn — no extra synthetic
+    // wake turn was stacked on top
+    expect(sessions).toHaveLength(1)
+    const prompts = sessions[0]!.prompts
+    expect(prompts.some((p) => p.includes('hi there'))).toBe(true)
+    expect(prompts.some((p) => p.includes('container just restarted'))).toBe(false)
+  })
+
+  test('still wakes when no inbound races during boot', async () => {
+    // given: a reservation with no racing inbound
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff())!
+
+    // when
+    await reservation.resume()
+    await waitFor(() => sessions.length > 0 && sessions[0]!.prompts.length > 0)
+
+    // then: the synthetic wake turn fired
+    expect(reservation.sawInbound).toBe(false)
+    expect(sessions[0]?.prompts.some((p) => p.includes('container just restarted'))).toBe(true)
   })
 })

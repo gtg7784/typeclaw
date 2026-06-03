@@ -324,6 +324,7 @@ describe('createRestartTool restart-pending handoff', () => {
       exit: () => {},
       agentDir,
       originatingSessionFile: '/some/abs/path/ses-originator.jsonl',
+      handoffOrigin: { kind: 'tui' },
     })
 
     // when
@@ -332,11 +333,64 @@ describe('createRestartTool restart-pending handoff', () => {
     // then
     const raw = await readFile(restartHandoffPath(agentDir), 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed.schemaVersion).toBe(2)
+    expect(parsed.origin).toEqual({ kind: 'tui' })
     expect(parsed.originatingSessionId).toBe('ses-originator')
     expect(parsed.originatingSessionFile).toBe('ses-originator.jsonl')
     expect(typeof parsed.restartedAt).toBe('string')
     expect(new Date(parsed.restartedAt).toISOString()).toBe(parsed.restartedAt)
+  })
+
+  test('writes a channel-origin handoff carrying the channel key', async () => {
+    // given
+    server = startOkServer()
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-channel',
+      exit: () => {},
+      agentDir,
+      originatingSessionFile: '/some/abs/path/ses-channel.jsonl',
+      handoffOrigin: {
+        kind: 'channel',
+        key: { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null },
+      },
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    const parsed = JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8'))
+    expect(parsed.schemaVersion).toBe(2)
+    expect(parsed.origin).toEqual({
+      kind: 'channel',
+      key: { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null },
+    })
+    expect(parsed.originatingSessionFile).toBe('ses-channel.jsonl')
+  })
+
+  test('skips the handoff when handoffOrigin is omitted (cron/subagent/system origins)', async () => {
+    // given
+    server = startOkServer()
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-cron',
+      exit: () => {},
+      agentDir,
+      originatingSessionFile: 'ses-cron.jsonl',
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
   })
 
   test('skips the handoff when agentDir is omitted (non-TUI origins do not greet)', async () => {
@@ -398,6 +452,7 @@ describe('createRestartTool restart-pending handoff', () => {
       },
       agentDir,
       originatingSessionFile: 'ses-originator.jsonl',
+      handoffOrigin: { kind: 'tui' },
     })
 
     // when
@@ -423,6 +478,7 @@ describe('createRestartTool restart-pending handoff', () => {
       stream,
       agentDir,
       originatingSessionFile: 'ses-originator.jsonl',
+      handoffOrigin: { kind: 'tui' },
     })
 
     // when

@@ -93,7 +93,7 @@ describe('requestContainerRestart', () => {
       },
     })
 
-    // when
+    // when: originatingSessionFile missing → no handoff
     await requestContainerRestart({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -101,6 +101,20 @@ describe('requestContainerRestart', () => {
       ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       agentDir,
       originatingSessionId: 'ses-incomplete',
+      handoffOrigin: { kind: 'tui' },
+      restartedAt: '2026-01-02T03:04:05.000Z',
+    })
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
+
+    // when: handoffOrigin missing → no handoff
+    await requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      agentDir,
+      originatingSessionId: 'ses-no-origin',
+      originatingSessionFile: '/tmp/sessions/ses-no-origin.jsonl',
       restartedAt: '2026-01-02T03:04:05.000Z',
     })
     expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
@@ -113,16 +127,18 @@ describe('requestContainerRestart', () => {
       agentDir,
       originatingSessionId: 'ses-origin',
       originatingSessionFile: '/tmp/sessions/ses-origin.jsonl',
+      handoffOrigin: { kind: 'tui' },
       restartedAt: '2026-01-02T03:04:05.000Z',
     })
 
     // then
     expect(result).toEqual({ ok: true, containerName: 'coder', restartedAt: '2026-01-02T03:04:05.000Z' })
     expect(JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8'))).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       restartedAt: '2026-01-02T03:04:05.000Z',
       originatingSessionId: 'ses-origin',
       originatingSessionFile: 'ses-origin.jsonl',
+      origin: { kind: 'tui' },
     })
   })
 

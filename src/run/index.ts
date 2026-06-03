@@ -4,6 +4,7 @@ import { createSession, createSessionWithDispose } from '@/agent'
 import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { requestContainerRestart } from '@/agent/restart'
+import { consumeRestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
   awaitWithSubagentTimeout,
@@ -287,9 +288,13 @@ export async function startAgent({
       if (containerName === undefined) {
         return 'Restart is unavailable: this agent is not running inside a typeclaw container.'
       }
-      // No originatingSessionId/stream/handoff: a channel-invoked restart must
-      // not write a resume hint or fire the "I'm back" broadcast that a TUI
-      // restart does (issue #291 scoping — only TUI origins resume).
+      // The /restart admin COMMAND writes no handoff: unlike the `restart`
+      // tool (which runs inside a specific session and resumes that exact
+      // conversation), this command is a fire-and-forget admin action with no
+      // originating session id/file to reopen. The container bounces; the next
+      // real inbound rehydrates the channel and resumes any pending todos via
+      // the normal idle continuation. Wiring command-initiated resume is
+      // tracked separately (see #291).
       const result = await requestContainerRestart({ containerName })
       return result.ok ? 'Restart scheduled; the container will bounce shortly.' : `Restart denied: ${result.reason}`
     },
@@ -515,7 +520,36 @@ export async function startAgent({
   })
 
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
+
+  // Two-phase channel restart-resume around adapter startup, to close the race
+  // where an adapter starts receiving before the resume claims the handoff:
+  //   1. Claim the channel handoff and RESERVE the originating key BEFORE
+  //      channelManager.start(). The reservation installs a per-key gate, so an
+  //      inbound that arrives the instant an adapter connects coalesces onto the
+  //      resume instead of stale-rolling the mapping or creating a rival session.
+  //   2. start() the adapters (registers outbound callbacks the wake reply needs).
+  //   3. resume() the reservation: reopen the exact session and enqueue the wake
+  //      — skipped automatically if a real inbound already coalesced in (2)→(3).
+  // Claims ONLY channel handoffs; tui handoffs are left on disk (peek-then-delete
+  // never removes an unclaimed handoff) for the websocket open handler to claim.
+  // Best-effort throughout: any failure leaves the todo to resume on the next inbound.
+  let restartReservation: ReturnType<typeof channelManager.router.reserveRestartHandoff> = null
+  try {
+    const handoff = await consumeRestartHandoff(cwd, { accept: (h) => h.origin.kind === 'channel' })
+    if (handoff !== null) restartReservation = channelManager.router.reserveRestartHandoff(handoff)
+  } catch (err) {
+    console.warn(`[run] channel restart-resume reserve failed: ${err instanceof Error ? err.message : err}`)
+  }
+
   await channelManager.start()
+
+  if (restartReservation !== null) {
+    try {
+      await restartReservation.resume()
+    } catch (err) {
+      console.warn(`[run] channel restart-resume failed: ${err instanceof Error ? err.message : err}`)
+    }
+  }
 
   // Captured separately from setSpawnSubagent so both the plugin context and
   // the plugin-command runner can dispatch through the same path. The setter
