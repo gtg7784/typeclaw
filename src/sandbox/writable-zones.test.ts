@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { resolveWritableZones } from './writable-zones'
+import { resolveWritableZones, subtractMasked } from './writable-zones'
 
 let agentDir: string
 
@@ -25,12 +25,14 @@ describe('resolveWritableZones', () => {
     expect(dirs).toEqual([join(agentDir, 'workspace'), join(agentDir, 'public')])
   })
 
-  test('includes nested .agents/skills when present', async () => {
+  test('excludes .agents/skills and packages even when present (guarded/executable surfaces)', async () => {
     await mkdir(join(agentDir, '.agents', 'skills'), { recursive: true })
+    await mkdir(join(agentDir, 'packages'))
 
     const { dirs } = await resolveWritableZones(agentDir)
 
-    expect(dirs).toContain(join(agentDir, '.agents/skills'))
+    expect(dirs).not.toContain(join(agentDir, '.agents/skills'))
+    expect(dirs).not.toContain(join(agentDir, 'packages'))
   })
 
   test('includes only the allowed root files that exist', async () => {
@@ -85,5 +87,46 @@ describe('resolveWritableZones', () => {
 
     expect(dirs).toEqual([])
     expect(files).toEqual([])
+  })
+})
+
+describe('subtractMasked', () => {
+  const w = (dirs: string[], files: string[]) => ({ dirs, files })
+
+  test('drops a writable dir that is itself masked (guest workspace stays hidden)', () => {
+    const result = subtractMasked(w(['/a/workspace', '/a/public', '/a/mounts'], ['/a/AGENTS.md']), {
+      dirs: ['/a/workspace', '/a/memory', '/a/sessions'],
+      files: ['/a/.env', '/a/secrets.json'],
+    })
+
+    expect(result.dirs).toEqual(['/a/public', '/a/mounts'])
+    expect(result.files).toEqual(['/a/AGENTS.md'])
+  })
+
+  test('keeps all writable dirs when nothing is masked (member: only secret files masked)', () => {
+    const result = subtractMasked(w(['/a/workspace', '/a/public', '/a/mounts'], ['/a/AGENTS.md']), {
+      dirs: [],
+      files: ['/a/.env', '/a/secrets.json'],
+    })
+
+    expect(result.dirs).toEqual(['/a/workspace', '/a/public', '/a/mounts'])
+  })
+
+  test('drops a writable path nested under a masked dir', () => {
+    const result = subtractMasked(w(['/a/workspace/sub'], []), { dirs: ['/a/workspace'], files: [] })
+
+    expect(result.dirs).toEqual([])
+  })
+
+  test('drops a writable file that is masked', () => {
+    const result = subtractMasked(w([], ['/a/.env', '/a/AGENTS.md']), { dirs: [], files: ['/a/.env'] })
+
+    expect(result.files).toEqual(['/a/AGENTS.md'])
+  })
+
+  test('does not drop a sibling that merely shares a masked prefix string', () => {
+    const result = subtractMasked(w(['/a/workspace-public'], []), { dirs: ['/a/workspace'], files: [] })
+
+    expect(result.dirs).toEqual(['/a/workspace-public'])
   })
 })

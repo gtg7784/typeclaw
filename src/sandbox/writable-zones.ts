@@ -1,16 +1,19 @@
 import { lstat } from 'node:fs/promises'
-import { join } from 'node:path'
+import path, { join } from 'node:path'
 
 export type WritableZones = {
   dirs: string[]
   files: string[]
 }
 
-// SECURITY: must mirror the write/edit guard allowlist in
-// src/bundled-plugins/guard/policies/non-workspace-write.ts — any divergence
-// lets bash write where the write/edit tool cannot, or vice versa. Subagent-only
-// memory paths are deliberately excluded (memory/ is masked from low-trust bash).
-const WRITABLE_DIRS = ['workspace', 'public', 'mounts', 'packages', '.agents/skills'] as const
+// SECURITY: a blanket RW bind is coarser than the write/edit guards, so this set
+// is deliberately NARROWER than the write/edit allowlist — only genuinely
+// free-write scratch zones. `.agents/skills` and `packages` are excluded: the
+// former is validated (SKILL.md shape, name, frontmatter) by the skillAuthoring
+// guard and the latter holds executable plugin code; bash must not get blanket
+// RW to either. Skill authoring and package writes go through the guarded
+// write/edit tool only.
+const WRITABLE_DIRS = ['workspace', 'public', 'mounts'] as const
 
 // Bash may EDIT these when present; creating a MISSING root file goes through
 // write/edit (bwrap cannot RW-bind a non-existent source without pre-creating it).
@@ -38,6 +41,25 @@ export async function resolveWritableZones(agentDir: string): Promise<WritableZo
     'file',
   )
   return { dirs, files }
+}
+
+// SECURITY: a writable RW bind renders AFTER the masks and last-op-wins, so an
+// RW bind on a masked path would re-expose the real (hidden) directory. Drop any
+// writable zone that is, or is nested under, a masked path so the confidentiality
+// boundary survives — e.g. a guest's masked `workspace/` is never re-exposed RW.
+export function subtractMasked(writable: WritableZones, masked: { dirs: string[]; files: string[] }): WritableZones {
+  const maskedDirs = masked.dirs
+  const isMasked = (target: string): boolean =>
+    masked.files.includes(target) || maskedDirs.some((dir) => target === dir || isInside(dir, target))
+  return {
+    dirs: writable.dirs.filter((dir) => !isMasked(dir)),
+    files: writable.files.filter((file) => !isMasked(file)),
+  }
+}
+
+function isInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child)
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
 }
 
 async function collectExisting(paths: string[], kind: 'dir' | 'file'): Promise<string[]> {

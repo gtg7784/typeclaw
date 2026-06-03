@@ -1,7 +1,7 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
 export { ensureBwrapAvailable, _resetBwrapAvailabilityCacheForTests } from './availability'
 export { resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
-export { resolveWritableZones, type WritableZones } from './writable-zones'
+export { resolveWritableZones, subtractMasked, type WritableZones } from './writable-zones'
 export { formatCommand, shellQuote } from './quote'
 export { SandboxPolicyError, SandboxUnavailableError } from './errors'
 export {
