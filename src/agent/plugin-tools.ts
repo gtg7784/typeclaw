@@ -33,7 +33,7 @@ import type {
   ToolContext,
   ToolResult,
 } from '@/plugin'
-import { buildSandboxedCommand, ensureBwrapAvailable, resolveHiddenPaths } from '@/sandbox'
+import { buildSandboxedCommand, ensureBwrapAvailable, resolveHiddenPaths, resolveWritableZones } from '@/sandbox'
 
 import { createLoopGuard, type LoopGuard } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
@@ -508,12 +508,19 @@ async function applyBashSandbox(
   if (dirs.length === 0 && files.length === 0) return
 
   await ensureBwrapAvailable()
+  // Write-confined jail for low-trust roles: bind the whole project read-only,
+  // hide private/secret paths, then re-expose only the write/edit allowlist RW.
+  // Anything else under agentDir (.git/, node_modules/, agentDir root itself) is
+  // EROFS, so bash cannot sidestep the non-workspace-write guard. Trusted/owner
+  // never reach here (their masks are empty) and keep full unsandboxed access.
+  const writable = await resolveWritableZones(agentDir)
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
   const { commandString } = buildSandboxedCommand(command, {
-    mounts: [{ type: 'bind', source: agentDir, dest: agentDir }],
+    mounts: [{ type: 'ro-bind', source: agentDir, dest: agentDir }],
     masks: { dirs, files },
+    writable,
     network: 'inherit',
     cwd: agentDir,
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
