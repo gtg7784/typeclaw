@@ -2,6 +2,7 @@ import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { requestContainerRestart } from '@/agent/restart'
+import type { RestartHandoffOrigin } from '@/agent/restart-handoff'
 import type { Stream } from '@/stream'
 
 const EXIT_DELAY_MS = 500
@@ -47,11 +48,15 @@ export type CreateRestartToolOptions = {
   // so the `typeclaw.restart-self` custom message entry that was just
   // appended is part of the LLM context on the next turn. When omitted,
   // no handoff is written — the new container cold-starts and no
-  // "I'm back" greeting fires. Gates the handoff on the origin being a
-  // TUI session: channel/cron/subagent origins should pass undefined so
-  // the next boot does not produce a stray channel post or unattended
-  // greeting (see issue #291's scoping concerns).
+  // "I'm back" greeting fires. Written for persisted TUI and channel
+  // origins; cron/subagent/system origins pass undefined so the next boot
+  // does not resume an unattended session.
   originatingSessionFile?: string
+  // Which subsystem owns resuming the originating session on the next boot
+  // (tui → websocket open handler; channel → channel router startup). Required
+  // alongside `originatingSessionFile` for the handoff to be written; omit to
+  // skip the handoff. See buildRestartHandoffWiring in src/agent/index.ts.
+  handoffOrigin?: RestartHandoffOrigin
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -69,6 +74,7 @@ export function createRestartTool({
   ackTimeoutMs,
   agentDir,
   originatingSessionFile,
+  handoffOrigin,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
 
@@ -114,6 +120,7 @@ export function createRestartTool({
         ...(stream !== undefined ? { stream } : {}),
         ...(agentDir !== undefined ? { agentDir } : {}),
         ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
+        ...(handoffOrigin !== undefined ? { handoffOrigin } : {}),
       })
       if (!result.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: result.reason }

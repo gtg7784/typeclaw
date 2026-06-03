@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 
-import { writeRestartHandoff } from '@/agent/restart-handoff'
+import { type RestartHandoffOrigin, writeRestartHandoff } from '@/agent/restart-handoff'
 import { send, sendHttp } from '@/hostd/client'
 import { containerSocketPath } from '@/hostd/paths'
 import type { Stream } from '@/stream'
@@ -30,6 +30,11 @@ export type RequestContainerRestartOptions = {
   agentDir?: string
   originatingSessionId?: string
   originatingSessionFile?: string
+  // Origin metadata persisted into the handoff so the next boot routes the
+  // resume to the right subsystem (tui → websocket open; channel → router
+  // startup). Required alongside agentDir + originatingSessionFile for the
+  // handoff to be written; omitting it skips the handoff entirely.
+  handoffOrigin?: RestartHandoffOrigin
   restartedAt?: string
 }
 
@@ -48,6 +53,7 @@ export async function requestContainerRestart({
   agentDir,
   originatingSessionId,
   originatingSessionFile,
+  handoffOrigin,
   restartedAt,
 }: RequestContainerRestartOptions): Promise<RequestContainerRestartResult> {
   const request = { kind: 'restart' as const, containerName, build: build === true }
@@ -84,13 +90,19 @@ export async function requestContainerRestart({
   // only; a missing one just cold-starts the rebooted container without the
   // "I'm back" greeting. writeRestartHandoff swallows its own errors today, but
   // guard here too so this contract survives the writer being changed later.
-  if (agentDir !== undefined && originatingSessionId !== undefined && originatingSessionFile !== undefined) {
+  if (
+    agentDir !== undefined &&
+    originatingSessionId !== undefined &&
+    originatingSessionFile !== undefined &&
+    handoffOrigin !== undefined
+  ) {
     try {
       await writeRestartHandoff(agentDir, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         restartedAt: restartTimestamp,
         originatingSessionId,
         originatingSessionFile: basename(originatingSessionFile),
+        origin: handoffOrigin,
       })
     } catch {
       // intentional swallow — see the post-ACK rationale above
