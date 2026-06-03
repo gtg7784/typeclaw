@@ -46,6 +46,7 @@ import {
   zodToToolParameters,
 } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
+import type { RestartHandoffOrigin } from './restart-handoff'
 import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
@@ -446,22 +447,39 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
 // Decides whether the restart tool should write the cross-restart handoff
 // file (`<agentDir>/.typeclaw/restart-pending.json`) and supplies the agentDir
-// + session file path it needs to do so. Returns an empty object — meaning
-// "no handoff" — for any session whose origin is not TUI, so a channel-
-// originated or cron-originated `restart` call cannot accidentally produce an
-// "I'm back" greeting in the next container's first TUI session. See
-// issue #291's scoping concerns. Also returns empty when the session is not
-// persisted to disk (in-memory sessions have no file the next container could
-// reopen).
+// + session file path + origin metadata it needs to do so. Returns an empty
+// object — meaning "no handoff" — for cron/subagent/system origins (no
+// attended session the next boot could resume) and for in-memory sessions
+// (no file to reopen).
+//
+// TUI and channel origins both resume: a TUI restart reattaches to the
+// reconnecting client (websocket open handler), a channel restart reopens the
+// originating chat session on the channel router's boot path. The `origin`
+// discriminator in the handoff is what routes the next boot to the correct
+// subsystem.
 export function buildRestartHandoffWiring(
   options: { origin?: SessionOrigin; plugins?: { agentDir: string } },
   sessionManager: SessionManager,
-): { agentDir?: string; originatingSessionFile?: string } {
-  if (options.origin?.kind !== 'tui') return {}
+): { agentDir?: string; originatingSessionFile?: string; handoffOrigin?: RestartHandoffOrigin } {
+  const origin = options.origin
+  if (origin === undefined) return {}
+  const handoffOrigin = restartHandoffOriginFor(origin)
+  if (handoffOrigin === null) return {}
   const agentDir = options.plugins?.agentDir
   const sessionFile = sessionManager.getSessionFile()
   if (agentDir === undefined || sessionFile === undefined) return {}
-  return { agentDir, originatingSessionFile: sessionFile }
+  return { agentDir, originatingSessionFile: sessionFile, handoffOrigin }
+}
+
+function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {
+  if (origin.kind === 'tui') return { kind: 'tui' }
+  if (origin.kind === 'channel') {
+    return {
+      kind: 'channel',
+      key: { adapter: origin.adapter, workspace: origin.workspace, chat: origin.chat, thread: origin.thread },
+    }
+  }
+  return null
 }
 
 // Subscribes the given session to the in-process broadcast that the `restart`
