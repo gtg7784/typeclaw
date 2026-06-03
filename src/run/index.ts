@@ -288,9 +288,13 @@ export async function startAgent({
       if (containerName === undefined) {
         return 'Restart is unavailable: this agent is not running inside a typeclaw container.'
       }
-      // No originatingSessionId/stream/handoff: a channel-invoked restart must
-      // not write a resume hint or fire the "I'm back" broadcast that a TUI
-      // restart does (issue #291 scoping — only TUI origins resume).
+      // The /restart admin COMMAND writes no handoff: unlike the `restart`
+      // tool (which runs inside a specific session and resumes that exact
+      // conversation), this command is a fire-and-forget admin action with no
+      // originating session id/file to reopen. The container bounces; the next
+      // real inbound rehydrates the channel and resumes any pending todos via
+      // the normal idle continuation. Wiring command-initiated resume is
+      // tracked separately (see #291).
       const result = await requestContainerRestart({ containerName })
       return result.ok ? 'Restart scheduled; the container will bounce shortly.' : `Restart denied: ${result.reason}`
     },
