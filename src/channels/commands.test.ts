@@ -10,6 +10,7 @@ const info = (name: string, description: string): CommandInfo => ({
   description,
   permission: 'session.control',
   requiresLiveSession: true,
+  wantsLiveSession: false,
 })
 
 describe('formatChannelCommandHelp', () => {

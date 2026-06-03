@@ -13,7 +13,13 @@ import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaot
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import type { GithubTokenBridge } from './github-token-bridge'
-import { createChannelRouter, type ChannelRouter, type ClaimHandler, type CreateSessionForChannel } from './router'
+import {
+  createChannelRouter,
+  type ChannelRouter,
+  type ClaimHandler,
+  type CreateSessionForChannel,
+  type RestartCommandContext,
+} from './router'
 import {
   ADAPTER_IDS,
   type AdapterId,
@@ -94,7 +100,7 @@ export type ChannelManagerOptions = {
   // container-restart bindings; tests omit them so the commands stay
   // unregistered. See CreateChannelRouterOptions.onReload/onRestart.
   onReload?: () => Promise<string>
-  onRestart?: () => Promise<string>
+  onRestart?: (ctx?: RestartCommandContext) => Promise<string>
 }
 
 export type ChannelManager = {
