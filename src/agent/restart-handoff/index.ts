@@ -88,21 +88,33 @@ export async function consumeRestartHandoff(
     return null
   }
 
-  await rm(path, { force: true }).catch(() => undefined)
-
   const handoff = parseHandoff(raw)
-  if (handoff === null) return null
+
+  // Peek before delete: a handoff we will NOT claim (malformed, expired, or
+  // rejected by `accept`) is left untouched on disk so the rightful consumer
+  // can still find it. The previous delete-then-restore opened a window where
+  // a concurrent rightful consumer saw no file; never deleting an unclaimed
+  // handoff closes that window entirely.
+  if (handoff === null) {
+    await rm(path, { force: true }).catch(() => undefined)
+    return null
+  }
 
   const restartedAtMs = Date.parse(handoff.restartedAt)
-  if (Number.isNaN(restartedAtMs)) return null
-  if (now - restartedAtMs > ttlMs) return null
+  if (Number.isNaN(restartedAtMs) || now - restartedAtMs > ttlMs) {
+    await rm(path, { force: true }).catch(() => undefined)
+    return null
+  }
 
-  if (options.accept !== undefined && !options.accept(handoff)) {
-    // Not ours to claim — put the file back so the owning subsystem's
-    // consume() can still find it. Restore is best-effort: if it fails the
-    // handoff is simply lost (cold-start), which is the same fail-safe as a
-    // SIGKILL'd writer.
-    await writeRestartHandoff(agentDir, handoff).catch(() => undefined)
+  if (options.accept !== undefined && !options.accept(handoff)) return null
+
+  // Claim by deleting. A non-forced unlink distinguishes "we removed it" from
+  // "it was already gone": if another consumer of the same kind claimed it
+  // first, the unlink throws ENOENT and we return null, so the handoff is
+  // honored exactly once even under concurrent same-kind consumers.
+  try {
+    await rm(path)
+  } catch {
     return null
   }
 

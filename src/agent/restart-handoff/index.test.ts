@@ -231,7 +231,7 @@ describe('consumeRestartHandoff', () => {
       expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
     })
 
-    test('rejects a handoff the predicate refuses and RESTORES the file', async () => {
+    test('rejects a handoff the predicate refuses and LEAVES the file untouched', async () => {
       await writeRestartHandoff(agentDir, channelHandoff())
 
       const result = await consumeRestartHandoff(agentDir, {
@@ -243,7 +243,7 @@ describe('consumeRestartHandoff', () => {
       expect(existsSync(restartHandoffPath(agentDir))).toBe(true)
     })
 
-    test('a restored channel handoff is still claimable by the channel predicate', async () => {
+    test('an unclaimed channel handoff is still claimable by the channel predicate', async () => {
       await writeRestartHandoff(agentDir, channelHandoff())
 
       const tuiClaim = await consumeRestartHandoff(agentDir, {
