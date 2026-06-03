@@ -37,11 +37,21 @@ export type SandboxMaskPolicy = {
   files?: string[]
 }
 
+// Writable carve-outs re-exposed on top of a read-only project root AND its
+// masks. Rendered last so "last op wins" makes these the only RW paths: an RW
+// bind here overrides the broad --ro-bind parent, while anything not listed
+// stays read-only (EROFS) or masked.
+export type SandboxWritablePolicy = {
+  dirs?: string[]
+  files?: string[]
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
   mounts?: SandboxMount[]
   masks?: SandboxMaskPolicy
+  writable?: SandboxWritablePolicy
   network?: SandboxNetwork
   env?: SandboxEnvPolicy
   commandFilter?: SandboxCommandFilter

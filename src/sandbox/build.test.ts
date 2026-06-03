@@ -205,6 +205,36 @@ describe('buildSandboxedCommand masks', () => {
   })
 })
 
+describe('buildSandboxedCommand writable overlays', () => {
+  test('re-binds writable dirs and files RW with --bind <p> <p>', () => {
+    const joined = argvOf('true', {
+      writable: { dirs: ['/agent/workspace'], files: ['/agent/AGENTS.md'] },
+    }).join(' ')
+    expect(joined).toContain('--bind /agent/workspace /agent/workspace')
+    expect(joined).toContain('--bind /agent/AGENTS.md /agent/AGENTS.md')
+  })
+
+  test('renders writable overlays AFTER the ro-bind root and after masks so they win', () => {
+    const argv = argvOf('true', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      masks: { dirs: ['/agent/memory'], files: ['/agent/.env'] },
+      writable: { dirs: ['/agent/workspace'], files: ['/agent/AGENTS.md'] },
+    })
+    const roRootDest = argv.indexOf('/agent')
+    const memoryMask = argv.indexOf('/agent/memory')
+    const writableDir = argv.indexOf('/agent/workspace')
+    const writableFile = argv.indexOf('/agent/AGENTS.md')
+    expect(roRootDest).toBeLessThan(writableDir)
+    expect(memoryMask).toBeLessThan(writableDir)
+    expect(memoryMask).toBeLessThan(writableFile)
+  })
+
+  test('emits no writable binds when the policy omits them', () => {
+    const argv = argvOf('true', { mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }] })
+    expect(argv).not.toContain('--bind')
+  })
+})
+
 describe('buildSandboxedCommand proc strategy', () => {
   test("omits the /proc tmpfs for proc: 'none'", () => {
     const argv = argvOf('true', { proc: 'none' })
