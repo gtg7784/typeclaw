@@ -291,4 +291,72 @@ describe('commitGitignoreWithUntracks', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('atomic commit preserves system-managed work staged by the backup/dreaming machinery', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await mkdir(join(dir, 'memory'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await writeFile(join(dir, 'memory', 'MEMORY.md'), 'v1\n')
+      await writeFile(join(dir, '.gitignore'), 'old\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+      // given: the system has staged a memory/ change (not yet committed)
+      await writeFile(join(dir, 'memory', 'MEMORY.md'), 'v2\n')
+      await runGit(dir, ['add', 'memory/MEMORY.md'])
+
+      const committed = await commitGitignoreWithUntracks(dir, '.gitignore', untracked, 'Untrack newly-ignored files')
+
+      // then: the hygiene commit landed without memory/, which stays staged for
+      // the next system commit — never dropped, never swept in
+      expect(committed).toBe(true)
+      expect(await runGit(dir, ['show', '--stat', '--format=', 'HEAD'])).not.toContain('memory/MEMORY.md')
+      expect(await runGit(dir, ['diff', '--cached', '--name-only'])).toContain('memory/MEMORY.md')
+      expect(await runGit(dir, ['show', 'HEAD:memory/MEMORY.md'])).toBe('v1')
+      expect(await isTracked(dir, 'public/review.json')).toBe(false)
+      expect(await isTracked(dir, 'memory/MEMORY.md')).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('fallback never drops staged system-managed work', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await mkdir(join(dir, 'sessions'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await writeFile(join(dir, 'sessions', 'history.jsonl'), 'a\n')
+      await writeFile(join(dir, '.gitignore'), 'old\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+      // given: sessions/ staged, and the atomic path forced to fail
+      await writeFile(join(dir, 'sessions', 'history.jsonl'), 'a\nb\n')
+      await runGit(dir, ['add', 'sessions/history.jsonl'])
+
+      const committed = await commitGitignoreWithUntracks(
+        dir,
+        '.gitignore',
+        untracked,
+        'Untrack newly-ignored files',
+        forceAtomicFailure,
+      )
+
+      // then: fallback refuses, leaving sessions/ staged and tracked — not dropped
+      expect(committed).toBe(false)
+      expect(await runGit(dir, ['diff', '--cached', '--name-only'])).toContain('sessions/history.jsonl')
+      expect(await isTracked(dir, 'sessions/history.jsonl')).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
