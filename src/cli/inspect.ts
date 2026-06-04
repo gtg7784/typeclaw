@@ -172,12 +172,15 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
     ...(liveHint !== undefined ? { liveHint } : {}),
   })
 
+  const cliAllowWritable = opts.allowWritable !== false
   const result = await runViewerLoop<ViewerItem>({
-    listItems: async () => {
+    listItems: async ({ allowWritable: loopAllowWritable }) => {
       const listOpts: Parameters<typeof listViewerItems>[0] = {
         sessionsDir,
         containerRunning,
-        allowWritable: opts.allowWritable !== false,
+        // Compose the CLI-level permission (false on tui detach handoff) with
+        // the loop-level one (false after returning to the picker from a viewer).
+        allowWritable: cliAllowWritable && loopAllowWritable,
         limit: 20,
         onWarn: stderr,
       }

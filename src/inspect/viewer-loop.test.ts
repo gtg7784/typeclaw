@@ -76,6 +76,33 @@ describe('runViewerLoop', () => {
     expect(opened).toEqual(['a', 'b'])
   })
 
+  test('listItems gets allowWritable:true first, then false after returning to the picker', async () => {
+    // Regression: after detaching from a tui (live) row, the next list refresh
+    // must not re-promote the now-dead session as writable.
+    const allowWritableCalls: boolean[] = []
+    let pickerCalls = 0
+
+    await runViewerLoop<FakeItem>({
+      listItems: async ({ allowWritable }) => {
+        allowWritableCalls.push(allowWritable)
+        return [
+          { key: 'live', kind: 'tui' },
+          { key: 'b', kind: 'session' },
+        ]
+      },
+      keyOf: (i) => i.key,
+      selectItem: async (items) => {
+        pickerCalls++
+        return items[pickerCalls - 1] ?? null
+      },
+      openItem: async () => (pickerCalls === 1 ? back : done),
+      createTailScope: () => fakeScope(),
+      onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
+    })
+
+    expect(allowWritableCalls).toEqual([true, false])
+  })
+
   test('the tui branch does not create a tail scope (no double raw-stdin owner)', async () => {
     let tailScopesCreated = 0
 

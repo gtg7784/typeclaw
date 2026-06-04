@@ -14,8 +14,15 @@ export type SelectItem<TItem> = (items: TItem[], opts: { initialKey?: string }) 
 
 export type OpenItem<TItem> = (item: TItem, ctx: OpenItemContext) => Promise<RunInspectResult>
 
+export type ListItemsContext = {
+  // False once the user has returned to the picker from any viewer: the prior
+  // viewer interaction ended, so there is no proof of a still-live writable
+  // session — a detached tui session must not be re-promoted as writable.
+  allowWritable: boolean
+}
+
 export type RunViewerLoopOptions<TItem> = {
-  listItems: () => Promise<TItem[]>
+  listItems: (ctx: ListItemsContext) => Promise<TItem[]>
   keyOf: (item: TItem) => string
   preselectKey?: string
   selectItem: SelectItem<TItem>
@@ -33,9 +40,14 @@ export type RunViewerLoopOptions<TItem> = {
 export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): Promise<RunInspectResult> {
   let preselectKey = opts.preselectKey
   let lastPickedKey: string | undefined
+  // Writable is only safe on the very first list. Returning to the picker means
+  // a viewer was just opened and left — any writable session it might represent
+  // is gone (detach ends the live session), so subsequent refreshes are
+  // read-only.
+  let allowWritable = true
 
   while (true) {
-    const items = await opts.listItems()
+    const items = await opts.listItems({ allowWritable })
     if (items.length === 0) return opts.onEmpty()
 
     let chosen: TItem | null
@@ -53,6 +65,7 @@ export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): P
     const result = await opts.openItem(chosen, { createTailScope: opts.createTailScope })
     if (!result.ok) return result
     if (result.escToPicker !== true) return result
+    allowWritable = false
   }
 }
 
