@@ -2518,6 +2518,27 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
   })
 
+  test('recovers the text arg from a single-quoted channel_reply(...) serialization', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText("channel_reply({text: 'it\\'s me'})")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe("it's me")
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
   test('recovers the text arg from a truncated channel_reply(...) serialization', async () => {
     const dir = await tempDir()
     const logs: string[] = []

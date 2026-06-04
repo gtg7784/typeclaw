@@ -4273,8 +4273,12 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 //
 // Structural-only detection (NOT a substring search): the trimmed text must
 // *start* with `channel_reply(`, `channel_send(`, or `skip_response(`, and
-// that opening paren must enclose at least one `"` (the serialized argument).
-// This deliberately matches the leak shape while letting prose that merely
+// that opening paren must enclose at least one quote — `"` or `'` (the
+// serialized argument). The single-quote arm matters because the extractor
+// recovers single-quoted values too; if the classifier only matched `"`, a
+// single-quoted leak like `channel_reply({text: 'hi'})` would bypass the
+// extractor and post raw plumbing. This deliberately matches the leak shape
+// while letting prose that merely
 // *mentions* a tool name (e.g. "I would normally call channel_reply here
 // but...") reach the user — that false-positive class is already locked in by
 // the `still recovers prose that mentions channel_reply` test.
@@ -4282,7 +4286,7 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 // The trailing close paren is NOT required: the model sometimes truncates
 // mid-serialization, and a half-leaked `channel_reply({"text":"..."` is
 // just as user-hostile as the full shape.
-const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(channel_reply|channel_send|skip_response)\s*\(\s*[^)]*"/
+const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(channel_reply|channel_send|skip_response)\s*\(\s*[^)]*["']/
 
 export type PlainTextChannelToolCallKind = 'reply' | 'send' | 'skip'
 
