@@ -1313,6 +1313,193 @@ function fakeFetch(fn: (input: string, init?: RequestInit) => Response): typeof 
   return Object.assign(impl, { preconnect: () => {} }) as typeof fetch
 }
 
+describe('createGithubWebhookHandler — pull_request.synchronize recheck', () => {
+  type ThreadNode = { id: string; isResolved: boolean; rootCommentId: number; login: string; isBot?: boolean }
+
+  function threadsFetch(threads: ThreadNode[]): typeof fetch {
+    return fakeFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: threads.map((t) => ({
+                      id: t.id,
+                      isResolved: t.isResolved,
+                      comments: {
+                        nodes: [
+                          {
+                            databaseId: t.rootCommentId,
+                            author: { __typename: t.isBot === false ? 'User' : 'Bot', login: t.login },
+                          },
+                        ],
+                      },
+                    })),
+                  },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+    )
+  }
+
+  function recheckHandler(input: {
+    fetchImpl: typeof fetch
+    routed: InboundMessage[]
+    tasks: Array<() => Promise<void>>
+    warns?: string[]
+    authToken?: GithubWebhookHandlerOptions['authToken']
+  }) {
+    return createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['pull_request.synchronize'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot[bot]',
+      authType: () => 'app',
+      authToken: input.authToken ?? (async () => 'tok'),
+      fetchImpl: input.fetchImpl,
+      scheduleBackgroundTask: (task) => {
+        input.tasks.push(task)
+      },
+      logger: { info: () => {}, warn: (m) => input.warns?.push(m), error: () => {} },
+      route: (msg) => {
+        input.routed.push(msg)
+      },
+    })
+  }
+
+  function synchronizePayload(headSha = 'abc1234def'): Record<string, unknown> {
+    return {
+      action: 'synchronize',
+      repository: repo(),
+      pull_request: {
+        number: 7,
+        id: 700,
+        title: 'Add widget',
+        head: { ref: 'feature', sha: headSha },
+        base: { ref: 'main' },
+        user: { login: 'alice', id: 10, type: 'User' },
+      },
+      sender: { login: 'alice', id: 10, type: 'User' },
+    }
+  }
+
+  it('does not route when the PR has no bot-authored unresolved threads', async () => {
+    const routed: InboundMessage[] = []
+    const tasks: Array<() => Promise<void>> = []
+    const handler = recheckHandler({
+      fetchImpl: threadsFetch([{ id: 'T_HUMAN', isResolved: false, rootCommentId: 5, login: 'alice', isBot: false }]),
+      routed,
+      tasks,
+    })
+
+    const res = await handler(signedRequest(JSON.stringify(synchronizePayload()), 'pull_request', 'sync-none'))
+
+    expect(res.status).toBe(200)
+    expect(tasks).toHaveLength(1)
+    await tasks[0]?.()
+    expect(routed).toHaveLength(0)
+  })
+
+  it('routes one engaging inbound listing the unresolved bot threads', async () => {
+    const routed: InboundMessage[] = []
+    const tasks: Array<() => Promise<void>> = []
+    const handler = recheckHandler({
+      fetchImpl: threadsFetch([
+        { id: 'T1', isResolved: false, rootCommentId: 100, login: 'typeclaw-bot' },
+        { id: 'T2', isResolved: false, rootCommentId: 200, login: 'typeclaw-bot' },
+        { id: 'T_DONE', isResolved: true, rootCommentId: 300, login: 'typeclaw-bot' },
+      ]),
+      routed,
+      tasks,
+    })
+
+    await handler(signedRequest(JSON.stringify(synchronizePayload('deadbeef999')), 'pull_request', 'sync-some'))
+    await tasks[0]?.()
+
+    expect(routed).toHaveLength(1)
+    const msg = routed[0]!
+    expect(msg.chat).toBe('pr:7')
+    expect(msg.thread).toBe(null)
+    expect(msg.isBotMention).toBe(true)
+    expect(msg.workspace).toBe('acme/project')
+    expect(msg.text).toContain('PR #7')
+    expect(msg.text).toContain('deadbee')
+    expect(msg.text).toContain('100, 200')
+    expect(msg.externalMessageId).toBe('pr-7-recheck-deadbeef999')
+  })
+
+  it('does not route a self-authored synchronize (bot pushed its own PR)', async () => {
+    const routed: InboundMessage[] = []
+    const tasks: Array<() => Promise<void>> = []
+    const handler = recheckHandler({
+      fetchImpl: threadsFetch([{ id: 'T1', isResolved: false, rootCommentId: 100, login: 'typeclaw-bot' }]),
+      routed,
+      tasks,
+    })
+    const payload = synchronizePayload()
+    payload.sender = { login: 'typeclaw-bot[bot]', id: 99, type: 'Bot' }
+
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request', 'sync-self'))
+
+    expect(tasks).toHaveLength(0)
+    expect(routed).toHaveLength(0)
+  })
+
+  it('dedups a redelivered synchronize so the sweep runs once', async () => {
+    const routed: InboundMessage[] = []
+    const tasks: Array<() => Promise<void>> = []
+    const dedup = createDeliveryDedup()
+    const handler = createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup,
+      allowlist: () => ['pull_request.synchronize'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot[bot]',
+      authType: () => 'app',
+      authToken: async () => 'tok',
+      fetchImpl: threadsFetch([{ id: 'T1', isResolved: false, rootCommentId: 100, login: 'typeclaw-bot' }]),
+      scheduleBackgroundTask: (task) => {
+        tasks.push(task)
+      },
+      logger,
+      route: (msg) => {
+        routed.push(msg)
+      },
+    })
+
+    const body = JSON.stringify(synchronizePayload())
+    await handler(signedRequest(body, 'pull_request', 'sync-dup'))
+    await handler(signedRequest(body, 'pull_request', 'sync-dup'))
+
+    expect(tasks).toHaveLength(1)
+  })
+
+  it('warns and does not route when the thread listing fails', async () => {
+    const routed: InboundMessage[] = []
+    const tasks: Array<() => Promise<void>> = []
+    const warns: string[] = []
+    const handler = recheckHandler({
+      fetchImpl: fakeFetch(() => new Response('boom', { status: 500 })),
+      routed,
+      tasks,
+      warns,
+    })
+
+    await handler(signedRequest(JSON.stringify(synchronizePayload()), 'pull_request', 'sync-fail'))
+    await tasks[0]?.()
+
+    expect(routed).toHaveLength(0)
+    expect(warns.some((w) => w.includes('review-thread recheck failed'))).toBe(true)
+  })
+})
+
 describe('createGithubWebhookHandler — allowApprove policy note', () => {
   const baseOptions = (routed: InboundMessage[], allowApprove?: () => boolean): GithubWebhookHandlerOptions => ({
     webhookSecret: 'secret',

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { channelsSchema, STICKY_DEFAULT_WINDOW_MS } from './schema'
+import { channelsSchema, DEFAULT_GITHUB_EVENT_ALLOWLIST, STICKY_DEFAULT_WINDOW_MS } from './schema'
 
 describe('channelsSchema', () => {
   test('parses an empty channels record', () => {
@@ -104,5 +104,11 @@ describe('channelsSchema', () => {
         github: { repos: ['owner/repo'], review: { on: 'closed' } },
       } as unknown as Parameters<typeof channelsSchema.parse>[0]),
     ).toThrow()
+  })
+
+  test('github default eventAllowlist admits pull_request.synchronize (PR-push recheck)', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
+    expect(parsed.github?.eventAllowlist).toEqual([...DEFAULT_GITHUB_EVENT_ALLOWLIST])
+    expect(parsed.github?.eventAllowlist).toContain('pull_request.synchronize')
   })
 })
