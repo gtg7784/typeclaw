@@ -35,6 +35,7 @@ import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import type { LiveSubagentRegistry } from './live-subagents'
+import { sanitizeMessagesForLlmReplay } from './llm-replay-sanitizer'
 import { applyModelRuntimeOverrides } from './model-overrides'
 import { createChannelLookAtTool, lookAtTool } from './multimodal'
 import {
@@ -404,6 +405,21 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+
+  // Layer the replay sanitizer over pi's convertToLlm so a transcript with an
+  // orphaned toolResult (e.g. a torn-down restart turn) can't wedge the session
+  // with an Anthropic 400 on every replay. Runs on every provider call path
+  // that goes through the agent. Honors pi's contract that convertToLlm must
+  // not throw: on any failure it falls back to the unsanitized output.
+  const innerConvertToLlm = session.agent.convertToLlm
+  session.agent.convertToLlm = async (messages) => {
+    const converted = await innerConvertToLlm(messages)
+    try {
+      return sanitizeMessagesForLlmReplay(converted).messages
+    } catch {
+      return converted
+    }
+  }
 
   abortHolder.abort = () => {
     if (session.agent.signal?.aborted !== true) session.agent.abort()
