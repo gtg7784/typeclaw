@@ -301,7 +301,12 @@ export function classifyGithubInbound(
         teamIsBotMember: options?.teamIsBotMember,
       })
     }
-    if (action === 'opened' && reviewOn === 'opened') {
+    // `ready_for_review` (draft→ready) is a fresh review opportunity, so it
+    // reuses the `opened` paths: same review trigger, same title-only awareness
+    // text. The draft skip in classifyOpenedReviewTrigger is a no-op here since
+    // the PR is non-draft once ready — preserving "review when no longer draft".
+    const isOpenLike = action === 'opened' || action === 'ready_for_review'
+    if (isOpenLike && reviewOn === 'opened') {
       const trigger = classifyOpenedReviewTrigger({
         payload,
         pr,
@@ -314,8 +319,7 @@ export function classifyGithubInbound(
     }
     const opener = readUser(pr.user)
     const hasBody = readString(pr, 'body')?.trim() ? true : false
-    const prText =
-      action === 'opened' ? bodyOrOpenedTitle(pr.body, opener, 'PR', number, readString(pr, 'title')) : pr.body
+    const prText = isOpenLike ? bodyOrOpenedTitle(pr.body, opener, 'PR', number, readString(pr, 'title')) : pr.body
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
       prText,
@@ -324,7 +328,7 @@ export function classifyGithubInbound(
       selfLogin,
       pr.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
-      action === 'opened' && !hasBody,
+      isOpenLike && !hasBody,
     )
   }
 
