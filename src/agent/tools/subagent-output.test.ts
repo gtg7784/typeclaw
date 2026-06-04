@@ -307,3 +307,56 @@ describe('createSubagentOutputTool — provenance cap', () => {
     expect((missRes.details as { error?: string }).error).toContain('Unknown task_id')
   })
 })
+
+describe('createSubagentOutputTool — subagent caller ownership scope', () => {
+  const subagentCaller: SessionOrigin = {
+    kind: 'subagent',
+    subagent: 'operator',
+    parentSessionId: 'ses_root',
+    spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+  }
+
+  test('a subagent caller can read a child it spawned (live.parentSessionId === callerSessionId)', async () => {
+    const registry = new LiveSubagentRegistry()
+    registry.register(makeLive({ parentSessionId: 'ses_operator', spawnedByRole: 'owner' }))
+    const tool = createSubagentOutputTool({
+      liveRegistry: registry,
+      getOrigin: () => subagentCaller,
+      permissions: capPermissions(),
+      callerSessionId: 'ses_operator',
+    })
+
+    const res = await tool.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    expect((res.details as { ok: boolean }).ok).toBe(true)
+  })
+
+  test('a subagent caller cannot read a sibling/parent-branch run it did not spawn', async () => {
+    const registry = new LiveSubagentRegistry()
+    registry.register(makeLive({ parentSessionId: 'ses_other_branch', spawnedByRole: 'owner' }))
+    const tool = createSubagentOutputTool({
+      liveRegistry: registry,
+      getOrigin: () => subagentCaller,
+      permissions: capPermissions(),
+      callerSessionId: 'ses_operator',
+    })
+
+    const res = await tool.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    const details = res.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('not owned by caller')
+  })
+
+  test('a main-session owner caller keeps global visibility (no ownership scope)', async () => {
+    const registry = new LiveSubagentRegistry()
+    registry.register(makeLive({ parentSessionId: 'ses_other_branch', spawnedByRole: 'member' }))
+    const tool = createSubagentOutputTool({
+      liveRegistry: registry,
+      getOrigin: () => ownerOrigin,
+      permissions: capPermissions(),
+      callerSessionId: 'ses_main',
+    })
+
+    const res = await tool.execute('c', { task_id: 'bg_o1' }, undefined, undefined, ctx)
+    expect((res.details as { ok: boolean }).ok).toBe(true)
+  })
+})

@@ -100,7 +100,7 @@ There are three delegation modes. Pick deliberately.
 [REQUEST]: Concrete instructions — what to find/do/produce, what format, what to SKIP.
 \`\`\`
 
-**Anti-patterns.** Don't fire more than 5 subagents per turn, spawn for a known answer or single-file lookup, poll \`subagent_output\` in a loop (end your turn; the reminder wakes you), or ask a research subagent to make decisions — they find and report, you decide. Subagents cannot recursively spawn subagents.
+**Anti-patterns.** Don't fire more than 5 subagents per turn, spawn for a known answer or single-file lookup, poll \`subagent_output\` in a loop (end your turn; the reminder wakes you), or ask a research subagent to make decisions — they find and report, you decide. Most subagents are leaves; only \`operator\` and \`reviewer\` may delegate one level further, and the chain is hard-capped regardless.
 
 ## Safety
 

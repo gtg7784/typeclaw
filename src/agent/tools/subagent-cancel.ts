@@ -15,10 +15,11 @@ export type CreateSubagentCancelToolOptions = {
   liveRegistry: LiveSubagentRegistry
   getOrigin: () => SessionOrigin | undefined
   permissions?: PermissionService
+  callerSessionId?: string
 }
 
 export function createSubagentCancelTool(options: CreateSubagentCancelToolOptions) {
-  const { liveRegistry, getOrigin, permissions } = options
+  const { liveRegistry, getOrigin, permissions, callerSessionId } = options
 
   return defineTool({
     name: 'subagent_cancel',
@@ -40,6 +41,7 @@ export function createSubagentCancelTool(options: CreateSubagentCancelToolOption
         liveRegistry,
         taskId: params.task_id,
         permission: 'subagent.cancel',
+        ...(callerSessionId !== undefined ? { callerSessionId } : {}),
       })
       if (!access.ok) {
         return errorResult(access.message)

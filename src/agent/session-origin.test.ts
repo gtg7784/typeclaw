@@ -1,6 +1,65 @@
 import { describe, expect, test } from 'bun:test'
 
-import { renderSessionOrigin, type ChannelParticipant } from './session-origin'
+import {
+  MAX_SUBAGENT_DEPTH,
+  renderSessionOrigin,
+  subagentDepth,
+  type ChannelParticipant,
+  type SessionOrigin,
+} from './session-origin'
+
+describe('subagentDepth', () => {
+  test('non-subagent origins are depth 0', () => {
+    expect(subagentDepth(undefined)).toBe(0)
+    expect(subagentDepth({ kind: 'tui', sessionId: 'ses_root' })).toBe(0)
+    expect(subagentDepth({ kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null })).toBe(0)
+  })
+
+  test('a subagent spawned by a root session is depth 1', () => {
+    const origin: SessionOrigin = {
+      kind: 'subagent',
+      subagent: 'operator',
+      parentSessionId: 'ses_root',
+      spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+    }
+    expect(subagentDepth(origin)).toBe(1)
+  })
+
+  test('a subagent spawned by another subagent is depth 2', () => {
+    const origin: SessionOrigin = {
+      kind: 'subagent',
+      subagent: 'operator',
+      parentSessionId: 'ses_child',
+      spawnedByOrigin: {
+        kind: 'subagent',
+        subagent: 'reviewer',
+        parentSessionId: 'ses_root',
+        spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+      },
+    }
+    expect(subagentDepth(origin)).toBe(MAX_SUBAGENT_DEPTH)
+  })
+
+  test('a truncated chain (serialized origin dropped spawnedByOrigin) fails closed at the cap', () => {
+    // A subagent origin with no ancestry could be a root-spawned child OR a
+    // truncated grandchild; since we cannot tell, fail closed at the cap so it
+    // cannot earn an extra spawn it may not be entitled to.
+    const origin: SessionOrigin = {
+      kind: 'subagent',
+      subagent: 'operator',
+      parentSessionId: 'ses_child',
+    }
+    expect(subagentDepth(origin)).toBe(MAX_SUBAGENT_DEPTH)
+  })
+
+  test('a cyclic ancestry is capped instead of looping forever', () => {
+    const origin = { kind: 'subagent', subagent: 'loop', parentSessionId: 'ses_x' } as SessionOrigin & {
+      spawnedByOrigin?: SessionOrigin
+    }
+    origin.spawnedByOrigin = origin
+    expect(subagentDepth(origin)).toBeLessThanOrEqual(MAX_SUBAGENT_DEPTH + 2)
+  })
+})
 
 describe('renderSessionOrigin', () => {
   test('TUI origin tells the agent the operator is attached', () => {

@@ -7,7 +7,7 @@ import type { PermissionService } from '@/permissions'
 import type { Stream } from '@/stream'
 
 import { type LiveSubagentRegistry, type SubagentCompletion } from '../live-subagents'
-import type { SessionOrigin } from '../session-origin'
+import { MAX_SUBAGENT_DEPTH, type SessionOrigin, subagentDepth } from '../session-origin'
 import { type CreateSessionForSubagent, type Subagent, type SubagentRegistry, startSubagent } from '../subagents'
 
 export const SPAWN_TASK_ID_PREFIX = 'bg_'
@@ -94,6 +94,16 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       }
       if (!hasPermissionForSubagent(permissions, origin, params.subagent_type, subagent)) {
         return errorResult('subagent.spawn denied: insufficient permissions')
+      }
+      // Fail closed past the chain-length ceiling. The tool is present on
+      // subagent sessions (operator/reviewer can delegate), but a session
+      // already at MAX_SUBAGENT_DEPTH cannot spawn a deeper one — this is the
+      // execute-time guard against runaway recursion, robust to tool-surface
+      // drift and serialized-origin resumes.
+      if (subagentDepth(origin) >= MAX_SUBAGENT_DEPTH) {
+        return errorResult(
+          `subagent.spawn denied: maximum delegation depth (${MAX_SUBAGENT_DEPTH}) reached; a subagent at this depth cannot spawn further subagents`,
+        )
       }
 
       const taskId = generateTaskId()
@@ -224,7 +234,8 @@ export function spawnSubagentDescription(registry: SubagentRegistry): string {
     `When run_in_background=true (preferred for long-running work), the tool returns a task_id immediately and the subagent runs concurrently — ` +
     `you will receive a system-reminder when it completes; do NOT poll subagent_output. ` +
     `When run_in_background=false (default), the tool blocks and returns the subagent's final message synchronously. ` +
-    `Subagents cannot recursively spawn other subagents.`
+    `The delegation chain is depth-limited: a subagent you spawn may itself delegate once more, but no deeper — ` +
+    `keep your delegation tree shallow.`
   )
 }
 

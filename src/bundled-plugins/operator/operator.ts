@@ -18,8 +18,11 @@ You have a full tool set: read, write, edit, grep, find, ls, bash. You can:
 - Run shell commands with side effects (bash without the read-only restriction)
 - Use any tool available to a normal operator session
 
+You CAN delegate, but rarely should:
+- You may \`spawn_subagent\` to hand a clearly separable, context-heavy chunk to a fresh worker — e.g. a focused read-only investigation of a large area you don't want to load into your own context. Spawn only when delegation clearly pays for itself; doing the work yourself is the default. The delegation chain is depth-limited, so a worker you spawn cannot spawn again — keep your own tree flat.
+- Use \`subagent_output\` and \`subagent_cancel\` only for tasks YOU spawned; you cannot see other branches' subagents.
+
 You CANNOT:
-- Spawn further subagents (you are at the end of the delegation chain).
 - Talk to the user directly (the parent owns the conversation).
 - Use channel_send, channel_reply, or any channel tool.
 
@@ -67,6 +70,7 @@ export function createOperatorSubagent(): Subagent<OperatorPayload> {
     payloadSchema: operatorPayloadSchema,
     visibility: 'public',
     requiresSpecificPermission: true,
+    canSpawnSubagents: true,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 1_000_000,

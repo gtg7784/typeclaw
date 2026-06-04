@@ -69,6 +69,36 @@ export type SessionOrigin =
       triggeredBy?: SessionOrigin
     }
 
+// Hard ceiling on the subagent delegation chain. Bounds chain LENGTH, not
+// fan-out breadth: the deepest reachable chain is main (depth 0) →
+// operator/reviewer (depth 1) → nested worker (depth 2). `spawn_subagent`
+// refuses to spawn from a session already at this depth.
+export const MAX_SUBAGENT_DEPTH = 2
+
+// Counts subagent links from the root by walking the `spawnedByOrigin`
+// ancestry. A non-subagent (or undefined) origin is depth 0; each nested
+// subagent origin adds one. Fails CLOSED on ambiguous ancestry: if a subagent
+// origin has no `spawnedByOrigin` (the serialized path in
+// parseSpawnedByOriginJson drops it), the true depth is unknowable, so we
+// return MAX_SUBAGENT_DEPTH rather than assume it sits at the root — a
+// truncated grandchild must not read as a child and earn an extra spawn. A
+// cyclic chain is bounded by the same cap.
+export function subagentDepth(origin: SessionOrigin | undefined): number {
+  let depth = 0
+  let current: SessionOrigin | undefined = origin
+  while (current !== undefined && current.kind === 'subagent') {
+    depth += 1
+    if (current.spawnedByOrigin === undefined) {
+      return MAX_SUBAGENT_DEPTH
+    }
+    if (depth >= MAX_SUBAGENT_DEPTH) {
+      return depth
+    }
+    current = current.spawnedByOrigin
+  }
+  return depth
+}
+
 export const PARTICIPANTS_TOP_K = 10
 export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 

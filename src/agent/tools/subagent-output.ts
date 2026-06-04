@@ -44,11 +44,12 @@ export type CreateSubagentOutputToolOptions = {
   liveRegistry: LiveSubagentRegistry
   getOrigin: () => SessionOrigin | undefined
   permissions?: PermissionService
+  callerSessionId?: string
   now?: () => number
 }
 
 export function createSubagentOutputTool(options: CreateSubagentOutputToolOptions) {
-  const { liveRegistry, getOrigin, permissions, now = () => Date.now() } = options
+  const { liveRegistry, getOrigin, permissions, callerSessionId, now = () => Date.now() } = options
 
   return defineTool({
     name: SUBAGENT_OUTPUT_TOOL_NAME,
@@ -73,6 +74,7 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
         liveRegistry,
         taskId: params.task_id,
         permission: 'subagent.output',
+        ...(callerSessionId !== undefined ? { callerSessionId } : {}),
       })
       if (!access.ok) {
         return errorResult(access.message)

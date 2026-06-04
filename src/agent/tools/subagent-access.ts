@@ -13,26 +13,45 @@ export type AuthorizeLiveSubagentAccessArgs = {
   liveRegistry: LiveSubagentRegistry
   taskId: string
   permission: SubagentAccessPermission
+  // The caller's own session id. When the caller is itself a subagent, access
+  // is scoped to subagents IT spawned (live.parentSessionId === callerSessionId)
+  // so a nested subagent cannot read or cancel siblings or parent-branch runs.
+  // Omitted by main-session callers, which keep the role-severity cap only.
+  callerSessionId?: string
 }
 
 // Authorizes a single subagent_output/subagent_cancel call and resolves the
-// live entry in one place so the two tools cannot drift. Caps access to the
-// requester's role: the caller must hold the permission AND resolve to a role
-// at least as high as the role that spawned the subagent.
+// live entry in one place so the two tools cannot drift. Two authorization
+// modes, both requiring the base permission first:
+//   - SUBAGENT caller: scoped to runs it spawned (live.parentSessionId ===
+//     callerSessionId). Ownership is the authorization; the role cap is skipped.
+//   - MAIN-SESSION caller: capped to the requester's role — must resolve to a
+//     role at least as high as the role that spawned the subagent.
 //
 // The ordering closes an existence oracle: the task-independent base-permission
 // check runs BEFORE any registry lookup, and for non-owner callers an absent
 // task, a capped task, and a task with missing provenance all collapse to one
 // identical denial — so a lower-role caller cannot probe which task IDs are
 // live. Only `owner` (the trust root, which outranks every spawner) learns the
-// truthful `Unknown task_id` for a genuine miss. The cap fails closed.
+// truthful `Unknown task_id` for a genuine miss. Both modes fail closed.
 export function authorizeLiveSubagentAccess(args: AuthorizeLiveSubagentAccessArgs): SubagentAccessResult {
-  const { permissions, origin, liveRegistry, taskId, permission } = args
+  const { permissions, origin, liveRegistry, taskId, permission, callerSessionId } = args
+
+  // A subagent caller may only touch subagents it spawned itself — never a
+  // sibling's or its parent's run. For subagent callers this ownership check
+  // REPLACES the role-severity cap (see the ownershipScoped branch below);
+  // main-session callers (subagent origin absent) skip it and fall through to
+  // the role cap, preserving the operator's global visibility over every spawn.
+  const ownershipScoped = origin?.kind === 'subagent'
+  const opaqueOwnershipDenial = `${permission} denied: unknown task_id or not owned by caller`
 
   if (permissions === undefined) {
     const live = liveRegistry.get(taskId)
     if (live === undefined) {
       return { ok: false, message: `Unknown task_id: ${taskId}.` }
+    }
+    if (ownershipScoped && live.parentSessionId !== callerSessionId) {
+      return { ok: false, message: opaqueOwnershipDenial }
     }
     return { ok: true, live }
   }
@@ -43,6 +62,22 @@ export function authorizeLiveSubagentAccess(args: AuthorizeLiveSubagentAccessArg
 
   const requesterRole = permissions.resolveRole(origin)
   const accessAll = requesterRole === 'owner'
+
+  // For a subagent caller, ownership of the run IS the authorization: having
+  // passed the base permission check above, it may manage exactly the children
+  // it spawned. The role-severity cap (below) does NOT apply — a deep subagent
+  // that inherited a low role from, say, a guest channel turn must still be
+  // able to read/cancel its own children; the cap is meant to stop a low-role
+  // MAIN session from reaching a higher-role-spawned run, which ownership
+  // already prevents here. A non-owning subagent caller fails closed.
+  if (ownershipScoped) {
+    const live = liveRegistry.get(taskId)
+    if (live === undefined || live.parentSessionId !== callerSessionId) {
+      return { ok: false, message: opaqueOwnershipDenial }
+    }
+    return { ok: true, live }
+  }
+
   const opaqueDenial = `${permission} denied: unknown task_id or insufficient role`
 
   const live = liveRegistry.get(taskId)

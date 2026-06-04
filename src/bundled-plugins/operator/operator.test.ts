@@ -13,7 +13,6 @@ describe('operator subagent — load-bearing prompt phrases', () => {
       'What changed',
       'What you observed',
       'Do NOT commit secrets',
-      'Spawn further subagents',
       'cannot proceed',
       'workspace in a broken state',
       'AGENTS.md',
@@ -31,9 +30,10 @@ describe('operator subagent — load-bearing prompt phrases', () => {
     expect(OPERATOR_SYSTEM_PROMPT).toContain("What's next.")
   })
 
-  test('prompt forbids recursive spawn (defense-in-depth alongside the tool-presence gate)', () => {
+  test('prompt describes depth-limited delegation (operator may spawn one level, not recurse)', () => {
     const lower = OPERATOR_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toContain('spawn further subagents')
+    expect(lower).toContain('spawn_subagent')
+    expect(lower).toContain('depth-limited')
   })
 
   test('prompt forbids talking to the user directly (Mode B contract: parent owns the conversation)', () => {
@@ -52,6 +52,11 @@ describe('operator subagent declaration', () => {
   test('declares requiresSpecificPermission=true (member with generic subagent.spawn cannot spawn it)', () => {
     const sub = createOperatorSubagent()
     expect(sub.requiresSpecificPermission).toBe(true)
+  })
+
+  test('declares canSpawnSubagents=true (orchestration tools are wired into its session)', () => {
+    const sub = createOperatorSubagent()
+    expect(sub.canSpawnSubagents).toBe(true)
   })
 
   test('uses the default model profile (needs reasoning for multi-step work, not the fast tier)', () => {

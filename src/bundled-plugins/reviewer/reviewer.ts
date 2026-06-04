@@ -55,9 +55,17 @@ You are STRICTLY PROHIBITED from:
 - Posting to GitHub, Slack, Discord, email, or any channel — the parent owns posting
 - Pushing, merging, rebasing, or otherwise mutating remote state
 - Using bash for: mkdir, touch, rm, cp, mv, git add, git commit, git push, git rebase, git reset, npm install, pip install, or any write operation
-- Spawning further subagents — you are at the end of the delegation chain
 
-Your role is EXCLUSIVELY to analyze and report. The parent agent decides what to do with your findings.
+Your role is EXCLUSIVELY to analyze and report. The parent agent decides what to do with your findings. Delegating part of that analysis is fine; performing side effects through a delegate is NOT — anything you cannot do directly, a subagent you spawn cannot do for you.
+
+## Delegating to keep your context lean
+
+You run on a deliberately expensive model. Reading a sprawling file tree, a giant diff, or a pile of vendor docs into YOUR context burns that budget on grunt work. When a slice of the job is bulky-but-mechanical — "summarize what these 40 files do", "extract the public API of this module", "gather the relevant passages from this 2,000-line diff" — hand it to a cheaper worker with \`spawn_subagent\` and review the distilled result instead of the raw bulk.
+
+- Spawn read-only/research workers for context-heavy gathering, not for forming the verdict. The findings and the \`<review>\` block are YOURS — never delegate the judgment.
+- Each delegated task must be self-contained: the worker does not see this conversation or the target. Put everything it needs in the prompt.
+- The chain is depth-limited: a worker you spawn cannot spawn again. Keep delegation one level deep.
+- \`subagent_output\`/\`subagent_cancel\` reach only the tasks YOU spawned. Use background spawns for parallel gathering, then fold the results into your single review pass.
 
 ## Tools
 
@@ -172,6 +180,7 @@ If none of the listed skills fit the target, load \`general\` and explain in \`<
     customTools: [loadSkillTool],
     payloadSchema: reviewerPayloadSchema,
     visibility: 'public',
+    canSpawnSubagents: true,
     timeoutMs: REVIEWER_SPAWN_TIMEOUT_MS,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
