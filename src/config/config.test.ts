@@ -4,6 +4,8 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
+
 import {
   buildConfigMigrationCommitMessage,
   configSchema,
@@ -1105,6 +1107,118 @@ describe('migrateLegacyConfigShape', () => {
     expect(result.changed).toBe(false)
     expect(result.applied).toEqual([])
   })
+
+  test('strips a seeded channels.github.eventAllowlist so it re-tracks the shipped default', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(channels.github).toEqual({ repos: ['acme/widgets'] })
+    expect(result.applied).toEqual([{ kind: 'drop-github-seeded-event-allowlist' }])
+  })
+
+  // Historical on-disk snapshots seeded by older releases. Inlined verbatim
+  // (not imported) so a future edit to the registry can't silently make these
+  // assertions pass against the wrong list. See SEEDED_GITHUB_EVENT_ALLOWLISTS.
+  const GITHUB_ALLOWLIST_V1 = [
+    'issue_comment.created',
+    'pull_request_review_comment.created',
+    'discussion_comment.created',
+    'issues.opened',
+    'pull_request.opened',
+    'discussion.created',
+    'pull_request_review.submitted',
+  ]
+  const GITHUB_ALLOWLIST_V2 = [
+    'issue_comment.created',
+    'pull_request_review_comment.created',
+    'discussion_comment.created',
+    'issues.opened',
+    'pull_request.opened',
+    'pull_request.review_requested',
+    'pull_request.review_request_removed',
+    'discussion.created',
+    'pull_request_review.submitted',
+  ]
+
+  test.each([
+    ['v1 (0.5.1–0.10.0, 7 events)', GITHUB_ALLOWLIST_V1],
+    ['v2 (0.11.0+, 9 events)', GITHUB_ALLOWLIST_V2],
+  ])('strips an older seeded github eventAllowlist: %s', (_label, seeded) => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...seeded] } },
+    })
+    expect(result.changed).toBe(true)
+    const channels = (result.json as Record<string, unknown>).channels as Record<string, Record<string, unknown>>
+    expect(channels.github).toEqual({ repos: ['acme/widgets'] })
+    expect(result.applied).toEqual([{ kind: 'drop-github-seeded-event-allowlist' }])
+  })
+
+  test('preserves a customized list even when it derives from an older seeded default', () => {
+    const customizedFromV1 = [...GITHUB_ALLOWLIST_V1, 'release.published']
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { eventAllowlist: customizedFromV1 } },
+    })
+    expect(result.changed).toBe(false)
+    const channels = (result.json as Record<string, unknown>).channels as Record<string, Record<string, unknown>>
+    expect(channels.github?.eventAllowlist).toEqual(customizedFromV1)
+  })
+
+  test('preserves a user-customized github eventAllowlist (any deviation from a seeded default)', () => {
+    const customized = [...DEFAULT_GITHUB_EVENT_ALLOWLIST, 'release.published']
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: customized } },
+    })
+    expect(result.changed).toBe(false)
+    const json = result.json as Record<string, unknown>
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(channels.github?.eventAllowlist).toEqual(customized)
+  })
+
+  test('treats a reordered seeded allowlist as a customization (deep-equal is order-sensitive)', () => {
+    const reordered = [
+      DEFAULT_GITHUB_EVENT_ALLOWLIST[1],
+      DEFAULT_GITHUB_EVENT_ALLOWLIST[0],
+      ...DEFAULT_GITHUB_EVENT_ALLOWLIST.slice(2),
+    ]
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { eventAllowlist: reordered } },
+    })
+    expect(result.changed).toBe(false)
+  })
+
+  test('is a no-op when github channel has no eventAllowlist (already canonical)', () => {
+    const input = { models: { default: VALID_MODEL }, channels: { github: { repos: ['acme/widgets'] } } }
+    const result = migrateLegacyConfigShape(input)
+    expect(result.changed).toBe(false)
+    expect(result.json).toBe(input)
+  })
+
+  test('seeded-allowlist strip is idempotent: re-running on the migrated shape does nothing', () => {
+    const first = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
+    })
+    const second = migrateLegacyConfigShape(first.json)
+    expect(second.changed).toBe(false)
+    expect(second.json).toEqual(first.json)
+  })
+
+  test('migrated github config re-parses through configSchema with the schema default applied', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
+    })
+    const parsed = configSchema.parse(result.json)
+    expect(parsed.channels.github?.eventAllowlist).toEqual([...DEFAULT_GITHUB_EVENT_ALLOWLIST])
+  })
 })
 
 describe('buildConfigMigrationCommitMessage', () => {
@@ -1147,6 +1261,12 @@ describe('buildConfigMigrationCommitMessage', () => {
     ])
     expect(msg).toContain('warning:')
     expect(msg).toContain('channel:C123')
+  })
+
+  test('names the github seeded-allowlist drop step', () => {
+    const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-github-seeded-event-allowlist' }])
+    expect(msg).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
+    expect(msg).toContain('re-tracks the shipped default')
   })
 })
 

@@ -314,7 +314,7 @@ describe('runAddChannel', () => {
     ])
   })
 
-  test('adds github channel: writes typeclaw.json (incl. repos[] and event allowlist), secrets.json, and match rules', async () => {
+  test('adds github channel: writes typeclaw.json (incl. repos[], omitting the defaulted event allowlist), secrets.json, and match rules', async () => {
     const events: AddChannelStepEvent[] = []
     const fetchImpl = recordingGithubFetch()
 
@@ -342,7 +342,9 @@ describe('runAddChannel', () => {
     }
     expect(cfg.channels?.github?.webhookUrl).toBe('https://agent.example.com/gh')
     expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
-    expect(cfg.channels?.github?.eventAllowlist).toContain('issue_comment.created')
+    // eventAllowlist is intentionally not persisted so the config tracks the
+    // shipped default across releases; the schema fills it at parse time.
+    expect(cfg.channels?.github?.eventAllowlist).toBeUndefined()
     expect(cfg.tunnels).toEqual([
       {
         name: 'github-webhook',

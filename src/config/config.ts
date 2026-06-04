@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
-import { channelsSchema } from '@/channels/schema'
+import { channelsSchema, SEEDED_GITHUB_EVENT_ALLOWLISTS } from '@/channels/schema'
 import { commitSystemFileSync } from '@/git/system-commit'
 import { rolesConfigSchema } from '@/permissions/schema'
 import { secretFieldSchema } from '@/secrets/resolve'
@@ -810,6 +810,7 @@ export type MigrationStep =
   | { kind: 'strip-permissions-gate-channel-respond' }
   | { kind: 'model-to-models'; ref: string }
   | { kind: 'drop-stale-model'; ref: string }
+  | { kind: 'drop-github-seeded-event-allowlist' }
 
 export type MigrationResult = { json: unknown; changed: boolean; applied: MigrationStep[] }
 
@@ -830,13 +831,15 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
   // silently — same precedence rule as the dockerfile/gitignore migrations.
   const hasLegacyModel = 'model' in obj && !('models' in obj) && typeof obj.model === 'string'
   const hasStaleModelAlongsideModels = 'model' in obj && 'models' in obj
+  const hasSeededGithubEventAllowlist = isSeededGithubEventAllowlist(obj)
   if (
     !hasLegacyDockerfile &&
     !hasLegacyGitignore &&
     !channelsAllowMigration.found &&
     !hasLegacyGateChannelRespond &&
     !hasLegacyModel &&
-    !hasStaleModelAlongsideModels
+    !hasStaleModelAlongsideModels &&
+    !hasSeededGithubEventAllowlist
   ) {
     return { json, changed: false, applied: [] }
   }
@@ -897,7 +900,41 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
     delete next.model
     applied.push({ kind: 'drop-stale-model', ref })
   }
+  if (hasSeededGithubEventAllowlist) {
+    dropSeededGithubEventAllowlist(next)
+    applied.push({ kind: 'drop-github-seeded-event-allowlist' })
+  }
   return { json: next, changed: true, applied }
+}
+
+// True when channels.github.eventAllowlist deep-equals an allowlist that
+// `channel add` / `init` has previously seeded verbatim. Such a value is
+// indistinguishable from "the default at that time", so stripping it lets the
+// config re-track the shipped default. A user who hand-edited to any other set
+// (added/removed/reordered an event) fails this check and is preserved.
+function isSeededGithubEventAllowlist(obj: Record<string, unknown>): boolean {
+  const github = isPlainObject(obj.channels) ? obj.channels.github : undefined
+  if (!isPlainObject(github)) return false
+  const list = github.eventAllowlist
+  if (!Array.isArray(list)) return false
+  return SEEDED_GITHUB_EVENT_ALLOWLISTS.some((seeded) => arraysEqual(list, seeded))
+}
+
+function dropSeededGithubEventAllowlist(next: Record<string, unknown>): void {
+  const channels = next.channels
+  if (!isPlainObject(channels)) return
+  const github = channels.github
+  if (!isPlainObject(github)) return
+  const { eventAllowlist: _dropped, ...rest } = github
+  next.channels = { ...channels, github: rest }
+}
+
+function arraysEqual(a: readonly unknown[], b: readonly unknown[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 // Builds a meaningful one-line git commit subject for a typeclaw.json
@@ -949,6 +986,8 @@ function shortStepLabel(step: MigrationStep): string {
       return 'lift model → models.default'
     case 'drop-stale-model':
       return 'drop stale legacy model alongside models'
+    case 'drop-github-seeded-event-allowlist':
+      return 'drop seeded channels.github.eventAllowlist'
   }
 }
 
@@ -972,6 +1011,8 @@ function describeStep(step: MigrationStep): string {
       return step.ref !== ''
         ? `drop stale top-level model (${step.ref}) — models block takes precedence`
         : 'drop stale top-level model — models block takes precedence'
+    case 'drop-github-seeded-event-allowlist':
+      return 'drop seeded channels.github.eventAllowlist so it re-tracks the shipped default'
   }
 }
 

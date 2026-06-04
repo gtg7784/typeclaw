@@ -1768,7 +1768,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
         for: { kind: 'channel', name: 'github' },
       },
     ])
-    expect(Array.isArray(config.channels?.github?.eventAllowlist)).toBe(true)
+    expect(config.channels?.github?.eventAllowlist).toBeUndefined()
     expect(config.roles?.member?.match).toContain('github:acme/repo-a')
 
     const secrets = await readSecrets(root)
