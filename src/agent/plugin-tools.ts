@@ -465,8 +465,8 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
         await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId, bashEnvOverlay)
       }
 
-      if ((tool.name === 'write' || tool.name === 'edit') && opts.permissions !== undefined) {
-        await applyTmpWriteRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
+      if (TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined) {
+        await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
       }
 
       const result = await bashEnvStore.run(bashEnvOverlay, () =>
@@ -570,14 +570,21 @@ async function applyBashSandbox(
   mutableArgs.command = commandString
 }
 
+// The builtin file tools that take a single filesystem `path` arg. For a
+// sandboxed role they all run UNSANDBOXED in the main process (only bash is
+// bwrap-wrapped), so each must apply the same /tmp -> session-dir mapping that
+// applyBashSandbox binds for bash — otherwise a `read` of /tmp/foo hits the
+// real container /tmp while sandboxed bash wrote the session backing dir.
+const TMP_REDIRECT_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls'])
+
 // Sandboxed roles read /tmp through bwrap's per-session bind (applyBashSandbox),
-// but write/edit run unsandboxed against the real container /tmp. Without this
-// redirect a guest/member write to /tmp/foo would land on the real container
-// /tmp while its later `gh --input /tmp/foo` reads the bound session dir — two
-// different files. Rewriting the on-disk path to the same session backing dir
-// makes both layers resolve /tmp/foo to one file. Unsandboxed roles (empty
-// masks) are left untouched: their bash already shares the real container /tmp.
-async function applyTmpWriteRedirect(
+// but the path-based file tools run unsandboxed against the real container /tmp.
+// Without this redirect a guest/member that touches /tmp/foo through bash (bound
+// to the session dir) and through a file tool (real /tmp) would see two
+// different files. Rewriting the file tool's on-disk path to the same session
+// backing dir makes every layer resolve /tmp/foo to one file. Unsandboxed roles
+// (empty masks) are left untouched: their bash already shares the real /tmp.
+async function applyTmpPathRedirect(
   mutableArgs: Record<string, unknown>,
   permissions: PermissionService,
   origin: SessionOrigin | undefined,
