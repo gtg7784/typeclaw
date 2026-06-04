@@ -143,12 +143,25 @@ async function peekSession(
   let bytesRead = 0
   for await (const event of replayJsonl(path, onWarn !== undefined ? { onWarn } : {})) {
     if (event.cat === 'meta' && origin === null) origin = event.origin
-    if (event.cat === 'user' && firstPrompt === null) firstPrompt = event.text
+    if (event.cat === 'user' && firstPrompt === null) firstPrompt = previewPrompt(event.text)
     if (origin !== null && firstPrompt !== null) break
     bytesRead += approximateSize(event)
     if (bytesRead > PREVIEW_MAX_BYTES) break
   }
   return { origin, firstPrompt }
+}
+
+// Strips runtime-injected blocks that lead every user turn (the per-turn
+// <current-time> anchor; the <hatching> bootstrap ritual) so the session-list
+// hint shows the real prompt. Returns null when nothing meaningful remains —
+// e.g. a turn that was only the time anchor — so the picker keeps scanning for
+// the next user message instead of showing a blank hint.
+function previewPrompt(text: string): string | null {
+  const stripped = text
+    .replace(/<current-time>[\s\S]*?<\/current-time>\s*/g, '')
+    .replace(/<hatching>[\s\S]*?<\/hatching>\s*/g, '')
+    .trim()
+  return stripped.length > 0 ? stripped : null
 }
 
 function approximateSize(event: { ts: number }): number {
