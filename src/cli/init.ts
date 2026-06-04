@@ -1184,6 +1184,7 @@ async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['c
       { value: 'pat', label: 'Fine-grained personal access token' },
       { value: 'app', label: 'GitHub App installation token (recommended)' },
     ],
+    initialValue: 'app',
   })
   if (isCancel(authType)) return back()
   const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()

@@ -631,6 +631,7 @@ async function promptGithubCredentials(cwd: string): Promise<{
       { value: 'pat', label: 'Fine-grained personal access token' },
       { value: 'app', label: 'GitHub App installation token (recommended)' },
     ],
+    initialValue: 'app',
   })
   if (isCancel(authType)) {
     cancel('Aborted.')
