@@ -109,6 +109,42 @@ describe('listSessions', () => {
     expect(sessions[0]?.firstPrompt).toBeNull()
   })
 
+  test('subagent with a machine payload as its first message → firstPrompt is null (no preamble noise)', async () => {
+    const payload = `Parent session: ${UUID_B}\nTranscript file: /agent/sessions/x.jsonl\nDaily stream file: /agent/memory/streams/today.jsonl`
+    await writeSession(
+      `2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`,
+      [metaLine({ kind: 'subagent', subagent: 'memory-logger', parentSessionId: UUID_B }), userLine(payload)],
+      1000,
+    )
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions[0]?.firstPrompt).toBeNull()
+  })
+
+  test('strips the injected <current-time> anchor from the first-prompt hint', async () => {
+    const text = '<current-time>2026-06-04T22:36:14+09:00 (Asia/Seoul, Thursday)</current-time>\n\nfix the parser'
+    await writeSession(`2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine(text)], 1000)
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions[0]?.firstPrompt).toBe('fix the parser')
+  })
+
+  test('a turn that is only the time anchor falls through to the next real user message', async () => {
+    const anchorOnly = '<current-time>2026-06-04T22:36:14+09:00 (Asia/Seoul, Thursday)</current-time>'
+    await writeSession(
+      `2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`,
+      [metaLine({ kind: 'tui' }), userLine(anchorOnly, 1000), userLine(`${anchorOnly}\n\nthe real ask`, 2000)],
+      1000,
+    )
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions[0]?.firstPrompt).toBe('the real ask')
+  })
+
+  test('strips the <hatching> bootstrap block from the first-prompt hint', async () => {
+    const text = '<hatching>secret ritual</hatching>\n\nactual first message'
+    await writeSession(`2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine(text)], 1000)
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions[0]?.firstPrompt).toBe('actual first message')
+  })
+
   test('channel origin with names preserved in summary', async () => {
     await writeSession(
       `2026-05-22T00-00-00-000Z_${UUID_A}.jsonl`,

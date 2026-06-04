@@ -11,9 +11,9 @@ describe('originLabel', () => {
     expect(originLabel({ kind: 'cron', jobId: 'daily-backup', jobKind: 'prompt' })).toBe('Cron daily-backup (prompt)')
   })
 
-  test('subagent origin includes name and shortened parent id', () => {
+  test('subagent origin shows the subagent name without the redundant parent id', () => {
     expect(originLabel({ kind: 'subagent', subagent: 'memory-logger', parentSessionId: 'ses_abcdef1234567890' })).toBe(
-      'Subagent memory-logger ← ses_abcdef12',
+      'Subagent memory-logger',
     )
   })
 

@@ -16,8 +16,26 @@ export { replayJsonl } from './replay'
 export { streamLive } from './live'
 export { parseDuration, parseFilter } from './types'
 export type { InspectCategory, InspectEvent, InspectFilter } from './types'
-export { runInspectLoop } from './loop'
-export type { RunInspectLoopOptions } from './loop'
+export { runInspectLoop, runViewerLoop } from './loop'
+export type {
+  OpenItem,
+  OpenItemContext,
+  RunInspectLoopOptions,
+  RunViewerLoopOptions,
+  SelectItem,
+  TailController,
+} from './loop'
+export type { ViewerItem } from './item'
+export { isWritable, itemKey } from './item'
+export { listViewerItems } from './item-list'
+export type { ListViewerItemsOptions, ViewerList } from './item-list'
+export { openViewerItem } from './open-item'
+export type { OpenViewerDeps } from './open-item'
+export { runTuiViewer } from './tui-item'
+export type { RunTuiViewerOptions } from './tui-item'
+export { streamLogs } from './logs-item'
+export { createTranscriptView } from './transcript-view'
+export type { TranscriptViewOptions, TranscriptViewOutcome } from './transcript-view'
 
 export type RunInspectOptions = {
   agentDir: string
@@ -51,7 +69,7 @@ export type LiveSourceFactory = (opts: {
 }) => AsyncIterable<InspectEvent>
 
 export type RunInspectResult =
-  | { ok: true; exitCode: 0; escToPicker?: boolean }
+  | { ok: true; exitCode: number; escToPicker?: boolean }
   | { ok: false; exitCode: number; reason: string }
 
 export type InspectTarget = {
@@ -164,51 +182,58 @@ async function chooseSession(
   return { ok: true, summary: picked }
 }
 
-async function streamSession(opts: {
+// Lifecycle phases surfaced to a consumer so renderers can react (e.g. batch a
+// pi-tui render at replay-end, announce a live divider). `sessionLive` on
+// 'live-start' is the registry hit/miss from the live source's onSubscribed.
+export type StreamPhase =
+  | { phase: 'replay-end' }
+  | { phase: 'replay-only-idle' }
+  | { phase: 'live-start'; sessionLive: boolean }
+  | { phase: 'end' }
+
+export type StreamSessionEventsOptions = {
   summary: SessionSummary
   filter: InspectFilter
   sinceMs: number | undefined
-  json: boolean
-  color: boolean
-  stdout: (line: string) => void
-  stderr: (line: string) => void
+  onEvent: (event: InspectEvent) => void
+  onPhase?: (phase: StreamPhase) => void
+  onWarn?: (msg: string) => void
   liveSource?: LiveSourceFactory
   signal?: AbortSignal
-  liveHint?: string
-  interactive?: boolean
-}): Promise<{ escToPicker: boolean }> {
-  if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
-  const emit = (event: InspectEvent): void => {
+  // When true and replay-only with a signal, block until aborted instead of
+  // returning immediately — a stable interactive viewer that esc/q dismisses.
+  blockWhenReplayOnly?: boolean
+}
+
+// The read path shared by the line renderer and the pi-tui transcript view:
+// replay the JSONL transcript, then optionally live-tail, applying since/filter
+// and honoring signal.aborted (-> escToPicker). Knows nothing about rendering —
+// it just delivers ordered, filtered InspectEvents to onEvent and announces
+// phase transitions via onPhase.
+export async function streamSessionEvents(opts: StreamSessionEventsOptions): Promise<{ escToPicker: boolean }> {
+  const aborted = (): boolean => opts.signal?.aborted === true
+  const deliver = (event: InspectEvent): void => {
     if (opts.sinceMs !== undefined && event.ts > 0 && event.ts < opts.sinceMs) return
     if (!matchesFilter(event, opts.filter)) return
-    if (opts.json) {
-      opts.stdout(JSON.stringify({ sessionId: opts.summary.sessionId, ...event }))
-    } else {
-      opts.stdout(renderEvent(event, { color: opts.color }))
-    }
+    opts.onEvent(event)
   }
 
-  const aborted = (): boolean => opts.signal?.aborted === true
-
-  for await (const event of replayJsonl(opts.summary.sessionFile, { onWarn: opts.stderr })) {
+  for await (const event of replayJsonl(
+    opts.summary.sessionFile,
+    opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {},
+  )) {
     if (aborted()) return { escToPicker: true }
-    emit(event)
+    deliver(event)
   }
+  opts.onPhase?.({ phase: 'replay-end' })
 
   if (opts.liveSource === undefined) {
-    if (!opts.json) opts.stdout('─── end of transcript ───')
-    // Already aborted during replay (user pressed esc/q): honor it, don't lose the keystroke.
     if (aborted()) return { escToPicker: true }
-    // Interactive replay-only: hold a stable viewer like `dreams` instead of
-    // bouncing straight back to the picker. Block until the tail scope aborts
-    // (esc → back, q/ctrl-c → exit). Never block without a signal (non-TTY has
-    // no listener and would hang) or in json/non-interactive mode (scriptability).
-    if (opts.interactive === true && !opts.json && opts.signal !== undefined) {
-      if (opts.liveHint !== undefined && opts.liveHint !== '') {
-        opts.stdout(divider(opts.color, opts.liveHint))
-      }
+    if (opts.blockWhenReplayOnly === true && opts.signal !== undefined) {
+      opts.onPhase?.({ phase: 'replay-only-idle' })
       await waitForAbort(opts.signal)
     }
+    opts.onPhase?.({ phase: 'end' })
     return { escToPicker: aborted() }
   }
 
@@ -227,22 +252,83 @@ async function streamSession(opts: {
   let liveAnnounced = false
   try {
     for await (const event of liveIter) {
-      if (!liveAnnounced && !opts.json) {
-        opts.stdout(
-          divider(opts.color, sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
-        )
-        if (opts.liveHint !== undefined && opts.liveHint !== '') {
-          opts.stdout(divider(opts.color, opts.liveHint))
-        }
+      if (!liveAnnounced) {
+        opts.onPhase?.({ phase: 'live-start', sessionLive })
         liveAnnounced = true
       }
-      emit(event)
+      deliver(event)
     }
   } catch (err) {
-    opts.stderr(`live tail ended: ${err instanceof Error ? err.message : String(err)}`)
+    opts.onWarn?.(`live tail ended: ${err instanceof Error ? err.message : String(err)}`)
   }
-  if (!opts.json) opts.stdout('─── end of transcript ───')
+  opts.onPhase?.({ phase: 'end' })
   return { escToPicker: aborted() }
+}
+
+// Line/JSON renderer: the original streamSession behavior, now expressed as a
+// streamSessionEvents consumer. Preserves the exact header/divider output and
+// scriptable stdout/JSON contract.
+async function streamSession(opts: {
+  summary: SessionSummary
+  filter: InspectFilter
+  sinceMs: number | undefined
+  json: boolean
+  color: boolean
+  stdout: (line: string) => void
+  stderr: (line: string) => void
+  liveSource?: LiveSourceFactory
+  signal?: AbortSignal
+  liveHint?: string
+  interactive?: boolean
+}): Promise<{ escToPicker: boolean }> {
+  if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
+
+  const onEvent = (event: InspectEvent): void => {
+    if (opts.json) opts.stdout(JSON.stringify({ sessionId: opts.summary.sessionId, ...event }))
+    else opts.stdout(renderEvent(event, { color: opts.color }))
+  }
+
+  const emitHint = (): void => {
+    if (!opts.json && opts.liveHint !== undefined && opts.liveHint !== '') {
+      opts.stdout(divider(opts.color, opts.liveHint))
+    }
+  }
+
+  // Replay-only prints the end-of-transcript footer once at the idle point (the
+  // viewer then blocks); the terminal 'end' phase must not print it a second
+  // time. Live mode skips the idle phase and prints the footer only at 'end'.
+  let footerPrinted = false
+  const printFooter = (): void => {
+    opts.stdout('─── end of transcript ───')
+    footerPrinted = true
+  }
+
+  const onPhase = (p: StreamPhase): void => {
+    if (opts.json) return
+    if (p.phase === 'replay-only-idle') {
+      printFooter()
+      emitHint()
+    } else if (p.phase === 'live-start') {
+      opts.stdout(
+        divider(opts.color, p.sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
+      )
+      emitHint()
+    } else if (p.phase === 'end' && !footerPrinted) {
+      printFooter()
+    }
+  }
+
+  return streamSessionEvents({
+    summary: opts.summary,
+    filter: opts.filter,
+    sinceMs: opts.sinceMs,
+    onEvent,
+    onPhase,
+    onWarn: opts.stderr,
+    ...(opts.liveSource !== undefined ? { liveSource: opts.liveSource } : {}),
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    blockWhenReplayOnly: opts.interactive === true && !opts.json,
+  })
 }
 
 function divider(color: boolean, text: string): string {

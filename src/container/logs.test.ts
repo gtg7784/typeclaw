@@ -164,6 +164,41 @@ describe('pumpWithTimestamps', () => {
 
     expect(chunks.join('')).toBe(`${expectedStamp} partial\n`)
   })
+
+  test('resolves when the signal aborts mid-read on a never-ending stream (the esc-in-logs freeze)', async () => {
+    // A `docker logs -f` stream that never emits or closes: without abort-aware
+    // reading, pumpWithTimestamps would hang forever and esc could not escape.
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    const sink = { write: (): boolean => true } as unknown as NodeJS.WritableStream
+    const ctrl = new AbortController()
+
+    const pump = pumpWithTimestamps(stream, sink, makeLogTimestampReformatter(), ctrl.signal)
+    queueMicrotask(() => ctrl.abort())
+
+    // then it resolves (does not hang) and the reader was cancelled
+    await pump
+    expect(cancelled).toBe(true)
+  })
+
+  test('returns immediately when the signal is already aborted', async () => {
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    const sink = { write: (): boolean => true } as unknown as NodeJS.WritableStream
+    const ctrl = new AbortController()
+    ctrl.abort()
+
+    await pumpWithTimestamps(stream, sink, makeLogTimestampReformatter(), ctrl.signal)
+    expect(cancelled).toBe(true)
+  })
 })
 
 function formatLocal(d: Date): string {

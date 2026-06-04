@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 import type { MinimalSessionOrigin } from '@/agent/session-meta'
 
+import { previewForHint } from './preview'
 import { replayJsonl } from './replay'
 
 export type SessionSummary = {
@@ -139,17 +140,28 @@ async function peekSession(
   onWarn?: (msg: string) => void,
 ): Promise<{ origin: MinimalSessionOrigin | null; firstPrompt: string | null }> {
   let origin: MinimalSessionOrigin | null = null
-  let firstPrompt: string | null = null
+  const userTexts: string[] = []
   let bytesRead = 0
   for await (const event of replayJsonl(path, onWarn !== undefined ? { onWarn } : {})) {
     if (event.cat === 'meta' && origin === null) origin = event.origin
-    if (event.cat === 'user' && firstPrompt === null) firstPrompt = event.text
-    if (origin !== null && firstPrompt !== null) break
+    if (event.cat === 'user' && userTexts.length < MAX_PREVIEW_CANDIDATES) userTexts.push(event.text)
+    if (origin !== null && userTexts.length >= MAX_PREVIEW_CANDIDATES) break
     bytesRead += approximateSize(event)
     if (bytesRead > PREVIEW_MAX_BYTES) break
   }
+  // Resolve the hint after the loop so origin (which selects the extraction
+  // strategy) is known even if a user event precedes the meta event. A turn
+  // that is pure injected preamble yields null, so fall through to the next user
+  // turn for a useful glance.
+  let firstPrompt: string | null = null
+  for (const text of userTexts) {
+    firstPrompt = previewForHint(origin, text)
+    if (firstPrompt !== null) break
+  }
   return { origin, firstPrompt }
 }
+
+const MAX_PREVIEW_CANDIDATES = 5
 
 function approximateSize(event: { ts: number }): number {
   return JSON.stringify(event).length

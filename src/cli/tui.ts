@@ -3,14 +3,16 @@ import { defineCommand } from 'citty'
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
 import { CLI_VERSION } from '@/init/cli-version'
-import { createTui, formatVersionMismatchWarning } from '@/tui'
+import { runTuiViewer } from '@/inspect'
+import { formatVersionMismatchWarning } from '@/tui'
 
+import { runInspectViewer } from './inspect'
 import { errorLine } from './ui'
 
 export const tui = defineCommand({
   meta: {
     name: 'tui',
-    description: 'start the tui client',
+    description: 'open the live agent session in the read+write viewer (host stage)',
   },
   args: {
     prompt: {
@@ -25,50 +27,42 @@ export const tui = defineCommand({
     },
   },
   async run({ args }) {
-    const resolveUrl: () => Promise<string> = args.url !== undefined ? async () => args.url as string : defaultUrl
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const resolveUrl: () => Promise<string> =
+      args.url !== undefined ? async () => args.url as string : () => defaultUrl(cwd)
 
-    let initialPrompt: string | undefined = args.prompt
-    let attempt = 0
-    const RECONNECT_MAX_ATTEMPTS = 30
-    const RECONNECT_BACKOFF_MS = 1_000
+    const result = await runTuiViewer({
+      resolveUrl,
+      ...(args.prompt !== undefined ? { initialPrompt: args.prompt } : {}),
+      expectedVersion: CLI_VERSION,
+      onVersionMismatch: (info) => {
+        process.stderr.write(`${formatVersionMismatchWarning(info)}\n`)
+      },
+      stderr: (line) => process.stderr.write(`${line}\n`),
+    })
 
-    while (true) {
-      const url = await resolveUrl()
-      const tui = createTui({
-        url,
-        ...(initialPrompt !== undefined ? { initialPrompt } : {}),
-        expectedVersion: CLI_VERSION,
-        onVersionMismatch: (info) => {
-          process.stderr.write(`${formatVersionMismatchWarning(info)}\n`)
-        },
-      })
-      const outcome = await tui.run()
-      if (!outcome.lostConnection) return
-      // The TUI lost its WS post-handshake (container restart, network blip,
-      // hostd hiccup). Re-resolve the URL because the host port can change
-      // across container lifecycles (see resolveHostPort), then reconnect.
-      // The initial prompt is intentionally cleared after the first cycle:
-      // on a reconnect, the agent is resuming the same session — replaying
-      // the prompt would re-send it to the LLM.
-      initialPrompt = undefined
-      attempt += 1
-      if (attempt > RECONNECT_MAX_ATTEMPTS) {
-        console.error(errorLine(`disconnected; gave up after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts`))
-        process.exit(1)
-      }
-      process.stderr.write(`reconnecting (attempt ${attempt}/${RECONNECT_MAX_ATTEMPTS})...\n`)
-      await new Promise((resolve) => setTimeout(resolve, RECONNECT_BACKOFF_MS))
+    // Esc detached from the live session: drop into the viewer list so the user
+    // can pick another session or the container logs — `tui` is just a deep-link
+    // into the session viewer, pre-opened on the live session. allowWritable
+    // is false because detaching ended the live session, so no row may be
+    // offered as a writable "live TUI" anymore.
+    if (result.ok && result.escToPicker === true) {
+      const viewerExit = await runInspectViewer({ cwd, allowWritable: false })
+      process.exit(viewerExit)
+      return
     }
+
+    if (!result.ok) {
+      process.stderr.write(`${errorLine(result.reason)}\n`)
+      process.exit(result.exitCode)
+    }
+    process.exit(result.exitCode)
   },
 })
 
-async function defaultUrl(): Promise<string> {
-  const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+async function defaultUrl(cwd: string): Promise<string> {
   const precheck = await requireContainerRunning({ cwd })
-  if (!precheck.ok) {
-    console.error(errorLine(precheck.reason))
-    process.exit(1)
-  }
+  if (!precheck.ok) throw new Error(precheck.reason)
   const port = await resolveHostPort({ cwd })
   const token = await resolveTuiToken({ cwd })
   const url = new URL(`ws://127.0.0.1:${port}`)

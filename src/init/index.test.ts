@@ -1975,7 +1975,7 @@ describe('defaultRunHatching', () => {
   // care about is "did it pass cliEntry through to start()", and the rest of
   // the function (waitForAgent + TUI) just needs to not blow up.
   const fakeTui: typeof import('@/tui').createTui = () =>
-    ({ run: async () => ({ lostConnection: false }) }) as ReturnType<typeof import('@/tui').createTui>
+    ({ run: async () => ({ reason: 'exit', exitCode: 0 }) }) as ReturnType<typeof import('@/tui').createTui>
   const fakeWaitForAgent = async () => {}
 
   test('forwards cliEntry to start() when provided', async () => {
@@ -2032,7 +2032,7 @@ describe('defaultRunHatching', () => {
     const calls: Parameters<typeof import('@/tui').createTui>[0][] = []
     const fn: typeof import('@/tui').createTui = (options) => {
       calls.push(options)
-      return { run: async () => ({ lostConnection: false }) } as ReturnType<typeof import('@/tui').createTui>
+      return { run: async () => ({ reason: 'exit', exitCode: 0 }) } as ReturnType<typeof import('@/tui').createTui>
     }
     return { fn, calls }
   }
