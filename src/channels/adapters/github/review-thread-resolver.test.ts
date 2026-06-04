@@ -97,6 +97,31 @@ describe('github review-thread resolver', () => {
     expect(seen.mutations).toEqual(['PRRT_1'])
   })
 
+  it('resolves the bot App thread when GraphQL reports the bare slug and self-login carries [bot]', async () => {
+    // given: GraphQL names the App author by bare slug while getSelf returns slug[bot]
+    const seen = { mutations: [] as string[], queryCount: 0 }
+    const resolve = resolverFor(
+      fakeGraphql({
+        pages: [
+          {
+            threads: [{ id: 'PRRT_BOT', isResolved: false, rootCommentId: 100, rootAuthorLogin: 'typeey' }],
+            hasNextPage: false,
+            endCursor: null,
+          },
+        ],
+        seen,
+      }),
+      'typeey[bot]',
+    )
+
+    // when
+    const result = await resolve(req(100))
+
+    // then
+    expect(result.ok).toBe(true)
+    expect(seen.mutations).toEqual(['PRRT_BOT'])
+  })
+
   it('refuses to resolve a thread authored by a human', async () => {
     const seen = { mutations: [] as string[], queryCount: 0 }
     const resolve = resolverFor(

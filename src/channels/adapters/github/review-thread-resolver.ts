@@ -66,7 +66,7 @@ export function createGithubReviewThreadResolver(deps: {
     const thread = lookup.thread
     // The load-bearing guard: only the bot may resolve the bot's own thread.
     // Resolving a human reviewer's thread would erase their open question.
-    if (thread.rootAuthorLogin !== selfLogin) {
+    if (!isSelfAuthor(thread.rootAuthorLogin, selfLogin)) {
       return {
         ok: false,
         error: `refusing to resolve thread authored by @${thread.rootAuthorLogin ?? 'unknown'} (not @${selfLogin})`,
@@ -77,6 +77,23 @@ export function createGithubReviewThreadResolver(deps: {
 
     return await runResolveMutation(fetchImpl, token, thread.id)
   }
+}
+
+// A GitHub App's own login differs across the two APIs this guard straddles:
+// REST `getSelf` returns `slug[bot]` (selfLogin) but GraphQL's `Bot` author node
+// returns the bare `slug` (rootAuthorLogin). Strict `===` thus refused the App's
+// OWN thread (production: "refusing to resolve thread authored by @typeey (not
+// @typeey[bot])"). Compare with the suffix stripped from both sides. Human
+// (User) authors never carry `[bot]`, so this never lets a human match the bot.
+const BOT_LOGIN_SUFFIX = '[bot]'
+
+function isSelfAuthor(rootAuthorLogin: string | null, selfLogin: string): boolean {
+  if (rootAuthorLogin === null) return false
+  return normalizeBotLogin(rootAuthorLogin) === normalizeBotLogin(selfLogin)
+}
+
+function normalizeBotLogin(login: string): string {
+  return login.endsWith(BOT_LOGIN_SUFFIX) ? login.slice(0, -BOT_LOGIN_SUFFIX.length) : login
 }
 
 type ResolveTarget = { owner: string; repo: string; prNumber: number; rootCommentId: number }
