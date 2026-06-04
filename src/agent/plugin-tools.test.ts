@@ -16,6 +16,7 @@ import {
   __resetSharedLoopGuardForTests,
   buildBuiltinPiToolOverrides,
   defaultBuiltinPiAgentTools,
+  forgetSharedLoopGuardTool,
   TYPECLAW_INTERNAL_BASH_ENV,
   wrapAgentToolAsCustomToolDefinition,
   wrapPluginTool,
@@ -1238,6 +1239,33 @@ describe('loop guard integration', () => {
     expect(calls.length).toBe(4)
     expect(blocked.isError).toBe(true)
     expect(blocked.content[0]?.text).toContain('loop-guard')
+  })
+
+  test('forgetSharedLoopGuardTool clears the shared streak for the named tool so the next call passes', async () => {
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute(args) {
+        return { content: [{ type: 'text', text: `q=${args.q}` }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-forget-1',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { q: 'a' }, undefined, undefined, {} as never)
+    }
+    forgetSharedLoopGuardTool('loop-forget-1', 'search')
+    const after = (await wrapped.execute('c5', { q: 'a' }, undefined, undefined, {} as never)) as {
+      isError?: boolean
+    }
+    expect(after.isError).toBeUndefined()
   })
 
   test('resets the streak when the args change between plugin tool calls', async () => {

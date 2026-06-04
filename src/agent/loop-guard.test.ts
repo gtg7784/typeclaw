@@ -356,3 +356,85 @@ describe('createLoopGuard — windowed multi-signature detection', () => {
     }
   })
 })
+
+describe('createLoopGuard — forgetTool', () => {
+  const noConsecutive = { softWarn: 1000, hardBlock: 1001 }
+
+  function windowGuard() {
+    return createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+  }
+
+  // Reproduces the incident: premature subagent_output polling (interleaved
+  // with other work, as it was in production — the windowed detector only sees
+  // non-consecutive repeats) poisons the window, then a completion reminder
+  // clears it so the next fetch is allowed.
+  function pollInterleaved(guard: ReturnType<typeof windowGuard>, times: number): ReturnType<typeof guard.check> {
+    const args = { task_id: 'bg_x' }
+    let last: ReturnType<typeof guard.check> = { kind: 'ok' }
+    for (let i = 0; i < times; i++) {
+      last = guard.check('s1', 'subagent_output', args)
+      guard.check('s1', 'bash', { command: `step${i}` })
+    }
+    return last
+  }
+
+  test('clears the windowed residue for the named tool so the next call is allowed', () => {
+    const guard = windowGuard()
+    pollInterleaved(guard, 5)
+    guard.forgetTool('s1', 'subagent_output')
+    expect(guard.check('s1', 'subagent_output', { task_id: 'bg_x' }).kind).toBe('ok')
+  })
+
+  test('without forgetTool the same polling spree still hard-blocks', () => {
+    const guard = windowGuard()
+    const last = pollInterleaved(guard, 6)
+    expect(last.kind).toBe('block')
+    if (last.kind === 'block') expect(last.reason).toBe('windowed')
+  })
+
+  // The windowed detector only evaluates on calls that break the consecutive
+  // streak (count === 1), so bash and subagent_output are interleaved here to
+  // keep each one's window count climbing without a consecutive run.
+  test('does not clear another tool\u2019s accumulated window', () => {
+    const guard = windowGuard()
+    let last: ReturnType<typeof guard.check> = { kind: 'ok' }
+    for (let i = 0; i < 6; i++) {
+      guard.check('s1', 'subagent_output', { task_id: 'bg_x' })
+      last = guard.check('s1', 'bash', { command: 'ls' })
+    }
+    // Drop subagent_output's residue; bash's six interleaved entries remain.
+    guard.forgetTool('s1', 'subagent_output')
+    expect(last.kind).toBe('block')
+    if (last.kind === 'block') expect(last.reason).toBe('windowed')
+  })
+
+  test('clears a consecutive streak only when it belongs to the named tool', () => {
+    const guard = createLoopGuard({ softWarn: 3, hardBlock: 5 })
+    guard.check('s1', 'subagent_output', { task_id: 'bg_x' })
+    guard.check('s1', 'subagent_output', { task_id: 'bg_x' })
+    guard.forgetTool('s1', 'subagent_output')
+    expect(guard.check('s1', 'subagent_output', { task_id: 'bg_x' }).kind).toBe('ok')
+    expect(guard.check('s1', 'subagent_output', { task_id: 'bg_x' }).kind).toBe('ok')
+    expect(guard.check('s1', 'subagent_output', { task_id: 'bg_x' }).kind).toBe('warn')
+  })
+
+  test('leaves a different tool\u2019s consecutive streak intact', () => {
+    const guard = createLoopGuard({ softWarn: 3, hardBlock: 5 })
+    guard.check('s1', 'bash', { command: 'ls' })
+    guard.check('s1', 'bash', { command: 'ls' })
+    guard.forgetTool('s1', 'subagent_output')
+    expect(guard.check('s1', 'bash', { command: 'ls' }).kind).toBe('warn')
+  })
+
+  test('coarsened path-bearing residue is cleared by tool name', () => {
+    const guard = windowGuard()
+    for (let i = 0; i < 5; i++) guard.check('s1', 'read', { path: '/a.ts', offset: i })
+    guard.forgetTool('s1', 'read')
+    expect(guard.check('s1', 'read', { path: '/a.ts', offset: 99 }).kind).toBe('ok')
+  })
+
+  test('is a no-op for an unknown session', () => {
+    const guard = windowGuard()
+    expect(() => guard.forgetTool('missing', 'subagent_output')).not.toThrow()
+  })
+})

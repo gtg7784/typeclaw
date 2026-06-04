@@ -7,6 +7,8 @@ import type { LiveSubagentRegistry, StatusSnapshot, SubagentProgressEvent } from
 import type { SessionOrigin } from '../session-origin'
 import { authorizeLiveSubagentAccess } from './subagent-access'
 
+export const SUBAGENT_OUTPUT_TOOL_NAME = 'subagent_output'
+
 export type SubagentOutputToolDetails =
   | {
       ok: true
@@ -49,7 +51,7 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
   const { liveRegistry, getOrigin, permissions, now = () => Date.now() } = options
 
   return defineTool({
-    name: 'subagent_output',
+    name: SUBAGENT_OUTPUT_TOOL_NAME,
     label: 'Subagent Output',
     description:
       'Fetch the current state of a subagent you previously spawned. Returns one of three statuses: ' +
