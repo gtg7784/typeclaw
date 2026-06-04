@@ -3,6 +3,7 @@ import { definePlugin } from '@/plugin'
 
 import { analyzeGhCommand } from './gh-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
+import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
 import { classifyGhToken } from './token-class'
 
 export default definePlugin({
@@ -14,6 +15,8 @@ export default definePlugin({
           if (event.tool !== 'bash') return
           const command = event.args.command
           if (typeof command !== 'string' || !command.includes('gh')) return
+
+          await noteReviewCommand({ callId: event.callId, command })
 
           const decision = analyzeGhCommand(command)
           if (decision.kind === 'pass-through') return
@@ -42,6 +45,7 @@ export default definePlugin({
         },
         'tool.after': async (event) => {
           checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
+          commitReviewIfSucceeded({ sessionId: event.sessionId, callId: event.callId, result: event.result })
         },
       },
     }
