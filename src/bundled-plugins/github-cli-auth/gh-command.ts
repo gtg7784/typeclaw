@@ -281,7 +281,7 @@ function isCommandBoundaryBefore(tokens: readonly string[], index: number): bool
   while (cursor >= 0) {
     const prev = tokens[cursor]
     if (prev === undefined) return false
-    if (prev === '&&' || prev === '||' || prev === '|' || prev === ';') return true
+    if (prev === '&&' || prev === '||' || prev === '|' || prev === ';' || prev === '\n') return true
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prev)) {
       cursor -= 1
       continue
@@ -409,11 +409,14 @@ function isPlaceholderSegment(segment: string): boolean {
   return segment.includes('{') || segment.includes('}')
 }
 
-// Splits on whitespace AND shell control operators (; | & && ||) so a boundary
-// like `true; gh ...` (no surrounding spaces) yields a standalone operator
-// token. Quote-aware: operators inside quotes are literal. This is a
-// command-position detector, not a full shell parser — it does not interpret
-// redirections, subshells, or backgrounding semantics beyond boundary marking.
+// Splits on whitespace AND shell control operators (newline ; | & && ||) so a
+// boundary like `true; gh ...` (no surrounding spaces) or a `gh` on its own line
+// yields a standalone separator token. A newline ends a simple command in bash,
+// so it must be a boundary too — otherwise a `gh` on a later line (e.g. after a
+// heredoc) is not seen at command position and escapes classification. Quote-
+// aware: operators inside quotes are literal. This is a command-position
+// detector, not a full shell parser — it does not interpret redirections,
+// subshells, heredoc bodies, or backgrounding semantics beyond boundary marking.
 function tokenize(command: string): string[] {
   const tokens: string[] = []
   let current = ''
@@ -441,8 +444,13 @@ function tokenize(command: string): string[] {
       hasContent = true
       continue
     }
-    if (ch === ' ' || ch === '\t' || ch === '\n') {
+    if (ch === ' ' || ch === '\t') {
       flush()
+      continue
+    }
+    if (ch === '\n') {
+      flush()
+      tokens.push('\n')
       continue
     }
     if (ch === ';' || ch === '|' || ch === '&') {
