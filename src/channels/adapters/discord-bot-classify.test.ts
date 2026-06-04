@@ -5,6 +5,7 @@ import type { DiscordGatewayMessageCreateEvent } from 'agent-messenger/discordbo
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
 import { classifyInbound } from './discord-bot-classify'
+import { encodeDiscordReactionRef } from './discord-bot-reactions'
 
 const BOT_USER_ID = '999'
 
@@ -296,6 +297,7 @@ describe('classifyInbound — route path', () => {
       thread: null,
       text: `hi <@${BOT_USER_ID}>`,
       externalMessageId: 'm1',
+      reactionRef: encodeDiscordReactionRef({ channel: 'c1', message: 'm1' }),
       authorId: 'u1',
       authorName: 'alice',
       authorIsBot: false,
