@@ -100,7 +100,7 @@ export async function composeLogs({
       follow,
       ...(tail !== undefined ? { tail } : {}),
     })
-    const proc = bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
     return { agent, proc }
   })
 

@@ -44,27 +44,48 @@ export async function logs({
       return { ok: false, reason: `Container ${plan.containerName} not found. Run \`typeclaw start\` first.` }
     }
 
-    const proc = bun.spawn({ cmd: buildDockerLogsCmd(plan), cwd, stdout: 'pipe', stderr: 'pipe' })
+    // stdin:'ignore' — `docker logs` never reads stdin, and letting the child
+    // hold the TTY breaks the viewer's raw-mode keypress listener (esc/q/ctrl-c
+    // stop reaching it, freezing the logs view with no way out).
+    const proc = bun.spawn({ cmd: buildDockerLogsCmd(plan), cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
 
+    // `docker logs -f` never exits on its own; aborting the signal must kill it
+    // so the pumps' stream readers end. Escalate to SIGKILL if SIGTERM is
+    // ignored, otherwise Promise.all(pumps) could hang until the pipes close.
+    let killTimer: ReturnType<typeof setTimeout> | undefined
     const onAbort = (): void => {
       try {
         proc.kill('SIGTERM')
+        killTimer = setTimeout(() => {
+          try {
+            proc.kill('SIGKILL')
+          } catch {
+            // already exited
+          }
+        }, 2_000)
       } catch {
         // already exited
       }
     }
     signal?.addEventListener('abort', onAbort, { once: true })
+    // The signal may already be aborted before we attached the listener (esc
+    // pressed during container existence check); addEventListener would then
+    // never fire, leaving docker logs -f running forever.
+    if (signal?.aborted === true) onAbort()
 
-    const colorOut = useColor ?? supportsColor(out)
-    const colorErr = useColor ?? supportsColor(err)
-    await Promise.all([
-      pumpWithTimestamps(proc.stdout, out, makeLogTimestampReformatter(undefined, { color: colorOut })),
-      pumpWithTimestamps(proc.stderr, err, makeLogTimestampReformatter(undefined, { color: colorErr })),
-    ])
-    const exitCode = await proc.exited
-    signal?.removeEventListener('abort', onAbort)
-
-    return { ok: true, containerName: plan.containerName, exitCode }
+    try {
+      const colorOut = useColor ?? supportsColor(out)
+      const colorErr = useColor ?? supportsColor(err)
+      await Promise.all([
+        pumpWithTimestamps(proc.stdout, out, makeLogTimestampReformatter(undefined, { color: colorOut })),
+        pumpWithTimestamps(proc.stderr, err, makeLogTimestampReformatter(undefined, { color: colorErr })),
+      ])
+      const exitCode = await proc.exited
+      return { ok: true, containerName: plan.containerName, exitCode }
+    } finally {
+      if (killTimer !== undefined) clearTimeout(killTimer)
+      signal?.removeEventListener('abort', onAbort)
+    }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
