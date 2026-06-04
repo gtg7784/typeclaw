@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { fetchWithLimits, normalizeUrl, parseMimeType, WebfetchError } from './fetch'
+import { fetchWithLimits, normalizeUrl, parseMimeType, WebFetchError } from './fetch'
 import { applyGrep, GrepError } from './strategies/grep'
 import { applyJq, JqError } from './strategies/jq'
 import { applyRaw } from './strategies/raw'
@@ -13,17 +13,17 @@ import {
   DEFAULT_TIMEOUT_SECONDS,
   MAX_TIMEOUT_SECONDS,
   OUTPUT_CAPS,
-  type WebfetchDetails,
+  type WebFetchDetails,
 } from './types'
 
 const STRATEGY_VALUES = ['readability', 'jq', 'selector', 'grep', 'snapshot', 'raw'] as const
 
-export const webfetchTool = defineTool({
-  name: 'webfetch',
+export const webFetchTool = defineTool({
+  name: 'web_fetch',
   label: 'Web Fetch',
   description:
     'Fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy. ' +
-    'Use this when the user references a specific URL or when websearch surfaced a result you need to read in full. ' +
+    'Use this when the user references a specific URL or when web_search surfaced a result you need to read in full. ' +
     'If `spawn_subagent` is available to you, PREFER delegating to the `scout` subagent by default: spawn it whenever you expect more than one fetch, an "across multiple sources" task, or any search-then-fetch loop. Scout runs the noisy fetching in its own context window and returns a distilled, citation-backed answer, keeping bulky page bodies out of yours. Only call this tool directly for a single known URL whose content you will cite immediately — or whenever you cannot spawn subagents (e.g. you are yourself a subagent), in which case fetch here. ' +
     'Outbound requests impersonate Chrome 136 at the TLS, HTTP/2, and header layers ' +
     '(via curl-impersonate), which helps with TLS/header fingerprint gates on sites behind Cloudflare/Akamai. ' +
@@ -72,7 +72,7 @@ export const webfetchTool = defineTool({
     try {
       normalizedUrl = normalizeUrl(inputUrl)
     } catch (error) {
-      const message = error instanceof WebfetchError ? error.message : `Invalid URL: ${error}`
+      const message = error instanceof WebFetchError ? error.message : `Invalid URL: ${error}`
       return errorResult(inputUrl, message, { startedAt })
     }
 
@@ -130,7 +130,7 @@ export const webfetchTool = defineTool({
     }
 
     const capped = capOutput(output, strategy)
-    const details: WebfetchDetails = {
+    const details: WebFetchDetails = {
       url: normalizedUrl,
       finalUrl: response.finalUrl,
       strategy,
@@ -150,7 +150,7 @@ export const webfetchTool = defineTool({
   },
 })
 
-type WebfetchParams = {
+type WebFetchParams = {
   url: string
   strategy?: CompactionStrategy
   query?: string
@@ -187,7 +187,7 @@ function resolveStrategy(explicit: CompactionStrategy | undefined, mime: string)
   return { kind: 'ok', strategy: 'raw', autoDetected: true }
 }
 
-function validateStrategyArgs(strategy: CompactionStrategy, params: WebfetchParams): string | null {
+function validateStrategyArgs(strategy: CompactionStrategy, params: WebFetchParams): string | null {
   if (strategy === 'jq' && !params.query) return 'Missing required arg `query` for strategy "jq".'
   if (strategy === 'selector' && !params.selector) return 'Missing required arg `selector` for strategy "selector".'
   if (strategy === 'grep' && !params.pattern) return 'Missing required arg `pattern` for strategy "grep".'
@@ -198,7 +198,7 @@ async function runStrategy(
   strategy: CompactionStrategy,
   body: string,
   url: string,
-  params: WebfetchParams,
+  params: WebFetchParams,
 ): Promise<string> {
   switch (strategy) {
     case 'raw':
@@ -250,10 +250,10 @@ function capOutput(text: string, strategy: CompactionStrategy): { text: string; 
 function errorResult(
   url: string,
   message: string,
-  partial: Partial<WebfetchDetails> & { startedAt: number },
-): { content: [{ type: 'text'; text: string }]; details: WebfetchDetails } {
+  partial: Partial<WebFetchDetails> & { startedAt: number },
+): { content: [{ type: 'text'; text: string }]; details: WebFetchDetails } {
   const { startedAt, ...rest } = partial
-  const details: WebfetchDetails = {
+  const details: WebFetchDetails = {
     url,
     finalUrl: rest.finalUrl ?? url,
     strategy: rest.strategy ?? 'none',

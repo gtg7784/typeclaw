@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { _setCurlBinaryForTest } from './ddg'
-import { websearchTool } from './websearch'
+import { webSearchTool } from './websearch'
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -26,7 +26,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-const ctx = {} as Parameters<typeof websearchTool.execute>[4]
+const ctx = {} as Parameters<typeof webSearchTool.execute>[4]
 
 const MINIMAL_DDG_HTML = `
 <tr><td><a rel="nofollow" href="https://example.com/" class='result-link'>Example Domain</a></td></tr>
@@ -36,7 +36,7 @@ const MINIMAL_DDG_HTML = `
 // The DuckDuckGo source talks to curl-impersonate via Bun.spawn rather than
 // fetch. We install a fake binary at a tmpdir path and point ddg.ts at it
 // via _setCurlBinaryForTest, so these end-to-end tests exercise the real
-// spawn codepath plus the websearchTool's success/error orchestration
+// spawn codepath plus the webSearchTool's success/error orchestration
 // without depending on a real network or a real curl_chrome136 install.
 describe('websearch tool: web (DuckDuckGo)', () => {
   let scratchDir: string
@@ -86,7 +86,7 @@ printf '%s' "$RENDERED"
     installFakePrintingBinary(MINIMAL_DDG_HTML)
 
     // when
-    const result = await websearchTool.execute('id', { query: 'example' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'example' }, undefined, undefined, ctx)
 
     // then
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
@@ -105,7 +105,7 @@ printf '%s' "$RENDERED"
     installFakePrintingBinary('<form id="challenge-form">Please verify you are a human</form>')
 
     // when
-    const result = await websearchTool.execute('id', { query: 'spam' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'spam' }, undefined, undefined, ctx)
 
     // then
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
@@ -118,7 +118,7 @@ printf '%s' "$RENDERED"
     installFakeBinary('echo "ECONNREFUSED" >&2; exit 1')
 
     // when
-    const result = await websearchTool.execute('id', { query: 'x' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'x' }, undefined, undefined, ctx)
 
     // then
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
@@ -131,7 +131,7 @@ printf '%s' "$RENDERED"
     installFakePrintingBinary('<html><body>nothing</body></html>')
 
     // when
-    const result = await websearchTool.execute('id', { query: 'zzznoresults' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'zzznoresults' }, undefined, undefined, ctx)
 
     // then
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
@@ -152,7 +152,7 @@ printf '%s' "$RENDERED"
     installFakePrintingBinary(html)
 
     // when
-    const result = await websearchTool.execute('id', { query: 'q', limit: 2 }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'q', limit: 2 }, undefined, undefined, ctx)
 
     // then
     expect((result.details as { count: number }).count).toBe(2)
@@ -167,7 +167,7 @@ describe('websearch tool: wikipedia', () => {
       new Response(JSON.stringify(json), { status: 200, headers: { 'content-type': 'application/json' } })
 
     // when
-    const result = await websearchTool.execute('id', { query: 'ts', source: 'wikipedia' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: 'ts', source: 'wikipedia' }, undefined, undefined, ctx)
 
     // then
     expect(fetchCalls).toHaveLength(1)
@@ -186,7 +186,7 @@ describe('websearch tool: input handling', () => {
   test('rejects an empty query before hitting the network', async () => {
     fetchResponse = () => new Response('should not be called', { status: 500 })
 
-    const result = await websearchTool.execute('id', { query: '   ' }, undefined, undefined, ctx)
+    const result = await webSearchTool.execute('id', { query: '   ' }, undefined, undefined, ctx)
 
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
     expect(text).toBe('Query is empty.')

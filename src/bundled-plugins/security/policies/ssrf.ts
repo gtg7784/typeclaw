@@ -100,7 +100,7 @@ export function classifyUrl(rawUrl: string): SsrfClassification {
 
 export function checkSsrfGuard(options: { tool: string; args: Record<string, unknown> }): SecurityBlock | undefined {
   const { tool, args } = options
-  if (tool !== 'webfetch') return undefined
+  if (tool !== 'web_fetch') return undefined
   const url = args.url
   if (typeof url !== 'string') return undefined
   if (isGuardAcknowledged(args, GUARD_SSRF)) return undefined
@@ -111,9 +111,9 @@ export function checkSsrfGuard(options: { tool: string; args: Record<string, unk
   return {
     block: true,
     reason: [
-      `Guard \`${GUARD_SSRF}\` blocked webfetch to a non-public destination (${result.category ?? 'unknown'}): ${result.reason ?? 'classified as internal'}.`,
+      `Guard \`${GUARD_SSRF}\` blocked web_fetch to a non-public destination (${result.category ?? 'unknown'}): ${result.reason ?? 'classified as internal'}.`,
       'This protects against SSRF, cloud metadata exfiltration, and accidental fetches against internal services.',
-      `If this is genuinely intentional and you trust the URL, retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_SSRF}: true\` in the webfetch arguments.`,
+      `If this is genuinely intentional and you trust the URL, retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_SSRF}: true\` in the web_fetch arguments.`,
     ].join(' '),
   }
 }

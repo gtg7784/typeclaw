@@ -1,4 +1,4 @@
-// Webfetch's HTTP transport.
+// WebFetch's HTTP transport.
 //
 // Production path (container, curl-impersonate available): we shell out to
 // `curl_chrome136` so outbound requests carry Chrome 136's TLS handshake
@@ -17,7 +17,7 @@
 //
 // Best-effort doctrine: this transport does NOT guarantee the fetch succeeds.
 // Bot-detected sites can still serve 403/CAPTCHA pages. We surface what we
-// got (status, body, final URL) and let the caller decide. The webfetch tool
+// got (status, body, final URL) and let the caller decide. The web_fetch tool
 // translates non-2xx into a tool-level error message that's useful to the
 // model.
 
@@ -38,10 +38,10 @@ export type FetchResult = {
   bytesIn: number
 }
 
-export class WebfetchError extends Error {
+export class WebFetchError extends Error {
   constructor(message: string) {
     super(message)
-    this.name = 'WebfetchError'
+    this.name = 'WebFetchError'
   }
 }
 
@@ -55,7 +55,7 @@ export function normalizeUrl(input: string): string {
   const trimmed = input.trim()
   if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
     if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-      throw new WebfetchError('URL must use http:// or https://')
+      throw new WebFetchError('URL must use http:// or https://')
     }
     return trimmed
   }
@@ -100,28 +100,28 @@ async function fetchWithCurlImpersonate(
     })
   } catch (error) {
     if (parentSignal?.aborted) {
-      throw new WebfetchError('Request aborted')
+      throw new WebFetchError('Request aborted')
     }
     if (error instanceof CurlImpersonateError) {
       if (isCurlExitTimeout(error)) {
-        throw new WebfetchError(`Request timed out after ${timeoutSeconds}s`)
+        throw new WebFetchError(`Request timed out after ${timeoutSeconds}s`)
       }
       if (isCurlExitFilesizeExceeded(error)) {
-        throw new WebfetchError(`Response too large (exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`)
+        throw new WebFetchError(`Response too large (exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`)
       }
-      throw new WebfetchError(`Fetch failed: ${error.message}`)
+      throw new WebFetchError(`Fetch failed: ${error.message}`)
     }
     const message = error instanceof Error ? error.message : String(error)
-    throw new WebfetchError(`Fetch failed: ${message}`)
+    throw new WebFetchError(`Fetch failed: ${message}`)
   }
 
   if (response.httpStatus < 200 || response.httpStatus >= 300) {
-    throw new WebfetchError(`Fetch failed: HTTP ${response.httpStatus}`)
+    throw new WebFetchError(`Fetch failed: HTTP ${response.httpStatus}`)
   }
 
   const bodyByteLength = new TextEncoder().encode(response.body).byteLength
   if (bodyByteLength > MAX_RESPONSE_BYTES) {
-    throw new WebfetchError(
+    throw new WebFetchError(
       `Response too large (${formatBytes(bodyByteLength)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
     )
   }
@@ -148,14 +148,14 @@ async function fetchWithBunFetch(
   try {
     const response = await fetch(url, { headers: FALLBACK_HEADERS, signal: controller.signal, redirect: 'follow' })
     if (!response.ok) {
-      throw new WebfetchError(`Fetch failed: HTTP ${response.status} ${response.statusText}`)
+      throw new WebFetchError(`Fetch failed: HTTP ${response.status} ${response.statusText}`)
     }
 
     const contentLengthHeader = response.headers.get('content-length')
     if (contentLengthHeader) {
       const declared = Number(contentLengthHeader)
       if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-        throw new WebfetchError(
+        throw new WebFetchError(
           `Response too large (${formatBytes(declared)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
         )
       }
@@ -163,7 +163,7 @@ async function fetchWithBunFetch(
 
     const buffer = await response.arrayBuffer()
     if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-      throw new WebfetchError(
+      throw new WebFetchError(
         `Response too large (${formatBytes(buffer.byteLength)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
       )
     }
@@ -182,11 +182,11 @@ async function fetchWithBunFetch(
       controller.signal.reason instanceof Error &&
       controller.signal.reason.message === 'timeout'
     ) {
-      throw new WebfetchError(`Request timed out after ${timeoutSeconds}s`)
+      throw new WebFetchError(`Request timed out after ${timeoutSeconds}s`)
     }
-    if (error instanceof WebfetchError) throw error
+    if (error instanceof WebFetchError) throw error
     const message = error instanceof Error ? error.message : String(error)
-    throw new WebfetchError(`Fetch failed: ${message}`)
+    throw new WebFetchError(`Fetch failed: ${message}`)
   } finally {
     clearTimeout(timeout)
     parentSignal?.removeEventListener('abort', onAbort)

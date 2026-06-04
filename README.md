@@ -34,7 +34,7 @@ If you're like me, TypeClaw is the right choice. If not, that's fine too.
 - 💬 **Multi-channel** — Slack, Discord, Telegram, KakaoTalk, GitHub webhooks, and a websocket TUI; one agent, many inboxes
 - ⏰ **Cron** — schedule prompts or shell commands; per-job coalescing so slow jobs don't pile up
 - 📚 **Skills on demand** — markdown procedures the agent loads only when relevant; zero token cost until used
-- 🔎 **Web research** — bundled `scout` subagent plus first-class `websearch` and `webfetch` tools (DuckDuckGo via curl-impersonate, Wikipedia)
+- 🔎 **Web research** — bundled `scout` subagent plus first-class `web_search` and `web_fetch` tools (DuckDuckGo via curl-impersonate, Wikipedia)
 - 🛡 **Security guards** — bundled `tool.before` policies catch secret exfil, SSRF, prompt injection, tainted git remotes, and silent privilege escalation (role/cron promotion) before they fire
 - 📊 **Usage, inspect, doctor** — `typeclaw usage` reports token/$ spend per session, model, or day; `typeclaw inspect` replays a session transcript and tails live activity; `typeclaw doctor` diagnoses host, agent folder, and plugin state
 

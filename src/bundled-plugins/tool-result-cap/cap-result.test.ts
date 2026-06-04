@@ -49,7 +49,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: 'A'.repeat(200) }],
     }
 
-    const stats = capToolResult('webfetch', result, baseOptions)
+    const stats = capToolResult('web_fetch', result, baseOptions)
 
     expect(stats.imagesReplaced).toBe(0)
     expect(stats.textsTruncated).toBe(1)
@@ -66,7 +66,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: 'A'.repeat(50) }],
     }
 
-    const stats = capToolResult('webfetch', result, baseOptions)
+    const stats = capToolResult('web_fetch', result, baseOptions)
 
     expect(stats.textsTruncated).toBe(0)
     expect(result.content[0]).toEqual({ type: 'text', text: 'A'.repeat(50) })
@@ -151,7 +151,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: `[tool-result-cap: quoted prior placeholder] ${'X'.repeat(500)}` }],
     }
 
-    const stats = capToolResult('webfetch', result, baseOptions)
+    const stats = capToolResult('web_fetch', result, baseOptions)
 
     expect(stats.textsTruncated).toBe(1)
     const part = result.content[0] as { type: 'text'; text: string }

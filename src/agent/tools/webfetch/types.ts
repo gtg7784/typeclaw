@@ -1,6 +1,6 @@
 export type CompactionStrategy = 'readability' | 'jq' | 'selector' | 'grep' | 'snapshot' | 'raw'
 
-export type WebfetchDetails = {
+export type WebFetchDetails = {
   url: string
   finalUrl: string
   strategy: CompactionStrategy | 'none'

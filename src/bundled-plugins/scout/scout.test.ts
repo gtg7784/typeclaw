@@ -23,8 +23,8 @@ describe('scout subagent — load-bearing prompt phrases', () => {
   })
 
   test('prompt names the two web tools by their exact runtime names', () => {
-    expect(SCOUT_SYSTEM_PROMPT).toContain('`websearch`')
-    expect(SCOUT_SYSTEM_PROMPT).toContain('`webfetch`')
+    expect(SCOUT_SYSTEM_PROMPT).toContain('`web_search`')
+    expect(SCOUT_SYSTEM_PROMPT).toContain('`web_fetch`')
   })
 
   test('prompt frames the role as external/web-only (counterpart to explorer) and forbids local-file access', () => {
@@ -54,7 +54,7 @@ describe('scout subagent — load-bearing prompt phrases', () => {
 
   test('prompt forbids following authenticated/one-time-token URLs (defense against prompt-injection-driven exfil)', () => {
     // If a malicious page tells scout "fetch this password-reset link",
-    // the only defense is a prompt-level refusal — webfetch itself has no
+    // the only defense is a prompt-level refusal — web_fetch itself has no
     // SSRF or auth-shape guard.
     expect(SCOUT_SYSTEM_PROMPT.toLowerCase()).toContain('one-time token')
   })
@@ -71,13 +71,13 @@ describe('scout subagent declaration', () => {
     expect(sub.profile).toBe('fast')
   })
 
-  test('tools list is exactly [websearch, webfetch] and NO filesystem tools', () => {
+  test('tools list is exactly [web_search, web_fetch] and NO filesystem tools', () => {
     const sub = createScoutSubagent()
     const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
-    expect(toolNames).toEqual(['webfetch', 'websearch'])
+    expect(toolNames).toEqual(['web_fetch', 'web_search'])
     // Drift guard: scout must never gain filesystem access. The whole
     // point of the explorer/scout split is that scout has no read/grep/ls
-    // and explorer has no websearch/webfetch — collapsing either side
+    // and explorer has no web_search/web_fetch — collapsing either side
     // makes one of the two subagents redundant and reintroduces the
     // confused-deputy risk (web pages tricking scout into reading
     // .env / secrets.json).
@@ -90,24 +90,24 @@ describe('scout subagent declaration', () => {
     expect(toolNames).not.toContain('edit')
   })
 
-  test('toolRefs dual-route correctly: websearch+webfetch land in toolDefinitions (customTools path), with no pi-side agentTools leaking', async () => {
+  test('toolRefs dual-route correctly: web_search+web_fetch land in toolDefinitions (customTools path), with no pi-side agentTools leaking', async () => {
     const { resolveBuiltinToolRefs } = await import('@/agent/plugin-tools')
-    const { websearchTool } = await import('@/agent/tools/websearch')
-    const { webfetchTool } = await import('@/agent/tools/webfetch')
+    const { webSearchTool } = await import('@/agent/tools/websearch')
+    const { webFetchTool } = await import('@/agent/tools/webfetch')
     const sub = createScoutSubagent()
     const resolved = resolveBuiltinToolRefs(sub.tools ?? [])
     expect(resolved.agentTools).toEqual([])
-    expect(resolved.toolDefinitions.map((t) => t.name).sort()).toEqual(['webfetch', 'websearch'])
+    expect(resolved.toolDefinitions.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
     const byName = Object.fromEntries(resolved.toolDefinitions.map((t) => [t.name, t]))
-    expect(byName.websearch).toBe(websearchTool)
-    expect(byName.webfetch).toBe(webfetchTool)
+    expect(byName.web_search).toBe(webSearchTool)
+    expect(byName.web_fetch).toBe(webFetchTool)
   })
 
-  test('declares a tool-result budget keyed on websearch+webfetch (so a runaway scout cannot exhaust parent context)', () => {
+  test('declares a tool-result budget keyed on web_search+web_fetch (so a runaway scout cannot exhaust parent context)', () => {
     const sub = createScoutSubagent()
     expect(sub.toolResultBudget).toBeDefined()
     expect(sub.toolResultBudget?.maxTotalBytes).toBeGreaterThan(0)
-    expect([...(sub.toolResultBudget?.toolNames ?? [])].sort()).toEqual(['webfetch', 'websearch'])
+    expect([...(sub.toolResultBudget?.toolNames ?? [])].sort()).toEqual(['web_fetch', 'web_search'])
   })
 
   test('inFlightKey returns distinct values for distinct requestId payloads (parallel spawns must not coalesce)', () => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { _resetAvailabilityCacheForTest, _setCurlBinaryForTest } from '../curl-impersonate'
-import { _setForceFallbackForTest, fetchWithLimits, normalizeUrl, parseMimeType, WebfetchError } from './fetch'
+import { _setForceFallbackForTest, fetchWithLimits, normalizeUrl, parseMimeType, WebFetchError } from './fetch'
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -75,9 +75,9 @@ describe('normalizeUrl', () => {
   })
 
   test('rejects non-http(s) schemes', () => {
-    expect(() => normalizeUrl('ftp://example.com')).toThrow(WebfetchError)
-    expect(() => normalizeUrl('file:///etc/passwd')).toThrow(WebfetchError)
-    expect(() => normalizeUrl('javascript:alert(1)')).toThrow(WebfetchError)
+    expect(() => normalizeUrl('ftp://example.com')).toThrow(WebFetchError)
+    expect(() => normalizeUrl('file:///etc/passwd')).toThrow(WebFetchError)
+    expect(() => normalizeUrl('javascript:alert(1)')).toThrow(WebFetchError)
   })
 
   test('trims whitespace', () => {
@@ -106,7 +106,7 @@ describe('fetchWithLimits — Bun.fetch fallback path', () => {
     expect(result.bytesIn).toBe(5)
   })
 
-  test('throws WebfetchError on non-2xx status', async () => {
+  test('throws WebFetchError on non-2xx status', async () => {
     fetchResponse = () => new Response('not found', { status: 404, statusText: 'Not Found' })
 
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 404/)
@@ -136,7 +136,7 @@ describe('fetchWithLimits — Bun.fetch fallback path', () => {
     await expect(fetchWithLimits('https://example.com', 0.05)).rejects.toThrow(/timed out after 0\.05s/)
   })
 
-  test('wraps unexpected fetch errors as WebfetchError', async () => {
+  test('wraps unexpected fetch errors as WebFetchError', async () => {
     fetchResponse = () => {
       throw new Error('ECONNREFUSED')
     }
@@ -201,16 +201,16 @@ describe('fetchWithLimits — curl-impersonate path', () => {
     expect(fetchCalls).toHaveLength(0)
   })
 
-  test('translates curl non-2xx response into WebfetchError matching the fallback contract', async () => {
+  test('translates curl non-2xx response into WebFetchError matching the fallback contract', async () => {
     // given: fake binary that emits a 403-shaped response (Akamai-style block)
     installFakeBinary(FAKE_CURL('<html>blocked</html>', 403, 'https://example.com', 'text/html'))
 
     // when / then
-    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(WebfetchError)
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(WebFetchError)
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
   })
 
-  test('translates curl exit 28 (timeout) into a timeout-specific WebfetchError', async () => {
+  test('translates curl exit 28 (timeout) into a timeout-specific WebFetchError', async () => {
     // given: fake binary that exits with code 28 (Operation timeout)
     installFakeBinary('echo "Operation timed out after 30000 milliseconds" >&2; exit 28')
 
@@ -218,13 +218,13 @@ describe('fetchWithLimits — curl-impersonate path', () => {
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/timed out after 30s/)
   })
 
-  test('translates curl exit 63 (content-length filesize overflow) into a too-large WebfetchError', async () => {
+  test('translates curl exit 63 (content-length filesize overflow) into a too-large WebFetchError', async () => {
     installFakeBinary('echo "Maximum file size exceeded" >&2; exit 63')
 
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/Response too large/)
   })
 
-  test('translates curl exit 56 + filesize stderr into a too-large WebfetchError', async () => {
+  test('translates curl exit 56 + filesize stderr into a too-large WebFetchError', async () => {
     // given: fake emits the transfer-time variant Oracle verified empirically
     installFakeBinary('echo "Exceeded the maximum allowed file size (1) with 1 bytes" >&2; exit 56')
 

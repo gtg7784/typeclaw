@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { _setForceFallbackForTest } from './fetch'
-import { webfetchTool } from './tool'
-import type { WebfetchDetails } from './types'
+import { webFetchTool } from './tool'
+import type { WebFetchDetails } from './types'
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -30,15 +30,15 @@ afterEach(() => {
   _setForceFallbackForTest(false)
 })
 
-const ctx = {} as Parameters<typeof webfetchTool.execute>[4]
+const ctx = {} as Parameters<typeof webFetchTool.execute>[4]
 
-function textOf(result: Awaited<ReturnType<typeof webfetchTool.execute>>): string {
+function textOf(result: Awaited<ReturnType<typeof webFetchTool.execute>>): string {
   const part = result.content[0]
   return part?.type === 'text' ? part.text : ''
 }
 
-function detailsOf(result: Awaited<ReturnType<typeof webfetchTool.execute>>): WebfetchDetails {
-  return result.details as WebfetchDetails
+function detailsOf(result: Awaited<ReturnType<typeof webFetchTool.execute>>): WebFetchDetails {
+  return result.details as WebFetchDetails
 }
 
 const ARTICLE_HTML = `
@@ -55,7 +55,7 @@ describe('webfetch: URL handling', () => {
   test('rewrites bare hostnames to https://', async () => {
     fetchResponse = () => new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } })
 
-    await webfetchTool.execute('id', { url: 'example.com' }, undefined, undefined, ctx)
+    await webFetchTool.execute('id', { url: 'example.com' }, undefined, undefined, ctx)
 
     expect(fetchCalls[0]?.url).toBe('https://example.com')
   })
@@ -63,7 +63,7 @@ describe('webfetch: URL handling', () => {
   test('rejects non-http(s) schemes without a network call', async () => {
     fetchResponse = () => new Response('should not be called', { status: 500 })
 
-    const result = await webfetchTool.execute('id', { url: 'file:///etc/passwd' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'file:///etc/passwd' }, undefined, undefined, ctx)
 
     expect(textOf(result)).toContain('http://')
     expect(detailsOf(result).error).toBe(true)
@@ -76,7 +76,7 @@ describe('webfetch: strategy auto-detection', () => {
     fetchResponse = () =>
       new Response(ARTICLE_HTML, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
 
-    const result = await webfetchTool.execute('id', { url: 'https://example.com/post' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://example.com/post' }, undefined, undefined, ctx)
     const details = detailsOf(result)
 
     expect(details.strategy).toBe('readability')
@@ -88,7 +88,7 @@ describe('webfetch: strategy auto-detection', () => {
   test('JSON content-type without explicit strategy returns a guidance error', async () => {
     fetchResponse = () => new Response('{"a":1}', { status: 200, headers: { 'content-type': 'application/json' } })
 
-    const result = await webfetchTool.execute('id', { url: 'https://api.example.com/x' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://api.example.com/x' }, undefined, undefined, ctx)
 
     expect(textOf(result)).toMatch(/strategy: "jq"/)
     expect(detailsOf(result).error).toBe(true)
@@ -97,7 +97,7 @@ describe('webfetch: strategy auto-detection', () => {
   test('text/plain content-type defaults to raw', async () => {
     fetchResponse = () => new Response('hello world', { status: 200, headers: { 'content-type': 'text/plain' } })
 
-    const result = await webfetchTool.execute('id', { url: 'https://example.com/r.txt' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://example.com/r.txt' }, undefined, undefined, ctx)
 
     expect(detailsOf(result).strategy).toBe('raw')
     expect(detailsOf(result).autoDetected).toBe(true)
@@ -113,7 +113,7 @@ describe('webfetch: explicit strategies', () => {
         headers: { 'content-type': 'application/json' },
       })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://api.example.com/x', strategy: 'jq', query: '.items[].name' },
       undefined,
@@ -129,7 +129,7 @@ describe('webfetch: explicit strategies', () => {
   test('jq without query returns a missing-arg error before parsing', async () => {
     fetchResponse = () => new Response('{"a":1}', { status: 200, headers: { 'content-type': 'application/json' } })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://api.example.com/x', strategy: 'jq' },
       undefined,
@@ -148,7 +148,7 @@ describe('webfetch: explicit strategies', () => {
         headers: { 'content-type': 'text/html' },
       })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://shop.example.com/p', strategy: 'selector', selector: '.price' },
       undefined,
@@ -164,7 +164,7 @@ describe('webfetch: explicit strategies', () => {
     const body = ['alpha', 'beta', 'gamma alpha', 'delta'].join('\n')
     fetchResponse = () => new Response(body, { status: 200, headers: { 'content-type': 'text/plain' } })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://example.com/list.txt', strategy: 'grep', pattern: 'alpha' },
       undefined,
@@ -184,7 +184,7 @@ describe('webfetch: explicit strategies', () => {
         headers: { 'content-type': 'text/html' },
       })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://example.com/', strategy: 'snapshot' },
       undefined,
@@ -200,7 +200,7 @@ describe('webfetch: explicit strategies', () => {
     fetchResponse = () =>
       new Response('<html>raw body</html>', { status: 200, headers: { 'content-type': 'text/html' } })
 
-    const result = await webfetchTool.execute(
+    const result = await webFetchTool.execute(
       'id',
       { url: 'https://example.com/', strategy: 'raw' },
       undefined,
@@ -216,7 +216,7 @@ describe('webfetch: errors and limits', () => {
   test('non-2xx response surfaces the status', async () => {
     fetchResponse = () => new Response('nope', { status: 500, statusText: 'Internal Server Error' })
 
-    const result = await webfetchTool.execute('id', { url: 'https://example.com/' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://example.com/' }, undefined, undefined, ctx)
 
     expect(textOf(result)).toContain('HTTP 500')
     expect(detailsOf(result).error).toBe(true)
@@ -226,7 +226,7 @@ describe('webfetch: errors and limits', () => {
     const big = 'x'.repeat(110_000)
     fetchResponse = () => new Response(big, { status: 200, headers: { 'content-type': 'text/plain' } })
 
-    const result = await webfetchTool.execute('id', { url: 'https://example.com/big' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://example.com/big' }, undefined, undefined, ctx)
     const details = detailsOf(result)
 
     expect(details.truncated).toBe(true)
@@ -239,7 +239,7 @@ describe('webfetch: errors and limits', () => {
       throw new Error('ECONNREFUSED')
     }
 
-    const result = await webfetchTool.execute('id', { url: 'https://example.com/' }, undefined, undefined, ctx)
+    const result = await webFetchTool.execute('id', { url: 'https://example.com/' }, undefined, undefined, ctx)
 
     expect(textOf(result)).toContain('ECONNREFUSED')
     expect(detailsOf(result).error).toBe(true)

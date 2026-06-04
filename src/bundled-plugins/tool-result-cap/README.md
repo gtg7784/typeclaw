@@ -9,7 +9,7 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 `pi-coding-agent`'s built-in tools occasionally return very large payloads that the model only needed once. Two empirically observed cases:
 
 1. **`read` on an image file** returns the base64-encoded image inline (e.g. `{type:"image", data:"<3.2MB of base64>"}`). The model uses it on the turn it was asked for, then sees the same 3.2MB of base64 as conversation context on every subsequent prompt — until compaction fires (which is token-driven, not byte-driven, so a single fat blob may sit in context for many turns before compaction is triggered).
-2. **`webfetch` on a binary URL** (PNG, ZIP, etc.) receives the raw response body, treats it as text, and stores raw binary as a JSON-encoded string. Same effect: 100KB+ of mojibake sits in the transcript permanently.
+2. **`web_fetch` on a binary URL** (PNG, ZIP, etc.) receives the raw response body, treats it as text, and stores raw binary as a JSON-encoded string. Same effect: 100KB+ of mojibake sits in the transcript permanently.
 
 The result is a session JSONL file that's tens of megabytes on disk but mostly one or two giant tool results, plus 3-minute first-prompt latencies after container restart because the full transcript gets re-shipped to the LLM as context.
 

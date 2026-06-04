@@ -389,7 +389,7 @@ export async function runPromptForCommand(args: {
   // Mirrors src/agent/multimodal/look-at.ts: spawn a session, prompt, capture
   // the final assistant text, dispose. Unlike look-at we want the FULL agent
   // toolset (no `tools: []` / `customTools: []` overrides) so the model can
-  // call channel_send, websearch, etc. The system prompt is composed from
+  // call channel_send, web_search, etc. The system prompt is composed from
   // the agent folder's IDENTITY/SOUL/MEMORY files via the default resource
   // loader (no `systemPromptOverride`).
   const snapshot = args.runtime.get()

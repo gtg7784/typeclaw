@@ -1,1 +1,1 @@
-export { webfetchTool } from './tool'
+export { webFetchTool } from './tool'

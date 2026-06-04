@@ -44,8 +44,8 @@ import {
 import { createLoopGuard, type LoopGuard } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import type { SessionOrigin } from './session-origin'
-import { webfetchTool } from './tools/webfetch'
-import { websearchTool } from './tools/websearch'
+import { webFetchTool } from './tools/webfetch'
+import { webSearchTool } from './tools/websearch'
 
 // Process-wide loop guard. State is keyed by sessionId so concurrent sessions
 // don't interfere; the guard's own LRU bound keeps it from growing without
@@ -112,7 +112,7 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
 // name-filter path); the wrapped customTools just replace the implementation
 // underneath so subagent and channel sessions share the same hook coverage.
 type PiAgentToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
-type TypeclawToolName = 'websearch' | 'webfetch'
+type TypeclawToolName = 'web_search' | 'web_fetch'
 
 const PI_AGENT_TOOL_MAP: Record<PiAgentToolName, AgentTool<any, any>> = {
   read: piReadTool,
@@ -125,8 +125,8 @@ const PI_AGENT_TOOL_MAP: Record<PiAgentToolName, AgentTool<any, any>> = {
 }
 
 const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any, any, any>> = {
-  websearch: websearchTool,
-  webfetch: webfetchTool,
+  web_search: webSearchTool,
+  web_fetch: webFetchTool,
 }
 
 function isPiAgentToolName(name: string): name is PiAgentToolName {

@@ -7,7 +7,7 @@ import { wikipediaSearch, type WikipediaResult } from './wikipedia'
 const DEFAULT_LIMIT = 10
 const MAX_LIMIT = 20
 
-type WebsearchDetails = {
+type WebSearchDetails = {
   query: string
   source: 'web' | 'wikipedia' | 'none'
   count: number
@@ -16,12 +16,12 @@ type WebsearchDetails = {
   message?: string
 }
 
-export const websearchTool = defineTool({
-  name: 'websearch',
+export const webSearchTool = defineTool({
+  name: 'web_search',
   label: 'Web Search',
   description:
     'Search the public web. Returns a ranked list of {title, url, snippet} entries. Use `source: "wikipedia"` for encyclopedic lookups; otherwise default to general web results from DuckDuckGo. Pair this with the `read` tool by visiting URLs you find with `bash` (curl) when you need full page contents.\n' +
-    'If `spawn_subagent` is available to you, PREFER delegating to the `scout` subagent by default: spawn it whenever the research is non-trivial (more than 1-2 queries, any "across multiple sources" framing, or follow-up fetches of the results). Scout runs `websearch`/`webfetch` in its own context window and returns a distilled, citation-backed answer, so the search churn never pollutes yours. Only call this tool directly for a single query whose top result you will cite immediately — or whenever you cannot spawn subagents (e.g. you are yourself a subagent), in which case run the searches here.',
+    'If `spawn_subagent` is available to you, PREFER delegating to the `scout` subagent by default: spawn it whenever the research is non-trivial (more than 1-2 queries, any "across multiple sources" framing, or follow-up fetches of the results). Scout runs `web_search`/`web_fetch` in its own context window and returns a distilled, citation-backed answer, so the search churn never pollutes yours. Only call this tool directly for a single query whose top result you will cite immediately — or whenever you cannot spawn subagents (e.g. you are yourself a subagent), in which case run the searches here.',
   parameters: Type.Object({
     query: Type.String({ description: 'The search query.' }),
     limit: Type.Optional(
@@ -66,7 +66,7 @@ function clampLimit(value: number | undefined): number {
 }
 
 function successResult(query: string, source: 'web' | 'wikipedia', results: DdgResult[] | WikipediaResult[]) {
-  const details: WebsearchDetails = { query, source, count: results.length, results }
+  const details: WebSearchDetails = { query, source, count: results.length, results }
   if (results.length === 0) {
     return {
       content: [{ type: 'text' as const, text: `No results for "${query}" on ${source}.` }],
@@ -89,7 +89,7 @@ function successResult(query: string, source: 'web' | 'wikipedia', results: DdgR
 }
 
 function errorResult(message: string) {
-  const details: WebsearchDetails = { query: '', source: 'none', count: 0, results: [], error: true, message }
+  const details: WebSearchDetails = { query: '', source: 'none', count: 0, results: [], error: true, message }
   return {
     content: [{ type: 'text' as const, text: message }],
     details,

@@ -1057,7 +1057,7 @@ describe('cloudflared layer', () => {
 // version, library path, and binary location. When they don't, the
 // per-agent Dockerfile's eventual FROM line inherits a base whose contents
 // don't match what buildDockerfile() assumes, and the agent fails at
-// runtime in subtle ways: websearch silently regresses when curl-impersonate
+// runtime in subtle ways: web_search silently regresses when curl-impersonate
 // is the wrong version, Chrome fails to launch when a runtime lib is
 // missing, etc. These tests lock the structural invariant that both
 // outputs share the same toolchain pins, install paths, and Layer 0 cache
