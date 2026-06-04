@@ -403,12 +403,18 @@ function raceSubagentCompletion(
   })
 }
 
-// A complete top-level <review>...</review> block. The reviewer's contract
-// is that this block IS its result; a trailing summary turn ("delivered
-// above") must not become the captured final message. `[\s\S]` spans newlines
-// (the block is multi-line); non-greedy stops at the first close so an
+// A complete <review>...</review> block. The reviewer's contract is that this
+// block IS its result; same-message preamble/trailing chatter or a later
+// summary turn must not become the captured final message. `[\s\S]` spans
+// newlines (the block is multi-line); non-greedy stops at the first close so an
 // incidental `<review>` literal in reviewed text cannot swallow real content.
-const REVIEW_BLOCK_RE = /<review>[\s\S]*?<\/review>/
+// Global so a message with several blocks yields the last (the revision).
+const REVIEW_BLOCK_RE = /<review>[\s\S]*?<\/review>/g
+
+function lastReviewBlock(text: string): string | null {
+  const matches = text.match(REVIEW_BLOCK_RE)
+  return matches === null ? null : (matches[matches.length - 1] ?? null)
+}
 
 function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
   let lastAssistant: string | null = null
@@ -424,7 +430,8 @@ function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: 
       const text = extractFinalMessageText(ev.message?.content)
       if (text === null) return
       lastAssistant = text
-      if (REVIEW_BLOCK_RE.test(text)) lastReview = text
+      const review = lastReviewBlock(text)
+      if (review !== null) lastReview = review
       onFinalMessage(lastReview ?? lastAssistant)
     })
   } catch {

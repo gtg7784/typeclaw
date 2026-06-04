@@ -849,6 +849,21 @@ describe('startSubagent', () => {
     expect(final).toBe(revised)
   })
 
+  test('returns only the <review> block, stripping same-message preamble and trailing chatter', async () => {
+    const review = '<review>\n<verdict>request-changes</verdict>\n</review>'
+    const final = await captureFinal([
+      { role: 'assistant', content: `Here is the review:\n${review}\nDone — let me know.` },
+    ])
+    expect(final).toBe(review)
+  })
+
+  test('returns the last <review> block when a single message contains more than one', async () => {
+    const first = '<review>\n<verdict>approve</verdict>\n</review>'
+    const second = '<review>\n<verdict>request-changes</verdict>\n</review>'
+    const final = await captureFinal([{ role: 'assistant', content: `${first}\n\nrevised:\n${second}` }])
+    expect(final).toBe(second)
+  })
+
   test('a bare <review> mention inside fenced text is not treated as a review block', async () => {
     const incidental = 'The diff adds a `<review>` literal but never closes it; flagging that.'
     const final = await captureFinal([{ role: 'assistant', content: incidental }])
