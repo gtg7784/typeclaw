@@ -136,7 +136,8 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
 // prefix is implied by this field living under the review config); `off` is the
 // disable sentinel, matching the `engagement.stickiness: 'off'` convention:
 //   - 'review_requested' — review only when the bot is requested (default)
-//   - 'opened'           — review every PR as soon as it opens
+//   - 'opened'           — review every non-draft PR as soon as it opens; draft
+//                          PRs are skipped until an explicit review_requested
 //   - 'off'              — disable code review entirely
 export const GITHUB_REVIEW_ON_VALUES = ['review_requested', 'opened', 'off'] as const
 

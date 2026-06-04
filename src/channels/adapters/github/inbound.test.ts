@@ -356,6 +356,34 @@ describe('classifyGithubInbound', () => {
         expect(msg?.text).toContain('requested your review on PR #7')
       })
 
+      it('skips the auto-review on a draft PR, landing it as awareness-only context', () => {
+        const msg = classifyGithubInbound('pull_request', openedPayload({ draft: true }), 'typeclaw-bot', {
+          reviewOn: 'opened',
+        })
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+
+      it('still auto-reviews when draft is explicitly false', () => {
+        const msg = classifyGithubInbound('pull_request', openedPayload({ draft: false }), 'typeclaw-bot', {
+          reviewOn: 'opened',
+        })
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.text).toContain('Please review the changes line-by-line')
+      })
+
+      it('still triggers on an explicit review_requested even when the PR is a draft', () => {
+        const msg = classifyGithubInbound(
+          'pull_request',
+          reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot', draft: true }),
+          'typeclaw-bot',
+          { reviewOn: 'opened' },
+        )
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.text).toContain('requested your review on PR #7')
+      })
+
       it('suppresses the review trigger when the bot opened its own PR (handler drops the self-authored event)', () => {
         const payload = openedPayload()
         ;(payload.sender as Record<string, unknown>).login = 'typeclaw-bot'
@@ -1268,20 +1296,28 @@ function pullRequestForReview(updatedAt: string): Record<string, unknown> {
   }
 }
 
-function openedPayload(options: { updatedAt?: string } = {}): Record<string, unknown> {
+function openedPayload(options: { updatedAt?: string; draft?: boolean } = {}): Record<string, unknown> {
+  const pull_request = pullRequestForReview(options.updatedAt ?? '2026-01-01T00:00:00Z')
+  if (options.draft !== undefined) pull_request.draft = options.draft
   return {
     action: 'opened',
     repository: repo(),
-    pull_request: pullRequestForReview(options.updatedAt ?? '2026-01-01T00:00:00Z'),
+    pull_request,
     sender: { login: 'alice', id: 10, type: 'User' },
   }
 }
 
-function reviewRequestedPayload(options: { reviewerLogin: string; updatedAt?: string }): Record<string, unknown> {
+function reviewRequestedPayload(options: {
+  reviewerLogin: string
+  updatedAt?: string
+  draft?: boolean
+}): Record<string, unknown> {
+  const pull_request = pullRequestForReview(options.updatedAt ?? '2026-01-01T00:00:00Z')
+  if (options.draft !== undefined) pull_request.draft = options.draft
   return {
     action: 'review_requested',
     repository: repo(),
-    pull_request: pullRequestForReview(options.updatedAt ?? '2026-01-01T00:00:00Z'),
+    pull_request,
     requested_reviewer: { login: options.reviewerLogin, id: 42, type: 'User' },
     sender: { login: 'alice', id: 10, type: 'User' },
   }

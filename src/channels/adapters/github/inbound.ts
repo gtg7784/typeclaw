@@ -494,6 +494,12 @@ function classifyOpenedReviewTrigger(input: OpenedReviewTriggerInput): InboundMe
   const decoyLogin = resolveDecoyReviewerLogin(selfLogin, authType)
   if (sender.login === selfLogin || (decoyLogin !== null && sender.login === decoyLogin)) return null
 
+  // A draft PR is work-in-progress, so the automatic `opened` path skips it: null
+  // here drops to awareness-only context (like a non-`opened` reviewOn) instead of
+  // waking a review. An explicit `review_requested` still triggers on a draft via
+  // classifyReviewRequest, preserving "skip until explicitly requested".
+  if (readBoolean(pr, 'draft') === true) return null
+
   const title = readString(pr, 'title') ?? `#${number}`
   const head = readString(readRecord(pr.head), 'ref')
   const baseRef = readString(readRecord(pr.base), 'ref')
@@ -736,6 +742,11 @@ function readString(obj: Record<string, unknown> | null, key: string): string | 
 function readNumber(obj: Record<string, unknown> | null, key: string): number | null {
   const value = obj?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function readBoolean(obj: Record<string, unknown> | null, key: string): boolean | null {
+  const value = obj?.[key]
+  return typeof value === 'boolean' ? value : null
 }
 
 function ok(): Response {
