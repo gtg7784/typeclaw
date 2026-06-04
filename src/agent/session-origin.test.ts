@@ -201,7 +201,7 @@ describe('renderSessionOrigin', () => {
   })
 
   test.each(['slack-bot', 'discord-bot', 'github'] as const)(
-    'reaction-capable channel origin (%s) tells the model to react proactively with channel_react',
+    'reaction-capable channel origin (%s) tells the model to react proactively with channel_react when a reaction target exists',
     (adapter) => {
       const out = renderSessionOrigin({
         kind: 'channel',
@@ -209,6 +209,7 @@ describe('renderSessionOrigin', () => {
         workspace: 'W0',
         chat: 'C0',
         thread: null,
+        reactionRef: { adapter, value: 'target' },
       })
       expect(out).toMatch(/React like a teammate/i)
       expect(out).toMatch(/channel_react\(\{ emoji \}\)/)
@@ -217,6 +218,26 @@ describe('renderSessionOrigin', () => {
       expect(out).toMatch(/tada/)
       // A reaction must not be presented as satisfying the reply obligation.
       expect(out).toMatch(/does NOT satisfy the\s+reply obligation/i)
+    },
+  )
+
+  // Regression for the `channel_react denied: this conversation has no message
+  // to react to` incident: reminder-only turns (restart-resume, subagent-
+  // completion, idle/todo continuation) wake a reaction-capable session with
+  // no inbound, so the origin carries no reactionRef. The proactive-reaction
+  // block must be suppressed there, otherwise the model is nudged into a
+  // channel_react the tool will deny.
+  test.each(['slack-bot', 'discord-bot', 'github'] as const)(
+    'reaction-capable channel origin (%s) omits the proactive-reaction guidance when there is no reaction target',
+    (adapter) => {
+      const out = renderSessionOrigin({
+        kind: 'channel',
+        adapter,
+        workspace: 'W0',
+        chat: 'C0',
+        thread: null,
+      })
+      expect(out).not.toMatch(/React like a teammate/i)
     },
   )
 
@@ -229,6 +250,7 @@ describe('renderSessionOrigin', () => {
         workspace: 'W0',
         chat: 'C0',
         thread: null,
+        reactionRef: { adapter, value: 'target' },
       })
       expect(out).not.toMatch(/React like a teammate/i)
       expect(out).not.toMatch(/channel_react/)
