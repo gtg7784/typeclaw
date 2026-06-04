@@ -4,6 +4,10 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  __resetProxyForTesting as resetDashboardProxy,
+  __waitForProxyBindForTesting as waitForDashboardProxyBind,
+} from '@/bundled-plugins/agent-browser'
 import { createChannelRouter, type ChannelManager, type ChannelManagerOptions } from '@/channels'
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
@@ -33,6 +37,11 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  // Drain the agent-browser background bind before clearing the override. The
+  // bind sleeps BROKER_HANDSHAKE_DELAY_MS before reading readPortConfig() when
+  // a broker token is set, so deleting the env first lets it fall back to 4848.
+  await waitForDashboardProxyBind()
+  resetDashboardProxy()
   delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
   if (!running) return
   running.server.stop(true)
