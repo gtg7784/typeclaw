@@ -403,13 +403,36 @@ function raceSubagentCompletion(
   })
 }
 
+// A complete <review>...</review> block. The reviewer's contract is that this
+// block IS its result; same-message preamble/trailing chatter or a later
+// summary turn must not become the captured final message. `[\s\S]` spans
+// newlines (the block is multi-line); non-greedy stops at the first close so an
+// incidental `<review>` literal in reviewed text cannot swallow real content.
+// Global so a message with several blocks yields the last (the revision).
+const REVIEW_BLOCK_RE = /<review>[\s\S]*?<\/review>/g
+
+function lastReviewBlock(text: string): string | null {
+  const matches = text.match(REVIEW_BLOCK_RE)
+  return matches === null ? null : (matches[matches.length - 1] ?? null)
+}
+
 function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
+  let lastAssistant: string | null = null
+  let lastReview: string | null = null
   try {
     session.subscribe((event: unknown) => {
-      const ev = event as { type?: string; message?: { content?: unknown } }
+      const ev = event as { type?: string; message?: { role?: string; content?: unknown } }
       if (ev?.type !== 'message_end') return
+      // Real assistant messages carry role 'assistant'; older test doubles omit
+      // it. user/toolResult echoes must never overwrite the assistant's answer.
+      const role = ev.message?.role
+      if (role !== undefined && role !== 'assistant') return
       const text = extractFinalMessageText(ev.message?.content)
-      if (text !== null) onFinalMessage(text)
+      if (text === null) return
+      lastAssistant = text
+      const review = lastReviewBlock(text)
+      if (review !== null) lastReview = review
+      onFinalMessage(lastReview ?? lastAssistant)
     })
   } catch {
     // session.subscribe is a stable upstream API; defensive try is for test

@@ -79,13 +79,20 @@ function firstTextChunk(result: unknown): string | null {
 // normally — unlike a silent alias, this rescue path cannot bypass policy.
 export function attachToolNotFoundNudge(session: NudgeableSession, knownToolNames: readonly string[]): () => void {
   const known = [...new Set(knownToolNames)]
+  // A wedged model re-calls the same wrong name every turn; each steer
+  // spawns a fresh assistant turn that clobbers the subagent's captured
+  // final message (see attachFinalMessageCapture). One reminder per mistake.
+  const nudged = new Set<string>()
   return session.subscribe((event) => {
     const e = event as { type?: unknown; isError?: unknown; result?: unknown }
     if (e?.type !== 'tool_execution_end' || e.isError !== true) return
     const text = firstTextChunk(e.result)
     if (text === null) return
+    const requested = extractNotFoundToolName(text)
+    if (requested === null || nudged.has(requested)) return
     const nudge = buildToolNotFoundNudge(text, known)
     if (nudge === null) return
+    nudged.add(requested)
     void session.steer(nudge)
   })
 }
