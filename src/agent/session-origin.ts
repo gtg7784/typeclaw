@@ -123,14 +123,20 @@ export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 type PlatformInfo = {
   displayName: string
   mentionMode: 'angle-id' | 'at-username' | 'alias'
+  // Whether this adapter registers a ReactionCallback, i.e. whether
+  // `channel_react` actually does anything here. Gates the proactive-reaction
+  // prompt guidance so we never tell a KakaoTalk/Telegram agent to react when
+  // the call would no-op. Keep in sync with the adapters that call
+  // `router.registerReaction` (github, slack-bot, discord-bot today).
+  supportsReactions: boolean
 }
 
 const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
-  'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id' },
-  'discord-bot': { displayName: 'Discord', mentionMode: 'angle-id' },
-  github: { displayName: 'GitHub', mentionMode: 'at-username' },
-  'telegram-bot': { displayName: 'Telegram', mentionMode: 'at-username' },
-  kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias' },
+  'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id', supportsReactions: true },
+  'discord-bot': { displayName: 'Discord', mentionMode: 'angle-id', supportsReactions: true },
+  github: { displayName: 'GitHub', mentionMode: 'at-username', supportsReactions: true },
+  'telegram-bot': { displayName: 'Telegram', mentionMode: 'at-username', supportsReactions: false },
+  kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias', supportsReactions: false },
 }
 
 function getPlatformInfo(adapter: AdapterId): PlatformInfo {
@@ -347,6 +353,23 @@ function renderChannelOrigin(
 
   const conversationLine = renderConversationLine(origin)
   if (conversationLine !== null) lines.push('', conversationLine)
+
+  if (platformInfo.supportsReactions) {
+    lines.push(
+      '',
+      '**React like a teammate would.** You can drop an emoji on the message that',
+      'triggered this turn with `channel_react({ emoji })` — it posts no comment,',
+      'just a reaction. Read the message and pick what genuinely fits its tone:',
+      '`+1` to agree or approve, `rocket` for something shipping or exciting,',
+      '`tada` to celebrate, `heart` to show appreciation, `laugh` for something',
+      'funny, `eyes` to signal you are looking. Reach for it when a reaction adds',
+      'real warmth or signal — not on every message, and not just because you can.',
+      'A reaction does NOT satisfy the reply obligation below: when the message',
+      'needs a substantive answer, still send it via `channel_reply`. Think of',
+      'reactions as the lightweight, human layer on top of your words, not a',
+      'replacement for them.',
+    )
+  }
 
   lines.push(
     '',
