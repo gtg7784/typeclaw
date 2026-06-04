@@ -1,6 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { checkFalseReceipt } from '@/channels/github-false-receipt'
 import {
   containsKimiToolDelimiter,
   isNoReplySignal,
@@ -22,6 +23,10 @@ export type ChannelReplyOrigin = {
 export type CreateChannelReplyToolOptions = {
   router: ChannelRouter
   origin: ChannelReplyOrigin
+  // Scopes the per-turn false-receipt ledger. Defaults to '' when a caller (e.g.
+  // a focused test) has no session; the guard then simply finds no recorded
+  // action and falls back to its safe default.
+  sessionId?: string
   logger?: ChannelToolLogger
 }
 
@@ -37,6 +42,7 @@ export type CreateChannelReplyToolOptions = {
 export function createChannelReplyTool({
   router,
   origin,
+  sessionId = '',
   logger = consoleChannelLogger,
 }: CreateChannelReplyToolOptions) {
   return defineTool({
@@ -131,6 +137,28 @@ export function createChannelReplyTool({
         }
       }
 
+      // False-receipt guard: deny a terminal reply that CLAIMS a PR verdict /
+      // thread close-out the agent never actually performed this turn. Warn-tier
+      // claims fall through and have their notice appended on success below.
+      const falseReceipt = checkFalseReceipt({
+        sessionId,
+        adapter: origin.adapter,
+        workspace: origin.workspace,
+        chat: origin.chat,
+        thread: origin.thread,
+        text,
+        isContinue: keepTurnAlive,
+        resolveReviewThread: params.resolve_review_thread === true,
+      })
+      if (falseReceipt.kind === 'block') {
+        logger.warn(formatChannelToolFailure('channel_reply', falseReceipt.reason))
+        return {
+          content: [{ type: 'text' as const, text: `channel_reply denied: ${falseReceipt.reason}` }],
+          details: { ok: false, error: falseReceipt.reason },
+        }
+      }
+      const falseReceiptNotice = falseReceipt.kind === 'warn' ? falseReceipt.notice : null
+
       // Resolve BEFORE posting: a successful channel_reply ends the turn, so a
       // resolve attempted "after" the ack would never run (the exact bug this
       // flag fixes). Resolve-failure blocks the reply so the agent never posts
@@ -203,8 +231,9 @@ export function createChannelReplyTool({
         // TOOL_RESULT_PREFIX to match the denial branch below. The prefix is
         // intentionally weaker and is safe ONLY because denials carry no echoed
         // prose; the success result does, and the weak prefix let Kimi loop.
+        const warnNote = falseReceiptNotice !== null ? fenceRuntimeNotice(falseReceiptNotice) : ''
         return {
-          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hint}` }],
+          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hint}${warnNote}` }],
           details,
         }
       }

@@ -630,7 +630,13 @@ export function buildChannelTools(
       chat: origin.chat,
       thread: origin.thread,
     }
-    tools.push(createChannelReplyTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(
+      createChannelReplyTool({
+        router: channelRouter,
+        origin: channelOrigin,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      }),
+    )
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(
