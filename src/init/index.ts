@@ -3,7 +3,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
 import {
   DEFAULT_MODEL_REF,
@@ -1167,10 +1166,12 @@ async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): 
 }
 
 function buildGithubChannelConfig(options: Extract<AddChannelOptions, { channel: 'github' }>): Record<string, unknown> {
+  // Do NOT write eventAllowlist: the schema defaults it at parse time, so
+  // omitting it lets the user's config track the shipped default across
+  // releases instead of freezing the list captured at `channel add` time.
   return {
     ...(options.webhookUrl !== undefined ? { webhookUrl: options.webhookUrl } : {}),
     webhookPort: options.webhookPort ?? 8975,
-    eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
     repos: options.repos,
   }
 }
@@ -1246,7 +1247,6 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
   existingChannels.github = {
     ...(credentials.webhookUrl !== undefined ? { webhookUrl: credentials.webhookUrl } : {}),
     webhookPort: credentials.webhookPort ?? 8975,
-    eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
     repos: credentials.repos,
   }
   parsed.channels = existingChannels

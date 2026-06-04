@@ -132,6 +132,14 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
   'pull_request_review.submitted',
 ] as const
 
+// Every event-allowlist that `channel add` / `init` has ever seeded verbatim
+// into typeclaw.json, newest last. The legacy-shape migration uses this to
+// tell a seeded default (safe to strip so the config re-tracks the shipped
+// default) from a user's deliberate customization (must be preserved). Append
+// the prior array here — never edit in place — whenever DEFAULT_GITHUB_EVENT_
+// ALLOWLIST changes, or the migration will start eating user edits.
+export const SEEDED_GITHUB_EVENT_ALLOWLISTS: readonly (readonly string[])[] = [DEFAULT_GITHUB_EVENT_ALLOWLIST]
+
 // Which pull_request webhook action triggers an agent code review. The two
 // event values are GitHub's bare PR action names (the `pull_request.` event
 // prefix is implied by this field living under the review config); `off` is the
