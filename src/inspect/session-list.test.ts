@@ -109,6 +109,17 @@ describe('listSessions', () => {
     expect(sessions[0]?.firstPrompt).toBeNull()
   })
 
+  test('subagent with a machine payload as its first message → firstPrompt is null (no preamble noise)', async () => {
+    const payload = `Parent session: ${UUID_B}\nTranscript file: /agent/sessions/x.jsonl\nDaily stream file: /agent/memory/streams/today.jsonl`
+    await writeSession(
+      `2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`,
+      [metaLine({ kind: 'subagent', subagent: 'memory-logger', parentSessionId: UUID_B }), userLine(payload)],
+      1000,
+    )
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions[0]?.firstPrompt).toBeNull()
+  })
+
   test('strips the injected <current-time> anchor from the first-prompt hint', async () => {
     const text = '<current-time>2026-06-04T22:36:14+09:00 (Asia/Seoul, Thursday)</current-time>\n\nfix the parser'
     await writeSession(`2026-06-04T00-00-00-000Z_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine(text)], 1000)

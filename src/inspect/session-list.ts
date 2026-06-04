@@ -148,6 +148,10 @@ async function peekSession(
     bytesRead += approximateSize(event)
     if (bytesRead > PREVIEW_MAX_BYTES) break
   }
+  // A subagent's first "user" message is a machine-built payload (Parent
+  // session:, Transcript file:, …), never user prose — and the row label
+  // already names the subagent. Drop the hint rather than show that noise.
+  if (origin?.kind === 'subagent') firstPrompt = null
   return { origin, firstPrompt }
 }
 
