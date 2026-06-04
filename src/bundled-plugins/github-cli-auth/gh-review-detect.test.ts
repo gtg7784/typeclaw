@@ -8,7 +8,7 @@ describe('detectReviewSubmission — REST --input', () => {
       command: 'gh api -X POST /repos/acme/widgets/pulls/12/reviews --input /tmp/review-12.json',
       inputFileContents: '{ "event": "APPROVE", "body": "lgtm" }',
     })
-    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 12, verdict: 'APPROVE' })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 12, verdict: 'APPROVE', source: 'api' })
   })
 
   test('REQUEST_CHANGES in the input file is detected', () => {
@@ -41,7 +41,7 @@ describe('detectReviewSubmission — REST inline fields', () => {
     const result = detectReviewSubmission({
       command: 'gh api /repos/acme/widgets/pulls/3/reviews -f event=APPROVE',
     })
-    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE' })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE', source: 'api' })
   })
 
   test('-F event=REQUEST_CHANGES', () => {
@@ -64,14 +64,19 @@ describe('detectReviewSubmission — gh pr review porcelain', () => {
     const result = detectReviewSubmission({
       command: 'gh pr review 42 --approve -R acme/widgets',
     })
-    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 42, verdict: 'APPROVE' })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 42, verdict: 'APPROVE', source: 'pr-review' })
   })
 
   test('gh pr review --request-changes N --repo owner/repo', () => {
     const result = detectReviewSubmission({
       command: 'gh pr review --request-changes 42 --repo acme/widgets',
     })
-    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 42, verdict: 'REQUEST_CHANGES' })
+    expect(result).toEqual({
+      workspace: 'acme/widgets',
+      prNumber: 42,
+      verdict: 'REQUEST_CHANGES',
+      source: 'pr-review',
+    })
   })
 
   test('gh pr review --comment is not tracked', () => {

@@ -73,4 +73,30 @@ describe('review recorder', () => {
     commitReviewIfSucceeded({ sessionId: SESSION, callId: 'c5', result: textResult(SUCCESS_OUTPUT) })
     expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 5, verdict: 'APPROVE' })).toBe(false)
   })
+
+  test('credits a `gh pr review --approve` from its porcelain confirmation line', async () => {
+    await noteReviewCommand({ callId: 'c6', command: `gh pr review 42 --approve -R ${WS}` })
+    commitReviewIfSucceeded({
+      sessionId: SESSION,
+      callId: 'c6',
+      result: textResult(`✓ Approved pull request ${WS}#42`),
+    })
+    expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 42, verdict: 'APPROVE' })).toBe(true)
+  })
+
+  test('credits a `gh pr review --request-changes` from its porcelain confirmation line', async () => {
+    await noteReviewCommand({ callId: 'c7', command: `gh pr review 42 --request-changes -R ${WS}` })
+    commitReviewIfSucceeded({
+      sessionId: SESSION,
+      callId: 'c7',
+      result: textResult(`+ Requested changes to pull request ${WS}#42`),
+    })
+    expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 42, verdict: 'REQUEST_CHANGES' })).toBe(true)
+  })
+
+  test('does NOT credit a porcelain command whose output is missing the confirmation (fail closed)', async () => {
+    await noteReviewCommand({ callId: 'c8', command: `gh pr review 42 --approve -R ${WS}` })
+    commitReviewIfSucceeded({ sessionId: SESSION, callId: 'c8', result: textResult('(no recognizable output)') })
+    expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 42, verdict: 'APPROVE' })).toBe(false)
+  })
 })

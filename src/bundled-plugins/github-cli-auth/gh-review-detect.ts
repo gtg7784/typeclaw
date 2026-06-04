@@ -7,10 +7,14 @@ import type { ReviewVerdict } from '@/channels/github-review-turn-ledger'
 // the command is not a verdict-bearing review submission (incl. COMMENT reviews,
 // which carry no false-receipt risk and are not tracked).
 
+// `source` drives success detection downstream: the REST endpoints echo the
+// created review JSON, while the `gh pr review` porcelain prints a plain
+// confirmation line — so each needs its own success markers (see review-recorder).
 export type DetectedReview = {
   workspace: string
   prNumber: number
   verdict: ReviewVerdict
+  source: 'api' | 'pr-review'
 }
 
 export type GhReviewDetectInput = {
@@ -42,7 +46,7 @@ function detectApiReview(args: readonly string[], fileContents: string | null): 
 
   const verdict = verdictFromInlineFields(args) ?? verdictFromFile(fileContents)
   if (verdict === null) return null
-  return { workspace, prNumber, verdict }
+  return { workspace, prNumber, verdict, source: 'api' }
 }
 
 // Inline `-f event=APPROVE` / `--field event=REQUEST_CHANGES` (and `-F` raw).
@@ -94,7 +98,7 @@ function detectPrReview(args: readonly string[]): DetectedReview | null {
   const workspace = repoFromFlag(args)
   const prNumber = prNumberArg(args)
   if (workspace === null || prNumber === null) return null
-  return { workspace, prNumber, verdict }
+  return { workspace, prNumber, verdict, source: 'pr-review' }
 }
 
 function repoFromFlag(args: readonly string[]): string | null {

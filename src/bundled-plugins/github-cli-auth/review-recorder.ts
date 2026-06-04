@@ -26,7 +26,7 @@ export function commitReviewIfSucceeded(args: { sessionId: string; callId: strin
   const detected = pending.get(args.callId)
   if (detected === undefined) return
   pending.delete(args.callId)
-  if (!looksSucceeded(collectText(args.result.content))) return
+  if (!looksSucceeded(detected, collectText(args.result.content))) return
   recordReview({
     sessionId: args.sessionId,
     workspace: detected.workspace,
@@ -62,15 +62,27 @@ function stripQuotes(value: string): string {
   return value
 }
 
-// A landed review POST echoes the created review JSON (its node id / state); a
-// rejected one prints a gh/HTTP error. Require a success marker AND no failure
-// marker, so a partial/garbled capture fails closed (uncredited).
-const SUCCESS_MARKERS = ['"node_id":"PRR_', '"state":"APPROVED"', '"state":"CHANGES_REQUESTED"', '"state": "APPROVED"']
+// Success markers are vector-specific. The REST endpoints echo the created
+// review JSON; the `gh pr review` porcelain prints a plain confirmation line
+// ("✓ Approved pull request OWNER/REPO#N" / "+ Requested changes to pull
+// request …", from cli/cli pkg/cmd/pr/review). Matching REST JSON markers
+// against porcelain output left every `gh pr review --approve` uncredited, so a
+// later "Approved" reply in the same turn was wrongly blocked.
+const API_SUCCESS_MARKERS = [
+  '"node_id":"PRR_',
+  '"state":"APPROVED"',
+  '"state":"CHANGES_REQUESTED"',
+  '"state": "APPROVED"',
+]
+const PR_REVIEW_SUCCESS_MARKERS = ['Approved pull request', 'Requested changes to pull request']
 const FAILURE_MARKERS = ['gh: ', 'HTTP 4', 'HTTP 5', 'Bad credentials', 'Not Found', 'Validation Failed']
 
-function looksSucceeded(text: string): boolean {
+// Require a success marker AND no failure marker, so a partial/garbled capture
+// fails closed (uncredited).
+function looksSucceeded(detected: DetectedReview, text: string): boolean {
   if (FAILURE_MARKERS.some((m) => text.includes(m))) return false
-  return SUCCESS_MARKERS.some((m) => text.includes(m))
+  const markers = detected.source === 'pr-review' ? PR_REVIEW_SUCCESS_MARKERS : API_SUCCESS_MARKERS
+  return markers.some((m) => text.includes(m))
 }
 
 function collectText(content: readonly ContentPart[]): string {
