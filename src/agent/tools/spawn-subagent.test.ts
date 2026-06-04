@@ -292,6 +292,83 @@ describe('createSpawnSubagentTool — background mode', () => {
     expect(completion?.subagent).toBe('explorer')
     expect(completion?.ok).toBe(true)
   })
+
+  test('channel-origin background completion carries the channel key for rollover-safe routing', async () => {
+    const stream = createStream()
+    const events: unknown[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+      events.push(msg.payload)
+    })
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry: new LiveSubagentRegistry(),
+      createSessionForSubagent: async () => stubSession(),
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin: () => ({
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T1',
+        chat: 'C1',
+        thread: 't1',
+      }),
+      stream,
+      generateTaskId: () => 'bg_ch',
+      now: () => 1_000,
+    })
+
+    await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    const completion = events.find((e) => (e as { kind?: string }).kind === 'subagent.completed') as
+      | Record<string, unknown>
+      | undefined
+    expect(completion?.channelKey).toEqual({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: 't1' })
+  })
+
+  test('non-channel (tui) origin omits the channel key', async () => {
+    const stream = createStream()
+    const events: unknown[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+      events.push(msg.payload)
+    })
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry: new LiveSubagentRegistry(),
+      createSessionForSubagent: async () => stubSession(),
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin: () => ({ kind: 'tui', sessionId: 'ses_parent' }),
+      stream,
+      generateTaskId: () => 'bg_tui',
+      now: () => 1_000,
+    })
+
+    await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    const completion = events.find((e) => (e as { kind?: string }).kind === 'subagent.completed') as
+      | Record<string, unknown>
+      | undefined
+    expect(completion).toBeDefined()
+    expect(completion?.channelKey).toBeUndefined()
+  })
 })
 
 describe('createSpawnSubagentTool — permissions gating', () => {

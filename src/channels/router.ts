@@ -671,6 +671,7 @@ export type ChannelRouter = {
     ok: boolean
     durationMs: number
     error?: string
+    channelKey?: { adapter: string; workspace: string; chat: string; thread: string | null }
   }) => { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' }
   // Record that the agent invoked `skip_response` during the current turn
   // for the channel session identified by `parentSessionId`. The reason is
@@ -3221,6 +3222,47 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'unknown-command', name: lowered }
   }
 
+  const deliverCompletionReminder = (
+    live: LiveSession,
+    args: {
+      parentSessionId: string
+      subagent: string
+      taskId: string
+      ok: boolean
+      durationMs: number
+      error?: string
+    },
+  ): { kind: 'delivered'; keyId: string } => {
+    const text = renderSubagentCompletionReminder({
+      subagent: args.subagent,
+      taskId: args.taskId,
+      ok: args.ok,
+      durationMs: args.durationMs,
+      ...(args.error !== undefined ? { error: args.error } : {}),
+      channel: true,
+    })
+    live.pendingSystemReminders.push(text)
+    // The reminder tells the agent to fetch this result now; clear the
+    // subagent_output window so an earlier premature-polling streak can't
+    // hard-block that legitimate fetch.
+    forgetSharedLoopGuardTool(live.sessionId, SUBAGENT_OUTPUT_TOOL_NAME)
+    logger.info(`[channels] ${live.keyId}: subagent-completion reminder queued task=${args.taskId} ok=${args.ok}`)
+    // Wake the drain loop. If a turn is already in flight, the wakeup is
+    // a no-op because drain() will pick up the reminder on its next
+    // iteration (it now gates on promptQueue OR pendingSystemReminders).
+    // If the session is idle, fire drain() immediately rather than going
+    // through the debounce path — the reminder is not a user inbound,
+    // so the "coalesce nearby inbounds" rationale for debouncing does
+    // not apply. Mirrors the TUI path's `idle ? 'interrupt' : 'queue'`
+    // semantics: the channel router doesn't have a `delivery: interrupt`
+    // mechanism (no in-flight abort during a turn), but firing drain()
+    // immediately is the equivalent for an idle session.
+    if (!live.draining) {
+      void drain(live)
+    }
+    return { kind: 'delivered', keyId: live.keyId }
+  }
+
   const injectSubagentCompletionReminder = (args: {
     parentSessionId: string
     subagent: string
@@ -3228,38 +3270,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     ok: boolean
     durationMs: number
     error?: string
+    channelKey?: { adapter: string; workspace: string; chat: string; thread: string | null }
   }): { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' } => {
     for (const live of liveSessions.values()) {
       if (live.destroyed) continue
       if (live.sessionId !== args.parentSessionId) continue
-      const text = renderSubagentCompletionReminder({
-        subagent: args.subagent,
-        taskId: args.taskId,
-        ok: args.ok,
-        durationMs: args.durationMs,
-        ...(args.error !== undefined ? { error: args.error } : {}),
-        channel: true,
-      })
-      live.pendingSystemReminders.push(text)
-      // The reminder tells the agent to fetch this result now; clear the
-      // subagent_output window so an earlier premature-polling streak can't
-      // hard-block that legitimate fetch.
-      forgetSharedLoopGuardTool(live.sessionId, SUBAGENT_OUTPUT_TOOL_NAME)
-      logger.info(`[channels] ${live.keyId}: subagent-completion reminder queued task=${args.taskId} ok=${args.ok}`)
-      // Wake the drain loop. If a turn is already in flight, the wakeup is
-      // a no-op because drain() will pick up the reminder on its next
-      // iteration (it now gates on promptQueue OR pendingSystemReminders).
-      // If the session is idle, fire drain() immediately rather than going
-      // through the debounce path — the reminder is not a user inbound,
-      // so the "coalesce nearby inbounds" rationale for debouncing does
-      // not apply. Mirrors the TUI path's `idle ? 'interrupt' : 'queue'`
-      // semantics: the channel router doesn't have a `delivery: interrupt`
-      // mechanism (no in-flight abort during a turn), but firing drain()
-      // immediately is the equivalent for an idle session.
-      if (!live.draining) {
-        void drain(live)
+      return deliverCompletionReminder(live, args)
+    }
+    // The exact parent session is gone. If the subagent was spawned from a
+    // channel session, the conversation may have rolled over
+    // (SESSION_FRESHNESS_TTL_MS) or been idle-evicted onto a fresh sessionId
+    // for the same channel key while the subagent ran. Fall back to the live
+    // successor for that key so a finished review/result still surfaces
+    // instead of being silently dropped.
+    if (args.channelKey !== undefined) {
+      const targetKeyId = channelKeyId(args.channelKey)
+      const successor = liveSessions.get(targetKeyId)
+      if (successor !== undefined && !successor.destroyed) {
+        logger.info(
+          `[channels] ${targetKeyId}: subagent-completion reminder rerouted to live successor (parent ${args.parentSessionId} gone) task=${args.taskId}`,
+        )
+        return deliverCompletionReminder(successor, args)
       }
-      return { kind: 'delivered', keyId: live.keyId }
     }
     return { kind: 'no-live-session' }
   }

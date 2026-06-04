@@ -382,6 +382,6 @@ export type ReviewThreadResolveResult =
 // support review threads never register one; the router answers `unsupported`.
 export type ReviewThreadResolver = (req: ReviewThreadResolveRequest) => Promise<ReviewThreadResolveResult>
 
-export function channelKeyId(key: ChannelKey): string {
+export function channelKeyId(key: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }
