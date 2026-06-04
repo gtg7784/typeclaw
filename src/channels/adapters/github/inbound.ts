@@ -187,6 +187,7 @@ export function classifyGithubInbound(
 ): InboundMessage | null {
   const repository = readRepository(payload)
   if (repository === null) return null
+  const mention = resolveBotMentionLogins(selfLogin, options?.authType ?? 'pat')
   const base = {
     adapter: 'github' as const,
     workspace: `${repository.owner}/${repository.name}`,
@@ -209,7 +210,7 @@ export function classifyGithubInbound(
       comment.body,
       id,
       user,
-      selfLogin,
+      mention,
       comment.created_at,
       { kind: 'issue-comment', owner: repository.owner, repo: repository.name, commentId: id },
     )
@@ -228,7 +229,7 @@ export function classifyGithubInbound(
       comment.body,
       id,
       readUser(comment.user),
-      selfLogin,
+      mention,
       comment.created_at,
       { kind: 'pr-review-comment', owner: repository.owner, repo: repository.name, commentId: id },
     )
@@ -246,7 +247,7 @@ export function classifyGithubInbound(
       comment.body,
       id,
       readUser(comment.user),
-      selfLogin,
+      mention,
       comment.created_at,
       null,
     )
@@ -270,7 +271,7 @@ export function classifyGithubInbound(
       text,
       id,
       opener,
-      selfLogin,
+      mention,
       issue.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
       action === 'opened' && !hasBody,
@@ -325,7 +326,7 @@ export function classifyGithubInbound(
       prText,
       id,
       opener,
-      selfLogin,
+      mention,
       pr.created_at,
       { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
       isOpenLike && !hasBody,
@@ -352,7 +353,7 @@ export function classifyGithubInbound(
       text,
       id,
       reviewer,
-      selfLogin,
+      mention,
       review.submitted_at,
       null,
       !hasBody,
@@ -377,7 +378,7 @@ export function classifyGithubInbound(
       text,
       id,
       opener,
-      selfLogin,
+      mention,
       discussion.created_at,
       null,
       action === 'created' && !hasBody,
@@ -415,6 +416,27 @@ function resolveDecoyReviewerLogin(selfLogin: string, authType: 'pat' | 'app'): 
   if (!selfLogin.endsWith(BOT_LOGIN_SUFFIX)) return null
   const slug = selfLogin.slice(0, -BOT_LOGIN_SUFFIX.length)
   return slug !== '' ? slug : null
+}
+
+// The @-handles that count as "addressed to us" in inbound body text. Under
+// App auth `selfLogin` is the actor login `slug[bot]`, but GitHub renders a
+// human's mention of the App as `@slug` (the bare slug — the decoy account's
+// login), with no `[bot]` suffix and no way to type one. Matching only against
+// `selfLogin` therefore never sees `@typeey` for a `typeey[bot]` actor, so a
+// direct "@typeey review again" lands with isBotMention=false and falls through
+// the engagement mention gate. Include the decoy slug so the bare-slug mention
+// is recognized. Under PAT auth the bot IS a real user, so there is no decoy
+// and only `selfLogin` applies.
+export type BotMentionLogins = readonly string[]
+
+export function resolveBotMentionLogins(selfLogin: string | null, authType: 'pat' | 'app'): BotMentionLogins {
+  if (selfLogin === null) return []
+  const decoyLogin = resolveDecoyReviewerLogin(selfLogin, authType)
+  return decoyLogin !== null ? [selfLogin, decoyLogin] : [selfLogin]
+}
+
+function textMentionsBot(text: string, mentionLogins: BotMentionLogins): boolean {
+  return mentionLogins.some((login) => text.includes(`@${login}`))
 }
 
 function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null {
@@ -550,7 +572,7 @@ function buildInbound(
   rawText: unknown,
   id: number,
   user: GithubUser | null,
-  selfLogin: string | null,
+  mention: BotMentionLogins,
   rawTs: unknown,
   reactionTarget: GithubReactionTarget | null,
   synthesizedAwareness = false,
@@ -567,7 +589,7 @@ function buildInbound(
   // Synthesized awareness lines carry an `@author` prefix describing who acted;
   // that handle is the author, never a third-party mention of the bot, so the
   // body-text mention heuristic must not fire on it.
-  const isBotMention = !synthesizedAwareness && selfLogin !== null && text.includes(`@${selfLogin}`)
+  const isBotMention = !synthesizedAwareness && textMentionsBot(text, mention)
   return {
     ...key,
     text,
