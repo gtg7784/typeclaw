@@ -132,13 +132,45 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
   'pull_request_review.submitted',
 ] as const
 
+// Prior values of DEFAULT_GITHUB_EVENT_ALLOWLIST that shipped in releases and
+// were seeded verbatim into typeclaw.json. Kept as historical record so the
+// migration can recognize and unfreeze configs created by those versions.
+// NEVER edit these in place — they are snapshots of what was on disk.
+//   - v1: 7-event default, shipped 0.5.1–0.10.0 (commit fe4f3a8)
+const GITHUB_EVENT_ALLOWLIST_V1 = [
+  'issue_comment.created',
+  'pull_request_review_comment.created',
+  'discussion_comment.created',
+  'issues.opened',
+  'pull_request.opened',
+  'discussion.created',
+  'pull_request_review.submitted',
+] as const
+//   - v2: added review_requested + review_request_removed, shipped 0.11.0+ (commit 4f365ce)
+const GITHUB_EVENT_ALLOWLIST_V2 = [
+  'issue_comment.created',
+  'pull_request_review_comment.created',
+  'discussion_comment.created',
+  'issues.opened',
+  'pull_request.opened',
+  'pull_request.review_requested',
+  'pull_request.review_request_removed',
+  'discussion.created',
+  'pull_request_review.submitted',
+] as const
+
 // Every event-allowlist that `channel add` / `init` has ever seeded verbatim
-// into typeclaw.json, newest last. The legacy-shape migration uses this to
-// tell a seeded default (safe to strip so the config re-tracks the shipped
-// default) from a user's deliberate customization (must be preserved). Append
-// the prior array here — never edit in place — whenever DEFAULT_GITHUB_EVENT_
-// ALLOWLIST changes, or the migration will start eating user edits.
-export const SEEDED_GITHUB_EVENT_ALLOWLISTS: readonly (readonly string[])[] = [DEFAULT_GITHUB_EVENT_ALLOWLIST]
+// into typeclaw.json, oldest first, current default last. The legacy-shape
+// migration uses this to tell a seeded default (safe to strip so the config
+// re-tracks the shipped default) from a user's deliberate customization (must
+// be preserved). Append the prior array here — never edit in place — whenever
+// DEFAULT_GITHUB_EVENT_ALLOWLIST changes, or configs from the old version stay
+// frozen and the migration starts eating user edits.
+export const SEEDED_GITHUB_EVENT_ALLOWLISTS: readonly (readonly string[])[] = [
+  GITHUB_EVENT_ALLOWLIST_V1,
+  GITHUB_EVENT_ALLOWLIST_V2,
+  DEFAULT_GITHUB_EVENT_ALLOWLIST,
+]
 
 // Which pull_request webhook action triggers an agent code review. The two
 // event values are GitHub's bare PR action names (the `pull_request.` event

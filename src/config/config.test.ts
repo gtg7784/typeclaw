@@ -1120,6 +1120,55 @@ describe('migrateLegacyConfigShape', () => {
     expect(result.applied).toEqual([{ kind: 'drop-github-seeded-event-allowlist' }])
   })
 
+  // Historical on-disk snapshots seeded by older releases. Inlined verbatim
+  // (not imported) so a future edit to the registry can't silently make these
+  // assertions pass against the wrong list. See SEEDED_GITHUB_EVENT_ALLOWLISTS.
+  const GITHUB_ALLOWLIST_V1 = [
+    'issue_comment.created',
+    'pull_request_review_comment.created',
+    'discussion_comment.created',
+    'issues.opened',
+    'pull_request.opened',
+    'discussion.created',
+    'pull_request_review.submitted',
+  ]
+  const GITHUB_ALLOWLIST_V2 = [
+    'issue_comment.created',
+    'pull_request_review_comment.created',
+    'discussion_comment.created',
+    'issues.opened',
+    'pull_request.opened',
+    'pull_request.review_requested',
+    'pull_request.review_request_removed',
+    'discussion.created',
+    'pull_request_review.submitted',
+  ]
+
+  test.each([
+    ['v1 (0.5.1–0.10.0, 7 events)', GITHUB_ALLOWLIST_V1],
+    ['v2 (0.11.0+, 9 events)', GITHUB_ALLOWLIST_V2],
+  ])('strips an older seeded github eventAllowlist: %s', (_label, seeded) => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...seeded] } },
+    })
+    expect(result.changed).toBe(true)
+    const channels = (result.json as Record<string, unknown>).channels as Record<string, Record<string, unknown>>
+    expect(channels.github).toEqual({ repos: ['acme/widgets'] })
+    expect(result.applied).toEqual([{ kind: 'drop-github-seeded-event-allowlist' }])
+  })
+
+  test('preserves a customized list even when it derives from an older seeded default', () => {
+    const customizedFromV1 = [...GITHUB_ALLOWLIST_V1, 'release.published']
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      channels: { github: { eventAllowlist: customizedFromV1 } },
+    })
+    expect(result.changed).toBe(false)
+    const channels = (result.json as Record<string, unknown>).channels as Record<string, Record<string, unknown>>
+    expect(channels.github?.eventAllowlist).toEqual(customizedFromV1)
+  })
+
   test('preserves a user-customized github eventAllowlist (any deviation from a seeded default)', () => {
     const customized = [...DEFAULT_GITHUB_EVENT_ALLOWLIST, 'release.published']
     const result = migrateLegacyConfigShape({
