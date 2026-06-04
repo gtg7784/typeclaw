@@ -18,6 +18,8 @@ import {
   CHANNEL_MAX_OUTPUT_TOKENS,
   createChannelRouter,
   DUPLICATE_SEND_ERROR,
+  extractPlainTextChannelToolCallText,
+  getPlainTextChannelToolCallKind,
   MAX_CHANNEL_SENDS_PER_TURN,
   MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
@@ -2474,7 +2476,7 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(false)
   })
 
-  test('suppresses leaked plain-text channel_reply(...) function-call serialization instead of posting it to the channel', async () => {
+  test('recovers the text arg from a leaked plain-text channel_reply(...) serialization instead of dropping it', async () => {
     const dir = await tempDir()
     const logs: string[] = []
     const sent: Array<{ text: string }> = []
@@ -2490,12 +2492,33 @@ describe('ChannelRouter channel-turn protocol', () => {
     }
     await router.__testing!.flushDebounce(KEY)
 
-    expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
-    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hi there')
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
   })
 
-  test('suppresses leaked plain-text channel_send(...) serialization the same way', async () => {
+  test('recovers the text arg from the unquoted-key channel_reply shape Kimi emits', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'yo typeey' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({ text: "hey! what\'s going on today?" })')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe("hey! what's going on today?")
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
+  test('recovers the text arg from a single-quoted channel_reply(...) serialization', async () => {
     const dir = await tempDir()
     const logs: string[] = []
     const sent: Array<{ text: string }> = []
@@ -2507,12 +2530,95 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     await router.route(inbound({ text: 'hello' }))
     sessions[0]!.onPrompt = () => {
-      sessions[0]!.setAssistantText('channel_send({"adapter":"discord-bot","chat":"c1","text":"hi"})')
+      sessions[0]!.setAssistantText("channel_reply({text: 'it\\'s me'})")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe("it's me")
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
+  test('recovers the text arg from a truncated channel_reply(...) serialization', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({"text":"hi there, how can I help')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hi there, how can I help')
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
+  test('recovers only the text arg from a leaked channel_send(...), ignoring model-supplied destination', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ chat: string; text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ chat: msg.chat, text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_send({"adapter":"discord-bot","chat":"evil-channel","text":"hi"})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hi')
+    expect(sent[0]!.chat).not.toBe('evil-channel')
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=send'))).toBe(true)
+  })
+
+  test('suppresses a leaked channel_reply(...) whose extracted text is itself a no-reply signal', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({"text":"NO_REPLY"})')
     }
     await router.__testing!.flushDebounce(KEY)
 
     expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
+  })
+
+  test('suppresses a leaked channel_reply(...) with no recoverable text arg', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({"reason":"some leaked arg with a " quote"})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed unextractable_plain_text_channel_tool_call'))).toBe(true)
   })
 
   test('suppresses leaked plain-text skip_response(...) serialization instead of posting it to the channel', async () => {
@@ -2532,7 +2638,7 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_skip_response'))).toBe(true)
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
@@ -2576,6 +2682,66 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]!.text).toContain('channel_reply tool')
     expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(false)
+  })
+
+  describe('getPlainTextChannelToolCallKind', () => {
+    test('classifies anchored reply/send/skip serializations', () => {
+      expect(getPlainTextChannelToolCallKind('channel_reply({"text":"hi"})')).toBe('reply')
+      expect(getPlainTextChannelToolCallKind('channel_send({"chat":"c","text":"hi"})')).toBe('send')
+      expect(getPlainTextChannelToolCallKind('skip_response({ reason: "no content" })')).toBe('skip')
+    })
+
+    test('returns null for prose that merely mentions a tool name', () => {
+      expect(getPlainTextChannelToolCallKind('Use the channel_reply tool to send "text".')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('channel_reply does this')).toBeNull()
+    })
+  })
+
+  describe('extractPlainTextChannelToolCallText', () => {
+    test('extracts double-quoted text', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({"text":"hi there"})')).toBe('hi there')
+    })
+
+    test('extracts unquoted-key, single-space, apostrophe-bearing text', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({ text: "what\'s up" })')).toBe("what's up")
+    })
+
+    test('extracts single-quoted value with an escaped inner quote', () => {
+      expect(extractPlainTextChannelToolCallText("channel_reply({text: 'it\\'s me'})")).toBe("it's me")
+    })
+
+    test('decodes \\n / \\t escapes inside the value', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({"text":"line1\\nline2\\ttab"})')).toBe(
+        'line1\nline2\ttab',
+      )
+    })
+
+    test('recovers a truncated value missing its closing quote and paren', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({"text":"hello world')).toBe('hello world')
+    })
+
+    test('ignores destination args and extracts only text from channel_send', () => {
+      expect(
+        extractPlainTextChannelToolCallText('channel_send({"adapter":"discord-bot","chat":"c1","text":"hi"})'),
+      ).toBe('hi')
+    })
+
+    test('returns null when no text arg is present', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({"reason":"nope"})')).toBeNull()
+    })
+
+    test('returns null for an empty text value', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({"text":""})')).toBeNull()
+      expect(extractPlainTextChannelToolCallText('channel_reply({"text":"   "})')).toBeNull()
+    })
+
+    test('returns null for skip_response (never a user-facing reply)', () => {
+      expect(extractPlainTextChannelToolCallText('skip_response({ reason: "x" })')).toBeNull()
+    })
+
+    test('returns null for prose mentioning the tool name', () => {
+      expect(extractPlainTextChannelToolCallText('Use channel_reply with a "text" field.')).toBeNull()
+    })
   })
 
   test('recovers visible assistant text when no channel tool sent a message', async () => {

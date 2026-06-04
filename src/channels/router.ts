@@ -2854,7 +2854,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    const { text: assistantText, source } = candidate
+    const { text: candidateText, source } = candidate
+    let assistantText = candidateText
 
     if (endsWithNoReplySignal(assistantText)) {
       const leakedReasoning = !isNoReplySignal(assistantText)
@@ -2874,9 +2875,48 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    if (isLikelyPlainTextChannelToolCall(assistantText)) {
-      logger.warn(`[channels] ${live.keyId}: suppressed plain_text_channel_tool_call text_len=${assistantText.length}`)
+    // Plain-text tool-call leak: the model serialized a channel tool call as
+    // ordinary prose instead of producing a real tool call (a Kimi-on-Fireworks
+    // failure mode — see `isLikelyPlainTextChannelToolCall`). We can't post the
+    // raw `channel_reply({...})` serialization to the channel, but for
+    // reply/send the model's *intent* is unambiguous: deliver the `text` arg.
+    // Extract it and recover the actual message. `skip_response` is the
+    // opposite — a genuine decline — so it stays suppressed.
+    const plainTextToolCallKind = getPlainTextChannelToolCallKind(assistantText)
+    if (plainTextToolCallKind === 'skip') {
+      logger.warn(
+        `[channels] ${live.keyId}: suppressed plain_text_channel_skip_response text_len=${assistantText.length}`,
+      )
       return
+    }
+    if (plainTextToolCallKind !== null) {
+      const extracted = extractPlainTextChannelToolCallText(assistantText)
+      // Unextractable (no `text` arg, empty value, or fully-truncated): fall
+      // back to the historical safe behavior — drop it rather than leak plumbing.
+      if (extracted === null) {
+        logger.warn(
+          `[channels] ${live.keyId}: suppressed unextractable_plain_text_channel_tool_call text_len=${assistantText.length}`,
+        )
+        return
+      }
+      // The extracted value is still untrusted model output: if it is itself a
+      // no-reply signal, an empty-response sentinel, or another (nested) leaked
+      // tool call, suppress it through the same guards rather than re-leaking.
+      if (
+        endsWithNoReplySignal(extracted) ||
+        isUpstreamEmptyResponseSentinel(extracted) ||
+        isLikelyKimiChannelToolLeak(extracted) ||
+        isLikelyPlainTextChannelToolCall(extracted)
+      ) {
+        logger.warn(
+          `[channels] ${live.keyId}: suppressed plain_text_channel_tool_call (unsafe extracted text) text_len=${extracted.length}`,
+        )
+        return
+      }
+      logger.warn(
+        `[channels] ${live.keyId}: recovered plain_text_channel_tool_call kind=${plainTextToolCallKind} text_len=${extracted.length}`,
+      )
+      assistantText = extracted
     }
 
     // `source` distinguishes the three recovery shapes for log triage:
@@ -4233,8 +4273,12 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 //
 // Structural-only detection (NOT a substring search): the trimmed text must
 // *start* with `channel_reply(`, `channel_send(`, or `skip_response(`, and
-// that opening paren must enclose at least one `"` (the serialized argument).
-// This deliberately matches the leak shape while letting prose that merely
+// that opening paren must enclose at least one quote — `"` or `'` (the
+// serialized argument). The single-quote arm matters because the extractor
+// recovers single-quoted values too; if the classifier only matched `"`, a
+// single-quoted leak like `channel_reply({text: 'hi'})` would bypass the
+// extractor and post raw plumbing. This deliberately matches the leak shape
+// while letting prose that merely
 // *mentions* a tool name (e.g. "I would normally call channel_reply here
 // but...") reach the user — that false-positive class is already locked in by
 // the `still recovers prose that mentions channel_reply` test.
@@ -4242,11 +4286,72 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 // The trailing close paren is NOT required: the model sometimes truncates
 // mid-serialization, and a half-leaked `channel_reply({"text":"..."` is
 // just as user-hostile as the full shape.
-const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(?:channel_(?:reply|send)|skip_response)\s*\(\s*[^)]*"/
+const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(channel_reply|channel_send|skip_response)\s*\(\s*[^)]*["']/
+
+export type PlainTextChannelToolCallKind = 'reply' | 'send' | 'skip'
+
+export function getPlainTextChannelToolCallKind(text: string): PlainTextChannelToolCallKind | null {
+  const match = PLAIN_TEXT_CHANNEL_TOOL_CALL_RE.exec(text.trim())
+  if (match === null) return null
+  switch (match[1]) {
+    case 'channel_reply':
+      return 'reply'
+    case 'channel_send':
+      return 'send'
+    case 'skip_response':
+      return 'skip'
+    default:
+      return null
+  }
+}
 
 export function isLikelyPlainTextChannelToolCall(text: string): boolean {
-  return PLAIN_TEXT_CHANNEL_TOOL_CALL_RE.test(text.trim())
+  return getPlainTextChannelToolCallKind(text) !== null
 }
+
+// Tolerant single-purpose scanner that pulls the `text` argument out of a
+// plain-text-serialized `channel_reply(...)` / `channel_send(...)` leak. A
+// single regex covering every shape (double/single/unquoted keys, escaped
+// quotes, mid-serialization truncation) is fragile, so this walks the string
+// once and extracts only the first string-valued `text` property. `channel_send`
+// also carries `adapter`/`chat`/`thread`, which are intentionally ignored —
+// recovery always routes back through the current channel, never a
+// model-supplied destination. Returns null when no recoverable, non-empty
+// `text` value is present so the caller can fall back to suppression.
+export function extractPlainTextChannelToolCallText(text: string): string | null {
+  const trimmed = text.trim()
+  if (!/^(?:channel_reply|channel_send)\s*\(/.test(trimmed)) return null
+
+  const keyRe = /(?:[{,\s])(?:"text"|'text'|text)\s*:\s*/g
+  const keyMatch = keyRe.exec(trimmed)
+  if (keyMatch === null) return null
+
+  let i = keyMatch.index + keyMatch[0].length
+  const quote = trimmed[i]
+  if (quote !== '"' && quote !== "'") return null
+  i++
+
+  let value = ''
+  let escaped = false
+  for (; i < trimmed.length; i++) {
+    const ch = trimmed[i]!
+    if (escaped) {
+      value += ESCAPE_REPLACEMENTS[ch] ?? ch
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === quote) break
+    value += ch
+  }
+
+  return value.trim().length > 0 ? value : null
+}
+
+const ESCAPE_REPLACEMENTS: Record<string, string> = { n: '\n', r: '\r', t: '\t' }
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
