@@ -31,12 +31,19 @@ export function createChannelReactTool({
     name: 'channel_react',
     label: 'Channel React',
     description:
-      'Add an emoji reaction to the message that triggered this turn — a lightweight acknowledgment that does not post a comment. ' +
-      'On GitHub this reacts to the triggering issue/PR/comment (e.g. :eyes: to signal "I am looking at this"). ' +
-      'Use this instead of a textual "on it" reply when a reaction is enough. Pass the bare emoji name, no colons.',
+      'React to the message that triggered this turn with an emoji that fits its content or tone — a lightweight, ' +
+      'human touch that posts no comment. Works on GitHub (issue/PR/comment), Slack, and Discord. ' +
+      'Pick the reaction a thoughtful teammate would leave: :+1: to agree or approve, :rocket: for something ' +
+      'shipping or exciting, :tada: to celebrate, :heart: to show appreciation, :eyes: to signal "I am looking at this", ' +
+      ':laugh: for something funny. Use it when a reaction adds genuine social signal — not on every message. ' +
+      'A reaction does NOT replace `channel_reply`: when the message needs a substantive answer, still send one. ' +
+      'If a reaction alone is the whole response, call `skip_response` afterward so the turn ends cleanly. ' +
+      'Pass the bare emoji name, no colons.',
     parameters: Type.Object({
       emoji: Type.String({
-        description: 'Bare emoji name, no surrounding colons. e.g. "eyes", "+1", "rocket", "heart".',
+        description:
+          'Bare emoji name, no surrounding colons. Choose one that matches the message: ' +
+          'e.g. "+1", "rocket", "tada", "heart", "eyes", "laugh".',
         minLength: 1,
       }),
     }),

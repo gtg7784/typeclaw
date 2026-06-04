@@ -43,6 +43,7 @@ import {
   type SlackInboundMessageEvent,
 } from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
+import { createSlackReactionCallback, createSlackRemoveReactionCallback } from './slack-bot-reactions'
 import { enrichSlackReferenceContext } from './slack-bot-reference'
 import {
   buildSlashAckPayload,
@@ -997,6 +998,9 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
   const fetchAttachmentCallback = createFetchAttachmentCallback({ client, logger })
 
+  const reactionCallback = createSlackReactionCallback({ client })
+  const removeReactionCallback = createSlackRemoveReactionCallback({ client })
+
   const dedupe = createSlackDedupe()
 
   const handleSlashCommand = createSlashCommandHandler({
@@ -1206,6 +1210,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       })
 
       options.router.registerOutbound('slack-bot', outboundCallback)
+      options.router.registerReaction('slack-bot', reactionCallback)
+      options.router.registerRemoveReaction('slack-bot', removeReactionCallback)
       options.router.registerTyping('slack-bot', typingCallback)
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
       options.router.registerSelfIdentity('slack-bot', selfIdentityResolver)
@@ -1216,6 +1222,22 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       try {
         await listener.start()
       } catch (err) {
+        // Listener failed after registration — roll back every callback so a
+        // failed start leaves no router state behind (stop() returns early on
+        // !started and would otherwise skip cleanup), mirroring the github
+        // adapter's rollback path.
+        options.router.unregisterOutbound('slack-bot', outboundCallback)
+        options.router.unregisterReaction('slack-bot', reactionCallback)
+        options.router.unregisterRemoveReaction('slack-bot', removeReactionCallback)
+        options.router.unregisterTyping('slack-bot', typingCallback)
+        options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
+        options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)
+        options.router.unregisterHistory('slack-bot', historyCallback)
+        options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
+        options.router.unregisterMembership('slack-bot', membershipResolver)
+        listener = null
+        botUserId = null
+        teamId = null
         started = false
         logger.error(`[slack-bot] listener start failed: ${describe(err)}`)
         throw err
@@ -1226,6 +1248,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       if (!started) return
       started = false
       options.router.unregisterOutbound('slack-bot', outboundCallback)
+      options.router.unregisterReaction('slack-bot', reactionCallback)
+      options.router.unregisterRemoveReaction('slack-bot', removeReactionCallback)
       options.router.unregisterTyping('slack-bot', typingCallback)
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)

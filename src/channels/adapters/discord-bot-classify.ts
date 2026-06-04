@@ -8,6 +8,8 @@ import type {
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
+import { encodeDiscordReactionRef } from './discord-bot-reactions'
+
 export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
   | 'empty_content' // SDK delivered content: '' — usually missing MessageContent intent
@@ -87,6 +89,7 @@ export function classifyInbound(
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.id,
+      reactionRef: encodeDiscordReactionRef({ channel: event.channel_id, message: event.id }),
       authorId: event.author.id,
       // Discord's post-2023 username system allows pure-numeric handles (e.g.
       // "1411531"); the human-facing display name lives on `global_name`. The

@@ -200,6 +200,41 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('"On it."')
   })
 
+  test.each(['slack-bot', 'discord-bot', 'github'] as const)(
+    'reaction-capable channel origin (%s) tells the model to react proactively with channel_react',
+    (adapter) => {
+      const out = renderSessionOrigin({
+        kind: 'channel',
+        adapter,
+        workspace: 'W0',
+        chat: 'C0',
+        thread: null,
+      })
+      expect(out).toMatch(/React like a teammate/i)
+      expect(out).toMatch(/channel_react\(\{ emoji \}\)/)
+      // The proactive guidance names a sentiment-based vocabulary, not just :eyes:.
+      expect(out).toMatch(/rocket/)
+      expect(out).toMatch(/tada/)
+      // A reaction must not be presented as satisfying the reply obligation.
+      expect(out).toMatch(/does NOT satisfy the\s+reply obligation/i)
+    },
+  )
+
+  test.each(['telegram-bot', 'kakaotalk'] as const)(
+    'channel origin without reaction support (%s) omits the proactive-reaction guidance',
+    (adapter) => {
+      const out = renderSessionOrigin({
+        kind: 'channel',
+        adapter,
+        workspace: 'W0',
+        chat: 'C0',
+        thread: null,
+      })
+      expect(out).not.toMatch(/React like a teammate/i)
+      expect(out).not.toMatch(/channel_react/)
+    },
+  )
+
   test('channel origin tells the model that plain-text narration is invisible and must go through channel_reply', () => {
     const out = renderSessionOrigin({
       kind: 'channel',

@@ -4,6 +4,7 @@ import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
+import { encodeSlackReactionRef } from './slack-bot-reactions'
 import { hasSlackMessageShareAttachments } from './slack-bot-reference'
 import { slackTsToMillis } from './slack-bot-time'
 
@@ -141,6 +142,7 @@ export function classifyInbound(
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.ts,
+      reactionRef: encodeSlackReactionRef({ channel: event.channel, ts: event.ts }),
       authorId: event.user,
       authorName: event.user,
       authorIsBot,

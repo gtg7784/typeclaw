@@ -39,6 +39,7 @@ import {
   type InboundDropReason,
   renderPlaceholder,
 } from './discord-bot-classify'
+import { createDiscordReactionCallback, createDiscordRemoveReactionCallback } from './discord-bot-reactions'
 import { enrichDiscordMessageReferences } from './discord-bot-reference'
 import {
   ackInteraction,
@@ -863,6 +864,9 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger })
 
+  const reactionCallback = createDiscordReactionCallback({ client })
+  const removeReactionCallback = createDiscordRemoveReactionCallback({ client })
+
   const interactionHandler = createInteractionHandler({
     router: options.router,
     knownCommandNames: SLASH_COMMAND_NAMES,
@@ -999,6 +1003,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       })
 
       options.router.registerOutbound('discord-bot', outboundCallback)
+      options.router.registerReaction('discord-bot', reactionCallback)
+      options.router.registerRemoveReaction('discord-bot', removeReactionCallback)
       options.router.registerTyping('discord-bot', typingCallback)
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
       options.router.registerSelfIdentity('discord-bot', selfIdentityResolver)
@@ -1009,6 +1015,21 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       try {
         await listener.start()
       } catch (err) {
+        // Listener failed after registration — roll back every callback so a
+        // failed start leaves no router state behind (stop() returns early on
+        // !started and would otherwise skip cleanup), mirroring the github
+        // adapter's rollback path.
+        options.router.unregisterOutbound('discord-bot', outboundCallback)
+        options.router.unregisterReaction('discord-bot', reactionCallback)
+        options.router.unregisterRemoveReaction('discord-bot', removeReactionCallback)
+        options.router.unregisterTyping('discord-bot', typingCallback)
+        options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
+        options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
+        options.router.unregisterHistory('discord-bot', historyCallback)
+        options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
+        options.router.unregisterMembership('discord-bot', membershipResolver)
+        listener = null
+        botUserId = null
         started = false
         logger.error(`[discord-bot] listener start failed: ${describe(err)}`)
         throw err
@@ -1019,6 +1040,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       if (!started) return
       started = false
       options.router.unregisterOutbound('discord-bot', outboundCallback)
+      options.router.unregisterReaction('discord-bot', reactionCallback)
+      options.router.unregisterRemoveReaction('discord-bot', removeReactionCallback)
       options.router.unregisterTyping('discord-bot', typingCallback)
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
