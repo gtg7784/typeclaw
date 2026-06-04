@@ -13,18 +13,23 @@ export type ChannelReactOrigin = {
   workspace: string
   chat: string
   thread: string | null
-  reactionRef?: ReactionRef
 }
 
 export type CreateChannelReactToolOptions = {
   router: ChannelRouter
   origin: ChannelReactOrigin
+  // Resolved at execute time, not captured: the target is the message that
+  // triggered THIS turn. The tool is built once at session creation, whose
+  // origin snapshot carries no reactionRef, so a static capture would deny
+  // every call.
+  getReactionRef: () => ReactionRef | undefined
   logger?: ChannelToolLogger
 }
 
 export function createChannelReactTool({
   router,
   origin,
+  getReactionRef,
   logger = consoleChannelLogger,
 }: CreateChannelReactToolOptions) {
   return defineTool({
@@ -58,14 +63,15 @@ export function createChannelReactTool({
         }
       }
 
-      if (origin.reactionRef === undefined) return deny('this conversation has no message to react to')
+      const reactionRef = getReactionRef()
+      if (reactionRef === undefined) return deny('this conversation has no message to react to')
 
       const result = await router.react({
         adapter: origin.adapter,
         workspace: origin.workspace,
         chat: origin.chat,
         thread: origin.thread,
-        reactionRef: origin.reactionRef,
+        reactionRef,
         emoji: params.emoji,
       })
 

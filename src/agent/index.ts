@@ -13,6 +13,7 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 
 import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
+import type { ReactionRef } from '@/channels/types'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
 import { defaultThinkingLevelForRef, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
@@ -359,7 +360,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId()),
+            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId(), getOrigin),
             ...(options.containerName
               ? [
                   createRestartTool({
@@ -620,6 +621,7 @@ export function buildChannelTools(
   channelRouter: ChannelRouter | undefined,
   origin: SessionOrigin | undefined,
   sessionId?: string,
+  getOrigin?: () => SessionOrigin | undefined,
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
@@ -633,10 +635,18 @@ export function buildChannelTools(
     tools.push(createChannelReplyTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
+    // Read the live turn origin, falling back to the static snapshot when no
+    // getter is wired (composition tests). `reactionRef` is per-turn, so the
+    // getter is what makes reactions work outside tests.
+    const resolveReactionRef = (): ReactionRef | undefined => {
+      const live = getOrigin?.() ?? origin
+      return live.kind === 'channel' ? live.reactionRef : undefined
+    }
     tools.push(
       createChannelReactTool({
         router: channelRouter,
-        origin: { ...channelOrigin, ...(origin.reactionRef !== undefined ? { reactionRef: origin.reactionRef } : {}) },
+        origin: channelOrigin,
+        getReactionRef: resolveReactionRef,
       }),
     )
     tools.push(
