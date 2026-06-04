@@ -226,4 +226,69 @@ describe('commitGitignoreWithUntracks', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  const forceAtomicFailure = { commitAtomic: async () => false }
+
+  test('falls back to a real-index commit when the plumbing path cannot run', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await writeFile(join(dir, '.gitignore'), 'old\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+
+      // when: the atomic plumbing path is forced to fail
+      const committed = await commitGitignoreWithUntracks(
+        dir,
+        '.gitignore',
+        untracked,
+        'Untrack newly-ignored files',
+        forceAtomicFailure,
+      )
+
+      // then: the fallback committed, repo is clean, removal landed
+      expect(committed).toBe(true)
+      expect(await runGit(dir, ['status', '--porcelain'])).toBe('')
+      expect(await isTracked(dir, 'public/review.json')).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('fallback refuses when the staged set is not exactly our changes', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await writeFile(join(dir, '.gitignore'), 'old\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+      // given: extra unrelated staged work, and the atomic path forced to fail
+      await writeFile(join(dir, 'user.txt'), 'wip\n')
+      await runGit(dir, ['add', 'user.txt'])
+
+      const committed = await commitGitignoreWithUntracks(
+        dir,
+        '.gitignore',
+        untracked,
+        'Untrack newly-ignored files',
+        forceAtomicFailure,
+      )
+
+      // then: fallback bails rather than sweeping unrelated work into a commit
+      expect(committed).toBe(false)
+      expect(await runGit(dir, ['diff', '--cached', '--name-only'])).toContain('user.txt')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

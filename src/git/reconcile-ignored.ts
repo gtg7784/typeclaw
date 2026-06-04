@@ -62,23 +62,55 @@ export async function untrackTrulyIgnoredFiles(
 // Caller contract: the REAL index already has .gitignore staged and the
 // untracked paths removed (via git rm --cached). update-ref then makes the
 // real index match the new HEAD, so those paths read clean afterward.
+//
+// If the plumbing path can't run (no HEAD, update-ref CAS race, transient git
+// failure) we fall back to a plain `git commit` of the real index — but ONLY
+// when the staged set is exactly { .gitignore + the removals }. This guarantees
+// start()'s hygiene rewrite never gets stranded staged-but-uncommitted (leaving
+// the repo dirty), while the staged-set check still protects any pre-existing
+// user-staged work from being swept into the fallback commit.
+export type CommitGitignoreDeps = {
+  // Seam so tests can force the plumbing path to fail and exercise the fallback;
+  // a real update-ref CAS race or transient git failure is otherwise hard to
+  // reproduce deterministically. Defaults to the real temp-index commit.
+  commitAtomic?: (
+    bun: BunLike,
+    cwd: string,
+    gitignoreFile: string,
+    untracked: readonly string[],
+    message: string,
+  ) => Promise<boolean>
+}
+
 export async function commitGitignoreWithUntracks(
   cwd: string,
   gitignoreFile: string,
   untracked: readonly string[],
   message: string,
+  deps: CommitGitignoreDeps = {},
 ): Promise<boolean> {
   const bun = getBun()
   if (!bun) return false
   if (!existsSync(join(cwd, '.git'))) return false
   if (untracked.length === 0) return false
 
+  const commitAtomic = deps.commitAtomic ?? commitViaTempIndex
+  if (!(await run(bun, cwd, ['add', '--', gitignoreFile]))) return false
+  if (await commitAtomic(bun, cwd, gitignoreFile, untracked, message)) return true
+  return await commitRealIndexIfExactlyOurs(bun, cwd, gitignoreFile, untracked, message)
+}
+
+async function commitViaTempIndex(
+  bun: BunLike,
+  cwd: string,
+  gitignoreFile: string,
+  untracked: readonly string[],
+  message: string,
+): Promise<boolean> {
   let indexDir: string | null = null
   try {
     const parent = (await capture(bun, cwd, ['rev-parse', '--verify', 'HEAD'])).trim()
     if (parent.length === 0) return false
-
-    if (!(await run(bun, cwd, ['add', '--', gitignoreFile]))) return false
 
     indexDir = await mkdtemp(join(tmpdir(), 'typeclaw-untrack-idx-'))
     const env = { ...process.env, GIT_INDEX_FILE: join(indexDir, 'index') }
@@ -97,6 +129,24 @@ export async function commitGitignoreWithUntracks(
   } finally {
     if (indexDir) await rm(indexDir, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+async function commitRealIndexIfExactlyOurs(
+  bun: BunLike,
+  cwd: string,
+  gitignoreFile: string,
+  untracked: readonly string[],
+  message: string,
+): Promise<boolean> {
+  const staged = (await capture(bun, cwd, ['diff', '--cached', '--name-only', '-z']))
+    .split('\0')
+    .filter((entry) => entry.length > 0)
+  if (staged.length === 0) return false
+
+  const expected = new Set([gitignoreFile, ...untracked])
+  if (staged.length !== expected.size || !staged.every((path) => expected.has(path))) return false
+
+  return await run(bun, cwd, ['commit', '-m', message])
 }
 
 // Hardcoded fail-closed guard: even if a custom git.ignore.append pattern
