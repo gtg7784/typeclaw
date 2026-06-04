@@ -211,7 +211,7 @@ Do not resolve on a bare "done" claim. A reply that says "fixed" is a prompt to 
 
 If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed". If their reasoning does **not** settle it, keep the thread open and answer instead.
 
-> **The verify and the resolve are one action, not two.** Once you've verified the fix, your acknowledgement reply **is** the close-out — it must carry `resolve_review_thread: true`. The common failure is posting a bare "Verified at \<sha\> — thanks, that addresses it" with the flag omitted: that reads as closed but leaves the thread **open forever**, because a successful reply ends your turn and the resolve can't happen in a later one. If your reply text says the issue is verified/fixed/addressed, the flag is **not optional** — it is the only thing that actually closes the thread.
+> **The verify and the resolve are one action, not two.** Once you've verified the fix, your acknowledgement reply **is** the close-out — carry `resolve_review_thread: true` on it. The common failure is posting a bare "Verified at \<sha\> — thanks, that addresses it" with the flag omitted: that reads as closed but leaves the thread **open**, because a successful reply ends your turn and the resolve can't happen in a later one. The flag is technically optional (nothing rejects a reply without it), but on an acknowledgement it is the only thing that actually closes the thread — so treat it as part of the acknowledgement, not an afterthought.
 
 ### How to resolve — `channel_reply({ resolve_review_thread: true })`
 
