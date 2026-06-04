@@ -380,6 +380,29 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     if (!result.ok) throw new Error('unreachable')
     expect(result.escToPicker).toBeFalsy()
   })
+
+  test('replay-only interactive prints the end-of-transcript footer exactly once', async () => {
+    // Regression: the streamSessionEvents refactor briefly printed the footer
+    // twice (at replay-only-idle AND at end) when the interactive viewer aborted.
+    await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    const ctrl = new AbortController()
+    const sink = captureSink()
+    // Abort AFTER replay finishes and the viewer is parked in the idle wait, so
+    // the footer is reached (aborting during replay would skip it entirely).
+    setTimeout(() => ctrl.abort(), 30)
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: ID_LIVET,
+      color: false,
+      interactive: true,
+      selectSession: neverPick,
+      signal: ctrl.signal,
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    const footers = sink.out.filter((l) => l.includes('end of transcript'))
+    expect(footers).toHaveLength(1)
+  })
 })
 
 describe('runInspect — picker path', () => {
