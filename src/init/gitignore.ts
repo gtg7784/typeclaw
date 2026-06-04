@@ -2,6 +2,29 @@ import type { GitignoreConfig } from '@/config/config'
 
 export const GITIGNORE_FILE = '.gitignore'
 
+// Match scope for the untrack reconciler (src/git/reconcile-ignored.ts): when a
+// tracked file later matches one of these, start() removes it from the index.
+export const TRULY_IGNORED_PATTERNS = [
+  '.env',
+  '.env.local',
+  'secrets.json',
+  'auth.json',
+  '.typeclaw/home/',
+  'node_modules/',
+  'packages/*/node_modules/',
+  'workspace/',
+  'public/',
+  'mounts/',
+  'Dockerfile',
+  '.DS_Store',
+] as const
+
+// Gitignored but force-committed by TypeClaw (auto-backup, dreaming, channels).
+// The reconciler MUST fail-closed and never untrack these, even if a custom
+// git.ignore.append pattern (e.g. `**`) matches them — doing so would drop
+// runtime-owned state out of git.
+export const SYSTEM_MANAGED_ROOTS = ['sessions/', 'memory/', 'channels/', 'todo/'] as const
+
 export function buildGitignore(config: GitignoreConfig = { append: [] }): string {
   const customEntries = renderCustomGitignoreEntries(config.append)
 
@@ -24,27 +47,13 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 # $HOME (e.g. ~/.codex/auth.json) into the bind-mounted agent folder so
 # tool credentials survive container restarts. Always credentials; never
 # commit.
-.env
-.env.local
-secrets.json
-auth.json
-.typeclaw/home/
-node_modules/
-packages/*/node_modules/
-workspace/
-public/
-mounts/
-Dockerfile
-.DS_Store
+${TRULY_IGNORED_PATTERNS.join('\n')}
 
 # System-managed: gitignored by default so the agent never stages them by hand,
 # but TypeClaw force-commits them on its own schedule (sessions/ + todo/ via
 # auto-backup, memory/ via the dreaming subagent). Treat them as runtime-owned,
 # not agent-owned.
-sessions/
-memory/
-channels/
-todo/
+${SYSTEM_MANAGED_ROOTS.join('\n')}
 `
 }
 
