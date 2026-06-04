@@ -6440,6 +6440,54 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(reminderText).toContain('NO_REPLY')
   })
 
+  test('a github session reminder carries the formal-review carve-out (gh api /reviews)', async () => {
+    // given a live github session (sessions are stamped ses_fake_<n> by creation order)
+    const dir = await tempDir()
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:7', thread: null }
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:7' }))
+    await router.__testing!.flushDebounce(githubKey)
+    expect(sessions).toHaveLength(1)
+
+    // when a reviewer subagent completes for it
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'reviewer',
+      taskId: 'bg_gh',
+      ok: true,
+      durationMs: 5_000,
+    })
+    expect(result.kind).toBe('delivered')
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    // then the reminder names the formal-review API path and keeps the base nudge
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('channel_reply')
+    expect(reminderText).toContain('/reviews')
+    expect(reminderText).toMatch(/formal review/i)
+  })
+
+  test('a discord session reminder does NOT carry the github carve-out (no gh api leakage)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'reviewer',
+      taskId: 'bg_dc',
+      ok: true,
+      durationMs: 5_000,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('channel_reply')
+    expect(reminderText).not.toContain('/reviews')
+    expect(reminderText).not.toContain('gh api')
+  })
+
   test('non-matching parentSessionId returns no-live-session and does not drain', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)

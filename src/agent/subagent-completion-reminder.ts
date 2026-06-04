@@ -16,6 +16,7 @@ export type CompletionReminderArgs = {
   durationMs: number
   error?: string
   channel?: boolean
+  adapter?: string
 }
 
 const CHANNEL_REPLY_NUDGE =
@@ -28,9 +29,23 @@ const CHANNEL_REPLY_NUDGE =
   'can see why the post-completion turn was silent. `NO_REPLY` is the legacy fallback only when ' +
   '`skip_response` is unavailable.'
 
+// Conditional carve-out for github channel sessions. The base nudge above
+// steers EVERY completion to `channel_reply`, which on github is a plain PR
+// comment — fine for most subagents, but wrong for a finished `reviewer`:
+// a verdict delivered as a comment leaves the PR "awaiting review" with no
+// formal approval. This reminder cannot tell a review turn from any other
+// completion, so the carve-out is phrased conditionally ("if this was a PR
+// review") to redirect only the review case without misleading the rest.
+const GITHUB_REVIEW_NUDGE =
+  'If this was a PR review, the verdict is a formal review, not a `channel_reply`: ' +
+  'post it via `gh api -X POST /repos/owner/repo/pulls/<N>/reviews` (APPROVE/REQUEST_CHANGES/COMMENT) ' +
+  'and end the turn with `skip_response`. A `channel_reply` that merely says "Approved" posts a ' +
+  'comment and leaves the PR awaiting review.'
+
 export function renderSubagentCompletionReminder(args: CompletionReminderArgs): string {
   const durationStr = formatReminderDuration(args.durationMs)
-  const channelTail = args.channel === true ? ` ${CHANNEL_REPLY_NUDGE}` : ''
+  const githubTail = args.channel === true && args.adapter === 'github' ? ` ${GITHUB_REVIEW_NUDGE}` : ''
+  const channelTail = args.channel === true ? ` ${CHANNEL_REPLY_NUDGE}${githubTail}` : ''
   if (args.ok) {
     return (
       `<system-reminder>\n` +
