@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { resolveWritableZones, subtractMasked } from './writable-zones'
+import { resolveProtectedZones, resolveWritableZones, subtractMasked } from './writable-zones'
 
 let agentDir: string
 
@@ -84,6 +84,41 @@ describe('resolveWritableZones', () => {
 
   test('returns empty lists for a bare agent dir', async () => {
     const { dirs, files } = await resolveWritableZones(agentDir)
+
+    expect(dirs).toEqual([])
+    expect(files).toEqual([])
+  })
+
+  test('includes .git when it exists so bash can commit', async () => {
+    await mkdir(join(agentDir, '.git'))
+
+    const { dirs } = await resolveWritableZones(agentDir)
+
+    expect(dirs).toContain(join(agentDir, '.git'))
+  })
+
+  test('omits .git when absent (bwrap would abort binding a missing source)', async () => {
+    const { dirs } = await resolveWritableZones(agentDir)
+
+    expect(dirs).not.toContain(join(agentDir, '.git'))
+  })
+})
+
+describe('resolveProtectedZones', () => {
+  test('re-protects .git/hooks and .git/config when present', async () => {
+    await mkdir(join(agentDir, '.git', 'hooks'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[core]\n')
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).toEqual([join(agentDir, '.git/hooks')])
+    expect(files).toEqual([join(agentDir, '.git/config')])
+  })
+
+  test('drops absent protected entries so bwrap never binds a missing source', async () => {
+    await mkdir(join(agentDir, '.git'))
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
 
     expect(dirs).toEqual([])
     expect(files).toEqual([])

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { join } from 'node:path'
 
 import type { AgentTool } from '@mariozechner/pi-agent-core'
 import {
@@ -37,6 +38,7 @@ import {
   buildSandboxedCommand,
   ensureBwrapAvailable,
   resolveHiddenPaths,
+  resolveProtectedZones,
   resolveWritableZones,
   subtractMasked,
 } from '@/sandbox'
@@ -516,12 +518,20 @@ async function applyBashSandbox(
   await ensureBwrapAvailable()
   // Write-confined jail for low-trust roles: bind the whole project read-only,
   // hide private/secret paths, then re-expose only the free-write scratch zones
-  // RW. Anything else under agentDir (.git/, node_modules/, agentDir root) is
-  // EROFS, so bash cannot sidestep the non-workspace-write guard. Trusted/owner
-  // never reach here (their masks are empty) and keep full unsandboxed access.
-  // subtractMasked drops any writable zone masked for this role so an RW bind
-  // never re-exposes a hidden path (e.g. a guest's masked workspace/).
+  // (workspace + root allowlist + .git) RW. The WORKING TREE outside those zones
+  // (node_modules/, agentDir root, non-allowlisted tracked files) stays EROFS, so
+  // bash cannot sidestep the non-workspace-write guard — and `git checkout` of a
+  // protected worktree path fails at the kernel. .git is RW so members can
+  // commit; .git/hooks + .git/config are re-protected RO (protected, rendered
+  // after writable) so a hook-plant / core.hooksPath does not become code
+  // execution in the unsandboxed runtime git ops. Trusted/owner never reach here
+  // (their masks are empty) and keep full unsandboxed access. subtractMasked
+  // drops any writable zone masked for this role so an RW bind never re-exposes a
+  // hidden path (e.g. a guest's masked workspace/).
   const writable = subtractMasked(await resolveWritableZones(agentDir), { dirs, files })
+  const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
+    ? await resolveProtectedZones(agentDir)
+    : { dirs: [], files: [] }
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
@@ -529,6 +539,7 @@ async function applyBashSandbox(
     mounts: [{ type: 'ro-bind', source: agentDir, dest: agentDir }],
     masks: { dirs, files },
     writable,
+    protected: protectedZones,
     network: 'inherit',
     cwd: agentDir,
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
