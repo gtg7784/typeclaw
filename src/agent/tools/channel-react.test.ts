@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ChannelRouter } from '@/channels/router'
-import type { ReactionRequest, ReactionResult } from '@/channels/types'
+import type { ReactionRef, ReactionRequest, ReactionResult } from '@/channels/types'
 
 import { createChannelReactTool, type ChannelReactOrigin } from './channel-react'
 
@@ -48,7 +48,11 @@ const githubOrigin: ChannelReactOrigin = {
   workspace: 'acme/project',
   chat: 'pr:7',
   thread: null,
-  reactionRef: { adapter: 'github', value: '{"kind":"issue","owner":"acme","repo":"project","issueNumber":7}' },
+}
+
+const githubReactionRef: ReactionRef = {
+  adapter: 'github',
+  value: '{"kind":"issue","owner":"acme","repo":"project","issueNumber":7}',
 }
 
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelReactTool>['execute']>[4]
@@ -64,6 +68,7 @@ describe('createChannelReactTool', () => {
         return { ok: true }
       }),
       origin: githubOrigin,
+      getReactionRef: () => githubReactionRef,
       logger: { warn: () => {} },
     })
 
@@ -75,9 +80,36 @@ describe('createChannelReactTool', () => {
       workspace: 'acme/project',
       chat: 'pr:7',
       thread: null,
-      reactionRef: githubOrigin.reactionRef!,
+      reactionRef: githubReactionRef,
       emoji: 'eyes',
     })
+  })
+
+  test('resolves the reaction ref at execute time, not at tool-build time', async () => {
+    // Regression: the tool is built once per session, but the reaction target
+    // is per-turn. A statically captured ref is the session-creation snapshot
+    // (always undefined), so every call would deny. The getter must be read on
+    // execute so each turn reacts to its own triggering message.
+    let current: ReactionRef | undefined
+    let captured: ReactionRequest | undefined
+    const tool = createChannelReactTool({
+      router: fakeRouter(async (req) => {
+        captured = req
+        return { ok: true }
+      }),
+      origin: githubOrigin,
+      getReactionRef: () => current,
+      logger: { warn: () => {} },
+    })
+
+    const denied = await run(tool, 'eyes')
+    expect(denied.details).toEqual({ ok: false, error: 'this conversation has no message to react to' })
+
+    current = githubReactionRef
+    const ok = await run(tool, 'rocket')
+    expect(ok.details).toEqual({ ok: true })
+    expect(captured?.reactionRef).toEqual(githubReactionRef)
+    expect(captured?.emoji).toBe('rocket')
   })
 
   test('denies when the conversation has no reaction target', async () => {
@@ -87,7 +119,8 @@ describe('createChannelReactTool', () => {
         called = true
         return { ok: true }
       }),
-      origin: { ...githubOrigin, reactionRef: undefined },
+      origin: githubOrigin,
+      getReactionRef: () => undefined,
       logger: { warn: () => {} },
     })
 
@@ -101,6 +134,7 @@ describe('createChannelReactTool', () => {
     const tool = createChannelReactTool({
       router: fakeRouter(async () => ({ ok: false, error: 'boom', code: 'permission-denied' })),
       origin: githubOrigin,
+      getReactionRef: () => githubReactionRef,
       logger: { warn: () => {} },
     })
 
