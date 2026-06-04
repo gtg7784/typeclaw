@@ -18,14 +18,21 @@ export type ProtectedZones = {
 // guard and the latter holds executable plugin code; bash must not get blanket
 // RW to either. Skill authoring and package writes go through the guarded
 // write/edit tool only.
-// `.git` is writable so a member can `git add`/`git commit` their own edits to
-// the already-editable surface (workspace + root allowlist files). The escape
-// risk — staging arbitrary tree content via plumbing, or planting hooks — is
-// contained two ways: low-trust roles are still write-confined for the WORKING
-// TREE (paths outside the writable zones stay EROFS, so `git checkout` of a
-// protected path fails at the kernel), and `.git/hooks` + `.git/config` are
-// re-protected read-only via resolveProtectedZones so core.hooksPath/hook-plant
-// RCE into the unsandboxed runtime git ops is closed.
+// `.git` is writable so a member can `git add`/`git commit` their own edits.
+// This is the AGENT'S OWN repo, not a shared/upstream one, so writing history
+// is not a privilege boundary: a low-trust role staging a tracked path it
+// cannot edit in the worktree (e.g. via `git update-index --cacheinfo` plumbing)
+// only writes the agent's own history — content the backup runner already
+// force-commits on idle regardless. So we deliberately do NOT try to confine
+// commit *content* to the worktree write-allowlist; that boundary governs the
+// working tree, not the object database.
+//
+// The one thing writable `.git` must NOT grant is code execution in the
+// UNSANDBOXED runtime (backup/dreaming commit the same .git out of band): a
+// planted `.git/hooks/*` or a `core.hooksPath` in `.git/config` would fire there
+// as a higher-privilege process. resolveProtectedZones re-binds `.git/hooks` and
+// `.git/config` read-only (after the writable .git bind, last-op-wins) to close
+// exactly that escalation.
 const WRITABLE_DIRS = ['workspace', 'public', 'mounts', '.git'] as const
 
 const PROTECTED_GIT_DIRS = ['.git/hooks'] as const
