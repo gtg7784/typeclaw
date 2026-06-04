@@ -1,5 +1,5 @@
 import type { LiveSourceFactory, RunInspectResult } from './index'
-import { streamInspectTarget } from './index'
+import { createTranscriptView, streamInspectTarget } from './index'
 import type { ViewerItem } from './item'
 import { streamLogs } from './logs-item'
 import type { OpenItemContext, TailController } from './loop'
@@ -22,10 +22,11 @@ export type OpenViewerDeps = {
   onVersionMismatch?: (info: { expected: string; actual: string }) => void
 }
 
-// Dispatches a selected list item to its viewer. session/logs run under the
-// loop's tail scope (raw-mode esc/q/ctrl-c handling owned by the loop); tui
-// runs WITHOUT a tail scope because createTui owns its own raw-mode terminal —
-// two raw-stdin owners would corrupt input.
+// Dispatches a selected list item to its viewer. The tui branch and the
+// interactive read-only transcript view each own their own raw-mode pi-tui
+// terminal, so they run WITHOUT the loop's tail scope (two raw-stdin owners
+// would corrupt input). The line/JSON session path and logs run UNDER the tail
+// scope, which owns the raw-mode esc/q/ctrl-c handling.
 export function openViewerItem(deps: OpenViewerDeps) {
   return async (item: ViewerItem, ctx: OpenItemContext): Promise<RunInspectResult> => {
     if (item.kind === 'tui') {
@@ -35,6 +36,20 @@ export function openViewerItem(deps: OpenViewerDeps) {
         ...(deps.expectedVersion !== undefined ? { expectedVersion: deps.expectedVersion } : {}),
         ...(deps.onVersionMismatch !== undefined ? { onVersionMismatch: deps.onVersionMismatch } : {}),
       })
+    }
+
+    // Interactive-TTY read-only session -> rich pi-tui transcript view. Owns its
+    // own terminal, so it bypasses the tail scope. JSON/non-TTY falls through to
+    // the scriptable line renderer below.
+    if (item.kind === 'session' && deps.interactive && !deps.json) {
+      const view = createTranscriptView({
+        summary: item.summary,
+        filter: deps.filter,
+        sinceMs: deps.sinceMs,
+        ...(deps.liveSource !== undefined ? { liveSource: deps.liveSource } : {}),
+      })
+      const outcome = await view.run()
+      return outcome.reason === 'back' ? { ok: true, exitCode: 0, escToPicker: true } : { ok: true, exitCode: 0 }
     }
 
     const scope = ctx.createTailScope()

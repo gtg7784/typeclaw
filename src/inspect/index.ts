@@ -34,6 +34,8 @@ export type { OpenViewerDeps } from './open-item'
 export { runTuiViewer } from './tui-item'
 export type { RunTuiViewerOptions } from './tui-item'
 export { streamLogs } from './logs-item'
+export { createTranscriptView } from './transcript-view'
+export type { TranscriptViewOptions, TranscriptViewOutcome } from './transcript-view'
 
 export type RunInspectOptions = {
   agentDir: string
