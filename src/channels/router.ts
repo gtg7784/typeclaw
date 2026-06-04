@@ -4322,19 +4322,62 @@ export function extractPlainTextChannelToolCallText(text: string): string | null
   const trimmed = text.trim()
   if (!/^(?:channel_reply|channel_send)\s*\(/.test(trimmed)) return null
 
-  const keyRe = /(?:[{,\s])(?:"text"|'text'|text)\s*:\s*/g
-  const keyMatch = keyRe.exec(trimmed)
-  if (keyMatch === null) return null
+  // Walk the serialization once, tracking string state, and only honor a `text`
+  // key found at the structural (non-string) level. A naive `text:` substring
+  // scan matches the key inside an earlier quoted value too — e.g.
+  // `channel_send({ reason: "see text: here", text: "real" })` — and latches
+  // onto the wrong (or unrecoverable) position, dropping a reply the model
+  // clearly intended to send. Skipping over string values first is the fix.
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]!
 
-  let i = keyMatch.index + keyMatch[0].length
-  const quote = trimmed[i]
-  if (quote !== '"' && quote !== "'") return null
-  i++
+    if (ch === '"' || ch === "'") {
+      i = skipStringLiteral(trimmed, i, ch)
+      continue
+    }
 
+    if (ch === '{' || ch === ',') {
+      const afterKey = matchTextKey(trimmed, i + 1)
+      if (afterKey === null) continue
+
+      const quote = trimmed[afterKey]
+      if (quote !== '"' && quote !== "'") return null
+      return readStringValue(trimmed, afterKey + 1, quote)
+    }
+  }
+
+  return null
+}
+
+// Returns the closing-quote index, or the last index when the literal is
+// truncated, so the caller's `i++` resumes past the consumed string.
+function skipStringLiteral(s: string, openIdx: number, quote: string): number {
+  let escaped = false
+  for (let i = openIdx + 1; i < s.length; i++) {
+    const ch = s[i]!
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === quote) return i
+  }
+  return s.length
+}
+
+function matchTextKey(s: string, from: number): number | null {
+  const m = /^\s*(?:"text"|'text'|text)\s*:\s*/.exec(s.slice(from))
+  return m === null ? null : from + m[0].length
+}
+
+function readStringValue(s: string, from: number, quote: string): string | null {
   let value = ''
   let escaped = false
-  for (; i < trimmed.length; i++) {
-    const ch = trimmed[i]!
+  for (let i = from; i < s.length; i++) {
+    const ch = s[i]!
     if (escaped) {
       value += ESCAPE_REPLACEMENTS[ch] ?? ch
       escaped = false
@@ -4347,7 +4390,6 @@ export function extractPlainTextChannelToolCallText(text: string): string | null
     if (ch === quote) break
     value += ch
   }
-
   return value.trim().length > 0 ? value : null
 }
 
