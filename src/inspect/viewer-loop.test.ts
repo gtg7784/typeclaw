@@ -20,6 +20,14 @@ function fakeScope(onDispose?: () => void): TailController {
 const back: RunInspectResult = { ok: true, exitCode: 0, escToPicker: true }
 const done: RunInspectResult = { ok: true, exitCode: 0 }
 
+// openItem now returns { result, endedWritableSession? }. wrap() is the common
+// "ordinary back/done" case; wrapWritable() marks a tui-style writable detach.
+const wrap = (result: RunInspectResult): { result: RunInspectResult } => ({ result })
+const wrapWritable = (result: RunInspectResult): { result: RunInspectResult; endedWritableSession: boolean } => ({
+  result,
+  endedWritableSession: result.ok && result.escToPicker === true,
+})
+
 describe('runViewerLoop', () => {
   test('opens the preselected item directly, skipping the picker', async () => {
     let pickerCalls = 0
@@ -38,7 +46,7 @@ describe('runViewerLoop', () => {
       },
       openItem: async (item) => {
         opened.push(item.key)
-        return done
+        return wrap(done)
       },
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
@@ -65,7 +73,7 @@ describe('runViewerLoop', () => {
       },
       openItem: async (item) => {
         opened.push(item.key)
-        return opened.length === 1 ? back : done
+        return wrap(opened.length === 1 ? back : done)
       },
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
@@ -76,9 +84,9 @@ describe('runViewerLoop', () => {
     expect(opened).toEqual(['a', 'b'])
   })
 
-  test('listItems gets allowWritable:true first, then false after returning to the picker', async () => {
-    // Regression: after detaching from a tui (live) row, the next list refresh
-    // must not re-promote the now-dead session as writable.
+  test('allowWritable flips false after a writable (tui) detach', async () => {
+    // Regression: detaching from a tui (live) row ends the session, so the next
+    // list refresh must not re-promote the now-dead session as writable.
     const allowWritableCalls: boolean[] = []
     let pickerCalls = 0
 
@@ -95,12 +103,40 @@ describe('runViewerLoop', () => {
         pickerCalls++
         return items[pickerCalls - 1] ?? null
       },
-      openItem: async () => (pickerCalls === 1 ? back : done),
+      openItem: async () => (pickerCalls === 1 ? wrapWritable(back) : wrap(done)),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
     })
 
     expect(allowWritableCalls).toEqual([true, false])
+  })
+
+  test('allowWritable stays true after leaving logs or a read-only transcript (no live session ended)', async () => {
+    // Esc from logs / read-only must NOT disable the writable row: those viewers
+    // do not touch the live TUI session.
+    const allowWritableCalls: boolean[] = []
+    let pickerCalls = 0
+
+    await runViewerLoop<FakeItem>({
+      listItems: async ({ allowWritable }) => {
+        allowWritableCalls.push(allowWritable)
+        return [
+          { key: 'logs', kind: 'logs' },
+          { key: 'a', kind: 'session' },
+        ]
+      },
+      keyOf: (i) => i.key,
+      selectItem: async (items) => {
+        pickerCalls++
+        return items[pickerCalls - 1] ?? null
+      },
+      // First open (logs) returns back WITHOUT endedWritableSession; second ends.
+      openItem: async () => (pickerCalls === 1 ? wrap(back) : wrap(done)),
+      createTailScope: () => fakeScope(),
+      onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
+    })
+
+    expect(allowWritableCalls).toEqual([true, true])
   })
 
   test('the tui branch does not create a tail scope (no double raw-stdin owner)', async () => {
@@ -115,7 +151,7 @@ describe('runViewerLoop', () => {
         // A real tui opener never touches ctx.createTailScope; assert the loop
         // does not force one on the branch.
         if (item.kind === 'session' || item.kind === 'logs') ctx.createTailScope()
-        return done
+        return wrap(done)
       },
       createTailScope: () => {
         tailScopesCreated++
@@ -132,7 +168,7 @@ describe('runViewerLoop', () => {
       listItems: async () => [{ key: 'a', kind: 'session' }],
       keyOf: (i) => i.key,
       selectItem: async () => null,
-      openItem: async () => done,
+      openItem: async () => wrap(done),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
     })
@@ -147,7 +183,7 @@ describe('runViewerLoop', () => {
       listItems: async () => [],
       keyOf: (i) => i.key,
       selectItem: async () => null,
-      openItem: async () => done,
+      openItem: async () => wrap(done),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'no sessions' }),
     })
@@ -161,7 +197,7 @@ describe('runViewerLoop', () => {
       keyOf: (i) => i.key,
       preselectKey: 'a',
       selectItem: async () => null,
-      openItem: async () => ({ ok: false, exitCode: 2, reason: 'boom' }),
+      openItem: async () => wrap({ ok: false, exitCode: 2, reason: 'boom' }),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
     })

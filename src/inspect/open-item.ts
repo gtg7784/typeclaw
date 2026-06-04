@@ -2,7 +2,7 @@ import type { LiveSourceFactory, RunInspectResult } from './index'
 import { createTranscriptView, streamInspectTarget } from './index'
 import type { ViewerItem } from './item'
 import { streamLogs } from './logs-item'
-import type { OpenItemContext, TailController } from './loop'
+import type { OpenItemContext, OpenItemResult, TailController } from './loop'
 import { runTuiViewer } from './tui-item'
 import type { InspectFilter } from './types'
 
@@ -28,19 +28,23 @@ export type OpenViewerDeps = {
 // would corrupt input). The line/JSON session path and logs run UNDER the tail
 // scope, which owns the raw-mode esc/q/ctrl-c handling.
 export function openViewerItem(deps: OpenViewerDeps) {
-  return async (item: ViewerItem, ctx: OpenItemContext): Promise<RunInspectResult> => {
+  return async (item: ViewerItem, ctx: OpenItemContext): Promise<OpenItemResult> => {
     if (item.kind === 'tui') {
-      return runTuiViewer({
+      const result = await runTuiViewer({
         resolveUrl: deps.resolveTuiUrl,
         stderr: deps.stderr,
         ...(deps.expectedVersion !== undefined ? { expectedVersion: deps.expectedVersion } : {}),
         ...(deps.onVersionMismatch !== undefined ? { onVersionMismatch: deps.onVersionMismatch } : {}),
       })
+      // Detaching the writable tui viewer ends the live session — the only path
+      // that should suppress the writable row on the next list refresh.
+      return { result, endedWritableSession: result.ok && result.escToPicker === true }
     }
 
     // Interactive-TTY read-only session -> rich pi-tui transcript view. Owns its
     // own terminal, so it bypasses the tail scope. JSON/non-TTY falls through to
-    // the scriptable line renderer below.
+    // the scriptable line renderer below. Read-only: esc does NOT end a live
+    // session, so endedWritableSession stays unset.
     if (item.kind === 'session' && deps.interactive && !deps.json) {
       const view = createTranscriptView({
         summary: item.summary,
@@ -49,13 +53,15 @@ export function openViewerItem(deps: OpenViewerDeps) {
         ...(deps.liveSource !== undefined ? { liveSource: deps.liveSource } : {}),
       })
       const outcome = await view.run()
-      return outcome.reason === 'back' ? { ok: true, exitCode: 0, escToPicker: true } : { ok: true, exitCode: 0 }
+      const result: RunInspectResult =
+        outcome.reason === 'back' ? { ok: true, exitCode: 0, escToPicker: true } : { ok: true, exitCode: 0 }
+      return { result }
     }
 
     const scope = ctx.createTailScope()
     try {
       if (item.kind === 'logs') {
-        const result = await streamLogs({
+        const logsResult = await streamLogs({
           cwd: deps.cwd,
           color: deps.color,
           stdout: deps.stdout,
@@ -63,7 +69,8 @@ export function openViewerItem(deps: OpenViewerDeps) {
           signal: scope.signal,
           ...(deps.liveHint !== undefined ? { liveHint: deps.liveHint } : {}),
         })
-        return toResult(result.escToPicker, scope)
+        // Logs esc does NOT touch the live session — no endedWritableSession.
+        return { result: toResult(logsResult.escToPicker, scope) }
       }
 
       const sessionResult = await streamInspectTarget({
@@ -79,7 +86,7 @@ export function openViewerItem(deps: OpenViewerDeps) {
         ...(deps.interactive ? { interactive: true } : {}),
       })
       const escToPicker = sessionResult.ok && sessionResult.escToPicker === true
-      return toResult(escToPicker, scope)
+      return { result: toResult(escToPicker, scope) }
     } finally {
       scope.dispose()
     }

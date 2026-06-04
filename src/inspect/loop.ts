@@ -12,7 +12,15 @@ export type OpenItemContext = {
 
 export type SelectItem<TItem> = (items: TItem[], opts: { initialKey?: string }) => Promise<TItem | null>
 
-export type OpenItem<TItem> = (item: TItem, ctx: OpenItemContext) => Promise<RunInspectResult>
+export type OpenItemResult = {
+  result: RunInspectResult
+  // True only when the viewer that just closed ended a writable (live TUI)
+  // session — i.e. a tui detach. Logs and read-only transcripts return
+  // escToPicker WITHOUT this, so they must not suppress the writable row.
+  endedWritableSession?: boolean
+}
+
+export type OpenItem<TItem> = (item: TItem, ctx: OpenItemContext) => Promise<OpenItemResult>
 
 export type ListItemsContext = {
   // False once the user has returned to the picker from any viewer: the prior
@@ -62,10 +70,13 @@ export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): P
       lastPickedKey = opts.keyOf(chosen)
     }
 
-    const result = await opts.openItem(chosen, { createTailScope: opts.createTailScope })
+    const opened = await opts.openItem(chosen, { createTailScope: opts.createTailScope })
+    const result = opened.result
     if (!result.ok) return result
     if (result.escToPicker !== true) return result
-    allowWritable = false
+    // Only a writable (tui) detach ends the live session; leaving logs or a
+    // read-only transcript leaves it untouched, so the writable row stays.
+    if (opened.endedWritableSession === true) allowWritable = false
   }
 }
 
