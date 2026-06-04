@@ -4,6 +4,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
+import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
@@ -15,6 +16,7 @@ import {
   recordTurnStart,
   runIdleContinuation,
 } from '@/agent/todo/continuation-wiring'
+import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
@@ -3239,6 +3241,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         channel: true,
       })
       live.pendingSystemReminders.push(text)
+      // The reminder tells the agent to fetch this result now; clear the
+      // subagent_output window so an earlier premature-polling streak can't
+      // hard-block that legitimate fetch.
+      forgetSharedLoopGuardTool(live.sessionId, SUBAGENT_OUTPUT_TOOL_NAME)
       logger.info(`[channels] ${live.keyId}: subagent-completion reminder queued task=${args.taskId} ok=${args.ok}`)
       // Wake the drain loop. If a turn is already in flight, the wakeup is
       // a no-op because drain() will pick up the reminder on its next

@@ -558,6 +558,16 @@ function appendLoopWarning(result: ToolResult, message: string): ToolResult {
   return { content, details: result.details }
 }
 
+// Clears one tool's loop-guard residue for a session on the process-wide shared
+// guard. The completion-reminder bridges (channel router + TUI server) call this
+// for `subagent_output` when a backgrounded subagent finishes, so the next fetch
+// the reminder asks for isn't blocked by the window the agent's premature polling
+// poisoned. Exposed as a narrow function rather than the guard itself so callers
+// can't reach `check`/`forget` and widen the blast radius.
+export function forgetSharedLoopGuardTool(sessionId: string, tool: string): void {
+  sharedLoopGuard.forgetTool(sessionId, tool)
+}
+
 // Test-only seam: swaps the shared loop guard for a fresh instance so tests
 // that reuse sessionIds across cases don't see cross-test streak counts.
 // Production code never calls this; the guard's LRU bound handles

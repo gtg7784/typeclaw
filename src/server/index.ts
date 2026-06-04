@@ -11,6 +11,7 @@ import {
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
+import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { detectProviderError } from '@/agent/provider-error'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
@@ -25,6 +26,7 @@ import {
   recordTurnStart,
   runIdleContinuation,
 } from '@/agent/todo/continuation-wiring'
+import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
 import type { ChannelRouter } from '@/channels/router'
 import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
 import type { McpManager } from '@/mcp'
@@ -930,6 +932,12 @@ function routeSubagentCompletionReminder(state: SessionState, msg: StreamMessage
   const parsed = parseSubagentCompletedPayload(msg.payload)
   if (parsed === null) return
   if (parsed.parentSessionId !== state.sessionFileId) return
+
+  // The reminder asks the agent to fetch this result now; clear the
+  // subagent_output window first so an earlier premature-polling streak can't
+  // hard-block that fetch. Reset before publish so the wakeup can't race stale
+  // guard state.
+  forgetSharedLoopGuardTool(state.sessionFileId, SUBAGENT_OUTPUT_TOOL_NAME)
 
   const idle = state.drainQueue.length === 0 && !state.draining
   const delivery = idle ? 'interrupt' : 'queue'
