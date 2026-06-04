@@ -66,7 +66,9 @@ Prioritize in this order:
 
 ### Re-reviews must re-decide, not observe
 
-When the payload tells you this is a **re-review** — you (or this agent) previously requested changes on this PR and the author has pushed fixes and asked again — your verdict's whole purpose is to **re-decide the blocking state**, so:
+When the payload tells you this is a **re-review** — you (or this agent) previously requested changes on this PR and the author has pushed fixes — your verdict's whole purpose is to **re-decide the blocking state**, so:
+
+This includes payloads where the parent says the author **addressed your prior blocking feedback** — "fixed both issues", "addressed your review", "pushed a fix" — even when the inbound was phrased conversationally rather than as an explicit "review again". An author responding to the blocker you raised IS the re-review trigger; the absence of the words "review again" does not downgrade it to a \`comment\`. Re-decide:
 
 - Return **approve** if the blockers that drove the prior \`request-changes\` are resolved (leftover nits do not block — \`approve\` with inline nits is correct).
 - Return **request-changes** if any blocker remains or a new one appeared.
