@@ -402,24 +402,24 @@ describe('memorySearchTool — stream events', () => {
   })
 })
 
-// Production: descriptive multi-word queries (e.g. "swmaestro summary webex
-// space id") matched no body as a contiguous substring even though every
-// word was present, returning {"matches":[]} for ~74% of multi-word calls.
-// Fallback OR-matches the whitespace-split tokens, but ONLY when the exact
-// phrase finds nothing.
+// Descriptive multi-word queries (more than one whitespace-separated word
+// that no single body contains as one contiguous substring even though every
+// word is present individually) used to return {"matches":[]}. Fallback
+// OR-matches the whitespace-split tokens, but ONLY when the exact phrase
+// finds nothing.
 describe('memorySearchTool — multi-word token fallback', () => {
   test('phrase that no body contains as a contiguous substring still matches via tokens', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(
       agentDir,
-      'webex-cron',
-      'Webex SWMaestro summary cron',
-      'Posts a summary of the SWMaestro Webex space to Discord.\n',
+      'report-cron',
+      'Quarterly report summary cron',
+      'Posts a summary of the quarterly regional revenue report.\n',
     )
 
-    const result = await call(agentDir, { query: 'swmaestro summary webex space id' })
+    const result = await call(agentDir, { query: 'quarterly summary regional report id' })
 
-    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['webex-cron'])
+    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['report-cron'])
   })
 
   test('exact-phrase match still wins and does NOT fall back to tokens', async () => {
@@ -436,20 +436,20 @@ describe('memorySearchTool — multi-word token fallback', () => {
     const agentDir = await makeAgentDir()
     // 'one-hit' sorts first alphabetically but matches fewer tokens, so the
     // tokens-matched ranking must reorder it behind 'three-hit'.
-    await writeShard(agentDir, 'one-hit', 'One hit', 'only perpetual appears here.\n')
-    await writeShard(agentDir, 'three-hit', 'Three hit', 'xrp perpetual futures all here.\n')
+    await writeShard(agentDir, 'one-hit', 'One hit', 'only gearbox appears here.\n')
+    await writeShard(agentDir, 'three-hit', 'Three hit', 'widget gearbox assembly all here.\n')
 
-    const result = await call(agentDir, { query: 'xrp perpetual futures bounce signal' })
+    const result = await call(agentDir, { query: 'widget gearbox assembly torque spec' })
 
     expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['three-hit', 'one-hit'])
   })
 
   test('token fallback covers stream events too, ranked after topics', async () => {
     const agentDir = await makeAgentDir()
-    await writeShard(agentDir, 'topic-shard', 'Topic shard', 'xrp futures live here.\n')
-    await writeStream(agentDir, '2026-05-20', [fragment('s1', 'Stream frag', 'bounce signal recorded.\n')])
+    await writeShard(agentDir, 'topic-shard', 'Topic shard', 'widget assembly live here.\n')
+    await writeStream(agentDir, '2026-05-20', [fragment('s1', 'Stream frag', 'torque spec recorded.\n')])
 
-    const result = await call(agentDir, { query: 'xrp futures bounce signal' })
+    const result = await call(agentDir, { query: 'widget assembly torque spec' })
 
     expect('matches' in result ? result.matches.map(matchKey) : []).toEqual([
       'topic:topic-shard',
@@ -479,21 +479,21 @@ describe('memorySearchTool — multi-word token fallback', () => {
       agentDir,
       'window',
       'Window',
-      'line 1\nline 2\nline 3\nline 4\nthe futures line 5\nline 6\nline 7\nline 8\nline 9\n',
+      'line 1\nline 2\nline 3\nline 4\nthe gearbox line 5\nline 6\nline 7\nline 8\nline 9\n',
     )
 
-    const result = await call(agentDir, { query: 'xrp perpetual futures' })
+    const result = await call(agentDir, { query: 'widget gearbox assembly' })
 
     expect('matches' in result ? result.matches[0]?.excerpt : undefined).toBe(
-      'line 2\nline 3\nline 4\nthe futures line 5\nline 6\nline 7\nline 8',
+      'line 2\nline 3\nline 4\nthe gearbox line 5\nline 6\nline 7\nline 8',
     )
   })
 
   test('duplicate and whitespace-only tokens collapse (no double-counting in ranking)', async () => {
     const agentDir = await makeAgentDir()
-    await writeShard(agentDir, 'one-word', 'One word', 'futures contract noted.\n')
+    await writeShard(agentDir, 'one-word', 'One word', 'gearbox contract noted.\n')
 
-    const result = await call(agentDir, { query: '  futures   futures  ' })
+    const result = await call(agentDir, { query: '  gearbox   gearbox  ' })
 
     expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['one-word'])
   })
