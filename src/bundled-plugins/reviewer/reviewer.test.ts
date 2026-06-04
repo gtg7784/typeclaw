@@ -269,6 +269,16 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('do not return `comment` on a re-review')
   })
 
+  test('code-review skill recognizes a conversationally-phrased address as a re-review trigger (no explicit "review again" required)', () => {
+    // An author responding to a blocker — "fixed", "addressed your review",
+    // "pushed a fix" — is a re-review even without the words "review again".
+    // Without this, a fix-and-address cycle phrased as chat falls through to a
+    // `comment` verdict and the bot's prior block stays stranded.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('addressed your prior blocking feedback')
+    expect(lower).toContain('review again')
+  })
+
   test('general skill body teaches universal review craft (load-bearing audience-fit phrasing)', () => {
     const lower = GENERAL_REVIEW_SKILL.content.toLowerCase()
     expect(lower).toContain('load-bearing')
