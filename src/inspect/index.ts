@@ -54,7 +54,20 @@ export type RunInspectResult =
   | { ok: true; exitCode: 0; escToPicker?: boolean }
   | { ok: false; exitCode: number; reason: string }
 
-export async function runInspect(opts: RunInspectOptions): Promise<RunInspectResult> {
+export type InspectTarget = {
+  summary: SessionSummary
+  filter: InspectFilter
+  sinceMs: number | undefined
+}
+
+export type ResolveInspectResult = { ok: true; target: InspectTarget } | { ok: false; exitCode: number; reason: string }
+
+// Picker phase, split out from the streaming phase so the tail scope is created
+// AFTER the picker, never before. A raw-mode 'data' listener active during the
+// Clack picker (which forces cooked mode via prepareStdinForClack) fights Clack
+// for stdin and leaves the later stream in cooked mode — that was the recurring
+// "esc does nothing" regression.
+export async function resolveInspectTarget(opts: Omit<RunInspectOptions, 'signal'>): Promise<ResolveInspectResult> {
   const filterResult = parseFilter(opts.filter)
   if (!filterResult.ok) return { ok: false, exitCode: 2, reason: filterResult.reason }
   const filter = filterResult.filter
@@ -71,10 +84,24 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
   const summary = await chooseSession(opts, sessionsDir, sinceMs)
   if (!summary.ok) return summary
 
+  return { ok: true, target: { summary: summary.summary, filter, sinceMs } }
+}
+
+export async function runInspect(opts: RunInspectOptions): Promise<RunInspectResult> {
+  const resolved = await resolveInspectTarget(opts)
+  if (!resolved.ok) return resolved
+  return streamInspectTarget({ ...opts, target: resolved.target })
+}
+
+export async function streamInspectTarget(
+  opts: Omit<RunInspectOptions, 'sessionIdOrPrefix' | 'filter' | 'since' | 'selectSession'> & {
+    target: InspectTarget
+  },
+): Promise<RunInspectResult> {
   const streamResult = await streamSession({
-    summary: summary.summary,
-    filter,
-    sinceMs,
+    summary: opts.target.summary,
+    filter: opts.target.filter,
+    sinceMs: opts.target.sinceMs,
     json: opts.json === true,
     color: opts.color,
     stdout: opts.stdout,

@@ -375,12 +375,14 @@ describe('runInspectLoop', () => {
     expect(trace).toEqual(['dispose', 'select', 'dispose'])
   })
 
-  test('scope is disposed on a non-esc early return (bad filter)', async () => {
-    // Dispose must run on every loop exit path, not just esc-to-picker, so an
-    // interrupted run can never leave the listener armed.
+  test('bad filter fails before any tail scope is created (raw mode never armed)', async () => {
+    // A config error is caught in the picker phase, before createTailScope runs.
+    // The whole point of the lifecycle fix: raw-mode stdin is never armed unless
+    // a session actually resolved and we're about to stream it, so an early
+    // return can never leave a listener armed — it was never created.
     await seedSession(`a_${ID_LOOP_D}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
-    let disposed = 0
+    let scopesCreated = 0
 
     const result = await runInspectLoop({
       agentDir,
@@ -388,12 +390,15 @@ describe('runInspectLoop', () => {
       filter: 'not-a-real-category',
       color: false,
       selectSession: async () => null,
-      createTailScope: () => fakeScope(() => disposed++),
+      createTailScope: () => {
+        scopesCreated++
+        return fakeScope()
+      },
       ...sink.push,
     })
 
     expect(result.ok).toBe(false)
-    expect(disposed).toBe(1)
+    expect(scopesCreated).toBe(0)
   })
 
   test('ctrl-c (exit intent) during the tail exits without re-opening the picker', async () => {
@@ -441,5 +446,38 @@ describe('runInspectLoop', () => {
     expect(pickerCalls).toBe(0)
     expect(liveCallCount).toBe(1)
     expect(disposed).toBe(1)
+  })
+
+  test('picker runs to completion before the tail scope is created', async () => {
+    // Regression for the recurring "esc does nothing after picking a session"
+    // bug: the tail scope arms raw-mode stdin, and the clack picker forces
+    // cooked mode. If the scope is created before the picker, the picker tears
+    // raw mode back down and the stream runs cooked, so esc bytes never reach
+    // the listener. The scope MUST be created only after the picker resolves.
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    const sink = captureSink()
+    const order: string[] = []
+
+    async function* finiteLive(): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'tick' } }
+    }
+
+    const result = await runInspectLoop({
+      agentDir,
+      color: false,
+      selectSession: async (sessions) => {
+        order.push('select')
+        return sessions.find((s) => s.sessionId === ID_LOOP_A) ?? null
+      },
+      liveSource: () => finiteLive(),
+      createTailScope: () => {
+        order.push('createTailScope')
+        return fakeScope()
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(order).toEqual(['select', 'createTailScope'])
   })
 })
