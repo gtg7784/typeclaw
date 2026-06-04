@@ -1,6 +1,8 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { checkFalseReceipt } from '@/channels/github-false-receipt'
+import { recordResolvedThread } from '@/channels/github-review-turn-ledger'
 import {
   containsKimiToolDelimiter,
   isNoReplySignal,
@@ -28,10 +30,19 @@ export type CreateChannelSendToolOptions = {
   // the model can self-correct on its next turn. Absent for sessions whose
   // origin isn't a channel (e.g. cron prompts that send to channels).
   origin?: ChannelSendOrigin
+  // Scopes the per-turn false-receipt ledger for github resolve close-outs.
+  // Defaults to '' when absent (cron / non-channel sessions); the guard then
+  // finds no recorded action and falls back to its safe default.
+  sessionId?: string
   logger?: ChannelToolLogger
 }
 
-export function createChannelSendTool({ router, origin, logger = consoleChannelLogger }: CreateChannelSendToolOptions) {
+export function createChannelSendTool({
+  router,
+  origin,
+  sessionId = '',
+  logger = consoleChannelLogger,
+}: CreateChannelSendToolOptions) {
   return defineTool({
     name: 'channel_send',
     label: 'Channel Send',
@@ -93,6 +104,15 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
           },
         ),
       ),
+      resolve_review_thread: Type.Optional(
+        Type.Boolean({
+          description:
+            'GitHub review threads ONLY — ignored on every other adapter and on a github send that has no `thread`. ' +
+            'Set `true` to close out a review thread you authored once you have confirmed the new commits address your concern: pass the thread\'s root comment id as `thread`, an acknowledgement (e.g. "addressed in <sha> — resolving") as `text`, and this flag. ' +
+            'This is the post-push close-out path: a `pull_request.synchronize` recheck lists your unresolved threads, and you call this once per addressed thread. ' +
+            "Safe by default — the runtime resolves BEFORE posting and ONLY if the thread's root comment is yours, refusing (and blocking the send) on a human reviewer's thread. Leave it unset to keep the thread open (not addressed, partial fix, disagreement).",
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params) {
@@ -134,6 +154,47 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
           content: [{ type: 'text' as const, text: `channel_send denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
         }
+      }
+
+      const wantsResolve = params.resolve_review_thread === true
+      const falseReceipt = checkFalseReceipt({
+        sessionId,
+        adapter,
+        workspace: params.workspace,
+        chat: params.chat,
+        thread: params.thread ?? null,
+        text: bodyText,
+        isContinue: false,
+        resolveReviewThread: wantsResolve,
+      })
+      if (falseReceipt.kind === 'block') {
+        logger.warn(formatChannelToolFailure('channel_send', falseReceipt.reason))
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${falseReceipt.reason}` }],
+          details: { ok: false, error: falseReceipt.reason },
+        }
+      }
+      const falseReceiptNotice = falseReceipt.kind === 'warn' ? falseReceipt.notice : null
+
+      // Resolve BEFORE posting (mirrors channel_reply): a failed resolve must
+      // block the acknowledgement so the bot never posts "addressed — resolving"
+      // next to a still-open thread. The router enforces that only the bot's own
+      // threads can be resolved.
+      if (wantsResolve) {
+        const resolveError = await resolveReviewThreadBeforeSend(router, {
+          adapter,
+          workspace: params.workspace,
+          chat: params.chat,
+          thread: params.thread ?? null,
+        })
+        if (resolveError !== null) {
+          logger.warn(formatChannelToolFailure('channel_send', resolveError))
+          return {
+            content: [{ type: 'text' as const, text: `channel_send denied: ${resolveError}` }],
+            details: { ok: false, error: resolveError },
+          }
+        }
+        recordResolvedThreadFromSend(sessionId, params.workspace, params.chat, params.thread ?? null)
       }
 
       const result = await router.send({
@@ -179,6 +240,8 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         })
         if (threadMismatch) hints.push(threadMismatch)
 
+        if (falseReceiptNotice !== null) hints.push(fenceRuntimeNotice(falseReceiptNotice))
+
         return {
           content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hints.join('')}` }],
           details,
@@ -190,6 +253,36 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
       }
     },
   })
+}
+
+async function resolveReviewThreadBeforeSend(
+  router: ChannelRouter,
+  target: { adapter: AdapterId; workspace: string; chat: string; thread: string | null },
+): Promise<string | null> {
+  if (target.adapter !== 'github') {
+    return 'resolve_review_thread is only supported on github sends.'
+  }
+  if (target.thread === null) {
+    return 'resolve_review_thread requires a `thread` (the review thread root comment id).'
+  }
+  const result = await router.resolveReviewThread({
+    adapter: target.adapter,
+    workspace: target.workspace,
+    chat: target.chat,
+    rootCommentId: target.thread,
+  })
+  if (result.ok) return null
+  if (result.code === 'no-match') return null
+  return `could not resolve review thread: ${result.error}`
+}
+
+function recordResolvedThreadFromSend(sessionId: string, workspace: string, chat: string, thread: string | null): void {
+  if (thread === null) return
+  const m = /^pr:(\d+)$/.exec(chat)
+  if (m === null) return
+  const prNumber = Number(m[1])
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return
+  recordResolvedThread({ sessionId, workspace, prNumber, rootCommentId: thread })
 }
 
 // Returns a behavioral hint when the model posted to the SAME conversation

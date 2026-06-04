@@ -640,7 +640,13 @@ export function buildChannelTools(
       }),
     )
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
-    tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(
+      createChannelSendTool({
+        router: channelRouter,
+        origin: channelOrigin,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+      }),
+    )
     // Read the live turn origin, falling back to the static snapshot when no
     // getter is wired (composition tests). `reactionRef` is per-turn, so the
     // getter is what makes reactions work outside tests.
