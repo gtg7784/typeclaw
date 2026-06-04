@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  __resetProxyForTesting as resetDashboardProxy,
+  __waitForProxyBindForTesting as waitForDashboardProxyBind,
+} from '@/bundled-plugins/agent-browser'
 import type { LoadCronResult } from '@/cron'
 
 import { startAgent, type LoadCronFn } from './index'
@@ -11,6 +15,19 @@ const noCron: LoadCronFn = async () => ({ ok: true, file: null }) as LoadCronRes
 
 let running: Awaited<ReturnType<typeof startAgent>> | null = null
 let agentDir: string | null = null
+let savedBrokerToken: string | undefined
+
+beforeEach(() => {
+  // startAgent boots the agent-browser plugin, whose dashboard proxy otherwise
+  // binds the hardcoded default 4848. Pin it to an ephemeral port (0) instead.
+  // The broker must stay disabled while the override is 0: bindWithForward
+  // waits for a forward-result keyed on the literal candidate 0, but the broker
+  // reports the OS-assigned port, so a present token would hang the bind on a
+  // timeout. Clear the token so port 0 is a pure local ephemeral bind.
+  savedBrokerToken = process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
+  delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
+  process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
+})
 
 afterEach(async () => {
   if (running) {
@@ -22,6 +39,13 @@ afterEach(async () => {
     await rm(agentDir, { recursive: true, force: true })
     agentDir = null
   }
+  // Drain the agent-browser background bind before restoring env so an in-flight
+  // bind can't read a half-reset environment (see the beforeEach rationale).
+  await waitForDashboardProxyBind()
+  resetDashboardProxy()
+  delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
+  if (savedBrokerToken === undefined) delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
+  else process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = savedBrokerToken
 })
 
 async function writePlugin(dir: string, body: string) {
