@@ -10,7 +10,7 @@ import { z } from 'zod'
 
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry } from '@/plugin'
-import { _resetBwrapAvailabilityCacheForTests } from '@/sandbox'
+import { _resetBwrapAvailabilityCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
 
 import {
   __resetSharedLoopGuardForTests,
@@ -987,6 +987,108 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
     })
     await wrapped.execute('c', args as never, undefined, undefined, {} as never)
     expect(seenInHook).toBeUndefined()
+  })
+})
+
+describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session scratch)', () => {
+  function fakeWrite(record: { path?: string }) {
+    return {
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+      async execute(_id: string, params: { path: string; content: string }) {
+        record.path = params.path
+        return { content: [{ type: 'text' as const, text: 'wrote' }], details: undefined }
+      },
+    }
+  }
+
+  function fakeRead(record: { path?: string }) {
+    return {
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute(_id: string, params: { path: string }) {
+        record.path = params.path
+        return { content: [{ type: 'text' as const, text: 'read' }], details: undefined }
+      },
+    }
+  }
+
+  const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+  const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
+
+  test('a sandboxed role (guest) has its /tmp write redirected to the session backing dir', async () => {
+    const record: { path?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { path: '/tmp/review.json', content: '{}' } as never, undefined, undefined, {} as never)
+    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
+  })
+
+  test('a sandboxed role (guest) reading /tmp resolves to the same session backing dir bash wrote', async () => {
+    const record: { path?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeRead(record), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { path: '/tmp/review.json' } as never, undefined, undefined, {} as never)
+    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
+  })
+
+  test('an unsandboxed role (tui→owner) writes the real /tmp path untouched', async () => {
+    const record: { path?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { path: '/tmp/review.json', content: '{}' } as never, undefined, undefined, {} as never)
+    expect(record.path).toBe('/tmp/review.json')
+  })
+
+  test('an unsandboxed role (tui→owner) reads the real /tmp path untouched', async () => {
+    const record: { path?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeRead(record), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { path: '/tmp/review.json' } as never, undefined, undefined, {} as never)
+    expect(record.path).toBe('/tmp/review.json')
+  })
+
+  test('a non-/tmp write is left untouched even for a sandboxed role', async () => {
+    const record: { path?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute(
+      'c',
+      { path: 'workspace/out.json', content: '{}' } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(record.path).toBe('workspace/out.json')
   })
 })
 

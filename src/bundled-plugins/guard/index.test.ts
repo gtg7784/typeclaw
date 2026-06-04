@@ -59,10 +59,7 @@ describe('guard plugin', () => {
       toolEvent('write', { path: 'workspace2/file.txt', content: 'x' }),
       hookContext('/agent'),
     )
-    const absoluteResult = await hook(
-      toolEvent('write', { path: '/tmp/outside.txt', content: 'x' }),
-      hookContext('/agent'),
-    )
+    const absoluteResult = await hook(toolEvent('write', { path: '/etc/passwd', content: 'x' }), hookContext('/agent'))
 
     expect(dotDotResult?.block).toBe(true)
     expect(siblingResult?.block).toBe(true)

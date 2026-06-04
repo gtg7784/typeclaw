@@ -37,6 +37,8 @@ import type {
 import {
   buildSandboxedCommand,
   ensureBwrapAvailable,
+  ensureSessionTmpDir,
+  mapVirtualTmpPath,
   resolveHiddenPaths,
   resolveProtectedZones,
   resolveWritableZones,
@@ -460,7 +462,11 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       stripGuardAcknowledgements(mutableArgs)
 
       if (tool.name === 'bash' && opts.permissions !== undefined) {
-        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, bashEnvOverlay)
+        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId, bashEnvOverlay)
+      }
+
+      if (TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined) {
+        await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
       }
 
       const result = await bashEnvStore.run(bashEnvOverlay, () =>
@@ -507,6 +513,7 @@ async function applyBashSandbox(
   permissions: PermissionService,
   origin: SessionOrigin | undefined,
   agentDir: string,
+  sessionId: string,
   envOverlay: BashEnvOverlay | undefined,
 ): Promise<void> {
   const command = mutableArgs.command
@@ -516,6 +523,13 @@ async function applyBashSandbox(
   if (dirs.length === 0 && files.length === 0) return
 
   await ensureBwrapAvailable()
+  // Per-session /tmp: bind this session's scratch dir over the default
+  // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
+  // match what the write/edit wrapper redirected a /tmp path to. The bind is
+  // emitted via policy.mounts (after the hardcoded --tmpfs /tmp), so last-op-
+  // wins makes it the live /tmp. Unsandboxed roles (empty masks, returned
+  // above) keep sharing the real container /tmp between write and bash.
+  const sessionTmp = await ensureSessionTmpDir(sessionId)
   // Write-confined jail for low-trust roles: bind the whole project read-only,
   // hide private/secret paths, then re-expose only the free-write scratch zones
   // (workspace + root allowlist + .git) RW. The WORKING TREE outside those zones
@@ -542,7 +556,10 @@ async function applyBashSandbox(
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
   const { commandString } = buildSandboxedCommand(command, {
-    mounts: [{ type: 'ro-bind', source: agentDir, dest: agentDir }],
+    mounts: [
+      { type: 'ro-bind', source: agentDir, dest: agentDir },
+      { type: 'bind', source: sessionTmp, dest: '/tmp' },
+    ],
     masks: { dirs, files },
     writable,
     protected: protectedZones,
@@ -551,6 +568,40 @@ async function applyBashSandbox(
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })
   mutableArgs.command = commandString
+}
+
+// The builtin file tools that take a single filesystem `path` arg. For a
+// sandboxed role they all run UNSANDBOXED in the main process (only bash is
+// bwrap-wrapped), so each must apply the same /tmp -> session-dir mapping that
+// applyBashSandbox binds for bash — otherwise a `read` of /tmp/foo hits the
+// real container /tmp while sandboxed bash wrote the session backing dir.
+const TMP_REDIRECT_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls'])
+
+// Sandboxed roles read /tmp through bwrap's per-session bind (applyBashSandbox),
+// but the path-based file tools run unsandboxed against the real container /tmp.
+// Without this redirect a guest/member that touches /tmp/foo through bash (bound
+// to the session dir) and through a file tool (real /tmp) would see two
+// different files. Rewriting the file tool's on-disk path to the same session
+// backing dir makes every layer resolve /tmp/foo to one file. Unsandboxed roles
+// (empty masks) are left untouched: their bash already shares the real /tmp.
+async function applyTmpPathRedirect(
+  mutableArgs: Record<string, unknown>,
+  permissions: PermissionService,
+  origin: SessionOrigin | undefined,
+  agentDir: string,
+  sessionId: string,
+): Promise<void> {
+  const rawPath = mutableArgs.path
+  if (typeof rawPath !== 'string') return
+
+  const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
+  if (dirs.length === 0 && files.length === 0) return
+
+  const backing = mapVirtualTmpPath(agentDir, sessionId, rawPath)
+  if (backing === undefined) return
+
+  await ensureSessionTmpDir(sessionId)
+  mutableArgs.path = backing
 }
 
 function appendLoopWarning(result: ToolResult, message: string): ToolResult {

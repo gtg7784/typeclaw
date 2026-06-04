@@ -43,15 +43,27 @@ export async function checkNonWorkspaceWriteGuard(options: {
 
   const targetPath = path.resolve(agentDir, rawPath)
   const workspacePath = path.resolve(agentDir, 'workspace')
-  const [realTargetPath, realWorkspacePath] = await Promise.all([
+  const [realTargetPath, realWorkspacePath, realAgentDir, realTmpRoot] = await Promise.all([
     resolveRealIntendedPath(targetPath),
     resolveRealIntendedPath(workspacePath),
+    resolveRealIntendedPath(path.resolve(agentDir)),
+    resolveRealIntendedPath('/tmp'),
   ])
   if (await isSkillAuthoringAllowed({ tool, args, agentDir })) return undefined
   if (await isMemoryRetrievalCacheWriteAllowed({ tool, args, agentDir, origin })) return undefined
   if (await isMemoryTopicsWriteAllowed({ tool, args, agentDir, origin })) return undefined
   if (await isAllowedAgentRootWrite(agentDir, targetPath, realTargetPath)) return undefined
   if (isInside(realWorkspacePath, realTargetPath)) return undefined
+  // /tmp is virtual per-session scratch (see src/sandbox/session-tmp.ts), not a
+  // project or secret surface — throwaway, never committed, so an unacknowledged
+  // write is expected. Allowed only on LEXICAL intent: the model's raw path must
+  // itself be an absolute /tmp/... path. A relative path that merely realpaths
+  // into /tmp (e.g. `workspace/link` where `link -> /tmp/x`) is a workspace
+  // escape, not scratch, and must stay blocked by the rules above. The physical
+  // target must also still resolve under real /tmp (blocks `/tmp/../agent/.env`
+  // and a `/tmp/link -> /agent/.env`) and must not land inside the agent dir
+  // (a container/test agent dir can itself sit under /tmp).
+  if (isTmpScratchWrite(rawPath, realTargetPath, realAgentDir, realTmpRoot)) return undefined
   if (isGuardAcknowledged(args, GUARD_NON_WORKSPACE_WRITE)) return undefined
 
   return {
@@ -75,6 +87,31 @@ async function isAllowedAgentRootWrite(agentDir: string, targetPath: string, rea
     if (isInside(await resolveRealIntendedPath(rootDir), realTargetPath)) return true
   }
   return false
+}
+
+// `rawPath`: the model's RAW path normalized; only an absolute /tmp/... path
+// counts as scratch intent (a relative workspace path that escapes into /tmp is
+// handled by the escape rules above, never here). `realTargetPath`: the
+// realpath-resolved physical target — must still land under /tmp (not /agent via
+// `..` or a planted symlink) and must not land inside the agent dir.
+function isTmpScratchWrite(
+  rawPath: string,
+  realTargetPath: string,
+  realAgentDir: string,
+  realTmpRoot: string,
+): boolean {
+  const normalizedRaw = path.normalize(rawPath)
+  const rawIsAbsoluteTmp = normalizedRaw === '/tmp' || isInside('/tmp', normalizedRaw)
+  if (!rawIsAbsoluteTmp) return false
+
+  // Compare against the REALPATH of /tmp, not the literal: on macOS /tmp is a
+  // symlink to /private/tmp, so realTargetPath resolves there and a literal-/tmp
+  // containment check would never match.
+  const physicallyUnderTmp = realTargetPath === realTmpRoot || isInside(realTmpRoot, realTargetPath)
+  if (!physicallyUnderTmp) return false
+
+  const insideAgent = realTargetPath === realAgentDir || isInside(realAgentDir, realTargetPath)
+  return !insideAgent
 }
 
 function isInside(parent: string, child: string): boolean {
