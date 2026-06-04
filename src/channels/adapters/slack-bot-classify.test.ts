@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
 import { classifyInbound, type SlackInboundMessageEvent } from './slack-bot-classify'
+import { encodeSlackReactionRef } from './slack-bot-reactions'
 
 const TEAM_ID = 'T0ACME'
 const BOT_USER_ID = 'UBOT'
@@ -266,6 +267,7 @@ describe('slack-bot classifyInbound — route path', () => {
       thread: '1700000000.000100',
       text: `hi <@${BOT_USER_ID}>`,
       externalMessageId: '1700000000.000100',
+      reactionRef: encodeSlackReactionRef({ channel: 'C0CHANNEL', ts: '1700000000.000100' }),
       authorId: 'UALICE',
       authorName: 'UALICE',
       authorIsBot: false,
