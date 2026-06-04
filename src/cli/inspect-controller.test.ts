@@ -215,6 +215,32 @@ describe('createTailScope', () => {
     }
   })
 
+  test('ESC then q within the idle window exits, not back', () => {
+    // Exit must win over a pending bare-ESC 'back'. Aborting on the ESC would
+    // settle 'back' synchronously and swallow the q.
+    const tty = new FakeTty()
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x1b])
+      tty.feed([0x71])
+      expect(scope.intent()).toBe('exit')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  test('ESC then Ctrl-C within the idle window exits, not back', () => {
+    const tty = new FakeTty()
+    const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: fakeProc as never })
+    try {
+      tty.feed([0x1b])
+      tty.feed([0x03])
+      expect(scope.intent()).toBe('exit')
+    } finally {
+      scope.dispose()
+    }
+  })
+
   test('q on a non-TTY input is a no-op', () => {
     const tty = new FakeTty()
     tty.isTTY = false

@@ -97,6 +97,14 @@ export function createEscController({ debounceMs }: { debounceMs: number }): Esc
             } else if (byte === SS3_INTRODUCER) {
               cancelPendingTimer()
               state = 'ss3'
+            } else if (byte === CTRL_C || byte === QUIT_KEY) {
+              // ESC then an exit key: exit must win over the pending bare-ESC
+              // 'back'. Drop the pending ESC WITHOUT aborting (abort would settle
+              // 'back' synchronously and pre-empt the exit), and surface the key.
+              cancelPendingTimer()
+              state = 'idle'
+              if (byte === CTRL_C) sigint = true
+              else quit = true
             } else if (byte === ESC) {
               // The first ESC was bare; abort now and keep this ESC pending.
               cancelPendingTimer()
@@ -104,13 +112,11 @@ export function createEscController({ debounceMs }: { debounceMs: number }): Esc
               state = 'sawEsc'
               scheduleBareEsc()
             } else {
-              // ESC + a non-sequence byte: the ESC was bare. Abort, then process
-              // this byte as a fresh idle keystroke (it may be ctrl-c or q).
+              // ESC + an ordinary byte: the ESC was bare. Abort to 'back' and
+              // drop the trailing byte (e.g. Alt+key is treated as a bare ESC).
               cancelPendingTimer()
               currentCtrl?.abort()
               state = 'idle'
-              if (byte === CTRL_C) sigint = true
-              else if (byte === QUIT_KEY) quit = true
             }
             break
           case 'csi':
