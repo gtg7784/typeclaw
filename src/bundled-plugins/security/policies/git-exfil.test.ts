@@ -264,7 +264,7 @@ describe('git-exfil guard', () => {
 
   test('allows non-bash tools entirely (only bash is in scope)', () => {
     expect(checkGitExfilGuard({ tool: 'read', args: { path: '.env' } })).toBeUndefined()
-    expect(checkGitExfilGuard({ tool: 'webfetch', args: { url: 'https://example.com' } })).toBeUndefined()
+    expect(checkGitExfilGuard({ tool: 'web_fetch', args: { url: 'https://example.com' } })).toBeUndefined()
   })
 
   test('allows ignored when tool is bash but command is not a string', () => {

@@ -11,7 +11,7 @@ import {
   renderToolNotFoundNudge,
 } from './tool-not-found-nudge'
 
-const KNOWN = ['read', 'grep', 'find', 'ls', 'bash', 'websearch', 'webfetch', 'load_skill']
+const KNOWN = ['read', 'grep', 'find', 'ls', 'bash', 'web_search', 'web_fetch', 'load_skill']
 
 describe('pi default-builtin coupling', () => {
   test("createSession derives the nudge vocabulary's default builtins from pi's coding tools — pinned so a pi change breaks loudly", () => {
@@ -24,11 +24,11 @@ describe('pi default-builtin coupling', () => {
 
 describe('extractNotFoundToolName', () => {
   test('extracts the tool name from pi-agent-core not-found text', () => {
-    expect(extractNotFoundToolName('Tool web_search not found')).toBe('web_search')
+    expect(extractNotFoundToolName('Tool websearch not found')).toBe('websearch')
   })
 
   test('tolerates surrounding whitespace', () => {
-    expect(extractNotFoundToolName('  Tool webfetch not found  ')).toBe('webfetch')
+    expect(extractNotFoundToolName('  Tool web_fetch not found  ')).toBe('web_fetch')
   })
 
   test('returns null for unrelated error text', () => {
@@ -38,13 +38,13 @@ describe('extractNotFoundToolName', () => {
 })
 
 describe('closestToolName', () => {
-  test('maps the conventional underscored web tools to their real names', () => {
-    expect(closestToolName('web_search', KNOWN)).toBe('websearch')
-    expect(closestToolName('web_fetch', KNOWN)).toBe('webfetch')
+  test('maps the legacy concatenated web tools to their real underscored names', () => {
+    expect(closestToolName('websearch', KNOWN)).toBe('web_search')
+    expect(closestToolName('webfetch', KNOWN)).toBe('web_fetch')
   })
 
   test('returns the exact name when it is already known', () => {
-    expect(closestToolName('websearch', KNOWN)).toBe('websearch')
+    expect(closestToolName('web_search', KNOWN)).toBe('web_search')
   })
 
   test('returns null when nothing is close enough (genuinely unknown tool)', () => {
@@ -54,9 +54,9 @@ describe('closestToolName', () => {
 
 describe('renderToolNotFoundNudge', () => {
   test('names both the wrong and the suggested tool and instructs an exact re-issue', () => {
-    const nudge = renderToolNotFoundNudge('web_search', 'websearch')
-    expect(nudge).toContain('`web_search`')
+    const nudge = renderToolNotFoundNudge('websearch', 'web_search')
     expect(nudge).toContain('`websearch`')
+    expect(nudge).toContain('`web_search`')
     expect(nudge).toContain('Re-issue')
     expect(nudge).toContain('<system-reminder>')
   })
@@ -64,9 +64,9 @@ describe('renderToolNotFoundNudge', () => {
 
 describe('buildToolNotFoundNudge', () => {
   test('produces a nudge for a close-but-wrong tool name', () => {
-    const nudge = buildToolNotFoundNudge('Tool web_search not found', KNOWN)
+    const nudge = buildToolNotFoundNudge('Tool websearch not found', KNOWN)
     expect(nudge).not.toBeNull()
-    expect(nudge).toContain('`websearch`')
+    expect(nudge).toContain('`web_search`')
   })
 
   test('returns null for non-not-found error text', () => {
@@ -78,7 +78,7 @@ describe('buildToolNotFoundNudge', () => {
   })
 
   test('returns null when the requested name equals its only match (no self-suggestion loop)', () => {
-    expect(buildToolNotFoundNudge('Tool websearch not found', KNOWN)).toBeNull()
+    expect(buildToolNotFoundNudge('Tool web_search not found', KNOWN)).toBeNull()
   })
 })
 
@@ -117,9 +117,9 @@ describe('attachToolNotFoundNudge', () => {
   test('steers a did-you-mean reminder when a near-miss tool name is not found', () => {
     const { session, emit, steered } = fakeSession()
     attachToolNotFoundNudge(session, KNOWN)
-    emit(notFoundEvent('web_search'))
+    emit(notFoundEvent('websearch'))
     expect(steered).toHaveLength(1)
-    expect(steered[0]).toContain('`websearch`')
+    expect(steered[0]).toContain('`web_search`')
   })
 
   test('stays silent on a successful tool execution', () => {
@@ -152,7 +152,7 @@ describe('attachToolNotFoundNudge', () => {
     const { session, emit, steered } = fakeSession()
     const unsub = attachToolNotFoundNudge(session, KNOWN)
     unsub()
-    emit(notFoundEvent('web_search'))
+    emit(notFoundEvent('websearch'))
     expect(steered).toHaveLength(0)
   })
 })

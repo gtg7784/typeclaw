@@ -61,7 +61,7 @@ describe('private-surface-read guard — fail-closed across ALL tools (not a whi
 describe('private-surface-read guard — free-text field scoping (no false positives)', () => {
   test('does not block a bare hidden-dir NAME in a free-text field', () => {
     expect(check('channel_reply', { text: 'memory' })).toBeUndefined()
-    expect(check('websearch', { query: 'workspace' })).toBeUndefined()
+    expect(check('web_search', { query: 'workspace' })).toBeUndefined()
     expect(check('grep', { pattern: 'sessions', path: 'public' })).toBeUndefined()
     expect(check('look_at_channel_attachment', { prompt: 'sessions' })).toBeUndefined()
   })

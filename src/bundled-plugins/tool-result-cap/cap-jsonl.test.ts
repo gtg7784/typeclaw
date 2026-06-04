@@ -134,8 +134,8 @@ describe('capJsonlFileInPlace', () => {
         timestamp: '2026-05-12T00:00:02Z',
         message: {
           role: 'toolResult',
-          toolCallId: 'functions.webfetch:1',
-          toolName: 'webfetch',
+          toolCallId: 'functions.web_fetch:1',
+          toolName: 'web_fetch',
           content: [{ type: 'image', mimeType: 'image/png', data: 'B'.repeat(500) }],
         },
       },
@@ -279,8 +279,8 @@ describe('capJsonlFileInPlace', () => {
         timestamp: '2026-05-12T00:00:01Z',
         message: {
           role: 'toolResult',
-          toolCallId: 'functions.webfetch:1',
-          toolName: 'webfetch',
+          toolCallId: 'functions.web_fetch:1',
+          toolName: 'web_fetch',
           content: [{ type: 'text', text: 'B'.repeat(200) }],
         },
       },

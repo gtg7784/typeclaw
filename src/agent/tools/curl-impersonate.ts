@@ -101,7 +101,7 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
   const method = req.method ?? 'GET'
 
   // Per-request random sentinel + UTF-8-safe parsing. The static sentinel
-  // approach (previous revision) had a hardening hole: webfetch reads
+  // approach (previous revision) had a hardening hole: web_fetch reads
   // attacker-controlled pages, and a static sentinel is a public, fixed
   // string. A page could include the sentinel byte sequence plus fabricated
   // metadata before the real write-out tail and `indexOf` would split at
@@ -137,7 +137,7 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
     '--proto-redir',
     '=http,https',
     // `--fail-with-body` would make curl exit non-zero on >=400 but still
-    // write the body. We intentionally DO NOT pass it: callers (webfetch,
+    // write the body. We intentionally DO NOT pass it: callers (web_fetch,
     // ddg) want to inspect httpStatus themselves and decide. Curl exits 0
     // on a 404-with-body in this mode, which matches our contract.
     '--compressed',

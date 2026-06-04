@@ -63,10 +63,10 @@ function humanizeArgs(name: string, args: unknown): string | null {
       return humanizeFindArgs(args)
     case 'ls':
       return humanizeLsArgs(args)
-    case 'websearch':
-      return humanizeWebsearchArgs(args)
-    case 'webfetch':
-      return humanizeWebfetchArgs(args)
+    case 'web_search':
+      return humanizeWebSearchArgs(args)
+    case 'web_fetch':
+      return humanizeWebFetchArgs(args)
     default:
       return null
   }
@@ -123,14 +123,14 @@ function humanizeLsArgs(args: ArgRecord): string | null {
   return asString(args.path) ?? '.'
 }
 
-function humanizeWebsearchArgs(args: ArgRecord): string | null {
+function humanizeWebSearchArgs(args: ArgRecord): string | null {
   const query = asString(args.query)
   if (query === null) return null
   const source = asString(args.source)
   return source && source !== 'web' ? `"${query}" (${source})` : `"${query}"`
 }
 
-function humanizeWebfetchArgs(args: ArgRecord): string | null {
+function humanizeWebFetchArgs(args: ArgRecord): string | null {
   return asString(args.url)
 }
 
@@ -153,8 +153,8 @@ function enrichResult(name: string, result: ArgRecord): string | null {
       return enrichBashResult(result)
     case 'read':
       return enrichReadResult(result)
-    case 'websearch':
-      return enrichWebsearchResult(result)
+    case 'web_search':
+      return enrichWebSearchResult(result)
     default:
       return null
   }
@@ -187,7 +187,7 @@ function enrichReadResult(result: ArgRecord): string | null {
   return mime ? `[image: ${mime}]` : '[image]'
 }
 
-function enrichWebsearchResult(result: ArgRecord): string | null {
+function enrichWebSearchResult(result: ArgRecord): string | null {
   const details = isObject(result.details) ? result.details : null
   if (details === null) return null
   const results = Array.isArray(details.results) ? details.results : null
@@ -198,13 +198,13 @@ function enrichWebsearchResult(result: ArgRecord): string | null {
   const source = asString(details.source) ?? ''
   const header = query ? `${results.length} result${results.length === 1 ? '' : 's'} for "${query}" (${source})` : null
   const lines = results
-    .map((entry, i) => formatWebsearchEntry(entry, i + 1))
+    .map((entry, i) => formatWebSearchEntry(entry, i + 1))
     .filter((line): line is string => line !== null)
   if (lines.length === 0) return extractContentText(result)
   return header === null ? lines.join('\n') : `${header}\n${lines.join('\n')}`
 }
 
-function formatWebsearchEntry(entry: unknown, index: number): string | null {
+function formatWebSearchEntry(entry: unknown, index: number): string | null {
   if (!isObject(entry)) return null
   const title = asString(entry.title)
   const url = asString(entry.url)

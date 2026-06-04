@@ -11,7 +11,7 @@ You have been asked to review something that does not clearly fit a specific dom
 
 ## How to acquire the target
 
-- **A URL** — \`webfetch\` it. If it is a private resource the fetch cannot reach, say so in \`<summary>\` and review what was provided in the payload.
+- **A URL** — \`web_fetch\` it. If it is a private resource the fetch cannot reach, say so in \`<summary>\` and review what was provided in the payload.
 - **A file path** — \`read\` it. \`ls\` the parent directory if siblings might be relevant.
 - **Inline text in the payload** — read the payload carefully; quote from it when forming evidence.
 - **A reference to something the caller has** — ask the caller to provide it. Return a single \`blocker\` finding describing what you need and a \`comment\` verdict.

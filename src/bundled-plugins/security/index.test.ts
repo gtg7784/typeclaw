@@ -78,25 +78,25 @@ describe('security plugin wiring', () => {
     expect(result?.block).toBe(true)
   })
 
-  test('tool.before blocks webfetch to AWS metadata endpoint', async () => {
+  test('tool.before blocks web_fetch to AWS metadata endpoint', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(
-      toolEvent('webfetch', { url: 'http://169.254.169.254/latest/meta-data/iam/' }),
+      toolEvent('web_fetch', { url: 'http://169.254.169.254/latest/meta-data/iam/' }),
       hookContext('/agent'),
     )
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('ssrf')
   })
 
-  test('tool.before blocks webfetch to localhost', async () => {
+  test('tool.before blocks web_fetch to localhost', async () => {
     const hook = await toolBeforeHook()
-    const result = await hook(toolEvent('webfetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
+    const result = await hook(toolEvent('web_fetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
   })
 
-  test('tool.before allows webfetch to a public URL', async () => {
+  test('tool.before allows web_fetch to a public URL', async () => {
     const hook = await toolBeforeHook()
-    const result = await hook(toolEvent('webfetch', { url: 'https://example.com/api' }), hookContext('/agent'))
+    const result = await hook(toolEvent('web_fetch', { url: 'https://example.com/api' }), hookContext('/agent'))
     expect(result).toBeUndefined()
   })
 
@@ -222,7 +222,7 @@ describe('security plugin wiring', () => {
     ).toBeUndefined()
     expect(
       await hook(
-        toolEvent('webfetch', { url: 'http://127.0.0.1/dev', acknowledgeGuards: { ssrf: true } }),
+        toolEvent('web_fetch', { url: 'http://127.0.0.1/dev', acknowledgeGuards: { ssrf: true } }),
         hookContext('/agent'),
       ),
     ).toBeUndefined()
@@ -475,7 +475,7 @@ describe('security plugin wiring', () => {
 
   test('medium-tier block reason mentions both owner and trusted (both bypass medium by default)', async () => {
     const hook = await toolBeforeHook()
-    const result = await hook(toolEvent('webfetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
+    const result = await hook(toolEvent('web_fetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('security.bypass.ssrf')
     expect(result?.reason).toMatch(/owner/i)
@@ -522,7 +522,7 @@ describe('security plugin wiring', () => {
     expect(await hook({ ...toolEvent('read', { path: '.env' }), origin: tui }, hookContext('/agent'))).toBeUndefined()
     expect(
       await hook(
-        { ...toolEvent('webfetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: tui },
+        { ...toolEvent('web_fetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: tui },
         hookContext('/agent'),
       ),
     ).toBeUndefined()
@@ -570,7 +570,7 @@ describe('security plugin wiring', () => {
     }
     expect(
       await hook(
-        { ...toolEvent('webfetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: slackOrigin },
+        { ...toolEvent('web_fetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: slackOrigin },
         hookContext('/agent'),
       ),
     ).toBeUndefined()

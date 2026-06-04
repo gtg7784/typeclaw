@@ -92,19 +92,19 @@ describe('formatToolStart args', () => {
     expect(out).toContain('*.ts in src')
   })
 
-  test('websearch shows quoted query', () => {
-    const out = visible(formatToolStart('websearch', { query: 'lmk what' }))
+  test('web_search shows quoted query', () => {
+    const out = visible(formatToolStart('web_search', { query: 'lmk what' }))
     expect(out).toContain('"lmk what"')
     expect(out).not.toContain('"query"')
   })
 
-  test('websearch shows source when not the default', () => {
-    const out = visible(formatToolStart('websearch', { query: 'foo', source: 'wikipedia' }))
+  test('web_search shows source when not the default', () => {
+    const out = visible(formatToolStart('web_search', { query: 'foo', source: 'wikipedia' }))
     expect(out).toContain('"foo" (wikipedia)')
   })
 
-  test('webfetch shows the url', () => {
-    const out = visible(formatToolStart('webfetch', { url: 'https://example.com/page' }))
+  test('web_fetch shows the url', () => {
+    const out = visible(formatToolStart('web_fetch', { url: 'https://example.com/page' }))
     expect(out).toContain('https://example.com/page')
     expect(out).not.toContain('"url"')
   })
@@ -187,7 +187,7 @@ describe('formatToolEnd results', () => {
     expect(out).toContain('Full output saved to: /tmp/full.txt')
   })
 
-  test('websearch reformats results into a numbered list', () => {
+  test('web_search reformats results into a numbered list', () => {
     const result = {
       content: [{ type: 'text', text: 'Search results for "x"…' }],
       details: {
@@ -200,7 +200,7 @@ describe('formatToolEnd results', () => {
         ],
       },
     }
-    const out = visible(formatToolEnd('websearch', false, result, 100))
+    const out = visible(formatToolEnd('web_search', false, result, 100))
     expect(out).toContain('2 results for "x" (web)')
     expect(out).toContain('1. First — https://a.example')
     expect(out).toContain('2. Second — https://b.example')
