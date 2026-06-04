@@ -104,6 +104,42 @@ describe('createEscController', () => {
     expect(quit).toBe(true)
   })
 
+  test('incomplete CSI then Ctrl-C surfaces sigint instead of swallowing it', () => {
+    // A truncated CSI (ESC [ with no final byte, e.g. dropped over SSH) must
+    // not strand the parser consuming the user's exit key.
+    const ctrl = createEscController({ debounceMs: 10 })
+    ctrl.armForStream()
+    ctrl.onChunk(Buffer.from([0x1b, 0x5b]))
+    const { sigint } = ctrl.onChunk(Buffer.from([0x03]))
+    expect(sigint).toBe(true)
+  })
+
+  test('incomplete SS3 then Ctrl-C surfaces sigint', () => {
+    const ctrl = createEscController({ debounceMs: 10 })
+    ctrl.armForStream()
+    ctrl.onChunk(Buffer.from([0x1b, 0x4f]))
+    const { sigint } = ctrl.onChunk(Buffer.from([0x03]))
+    expect(sigint).toBe(true)
+  })
+
+  test('ESC mid-CSI resynchronizes to a new sequence (a following arrow does not abort)', async () => {
+    const ctrl = createEscController({ debounceMs: 10 })
+    const signal = ctrl.armForStream()
+    ctrl.onChunk(Buffer.from([0x1b, 0x5b])) // truncated CSI
+    ctrl.onChunk(Buffer.from([0x1b, 0x5b, 0x42])) // resync: a full arrow-down
+    await tick(IDLE_WAIT_MS)
+    expect(signal.aborted).toBe(false)
+  })
+
+  test('complete CSI ending in q is consumed, not treated as quit', () => {
+    // 0x71 'q' is a valid CSI final byte; inside a sequence it ends the
+    // sequence rather than surfacing quit.
+    const ctrl = createEscController({ debounceMs: 10 })
+    ctrl.armForStream()
+    const { quit } = ctrl.onChunk(Buffer.from([0x1b, 0x5b, 0x71]))
+    expect(quit).toBe(false)
+  })
+
   test('signal handed out by armForStream still aborts on ESC after clearPending → re-arm of listener (the picker pause/resume cycle)', async () => {
     // given: a stream is armed (caller stashes the signal as escSignal)
     const ctrl = createEscController({ debounceMs: 10 })

@@ -35,6 +35,11 @@ function isCsiFinal(byte: number): boolean {
   return byte >= 0x40 && byte <= 0x7e
 }
 
+// C0 controls (0x00..0x1f plus DEL 0x7f) are not legal sequence-body bytes.
+function isC0Control(byte: number): boolean {
+  return byte <= 0x1f || byte === 0x7f
+}
+
 export function createEscController({ debounceMs }: { debounceMs: number }): EscController {
   let currentCtrl: AbortController | null = null
   let state: ParseState = 'idle'
@@ -120,11 +125,28 @@ export function createEscController({ debounceMs }: { debounceMs: number }): Esc
             }
             break
           case 'csi':
-            if (isCsiFinal(byte)) state = 'idle'
-            break
           case 'ss3':
-            // SS3 carries exactly one final byte (e.g. application-mode arrows).
-            state = 'idle'
+            // A C0 control byte is never a legal part of a CSI/SS3 body. A
+            // truncated or malformed sequence (e.g. dropped final byte over a
+            // lossy SSH link) must not strand the parser swallowing the user's
+            // exit keys. ESC resynchronizes to a new sequence; Ctrl-C surfaces
+            // immediately; any other C0 control just abandons the sequence.
+            if (byte === ESC) {
+              state = 'sawEsc'
+              scheduleBareEsc()
+            } else if (byte === CTRL_C) {
+              cancelPendingTimer()
+              state = 'idle'
+              sigint = true
+            } else if (isC0Control(byte)) {
+              cancelPendingTimer()
+              state = 'idle'
+            } else if (state === 'csi') {
+              if (isCsiFinal(byte)) state = 'idle'
+            } else {
+              // SS3 carries exactly one final byte (e.g. application-mode arrows).
+              state = 'idle'
+            }
             break
         }
       }
