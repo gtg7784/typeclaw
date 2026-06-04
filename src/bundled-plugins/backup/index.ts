@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { withGitLock } from '@/git/mutex'
 import { definePlugin, type PluginContext, type SpawnSubagentOptions, type Subagent } from '@/plugin'
 
 import { COMMIT_TIMEOUT_MS, makeDefaultGitSpawn, NETWORK_TIMEOUT_MS, runBackup, type BackupResult } from './runner'
@@ -174,44 +175,46 @@ async function runBackupOnce(
     spawnedByOrigin: { kind: 'tui', sessionId: 'backup-runner' },
   }
 
-  const result = await runBackup(
-    { cwd: payload.agentDir, pushToOrigin: payload.pushToOrigin },
-    {
-      gitSpawn: makeDefaultGitSpawn(),
-      pickCommitMessage: async ({ status, diffstat }) => {
-        await cleanupMessageFile(messagePath)
-        const messagePayload: CommitMessagePayload = {
-          agentDir: payload.agentDir,
-          status,
-          diffstat,
-          outputPath: messagePath,
-        }
-        try {
-          await ctx.spawnSubagent(SUBAGENT_COMMIT_MESSAGE, messagePayload, inheritOwner)
-        } catch (err) {
-          ctx.logger.warn(
-            `${SUBAGENT_COMMIT_MESSAGE} subagent failed, using fallback: ${err instanceof Error ? err.message : String(err)}`,
-          )
-        }
-        const written = await readMessageFile(messagePath)
-        await cleanupMessageFile(messagePath)
-        return written ?? 'chore: backup'
+  const result = await withGitLock(payload.agentDir, () =>
+    runBackup(
+      { cwd: payload.agentDir, pushToOrigin: payload.pushToOrigin },
+      {
+        gitSpawn: makeDefaultGitSpawn(),
+        pickCommitMessage: async ({ status, diffstat }) => {
+          await cleanupMessageFile(messagePath)
+          const messagePayload: CommitMessagePayload = {
+            agentDir: payload.agentDir,
+            status,
+            diffstat,
+            outputPath: messagePath,
+          }
+          try {
+            await ctx.spawnSubagent(SUBAGENT_COMMIT_MESSAGE, messagePayload, inheritOwner)
+          } catch (err) {
+            ctx.logger.warn(
+              `${SUBAGENT_COMMIT_MESSAGE} subagent failed, using fallback: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+          const written = await readMessageFile(messagePath)
+          await cleanupMessageFile(messagePath)
+          return written ?? 'chore: backup'
+        },
+        diagnoseFailure: async (input) => {
+          const diagPayload: DiagnoseFailurePayload = {
+            agentDir: input.cwd,
+            stage: input.stage,
+            exitCode: input.exitCode,
+            stderr: input.stderr,
+            stdout: input.stdout,
+          }
+          try {
+            await ctx.spawnSubagent(SUBAGENT_DIAGNOSE, diagPayload, inheritOwner)
+          } catch (err) {
+            ctx.logger.warn(`${SUBAGENT_DIAGNOSE} subagent failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        },
       },
-      diagnoseFailure: async (input) => {
-        const diagPayload: DiagnoseFailurePayload = {
-          agentDir: input.cwd,
-          stage: input.stage,
-          exitCode: input.exitCode,
-          stderr: input.stderr,
-          stdout: input.stdout,
-        }
-        try {
-          await ctx.spawnSubagent(SUBAGENT_DIAGNOSE, diagPayload, inheritOwner)
-        } catch (err) {
-          ctx.logger.warn(`${SUBAGENT_DIAGNOSE} subagent failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      },
-    },
+    ),
   )
 
   await cleanupMessageFile(messagePath)

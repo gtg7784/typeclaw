@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { join } from 'node:path'
 
 import type { AgentTool } from '@mariozechner/pi-agent-core'
 import {
@@ -37,6 +38,7 @@ import {
   buildSandboxedCommand,
   ensureBwrapAvailable,
   resolveHiddenPaths,
+  resolveProtectedZones,
   resolveWritableZones,
   subtractMasked,
 } from '@/sandbox'
@@ -516,12 +518,26 @@ async function applyBashSandbox(
   await ensureBwrapAvailable()
   // Write-confined jail for low-trust roles: bind the whole project read-only,
   // hide private/secret paths, then re-expose only the free-write scratch zones
-  // RW. Anything else under agentDir (.git/, node_modules/, agentDir root) is
-  // EROFS, so bash cannot sidestep the non-workspace-write guard. Trusted/owner
-  // never reach here (their masks are empty) and keep full unsandboxed access.
-  // subtractMasked drops any writable zone masked for this role so an RW bind
-  // never re-exposes a hidden path (e.g. a guest's masked workspace/).
+  // (workspace + root allowlist + .git) RW. The WORKING TREE outside those zones
+  // (node_modules/, agentDir root, non-allowlisted tracked files) stays EROFS, so
+  // bash cannot sidestep the non-workspace-write guard — and `git checkout` of a
+  // protected worktree path fails at the kernel. .git is RW so members can
+  // commit; .git/hooks + .git/config (and any writable core.hooksPath target)
+  // are re-protected RO (protected, rendered after writable, ensured to exist so
+  // an absent path can't be created+executed) so a hook-plant / core.hooksPath
+  // never becomes code execution in the unsandboxed runtime git ops. Trusted/owner never reach here
+  // (their masks are empty) and keep full unsandboxed access. subtractMasked
+  // drops any writable zone masked for this role so an RW bind never re-exposes a
+  // hidden path (e.g. a guest's masked workspace/).
   const writable = subtractMasked(await resolveWritableZones(agentDir), { dirs, files })
+  // subtractMasked again on the protected set: a protected RO bind renders after
+  // the masks (last-op-wins), so an unfiltered protected path nested under a
+  // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)
+  // would re-expose the hidden real dir. A masked path is already non-writable
+  // for this role, so it needs no protection anyway.
+  const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
+    ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
+    : { dirs: [], files: [] }
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
@@ -529,6 +545,7 @@ async function applyBashSandbox(
     mounts: [{ type: 'ro-bind', source: agentDir, dest: agentDir }],
     masks: { dirs, files },
     writable,
+    protected: protectedZones,
     network: 'inherit',
     cwd: agentDir,
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),

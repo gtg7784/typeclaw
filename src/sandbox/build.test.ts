@@ -235,6 +235,36 @@ describe('buildSandboxedCommand writable overlays', () => {
   })
 })
 
+describe('buildSandboxedCommand protected re-binds', () => {
+  test('re-binds protected dirs and files read-only with --ro-bind <p> <p>', () => {
+    const joined = argvOf('true', {
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
+    }).join(' ')
+    expect(joined).toContain('--ro-bind /agent/.git/hooks /agent/.git/hooks')
+    expect(joined).toContain('--ro-bind /agent/.git/config /agent/.git/config')
+  })
+
+  test('renders protected RO re-binds AFTER the writable .git bind so last-op-wins keeps hooks/config EROFS', () => {
+    const argv = argvOf('true', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      writable: { dirs: ['/agent/.git'], files: [] },
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
+    })
+    const writableGit = argv.lastIndexOf('/agent/.git')
+    const hooksProtect = argv.indexOf('/agent/.git/hooks')
+    const configProtect = argv.indexOf('/agent/.git/config')
+    expect(writableGit).toBeGreaterThanOrEqual(0)
+    expect(hooksProtect).toBeGreaterThan(writableGit)
+    expect(configProtect).toBeGreaterThan(writableGit)
+  })
+
+  test('emits no protected re-binds when the policy omits them', () => {
+    const joined = argvOf('true', { writable: { dirs: ['/agent/.git'] } }).join(' ')
+    expect(joined).not.toContain('/agent/.git/hooks')
+    expect(joined).not.toContain('/agent/.git/config')
+  })
+})
+
 describe('buildSandboxedCommand proc strategy', () => {
   test("omits the /proc tmpfs for proc: 'none'", () => {
     const argv = argvOf('true', { proc: 'none' })

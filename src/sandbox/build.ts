@@ -111,6 +111,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
 
   appendMasks(argv, policy)
   appendWritable(argv, policy)
+  appendProtected(argv, policy)
 
   if (policy.cwd !== undefined) {
     argv.push('--chdir', policy.cwd)
@@ -135,6 +136,15 @@ function appendWritable(argv: string[], policy: SandboxPolicy): void {
   }
   for (const file of policy.writable?.files ?? []) {
     argv.push('--bind', file, file)
+  }
+}
+
+function appendProtected(argv: string[], policy: SandboxPolicy): void {
+  for (const dir of policy.protected?.dirs ?? []) {
+    argv.push('--ro-bind', dir, dir)
+  }
+  for (const file of policy.protected?.files ?? []) {
+    argv.push('--ro-bind', file, file)
   }
 }
 
