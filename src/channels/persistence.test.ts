@@ -24,29 +24,6 @@ describe('loadChannelSessions', () => {
     expect(out).toEqual([])
   })
 
-  test('migrates a v3 file to v4 with unknown lastInboundAt sentinel', async () => {
-    const dir = await tempDir()
-    const path = channelsSessionsPath(dir)
-    await mkdir(join(dir, 'channels'), { recursive: true })
-    const records: ChannelSessionRecord[] = [
-      {
-        adapter: 'discord-bot',
-        workspace: 'g1',
-        chat: 'c1',
-        thread: null,
-        sessionId: 'ses_abc',
-        sessionFile: '2026-05-02T16-56-52-380Z_ses_abc.jsonl',
-        participants: [],
-      },
-    ]
-    await writeFile(path, JSON.stringify({ version: 3, sessions: records }))
-    const out = await loadChannelSessions(dir, silentLogger)
-    expect(out).toHaveLength(1)
-    expect(out[0]?.sessionId).toBe('ses_abc')
-    expect(out[0]?.sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')
-    expect(out[0]?.lastInboundAt).toBe(0)
-  })
-
   test('loads a v4 file without clobbering lastInboundAt', async () => {
     const dir = await tempDir()
     const path = channelsSessionsPath(dir)
@@ -71,84 +48,37 @@ describe('loadChannelSessions', () => {
     expect(out[0]?.lastInboundAt).toBe(1234)
   })
 
-  test('migrates a v2 file by globbing the sessions directory for *_<sessionId>.jsonl', async () => {
-    // given: a v2 mapping plus an actual session file written by pi-coding-agent
-    const dir = await tempDir()
-    const path = channelsSessionsPath(dir)
-    await mkdir(join(dir, 'channels'), { recursive: true })
-    await mkdir(join(dir, 'sessions'), { recursive: true })
-    await writeFile(join(dir, 'sessions', '2026-05-02T16-56-52-380Z_ses_abc.jsonl'), '{"type":"session"}\n')
-    const records = [
-      {
-        adapter: 'discord-bot',
-        workspace: 'g1',
-        chat: 'c1',
-        thread: null,
-        sessionId: 'ses_abc',
-        participants: [],
-      },
-    ]
-    await writeFile(path, JSON.stringify({ version: 2, sessions: records }))
+  for (const version of [2, 3]) {
+    test(`returns empty list and logs when v${version} file is no longer supported`, async () => {
+      const dir = await tempDir()
+      const path = channelsSessionsPath(dir)
+      await mkdir(join(dir, 'channels'), { recursive: true })
+      await writeFile(
+        path,
+        JSON.stringify({
+          version,
+          sessions: [
+            {
+              adapter: 'discord-bot',
+              workspace: 'g1',
+              chat: 'c1',
+              thread: null,
+              sessionId: 'ses_abc',
+              sessionFile: '2026-05-02T16-56-52-380Z_ses_abc.jsonl',
+              participants: [],
+            },
+          ],
+        }),
+      )
+      const warns: string[] = []
 
-    // when: load runs the v2→v3→v4 migration chain
-    const out = await loadChannelSessions(dir, silentLogger)
+      const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
 
-    // then: the actual basename is attached and the unknown-inbound sentinel is set
-    expect(out).toHaveLength(1)
-    expect(out[0]?.sessionId).toBe('ses_abc')
-    expect(out[0]?.sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')
-    expect(out[0]?.lastInboundAt).toBe(0)
-  })
-
-  test('v2 migration leaves sessionFile unset and warns when the on-disk file is missing', async () => {
-    const dir = await tempDir()
-    const path = channelsSessionsPath(dir)
-    await mkdir(join(dir, 'channels'), { recursive: true })
-    await mkdir(join(dir, 'sessions'), { recursive: true })
-    const records = [
-      {
-        adapter: 'discord-bot',
-        workspace: 'g1',
-        chat: 'c1',
-        thread: null,
-        sessionId: 'ses_lost',
-        participants: [],
-      },
-    ]
-    await writeFile(path, JSON.stringify({ version: 2, sessions: records }))
-
-    const warns: string[] = []
-    const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
-
-    expect(out).toHaveLength(1)
-    expect(out[0]?.sessionFile).toBeUndefined()
-    expect(out[0]?.lastInboundAt).toBe(0)
-    expect(warns.some((w) => w.includes('ses_lost') && w.includes('no session file'))).toBe(true)
-  })
-
-  test('v2 migration is non-fatal when the sessions directory does not exist', async () => {
-    const dir = await tempDir()
-    const path = channelsSessionsPath(dir)
-    await mkdir(join(dir, 'channels'), { recursive: true })
-    // no sessions/ directory at all
-    const records = [
-      {
-        adapter: 'discord-bot',
-        workspace: 'g1',
-        chat: 'c1',
-        thread: null,
-        sessionId: 'ses_abc',
-        participants: [],
-      },
-    ]
-    await writeFile(path, JSON.stringify({ version: 2, sessions: records }))
-
-    const out = await loadChannelSessions(dir, silentLogger)
-
-    expect(out).toHaveLength(1)
-    expect(out[0]?.sessionFile).toBeUndefined()
-    expect(out[0]?.lastInboundAt).toBe(0)
-  })
+      expect(out).toEqual([])
+      expect(warns[0]).toContain(`version ${version} not supported`)
+      expect(warns[0]).toContain('expected 4')
+    })
+  }
 
   test('returns empty list and logs when file is corrupted JSON', async () => {
     const dir = await tempDir()
@@ -170,6 +100,7 @@ describe('loadChannelSessions', () => {
     const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
     expect(out).toEqual([])
     expect(warns[0]).toContain('version 5 not supported')
+    expect(warns[0]).toContain('expected 4')
   })
 })
 

@@ -41,52 +41,6 @@ describe('SecretsBackend', () => {
     expect(parsed['$schema']).toBe('./node_modules/typeclaw/secrets.schema.json')
   })
 
-  test('legacy flat file is read transparently and upgraded on next write', async () => {
-    await writeFile(secretsPath, JSON.stringify({ openai: { type: 'api_key', key: 'sk-old' } }))
-
-    const store = createSecretsStoreForAgent(secretsPath)
-    expect(store.get('openai')).toEqual({ type: 'api_key', key: 'sk-old' })
-
-    store.set('fireworks', { type: 'api_key', key: 'fw-new' })
-
-    const raw = await readFile(secretsPath, 'utf8')
-    const result = parseSecretsFile(JSON.parse(raw))
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.file.version).toBe(2)
-    expect(result.file.providers.openai).toEqual({ type: 'api_key', key: { value: 'sk-old' } })
-    expect(result.file.providers.fireworks).toEqual({ type: 'api_key', key: { value: 'fw-new' } })
-  })
-
-  test('legacy v1 envelope (llm + env-keyed channels) is upgraded to v2 on next write', async () => {
-    await writeFile(
-      secretsPath,
-      JSON.stringify({
-        version: 1,
-        llm: { openai: { type: 'api_key', key: 'sk-v1' } },
-        channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-tok' } },
-      }),
-    )
-
-    const store = createSecretsStoreForAgent(secretsPath)
-    expect(store.get('openai')).toEqual({ type: 'api_key', key: 'sk-v1' })
-
-    store.set('fireworks', { type: 'api_key', key: 'fw-v2' })
-
-    const raw = await readFile(secretsPath, 'utf8')
-    const obj = JSON.parse(raw) as {
-      version: number
-      providers: Record<string, unknown>
-      channels: Record<string, unknown>
-    }
-    expect(obj.version).toBe(2)
-    expect(obj.providers).toEqual({
-      openai: { type: 'api_key', key: { value: 'sk-v1' } },
-      fireworks: { type: 'api_key', key: { value: 'fw-v2' } },
-    })
-    expect(obj.channels).toEqual({ 'discord-bot': { token: { value: 'd-tok' } } })
-  })
-
   test('round-trip: set + reload + get returns the same value', () => {
     const a = createSecretsStoreForAgent(secretsPath)
     a.set('openai', { type: 'api_key', key: 'sk-roundtrip' })

@@ -60,7 +60,7 @@ When a `prompt` job fires, a session is created with the role stamped in `schedu
 
 This closes a class of laundering attacks where a low-privilege session would otherwise schedule itself a high-privilege future run. The role is stamped at scheduling time and enforced at firing time, end of story.
 
-If you hand-author a `cron.json` entry and forget `scheduledByRole`, TypeClaw auto-stamps `"owner"` on first load and commits the rewrite. This is a migration path for legacy files — don't rely on it for new jobs.
+If you hand-author a `cron.json` entry and forget `scheduledByRole`, TypeClaw rejects the file with an error on load. Add `"scheduledByRole": "owner"` (or whichever role is appropriate) yourself before running `typeclaw reload`.
 
 ---
 

@@ -1,7 +1,6 @@
 import { z } from 'zod'
 
-import { CHANNEL_ENV_TO_FIELD } from './defaults'
-import { secretFieldSchema, type Secret } from './resolve'
+import { secretFieldSchema } from './resolve'
 
 // providers.<id> for api-key credentials: the `key` field is a Secret (string
 // shorthand or `{ value?, env? }` object). resolveSecret turns this into a
@@ -115,9 +114,7 @@ export const channelsSchema = z
   .catchall(z.unknown())
 
 // version 2 = providers.* with Secret-typed api-key.key + per-adapter
-// channel field shapes. version 1 = the previous shape (flat `llm.*`, channel
-// slots keyed by env-var name). Legacy v1 input is upgraded transparently by
-// parseSecretsFile; the first write persists v2.
+// channel field shapes.
 export const SECRETS_FILE_VERSION = 2
 
 export const secretsFileSchema = z.object({
@@ -140,96 +137,13 @@ export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
 
-// parseSecretsFile recognises three shapes, in priority order:
-//   1. The v2 envelope (current): { version: 2, providers, channels }
-//   2. The v1 envelope (legacy): { version: 1, llm, channels } where channel
-//      slots are keyed by env-var name. Both `llm` and `channels` get
-//      reshaped — llm -> providers, env-keyed channel slots -> field-keyed.
-//   3. The pre-envelope flat shape (very legacy): Record<string, AuthCredential>
-//      at top level. Treated as { version: 2, providers: <flat>, channels: {} }
-//      so existing OAuth users transparently upgrade.
-//
-// Every legacy upgrade produces a v2-shaped SecretsFile in memory; the next
-// write persists v2 to disk. The legacy branches stay forever as a quiet
-// compatibility seam — only the v2 form is documented.
+// parseSecretsFile accepts only the current v2 envelope:
+// { version: 2, providers, channels }.
 export function parseSecretsFile(raw: unknown): ParseSecretsResult {
   const v2 = secretsFileSchema.safeParse(raw)
   if (v2.success) return { ok: true, file: v2.data }
 
-  const v1 = legacyV1Schema.safeParse(raw)
-  if (v1.success) return { ok: true, file: upgradeV1ToV2(v1.data) }
-
-  const flat = legacyFlatProviderSchema.safeParse(raw)
-  if (flat.success) {
-    return { ok: true, file: upgradeV1ToV2({ version: 1, llm: flat.data, channels: {} }) }
-  }
-
   return { ok: false, reason: v2.error.issues.map(formatIssue).join('; ') }
-}
-
-// Legacy v1 schema: `llm` (flat string-key) and `channels` (env-var-keyed
-// flat map per adapter). Used only for upgrade reads; never written.
-const legacyV1ApiKeySchema = z.object({
-  type: z.literal('api_key'),
-  key: z.string().min(1),
-})
-
-const legacyV1OAuthSchema = z
-  .object({
-    type: z.literal('oauth'),
-  })
-  .catchall(z.unknown())
-
-const legacyV1CredentialSchema = z.discriminatedUnion('type', [legacyV1ApiKeySchema, legacyV1OAuthSchema])
-
-const legacyV1LlmSchema = z.record(z.string(), legacyV1CredentialSchema)
-
-const legacyV1ChannelsSchema = z.record(z.string(), z.record(z.string(), z.string()))
-
-const legacyV1Schema = z.object({
-  $schema: z.string().optional(),
-  version: z.literal(1),
-  llm: legacyV1LlmSchema.default({}),
-  channels: legacyV1ChannelsSchema.default({}),
-})
-
-const legacyFlatProviderSchema = z.record(z.string(), legacyV1CredentialSchema)
-
-function upgradeV1ToV2(legacy: z.infer<typeof legacyV1Schema>): SecretsFile {
-  const providers: Providers = {}
-  for (const [providerId, cred] of Object.entries(legacy.llm)) {
-    if (cred.type === 'api_key') {
-      providers[providerId] = { type: 'api_key', key: { value: cred.key } }
-    } else {
-      providers[providerId] = cred
-    }
-  }
-
-  const channels: Channels = {}
-  for (const [adapterId, envKeyedSlot] of Object.entries(legacy.channels)) {
-    const upgradedSlot: Record<string, Secret> = {}
-    for (const [envKey, value] of Object.entries(envKeyedSlot)) {
-      const mapping = CHANNEL_ENV_TO_FIELD[envKey]
-      if (mapping && mapping.adapterId === adapterId) {
-        upgradedSlot[mapping.fieldName] = { value }
-      } else {
-        // Unknown env-var-name key on a known adapter, or an adapter we don't
-        // recognise: pass through verbatim under the original key. Better to
-        // preserve user data than drop it; the catchall on channelsSchema
-        // makes this safe.
-        upgradedSlot[envKey] = { value }
-      }
-    }
-    channels[adapterId] = upgradedSlot
-  }
-
-  const result: SecretsFile = {
-    version: SECRETS_FILE_VERSION,
-    providers,
-    channels,
-  }
-  if (legacy.$schema !== undefined) result.$schema = legacy.$schema
-  return result
 }
 
 function formatIssue(issue: { path: PropertyKey[]; message: string }): string {

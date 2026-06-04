@@ -58,7 +58,7 @@ discord:9999 author:U_MOD
 kakao:group/*
 ```
 
-Within one rule, tokens AND. Across rules on the same role, OR. Strict equality everywhere — no regex, no glob beyond listed `*` shapes. The parser owns precise typo errors, rejection of redundant forms (`slack:*/*` etc.), and legacy-prefix rejection with remediation. `migrateLegacyConfigShape` rewrites legacy `team:`/`guild:`/`tg:` prefixes to canonical DSL on load.
+Within one rule, tokens AND. Across rules on the same role, OR. Strict equality everywhere — no regex, no glob beyond listed `*` shapes. The parser owns precise typo errors, rejection of redundant forms (`slack:*/*` etc.), and rejection of legacy prefixes (`team:`, `guild:`, `tg:`) with a hint to use the canonical form (`slack:`, `discord:`, `telegram:`).
 
 ## Cron and subagent provenance
 
@@ -68,7 +68,7 @@ These origins don't resolve via match-rule walking. They carry stamped provenanc
 - **Subagent**: `origin.spawnedByRole` + `origin.spawnedByOrigin`. Snapshot at spawn; parent cleanup doesn't affect it. Role = `spawnedByRole` directly (same `guest` fallback).
 - **System**: the runtime-owned `system` origin (memory logging/retrieval, backup) resolves to `owner`. It is constructed only by runtime/bundled code — inbound channel/cron content can never produce it — so resolving it to `owner` is not a laundering vector. It acts on the operator's behalf over operator-owned state, with no single user session to inherit authority from.
 
-This closes the laundering attack: a `guest` who asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped. When the job fires, the security plugin blocks `bash env` again. Hand-authored `cron.json` entries missing `scheduledByRole` are auto-migrated to `"owner"` by `migrateLegacyCronShape` (one-shot rewrite + git commit) — needed to unstick agents that crash-looped post-PR #171.
+This closes the laundering attack: a `guest` who asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped. When the job fires, the security plugin blocks `bash env` again. Hand-authored `cron.json` entries missing `scheduledByRole` are rejected with an explicit error.
 
 **Subagents do not escalate.** At spawn, `createSpawnSubagentTool` stamps `spawnedByRole = permissions.resolveRole(parentOrigin)` — the parent's resolved role, captured by the runtime, not chosen by the caller. The child `subagent` origin then resolves back to that exact role. A `guest` parent spawns a `guest` subagent: no automatic promotion to `member`/`trusted`/`owner`, and every `tool.before` guard fires identically against the child. The subagent also receives only the tool set its definition declares — there is no inheritance of the parent's tools. Granting `guest` `subagent.spawn` is therefore capability amplification (a fresh context window + a specialized prompt for read-only/research subagents), not privilege escalation.
 
@@ -81,7 +81,7 @@ This closes the laundering attack: a `guest` who asks the agent to schedule a cr
 5. **Cron stamping**: `createSessionForCron` reads provenance from the persisted job. `parseCronFile` rejects entries without `scheduledByRole`; plugin cron defaults to `'owner'` via `toCronJob`.
 6. **Subagent stamping**: the `new-session` stream target carries `parentSessionId`, `spawnedByRole`, and `spawnedByOriginJson`. `SubagentConsumer` decodes and forwards.
 7. **Plugin `ctx.spawnSubagent`**: hook callers pass `{ parentSessionId, spawnedByOrigin: event.origin }`. The runtime resolves `spawnedByRole` from the origin via PermissionService — callers can't forge a role.
-8. **Channel router (`channel.respond` gate)**: every inbound is gated BEFORE `ensureLive`. Denial logs `[channels] <key>: denied by permissions (channel.respond) author=<id> id=<msg>` and returns. Legacy `channels.<adapter>.allow[]` is gone — auto-translated to `roles.member.match[]`.
+8. **Channel router (`channel.respond` gate)**: every inbound is gated BEFORE `ensureLive`. Denial logs `[channels] <key>: denied by permissions (channel.respond) author=<id> id=<msg>` and returns. The `channels.<adapter>.allow[]` field is no longer supported — it is silently ignored on parse and NOT translated to `roles.member.match[]`. Define `roles.member.match[]` directly.
 
 ## Rules of thumb
 

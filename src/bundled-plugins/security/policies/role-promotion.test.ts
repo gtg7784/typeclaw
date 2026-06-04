@@ -320,52 +320,6 @@ describe('checkRolePromotionGuard — edit (oldText/newText)', () => {
   })
 })
 
-describe('checkRolePromotionGuard — legacy-shape on disk (migrate:true regression)', () => {
-  test('legacy channels.<adapter>.allow[] on disk does not flag the migrated equivalent as a new grant', async () => {
-    const agentDir = await makeAgentDir()
-    await writeConfig(agentDir, {
-      port: 9000,
-      channels: { slack: { allow: ['team:T000'] } },
-    })
-
-    const after = {
-      port: 9000,
-      channels: { slack: {} },
-      roles: { member: { match: ['slack:T000'] } },
-    }
-    const result = await checkRolePromotionGuard({
-      tool: 'write',
-      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
-      agentDir,
-    })
-    expect(result).toBeUndefined()
-  })
-
-  test('legacy-shape file + a NEW match rule beyond the migrated baseline is still blocked', async () => {
-    const agentDir = await makeAgentDir()
-    await writeConfig(agentDir, {
-      port: 9000,
-      channels: { slack: { allow: ['team:T000'] } },
-    })
-
-    const after = {
-      port: 9000,
-      channels: { slack: {} },
-      roles: {
-        member: { match: ['slack:T000'] },
-        owner: { match: ['tui', 'discord:* author:U_NEW'] },
-      },
-    }
-    const result = await checkRolePromotionGuard({
-      tool: 'write',
-      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
-      agentDir,
-    })
-    expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('discord:* author:U_NEW')
-  })
-})
-
 describe('sanitizeForReason — operator-side ANSI injection defense', () => {
   test('strips C0 control characters (ANSI escape, BEL, etc.)', () => {
     const dirty = 'normal\u001b[2J\u001b[Hinjected\u0007text'

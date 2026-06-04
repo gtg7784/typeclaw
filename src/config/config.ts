@@ -249,8 +249,7 @@ export const gitignoreSchema = gitignoreObjectSchema.default(() => gitignoreObje
 export type GitignoreConfig = z.infer<typeof gitignoreSchema>
 
 // Same rationale as `dockerSchema`: a `git` namespace today carries `git.ignore`
-// and leaves room for future siblings (e.g. `git.attributes`). The one-time
-// migration also handles the rename of legacy top-level `gitignore`.
+// and leaves room for future siblings (e.g. `git.attributes`).
 export const gitSchema = z
   .object({
     ignore: gitignoreSchema,
@@ -783,34 +782,17 @@ export function loadConfigSync(cwd: string): Config {
   return result.data
 }
 
-// One-shot rename of legacy top-level `dockerfile` / `gitignore` keys into the
-// nested `docker.file` / `git.ignore` shape introduced for namespace
-// extensibility (`docker.compose`, `git.attributes`, etc. land here later
-// without a second migration). Called from every entry point that reads
-// `typeclaw.json` so the rest of the pipeline only ever sees the new shape.
-//
-// Precedence when both legacy and new keys coexist: the new shape wins and
-// the legacy key is dropped silently. Two ways this happens in practice:
-//   1. User hand-edited the new shape after auto-migration but forgot to
-//      delete the legacy key.
-//   2. Two `typeclaw start` invocations raced on a stale checkout.
-// Either way, the new shape is the source of truth — losing the legacy
-// duplicate is the right call because it would otherwise be shadowed at
-// parse time anyway (`configSchema` has no `dockerfile`/`gitignore` keys).
+// Strips a `channels.github.eventAllowlist` that deep-equals a value `channel
+// add` / `init` previously seeded verbatim, so the config re-tracks the shipped
+// default. Called from every entry point that reads `typeclaw.json` so the rest
+// of the pipeline only ever sees the canonical shape.
 //
 // The returned `applied` array names each migration step that fired, so
-// callers in `typeclaw start` can build a meaningful git commit message
-// instead of a generic "migrate legacy shape" subject. `changed` is the
-// boolean equivalent of `applied.length > 0` and is preserved for back-compat
-// with the many call sites that only care whether ANY rewrite happened.
-export type MigrationStep =
-  | { kind: 'dockerfile-to-docker-file' }
-  | { kind: 'gitignore-to-git-ignore' }
-  | { kind: 'channels-allow-to-roles-member-match'; rules: string[]; dropped: string[] }
-  | { kind: 'strip-permissions-gate-channel-respond' }
-  | { kind: 'model-to-models'; ref: string }
-  | { kind: 'drop-stale-model'; ref: string }
-  | { kind: 'drop-github-seeded-event-allowlist' }
+// callers in `typeclaw start` can build a meaningful git commit message.
+// `changed` is the boolean equivalent of `applied.length > 0` and is preserved
+// for back-compat with the many call sites that only care whether ANY rewrite
+// happened.
+export type MigrationStep = { kind: 'drop-github-seeded-event-allowlist' }
 
 export type MigrationResult = { json: unknown; changed: boolean; applied: MigrationStep[] }
 
@@ -820,86 +802,13 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
   }
 
   const obj = json as Record<string, unknown>
-  const hasLegacyDockerfile = 'dockerfile' in obj
-  const hasLegacyGitignore = 'gitignore' in obj
-  const channelsAllowMigration = collectChannelsAllowMigration(obj)
-  const hasLegacyGateChannelRespond = isPlainObject(obj.permissions) && 'gateChannelRespond' in obj.permissions
-  // The pre-multi-model schema had a top-level `model: KnownModelRef` and no
-  // `models` key. Detecting the legacy shape requires both: `model` present
-  // AND `models` absent. If both coexist (user hand-edited after auto-migrate
-  // but didn't delete the legacy key), `models` wins and `model` is dropped
-  // silently — same precedence rule as the dockerfile/gitignore migrations.
-  const hasLegacyModel = 'model' in obj && !('models' in obj) && typeof obj.model === 'string'
-  const hasStaleModelAlongsideModels = 'model' in obj && 'models' in obj
   const hasSeededGithubEventAllowlist = isSeededGithubEventAllowlist(obj)
-  if (
-    !hasLegacyDockerfile &&
-    !hasLegacyGitignore &&
-    !channelsAllowMigration.found &&
-    !hasLegacyGateChannelRespond &&
-    !hasLegacyModel &&
-    !hasStaleModelAlongsideModels &&
-    !hasSeededGithubEventAllowlist
-  ) {
+  if (!hasSeededGithubEventAllowlist) {
     return { json, changed: false, applied: [] }
   }
 
   const applied: MigrationStep[] = []
   const next: Record<string, unknown> = { ...obj }
-  if (hasLegacyDockerfile) {
-    const legacy = next.dockerfile
-    delete next.dockerfile
-    if (!('docker' in next)) {
-      next.docker = { file: legacy }
-    } else if (isPlainObject(next.docker) && !('file' in next.docker)) {
-      next.docker = { ...next.docker, file: legacy }
-    }
-    applied.push({ kind: 'dockerfile-to-docker-file' })
-  }
-  if (hasLegacyGitignore) {
-    const legacy = next.gitignore
-    delete next.gitignore
-    if (!('git' in next)) {
-      next.git = { ignore: legacy }
-    } else if (isPlainObject(next.git) && !('ignore' in next.git)) {
-      next.git = { ...next.git, ignore: legacy }
-    }
-    applied.push({ kind: 'gitignore-to-git-ignore' })
-  }
-  if (channelsAllowMigration.found) {
-    applyChannelsAllowMigration(next, channelsAllowMigration)
-    applied.push({
-      kind: 'channels-allow-to-roles-member-match',
-      rules: channelsAllowMigration.rules,
-      dropped: channelsAllowMigration.warnings,
-    })
-  }
-  if (hasLegacyGateChannelRespond) {
-    const perms = { ...(next.permissions as Record<string, unknown>) }
-    delete perms.gateChannelRespond
-    if (Object.keys(perms).length === 0) {
-      delete next.permissions
-    } else {
-      next.permissions = perms
-    }
-    applied.push({ kind: 'strip-permissions-gate-channel-respond' })
-  }
-  if (hasLegacyModel) {
-    const ref = next.model as string
-    delete next.model
-    next.models = { default: ref }
-    applied.push({ kind: 'model-to-models', ref })
-  } else if (hasStaleModelAlongsideModels) {
-    // `models` wins (per the same precedence rule as dockerfile/gitignore), but
-    // the drop is still a tracked migration step so the disk rewrite gets a
-    // commit instead of silently dirtying the worktree. Without this, the
-    // file would be rewritten by persistMigratedConfig and no commit would
-    // fire (buildConfigMigrationCommitMessage returns null for empty applied
-    // lists), contradicting the invariant in persistMigratedConfig's comment.
-    const ref = typeof next.model === 'string' ? next.model : ''
-    delete next.model
-    applied.push({ kind: 'drop-stale-model', ref })
-  }
   if (hasSeededGithubEventAllowlist) {
     dropSeededGithubEventAllowlist(next)
     applied.push({ kind: 'drop-github-seeded-event-allowlist' })
@@ -937,12 +846,6 @@ function arraysEqual(a: readonly unknown[], b: readonly unknown[]): boolean {
   return true
 }
 
-// Builds a meaningful one-line git commit subject for a typeclaw.json
-// migration. Single-step migrations get a specific subject; multi-step ones
-// fall back to a stable summary subject with the count. The body (after the
-// blank line) enumerates each step so `git log -p typeclaw.json` is an
-// auditable trail of what legacy shapes the agent has graduated from.
-//
 // Returns null when no steps were applied — callers should not commit in
 // that case. Keeping the null branch here (vs an empty string) makes the
 // "nothing happened" case impossible to misuse at the call site.
@@ -950,42 +853,13 @@ export function buildConfigMigrationCommitMessage(applied: readonly MigrationSte
   const first = applied[0]
   if (first === undefined) return null
 
-  const subject =
-    applied.length === 1
-      ? `typeclaw.json: ${shortStepLabel(first)}`
-      : `typeclaw.json: migrate legacy shape (${applied.length} steps)`
-
+  const subject = `typeclaw.json: ${shortStepLabel(first)}`
   const bodyLines: string[] = applied.map((step) => `- ${describeStep(step)}`)
-
-  // Surface dropped rules in the commit body so a user inspecting `git log -p`
-  // sees exactly which legacy entries had to be hand-re-added (the lossy
-  // `channel:<id>` case). Without this, the silent-drop is invisible after
-  // the fact.
-  for (const step of applied) {
-    if (step.kind === 'channels-allow-to-roles-member-match' && step.dropped.length > 0) {
-      for (const warning of step.dropped) {
-        bodyLines.push(`  warning: ${warning}`)
-      }
-    }
-  }
-
   return `${subject}\n\n${bodyLines.join('\n')}\n`
 }
 
 function shortStepLabel(step: MigrationStep): string {
   switch (step.kind) {
-    case 'dockerfile-to-docker-file':
-      return 'lift dockerfile → docker.file'
-    case 'gitignore-to-git-ignore':
-      return 'lift gitignore → git.ignore'
-    case 'channels-allow-to-roles-member-match':
-      return 'lift channels.<adapter>.allow[] → roles.member.match[]'
-    case 'strip-permissions-gate-channel-respond':
-      return 'drop permissions.gateChannelRespond'
-    case 'model-to-models':
-      return 'lift model → models.default'
-    case 'drop-stale-model':
-      return 'drop stale legacy model alongside models'
     case 'drop-github-seeded-event-allowlist':
       return 'drop seeded channels.github.eventAllowlist'
   }
@@ -993,150 +867,9 @@ function shortStepLabel(step: MigrationStep): string {
 
 function describeStep(step: MigrationStep): string {
   switch (step.kind) {
-    case 'dockerfile-to-docker-file':
-      return 'lift top-level dockerfile into docker.file'
-    case 'gitignore-to-git-ignore':
-      return 'lift top-level gitignore into git.ignore'
-    case 'channels-allow-to-roles-member-match': {
-      if (step.rules.length === 0) {
-        return 'strip channels.<adapter>.allow[] (no translatable rules)'
-      }
-      return `lift channels.<adapter>.allow[] → roles.member.match[]: ${step.rules.join(', ')}`
-    }
-    case 'strip-permissions-gate-channel-respond':
-      return 'drop permissions.gateChannelRespond (removed key)'
-    case 'model-to-models':
-      return `lift top-level model into models.default: ${step.ref}`
-    case 'drop-stale-model':
-      return step.ref !== ''
-        ? `drop stale top-level model (${step.ref}) — models block takes precedence`
-        : 'drop stale top-level model — models block takes precedence'
     case 'drop-github-seeded-event-allowlist':
       return 'drop seeded channels.github.eventAllowlist so it re-tracks the shipped default'
   }
-}
-
-// Channels.<adapter>.allow[] → roles.member.match[] migration.
-//
-// Phase 3 removes the per-adapter allow-list and unifies wake-up gating
-// through `roles.member.match[]` + the `channel.respond` permission. This
-// helper translates legacy `allow` entries into canonical match-rule DSL
-// strings and appends them (deduplicated, preserving declaration order)
-// to `roles.member.match[]`. The `allow` field is then stripped from each
-// adapter block; the block survives — only the field is gone.
-//
-// `channel:<id>` rules cannot round-trip (the DSL forbids
-// wildcard-workspace + specific-chat) and are dropped with a warning. All
-// other shapes translate losslessly per the table in match-rule.ts.
-type ChannelsAllowMigration = {
-  found: boolean
-  rules: string[]
-  warnings: string[]
-}
-
-function collectChannelsAllowMigration(obj: Record<string, unknown>): ChannelsAllowMigration {
-  const out: ChannelsAllowMigration = { found: false, rules: [], warnings: [] }
-  const channels = obj.channels
-  if (!isPlainObject(channels)) return out
-  for (const [adapter, value] of Object.entries(channels)) {
-    if (!isPlainObject(value)) continue
-    if (!('allow' in value)) continue
-    out.found = true
-    const allow = value.allow
-    if (!Array.isArray(allow)) continue
-    for (const entry of allow) {
-      if (typeof entry !== 'string') continue
-      const translated = translateLegacyAllowRule(entry)
-      if (translated.kind === 'rule') {
-        out.rules.push(translated.value)
-      } else {
-        out.warnings.push(`channels.${adapter}.allow[]: dropped '${entry}' (${translated.reason})`)
-      }
-    }
-  }
-  return out
-}
-
-function applyChannelsAllowMigration(next: Record<string, unknown>, migration: ChannelsAllowMigration): void {
-  const channels = next.channels
-  if (isPlainObject(channels)) {
-    const updated: Record<string, unknown> = {}
-    for (const [adapter, value] of Object.entries(channels)) {
-      if (isPlainObject(value) && 'allow' in value) {
-        const { allow: _allow, ...rest } = value
-        updated[adapter] = rest
-      } else {
-        updated[adapter] = value
-      }
-    }
-    next.channels = updated
-  }
-
-  if (migration.rules.length === 0) {
-    for (const warning of migration.warnings) {
-      console.warn(`[config] ${warning}`)
-    }
-    return
-  }
-
-  const roles = isPlainObject(next.roles) ? { ...next.roles } : {}
-  const member = isPlainObject(roles.member) ? { ...roles.member } : {}
-  const existingMatch = Array.isArray(member.match)
-    ? (member.match as unknown[]).filter((m) => typeof m === 'string')
-    : []
-  const seen = new Set<string>(existingMatch as string[])
-  const merged = [...(existingMatch as string[])]
-  for (const rule of migration.rules) {
-    if (!seen.has(rule)) {
-      seen.add(rule)
-      merged.push(rule)
-    }
-  }
-  member.match = merged
-  roles.member = member
-  next.roles = roles
-
-  console.warn(`[config] migrated channels.<adapter>.allow[] -> roles.member.match[]: ${migration.rules.join(', ')}`)
-  for (const warning of migration.warnings) {
-    console.warn(`[config] ${warning}`)
-  }
-}
-
-type TranslatedRule = { kind: 'rule'; value: string } | { kind: 'drop'; reason: string }
-
-function translateLegacyAllowRule(rule: string): TranslatedRule {
-  // Already canonical / cross-platform.
-  if (rule === '*') return { kind: 'rule', value: '*' }
-  if (rule.startsWith('kakao:')) return { kind: 'rule', value: rule }
-
-  // Discord: guild → discord, dm → discord:dm.
-  if (rule === 'guild:*') return { kind: 'rule', value: 'discord:*' }
-  if (rule.startsWith('guild:')) return { kind: 'rule', value: `discord:${rule.slice('guild:'.length)}` }
-  if (rule === 'dm:*') return { kind: 'rule', value: 'discord:dm/*' }
-  if (rule.startsWith('dm:')) return { kind: 'rule', value: `discord:dm/${rule.slice('dm:'.length)}` }
-
-  // Slack: team → slack, im → slack:dm.
-  if (rule === 'team:*') return { kind: 'rule', value: 'slack:*' }
-  if (rule.startsWith('team:')) return { kind: 'rule', value: `slack:${rule.slice('team:'.length)}` }
-  if (rule === 'im:*') return { kind: 'rule', value: 'slack:dm/*' }
-  if (rule.startsWith('im:')) return { kind: 'rule', value: `slack:dm/${rule.slice('im:'.length)}` }
-
-  // Telegram: tg → telegram.
-  if (rule === 'tg:*') return { kind: 'rule', value: 'telegram:*' }
-  if (rule.startsWith('tg:')) return { kind: 'rule', value: `telegram:${rule.slice('tg:'.length)}` }
-
-  // `channel:<id>` had no workspace; canonical DSL rejects wildcard
-  // workspace + specific chat. Drop with a warning so the operator knows
-  // to re-add the rule explicitly with a workspace coordinate.
-  if (rule.startsWith('channel:')) {
-    return {
-      kind: 'drop',
-      reason:
-        'channel:<id> rules require an explicit workspace under the new DSL; re-add as discord:<guild>/<id> or slack:<team>/<id>',
-    }
-  }
-
-  return { kind: 'drop', reason: `unrecognized legacy allow shape '${rule}'` }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1156,18 +889,16 @@ function persistMigratedConfig(cwd: string, json: unknown, applied: readonly Mig
   }
 
   // Pair the disk rewrite with a git commit so the agent folder is never
-  // silently dirty after a legacy-shape migration. typeclaw.json is in
-  // git's "tracked" category (unlike Dockerfile, which is regenerated on
-  // every start and intentionally gitignored), so an uncommitted rewrite
-  // gets mixed into unrelated commits the moment any other tool touches
-  // the repo. commitSystemFileSync no-ops on non-git folders, missing
-  // Bun, and clean files, so canonical-shape reads pay zero cost.
+  // silently dirty after a migration. typeclaw.json is in git's "tracked"
+  // category (unlike Dockerfile, which is regenerated on every start and
+  // intentionally gitignored), so an uncommitted rewrite gets mixed into
+  // unrelated commits the moment any other tool touches the repo.
+  // commitSystemFileSync no-ops on non-git folders, missing Bun, and clean
+  // files, so canonical-shape reads pay zero cost.
   //
   // Called from every entry point that reads typeclaw.json (host CLI,
   // hostd daemon, container runtime) so the commit follows the rewrite
-  // wherever it happens — not only from `typeclaw start`. The earlier
-  // design that committed only in start() missed the long-running hostd
-  // daemon, doctor, tui, reload, and compose paths.
+  // wherever it happens — not only from `typeclaw start`.
   const message = buildConfigMigrationCommitMessage(applied)
   if (message !== null) {
     commitSystemFileSync(cwd, CONFIG_FILE, message)

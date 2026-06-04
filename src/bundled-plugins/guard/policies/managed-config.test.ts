@@ -212,7 +212,7 @@ describe('managedConfig guard — cron.json', () => {
     expect(result?.reason).toContain('duplicate job id')
   })
 
-  test('rejects a write missing scheduledByRole (legacy shape, runtime would auto-migrate + commit)', async () => {
+  test('rejects a write missing scheduledByRole', async () => {
     const agentDir = await makeAgentDir()
     const content = JSON.stringify({
       jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],

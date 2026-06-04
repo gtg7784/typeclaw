@@ -38,8 +38,7 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 #
 # auth.json is the pre-rename name for secrets.json; kept here permanently
 # as a safety net so an agent folder cloned from a pre-rename machine never
-# stages credentials by accident, even if its agent boot hasn't yet run the
-# auth.json -> secrets.json migration.
+# stages credentials by accident.
 #
 # .typeclaw/home/ is the persistent-$HOME overlay populated by the
 # entrypoint shim's \`link_persistent_home_files\` (see

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
@@ -59,11 +60,6 @@ type GitignoreBlock = { append?: string[] }
 
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
-  // Legacy shape: tests written before the docker/git namespace migration still
-  // pass `dockerfile`/`gitignore` at the top level. The helper accepts both and
-  // exercises the on-disk migration path implicitly when callers pass legacy.
-  dockerfile?: DockerfileBlock
-  gitignore?: GitignoreBlock
   docker?: { file?: DockerfileBlock }
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
@@ -74,8 +70,6 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
     mounts: overrides.mounts ?? [],
-    ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
-    ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
     ...(overrides.docker ? { docker: overrides.docker } : {}),
     ...(overrides.git ? { git: overrides.git } : {}),
     ...(overrides.network ? { network: overrides.network } : {}),
@@ -630,7 +624,7 @@ describe('refreshDockerfile', () => {
   test('writes custom append lines from typeclaw.json before the entrypoint', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-'))
     try {
-      await writeTypeclawConfig(dir, { dockerfile: { append: ['RUN echo custom', 'ENV CUSTOM_FLAG=1'] } })
+      await writeTypeclawConfig(dir, { docker: { file: { append: ['RUN echo custom', 'ENV CUSTOM_FLAG=1'] } } })
 
       await refreshDockerfile(dir)
 
@@ -649,7 +643,7 @@ describe('refreshDockerfile', () => {
   test('writes ffmpeg from typeclaw.json into the apt package list', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-'))
     try {
-      await writeTypeclawConfig(dir, { dockerfile: { ffmpeg: true } })
+      await writeTypeclawConfig(dir, { docker: { file: { ffmpeg: true } } })
 
       await refreshDockerfile(dir)
 
@@ -818,7 +812,7 @@ describe('refreshGitignore', () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
     try {
       await gitInit(dir)
-      await writeTypeclawConfig(dir, { gitignore: { append: ['!sessions/', '!sessions/**', 'scratch/'] } })
+      await writeTypeclawConfig(dir, { git: { ignore: { append: ['!sessions/', '!sessions/**', 'scratch/'] } } })
 
       await refreshGitignore(dir)
 
@@ -835,14 +829,19 @@ describe('refreshGitignore', () => {
 })
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn({ cmd: ['/usr/bin/git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
   const out = await new Response(proc.stdout).text()
   await proc.exited
   return out.trim()
 }
 
 async function isGitIgnored(cwd: string, path: string): Promise<boolean> {
-  const proc = Bun.spawn({ cmd: ['git', 'check-ignore', '--quiet', path], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn({
+    cmd: ['/usr/bin/git', 'check-ignore', '--quiet', path],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   return (await proc.exited) === 0
 }
 
@@ -855,7 +854,7 @@ async function gitInit(cwd: string): Promise<void> {
     ['config', 'user.name', 'Test User'],
     ['config', 'user.email', 'test@example.com'],
   ]) {
-    const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = Bun.spawn({ cmd: ['/usr/bin/git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
     await proc.exited
   }
 }
@@ -1113,80 +1112,6 @@ describe('start (composition)', () => {
     expect(onDisk).not.toContain('FROM stale')
   })
 
-  test('promotes legacy KakaoTalk credential files into secrets.json before container start', async () => {
-    await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await mkdir(join(root, 'workspace', '.agent-messenger'), { recursive: true })
-    const legacyDir = join(root, 'workspace', '.agent-messenger')
-    await writeFile(
-      join(legacyDir, 'kakaotalk-credentials.json'),
-      JSON.stringify({
-        current_account: 'user-1',
-        accounts: {
-          'user-1': {
-            account_id: 'user-1',
-            oauth_token: 'oauth-user-1',
-            user_id: 'user-1',
-            refresh_token: 'refresh-user-1',
-            device_uuid: 'device-user-1',
-            device_type: 'tablet',
-            auth_method: 'login',
-            created_at: '2026-01-01T00:00:00.000Z',
-            updated_at: '2026-01-01T00:00:00.000Z',
-          },
-        },
-      }),
-    )
-    await writeFile(
-      join(legacyDir, 'kakaotalk-pending-login.json'),
-      JSON.stringify({
-        device_uuid: 'pending-device',
-        device_type: 'tablet',
-        email: 'user@example.com',
-        created_at: '2026-01-01T00:00:00.000Z',
-      }),
-    )
-    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
-
-    const result = await start({
-      cwd: root,
-      preferredHostPort: 8973,
-      exec,
-      allocatePort: deterministicAllocator,
-      ensureDeps: noEnsureDeps,
-      ...bypassVerify,
-    })
-
-    expect(result.ok).toBe(true)
-    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
-      channels: {
-        kakaotalk?: { currentAccount: string | null; accounts: Record<string, unknown>; pendingLogin?: unknown }
-      }
-    }
-    expect(secrets.channels.kakaotalk?.currentAccount).toBe('user-1')
-    expect(secrets.channels.kakaotalk?.accounts['user-1']).toBeDefined()
-    expect(secrets.channels.kakaotalk?.pendingLogin).toEqual({
-      device_uuid: 'pending-device',
-      device_type: 'tablet',
-      email: 'user@example.com',
-      created_at: '2026-01-01T00:00:00.000Z',
-    })
-    expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json'))).toBe(false)
-    expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json.migrated'))).toBe(true)
-    expect(existsSync(join(legacyDir, 'kakaotalk-pending-login.json.migrated'))).toBe(true)
-
-    const second = await start({
-      cwd: root,
-      preferredHostPort: 8973,
-      exec,
-      allocatePort: deterministicAllocator,
-      ensureDeps: noEnsureDeps,
-      ...bypassVerify,
-    })
-    expect(second.ok).toBe(true)
-    expect(JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8'))).toEqual(secrets)
-  })
-
   test('refreshes .gitignore from the template on every start', async () => {
     // given: a stale .gitignore and an existing image
     await writeFile(join(root, '.gitignore'), '# stale\nold-entry\n')
@@ -1215,7 +1140,7 @@ describe('start (composition)', () => {
     await writeFile(join(root, '.gitignore'), '# stale\n')
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { gitignore: { append: ['scratch/', '*.local.log'] } })
+    await writeTypeclawConfig(root, { git: { ignore: { append: ['scratch/', '*.local.log'] } } })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const result = await start({
@@ -1259,7 +1184,7 @@ describe('start (composition)', () => {
   test('start refreshes Dockerfile with custom append lines from typeclaw.json', async () => {
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { dockerfile: { append: ['RUN echo from-config'] } })
+    await writeTypeclawConfig(root, { docker: { file: { append: ['RUN echo from-config'] } } })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const result = await start({
@@ -1284,7 +1209,7 @@ describe('start (composition)', () => {
   test('forceBuild=true rebuild sees Dockerfile with ffmpeg from typeclaw.json', async () => {
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { dockerfile: { ffmpeg: true } })
+    await writeTypeclawConfig(root, { docker: { file: { ffmpeg: true } } })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const result = await start({
@@ -1469,9 +1394,10 @@ describe('start (composition)', () => {
   // so a silent disk rewrite without a commit produces invisible drift the
   // moment any other tool touches the repo. The fix in this PR adds the
   // commit alongside the existing .gitignore / package.json commits.
-  test('start auto-commits the typeclaw.json legacy-shape migration (permission migration regression)', async () => {
-    // given: an agent folder with the legacy channels.<adapter>.allow shape
-    // (the permission migration the user flagged as missing) already committed
+  test('start auto-commits the typeclaw.json seeded GitHub event allowlist migration', async () => {
+    // given: an agent folder with the seeded channels.github.eventAllowlist
+    // already committed. Current config migration strips it so the channel
+    // re-tracks the shipped default.
     await gitInit(root)
     await writeFile(join(root, '.gitignore'), buildGitignore())
     await writeFile(join(root, 'Dockerfile'), buildDockerfile())
@@ -1481,7 +1407,7 @@ describe('start (composition)', () => {
       `${JSON.stringify(
         {
           models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
-          channels: { 'slack-bot': { allow: ['team:T0123'] } },
+          channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
         },
         null,
         2,
@@ -1492,7 +1418,7 @@ describe('start (composition)', () => {
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    // when: start runs against the legacy folder
+    // when: start runs against the migratable folder
     const result = await start({
       cwd: root,
       preferredHostPort: 8973,
@@ -1508,12 +1434,11 @@ describe('start (composition)', () => {
     // on-disk file, so the agent repo is not silently dirty.
     expect(result.ok).toBe(true)
     const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
-    expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+    expect(subjects).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).not.toBe(headBefore)
     const onDisk = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8'))
-    expect(onDisk.channels['slack-bot']).toEqual({})
-    expect(onDisk.roles.member.match).toEqual(['slack:T0123'])
+    expect(onDisk.channels.github).toEqual({ repos: ['acme/widgets'] })
     const tracked = JSON.parse(await runGit(root, ['show', 'HEAD:typeclaw.json']))
     expect(tracked).toEqual(onDisk)
   })
@@ -1554,42 +1479,6 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
-  })
-
-  test('start auto-commits the typeclaw.json model→models.default migration (multi-model regression)', async () => {
-    // given: an agent folder with the legacy top-level `model` key, already committed
-    await gitInit(root)
-    await writeFile(join(root, '.gitignore'), buildGitignore())
-    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeFile(
-      join(root, 'typeclaw.json'),
-      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }, null, 2)}\n`,
-    )
-    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'typeclaw.json'])
-    await runGit(root, ['commit', '-m', 'initial'])
-    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
-    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
-
-    const result = await start({
-      cwd: root,
-      preferredHostPort: 8973,
-      exec,
-      allocatePort: deterministicAllocator,
-      ensureDeps: noEnsureDeps,
-      ...bypassVerify,
-    })
-
-    expect(result.ok).toBe(true)
-    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
-    expect(subjects).toContain('typeclaw.json: lift model → models.default')
-    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
-    expect(headAfter).not.toBe(headBefore)
-    const onDisk = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8'))
-    expect(onDisk).not.toHaveProperty('model')
-    expect(onDisk.models).toEqual({ default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
-    const tracked = JSON.parse(await runGit(root, ['show', 'HEAD:typeclaw.json']))
-    expect(tracked).toEqual(onDisk)
   })
 
   test('auto-commits bun.lock drift on start (e.g. after a typeclaw CLI upgrade rewrote it)', async () => {

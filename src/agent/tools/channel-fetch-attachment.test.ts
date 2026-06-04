@@ -162,20 +162,4 @@ describe('channel_fetch_attachment', () => {
 
     expect(result.details).toEqual({ ok: false, error: 'invalid Slack file id: F-bogus' })
   })
-
-  test('strips the legacy `id=` prefix from looked-up refs before passing them downstream', async () => {
-    const calls: FetchAttachmentArgs[] = []
-    const router = makeRouter({
-      attachments: [{ id: 1, kind: 'file', ref: 'id=FABC123', filename: 'legacy.txt' }],
-      fetch: async (_adapter, args) => {
-        calls.push(args)
-        return { ok: true, buffer: Buffer.from('x'), filename: 'legacy.txt', size: 1 }
-      },
-    })
-
-    const tool = createChannelFetchAttachmentTool({ router, origin, inboxDir })
-    await runTool(tool, { attachment_id: 1 })
-
-    expect(calls).toEqual([{ ref: 'FABC123', filename: 'legacy.txt' }])
-  })
 })

@@ -9,7 +9,6 @@ import {
 import lockfile from 'proper-lockfile'
 
 import { providerKeyDefaultEnv } from './defaults'
-import { migrateLegacyAuthJson } from './migrate'
 import { resolveSecret, type Secret } from './resolve'
 import {
   type Channels,
@@ -375,7 +374,6 @@ export class SecretsBackend implements AuthStorageBackend {
 }
 
 export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
-  migrateLegacyAuthJson(dirname(secretsPath))
   return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
 }
 

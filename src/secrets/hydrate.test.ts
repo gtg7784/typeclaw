@@ -109,22 +109,6 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(result.applied).toEqual([])
   })
 
-  test('legacy v1 envelope with env-keyed channels still hydrates correctly', () => {
-    writeFileSync(
-      join(root, 'secrets.json'),
-      JSON.stringify({
-        version: 1,
-        llm: {},
-        channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-legacy' } },
-      }),
-    )
-    const env: NodeJS.ProcessEnv = {}
-
-    hydrateChannelEnvFromSecrets({ agentDir: root, env })
-
-    expect(env['DISCORD_BOT_TOKEN']).toBe('d-legacy')
-  })
-
   test('ignores malformed secrets.json rather than throwing', () => {
     writeFileSync(join(root, 'secrets.json'), '{ not json')
     const env: NodeJS.ProcessEnv = {}

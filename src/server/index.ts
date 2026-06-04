@@ -1181,10 +1181,6 @@ async function handleCronList(
     // jobs from a newer registry.
     const snapshot = pluginRuntime?.get()
     const loadResult = await loadCron(agentDir, {
-      // Read-only path: do not rewrite cron.json or commit the
-      // migration just because the user (or the agent) asked to see
-      // the schedule. Boot/reload still own the persistent migration.
-      persistMigrations: false,
       ...(snapshot !== undefined ? { subagents: snapshot.subagents } : {}),
     })
     if (!loadResult.ok) {
