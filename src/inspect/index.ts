@@ -16,8 +16,24 @@ export { replayJsonl } from './replay'
 export { streamLive } from './live'
 export { parseDuration, parseFilter } from './types'
 export type { InspectCategory, InspectEvent, InspectFilter } from './types'
-export { runInspectLoop } from './loop'
-export type { RunInspectLoopOptions } from './loop'
+export { runInspectLoop, runViewerLoop } from './loop'
+export type {
+  OpenItem,
+  OpenItemContext,
+  RunInspectLoopOptions,
+  RunViewerLoopOptions,
+  SelectItem,
+  TailController,
+} from './loop'
+export type { ViewerItem } from './item'
+export { isWritable, itemKey } from './item'
+export { listViewerItems } from './item-list'
+export type { ListViewerItemsOptions, ViewerList } from './item-list'
+export { openViewerItem } from './open-item'
+export type { OpenViewerDeps } from './open-item'
+export { runTuiViewer } from './tui-item'
+export type { RunTuiViewerOptions } from './tui-item'
+export { streamLogs } from './logs-item'
 
 export type RunInspectOptions = {
   agentDir: string
@@ -51,7 +67,7 @@ export type LiveSourceFactory = (opts: {
 }) => AsyncIterable<InspectEvent>
 
 export type RunInspectResult =
-  | { ok: true; exitCode: 0; escToPicker?: boolean }
+  | { ok: true; exitCode: number; escToPicker?: boolean }
   | { ok: false; exitCode: number; reason: string }
 
 export type InspectTarget = {

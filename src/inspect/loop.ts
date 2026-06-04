@@ -6,6 +6,56 @@ export type TailController = {
   dispose: () => void
 }
 
+export type OpenItemContext = {
+  createTailScope: () => TailController
+}
+
+export type SelectItem<TItem> = (items: TItem[], opts: { initialKey?: string }) => Promise<TItem | null>
+
+export type OpenItem<TItem> = (item: TItem, ctx: OpenItemContext) => Promise<RunInspectResult>
+
+export type RunViewerLoopOptions<TItem> = {
+  listItems: () => Promise<TItem[]>
+  keyOf: (item: TItem) => string
+  preselectKey?: string
+  selectItem: SelectItem<TItem>
+  openItem: OpenItem<TItem>
+  createTailScope: () => TailController
+  onEmpty: () => RunInspectResult
+}
+
+// The session-viewer state machine: pick an item → open it → on back, re-open
+// the picker; on exit, return. `openItem` owns the per-branch lifecycle and
+// decides whether to request a tail scope (session/logs do; tui does not, since
+// it owns its own raw-mode terminal). When used, the tail scope is created
+// inside `openItem` AFTER the picker resolves and disposed before the picker
+// re-opens, so clack always owns a clean cooked-mode stdin.
+export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): Promise<RunInspectResult> {
+  let preselectKey = opts.preselectKey
+  let lastPickedKey: string | undefined
+
+  while (true) {
+    const items = await opts.listItems()
+    if (items.length === 0) return opts.onEmpty()
+
+    let chosen: TItem | null
+    if (preselectKey !== undefined) {
+      chosen = items.find((i) => opts.keyOf(i) === preselectKey) ?? null
+      preselectKey = undefined
+      if (chosen === null) return opts.onEmpty()
+    } else {
+      const hint = lastPickedKey
+      chosen = await opts.selectItem(items, hint !== undefined ? { initialKey: hint } : {})
+      if (chosen === null) return { ok: false, exitCode: 130, reason: 'cancelled' }
+      lastPickedKey = opts.keyOf(chosen)
+    }
+
+    const result = await opts.openItem(chosen, { createTailScope: opts.createTailScope })
+    if (!result.ok) return result
+    if (result.escToPicker !== true) return result
+  }
+}
+
 export type RunInspectLoopOptions = Omit<RunInspectOptions, 'signal'> & {
   // Builds a fresh interaction scope for ONE live-tail attempt: a new
   // AbortController plus a temporary raw-mode listener. The loop creates it
@@ -30,12 +80,9 @@ export async function runInspectLoop(opts: RunInspectLoopOptions): Promise<RunIn
     if (sessionArg !== undefined) resolveOpts.sessionIdOrPrefix = sessionArg
     else delete (resolveOpts as { sessionIdOrPrefix?: string }).sessionIdOrPrefix
 
-    // Picker phase: cooked-mode stdin, no tail scope alive.
     const resolved = await resolveInspectTarget(resolveOpts)
     if (!resolved.ok) return resolved
 
-    // Streaming phase: scope owns raw-mode stdin start-to-dispose, never
-    // spanning the picker above or the next iteration's picker below.
     const scope = opts.createTailScope()
     let result: RunInspectResult
     try {
