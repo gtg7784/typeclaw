@@ -118,6 +118,76 @@ describe('classifyGithubInbound', () => {
     })
   })
 
+  // Regression: under GitHub App auth selfLogin is the actor login `slug[bot]`,
+  // but a human mentions the App by its bare slug `@slug` (the decoy account).
+  // The classifier must recognize the bare-slug mention or a direct
+  // "@typeey review again" lands with isBotMention=false and the engagement
+  // mention gate never fires (the comment is silently observed/dropped).
+  describe('isBotMention decoy-aware detection (App auth)', () => {
+    it('recognizes a bare-slug @mention of an App bot whose actor login is slug[bot]', () => {
+      const msg = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@typeclaw review again' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.isBotMention).toBe(true)
+    })
+
+    it('still recognizes the full slug[bot] @mention under App auth', () => {
+      const msg = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@typeclaw[bot] review again' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.isBotMention).toBe(true)
+    })
+
+    it('does not flag an unrelated @mention as a self-mention under App auth', () => {
+      const msg = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@someone-else take a look' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.isBotMention).toBe(false)
+    })
+
+    it('does not treat a longer login sharing the decoy-slug prefix as a self-mention', () => {
+      // The decoy slug for `typeclaw[bot]` is `typeclaw`; `@typeclaw-bot` is a
+      // DIFFERENT GitHub user. A substring check would false-positive here, so
+      // the matcher must respect GitHub-login boundaries (- is a login char).
+      const msg = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@typeclaw-bot can you review?' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.isBotMention).toBe(false)
+    })
+
+    it('does not derive a decoy slug under PAT auth (only the real login mentions)', () => {
+      // PAT bots are real users requested by their actual login; there is no
+      // decoy slug, so a bare-prefix collision must not register as a mention.
+      const hit = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@typeclaw review again' }),
+        'typeclaw-bot',
+        { authType: 'pat' },
+      )
+      expect(hit?.isBotMention).toBe(false)
+
+      const realMention = classifyGithubInbound(
+        'issue_comment',
+        issueCommentPayload({ pullRequest: true, body: '@typeclaw-bot review again' }),
+        'typeclaw-bot',
+        { authType: 'pat' },
+      )
+      expect(realMention?.isBotMention).toBe(true)
+    })
+  })
+
   describe('pull_request.review_requested', () => {
     it('wakes the bot when it is the requested reviewer', () => {
       const msg = classifyGithubInbound(
@@ -1317,12 +1387,17 @@ function user(): Record<string, unknown> {
   return { login: 'alice', id: 10, type: 'User' }
 }
 
-function issueCommentPayload(options: { pullRequest: boolean }): Record<string, unknown> {
+function issueCommentPayload(options: { pullRequest: boolean; body?: string }): Record<string, unknown> {
   return {
     action: 'created',
     repository: repo(),
     issue: { number: 7, ...(options.pullRequest ? { pull_request: {} } : {}) },
-    comment: { id: 99, body: '@typeclaw-bot hello', created_at: '2026-01-01T00:00:00Z', user: user() },
+    comment: {
+      id: 99,
+      body: options.body ?? '@typeclaw-bot hello',
+      created_at: '2026-01-01T00:00:00Z',
+      user: user(),
+    },
   }
 }
 
