@@ -113,6 +113,68 @@ describe('renderSubagentCompletionReminder', () => {
     })
     expect(explicitFalse).not.toContain('channel_reply')
   })
+
+  test('channel=true + adapter=github appends the formal-review carve-out so a finished reviewer is posted via gh api, not a channel_reply', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'reviewer',
+      taskId: 'bg_rev',
+      ok: true,
+      durationMs: 73_000,
+      channel: true,
+      adapter: 'github',
+    })
+    expect(text).toContain('channel_reply')
+    // Conditional phrasing ("if this was a PR review") is load-bearing: this
+    // reminder fires on EVERY subagent completion in a github session, not
+    // just review turns, so an imperative carve-out would misdirect a
+    // non-review completion into the review API.
+    expect(text).toMatch(/if this was a pr review/i)
+    expect(text).toContain('/reviews')
+    expect(text).toMatch(/formal review/i)
+    expect(text).toMatch(/not a (plain )?`?channel_reply`?/i)
+  })
+
+  test('adapter=github WITHOUT channel=true does not add the github carve-out (TUI github sessions are not a thing, but guard against accidental injection)', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'reviewer',
+      taskId: 'bg_rev',
+      ok: true,
+      durationMs: 1_000,
+      adapter: 'github',
+    })
+    expect(text).not.toContain('/reviews')
+    expect(text).not.toContain('channel_reply')
+  })
+
+  test('channel=true + non-github adapter keeps only the base nudge (no gh api leakage into slack/discord/telegram/kakaotalk)', () => {
+    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk']) {
+      const text = renderSubagentCompletionReminder({
+        subagent: 'reviewer',
+        taskId: 'bg_rev',
+        ok: true,
+        durationMs: 1_000,
+        channel: true,
+        adapter,
+      })
+      expect(text).toContain('channel_reply')
+      expect(text).not.toContain('/reviews')
+      expect(text).not.toContain('gh api')
+    }
+  })
+
+  test('channel=true + adapter=github on a FAILED reminder still appends the carve-out', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'reviewer',
+      taskId: 'bg_rev',
+      ok: false,
+      durationMs: 1_000,
+      error: 'reviewer crashed',
+      channel: true,
+      adapter: 'github',
+    })
+    expect(text).toContain('FAILED')
+    expect(text).toContain('/reviews')
+  })
 })
 
 describe('formatReminderDuration', () => {

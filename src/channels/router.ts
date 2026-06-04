@@ -3233,6 +3233,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       error?: string
     },
   ): { kind: 'delivered'; keyId: string } => {
+    const adapter = live.keyId.split(':', 1)[0] ?? ''
     const text = renderSubagentCompletionReminder({
       subagent: args.subagent,
       taskId: args.taskId,
@@ -3240,6 +3241,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       durationMs: args.durationMs,
       ...(args.error !== undefined ? { error: args.error } : {}),
       channel: true,
+      adapter,
     })
     live.pendingSystemReminders.push(text)
     // The reminder tells the agent to fetch this result now; clear the
