@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -30,6 +30,60 @@ describe('non-workspace-write guard policy', () => {
     })
 
     expect(result).toBeUndefined()
+  })
+
+  test('allows unacknowledged writes under /tmp (virtual per-session scratch)', async () => {
+    const agentDir = await makeAgentDir()
+
+    const result = await checkNonWorkspaceWriteGuard({
+      tool: 'write',
+      args: { path: '/tmp/review.json', content: '{}' },
+      agentDir,
+      origin: { kind: 'tui', sessionId: 's1' },
+    })
+
+    expect(result).toBeUndefined()
+  })
+
+  test('does not treat a relative workspace path that symlink-escapes into /tmp as scratch', async () => {
+    // The escape target sits under /tmp (a sibling of the tmpdir agent dir), but
+    // the model's RAW path is `workspace/...` — lexical intent is a workspace
+    // write, not /tmp scratch, so the escape rule must win and block it.
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-tmp-escape-'))
+    const agentDir = path.join(root, 'agent')
+    const workspaceDir = path.join(agentDir, 'workspace')
+    const outsideDir = path.join(root, 'outside')
+    await mkdir(workspaceDir, { recursive: true })
+    await mkdir(outsideDir)
+    await symlink(outsideDir, path.join(workspaceDir, 'escape'))
+
+    const result = await checkNonWorkspaceWriteGuard({
+      tool: 'write',
+      args: { path: 'workspace/escape/file.txt', content: 'x' },
+      agentDir,
+      origin: { kind: 'tui', sessionId: 's1' },
+    })
+
+    expect(result?.block).toBe(true)
+  })
+
+  test('still blocks a /tmp-rooted agent dir from writing its own memory/ via the /tmp allowance', async () => {
+    // makeAgentDir lives under the OS tmpdir, which is /tmp on Linux — so its
+    // own memory/ path resolves under /tmp. The /tmp scratch allowance must not
+    // wave that through; it is the agent surface, governed by the normal rules.
+    const agentDir = await makeAgentDir()
+
+    const result = await checkNonWorkspaceWriteGuard({
+      tool: 'write',
+      args: { path: 'memory/.retrieval-cache/s1.md', content: 'x' },
+      agentDir,
+      origin: { kind: 'tui', sessionId: 's1' },
+    })
+
+    expect(result).toEqual({
+      block: true,
+      reason: expect.stringContaining('nonWorkspaceWrite'),
+    })
   })
 
   test('blocks main-agent writes to the retrieval cache file', async () => {
