@@ -32,7 +32,7 @@ A todo list is not keyed on `sessionId`. SessionIds churn — every TUI reconnec
 | `subagent` | `null`                                          | Subagents do not own continuation — their parent does.                                                   |
 | `system`   | `null`                                          | Runtime infrastructure (memory/backup) is not user-delegated work and must never auto-continue.          |
 
-The `key` is a single filesystem-safe path segment. `encodeComponent` emits a discriminant prefix (`n` for null, `s<encodeURIComponent(value)>` for strings) so the cases lossy schemes confused stay pairwise distinguishable: a null thread vs a literal `"n"`, an empty string vs `"_empty"`, and any two values whose unsafe chars would otherwise collide. `encodeURIComponent` never emits `/` or `:`, so the joined key is both a valid path segment and a collision-free conversation identity.
+`scope.key` is a **traversal-safe relative key**, not a single path segment: the `channel/...` and `cron/...` keys deliberately contain `/` and are stored as nested paths under `todo/`. What is single-segment-safe is each encoded **component** within a key. `encodeComponent` emits a discriminant prefix (`n` for null, `s<encodeURIComponent(value)>` for strings) so the cases lossy schemes confused stay pairwise distinguishable: a null thread vs a literal `"n"`, an empty string vs `"_empty"`, and any two values whose unsafe chars would otherwise collide. `encodeURIComponent` never emits `/` or `:`, so each component is a clean path-segment and the joined key is a collision-free conversation identity whose only `/` separators are the ones the scheme intends.
 
 ### Storage
 
@@ -57,9 +57,11 @@ A continuation **episode** is the unit a budget applies to. It opens when the fi
 
 The just-completed turn's token spend (`lastTurnOutcome.tokens`, from the assistant message's `usage.totalTokens`) is folded into `cumulativeTokens` **before** the ceiling check, so the budget reflects real spend; missing usage counts as 0.
 
-### Stagnation: "the hash changed" is not "progress"
+### Stagnation: hash-equality, not real progress
 
-`hashIncomplete` canonicalizes the incomplete set (sort by id-or-text, collapse whitespace, include status) into a stable SHA-256. It is a stagnation _heuristic_ only — deliberately **not** proof of progress. `hasRealProgress` is the stricter test: the incomplete set must **shrink**. Reword / reorder / split churn changes the hash but does not count as progress, which closes the fake-progress loophole — only a drop in the number of incomplete items resets the stagnation counter. Two consecutive stagnant turns (`stagnationLimit`) end the episode.
+`hashIncomplete` canonicalizes the incomplete set (sort by id-or-text, collapse whitespace, include status) into a stable SHA-256. The live gate in `decideContinuation` is hash equality: when `episode.lastIncompleteHash === hash` the turn is **stagnant** and `stagnationCount` increments; two consecutive stagnant turns (`stagnationLimit`) end the episode. Because the hash normalizes order and whitespace, a pure reorder or whitespace-only edit reads as stagnant — but a genuine **reword or split changes the hash and so resets the counter**, even though no item was completed. The hash is a _heuristic_, not proof of progress.
+
+`hasRealProgress` (incomplete set must **shrink**) is the stricter shrink-only test the file documents as the "fake-progress" closer, but it is **not wired into `decideContinuation`** today — it exists with unit coverage and is unused by the runtime decision. Treat the hash-equality gate as the real behavior; `hasRealProgress` is a latent helper, not the enforced invariant.
 
 ### The skip ladder
 
@@ -100,7 +102,7 @@ The episode mutation is persisted **before** delivery, so a crash between persis
 
 - **`decideContinuation` is pure and fails closed.** Every ambiguous input yields `skip`. If you add a budget or a suppressor, add it to the skip ladder _and_ to `parseContinuationState`, or a malformed state file will bypass it.
 - **Only a real user turn resets the episode.** The runtime's own injected prompts pass `isRealUserTurn=false`. Reset on an injected turn and the budget never counts down — the crash-loop ceiling is gone.
-- **Progress means the incomplete set shrinks.** Rewording or reordering todos is not progress. Don't weaken `hasRealProgress` back to "the hash changed."
+- **Stagnation is hash-equality, not shrink.** The live gate is `lastIncompleteHash === hash`; a reword or split resets it even with no item completed. `hasRealProgress` (shrink-only) is a stricter helper that exists but is **not** wired into the decision — don't describe it as the enforced behavior, and if you wire it in, update this page.
 - **No-scope is a no-op, not a default.** Subagent / system / undefined origins own no list. Never default an unknown origin into the `tui` scope.
 - **Persist before deliver.** The under-count failure mode (one wasted slot) is the safe one. Never reorder to deliver-then-persist, which can double-inject after a crash.
 - **TUI is a documented singleton.** Concurrent TUI attaches share one `tui` scope; last-writer-wins on the atomic rename is accepted (no lock for a todo list).
