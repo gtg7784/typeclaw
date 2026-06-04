@@ -262,6 +262,17 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('(\ngh pr view -R acme/widgets\n)').kind).not.toBe('inject')
   })
 
+  // Intentional, documented false positive: tokenize() has no heredoc model, so
+  // a `gh ...` line INSIDE a heredoc body is read as a real invocation. This is
+  // safe by design — recognition may be conservative, injection must be strict:
+  // the worst outcome is a `block` (the command is never single-bare-`gh`, and
+  // a repo-less `gh` under multi-owner App auth has no single token), never a
+  // wrong token mint. We assert `block`, not `inject`, to pin that intent.
+  it('blocks (never injects) gh text inside a heredoc body — intentional false positive', () => {
+    expect(analyzeGhCommand("cat <<'X'\ngh secret list\nX").kind).toBe('block')
+    expect(analyzeGhCommand("cat <<'X'\ngh pr view -R acme/widgets\nX").kind).toBe('block')
+  })
+
   it('allows jq pipes and JSON braces inside single quotes (single bare gh)', () => {
     expect(analyzeGhCommand("gh api /repos/acme/widgets/pulls --jq '.[] | {id, state}'")).toEqual({
       kind: 'inject',
