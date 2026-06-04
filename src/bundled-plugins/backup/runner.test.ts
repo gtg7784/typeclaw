@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { type BackupRunnerDeps, type GitSpawn, type GitSpawnResult, parsePorcelain, runBackup } from './runner'
+import {
+  type BackupRunnerDeps,
+  type GitSpawn,
+  type GitSpawnResult,
+  parsePorcelain,
+  runBackup,
+  withIndexLockRetry,
+} from './runner'
 
 const okResult = (stdout = ''): GitSpawnResult => ({ exitCode: 0, stdout, stderr: '', timedOut: false })
 const failResult = (stderr = 'boom', exit = 1): GitSpawnResult => ({
@@ -361,5 +368,21 @@ describe('parsePorcelain', () => {
 
   test('skips empty and short lines', () => {
     expect(parsePorcelain('\n  \nXY\n')).toEqual([])
+  })
+})
+
+describe('withIndexLockRetry', () => {
+  test('retries index.lock failures and returns the successful result', async () => {
+    const calls: Array<readonly string[]> = []
+    const spawn: GitSpawn = async (args) => {
+      calls.push(args)
+      if (calls.length <= 2) return failResult("fatal: Unable to create '.git/index.lock': File exists")
+      return okResult('done')
+    }
+
+    const result = await withIndexLockRetry(spawn)(['add', '--', 'foo'], { cwd: '/repo', timeoutMs: 1 })
+
+    expect(result).toEqual(okResult('done'))
+    expect(calls).toHaveLength(3)
   })
 })

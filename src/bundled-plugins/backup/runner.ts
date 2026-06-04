@@ -217,7 +217,7 @@ function sanitizeCommitMessage(raw: string): string {
 }
 
 export function makeDefaultGitSpawn(): GitSpawn {
-  return async (args, { cwd, timeoutMs }) => {
+  return withIndexLockRetry(async (args, { cwd, timeoutMs }) => {
     const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
     if (!bun) {
       return { exitCode: 127, stdout: '', stderr: 'Bun runtime not available', timedOut: false }
@@ -249,5 +249,26 @@ export function makeDefaultGitSpawn(): GitSpawn {
     } finally {
       clearTimeout(timer)
     }
+  })
+}
+
+export function withIndexLockRetry(spawn: GitSpawn): GitSpawn {
+  return async (args, opts) => {
+    let result = await spawn(args, opts)
+    for (const delayMs of [50, 150, 350]) {
+      if (result.exitCode === 0 || !isIndexLockContention(result.stderr)) return result
+      await sleep(delayMs)
+      result = await spawn(args, opts)
+    }
+    return result
   }
+}
+
+function isIndexLockContention(stderr: string): boolean {
+  const lower = stderr.toLowerCase()
+  return lower.includes('index.lock') || (lower.includes('unable to create') && lower.includes('index.lock'))
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
