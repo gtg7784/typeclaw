@@ -118,10 +118,16 @@ function makeFakeListenHost(opts: { failPorts?: Set<number>; listeners: Map<numb
   }
 }
 
-function setup(opts: { policy: PortForward; resolveHostPort?: () => Promise<number | null>; failPorts?: Set<number> }) {
+function setup(opts: {
+  policy: PortForward
+  resolveHostPort?: () => Promise<number | null>
+  failPorts?: Set<number>
+  connectWs?: () => Promise<WsClient>
+}) {
   const ws = makeFakeWs()
   const listeners = new Map<number, FakeListener>()
   const events: PortForwardEvent[] = []
+  const fatalAuthFailures: string[] = []
   const broker = createBroker({
     containerName: 'test-agent',
     cwd: '/tmp/test',
@@ -129,11 +135,12 @@ function setup(opts: { policy: PortForward; resolveHostPort?: () => Promise<numb
     resolveHostPort: opts.resolveHostPort ?? (async () => 12345),
     brokerToken: 'tok',
     onEvent: (e) => events.push(e),
-    connectWs: async () => ws,
+    onFatalAuthFailure: (reason) => fatalAuthFailures.push(reason),
+    connectWs: opts.connectWs ?? (async () => ws),
     listenHost: makeFakeListenHost({ ...(opts.failPorts ? { failPorts: opts.failPorts } : {}), listeners }),
     reconnectDelaysMs: [10, 10],
   })
-  return { broker, ws, listeners, events }
+  return { broker, ws, listeners, events, fatalAuthFailures }
 }
 
 describe('createBroker', () => {
@@ -151,6 +158,35 @@ describe('createBroker', () => {
     await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     expect(ws.outbox).toContainEqual({ type: 'port-watch-subscribe' })
+    await broker.stop()
+  })
+
+  test('auth nack (invalid token) is fatal: no reconnect, fires onFatalAuthFailure', async () => {
+    const { broker, ws, fatalAuthFailures } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    const helloCount = () => ws.outbox.filter((m) => m.type === 'broker-hello').length
+    expect(helloCount()).toBe(1)
+
+    ws.emit({ type: 'broker-hello-nack', reason: 'invalid token' })
+
+    await waitFor(() => fatalAuthFailures.length > 0)
+    expect(fatalAuthFailures).toEqual(['invalid token'])
+    expect(ws.closed).toBe(true)
+    await expectStable(() => helloCount() > 1, { durationMs: 60, description: 'reconnect-after-auth-nack' })
+    expect(helloCount()).toBe(1)
+    await broker.stop()
+  })
+
+  test('non-auth WS close still reconnects', async () => {
+    const { broker, ws, fatalAuthFailures } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+
+    ws.triggerClose()
+
+    await waitFor(() => ws.outbox.filter((m) => m.type === 'broker-hello').length >= 2)
+    expect(fatalAuthFailures).toEqual([])
     await broker.stop()
   })
 

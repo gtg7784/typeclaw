@@ -589,6 +589,77 @@ describe('startDaemon', () => {
     expect(existsSync(registrationFilePath('coder'))).toBe(false)
   })
 
+  test('fatal auth failure GCs the matching registration (broker + file + list)', async () => {
+    const startCalls: PortbrokerStartInput[] = []
+    const stopCalls: Array<{ name: string; reason: string }> = []
+    const portbroker: PortbrokerCallbacks = {
+      start: async (input) => {
+        startCalls.push(input)
+      },
+      stop: async (name, reason) => {
+        stopCalls.push({ name, reason })
+      },
+      forwardedPorts: () => [],
+    }
+    daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, portbroker })
+    await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      wsHostPort: 12345,
+      portForward: { allow: '*' },
+      brokerToken: 'T1',
+    })
+    expect(existsSync(registrationFilePath('coder'))).toBe(true)
+
+    startCalls[0]?.onFatalAuthFailure?.({ brokerToken: 'T1', reason: 'invalid token' })
+
+    await waitFor(() => !existsSync(registrationFilePath('coder')))
+    expect(stopCalls).toEqual([{ name: 'coder', reason: 'fatal-auth' }])
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations).toHaveLength(0)
+  })
+
+  test('stale fatal auth (T_old) does not delete a freshly re-registered T_new', async () => {
+    const startCalls: PortbrokerStartInput[] = []
+    const stopCalls: Array<{ name: string; reason: string }> = []
+    const portbroker: PortbrokerCallbacks = {
+      start: async (input) => {
+        startCalls.push(input)
+      },
+      stop: async (name, reason) => {
+        stopCalls.push({ name, reason })
+      },
+      forwardedPorts: () => [],
+    }
+    daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, portbroker })
+
+    const base = {
+      kind: 'register' as const,
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      wsHostPort: 12345,
+      portForward: { allow: '*' as const },
+    }
+    await send({ ...base, brokerToken: 'T1' })
+    await send({ ...base, brokerToken: 'T2' })
+    expect(existsSync(registrationFilePath('coder'))).toBe(true)
+
+    startCalls[0]?.onFatalAuthFailure?.({ brokerToken: 'T1', reason: 'invalid token' })
+
+    await expectStable(() => !existsSync(registrationFilePath('coder')), {
+      durationMs: 60,
+      description: 'T_new registration deleted by stale T_old fatal callback',
+    })
+    expect(stopCalls).toEqual([])
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+  })
+
   test('persisted registrations survive daemon respawn (HTTP restart works against a fresh daemon)', async () => {
     const restartCalls: Array<{ containerName: string; cwd: string }> = []
     const restart = async ({ containerName, cwd }: { containerName: string; cwd: string }) => {

@@ -25,6 +25,10 @@ export type BrokerOptions = {
   resolveHostPort: () => Promise<number | null>
   brokerToken: string
   onEvent: (event: PortForwardEvent) => void
+  // A broker's token is immutable for its lifetime, so an auth rejection can
+  // never be repaired by reconnecting. On auth nack the broker stops for good
+  // and reports the reason so hostd can GC the stale registration.
+  onFatalAuthFailure?: (reason: string) => void
   onLog?: (msg: string) => void
   connectWs?: (url: string) => Promise<WsClient>
   listenHost?: ListenHostFn
@@ -67,6 +71,11 @@ export type Broker = {
 
 const DEFAULT_RECONNECT_DELAYS = [1_000, 2_000, 4_000, 10_000]
 const DEFAULT_HOST_BIND = '127.0.0.1'
+
+// broker-hello-nack reasons emitted by container-server.ts when authentication
+// fails. These are immutable for a broker instance's lifetime, so reconnecting
+// the same broker can only reproduce them — the broker must stop instead.
+const AUTH_NACK_REASONS: ReadonlySet<string> = new Set(['invalid token', 'expected broker-hello first'])
 
 export function createBroker(opts: BrokerOptions): Broker {
   const log = opts.onLog ?? (() => {})
@@ -211,7 +220,11 @@ export function createBroker(opts: BrokerOptions): Broker {
         return
       case 'broker-hello-nack':
         log(`broker-hello rejected: ${msg.reason}`)
-        if (ws) ws.close()
+        if (AUTH_NACK_REASONS.has(msg.reason)) {
+          fatalStop(msg.reason)
+        } else if (ws) {
+          ws.close()
+        }
         return
       case 'port-listen-snapshot':
         for (const { port, bindAddr } of msg.ports) {
@@ -307,6 +320,27 @@ export function createBroker(opts: BrokerOptions): Broker {
     }, delay)
   }
 
+  const teardown = (): void => {
+    stopped = true
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    teardownAllForwarders('broker-stopped')
+    if (ws) {
+      try {
+        ws.close()
+      } catch {}
+      ws = null
+    }
+  }
+
+  const fatalStop = (reason: string): void => {
+    if (stopped) return
+    teardown()
+    opts.onFatalAuthFailure?.(reason)
+  }
+
   return {
     start() {
       if (!brokerEnabled(opts.policy)) {
@@ -316,18 +350,7 @@ export function createBroker(opts: BrokerOptions): Broker {
       void connect()
     },
     async stop() {
-      stopped = true
-      if (reconnectTimer !== null) {
-        clearTimeout(reconnectTimer)
-        reconnectTimer = null
-      }
-      teardownAllForwarders('broker-stopped')
-      if (ws) {
-        try {
-          ws.close()
-        } catch {}
-        ws = null
-      }
+      teardown()
     },
     forwardedPorts() {
       return Array.from(forwarders.keys())

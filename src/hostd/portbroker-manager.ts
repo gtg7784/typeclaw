@@ -70,6 +70,13 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
           if (event.kind === 'port-forward-opened') tailscale.servePort(event.port)
           else if (event.kind === 'port-forward-closed') tailscale.stopPort(event.port)
         },
+        onFatalAuthFailure: (reason) => {
+          // The broker has already stopped itself. Drop it from the map so a
+          // later stop()/start() doesn't double-stop or race the dead instance,
+          // then let hostd GC the stale registration (token-guarded).
+          if (brokers.get(input.containerName) === broker) brokers.delete(input.containerName)
+          input.onFatalAuthFailure?.({ brokerToken: input.brokerToken, reason })
+        },
         onLog: (msg) => log(`[portbroker:${input.containerName}] ${msg}`),
       })
       brokers.set(input.containerName, broker)
