@@ -2,7 +2,19 @@ import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { runInspectLoop, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
+import {
+  listViewerItems,
+  openViewerItem,
+  parseDuration,
+  parseFilter,
+  resolveSession,
+  runInspectLoop,
+  runViewerLoop,
+  streamLive,
+  type LiveSourceFactory,
+  type SessionSummary,
+  type ViewerItem,
+} from '@/inspect'
 import { originLabel, shortSessionId } from '@/inspect/label'
 
 import { createTailScope } from './inspect-controller'
@@ -13,12 +25,12 @@ const ESC_DEBOUNCE_MS = 50
 export const inspectCommand = defineCommand({
   meta: {
     name: 'inspect',
-    description: 'observe a session: replay the transcript, then tail live activity (host stage)',
+    description: 'session viewer: pick a session, the live TUI, or container logs to observe (host stage)',
   },
   args: {
     session: {
       type: 'positional',
-      description: 'session id or short prefix (omit to pick from a list)',
+      description: 'session id or short prefix (omit to pick from the list)',
       required: false,
     },
     filter: {
@@ -42,42 +54,168 @@ export const inspectCommand = defineCommand({
     const sessionArg = typeof args.session === 'string' ? args.session : undefined
     const filterArg = typeof args.filter === 'string' ? args.filter : undefined
     const sinceArg = typeof args.since === 'string' ? args.since : undefined
-
     const isJson = args.json === true
-    const liveSource = isJson ? undefined : await buildLiveSource(cwd)
-    const interactive = !isJson && Boolean(process.stdin.isTTY)
-    const liveHint = interactive ? escHintLine(color) : undefined
 
-    const result = await runInspectLoop({
-      agentDir: cwd,
-      ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
-      ...(filterArg !== undefined ? { filter: filterArg } : {}),
-      ...(sinceArg !== undefined ? { since: sinceArg } : {}),
-      json: isJson,
-      color,
-      selectSession: (sessions, selectOpts) => clackSelect(sessions, selectOpts?.initialSessionId),
-      ...(liveSource !== undefined ? { liveSource } : {}),
-      createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
-      ...(interactive ? { interactive: true } : {}),
-      ...(liveHint !== undefined ? { liveHint } : {}),
-      stdout: (line) => process.stdout.write(`${line}\n`),
-      stderr: (line) => process.stderr.write(`${line}\n`),
-    })
-
-    if (!result.ok) {
-      process.stderr.write(`${errorLine(result.reason)}\n`)
-      process.exit(result.exitCode)
+    // JSON mode stays the scriptable, session-only path: no list, no logs/tui
+    // rows, explicit session id required. Behavior is unchanged from before the
+    // viewer merge.
+    if (isJson) {
+      const result = await runInspectLoop({
+        agentDir: cwd,
+        ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
+        ...(filterArg !== undefined ? { filter: filterArg } : {}),
+        ...(sinceArg !== undefined ? { since: sinceArg } : {}),
+        json: true,
+        color,
+        selectSession: (sessions, selectOpts) => clackSelectSession(sessions, selectOpts?.initialSessionId),
+        createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
+        stdout: (line) => process.stdout.write(`${line}\n`),
+        stderr: (line) => process.stderr.write(`${line}\n`),
+      })
+      finish(result)
+      return
     }
-    process.exit(result.exitCode)
+
+    const exitCode = await runInspectViewer({
+      cwd,
+      ...(sessionArg !== undefined ? { sessionArg } : {}),
+      ...(filterArg !== undefined ? { filterArg } : {}),
+      ...(sinceArg !== undefined ? { sinceArg } : {}),
+      color,
+    })
+    process.exit(exitCode)
   },
 })
 
-async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefined> {
-  const precheck = await requireContainerRunning({ cwd })
-  if (!precheck.ok) {
-    process.stderr.write(`${c.yellow('⚠')} ${precheck.reason}; tailing live events disabled\n`)
-    return undefined
+export type RunInspectViewerOptions = {
+  cwd: string
+  sessionArg?: string
+  filterArg?: string
+  sinceArg?: string
+  color?: boolean
+}
+
+// The interactive session-viewer: list → open → back to list. Shared by the
+// `inspect` command and `tui`'s esc-detach fallthrough. Returns an exit code
+// instead of calling process.exit so callers can chain (e.g. tui drops here).
+export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<number> {
+  const { cwd } = opts
+  const color = opts.color ?? useColor()
+
+  const filterResult = parseFilter(opts.filterArg)
+  if (!filterResult.ok) {
+    process.stderr.write(`${errorLine(filterResult.reason)}\n`)
+    return 2
   }
+  let sinceMs: number | undefined
+  if (opts.sinceArg !== undefined) {
+    const d = parseDuration(opts.sinceArg)
+    if (!d.ok) {
+      process.stderr.write(`${errorLine(d.reason)}\n`)
+      return 2
+    }
+    sinceMs = Date.now() - d.ms
+  }
+
+  const containerRunning = (await requireContainerRunning({ cwd })).ok
+  if (!containerRunning) {
+    process.stderr.write(`${c.yellow('⚠')} container not running; showing read-only history and logs only\n`)
+  }
+
+  const sessionsDir = `${cwd}/sessions`
+
+  // Resolve a session arg (id or short prefix) to a full session id BEFORE the
+  // loop: runViewerLoop matches preselectKey against exact itemKeys, so a bare
+  // prefix would otherwise miss every row and report "no sessions". 'logs' is a
+  // reserved key, not a session, so it bypasses resolution.
+  let preselectKey: string | undefined
+  if (opts.sessionArg !== undefined && opts.sessionArg !== 'logs') {
+    const resolved = await resolveSession(sessionsDir, opts.sessionArg, (l) => process.stderr.write(`${l}\n`))
+    if (!resolved.ok) {
+      const reason =
+        resolved.reason === 'ambiguous'
+          ? `Ambiguous session prefix "${opts.sessionArg}" matches ${resolved.matches.length} sessions. Use a longer prefix or run \`typeclaw inspect\` without args.`
+          : `No session matching "${opts.sessionArg}" in ${sessionsDir}/`
+      process.stderr.write(`${errorLine(reason)}\n`)
+      return resolved.reason === 'ambiguous' ? 2 : 1
+    }
+    preselectKey = resolved.summary.sessionId
+  } else if (opts.sessionArg === 'logs') {
+    preselectKey = 'logs'
+  }
+
+  const interactive = Boolean(process.stdin.isTTY)
+  const liveHint = interactive ? escHintLine(color) : undefined
+  const liveSource = containerRunning ? await buildLiveSource(cwd) : undefined
+
+  const stdout = (line: string): void => {
+    process.stdout.write(`${line}\n`)
+  }
+  const stderr = (line: string): void => {
+    process.stderr.write(`${line}\n`)
+  }
+
+  const open = openViewerItem({
+    cwd,
+    filter: filterResult.filter,
+    sinceMs,
+    json: false,
+    color,
+    interactive,
+    stdout,
+    stderr,
+    resolveTuiUrl: () => resolveTuiUrl(cwd),
+    ...(liveSource !== undefined ? { liveSource } : {}),
+    ...(liveHint !== undefined ? { liveHint } : {}),
+  })
+
+  const result = await runViewerLoop<ViewerItem>({
+    listItems: async () => {
+      const listOpts: Parameters<typeof listViewerItems>[0] = {
+        sessionsDir,
+        containerRunning,
+        limit: 20,
+        onWarn: stderr,
+      }
+      if (sinceMs !== undefined) listOpts.sinceMs = sinceMs
+      return (await listViewerItems(listOpts)).items
+    },
+    keyOf: (item) => (item.kind === 'logs' ? 'logs' : item.summary.sessionId),
+    ...(preselectKey !== undefined ? { preselectKey } : {}),
+    selectItem: (items, selectOpts) => clackSelectItem(items, selectOpts.initialKey),
+    openItem: open,
+    createTailScope: () => createTailScope({ debounceMs: ESC_DEBOUNCE_MS }),
+    onEmpty: () => ({
+      ok: false,
+      exitCode: 1,
+      reason: `No sessions found in ${sessionsDir}/.\nStart a session with \`typeclaw tui\` or send a message from a configured channel.`,
+    }),
+  })
+
+  if (!result.ok && result.reason !== undefined) {
+    process.stderr.write(`${errorLine(result.reason)}\n`)
+  }
+  return result.exitCode
+}
+
+function finish(result: { ok: boolean; exitCode: number; reason?: string }): void {
+  if (!result.ok && result.reason !== undefined) {
+    process.stderr.write(`${errorLine(result.reason)}\n`)
+  }
+  process.exit(result.exitCode)
+}
+
+async function resolveTuiUrl(cwd: string): Promise<string> {
+  const precheck = await requireContainerRunning({ cwd })
+  if (!precheck.ok) throw new Error(precheck.reason)
+  const port = await resolveHostPort({ cwd })
+  const token = await resolveTuiToken({ cwd })
+  const url = new URL(`ws://127.0.0.1:${port}`)
+  if (token !== null) url.searchParams.set('token', token)
+  return url.toString()
+}
+
+async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefined> {
   const port = await resolveHostPort({ cwd })
   const token = await resolveTuiToken({ cwd })
   const baseUrl = new URL(`ws://127.0.0.1:${port}/inspect`)
@@ -94,7 +232,7 @@ async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefin
 }
 
 function escHintLine(color: boolean): string {
-  const text = '(esc to return to session list · q to quit)'
+  const text = '(esc to return to the list · q to quit)'
   return color ? `\u001b[2m${text}\u001b[0m` : text
 }
 
@@ -105,7 +243,29 @@ function useColor(): boolean {
   return Boolean(process.stdout.isTTY)
 }
 
-async function clackSelect(
+async function clackSelectItem(items: ViewerItem[], initialKey: string | undefined): Promise<ViewerItem | null> {
+  const { select } = await import('@clack/prompts')
+  prepareStdinForClack()
+  const keyOf = (item: ViewerItem): string => (item.kind === 'logs' ? 'logs' : item.summary.sessionId)
+  const preferred =
+    initialKey !== undefined && items.some((i) => keyOf(i) === initialKey) ? initialKey : keyOf(items[0]!)
+  const picked = await select<string>({
+    message: `Pick what to view (showing ${items.length})`,
+    options: items.map((item) => ({
+      value: keyOf(item),
+      label: itemLabel(item),
+      ...itemHint(item),
+    })),
+    initialValue: preferred,
+  })
+  if (isCancel(picked)) {
+    cancel('Cancelled.')
+    return null
+  }
+  return items.find((i) => keyOf(i) === picked) ?? null
+}
+
+async function clackSelectSession(
   sessions: SessionSummary[],
   initialSessionId: string | undefined,
 ): Promise<SessionSummary | null> {
@@ -119,7 +279,7 @@ async function clackSelect(
     message: `Pick a session to inspect (showing ${sessions.length})`,
     options: sessions.map((s) => ({
       value: s.sessionId,
-      label: formatRowLabel(s),
+      label: sessionRowLabel(s),
       ...(s.firstPrompt !== null ? { hint: truncate(s.firstPrompt, 60) } : { hint: '(no prompt)' }),
     })),
     initialValue: preferred,
@@ -131,7 +291,20 @@ async function clackSelect(
   return sessions.find((s) => s.sessionId === picked) ?? null
 }
 
-function formatRowLabel(s: SessionSummary): string {
+function itemLabel(item: ViewerItem): string {
+  if (item.kind === 'logs') return `${c.dim('▤')} container logs`
+  if (item.kind === 'tui') return `${c.green('●')} ${c.bold('live TUI')}  ${sessionRowLabel(item.summary)}`
+  return `${c.dim('○')} ${sessionRowLabel(item.summary)}`
+}
+
+function itemHint(item: ViewerItem): { hint: string } {
+  if (item.kind === 'logs') return { hint: 'read-only · works offline' }
+  if (item.kind === 'tui') return { hint: 'read+write · esc detaches and ends the live session' }
+  if (item.summary.firstPrompt !== null) return { hint: truncate(item.summary.firstPrompt, 60) }
+  return { hint: '(no prompt)' }
+}
+
+function sessionRowLabel(s: SessionSummary): string {
   const id = shortSessionId(s.sessionId)
   const label = s.origin === null ? '(unknown origin)' : originLabel(s.origin)
   const when = formatRelative(s.mtimeMs)
