@@ -1182,7 +1182,7 @@ async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['c
     message: 'GitHub authentication type',
     options: [
       { value: 'pat', label: 'Fine-grained personal access token' },
-      { value: 'app', label: 'GitHub App installation token' },
+      { value: 'app', label: 'GitHub App installation token (recommended)' },
     ],
   })
   if (isCancel(authType)) return back()
