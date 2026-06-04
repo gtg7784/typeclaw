@@ -77,8 +77,8 @@ export async function logs({
       const colorOut = useColor ?? supportsColor(out)
       const colorErr = useColor ?? supportsColor(err)
       await Promise.all([
-        pumpWithTimestamps(proc.stdout, out, makeLogTimestampReformatter(undefined, { color: colorOut })),
-        pumpWithTimestamps(proc.stderr, err, makeLogTimestampReformatter(undefined, { color: colorErr })),
+        pumpWithTimestamps(proc.stdout, out, makeLogTimestampReformatter(undefined, { color: colorOut }), signal),
+        pumpWithTimestamps(proc.stderr, err, makeLogTimestampReformatter(undefined, { color: colorErr }), signal),
       ])
       const exitCode = await proc.exited
       return { ok: true, containerName: plan.containerName, exitCode }
@@ -122,30 +122,57 @@ export function buildDockerLogsCmd(plan: LogsPlan): string[] {
 
 // Exported for `compose/logs.ts` so the multi-agent path reuses the same
 // reformatter and stays consistent with single-agent output.
+//
+// Abort handling is load-bearing for the interactive logs viewer: killing
+// `docker logs -f` does NOT reliably make Bun's pending `reader.read()` resolve
+// (the killed child may not promptly EOF its piped stdout — see the OrbStack
+// /proc quirk). Without cancelling the reader on abort, esc would hang forever.
+// So on abort we cancel the reader, which unblocks the pending read; the caller
+// still kills the process for OS-side cleanup.
 export async function pumpWithTimestamps(
   stream: ReadableStream<Uint8Array>,
   sink: NodeJS.WritableStream,
   reformatter: TimestampReformatter = makeLogTimestampReformatter(),
+  signal?: AbortSignal,
 ): Promise<void> {
   const decoder = new TextDecoder()
   const reader = stream.getReader()
+  let aborted = signal?.aborted === true
+  const onAbort = (): void => {
+    aborted = true
+    void reader.cancel().catch(() => {})
+  }
+  if (aborted) onAbort()
+  else signal?.addEventListener('abort', onAbort, { once: true })
+
   try {
     while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value && value.byteLength > 0) {
-        const out = reformatter.write(decoder.decode(value, { stream: true }))
+      if (aborted) break
+      const chunk = await reader.read().catch((error: unknown) => {
+        if (aborted || signal?.aborted === true) return null
+        throw error
+      })
+      if (chunk === null || chunk.done || aborted) break
+      if (chunk.value && chunk.value.byteLength > 0) {
+        const out = reformatter.write(decoder.decode(chunk.value, { stream: true }))
         if (out.length > 0) sink.write(out)
       }
     }
-    const tail = decoder.decode()
-    if (tail.length > 0) {
-      const out = reformatter.write(tail)
-      if (out.length > 0) sink.write(out)
+    if (!aborted) {
+      const tail = decoder.decode()
+      if (tail.length > 0) {
+        const out = reformatter.write(tail)
+        if (out.length > 0) sink.write(out)
+      }
+      const flushed = reformatter.flush()
+      if (flushed.length > 0) sink.write(flushed)
     }
-    const flushed = reformatter.flush()
-    if (flushed.length > 0) sink.write(flushed)
   } finally {
-    reader.releaseLock()
+    signal?.removeEventListener('abort', onAbort)
+    try {
+      reader.releaseLock()
+    } catch {
+      // harmless if cancel/abort raced with stream teardown
+    }
   }
 }
