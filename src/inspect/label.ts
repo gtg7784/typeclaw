@@ -17,7 +17,7 @@ export function originLabel(origin: MinimalSessionOrigin): string {
     case 'cron':
       return `Cron ${origin.jobId} (${origin.jobKind})`
     case 'subagent':
-      return `Subagent ${origin.subagent} ← ${shortSessionId(origin.parentSessionId)}`
+      return `Subagent ${origin.subagent}`
     case 'channel':
       return channelLabel(origin)
     case 'system':
