@@ -25,7 +25,15 @@ function stubScheduler(): Scheduler {
 
 let running: Awaited<ReturnType<typeof startAgent>> | null = null
 
+beforeEach(() => {
+  // startAgent boots the agent-browser plugin, whose dashboard proxy otherwise
+  // binds the hardcoded default 4848. Under --parallel that collides across
+  // tests (flaky "bind 4848 failed"); pin it to an ephemeral port instead.
+  process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
+})
+
 afterEach(async () => {
+  delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
   if (!running) return
   running.server.stop(true)
   running.tuiPromise?.catch(() => {})

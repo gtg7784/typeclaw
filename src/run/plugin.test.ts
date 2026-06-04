@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +12,13 @@ const noCron: LoadCronFn = async () => ({ ok: true, file: null }) as LoadCronRes
 let running: Awaited<ReturnType<typeof startAgent>> | null = null
 let agentDir: string | null = null
 
+beforeEach(() => {
+  // startAgent boots the agent-browser plugin, whose dashboard proxy otherwise
+  // binds the hardcoded default 4848. Under --parallel that collides across
+  // tests (flaky "bind 4848 failed"); pin it to an ephemeral port instead.
+  process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
+})
+
 afterEach(async () => {
   if (running) {
     running.stop()
@@ -22,6 +29,7 @@ afterEach(async () => {
     await rm(agentDir, { recursive: true, force: true })
     agentDir = null
   }
+  delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
 })
 
 async function writePlugin(dir: string, body: string) {

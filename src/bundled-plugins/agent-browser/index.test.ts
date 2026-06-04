@@ -10,7 +10,11 @@ beforeEach(() => {
   process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT'] = '0'
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // Drain the background bind before clearing env. Otherwise an in-flight bind
+  // reads readPortConfig() after the delete, falls back to the default 4848,
+  // and collides with whatever parallel test holds that port (flaky warning).
+  await __waitForProxyBindForTesting()
   __resetProxyForTesting()
   delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
   delete process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT']
