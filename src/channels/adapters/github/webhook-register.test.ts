@@ -150,6 +150,23 @@ describe('registerGithubWebhooks', () => {
     expect(good?.action).toBe('created')
   })
 
+  test('deduplicates repeated repo slugs so concurrent fan-out cannot create duplicate hooks', async () => {
+    const { fetch: fetchImpl, calls } = makeFetch(({ url, init }) => {
+      if (url.includes('/repos/acme/widgets/hooks') && (init?.method ?? 'GET') === 'GET') {
+        return { status: 200, body: [] }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && init?.method === 'POST') {
+        return { status: 201, body: { id: 42 } }
+      }
+      return { status: 500 }
+    })
+
+    const result = await registerGithubWebhooks(baseOpts({ fetchImpl, repos: ['acme/widgets', 'acme/widgets'] }))
+
+    expect(result.repos).toEqual([{ repo: 'acme/widgets', action: 'created', hookId: 42 }])
+    expect(calls.filter((c) => c.init?.method === 'POST').length).toBe(1)
+  })
+
   test('resolves a separate token per repo so multi-owner repos use the right installation', async () => {
     const tokenByRepo: Record<string, string> = { 'acme/api': 'tok-acme', 'personal/blog': 'tok-personal' }
     const bearerByRepo: Record<string, string | null> = {}

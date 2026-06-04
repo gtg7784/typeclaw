@@ -54,17 +54,25 @@ export async function registerGithubWebhooks(
   options: RegisterGithubWebhooksOptions,
 ): Promise<WebhookRegistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
-  const repos: WebhookRepoResult[] = []
-  for (const repo of options.repos) {
-    let token: string
-    try {
-      token = await options.token(repo)
-    } catch (err) {
-      repos.push({ repo, action: 'failed', error: describe(err) })
-      continue
-    }
-    repos.push(await registerOne(fetchImpl, token, repo, options))
-  }
+  // Dedupe before fanning out: the serial loop self-corrected on a repeated
+  // repo (the second pass saw the first pass's hook and updated it), but
+  // concurrent passes would both list an empty set and each POST a hook,
+  // creating a duplicate. Collapsing to distinct slugs restores convergence.
+  const distinctRepos = [...new Set(options.repos)]
+  // Repos are independent (own installation token, own hooks), so register them
+  // concurrently. Every task resolves to a result (failures are caught into a
+  // `failed` entry, never thrown), so the batch never rejects and order is kept.
+  const repos = await Promise.all(
+    distinctRepos.map(async (repo): Promise<WebhookRepoResult> => {
+      let token: string
+      try {
+        token = await options.token(repo)
+      } catch (err) {
+        return { repo, action: 'failed', error: describe(err) }
+      }
+      return registerOne(fetchImpl, token, repo, options)
+    }),
+  )
   return { repos }
 }
 
@@ -82,17 +90,17 @@ export async function deregisterGithubWebhooks(
   options: DeregisterGithubWebhooksOptions,
 ): Promise<WebhookDeregistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
-  const hooks: WebhookDeregistrationResult['hooks'] = []
-  for (const hook of options.hooks) {
-    let token: string
-    try {
-      token = await options.token(hook.repo)
-    } catch (err) {
-      hooks.push({ ...hook, action: 'failed', error: describe(err) })
-      continue
-    }
-    hooks.push(await deleteOne(fetchImpl, token, hook))
-  }
+  const hooks = await Promise.all(
+    options.hooks.map(async (hook): Promise<WebhookDeregistrationResult['hooks'][number]> => {
+      let token: string
+      try {
+        token = await options.token(hook.repo)
+      } catch (err) {
+        return { ...hook, action: 'failed', error: describe(err) }
+      }
+      return deleteOne(fetchImpl, token, hook)
+    }),
+  )
   return { hooks }
 }
 
@@ -125,11 +133,8 @@ async function registerOne(
     // inspecting the repo's webhook list.
     const [keep, ...stale] = owned.slice().sort((a, b) => a - b)
     await updateHook(fetchImpl, token, parsed, keep!, options)
-    let stalePruned = 0
-    for (const id of stale) {
-      const ok = await tryDeleteHook(fetchImpl, token, parsed, id)
-      if (ok) stalePruned++
-    }
+    const pruned = await Promise.all(stale.map((id) => tryDeleteHook(fetchImpl, token, parsed, id)))
+    const stalePruned = pruned.filter(Boolean).length
     return { repo, action: 'updated', hookId: keep!, stalePruned }
   } catch (err) {
     return { repo, action: 'failed', error: describe(err) }
