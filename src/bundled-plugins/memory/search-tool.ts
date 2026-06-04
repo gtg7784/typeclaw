@@ -36,7 +36,7 @@ type Matcher = (haystack: string) => boolean
 
 export const memorySearchTool = defineTool({
   description:
-    'Search the agent\'s long-term memory. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Case-insensitive substring by default; asRegex=true treats query as a JavaScript regex. Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies. Topic matches come first (alphabetical by slug), then stream matches (newest day first).',
+    'Search the agent\'s long-term memory. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies. Topic matches come first (alphabetical by slug), then stream matches (newest day first).',
   parameters: z.object({
     query: z.string(),
     asRegex: z.boolean().default(false),
@@ -58,9 +58,48 @@ export const memorySearchTool = defineTool({
     }
 
     const result = searchAll(shards, streamDays, matcherOrError, { full, maxResults })
+    if ('matches' in result && result.matches.length === 0) {
+      const fallback = tokenFallback(query, asRegex, shards, streamDays, { full, maxResults })
+      if (fallback !== null) return resultToToolResult(fallback)
+    }
     return resultToToolResult(result)
   },
 })
+
+// Phrase-first/token-fallback: the descriptive multi-word queries the
+// retrieval subagent issues rarely appear verbatim in any body, so a
+// whole-phrase substring search returns nothing while every component word is
+// present. When the phrase search comes up empty, split on whitespace and
+// OR-match the distinct tokens, ranking each hit by how many tokens it
+// matched (richer matches first) with the natural topic-first/newest-stream
+// order as the stable tiebreak. Returns null when tokenizing cannot widen the
+// search: regex mode (whitespace is intentional pattern syntax), or a token
+// set that is identical to the phrase already tried (a single clean token, so
+// the phrase search already covered it).
+function tokenFallback(
+  query: string,
+  asRegex: boolean,
+  shards: TopicShard[],
+  streamDays: UndreamedStreamDay[],
+  options: { full: boolean; maxResults: number },
+): MemorySearchResult | null {
+  if (asRegex) return null
+  const tokens = distinctTokens(query)
+  if (tokens.length === 0) return null
+  if (tokens.length === 1 && tokens[0] === query.trim().toLowerCase()) return null
+  return searchAllRanked(shards, streamDays, tokens, options)
+}
+
+function distinctTokens(query: string): string[] {
+  return [
+    ...new Set(
+      query
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((t) => t.length > 0),
+    ),
+  ]
+}
 
 function buildMatcher(query: string, asRegex: boolean): Matcher | string {
   if (asRegex) {
@@ -117,6 +156,64 @@ function searchAll(
   }
 
   return truncatedAt === undefined ? { matches } : { matches, truncatedAt }
+}
+
+// Token-OR variant of searchAll. Builds each match with an any-token matcher
+// (so a hit requires only one token and the excerpt anchors on the first line
+// matching any token), then scores it by how many distinct tokens appear in
+// its full searchable text. Results sort by score descending; ties keep the
+// natural enumeration order (topics first in loadAllShards order, then stream
+// days newest-first), so the established ordering contract holds within each
+// score band. maxResults truncation is applied last, after ranking.
+function searchAllRanked(
+  shards: TopicShard[],
+  streamDays: UndreamedStreamDay[],
+  tokens: string[],
+  options: { full: boolean; maxResults: number },
+): MemorySearchResult {
+  const anyToken: Matcher = (haystack) => {
+    const lower = haystack.toLowerCase()
+    return tokens.some((t) => lower.includes(t))
+  }
+  const scoreOf = (text: string): number => {
+    const lower = text.toLowerCase()
+    return tokens.reduce((n, t) => (lower.includes(t) ? n + 1 : n), 0)
+  }
+
+  const scored: Array<{ match: MemorySearchMatch; score: number; order: number }> = []
+  let order = 0
+
+  for (const shard of shards) {
+    const match = matchShard(shard, anyToken, options.full)
+    if (match === null) continue
+    scored.push({ match, score: scoreOf(shardSearchText(shard)), order: order++ })
+  }
+
+  for (let i = streamDays.length - 1; i >= 0; i--) {
+    const day = streamDays[i]!
+    for (const event of day.events) {
+      const match = matchStreamEvent(day, event, anyToken, options.full)
+      if (match === null) continue
+      scored.push({ match, score: scoreOf(eventSearchText(event)), order: order++ })
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.order - b.order)
+
+  if (scored.length > options.maxResults) {
+    return { matches: scored.slice(0, options.maxResults).map((s) => s.match), truncatedAt: options.maxResults }
+  }
+  return { matches: scored.map((s) => s.match) }
+}
+
+function shardSearchText(shard: TopicShard): string {
+  return [shard.slug, shard.frontmatter.heading, ...(shard.frontmatter.tags ?? []), shard.body].join('\n')
+}
+
+function eventSearchText(event: StreamEvent): string {
+  if (event.type === 'fragment') return `${event.topic}\n${event.body}`
+  if (event.type === 'legacy_prose') return event.text
+  return ''
 }
 
 function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMatch | null {

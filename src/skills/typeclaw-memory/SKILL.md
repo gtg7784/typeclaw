@@ -25,6 +25,8 @@ Citations in shard bodies use the canonical form `streams/yyyy-MM-dd#<fragment-i
 
 When index-mode injection hides bodies, or when you need recent fragments the dreaming subagent hasn't consolidated yet, use `memory_search({query, asRegex?, full?, maxResults?})`. It searches BOTH topic shards under `memory/topics/` and undreamed stream events under `memory/streams/`. Substring (case-insensitive) by default; `asRegex: true` for regex.
 
+Plain queries are **phrase-first with a word fallback**: the whole query is tried as one substring, and only if that finds nothing is the query split on whitespace and the distinct words OR-matched (ranked by how many words each hit contains). So a descriptive multi-word query like `swmaestro summary webex space` still returns results even when no entry contains that exact phrase. You don't need to pre-split queries into single keywords — but a focused phrase still wins when an entry contains it verbatim. Regex queries never fall back (whitespace stays part of the pattern).
+
 Results are discriminated by `source`:
 
 - `source: "topic"` — fields `shardPath`, `slug`, `heading`, `excerpt`, `fullBody?`
