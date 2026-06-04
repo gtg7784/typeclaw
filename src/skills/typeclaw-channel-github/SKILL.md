@@ -14,9 +14,23 @@ GitHub renders normal Markdown in issues, PRs, discussions, and review comments.
 
 A successful `channel_reply` ends your turn by default — the runtime stops the model right after the reply lands. That is correct for a final answer, but it will **silently truncate** a turn that still has work to do. If you post a status line like "Reviewing now, I'll be back with findings" and then expect to keep working (fetch the diff, spawn the reviewer, post the review) in the **same** turn, you must call `channel_reply({ text: "…", continue: true })`. Without `continue: true`, the turn ends at that status reply and the review never runs. Reserve `continue: true` for genuine multi-step turns; the final reply that wraps up the turn omits it.
 
+## Inbound triage — do this first, every time
+
+Before you pick an action, classify the inbound. Skipping this step is how a PR ends up with a "looks good" comment but no approval: the model pattern-matches on the prose ("they fixed it → resolve the thread") and never asks whether it owes the PR a formal review. Answer these in order; the **first** that matches decides your path. Do not skip ahead.
+
+1. **Is this a PR, and do I have unfinished review business on it?** On any `pr:N` inbound, before anything else, check whether you already have an open review obligation on this PR. Run the step-1 re-review query in the PR review flow (`gh api --paginate --slurp /repos/owner/repo/pulls/<N>/reviews --jq '…'` filtered to `{CHANGES_REQUESTED, APPROVED}`). If your latest **blocking decision** is `CHANGES_REQUESTED`, this is a **re-review** — go to the **PR review flow** regardless of how the inbound is phrased. An author commenting "fixed both issues" / "addressed your feedback" / "pushed a fix" is a re-review trigger, **not** a thread-resolve trigger. A re-review is closed by re-deciding the verdict and landing a formal review (`APPROVE` clears the sticky block; a comment or a flat reply does not).
+
+2. **Am I being asked to review (first-time)?** Explicit `review_requested` inbound, or a human asking in plain language ("review this", "take a look at #N"). → **PR review flow** (see "When you are being asked to review").
+
+3. **Is this a reply inside an inline review thread I authored** (`pr:N` with `thread` set, on a thread whose root comment is mine)? → verify the fix at head SHA and **resolve the thread** (see "Resolving review threads you authored"). `resolve_review_thread` only works when `thread` is set on the origin; if there is **no** `thread`, this branch does not apply — do not attempt it, fall through to the table below.
+
+4. **None of the above** → use the routing table below.
+
+> The decisive question is **#1**. A formal verdict you owe a PR is never discharged by a `channel_reply` or an `issue_comment`; those carry no review state. If you have a pending or prior verdict on the PR, the close-out is always a formal review via `POST /pulls/<N>/reviews`.
+
 ## What to do, by inbound type
 
-Every GitHub inbound lands on a `chat` keyed by its subject: `issue:N`, `pr:N`, or `discussion:N`. Pick your action from the kind of thing that arrived. The default action for anything addressed to you is a normal `channel_reply` in that thread; the **PR review flow** below is the one exception that requires delegation.
+Every GitHub inbound lands on a `chat` keyed by its subject: `issue:N`, `pr:N`, or `discussion:N`. **Run the triage above first.** Only if no triage branch matched do you pick an action from this table. The default action for anything addressed to you is a normal `channel_reply` in that thread; the **PR review flow** is the exception that requires delegation.
 
 | Inbound                                                  | Looks like                                                                           | What to do                                                                                                                                        |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
