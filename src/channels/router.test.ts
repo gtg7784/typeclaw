@@ -6460,6 +6460,78 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(sessions[0]!.prompts.length).toBe(promptsBefore)
   })
 
+  test('channel-key fallback wakes the rolled-over session when the original parentSessionId is gone', async () => {
+    // given a session that rolls over while a background subagent runs:
+    // m1 opens ses_fake_1; after the freshness TTL, m2 opens ses_fake_2 for the
+    // same channel key. The completion broadcast still carries ses_fake_1.
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'still there?' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(2)
+    const promptsBefore = sessions[1]!.prompts.length
+
+    // when the subagent completes carrying the STALE sessionId plus the channel key
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'reviewer',
+      taskId: 'bg_rev',
+      ok: true,
+      durationMs: 360_000,
+      channelKey: KEY,
+    })
+
+    // then it is delivered to the live successor session, not dropped
+    expect(result.kind).toBe('delivered')
+    await waitFor(() => sessions[1]!.prompts.length > promptsBefore)
+    const reminderText = sessions[1]!.prompts[sessions[1]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('<system-reminder>')
+    expect(reminderText).toContain('bg_rev')
+    expect(reminderText).toContain('subagent_output')
+  })
+
+  test('exact parentSessionId match is preferred over the channel-key fallback', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const promptsBefore = sessions[0]!.prompts.length
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'reviewer',
+      taskId: 'bg_exact',
+      ok: true,
+      durationMs: 5_000,
+      channelKey: KEY,
+    })
+
+    expect(result.kind).toBe('delivered')
+    await waitFor(() => sessions[0]!.prompts.length > promptsBefore)
+    expect(sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? '').toContain('bg_exact')
+  })
+
+  test('no channelKey and no matching sessionId still returns no-live-session', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'someone-else',
+      subagent: 'reviewer',
+      taskId: 'bg_nokey',
+      ok: true,
+      durationMs: 100,
+    })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+  })
+
   test('failed subagent reminder reaches the channel session with FAILED marker and error string', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)

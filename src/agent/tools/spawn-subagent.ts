@@ -136,6 +136,11 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       }
       liveRegistry.register(live)
 
+      const channelKey =
+        origin?.kind === 'channel'
+          ? { adapter: origin.adapter, workspace: origin.workspace, chat: origin.chat, thread: origin.thread }
+          : undefined
+
       void completion.then((c) => {
         const durationMs = now() - startedAt
         liveRegistry.recordCompletion(taskId, completionToFinalShape(c, durationMs))
@@ -150,6 +155,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
               ok: c.ok,
               durationMs,
               ...(c.ok ? {} : { error: c.error }),
+              ...(channelKey !== undefined ? { channelKey } : {}),
             },
           })
         }

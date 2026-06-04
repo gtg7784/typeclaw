@@ -47,27 +47,23 @@ const consoleLogger: SubagentCompletionBridgeLogger = {
 // `LiveSession`, so the lookup is O(N) over live sessions with N small
 // (one per active conversation).
 //
-// On `no-live-session`, we silently drop. Three observable paths reach
-// this branch in production:
+// On `no-live-session`, we drop the reminder. When the parent was a
+// channel session, the broadcast now carries the channel-key coordinate
+// `{ adapter, workspace, chat, thread }`, and the router first tries to
+// reroute to the live successor session for that key — covering the two
+// common drop paths where the exact sessionId is gone but the
+// conversation lives on:
 //
 //   - The parent session was GC'd by the idle-eviction tick
 //     (SESSION_IDLE_MS) while the subagent was running.
 //   - The parent session rolled over (SESSION_FRESHNESS_TTL_MS) when a
-//     new inbound arrived during a long-running subagent — the channel
-//     conversation continues on the new sessionId, but the broadcast
-//     still carries the old one.
-//   - The parent was a TUI session (the TUI bridge in
-//     src/server/index.ts handles it).
+//     new inbound arrived during a long-running subagent.
 //
-// The right fix for the first two paths is for the broadcast to carry
-// the channel-key coordinate `{ adapter, workspace, chat, thread }` so
-// the bridge can fall back to "any live session for the same channel
-// key" when the exact sessionId no longer matches. That requires
-// extending the broadcast payload (consumed by TUI and channel paths)
-// and gating spawn_subagent to capture the origin coordinates — both
-// non-trivial. Deferred until we see this drop pattern in production
-// logs; the info log line below makes the case diagnosable from logs
-// alone.
+// A reminder still reaching this branch means there is no live session
+// for the key at all (the whole conversation went idle), or the parent
+// was a TUI session (handled by the TUI bridge in src/server/index.ts).
+// Logged at warn with the channel key so an undelivered completion is
+// diagnosable from logs alone.
 export function createSubagentCompletionBridge(options: SubagentCompletionBridgeOptions): SubagentCompletionBridge {
   const logger = options.logger ?? consoleLogger
   const unsubscribe = options.stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -75,8 +71,12 @@ export function createSubagentCompletionBridge(options: SubagentCompletionBridge
     if (parsed === null) return
     const result = options.router.injectSubagentCompletionReminder(parsed)
     if (result.kind === 'no-live-session') {
-      logger.info(
-        `[channels] subagent-completion reminder dropped: no live session for parentSessionId=${parsed.parentSessionId} task=${parsed.taskId}`,
+      const keyInfo =
+        parsed.channelKey !== undefined
+          ? ` channelKey=${parsed.channelKey.adapter}:${parsed.channelKey.workspace}:${parsed.channelKey.chat}:${parsed.channelKey.thread ?? ''}`
+          : ''
+      logger.warn(
+        `[channels] subagent-completion reminder dropped: no live session for parentSessionId=${parsed.parentSessionId} task=${parsed.taskId}${keyInfo}`,
       )
     }
   })

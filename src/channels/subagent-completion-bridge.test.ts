@@ -93,7 +93,7 @@ describe('createSubagentCompletionBridge', () => {
     expect(calls).toHaveLength(0)
   })
 
-  test('no-live-session outcome logs an info line (debuggable drop), no throw', () => {
+  test('no-live-session outcome logs a warn line with the channel key (debuggable drop), no throw', () => {
     const stream = createStream()
     const { router, setOutcome } = fakeRouter()
     setOutcome({ kind: 'no-live-session' })
@@ -116,11 +116,15 @@ describe('createSubagentCompletionBridge', () => {
         parentSessionId: 'ses_gone',
         ok: true,
         durationMs: 100,
+        channelKey: { adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: 't1' },
       },
     })
 
-    expect(logs.some((l) => l.includes('subagent-completion reminder dropped'))).toBe(true)
-    expect(logs.some((l) => l.includes('ses_gone'))).toBe(true)
+    const dropLine = logs.find((l) => l.includes('subagent-completion reminder dropped'))
+    expect(dropLine).toBeDefined()
+    expect(dropLine).toStartWith('warn:')
+    expect(dropLine).toContain('ses_gone')
+    expect(dropLine).toContain('channelKey=slack-bot:T1:C1:t1')
   })
 
   test('stop() unsubscribes — subsequent broadcasts are not forwarded', () => {

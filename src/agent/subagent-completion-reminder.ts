@@ -59,6 +59,13 @@ export function formatReminderDuration(ms: number): string {
   return `${min}m${sec}s`
 }
 
+export type SubagentCompletedChannelKey = {
+  adapter: string
+  workspace: string
+  chat: string
+  thread: string | null
+}
+
 export type SubagentCompletedPayload = {
   taskId: string
   subagent: string
@@ -66,6 +73,11 @@ export type SubagentCompletedPayload = {
   ok: boolean
   durationMs: number
   error?: string
+  // Present when the parent was a channel session. Lets the router fall back
+  // to the live successor session for the same channel key when the parent
+  // rolled over (SESSION_FRESHNESS_TTL_MS) or was idle-evicted while the
+  // subagent ran — otherwise the completion is silently dropped.
+  channelKey?: SubagentCompletedChannelKey
 }
 
 // Type guard for the `subagent.completed` broadcast payload. Subscribers
@@ -82,9 +94,11 @@ export function parseSubagentCompletedPayload(payload: unknown): SubagentComplet
     ok?: unknown
     durationMs?: unknown
     error?: unknown
+    channelKey?: unknown
   }
   if (p.kind !== 'subagent.completed') return null
   if (typeof p.parentSessionId !== 'string') return null
+  const channelKey = parseChannelKey(p.channelKey)
   return {
     taskId: typeof p.taskId === 'string' ? p.taskId : '<unknown>',
     subagent: typeof p.subagent === 'string' ? p.subagent : 'subagent',
@@ -92,5 +106,14 @@ export function parseSubagentCompletedPayload(payload: unknown): SubagentComplet
     ok: p.ok === true,
     durationMs: typeof p.durationMs === 'number' ? p.durationMs : 0,
     ...(typeof p.error === 'string' ? { error: p.error } : {}),
+    ...(channelKey !== null ? { channelKey } : {}),
   }
+}
+
+function parseChannelKey(value: unknown): SubagentCompletedChannelKey | null {
+  if (value === null || typeof value !== 'object') return null
+  const k = value as { adapter?: unknown; workspace?: unknown; chat?: unknown; thread?: unknown }
+  if (typeof k.adapter !== 'string' || typeof k.workspace !== 'string' || typeof k.chat !== 'string') return null
+  if (k.thread !== null && typeof k.thread !== 'string') return null
+  return { adapter: k.adapter, workspace: k.workspace, chat: k.chat, thread: k.thread }
 }

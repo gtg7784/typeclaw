@@ -166,6 +166,33 @@ describe('parseSubagentCompletedPayload', () => {
     expect(parsed?.error).toBe('provider rate limit')
   })
 
+  test('preserves a valid channelKey (with null thread)', () => {
+    const parsed = parseSubagentCompletedPayload({
+      kind: 'subagent.completed',
+      taskId: 'bg_rev',
+      subagent: 'reviewer',
+      parentSessionId: 'ses_abc',
+      ok: true,
+      durationMs: 1,
+      channelKey: { adapter: 'github', workspace: 'acme', chat: 'acme/repo#1', thread: null },
+    })
+    expect(parsed!.channelKey).toEqual({ adapter: 'github', workspace: 'acme', chat: 'acme/repo#1', thread: null })
+  })
+
+  test('drops a malformed channelKey but keeps the rest of the payload', () => {
+    const parsed = parseSubagentCompletedPayload({
+      kind: 'subagent.completed',
+      taskId: 'bg_rev',
+      subagent: 'reviewer',
+      parentSessionId: 'ses_abc',
+      ok: true,
+      durationMs: 1,
+      channelKey: { adapter: 'github', workspace: 'acme' },
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed!.channelKey).toBeUndefined()
+  })
+
   test('non-completion kind returns null', () => {
     expect(parseSubagentCompletedPayload({ kind: 'tunnel-url-changed', parentSessionId: 'ses_abc' })).toBeNull()
     expect(parseSubagentCompletedPayload({ kind: 'noise' })).toBeNull()
