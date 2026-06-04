@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 
 import type { ReviewThreadResolveRequest } from '@/channels/types'
 
-import { createGithubReviewThreadResolver } from './review-thread-resolver'
+import { createGithubReviewThreadResolver, listUnresolvedSelfReviewThreads } from './review-thread-resolver'
 
 type ThreadFixture = {
   id: string
@@ -366,5 +366,120 @@ describe('github review-thread resolver', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('no-match')
     expect(seen.mutations).toEqual([])
+  })
+})
+
+describe('listUnresolvedSelfReviewThreads', () => {
+  const list = (fetchImpl: typeof fetch, selfLogin = 'bot[bot]') =>
+    listUnresolvedSelfReviewThreads({
+      token: 'tok',
+      selfLogin,
+      owner: 'acme',
+      repo: 'widgets',
+      prNumber: 585,
+      fetchImpl,
+    })
+
+  it('returns only the bot-authored, still-unresolved threads', async () => {
+    const fetchImpl = fakeGraphql({
+      pages: [
+        {
+          threads: [
+            { id: 'T_OPEN_BOT', isResolved: false, rootCommentId: 100, rootAuthorLogin: 'bot[bot]' },
+            { id: 'T_RESOLVED_BOT', isResolved: true, rootCommentId: 101, rootAuthorLogin: 'bot[bot]' },
+            {
+              id: 'T_OPEN_HUMAN',
+              isResolved: false,
+              rootCommentId: 102,
+              rootAuthorLogin: 'alice',
+              rootAuthorType: 'User',
+            },
+          ],
+          hasNextPage: false,
+          endCursor: null,
+        },
+      ],
+    })
+
+    const result = await list(fetchImpl)
+
+    expect(result).toEqual({ ok: true, threads: [{ threadId: 'T_OPEN_BOT', rootCommentId: 100 }] })
+  })
+
+  it('paginates across pages and aggregates self threads', async () => {
+    const fetchImpl = fakeGraphql({
+      pages: [
+        {
+          threads: [{ id: 'T1', isResolved: false, rootCommentId: 1, rootAuthorLogin: 'bot[bot]' }],
+          hasNextPage: true,
+          endCursor: 'cur1',
+        },
+        {
+          threads: [{ id: 'T2', isResolved: false, rootCommentId: 2, rootAuthorLogin: 'bot[bot]' }],
+          hasNextPage: false,
+          endCursor: null,
+        },
+      ],
+    })
+
+    const result = await list(fetchImpl)
+
+    expect(result).toEqual({
+      ok: true,
+      threads: [
+        { threadId: 'T1', rootCommentId: 1 },
+        { threadId: 'T2', rootCommentId: 2 },
+      ],
+    })
+  })
+
+  it('matches the App bot thread when GraphQL reports the bare slug and self-login carries [bot]', async () => {
+    const fetchImpl = fakeGraphql({
+      pages: [
+        {
+          threads: [
+            { id: 'T_APP', isResolved: false, rootCommentId: 9, rootAuthorLogin: 'typeey', rootAuthorType: 'Bot' },
+          ],
+          hasNextPage: false,
+          endCursor: null,
+        },
+      ],
+    })
+
+    const result = await list(fetchImpl, 'typeey[bot]')
+
+    expect(result).toEqual({ ok: true, threads: [{ threadId: 'T_APP', rootCommentId: 9 }] })
+  })
+
+  it('returns an empty list when no bot-authored unresolved threads exist', async () => {
+    const fetchImpl = fakeGraphql({
+      pages: [
+        {
+          threads: [
+            { id: 'T_HUMAN', isResolved: false, rootCommentId: 5, rootAuthorLogin: 'alice', rootAuthorType: 'User' },
+          ],
+          hasNextPage: false,
+          endCursor: null,
+        },
+      ],
+    })
+
+    const result = await list(fetchImpl)
+
+    expect(result).toEqual({ ok: true, threads: [] })
+  })
+
+  it('surfaces a transport error as ok:false', async () => {
+    const fetchImpl = Object.assign(
+      async (): Promise<Response> => {
+        throw new Error('network down')
+      },
+      { preconnect: () => {} },
+    )
+
+    const result = await list(fetchImpl)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('network down')
   })
 })

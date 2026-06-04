@@ -128,6 +128,69 @@ function parseDecimalId(value: string | undefined): number | null {
 }
 
 async function findThread(fetchImpl: typeof fetch, token: string, target: ResolveTarget): Promise<ThreadLookup> {
+  let lookup: ThreadLookup = { kind: 'absent' }
+  const outcome = await walkThreadPages(
+    fetchImpl,
+    token,
+    { owner: target.owner, repo: target.repo, prNumber: target.prNumber },
+    (nodes) => {
+      for (const node of nodes) {
+        if (node.rootCommentId === target.rootCommentId) {
+          lookup = { kind: 'found', thread: node }
+          return 'stop'
+        }
+      }
+      return 'continue'
+    },
+  )
+  if (outcome.kind === 'error') return { kind: 'error', result: outcome.result }
+  return lookup
+}
+
+export type UnresolvedSelfReviewThread = { threadId: string; rootCommentId: number }
+
+export type ListUnresolvedSelfReviewThreadsResult =
+  | { ok: true; threads: UnresolvedSelfReviewThread[] }
+  | { ok: false; error: string }
+
+// Reuses the same page-walk and authorship guard (`isSelfAuthor`) as the
+// single-thread resolver so the post-push "did my comments get addressed?"
+// sweep can never surface a human reviewer's thread as a resolve candidate.
+export async function listUnresolvedSelfReviewThreads(deps: {
+  token: string
+  selfLogin: string
+  owner: string
+  repo: string
+  prNumber: number
+  fetchImpl?: typeof fetch
+}): Promise<ListUnresolvedSelfReviewThreadsResult> {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  const threads: UnresolvedSelfReviewThread[] = []
+  const outcome = await walkThreadPages(
+    fetchImpl,
+    deps.token,
+    { owner: deps.owner, repo: deps.repo, prNumber: deps.prNumber },
+    (nodes) => {
+      for (const node of nodes) {
+        if (node.isResolved || node.rootCommentId === null) continue
+        if (!isSelfAuthor(node, deps.selfLogin)) continue
+        threads.push({ threadId: node.id, rootCommentId: node.rootCommentId })
+      }
+      return 'continue'
+    },
+  )
+  if (outcome.kind === 'error') return { ok: false, error: outcome.result.error }
+  return { ok: true, threads }
+}
+
+type WalkOutcome = { kind: 'done' } | { kind: 'error'; result: ReviewThreadResolveResult & { ok: false } }
+
+async function walkThreadPages(
+  fetchImpl: typeof fetch,
+  token: string,
+  target: { owner: string; repo: string; prNumber: number },
+  onPage: (nodes: ReviewThreadNode[]) => 'stop' | 'continue',
+): Promise<WalkOutcome> {
   let after: string | null = null
   for (;;) {
     let response: Response
@@ -148,11 +211,8 @@ async function findThread(fetchImpl: typeof fetch, token: string, target: Resolv
     }
     const parsed = await parseThreadsPage(response)
     if (parsed.kind === 'error') return { kind: 'error', result: parsed.result }
-
-    for (const node of parsed.nodes) {
-      if (node.rootCommentId === target.rootCommentId) return { kind: 'found', thread: node }
-    }
-    if (!parsed.hasNextPage || parsed.endCursor === null) return { kind: 'absent' }
+    if (onPage(parsed.nodes) === 'stop') return { kind: 'done' }
+    if (!parsed.hasNextPage || parsed.endCursor === null) return { kind: 'done' }
     after = parsed.endCursor
   }
 }
