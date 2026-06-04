@@ -63,6 +63,14 @@ export type LoopGuard = {
   check: (sessionId: string, tool: string, args: unknown) => LoopGuardDecision
   reset: (sessionId: string) => void
   forget: (sessionId: string) => void
+  // Clears only the residue a single tool left behind in a session: its entries
+  // in the windowed history and, if the current consecutive streak belongs to
+  // that tool, the streak itself. Used when a state-change boundary makes a
+  // tool's prior calls irrelevant — e.g. a backgrounded subagent finishing
+  // makes the next `subagent_output` fetch legitimate even though earlier
+  // premature polls poisoned the window. Narrower than `forget`, so an
+  // unrelated tool's accumulating loop on the same session is preserved.
+  forgetTool: (sessionId: string, tool: string) => void
 }
 
 type SessionState = {
@@ -215,7 +223,33 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
     forget(sessionId) {
       sessions.delete(sessionId)
     },
+    forgetTool(sessionId, tool) {
+      const state = sessions.get(sessionId)
+      if (state === undefined) return
+      const retained: string[] = []
+      for (const sig of state.window) {
+        if (signatureBelongsToTool(sig, tool)) {
+          state.windowWarned.delete(sig)
+        } else {
+          retained.push(sig)
+        }
+      }
+      state.window = retained
+      if (signatureBelongsToTool(state.signature, tool)) {
+        state.signature = ''
+        state.count = 0
+        state.warned = false
+      }
+    },
   }
+}
+
+// Both signature builders prefix the tool name: exact signatures as `tool:...`
+// and path-coarsened ones as `tool#path:...`. A tool's residue is therefore any
+// signature starting with `tool:` or `tool#`, never a different tool whose name
+// merely shares this one as a prefix (the delimiter rules that out).
+function signatureBelongsToTool(signature: string, tool: string): boolean {
+  return signature.startsWith(`${tool}:`) || signature.startsWith(`${tool}#`)
 }
 
 function formatWarnMessage(tool: string, count: number): string {
