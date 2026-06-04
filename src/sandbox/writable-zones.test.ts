@@ -158,6 +158,20 @@ describe('resolveProtectedZones', () => {
     expect(dirs).not.toContain('/etc')
     expect(dirs).toContain(join(agentDir, '.git/hooks'))
   })
+
+  test('a masked-dir core.hooksPath is dropped by subtractMasked (no mask re-exposure)', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[core]\n\thooksPath = workspace/hooks\n')
+
+    // given a guest whose workspace/ is masked, protecting workspace/hooks would
+    // re-expose the hidden dir; subtractMasked (as applyBashSandbox applies it)
+    // must drop it — the masked path is unwritable, so it needs no protection
+    const protectedZones = await resolveProtectedZones(agentDir)
+    const filtered = subtractMasked(protectedZones, { dirs: [join(agentDir, 'workspace')], files: [] })
+
+    expect(filtered.dirs).not.toContain(join(agentDir, 'workspace/hooks'))
+    expect(filtered.dirs).toContain(join(agentDir, '.git/hooks'))
+  })
 })
 
 describe('subtractMasked', () => {

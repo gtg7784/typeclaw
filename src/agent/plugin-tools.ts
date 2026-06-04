@@ -530,8 +530,13 @@ async function applyBashSandbox(
   // drops any writable zone masked for this role so an RW bind never re-exposes a
   // hidden path (e.g. a guest's masked workspace/).
   const writable = subtractMasked(await resolveWritableZones(agentDir), { dirs, files })
+  // subtractMasked again on the protected set: a protected RO bind renders after
+  // the masks (last-op-wins), so an unfiltered protected path nested under a
+  // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)
+  // would re-expose the hidden real dir. A masked path is already non-writable
+  // for this role, so it needs no protection anyway.
   const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
-    ? await resolveProtectedZones(agentDir)
+    ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
     : { dirs: [], files: [] }
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
