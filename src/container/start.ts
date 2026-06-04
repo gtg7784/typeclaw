@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { expandMountPath, loadConfigSync, type Config } from '@/config'
+import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
@@ -188,7 +189,12 @@ export async function start({
     // trigger the migration commit if the file was legacy.
     await refreshGitignore(cwd)
     const pkgRefresh = await refreshPackageJson(cwd)
-    await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
+    const { untracked } = await untrackTrulyIgnoredFiles(cwd, (await loadTypeclawConfig(cwd)).git.ignore.append)
+    if (untracked.length > 0) {
+      await commitGitignoreWithUntracks(cwd, GITIGNORE_FILE, untracked, 'Untrack newly-ignored files')
+    } else {
+      await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
+    }
     if (pkgRefresh.changed) {
       await commitSystemFile(cwd, pkgRefresh.files, 'Enable bun workspaces (packages/*)')
     }
