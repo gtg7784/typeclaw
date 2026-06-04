@@ -82,9 +82,17 @@ describe('reviewer subagent — load-bearing prompt phrases', () => {
     expect(REVIEWER_SYSTEM_PROMPT).toContain('<suggestion>')
   })
 
-  test('prompt forbids recursive spawn (defense-in-depth alongside the tool-presence gate)', () => {
+  test('prompt frames delegation as context-saving (deep model offloads bulk to cheaper workers)', () => {
     const lower = REVIEWER_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toContain('spawning further subagents')
+    expect(lower).toContain('spawn_subagent')
+    expect(lower).toContain('cheaper')
+    // The judgment stays with the reviewer — delegation gathers, never decides.
+    expect(lower).toContain('never delegate the judgment')
+  })
+
+  test('prompt still forbids side effects through a delegate (no laundering write access via a subagent)', () => {
+    const lower = REVIEWER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('a subagent you spawn cannot do for you')
   })
 
   test('prompt forbids generic LLM review noise (drift guard: the whole point of a deep-model reviewer)', () => {
@@ -119,6 +127,11 @@ describe('reviewer subagent declaration', () => {
   test('does NOT require a specific permission (member with generic subagent.spawn can spawn it)', () => {
     const sub = createReviewerSubagent()
     expect(sub.requiresSpecificPermission ?? false).toBe(false)
+  })
+
+  test('declares canSpawnSubagents=true (deep-model reviewer offloads bulk gathering to cheaper workers)', () => {
+    const sub = createReviewerSubagent()
+    expect(sub.canSpawnSubagents).toBe(true)
   })
 
   test('tools list is read-only by whitelist: read/grep/find/ls/bash/web_search/web_fetch with NO write/edit', () => {

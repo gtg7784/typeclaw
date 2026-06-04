@@ -585,3 +585,56 @@ describe('createSpawnSubagentTool — role inheritance', () => {
     expect(capturedOptions?.spawnedByRole).toBeUndefined()
   })
 })
+
+describe('createSpawnSubagentTool — depth guard', () => {
+  function spawnWithOrigin(origin: SessionOrigin) {
+    const registry = makeRegistry()
+    const liveRegistry = new LiveSubagentRegistry()
+    let counter = 0
+    const tool = createSpawnSubagentTool({
+      registry,
+      liveRegistry,
+      createSessionForSubagent: async () => stubSession(),
+      agentDir: '/agent',
+      parentSessionId: 'ses_child',
+      getOrigin: () => origin,
+      generateTaskId: () => `bg_depth${(counter += 1)}`,
+      now: () => 1_000,
+    })
+    return { tool }
+  }
+
+  test('a depth-1 subagent (spawned by a root session) can still spawn', async () => {
+    const { tool } = spawnWithOrigin({
+      kind: 'subagent',
+      subagent: 'operator',
+      parentSessionId: 'ses_child',
+      spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean }
+    expect(details.ok).toBe(true)
+  })
+
+  test('a subagent already at MAX_SUBAGENT_DEPTH is refused', async () => {
+    const { tool } = spawnWithOrigin({
+      kind: 'subagent',
+      subagent: 'operator',
+      parentSessionId: 'ses_grandchild',
+      spawnedByOrigin: {
+        kind: 'subagent',
+        subagent: 'reviewer',
+        parentSessionId: 'ses_child',
+        spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+      },
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('maximum delegation depth')
+  })
+})

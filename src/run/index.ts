@@ -347,6 +347,20 @@ export async function startAgent({
           ...(entry.pluginSubagent.customTools ? { customTools: entry.pluginSubagent.customTools } : {}),
           toolNamePrefix: `__plugin_${entry.pluginName}_${entry.subagentName}`,
         },
+        // Orchestration wiring is opt-in per subagent (canSpawnSubagents) so
+        // only operator/reviewer can delegate; explorer/scout/etc. stay leaves.
+        // The same liveSubagentRegistry instance is shared, but
+        // subagent_output/subagent_cancel scope by the caller's session (see
+        // authorizeLiveSubagentAccess) and spawn_subagent caps the chain at
+        // MAX_SUBAGENT_DEPTH. createSessionForSubagent self-references so a
+        // nested spawn re-enters this same factory.
+        ...(entry.pluginSubagent.canSpawnSubagents === true
+          ? {
+              liveSubagentRegistry,
+              subagentRegistry: snap.subagents,
+              createSessionForSubagent,
+            }
+          : {}),
         ...(entry.pluginSubagent.profile !== undefined ? { profile: entry.pluginSubagent.profile } : {}),
         ...(entry.pluginSubagent.toolResultBudget !== undefined
           ? { toolResultBudget: entry.pluginSubagent.toolResultBudget }

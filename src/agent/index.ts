@@ -328,11 +328,30 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     }
   }
 
+  // Plugin subagents (operator/reviewer) see ONLY their declared builtins plus
+  // the orchestration tools — never the full main-session tool surface. The
+  // orchestration tools self-omit unless `liveSubagentRegistry`/
+  // `subagentRegistry`/`createSessionForSubagent` are wired (see
+  // buildSubagentOrchestrationTools); `spawn_subagent` enforces MAX_SUBAGENT_DEPTH
+  // at execute time so a depth-capped subagent's spawn fails closed even though
+  // the tool is present.
   const customSystemTools =
     options.customTools !== undefined
       ? options.customTools
       : options.pluginSubagent
-        ? resolvedSubagentBuiltins.toolDefinitions
+        ? [
+            ...resolvedSubagentBuiltins.toolDefinitions,
+            ...buildSubagentOrchestrationTools({
+              liveRegistry: options.liveSubagentRegistry,
+              registry: options.subagentRegistry,
+              createSessionForSubagent: options.createSessionForSubagent,
+              agentDir: options.plugins?.agentDir,
+              parentSessionId: sessionManager.getSessionId(),
+              getOrigin,
+              permissions: options.permissions,
+              stream: options.stream,
+            }),
+          ]
         : [
             webSearchTool,
             webFetchTool,
@@ -702,11 +721,13 @@ export function buildSubagentOrchestrationTools(opts: {
     createSubagentOutputTool({
       liveRegistry: opts.liveRegistry,
       getOrigin: opts.getOrigin,
+      callerSessionId: opts.parentSessionId,
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
     }),
     createSubagentCancelTool({
       liveRegistry: opts.liveRegistry,
       getOrigin: opts.getOrigin,
+      callerSessionId: opts.parentSessionId,
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
     }),
   ]

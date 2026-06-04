@@ -49,6 +49,12 @@ export type SubagentShared<P = unknown> = {
   toolResultBudget?: ToolResultBudget
   visibility?: 'public' | 'internal'
   requiresSpecificPermission?: boolean
+  // Opt-in: when true, this subagent's session is wired with the orchestration
+  // tools (spawn_subagent/subagent_output/subagent_cancel) so it can delegate
+  // to its own subagents, bounded by MAX_SUBAGENT_DEPTH and caller-owned
+  // registry scoping. Default (unset/false) keeps the subagent a leaf — the
+  // historical contract for explorer/scout/memory-logger/etc.
+  canSpawnSubagents?: boolean
   // Wall-clock ceiling on a single spawn, enforced at the orchestration
   // layer (both `dispatchSpawnSubagent` and the stream-driven
   // `SubagentConsumer`). When exceeded, the orchestrator's `await` settles
