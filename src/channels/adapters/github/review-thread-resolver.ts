@@ -9,7 +9,7 @@ const GRAPHQL_ENDPOINT = `${GITHUB_API_BASE}/graphql`
 // carry more, so the resolver paginates until it matches the root comment id
 // or exhausts the pages — stopping early on a 404-equivalent (thread absent)
 // rather than fabricating a node id.
-const THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}`
+const THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{__typename login}}}}}}}}`
 
 const RESOLVE_MUTATION = `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}`
 
@@ -18,6 +18,7 @@ type ReviewThreadNode = {
   isResolved: boolean
   rootCommentId: number | null
   rootAuthorLogin: string | null
+  rootAuthorIsBot: boolean
 }
 
 type ThreadLookup =
@@ -66,7 +67,7 @@ export function createGithubReviewThreadResolver(deps: {
     const thread = lookup.thread
     // The load-bearing guard: only the bot may resolve the bot's own thread.
     // Resolving a human reviewer's thread would erase their open question.
-    if (thread.rootAuthorLogin !== selfLogin) {
+    if (!isSelfAuthor(thread, selfLogin)) {
       return {
         ok: false,
         error: `refusing to resolve thread authored by @${thread.rootAuthorLogin ?? 'unknown'} (not @${selfLogin})`,
@@ -77,6 +78,29 @@ export function createGithubReviewThreadResolver(deps: {
 
     return await runResolveMutation(fetchImpl, token, thread.id)
   }
+}
+
+// A GitHub App's own login differs across the two APIs this guard straddles:
+// REST `getSelf` returns `slug[bot]` (selfLogin) but GraphQL's `Bot` author node
+// returns the bare `slug` (rootAuthorLogin). Strict `===` thus refused the App's
+// OWN thread (production: "refusing to resolve thread authored by @typeey (not
+// @typeey[bot])"). The bare-slug match is gated on the GraphQL author actually
+// being a `Bot`: a human `User` can legitimately own the bare slug as a login
+// (e.g. the user `typeey` exists alongside the App `typeey[bot]`), so a User
+// author must still match `selfLogin` exactly — otherwise the suffix-strip would
+// let the bot close a human reviewer's thread, defeating the guard above.
+const BOT_LOGIN_SUFFIX = '[bot]'
+
+function isSelfAuthor(thread: ReviewThreadNode, selfLogin: string): boolean {
+  if (thread.rootAuthorLogin === null) return false
+  if (thread.rootAuthorIsBot) {
+    return normalizeBotLogin(thread.rootAuthorLogin) === normalizeBotLogin(selfLogin)
+  }
+  return thread.rootAuthorLogin === selfLogin
+}
+
+function normalizeBotLogin(login: string): string {
+  return login.endsWith(BOT_LOGIN_SUFFIX) ? login.slice(0, -BOT_LOGIN_SUFFIX.length) : login
 }
 
 type ResolveTarget = { owner: string; repo: string; prNumber: number; rootCommentId: number }
@@ -175,6 +199,7 @@ async function parseThreadsPage(response: Response): Promise<ThreadsPage> {
       isResolved: n.isResolved,
       rootCommentId: root?.databaseId ?? null,
       rootAuthorLogin: root?.author?.login ?? null,
+      rootAuthorIsBot: root?.author?.__typename === 'Bot',
     }
   })
   return { kind: 'ok', nodes, hasNextPage: connection.pageInfo.hasNextPage, endCursor: connection.pageInfo.endCursor }
@@ -231,7 +256,7 @@ type GraphqlThreadsResponse = {
           nodes: Array<{
             id: string
             isResolved: boolean
-            comments: { nodes: Array<{ databaseId?: number; author?: { login?: string } }> }
+            comments: { nodes: Array<{ databaseId?: number; author?: { __typename?: string; login?: string } }> }
           }>
         }
       }
