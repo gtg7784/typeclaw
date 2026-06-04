@@ -10,7 +10,7 @@ export const GUARD_PRIVATE_SURFACE_READ = 'privateSurfaceRead'
 // bash is excluded: its access to hidden paths is contained by the bwrap
 // sandbox (applyBashSandbox), not by blocking the call. Every OTHER tool is
 // scanned, so a new file-reading tool — bundled or third-party — is covered
-// the day it ships without a whitelist edit. websearch/webfetch take URLs, not
+// the day it ships without a whitelist edit. web_search/web_fetch take URLs, not
 // local paths, and the path-plausibility filter keeps their args from matching.
 const UNSCANNED_TOOLS = new Set(['bash'])
 
@@ -65,7 +65,7 @@ export function checkPrivateSurfaceReadGuard(options: {
 
 // Field names whose values are ALWAYS free text (prose/queries/ids), NEVER a
 // filesystem path, for EVERY tool. Scanning them caused false positives: a
-// guest's `channel_reply({ text: "the memory leak" })` or `websearch({ query:
+// guest's `channel_reply({ text: "the memory leak" })` or `web_search({ query:
 // "workspace setup" })` resolve to a bare hidden-dir name and were wrongly
 // blocked. This is a DENYLIST OF KEY NAMES, not a tool whitelist: an unknown
 // field on an unknown tool is still scanned (fail-closed for new path-bearing

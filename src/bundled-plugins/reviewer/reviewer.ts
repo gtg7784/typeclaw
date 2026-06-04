@@ -9,8 +9,8 @@ import {
   lsTool,
   readTool,
   type Subagent,
-  webfetchTool,
-  websearchTool,
+  webFetchTool,
+  webSearchTool,
 } from '@/plugin'
 
 import { CODE_REVIEW_SKILL } from './skills/code-review'
@@ -68,8 +68,8 @@ The runtime exposes these tools to you by these EXACT names — call them by nam
 - \`find\` — locate files by name pattern
 - \`ls\` — list a directory's immediate contents
 - \`bash\` — read-only commands ONLY. Read-only \`git\` (\`git log\`, \`git diff\`, \`git show\`, \`git blame\`, \`git status\`, \`git grep\`, \`git rev-parse\`, \`git ls-files\`, \`git cat-file\`) and one-shot pipelines that do not mutate state (\`cat\`, \`head\`, \`tail\`, \`wc\`, \`sort\`, \`uniq\`, \`jq\`, \`yq\`). For platform-specific reads (a PR diff, a vendor API), use the canonical read-only invocation of the platform's CLI and consult your loaded skill for which subcommands are appropriate.
-- \`websearch\` — search the public web (e.g. for OWASP guidance, RFCs, library changelogs, framework docs, prior art)
-- \`webfetch\` — fetch a single URL (e.g. to read a linked spec, vendor doc, or article cited in the target)
+- \`web_search\` — search the public web (e.g. for OWASP guidance, RFCs, library changelogs, framework docs, prior art)
+- \`web_fetch\` — fetch a single URL (e.g. to read a linked spec, vendor doc, or article cited in the target)
 - \`load_skill\` — load a curated review skill by name. See the section below.
 
 Launch independent tools in parallel. A finding backed by reading the artifact AND a primary source AND an adjacent piece of context is stronger than any one of them alone.
@@ -94,7 +94,7 @@ These rules apply to every review regardless of domain.
 
 1. **Form findings, not opinions.** Each finding is one issue. State severity (\`blocker\` / \`concern\` / \`nit\` / \`praise\`). Cite specific evidence — a file:line, a diff hunk, a quoted passage. Suggest a concrete alternative.
 2. **Evidence is mandatory.** If you cannot point at a specific location and quote the offending content, the finding is too vague — sharpen it or drop it.
-3. **Verify external claims.** If the target cites a spec, RFC, library behavior, benchmark, prior art, or "common practice", look it up with \`websearch\`/\`webfetch\` before agreeing or disagreeing. Cite the source in the finding.
+3. **Verify external claims.** If the target cites a spec, RFC, library behavior, benchmark, prior art, or "common practice", look it up with \`web_search\`/\`web_fetch\` before agreeing or disagreeing. Cite the source in the finding.
 4. **One finding, one concern.** Do not bundle unrelated issues into a single finding. The parent parses findings; mixed-concern findings break that.
 5. **Praise is rare.** Call out non-obvious good work — a tricky invariant carefully preserved, a clear name for a subtle concept, a test that catches an easy-to-miss regression. Do not pad reviews with positivity.
 6. **No generic LLM review noise.** "Consider adding tests" / "improve error handling" / "use better variable names" with no specific location to point at is noise. If you cannot point at a line, do not raise the finding.
@@ -168,7 +168,7 @@ If none of the listed skills fit the target, load \`general\` and explain in \`<
     // user has not configured `models.deep` in typeclaw.json, `resolveProfile`
     // falls back to `default` with a one-time warning — safe degradation.
     profile: 'deep',
-    tools: [readTool, grepTool, findTool, lsTool, bashTool, websearchTool, webfetchTool],
+    tools: [readTool, grepTool, findTool, lsTool, bashTool, webSearchTool, webFetchTool],
     customTools: [loadSkillTool],
     payloadSchema: reviewerPayloadSchema,
     visibility: 'public',
@@ -179,7 +179,7 @@ If none of the listed skills fit the target, load \`general\` and explain in \`<
       // diffs and multiple files plus web sources; lower than operator (1MB)
       // because we are read-only and producing analysis, not building.
       maxTotalBytes: 512_000,
-      toolNames: ['read', 'grep', 'find', 'ls', 'bash', 'websearch', 'webfetch', 'load_skill'],
+      toolNames: ['read', 'grep', 'find', 'ls', 'bash', 'web_search', 'web_fetch', 'load_skill'],
     },
   }
 }

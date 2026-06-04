@@ -1,7 +1,12 @@
-import { lstat } from 'node:fs/promises'
-import path, { join } from 'node:path'
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import path, { isAbsolute, join, resolve } from 'node:path'
 
 export type WritableZones = {
+  dirs: string[]
+  files: string[]
+}
+
+export type ProtectedZones = {
   dirs: string[]
   files: string[]
 }
@@ -13,7 +18,25 @@ export type WritableZones = {
 // guard and the latter holds executable plugin code; bash must not get blanket
 // RW to either. Skill authoring and package writes go through the guarded
 // write/edit tool only.
-const WRITABLE_DIRS = ['workspace', 'public', 'mounts'] as const
+// `.git` is writable so a member can `git add`/`git commit` their own edits.
+// This is the AGENT'S OWN repo, not a shared/upstream one, so writing history
+// is not a privilege boundary: a low-trust role staging a tracked path it
+// cannot edit in the worktree (e.g. via `git update-index --cacheinfo` plumbing)
+// only writes the agent's own history — content the backup runner already
+// force-commits on idle regardless. So we deliberately do NOT try to confine
+// commit *content* to the worktree write-allowlist; that boundary governs the
+// working tree, not the object database.
+//
+// The one thing writable `.git` must NOT grant is code execution in the
+// UNSANDBOXED runtime (backup/dreaming commit the same .git out of band): a
+// planted `.git/hooks/*` or a `core.hooksPath` in `.git/config` would fire there
+// as a higher-privilege process. resolveProtectedZones re-binds `.git/hooks` and
+// `.git/config` read-only (after the writable .git bind, last-op-wins) to close
+// exactly that escalation.
+const WRITABLE_DIRS = ['workspace', 'public', 'mounts', '.git'] as const
+
+const PROTECTED_GIT_DIRS = ['.git/hooks'] as const
+const PROTECTED_GIT_FILES = ['.git/config'] as const
 
 // Bash may EDIT these when present; creating a MISSING root file goes through
 // write/edit (bwrap cannot RW-bind a non-existent source without pre-creating it).
@@ -41,6 +64,83 @@ export async function resolveWritableZones(agentDir: string): Promise<WritableZo
     'file',
   )
   return { dirs, files }
+}
+
+// Read-only re-protections rendered on top of the writable .git bind. Unlike
+// the writable resolvers, this MUST NOT drop absent entries: .git is writable,
+// so a path absent at jail-build time would otherwise be CREATED by sandboxed
+// bash (e.g. a planted .git/hooks/pre-commit) and then executed by the
+// unsandboxed runtime git ops. So we ensure each protected path exists first,
+// then always RO-bind it — a read-only bind of a real dir blocks creating
+// children inside it (EROFS), and a read-only bind of config keeps its real
+// content readable (commits need user.name/email) while blocking mutation.
+//
+// We also resolve the effective core.hooksPath from the real (about-to-be-RO)
+// config: if it already points at a writable location (e.g. workspace/hooks),
+// the .git/hooks RO-bind alone would not cover it, so that dir is protected too.
+export async function resolveProtectedZones(agentDir: string): Promise<ProtectedZones> {
+  const dirs: string[] = []
+  for (const rel of PROTECTED_GIT_DIRS) {
+    dirs.push(await ensureProtectedDir(join(agentDir, rel)))
+  }
+  const files: string[] = []
+  for (const rel of PROTECTED_GIT_FILES) {
+    files.push(await ensureProtectedFile(join(agentDir, rel)))
+  }
+
+  const hooksPathDir = await resolveEffectiveHooksPath(agentDir)
+  if (hooksPathDir !== undefined && !dirs.includes(hooksPathDir)) {
+    dirs.push(await ensureProtectedDir(hooksPathDir))
+  }
+
+  return { dirs, files }
+}
+
+// Fail closed: a symlink at a protected path would make the RO bind follow it
+// elsewhere, so reject it rather than silently protect the wrong target.
+async function ensureProtectedDir(target: string): Promise<string> {
+  await mkdir(target, { recursive: true })
+  await assertNotSymlink(target)
+  return target
+}
+
+async function ensureProtectedFile(target: string): Promise<string> {
+  if (!(await isRealEntry(target, 'file'))) {
+    try {
+      await writeFile(target, '', { flag: 'wx' })
+    } catch {
+      // Lost a race (or it appeared); the symlink check below still guards it.
+    }
+  }
+  await assertNotSymlink(target)
+  return target
+}
+
+async function assertNotSymlink(target: string): Promise<void> {
+  const stats = await lstat(target)
+  if (stats.isSymbolicLink()) {
+    throw new Error(`sandbox: refusing to protect symlinked path ${target}`)
+  }
+}
+
+// Reads core.hooksPath straight from .git/config text (the file is about to be
+// RO-bound, so its content is the trusted baseline). Returns the resolved
+// absolute dir only when it lands inside agentDir — an outside path is not
+// writable by the jail and a relative path resolves against the repo root, per
+// gitconfig semantics.
+async function resolveEffectiveHooksPath(agentDir: string): Promise<string | undefined> {
+  let text: string
+  try {
+    text = await readFile(join(agentDir, '.git', 'config'), 'utf8')
+  } catch {
+    return undefined
+  }
+  const match = text.match(/^\s*hooksPath\s*=\s*(.+?)\s*$/m)
+  if (match === null) return undefined
+  const raw = match[1]?.trim()
+  if (raw === undefined || raw.length === 0) return undefined
+  const resolved = isAbsolute(raw) ? resolve(raw) : resolve(agentDir, raw)
+  return isInside(agentDir, resolved) ? resolved : undefined
 }
 
 // SECURITY: a writable RW bind renders AFTER the masks and last-op-wins, so an

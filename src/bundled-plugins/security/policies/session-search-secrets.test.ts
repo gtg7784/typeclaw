@@ -121,7 +121,7 @@ describe('checkSessionSearchSecretsGuard', () => {
 
   test('does not apply to unrelated tools', () => {
     expect(checkSessionSearchSecretsGuard({ tool: 'bash', args: { query: 'password' } })).toBeUndefined()
-    expect(checkSessionSearchSecretsGuard({ tool: 'webfetch', args: { query: 'password' } })).toBeUndefined()
+    expect(checkSessionSearchSecretsGuard({ tool: 'web_fetch', args: { query: 'password' } })).toBeUndefined()
     expect(checkSessionSearchSecretsGuard({ tool: 'grep', args: { query: 'password' } })).toBeUndefined()
   })
 

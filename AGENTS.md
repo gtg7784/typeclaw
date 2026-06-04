@@ -159,7 +159,7 @@ The architecture reference lives in the published docs under [Internals](https:/
 | `src/stream/` targets, subagent dispatch, cron split, TUI wire-protocol                       | [/docs/internals/message-stream](https://typeclaw.dev/docs/internals/message-stream)       |
 | `src/channels/` engage/observe decision, context buffer, suppressors, peer-bot loop guard     | [/docs/internals/engagement](https://typeclaw.dev/docs/internals/engagement)               |
 | `src/agent/todo/` tools, durable scope resolution, fail-closed auto-continuation budgets      | [/docs/internals/todo-continuation](https://typeclaw.dev/docs/internals/todo-continuation) |
-| `websearch` tool, `curl-impersonate` pin, DDG failure modes                                   | [/docs/internals/web-search](https://typeclaw.dev/docs/internals/web-search)               |
+| `web_search` tool, `curl-impersonate` pin, DDG failure modes                                  | [/docs/internals/web-search](https://typeclaw.dev/docs/internals/web-search)               |
 | Xvfb, NET_ADMIN drop, persistent-`$HOME` overlay, agent-browser headed-mode wrapper           | [/docs/internals/xvfb](https://typeclaw.dev/docs/internals/xvfb)                           |
 | `bwrap` per-tool sandbox, `seccomp=unconfined` rationale, OrbStack `/proc` workaround         | [/docs/internals/sandbox](https://typeclaw.dev/docs/internals/sandbox)                     |
 

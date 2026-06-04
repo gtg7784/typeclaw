@@ -1336,7 +1336,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \\
  && mkdir -p -m 755 /etc/apt/keyrings`
 
 // Layer 2.5: install pinned curl-impersonate (lexiforest fork) for the
-// websearch tool's DDG scraper. Required to evade DDG's TLS/HTTP2
+// web_search tool's DDG scraper. Required to evade DDG's TLS/HTTP2
 // fingerprinting on residential IPs — see src/agent/tools/ddg.ts for the
 // full rationale. Placed after Layer 2 so curl + ca-certificates + tar
 // (already in baseline) are present, and before agent-browser so a version

@@ -653,11 +653,11 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
       { __builtinTool: 'grep' },
       { __builtinTool: 'find' },
       { __builtinTool: 'ls' },
-      { __builtinTool: 'websearch' },
-      { __builtinTool: 'webfetch' },
+      { __builtinTool: 'web_search' },
+      { __builtinTool: 'web_fetch' },
     ])
     expect(resolved.agentTools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
-    expect(resolved.toolDefinitions.map((t) => t.name)).toEqual(['websearch', 'webfetch'])
+    expect(resolved.toolDefinitions.map((t) => t.name)).toEqual(['web_search', 'web_fetch'])
   })
 
   test('pi-side resolve to pi-coding-agent AgentTool exports by reference equality (not *ToolDefinition variant)', async () => {
@@ -693,21 +693,21 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
 
   test('typeclaw-side resolve to the original ToolDefinition imports by reference equality', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const { websearchTool } = await import('./tools/websearch')
-    const { webfetchTool } = await import('./tools/webfetch')
-    const ws = resolveBuiltinToolRefs([{ __builtinTool: 'websearch' }])
-    const wf = resolveBuiltinToolRefs([{ __builtinTool: 'webfetch' }])
+    const { webSearchTool } = await import('./tools/websearch')
+    const { webFetchTool } = await import('./tools/webfetch')
+    const ws = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }])
+    const wf = resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }])
     expect(ws.agentTools).toEqual([])
-    expect(ws.toolDefinitions[0]).toBe(websearchTool)
+    expect(ws.toolDefinitions[0]).toBe(webSearchTool)
     expect(wf.agentTools).toEqual([])
-    expect(wf.toolDefinitions[0]).toBe(webfetchTool)
+    expect(wf.toolDefinitions[0]).toBe(webFetchTool)
   })
 
   test('mixed refs partition correctly: scout-shape (web only) leaves agentTools empty', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const r = resolveBuiltinToolRefs([{ __builtinTool: 'websearch' }, { __builtinTool: 'webfetch' }])
+    const r = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }, { __builtinTool: 'web_fetch' }])
     expect(r.agentTools).toEqual([])
-    expect(r.toolDefinitions.map((t) => t.name).sort()).toEqual(['webfetch', 'websearch'])
+    expect(r.toolDefinitions.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
   })
 
   test('mixed refs partition correctly: explorer-shape (coding only) leaves toolDefinitions empty', async () => {
@@ -1275,8 +1275,8 @@ describe('loop guard integration', () => {
   test('throws on the fifth identical system tool call so the engine surfaces the loop error', async () => {
     const calls: number[] = []
     const tool = definePiTool({
-      name: 'webfetch',
-      label: 'webfetch',
+      name: 'web_fetch',
+      label: 'web_fetch',
       description: '',
       parameters: Type.Object({ url: Type.String() }),
       async execute() {
@@ -1363,8 +1363,8 @@ describe('loop guard integration', () => {
   test('aborts the turn when a system tool is blocked, alongside the thrown loop error', async () => {
     let aborts = 0
     const tool = definePiTool({
-      name: 'webfetch',
-      label: 'webfetch',
+      name: 'web_fetch',
+      label: 'web_fetch',
       description: '',
       parameters: Type.Object({ url: Type.String() }),
       async execute() {

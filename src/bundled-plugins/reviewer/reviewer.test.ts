@@ -47,8 +47,8 @@ describe('reviewer subagent — load-bearing prompt phrases', () => {
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`find`')
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`ls`')
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`bash`')
-    expect(REVIEWER_SYSTEM_PROMPT).toContain('`websearch`')
-    expect(REVIEWER_SYSTEM_PROMPT).toContain('`webfetch`')
+    expect(REVIEWER_SYSTEM_PROMPT).toContain('`web_search`')
+    expect(REVIEWER_SYSTEM_PROMPT).toContain('`web_fetch`')
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`load_skill`')
   })
 
@@ -121,10 +121,10 @@ describe('reviewer subagent declaration', () => {
     expect(sub.requiresSpecificPermission ?? false).toBe(false)
   })
 
-  test('tools list is read-only by whitelist: read/grep/find/ls/bash/websearch/webfetch with NO write/edit', () => {
+  test('tools list is read-only by whitelist: read/grep/find/ls/bash/web_search/web_fetch with NO write/edit', () => {
     const sub = createReviewerSubagent()
     const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
-    expect(toolNames).toEqual(['bash', 'find', 'grep', 'ls', 'read', 'webfetch', 'websearch'])
+    expect(toolNames).toEqual(['bash', 'find', 'grep', 'ls', 'read', 'web_fetch', 'web_search'])
     expect(toolNames).not.toContain('write')
     expect(toolNames).not.toContain('edit')
   })

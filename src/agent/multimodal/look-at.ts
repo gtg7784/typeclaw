@@ -161,7 +161,7 @@ async function runLookAtImages(imageContents: ImageContent[], prompt: string | u
     origin,
     profile: 'vision',
     // Both knobs are required to fully disarm the subagent's tool surface:
-    // `customTools: []` blocks typeclaw's system tools (websearch/webfetch/
+    // `customTools: []` blocks typeclaw's system tools (web_search/web_fetch/
     // look_at/restart/...) — without it, the look_at tool would recurse
     // into itself. `tools: []` blocks pi-coding-agent's defaults
     // (read/bash/edit/write) — without it, a vision model could be talked

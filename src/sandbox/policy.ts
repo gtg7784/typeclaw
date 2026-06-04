@@ -46,12 +46,24 @@ export type SandboxWritablePolicy = {
   files?: string[]
 }
 
+// Read-only re-protections carved back out of a writable parent. MUST render
+// after `writable` so bwrap's last-op-wins keeps these EROFS despite the parent
+// RW bind. Load-bearing: `.git` is writable so members can commit, but
+// `.git/hooks` and `.git/config` stay RO here — otherwise a low-trust role
+// plants a hook or sets core.hooksPath and gets code execution in the
+// unsandboxed runtime git ops (backup/dreaming) that share the same .git.
+export type SandboxProtectedPolicy = {
+  dirs?: string[]
+  files?: string[]
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
   mounts?: SandboxMount[]
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy
+  protected?: SandboxProtectedPolicy
   network?: SandboxNetwork
   env?: SandboxEnvPolicy
   commandFilter?: SandboxCommandFilter

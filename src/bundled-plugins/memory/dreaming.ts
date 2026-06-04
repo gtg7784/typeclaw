@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { z } from 'zod'
 
+import { withGitLock } from '@/git/mutex'
 import { defineTool, lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
@@ -419,6 +420,10 @@ async function ensureMemoryFiles(agentDir: string): Promise<void> {
 // `git add` fails with "outside of your sparse-checkout definition" on a
 // skip-worktree path.
 export async function commitMemorySnapshot(cwd: string): Promise<void> {
+  await withGitLock(cwd, () => commitMemorySnapshotUnlocked(cwd))
+}
+
+async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return
   if (!existsSync(join(cwd, '.git'))) return

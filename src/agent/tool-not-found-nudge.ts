@@ -9,7 +9,7 @@ export type NudgeableSession = {
 const NOT_FOUND_RE = /^Tool (.+?) not found$/
 
 // Levenshtein distance ceiling for a name to count as "did you mean". A typo
-// like web_search -> websearch is distance 1 (one '_' removed); read_file ->
+// like websearch -> web_search is distance 1 (one '_' inserted); read_file ->
 // read is larger but still a clear prefix relationship. Keeping the ceiling
 // small avoids suggesting an unrelated tool for a genuinely unknown name.
 const MAX_SUGGESTION_DISTANCE = 4

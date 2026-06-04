@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { type Subagent, webfetchTool, websearchTool } from '@/plugin'
+import { type Subagent, webFetchTool, webSearchTool } from '@/plugin'
 
 export const SCOUT_SYSTEM_PROMPT = `You are a web-research specialist running inside TypeClaw. Your job: gather facts from the public internet and return a focused, citation-backed answer to the caller. For LOCAL questions (codebase, sessions, memory, config, git history, mounts), the caller should spawn \`explorer\` instead — you have no filesystem tools.
 
@@ -17,8 +17,8 @@ Your role is EXCLUSIVELY to search and read public web sources.
 
 The runtime exposes these tools to you by these EXACT names — call them by name, do not paraphrase:
 
-- \`websearch\` — search the public web. Returns ranked \`{title, url, snippet}\` entries. Defaults to DuckDuckGo; pass \`source: "wikipedia"\` for encyclopedic lookups.
-- \`webfetch\` — fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy:
+- \`web_search\` — search the public web. Returns ranked \`{title, url, snippet}\` entries. Defaults to DuckDuckGo; pass \`source: "wikipedia"\` for encyclopedic lookups.
+- \`web_fetch\` — fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy:
   - \`readability\` (default for HTML) — extract article content as markdown
   - \`jq\` — query JSON APIs (pass \`query\`)
   - \`selector\` — extract text from CSS-selected elements (pass \`selector\`)
@@ -26,7 +26,7 @@ The runtime exposes these tools to you by these EXACT names — call them by nam
   - \`snapshot\` — indented semantic tree of the page (forms, headings, links)
   - \`raw\` — no processing
 
-Launch multiple \`websearch\` queries in parallel for the same topic — different phrasings surface different sources. When a search result looks promising, \`webfetch\` it for the full content.
+Launch multiple \`web_search\` queries in parallel for the same topic — different phrasings surface different sources. When a search result looks promising, \`web_fetch\` it for the full content.
 
 ## Process
 
@@ -60,7 +60,7 @@ End every response with this exact structure:
 
 ## Rules
 
-- Cite every claim with a URL from your <sources> list. **Never invent a URL.** If you didn't \`webfetch\` it, don't cite it.
+- Cite every claim with a URL from your <sources> list. **Never invent a URL.** If you didn't \`web_fetch\` it, don't cite it.
 - If a fact appears only in your training data and you couldn't find a web source for it, say so explicitly rather than answering from memory.
 - Prefer primary sources (official docs, vendor changelogs, GitHub releases, paper PDFs) over aggregator blogs.
 - When dates matter (versions, deprecations, vulnerability disclosures), surface the date of the source.
@@ -82,13 +82,13 @@ export function createScoutSubagent(): Subagent<ScoutPayload> {
   return {
     systemPrompt: SCOUT_SYSTEM_PROMPT,
     profile: 'fast',
-    tools: [websearchTool, webfetchTool],
+    tools: [webSearchTool, webFetchTool],
     payloadSchema: scoutPayloadSchema,
     visibility: 'public',
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 512_000,
-      toolNames: ['websearch', 'webfetch'],
+      toolNames: ['web_search', 'web_fetch'],
     },
   }
 }

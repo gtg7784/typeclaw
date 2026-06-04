@@ -72,8 +72,8 @@ import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { createSubagentCancelTool } from './tools/subagent-cancel'
 import { createSubagentOutputTool } from './tools/subagent-output'
 import { createTodoTools } from './tools/todo'
-import { webfetchTool } from './tools/webfetch'
-import { websearchTool } from './tools/websearch'
+import { webFetchTool } from './tools/webfetch'
+import { webSearchTool } from './tools/websearch'
 
 export type { SessionOrigin } from './session-origin'
 
@@ -333,8 +333,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       : options.pluginSubagent
         ? resolvedSubagentBuiltins.toolDefinitions
         : [
-            websearchTool,
-            webfetchTool,
+            webSearchTool,
+            webFetchTool,
             lookAtTool,
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),

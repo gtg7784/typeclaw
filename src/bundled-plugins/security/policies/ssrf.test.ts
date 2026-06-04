@@ -97,37 +97,37 @@ describe('SSRF classifier', () => {
     expect(classifyUrl('http://8.8.8.8/').blocked).toBe(false)
   })
 
-  test('does not block bogus / unparseable URL (left to webfetch tool to reject)', () => {
+  test('does not block bogus / unparseable URL (left to web_fetch tool to reject)', () => {
     expect(classifyUrl('not-a-url').blocked).toBe(false)
   })
 })
 
 describe('checkSsrfGuard', () => {
-  test('blocks SSRF on webfetch', () => {
-    const result = checkSsrfGuard({ tool: 'webfetch', args: { url: 'http://169.254.169.254/' } })
+  test('blocks SSRF on web_fetch', () => {
+    const result = checkSsrfGuard({ tool: 'web_fetch', args: { url: 'http://169.254.169.254/' } })
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('cloud_metadata')
   })
 
   test('allows public URL', () => {
-    expect(checkSsrfGuard({ tool: 'webfetch', args: { url: 'https://example.com/' } })).toBeUndefined()
+    expect(checkSsrfGuard({ tool: 'web_fetch', args: { url: 'https://example.com/' } })).toBeUndefined()
   })
 
   test('allows acknowledged SSRF', () => {
     const result = checkSsrfGuard({
-      tool: 'webfetch',
+      tool: 'web_fetch',
       args: { url: 'http://127.0.0.1:3000/dev', acknowledgeGuards: { ssrf: true } },
     })
     expect(result).toBeUndefined()
   })
 
-  test('does not apply to non-webfetch tools', () => {
+  test('does not apply to non-web_fetch tools', () => {
     expect(checkSsrfGuard({ tool: 'bash', args: { url: 'http://127.0.0.1/' } })).toBeUndefined()
   })
 
   test('handles non-string url gracefully', () => {
-    expect(checkSsrfGuard({ tool: 'webfetch', args: { url: 42 } })).toBeUndefined()
-    expect(checkSsrfGuard({ tool: 'webfetch', args: {} })).toBeUndefined()
+    expect(checkSsrfGuard({ tool: 'web_fetch', args: { url: 42 } })).toBeUndefined()
+    expect(checkSsrfGuard({ tool: 'web_fetch', args: {} })).toBeUndefined()
   })
 
   test('exposes guard name constant', () => {
