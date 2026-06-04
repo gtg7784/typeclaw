@@ -70,7 +70,7 @@ export type RestartPreflight = (input: {
 
 export type PortbrokerCallbacks = {
   start: (input: PortbrokerStartInput) => Promise<void>
-  stop: (containerName: string, reason: 'deregistered' | 'broker-stopped') => Promise<void>
+  stop: (containerName: string, reason: 'deregistered' | 'broker-stopped' | 'fatal-auth') => Promise<void>
   // Returns ports the broker is currently exposing on the host for this
   // container. Empty array when the container is unregistered, when the broker
   // is disabled (`portForward.allow: []`), or when nothing inside the
@@ -87,6 +87,7 @@ export type PortbrokerStartInput = {
   brokerToken: string
   onEvent: (event: PortForwardEvent) => void
   onTailscaleServeEvent: (event: TailscaleServeEvent) => void
+  onFatalAuthFailure?: (info: { brokerToken: string; reason: string }) => void
 }
 
 export type DaemonLogEvent =
@@ -227,6 +228,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const version = opts.version ?? UNVERSIONED_SENTINEL
   const cwds = new Map<string, string>()
   const restartTokens = new Map<string, string>()
+  const brokerTokens = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
   let stopped = false
@@ -285,6 +287,24 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     } catch {}
   }
 
+  // A broker reports fatal auth when its token no longer matches the running
+  // container (typically a stale T_old broker revived on hostd boot racing a
+  // container that now expects T_new). The token guard is load-bearing: a fresh
+  // register may have overwritten brokerTokens with T_new before this late
+  // callback fires, in which case we must NOT delete the live registration.
+  const handleFatalAuthFailure = (containerName: string, failedToken: string, reason: string): Promise<void> =>
+    runSerially(containerName, async () => {
+      if (brokerTokens.get(containerName) !== failedToken) return
+      brokerTokens.delete(containerName)
+      cwds.delete(containerName)
+      restartTokens.delete(containerName)
+      gcMisses.delete(containerName)
+      if (opts.portbroker) await opts.portbroker.stop(containerName, 'fatal-auth').catch(() => {})
+      if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(containerName).catch(() => {})
+      await removeRegistrationFile(containerName)
+      log({ kind: 'registration-skipped', containerName, reason: `fatal broker auth: ${reason}` })
+    })
+
   const applyRegistration = async (payload: RegisterPayload): Promise<void> => {
     const alreadyRegistered = cwds.has(payload.containerName)
     cwds.set(payload.containerName, payload.cwd)
@@ -299,6 +319,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       payload.portForward !== undefined &&
       payload.brokerToken !== undefined
     ) {
+      brokerTokens.set(payload.containerName, payload.brokerToken)
       await opts.portbroker.start({
         containerName: payload.containerName,
         cwd: payload.cwd,
@@ -307,6 +328,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         brokerToken: payload.brokerToken,
         onEvent: (event) => log({ kind: 'port-forward-event', event }),
         onTailscaleServeEvent: (event) => log({ kind: 'tailscale-serve-event', event }),
+        onFatalAuthFailure: ({ brokerToken, reason }) => {
+          void handleFatalAuthFailure(payload.containerName, brokerToken, reason)
+        },
       })
     }
     if (opts.kakaoRenewal) {
@@ -335,6 +359,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     runSerially(req.containerName, async () => {
       const hadCwd = cwds.delete(req.containerName)
       restartTokens.delete(req.containerName)
+      brokerTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
       if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
       if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(req.containerName).catch(() => {})
