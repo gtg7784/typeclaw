@@ -50,13 +50,21 @@ export type TuiOptions = {
   onVersionMismatch?: (info: VersionMismatch) => void
 }
 
-// Outcome of a single `run()` cycle. The CLI's reconnect loop reads this to
-// decide whether to spin again or exit. `lostConnection` is true when the
-// WS closed AFTER the connected handshake without a deliberate /quit or
-// Ctrl+C — exactly the case a self-restart produces, and the only one
-// where a fresh connect can recover the session. Quit / Ctrl+C / pre-
-// handshake errors all resolve with `lostConnection: false`.
-export type TuiRunOutcome = { lostConnection: boolean }
+// Outcome of a single `run()` cycle.
+//   - 'detach': idle Esc — return to the session-viewer list. Closing the WS
+//     ends the server-side AgentSession (accepted; the list re-shows it as a
+//     read-only transcript).
+//   - 'exit': deliberate /quit or Ctrl+C — terminate the client.
+//   - 'lostConnection': WS closed AFTER the handshake without a deliberate
+//     quit/detach — exactly the self-restart case, and the only one where a
+//     fresh connect can recover the session.
+//   - 'connectFailed': pre-handshake connect/handshake error.
+// The CLI reconnect loop spins only on 'lostConnection'.
+export type TuiRunResult =
+  | { reason: 'detach' }
+  | { reason: 'exit'; exitCode: number }
+  | { reason: 'lostConnection' }
+  | { reason: 'connectFailed' }
 
 export function createTui({
   url,
@@ -68,7 +76,7 @@ export function createTui({
   expectedVersion,
   onVersionMismatch,
 }: TuiOptions) {
-  async function run(): Promise<TuiRunOutcome> {
+  async function run(): Promise<TuiRunResult> {
     const terminal = createTerminal()
     const tui = new TUI(terminal)
     const displayUrl = redactUrl(url)
@@ -78,13 +86,19 @@ export function createTui({
     tui.start()
     tui.requestRender()
 
-    const client = await createClient(url).catch((err) => {
+    // Pre-handshake failures resolve 'connectFailed' (not throw): the standalone
+    // CLI injects exit=process.exit so exit(1) ends the process and the return is
+    // moot; the viewer injects a no-op exit so run() resolves cleanly and the
+    // caller maps connectFailed into an error result instead of an uncaught reject.
+    const maybeClient = await createClient(url).catch((err) => {
       status.setText(colors.red(`connection error: ${err instanceof Error ? err.message : String(err)}`))
       tui.requestRender()
       tui.stop()
       exit(1)
-      throw err
+      return null
     })
+    if (maybeClient === null) return { reason: 'connectFailed' }
+    const client = maybeClient
 
     const handshake = await waitForConnected(client, displayUrl, handshakeTimeoutMs).catch((err) => {
       status.setText(colors.red(`connection error: ${err instanceof Error ? err.message : String(err)}`))
@@ -92,10 +106,10 @@ export function createTui({
       client.close()
       tui.stop()
       exit(1)
-      throw err
+      return null
     })
+    if (handshake === null) return { reason: 'connectFailed' }
 
-    let userInitiatedShutdown = false
     const { sessionId, serverVersion } = handshake
     status.setText(colors.dim(`session: ${sessionId}`))
     tui.requestRender()
@@ -231,12 +245,23 @@ export function createTui({
       }
     })
 
-    const closed = new Promise<boolean>((resolve) => {
-      client.onClose(() => {
-        appendHistory(new Text(colors.dim('disconnected'), 0, 0))
-        tui.requestRender()
-        resolve(!userInitiatedShutdown)
-      })
+    let settleOutcome: ((result: TuiRunResult) => void) | null = null
+    const outcome = new Promise<TuiRunResult>((resolve) => {
+      settleOutcome = resolve
+    })
+    const settle = (result: TuiRunResult): void => {
+      if (settleOutcome === null) return
+      const fn = settleOutcome
+      settleOutcome = null
+      fn(result)
+    }
+
+    client.onClose(() => {
+      appendHistory(new Text(colors.dim('disconnected'), 0, 0))
+      tui.requestRender()
+      // A user-initiated detach/exit already closed the WS deliberately and
+      // settled the outcome; onClose then fires but must not override it.
+      settle({ reason: 'lostConnection' })
     })
 
     function send(text: string): Promise<void> {
@@ -249,7 +274,7 @@ export function createTui({
 
     function runTuiCommand(command: TuiCommandName): boolean {
       if (command === 'quit') {
-        shutdown(0)
+        exitWith(0)
         return true
       }
       if (command === 'reload') {
@@ -266,29 +291,44 @@ export function createTui({
       return true
     }
 
-    // Esc aborts an in-flight reply. The Editor does not bind Esc, so a
-    // top-level input listener can intercept it without fighting the editor.
+    // Esc means "abort the in-flight reply" while a turn is generating, and
+    // "detach back to the session list" when idle. The Editor does not bind
+    // Esc, so a top-level listener intercepts it without fighting the editor.
     tui.addInputListener((data) => {
-      if (matchesKey(data, Key.escape) && replyInFlight) {
+      if (!matchesKey(data, Key.escape)) return undefined
+      if (replyInFlight) {
         client.send({ type: 'abort' })
         return { consume: true }
       }
-      return undefined
+      detach()
+      return { consume: true }
     })
 
-    const shutdown = (code: number) => {
-      userInitiatedShutdown = true
+    // Settle BEFORE closing the client: client.close() fires onClose, which
+    // settles 'lostConnection'. settle() is idempotent, so the first call wins —
+    // settling the deliberate outcome first keeps the later onClose a no-op.
+    const teardown = (): void => {
       tui.stop()
       client.close()
+    }
+
+    const exitWith = (code: number): void => {
+      settle({ reason: 'exit', exitCode: code })
+      teardown()
       exit(code)
     }
 
-    // Ctrl+C exits cleanly. In raw mode the kernel does NOT generate SIGINT,
-    // so we must intercept the \x03 byte ourselves. The Editor would otherwise
-    // swallow it. tui.stop() restores raw-mode/cursor/echo before we exit.
+    const detach = (): void => {
+      settle({ reason: 'detach' })
+      teardown()
+    }
+
+    // Ctrl+C exits the client. In raw mode the kernel does NOT generate SIGINT,
+    // so we intercept the \x03 byte ourselves; the Editor would otherwise
+    // swallow it. teardown() restores raw-mode/cursor/echo before we settle.
     tui.addInputListener((data) => {
       if (matchesKey(data, Key.ctrl('c'))) {
-        shutdown(0)
+        exitWith(0)
         return { consume: true }
       }
       return undefined
@@ -330,15 +370,15 @@ export function createTui({
       const command = parseBareTuiCommand(initialPrompt)
       if (command !== null) {
         runTuiCommand(command)
-        if (command === 'quit') return { lostConnection: false }
+        if (command === 'quit') return { reason: 'exit', exitCode: 0 }
       } else {
         await send(initialPrompt)
       }
     }
 
-    const lostConnection = await closed
+    const result = await outcome
     tui.stop()
-    return { lostConnection }
+    return result
   }
 
   return { run }

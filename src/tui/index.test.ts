@@ -143,11 +143,11 @@ describe('createTui', () => {
     client.triggerClose()
 
     // then
-    await expect(runPromise).rejects.toThrow('closed before the session was ready')
+    await expect(runPromise).resolves.toEqual({ reason: 'connectFailed' })
     expect(exitCode).toBe(1)
   })
 
-  test('exits when the server never sends connected', async () => {
+  test('reports connectFailed when the server never sends connected', async () => {
     // given
     const terminal = new FakeTerminal()
     const client = fakeClient()
@@ -164,7 +164,7 @@ describe('createTui', () => {
     })
 
     // when / then
-    await expect(tui.run()).rejects.toThrow('timed out waiting for connected message')
+    await expect(tui.run()).resolves.toEqual({ reason: 'connectFailed' })
     expect(exitCode).toBe(1)
   })
 
@@ -1102,7 +1102,7 @@ describe('createTui queue panel', () => {
     )
   })
 
-  test('returns lostConnection: true when the WS closes after handshake without user action', async () => {
+  test('resolves lostConnection when the WS closes after handshake without user action', async () => {
     // given
     const terminal = new FakeTerminal()
     const client = fakeClient()
@@ -1120,31 +1120,47 @@ describe('createTui queue panel', () => {
     client.triggerClose()
 
     // then
-    await expect(runPromise).resolves.toEqual({ lostConnection: true })
+    await expect(runPromise).resolves.toEqual({ reason: 'lostConnection' })
   })
 
-  test('returns lostConnection: false when the user submits /quit', async () => {
+  test('resolves exit when the user submits /quit', async () => {
     // given
     const terminal = new FakeTerminal()
     const client = fakeClient()
     client.emit({ type: 'connected', sessionId: 'sid-quit' })
-    let exitCode: number | undefined
     const tui = createTui({
       url: 'ws://ignored',
       initialPrompt: '/quit',
       createClient: async () => client,
       createTerminal: () => terminal,
-      exit: (code) => {
-        exitCode = code
-        client.triggerClose()
-      },
+      exit: () => {},
     })
 
     // when
     const outcome = await tui.run()
 
     // then
-    expect(outcome).toEqual({ lostConnection: false })
-    expect(exitCode).toBe(0)
+    expect(outcome).toEqual({ reason: 'exit', exitCode: 0 })
+  })
+
+  test('resolves detach when Esc is pressed while idle', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-detach' })
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: () => {},
+    })
+
+    // when
+    const runPromise = tui.run()
+    await flush()
+    terminal.feed('\x1b')
+
+    // then
+    await expect(runPromise).resolves.toEqual({ reason: 'detach' })
   })
 })
