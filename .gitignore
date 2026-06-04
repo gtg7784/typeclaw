@@ -56,4 +56,5 @@ auth.json
 /sessions/
 /memory/
 /channels/
+/todo/
 

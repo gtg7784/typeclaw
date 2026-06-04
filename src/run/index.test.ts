@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,8 +33,19 @@ afterEach(async () => {
 })
 
 describe('startAgent', () => {
+  // Isolate cwd per test: startAgent defaults cwd to process.cwd(), and the
+  // cron/session/todo paths derive agentDir from it. Without this, a fired
+  // cron job writes todo/cron/*.json into the repo source tree (dev stage).
+  let testCwd: string
+  beforeEach(async () => {
+    testCwd = await mkdtemp(join(tmpdir(), 'typeclaw-run-cwd-'))
+  })
+  afterEach(async () => {
+    await rm(testCwd, { recursive: true, force: true })
+  })
+
   test('starts a ws server on an ephemeral port in headless mode', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
 
     expect(running.server.port).toBeGreaterThan(0)
     expect(running.tuiPromise).toBeNull()
@@ -55,6 +66,7 @@ describe('startAgent', () => {
       port: 0,
       attachTui: true,
       initialPrompt: 'hello',
+      cwd: testCwd,
       createTui: fakeTui,
       loadCron: noCron,
     })
@@ -75,7 +87,7 @@ describe('startAgent', () => {
         return { run: () => new Promise<void>(() => {}) }
       }
 
-      running = await startAgent({ port: 0, attachTui: true, createTui: fakeTui, loadCron: noCron })
+      running = await startAgent({ port: 0, attachTui: true, cwd: testCwd, createTui: fakeTui, loadCron: noCron })
 
       expect(calls).toHaveLength(1)
       const url = new URL(calls[0]!.url)
@@ -98,14 +110,14 @@ describe('startAgent', () => {
       return { run: () => Promise.resolve() }
     }
 
-    running = await startAgent({ port: 0, attachTui: false, createTui: fakeTui, loadCron: noCron })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, createTui: fakeTui, loadCron: noCron })
 
     expect(calls).toHaveLength(0)
     expect(running.tuiPromise).toBeNull()
   })
 
   test('stop() shuts the ws server down so the port stops accepting connections', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
     const port = running.server.port
     const before = await fetch(`http://localhost:${port}`)
     expect(before.status).toBe(200)
@@ -122,7 +134,7 @@ describe('startAgent', () => {
       return stubScheduler()
     }
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron, createSchedulerFor })
 
     expect(factoryCalls).toHaveLength(1)
     expect(running.scheduler).not.toBeNull()
@@ -136,7 +148,7 @@ describe('startAgent', () => {
       return stubScheduler()
     }
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     expect(factoryCalls).toHaveLength(1)
     expect(running.scheduler).not.toBeNull()
@@ -160,7 +172,7 @@ describe('startAgent', () => {
     }
     const createSchedulerFor: SchedulerFactory = () => fakeScheduler
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     expect(running.scheduler).toBe(fakeScheduler)
     expect(started).toBe(true)
@@ -173,13 +185,13 @@ describe('startAgent', () => {
     const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [] } }) as LoadCronResult
     const createSchedulerFor: SchedulerFactory = () => stubScheduler()
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     expect(running.reloadRegistry.has('cron')).toBe(true)
   })
 
   test('registers cron in the reload registry even when cron.json is absent because the bundled memory plugin contributes a default dreaming cron job', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
 
     expect(running.reloadRegistry.has('cron')).toBe(true)
   })
@@ -192,7 +204,7 @@ describe('startAgent', () => {
       return stubScheduler()
     }
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     expect(factoryCalls).toHaveLength(0)
     expect(running.scheduler).toBeNull()
@@ -211,7 +223,7 @@ describe('startAgent', () => {
       return stubScheduler()
     }
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     const cronMessages: unknown[] = []
     running.stream.subscribe({ target: { kind: 'cron' } }, (msg) => {
@@ -231,13 +243,13 @@ describe('startAgent', () => {
     const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [] } }) as LoadCronResult
     const createSchedulerFor: SchedulerFactory = () => stubScheduler()
 
-    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
     expect(running.cronConsumer).not.toBeNull()
   })
 
   test('cronConsumer is started when bundled memory plugin contributes a default dreaming cron job (no cron.json)', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
 
     expect(running.cronConsumer).not.toBeNull()
   })
