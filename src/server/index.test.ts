@@ -1940,35 +1940,6 @@ describe('createServer cron_list handler', () => {
     ws.close()
   })
 
-  test('does not rewrite legacy cron.json when listing (read-only path)', async () => {
-    const { readFile } = await import('node:fs/promises')
-    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-legacy-'))
-    const cronPath = join(agentDir, 'cron.json')
-    const legacy = JSON.stringify({
-      jobs: [{ id: 'legacy-job', schedule: '0 * * * *', kind: 'prompt', prompt: 'hi' }],
-    })
-    await writeFile(cronPath, legacy)
-
-    const session = createFakeSession()
-    const { url } = await startWithSession(session, {
-      agentDir,
-      pluginRegistry: await makeEmptyRegistry(),
-      pluginHooks: createHookBus(),
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-legacy' }))
-    const reply = await waitFor((m) => m.type === 'cron_list_result')
-
-    if (reply.type !== 'cron_list_result' || !reply.result.ok) throw new Error('unreachable')
-    expect(reply.result.jobs).toHaveLength(1)
-    expect(reply.result.jobs[0]!.scheduledByRole).toBe('owner')
-    const onDisk = await readFile(cronPath, 'utf8')
-    expect(onDisk).toBe(legacy)
-    ws.close()
-  })
-
   test('reports invalid subagent reference when plugin runtime is available', async () => {
     const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-bad-subagent-'))
     await writeFile(

@@ -8,7 +8,6 @@ import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
-import { normalizeRef } from './normalize-ref'
 
 export type ChannelFetchAttachmentOrigin = {
   adapter: AdapterId
@@ -87,7 +86,7 @@ export function createChannelFetchAttachmentTool({
           `attachment #${params.attachment_id} (${found.kind}) has no fetchable ref — likely a sticker or an upstream payload without a public URL. Acknowledge the user but do not promise to view it.`,
         )
       }
-      const ref = normalizeRef(found.ref)
+      const ref = found.ref
       const filename = params.filename ?? found.filename
       const result = await router.fetchAttachment(adapter, {
         ref,

@@ -8,7 +8,7 @@ Your agent folder has files you write, files TypeClaw writes, and files where th
 
 ## Truly owned by you
 
-`typeclaw.json`, `cron.json`, `.env`, `secrets.json`, anything under `workspace/`, anything you create yourself. TypeClaw reads these; it doesn't rewrite them unsolicited. The exceptions are auto-migrations (legacy `dockerfile` → `docker.file`, legacy `allow[]` → `roles.member.match[]`) which run on first load after a schema change and commit the rewrite with a descriptive subject — and even those preserve every byte that doesn't need to change.
+`typeclaw.json`, `cron.json`, `.env`, `secrets.json`, anything under `workspace/`, anything you create yourself. TypeClaw reads these; it doesn't rewrite them unsolicited. The exception is the `drop seeded channels.github.eventAllowlist` migration, which removes a GitHub-seeded field on first load and commits the rewrite with a descriptive subject — and even that preserves every byte that doesn't need to change.
 
 `workspace/` is the agent's free-write zone. It's gitignored. It's where the agent stages experiments, scratch files, intermediate output. If the agent loses it, nothing important is gone.
 

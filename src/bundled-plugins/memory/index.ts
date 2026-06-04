@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { access, constants as fsConstants, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, constants as fsConstants, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
@@ -14,7 +14,6 @@ import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGE
 import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
-import { runMigration, runShardingMigration } from './migration'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { memorySearchTool } from './search-tool'
 
@@ -140,26 +139,6 @@ export default definePlugin({
     const spawnTimeoutMs = ctx.config.spawnTimeoutMs
     const retrievalSpawnTimeoutMs = ctx.config.retrievalSpawnTimeoutMs
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
-
-    const migrationResult = await runMigration({
-      agentDir: ctx.agentDir,
-      logger: ctx.logger,
-    })
-    if (migrationResult.migrated.length > 0) {
-      ctx.logger.info(`[memory] migrated ${migrationResult.migrated.length} daily stream(s) to JSONL`)
-    }
-
-    const shardingResult = await runShardingMigration({
-      agentDir: ctx.agentDir,
-      logger: ctx.logger,
-    })
-    if (shardingResult.migrated) {
-      ctx.logger.info(
-        `[memory] sharded ${shardingResult.topicCount} topics + ${shardingResult.streamCount} streams (pre-shard backup at memory/MEMORY.md.pre-shard.bak)`,
-      )
-    } else if (shardingResult.error !== undefined) {
-      ctx.logger.warn(`[memory] sharding migration aborted: ${shardingResult.error}`)
-    }
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
@@ -546,133 +525,6 @@ export default definePlugin({
                 },
               },
             }
-          },
-        },
-        'legacy-md-cleanup': {
-          description: 'Check for legacy .md daily stream files and un-migrated root MEMORY.md',
-          run: async (dctx) => {
-            const memoryDir = join(dctx.agentDir, 'memory')
-            // kept: pre-migration agents may still have a root MEMORY.md.
-            const rootMemoryPath = join(dctx.agentDir, 'MEMORY.md')
-            const hasRootMemory = existsSync(rootMemoryPath)
-            const hasTopicsDir = existsSync(topicsDir(dctx.agentDir))
-
-            let files: string[]
-            try {
-              files = await readdir(memoryDir)
-            } catch {
-              if (!hasRootMemory) return { status: 'ok', message: 'memory/ does not exist yet' }
-              return {
-                status: 'warning',
-                message: 'root MEMORY.md present but not sharded',
-                fix: {
-                  description: 'Run sharding migration to convert root MEMORY.md to topic shards',
-                  apply: async (fixCtx) => {
-                    const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
-                    return {
-                      summary: result.migrated
-                        ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
-                        : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
-                      changedPaths: result.migrated
-                        ? [
-                            join('memory', 'topics'),
-                            join('memory', 'streams'),
-                            join('memory', 'MEMORY.md.pre-shard.bak'),
-                          ]
-                        : [],
-                    }
-                  },
-                },
-              }
-            }
-
-            const mdFiles = files.filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
-
-            if (hasRootMemory) {
-              if (!hasTopicsDir) {
-                const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
-                return {
-                  status: 'warning',
-                  message: `root MEMORY.md present but not sharded${mdMsg}`,
-                  fix: {
-                    description: 'Run sharding migration to convert root MEMORY.md to topic shards',
-                    apply: async (fixCtx) => {
-                      const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
-                      return {
-                        summary: result.migrated
-                          ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
-                          : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
-                        changedPaths: result.migrated
-                          ? [
-                              join('memory', 'topics'),
-                              join('memory', 'streams'),
-                              join('memory', 'MEMORY.md.pre-shard.bak'),
-                            ]
-                          : [],
-                      }
-                    },
-                  },
-                }
-              }
-              const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
-              return {
-                status: 'warning',
-                message: `orphaned root MEMORY.md after sharding migration${mdMsg}`,
-                fix: {
-                  description: 'Delete the orphaned root MEMORY.md file',
-                  apply: async () => {
-                    await unlink(rootMemoryPath)
-                    return { summary: 'deleted orphaned root MEMORY.md', changedPaths: ['MEMORY.md'] }
-                  },
-                },
-              }
-            }
-
-            if (mdFiles.length === 0) return { status: 'ok', message: 'no legacy .md daily streams found' }
-
-            const caseA: string[] = []
-            const caseB: string[] = []
-
-            for (const mdFile of mdFiles) {
-              const date = mdFile.replace('.md', '')
-              const jsonlFile = `${date}.jsonl`
-              if (files.includes(jsonlFile)) {
-                caseB.push(date)
-              } else {
-                caseA.push(date)
-              }
-            }
-
-            if (caseA.length > 0 && caseB.length === 0) {
-              return {
-                status: 'warning',
-                message: `${caseA.length} legacy .md daily stream(s) still present; boot-time migration likely failed`,
-                fix: {
-                  description: 'Re-run migration to convert .md files to .jsonl',
-                  apply: async (fixCtx) => {
-                    const result = await runMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
-                    return {
-                      summary: `migrated ${result.migrated.length} legacy .md daily stream(s) to .jsonl`,
-                      changedPaths: result.migrated.map((d) => `memory/${d}.jsonl`),
-                    }
-                  },
-                },
-              }
-            }
-
-            if (caseB.length > 0) {
-              const allDates = [...caseA, ...caseB]
-              return {
-                status: 'warning',
-                message: `Conflicting .md+.jsonl pair for dates: ${allDates.join(', ')}. Inspect manually: the .jsonl is the authoritative new format; if its contents match or supersede the .md, delete the .md by hand.`,
-                fix: {
-                  description: 'Manual inspection required. Delete the .md file if the .jsonl is correct.',
-                  // No apply — this is an operator decision
-                },
-              }
-            }
-
-            return { status: 'ok', message: 'no legacy .md daily streams found' }
           },
         },
         'pre-shard-backup-age': {

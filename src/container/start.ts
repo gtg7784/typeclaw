@@ -22,7 +22,6 @@ import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
-import { migrateKakaotalkCredentials } from '@/secrets'
 
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
@@ -258,7 +257,6 @@ export async function start({
     // ensures the base image's CLI version matches the runtime the
     // container will actually load.
     const dockerfileRefresh = await refreshDockerfile(cwd)
-    await migrateKakaotalkCredentials(cwd)
 
     if (state.exists) {
       // Container holds the name but is not running. Without `--rm`, this is

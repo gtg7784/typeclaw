@@ -753,100 +753,11 @@ describe('git.ignore schema', () => {
 })
 
 describe('migrateLegacyConfigShape', () => {
-  test('returns input unchanged when neither legacy key is present', () => {
+  test('returns input unchanged when seeded github eventAllowlist is absent', () => {
     const input = { models: { default: VALID_MODEL }, port: 9001 }
     const result = migrateLegacyConfigShape(input)
     expect(result.changed).toBe(false)
     expect(result.json).toBe(input)
-  })
-
-  test('moves legacy dockerfile into docker.file', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      docker: { file: { ffmpeg: true, append: ['ENV X=1'] } },
-    })
-  })
-
-  test('moves legacy gitignore into git.ignore', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      gitignore: { append: ['scratch/'] },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      git: { ignore: { append: ['scratch/'] } },
-    })
-  })
-
-  test('migrates both legacy keys in a single pass', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: true },
-      gitignore: { append: ['scratch/'] },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      docker: { file: { ffmpeg: true } },
-      git: { ignore: { append: ['scratch/'] } },
-    })
-  })
-
-  test('migrated config parses cleanly through configSchema', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
-      gitignore: { append: ['scratch/'] },
-    })
-    const parsed = configSchema.parse(result.json)
-    expect(parsed.docker.file.ffmpeg).toBe(true)
-    expect(parsed.docker.file.append).toEqual(['ENV X=1'])
-    expect(parsed.git.ignore.append).toEqual(['scratch/'])
-  })
-
-  test('drops legacy dockerfile when new docker.file already present (new shape wins)', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: false, append: ['LEGACY'] },
-      docker: { file: { ffmpeg: true, append: ['NEW'] } },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      docker: { file: { ffmpeg: true, append: ['NEW'] } },
-    })
-  })
-
-  test('drops legacy gitignore when new git.ignore already present (new shape wins)', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      gitignore: { append: ['LEGACY'] },
-      git: { ignore: { append: ['NEW'] } },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      git: { ignore: { append: ['NEW'] } },
-    })
-  })
-
-  test('merges legacy dockerfile into existing docker namespace that lacks file', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: true },
-      docker: { somethingElse: 'future' },
-    })
-    expect(result.changed).toBe(true)
-    expect(result.json).toEqual({
-      models: { default: VALID_MODEL },
-      docker: { somethingElse: 'future', file: { ffmpeg: true } },
-    })
   })
 
   test('non-object inputs are returned unchanged', () => {
@@ -855,47 +766,22 @@ describe('migrateLegacyConfigShape', () => {
     expect(migrateLegacyConfigShape('string')).toEqual({ json: 'string', changed: false, applied: [] })
   })
 
-  test('loadConfigSync rewrites typeclaw.json on disk when legacy keys are present', async () => {
+  test('loadConfigSync rewrites typeclaw.json on disk when seeded github eventAllowlist is present', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-'))
     try {
       await writeFile(
         join(cwd, 'typeclaw.json'),
         JSON.stringify({
           models: { default: VALID_MODEL },
-          dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
-          gitignore: { append: ['scratch/'] },
+          channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
         }),
       )
 
       const cfg = loadConfigSync(cwd)
-      expect(cfg.docker.file.ffmpeg).toBe(true)
-      expect(cfg.git.ignore.append).toEqual(['scratch/'])
+      expect(cfg.channels.github?.eventAllowlist).toEqual([...DEFAULT_GITHUB_EVENT_ALLOWLIST])
 
       const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
-      expect(onDisk).not.toHaveProperty('dockerfile')
-      expect(onDisk).not.toHaveProperty('gitignore')
-      expect(onDisk.docker.file.ffmpeg).toBe(true)
-      expect(onDisk.git.ignore.append).toEqual(['scratch/'])
-    } finally {
-      await rm(cwd, { recursive: true, force: true })
-    }
-  })
-
-  test('loadConfigSync rewrites typeclaw.json on disk when legacy `model` is present', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-model-'))
-    try {
-      await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, port: 9001 }))
-
-      const cfg = loadConfigSync(cwd)
-      // Parsed value is normalised to KnownModelRef[]; on-disk shape remains
-      // the user-friendly single string the migration writes (the schema
-      // accepts both shapes transparently).
-      expect(cfg.models).toEqual({ default: [VALID_MODEL] })
-
-      const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
-      expect(onDisk).not.toHaveProperty('model')
-      expect(onDisk.models).toEqual({ default: VALID_MODEL })
-      expect(onDisk.port).toBe(9001)
+      expect(onDisk.channels.github).toEqual({ repos: ['acme/widgets'] })
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
@@ -923,7 +809,7 @@ describe('migrateLegacyConfigShape', () => {
         join(cwd, 'typeclaw.json'),
         JSON.stringify({
           models: { default: VALID_MODEL },
-          dockerfile: { ffmpeg: true },
+          channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
         }),
       )
 
@@ -931,180 +817,14 @@ describe('migrateLegacyConfigShape', () => {
       expect(result.ok).toBe(true)
 
       const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
-      expect(onDisk).not.toHaveProperty('dockerfile')
-      expect(onDisk.docker.file.ffmpeg).toBe(true)
+      expect(onDisk.channels.github).toEqual({ repos: ['acme/widgets'] })
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
   })
 
-  test('translates channels.<adapter>.allow into roles.member.match and strips the allow field', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: {
-        'slack-bot': { allow: ['team:T0123', '*'] },
-        'discord-bot': { allow: ['guild:9999/1', 'dm:*'] },
-      },
-    })
-    expect(result.changed).toBe(true)
-    const json = result.json as Record<string, unknown>
-    const channels = json.channels as Record<string, Record<string, unknown>>
-    expect(channels['slack-bot']).toEqual({})
-    expect(channels['discord-bot']).toEqual({})
-    const roles = json.roles as Record<string, Record<string, unknown>>
-    expect(roles.member?.match).toEqual(['slack:T0123', '*', 'discord:9999/1', 'discord:dm/*'])
-  })
-
-  test('appends to an existing roles.member.match and deduplicates', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: { 'slack-bot': { allow: ['team:T0123', '*'] } },
-      roles: { member: { match: ['*', 'discord:9999'] } },
-    })
-    const json = result.json as Record<string, unknown>
-    const roles = json.roles as Record<string, Record<string, unknown>>
-    expect(roles.member?.match).toEqual(['*', 'discord:9999', 'slack:T0123'])
-  })
-
-  test('preserves kakao rules verbatim', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: { kakaotalk: { allow: ['kakao:dm/*', 'kakao:12345'] } },
-    })
-    const json = result.json as Record<string, unknown>
-    const roles = json.roles as Record<string, Record<string, unknown>>
-    expect(roles.member?.match).toEqual(['kakao:dm/*', 'kakao:12345'])
-    const channels = json.channels as Record<string, Record<string, unknown>>
-    expect(channels.kakaotalk).toEqual({})
-  })
-
-  test('drops channel:<id> rules with a warning and keeps other rules', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: { 'slack-bot': { allow: ['channel:C123', 'team:T0123'] } },
-    })
-    const json = result.json as Record<string, unknown>
-    const roles = json.roles as Record<string, Record<string, unknown>>
-    expect(roles.member?.match).toEqual(['slack:T0123'])
-  })
-
-  test('is idempotent: running twice produces the same shape as once', () => {
-    const input = {
-      models: { default: VALID_MODEL },
-      channels: { 'slack-bot': { allow: ['team:T0123'], engagement: { trigger: ['dm'] } } },
-    }
-    const first = migrateLegacyConfigShape(input)
-    const second = migrateLegacyConfigShape(first.json)
-    expect(second.changed).toBe(false)
-    expect(second.json).toEqual(first.json)
-  })
-
-  test('preserves adapter siblings (engagement/history/enabled) when stripping allow', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: {
-        'discord-bot': {
-          allow: ['*'],
-          enabled: false,
-          engagement: { trigger: ['dm'] },
-        },
-      },
-    })
-    const json = result.json as Record<string, unknown>
-    const channels = json.channels as Record<string, Record<string, unknown>>
-    expect(channels['discord-bot']).toEqual({
-      enabled: false,
-      engagement: { trigger: ['dm'] },
-    })
-  })
-
-  test('migrated channels-allow config parses cleanly through configSchema', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: { 'slack-bot': { allow: ['team:T0123'] } },
-    })
-    const parsed = configSchema.parse(result.json)
-    expect(parsed.channels['slack-bot']).toBeDefined()
-    expect(parsed.roles?.member?.match).toEqual([{ kind: 'channel', platform: 'slack', workspace: 'T0123' }])
-  })
-
-  test('strips permissions.gateChannelRespond when present', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      permissions: { gateChannelRespond: true },
-    })
-    expect(result.changed).toBe(true)
-    const json = result.json as Record<string, unknown>
-    expect(json).not.toHaveProperty('permissions')
-  })
-
   test('returns applied: [] when nothing migrated', () => {
     const result = migrateLegacyConfigShape({ models: { default: VALID_MODEL }, port: 9001 })
-    expect(result.applied).toEqual([])
-  })
-
-  test('names each applied step in order — drives commit-message body', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      dockerfile: { ffmpeg: true },
-      gitignore: { append: ['scratch/'] },
-      channels: { 'slack-bot': { allow: ['team:T0123'] } },
-      permissions: { gateChannelRespond: true },
-    })
-    expect(result.applied.map((s) => s.kind)).toEqual([
-      'dockerfile-to-docker-file',
-      'gitignore-to-git-ignore',
-      'channels-allow-to-roles-member-match',
-      'strip-permissions-gate-channel-respond',
-    ])
-  })
-
-  test('channels-allow step carries translated rules and dropped warnings', () => {
-    const result = migrateLegacyConfigShape({
-      models: { default: VALID_MODEL },
-      channels: { 'slack-bot': { allow: ['team:T0123', 'channel:C123'] } },
-    })
-    const step = result.applied.find((s) => s.kind === 'channels-allow-to-roles-member-match')
-    if (step?.kind !== 'channels-allow-to-roles-member-match') throw new Error('expected channels-allow step')
-    expect(step.rules).toEqual(['slack:T0123'])
-    expect(step.dropped.length).toBe(1)
-    expect(step.dropped[0]).toContain('channel:C123')
-  })
-
-  test('lifts legacy top-level model into models.default', () => {
-    const result = migrateLegacyConfigShape({ model: VALID_MODEL, port: 9001 })
-    expect(result.changed).toBe(true)
-    const json = result.json as Record<string, unknown>
-    expect(json).not.toHaveProperty('model')
-    expect(json.models).toEqual({ default: VALID_MODEL })
-    expect(json.port).toBe(9001)
-    expect(result.applied).toEqual([{ kind: 'model-to-models', ref: VALID_MODEL }])
-  })
-
-  test('drops legacy `model` when `models` already exists (new shape wins) and records drop-stale-model step', () => {
-    const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
-      models: { default: VALID_MODEL_2, fast: VALID_MODEL },
-    })
-    expect(result.changed).toBe(true)
-    const json = result.json as Record<string, unknown>
-    expect(json).not.toHaveProperty('model')
-    expect(json.models).toEqual({ default: VALID_MODEL_2, fast: VALID_MODEL })
-    // drop-stale-model step is recorded so persistMigratedConfig commits the
-    // rewrite — without the step, applied: [] would silently dirty the worktree.
-    expect(result.applied).toEqual([{ kind: 'drop-stale-model', ref: VALID_MODEL }])
-  })
-
-  test('drop-stale-model commit message names the dropped ref so audit trail is clear', () => {
-    const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-stale-model', ref: VALID_MODEL }])
-    expect(msg).not.toBeNull()
-    expect(msg).toContain('drop stale legacy model alongside models')
-    expect(msg).toContain(VALID_MODEL)
-  })
-
-  test('non-string legacy model values are ignored (schema will reject downstream)', () => {
-    const result = migrateLegacyConfigShape({ model: 123 })
-    expect(result.changed).toBe(false)
     expect(result.applied).toEqual([])
   })
 
@@ -1226,43 +946,6 @@ describe('buildConfigMigrationCommitMessage', () => {
     expect(buildConfigMigrationCommitMessage([])).toBeNull()
   })
 
-  test('single-step migration produces a specific subject', () => {
-    const msg = buildConfigMigrationCommitMessage([{ kind: 'dockerfile-to-docker-file' }])
-    expect(msg).toContain('typeclaw.json: lift dockerfile → docker.file')
-  })
-
-  test('single-step channels-allow names the specific permission migration', () => {
-    const msg = buildConfigMigrationCommitMessage([
-      { kind: 'channels-allow-to-roles-member-match', rules: ['slack:T0123'], dropped: [] },
-    ])
-    expect(msg?.split('\n')[0]).toBe('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
-    expect(msg).toContain('slack:T0123')
-  })
-
-  test('multi-step migration falls back to a count subject and enumerates each step in body', () => {
-    const msg = buildConfigMigrationCommitMessage([
-      { kind: 'dockerfile-to-docker-file' },
-      { kind: 'gitignore-to-git-ignore' },
-    ])
-    if (msg === null) throw new Error('expected a commit message')
-    const lines = msg.split('\n')
-    expect(lines[0]).toBe('typeclaw.json: migrate legacy shape (2 steps)')
-    expect(msg).toContain('lift top-level dockerfile into docker.file')
-    expect(msg).toContain('lift top-level gitignore into git.ignore')
-  })
-
-  test('surfaces dropped legacy rules in the body so silent drops are auditable', () => {
-    const msg = buildConfigMigrationCommitMessage([
-      {
-        kind: 'channels-allow-to-roles-member-match',
-        rules: ['slack:T0123'],
-        dropped: ["channels.slack-bot.allow[]: dropped 'channel:C123' (workspace coordinate required)"],
-      },
-    ])
-    expect(msg).toContain('warning:')
-    expect(msg).toContain('channel:C123')
-  })
-
   test('names the github seeded-allowlist drop step', () => {
     const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-github-seeded-event-allowlist' }])
     expect(msg).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
@@ -1286,7 +969,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
     const legacyJson = `${JSON.stringify(
       {
         models: { default: VALID_MODEL },
-        channels: { 'slack-bot': { allow: ['team:T0123'] } },
+        channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
       },
       null,
       2,
@@ -1306,7 +989,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
 
       // then: the migration commit landed in git history
       const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
-      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+      expect(subjects).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
       const onDisk = JSON.parse(await readFileText(join(cwd, 'typeclaw.json')))
       const tracked = JSON.parse(await runGitForCommitTests(cwd, ['show', 'HEAD:typeclaw.json']))
       expect(tracked).toEqual(onDisk)
@@ -1326,7 +1009,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
       // then: it succeeds AND the commit landed
       expect(result.ok).toBe(true)
       const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
-      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+      expect(subjects).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
@@ -1342,7 +1025,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
 
       // then
       const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
-      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+      expect(subjects).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
@@ -1369,7 +1052,10 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
     const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-nogit-commit-'))
     try {
       const legacyJson = `${JSON.stringify(
-        { models: { default: VALID_MODEL }, channels: { 'slack-bot': { allow: ['team:T0123'] } } },
+        {
+          models: { default: VALID_MODEL },
+          channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
+        },
         null,
         2,
       )}\n`
@@ -1380,8 +1066,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
 
       // then: the rewrite happened (next start will see canonical), no .git was created
       const onDisk = JSON.parse(await readFileText(join(cwd, 'typeclaw.json')))
-      expect(onDisk.channels['slack-bot']).toEqual({})
-      expect(onDisk.roles.member.match).toEqual(['slack:T0123'])
+      expect(onDisk.channels.github).toEqual({ repos: ['acme/widgets'] })
       expect(existsSync(join(cwd, '.git'))).toBe(false)
     } finally {
       await rm(cwd, { recursive: true, force: true })
@@ -1400,8 +1085,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
 
       // then: the commit landed in the user's agent repo
       const headContent = JSON.parse(await runGitForCommitTests(cwd, ['show', 'HEAD:typeclaw.json']))
-      expect(headContent.channels['slack-bot']).toEqual({})
-      expect(headContent.roles.member.match).toEqual(['slack:T0123'])
+      expect(headContent.channels.github).toEqual({ repos: ['acme/widgets'] })
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }

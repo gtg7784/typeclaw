@@ -85,28 +85,10 @@ A `[dreaming] citation-superset violation: …` warning logs the dropped ids and
 
 - **`memory/topics/<slug>.md`** — per-topic shards with YAML frontmatter (`heading`, `cites`, `days`, `lastReinforced`, `tags?`) + body markdown. Runtime owns the frontmatter (recomputed after every dreaming run from the body's citations); dreaming subagent writes body only.
 - **`memory/streams/yyyy-MM-dd.jsonl`** — daily fragment streams. One event per line, discriminated union of `fragment | watermark | legacy_prose`. Force-committed alongside the shards.
-- **`memory/MEMORY.md.pre-shard.bak`** — one-shot pre-migration backup created by the boot migration. Safe to delete after verifying.
+- **`memory/MEMORY.md.pre-shard.bak`** — legacy pre-shard backup left by older TypeClaw versions. Safe to delete after verifying.
 - **`memory/skills/<name>/SKILL.md`** — muscle memory. Skills the dreaming subagent distills from repeated procedures. Auto-loaded as first-class skills.
 - **`memory/.dreaming-state.json`** — per-day dreamed-id sets.
 - **`memory/.retrieval-cache/<sessionId>.md`** — ephemeral retrieval summaries. Written by `memory-retrieval`, read by `loadMemory` on the next prompt of the same session, unlinked on `session.end`.
-
-## One-shot boot migration
-
-When the plugin boots against an agent folder with a root `MEMORY.md` and no `memory/topics/`, it runs `runShardingMigration`. Steps:
-
-1. Detect prerequisites.
-2. Reset `memory/.migrating/` if a previous run crashed mid-flight.
-3. Run the legacy `.md → .jsonl` daily-stream migration (existing behavior).
-4. Parse `MEMORY.md` via `parseTopicsWithBodies`.
-5. **Stage topic shards** in `memory/.migrating/topics/` (originals untouched).
-6. **Stage streams** by COPY (not rename) to `memory/.migrating/streams/`.
-7. Stage pre-shard backup by COPY.
-8. **Verify staging** via `checkCitationSupersetAcrossShards`. On failure, abort and KEEP `memory/.migrating/` for human inspection. Originals untouched.
-9. **Atomic finalization**: rename three dirs (`topics`, `streams`, `.pre-shard.bak`), then unlink originals.
-
-Crash-recovery branches at boot: stale `memory/.migrating/` with no `topics/` → cleanup + retry; leftover `memory/.migrating/` alongside complete `topics/` → cleanup only; orphan root `MEMORY.md` or `memory/<date>.jsonl` alongside the new layout → delete orphans.
-
-The migration is idempotent and crash-safe.
 
 ## How `session.idle` works
 
@@ -132,9 +114,9 @@ Each `memory-logger` spawn captures the line count of `memory/streams/<today>.js
 
 ## Tests
 
-Test files in this directory (kebab-case, `.test.ts` neighbors): `paths`, `slug`, `frontmatter`, `topics`, `shard-snapshot`, `delete-tool`, `citations`, `citation-superset`, `migration`, `load-shards`, `load-memory`, `injection-plan`, `search-tool`, `memory-retrieval`, `memory-logger`, `dreaming`, `index`, `integration`. Plus guard policies in `../guard/policies/`: `memory-topics-delete`, `memory-topics-write`, `memory-retrieval-cache-write`.
+Test files in this directory (kebab-case, `.test.ts` neighbors): `paths`, `slug`, `frontmatter`, `topics`, `shard-snapshot`, `delete-tool`, `citations`, `citation-superset`, `load-shards`, `load-memory`, `injection-plan`, `search-tool`, `memory-retrieval`, `memory-logger`, `dreaming`, `index`, `integration`. Plus guard policies in `../guard/policies/`: `memory-topics-delete`, `memory-topics-write`, `memory-retrieval-cache-write`.
 
-## Migration notes (from before the plugin existed)
+## Notes from before the plugin existed
 
 - `memory.idleMs` and `memory.dreaming.schedule` already existed in core's `typeclaw.json` schema and moved into this plugin's `configSchema` verbatim.
 - `memory.dreaming.schedule` is now **restart-required** because plugin config is read once at boot.

@@ -459,50 +459,7 @@ describe('ChannelRouter session lifecycle', () => {
     expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_fake_1.jsonl')
   })
 
-  test('restart with a v2 mapping (no sessionFile, file actually present) migrates and reopens', async () => {
-    // given: a v2 mapping on disk plus the matching pi-coding-agent file
-    const dir = await tempDir()
-    const sessionsDir = join(dir, 'sessions')
-    await mkdir(sessionsDir, { recursive: true })
-    await writeFileFs(
-      join(sessionsDir, '2026-05-02T16-56-52-380Z_ses_legacy.jsonl'),
-      '{"type":"session","version":3,"id":"ses_legacy","timestamp":"2026-05-02T16:56:52.380Z","cwd":"/agent"}\n',
-    )
-    await mkdir(join(dir, 'channels'), { recursive: true })
-    await writeFileFs(
-      channelsSessionsPath(dir),
-      JSON.stringify({
-        version: 2,
-        sessions: [
-          {
-            adapter: 'discord-bot',
-            workspace: 'g1',
-            chat: 'c1',
-            thread: null,
-            sessionId: 'ses_legacy',
-            participants: [],
-          },
-        ],
-      }),
-    )
-
-    const factoryCalls: SessionFactoryArgs[] = []
-    const transcriptPathFor = (sessionId: string): string =>
-      `${sessionsDir}/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`
-    const { router } = makeRouter(dir, { factoryCalls, transcriptPathFor })
-
-    // when: a new inbound arrives after the v2→v3 migration
-    await router.route(inbound({ text: 'hi' }))
-    await router.__testing!.flushDebounce(KEY)
-
-    // then: the migrated sessionFile was passed to the factory
-    expect(factoryCalls).toHaveLength(1)
-    expect(factoryCalls[0]?.existingSessionId).toBe('ses_legacy')
-    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_legacy.jsonl')
-  })
-
-  test('restart with a v2 mapping whose session file is missing creates a fresh session', async () => {
-    // given: a v2 mapping pointing at a session id with no on-disk file
+  test('restart with an unsupported v2 mapping creates a fresh session', async () => {
     const dir = await tempDir()
     await mkdir(join(dir, 'sessions'), { recursive: true })
     await mkdir(join(dir, 'channels'), { recursive: true })
@@ -529,10 +486,8 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound())
     await router.__testing!.flushDebounce(KEY)
 
-    // existingSessionId still propagates, but existingSessionFile is undefined,
-    // signaling the consumer to create a fresh SessionManager
     expect(factoryCalls).toHaveLength(1)
-    expect(factoryCalls[0]?.existingSessionId).toBe('ses_lost')
+    expect(factoryCalls[0]?.existingSessionId).toBeUndefined()
     expect(factoryCalls[0]?.existingSessionFile).toBeUndefined()
   })
 

@@ -107,11 +107,9 @@ const quotedReplySchema = z
   .default({ enabled: true, queueDelayMs: DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS })
 
 // Deliberately non-strict: a stale on-disk file may still carry the
-// legacy `allow` field (`migrateLegacyConfigShape` lifts it into
-// `roles.member.match[]` on load, but a between-reload window can
-// briefly contain both). Zod silently drops unknown keys here, which is
-// exactly what we want — a hard `.strict()` reject would brick recovery
-// for any user mid-migration.
+// legacy `allow` field. Zod silently drops unknown keys here, which is
+// exactly what we want — the field is ignored, not translated, and a hard
+// `.strict()` reject would brick recovery for any user with an old config.
 const adapterSchema = z.object({
   engagement: engagementSchema,
   history: historySchema,

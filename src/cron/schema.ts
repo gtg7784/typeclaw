@@ -64,99 +64,7 @@ export type ParseCronOptions = {
   subagents?: SubagentRegistry
 }
 
-// One-shot rewrite for cron.json files that predate PR #171, when
-// `scheduledByRole` became mandatory on every job. The schema gate
-// (`parseCronFile`) rejects legacy entries with a precise remediation
-// message, but rejecting on every container boot is a stuck state for
-// the user — the agent crashes in a tight restart loop with no path
-// forward except hand-editing cron.json.
-//
-// The migration stamps `scheduledByRole: 'owner'` on every job that's
-// missing it. `owner` is the right default for two reasons:
-//   1. Before #171 there was no role concept; every cron job ran with
-//      the same (effectively-owner) privileges the agent had.
-//   2. The schema gate's own error message tells users to add
-//      `"scheduledByRole": "owner"` for manually-authored entries —
-//      we just do it for them.
-//
-// Mirrors `migrateLegacyConfigShape` in src/config/config.ts: pure
-// function, returns the rewritten JSON plus an `applied` array so
-// callers can build a meaningful commit message. Returns `changed:
-// false` on canonical input so the persist + commit path stays
-// untouched on the happy path.
-export type CronMigrationStep = { kind: 'stamp-scheduled-by-role-owner'; jobIds: string[] }
-
-export type CronMigrationResult = { json: unknown; changed: boolean; applied: CronMigrationStep[] }
-
-export function migrateLegacyCronShape(json: unknown): CronMigrationResult {
-  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
-    return { json, changed: false, applied: [] }
-  }
-
-  const obj = json as Record<string, unknown>
-  const jobs = obj.jobs
-  if (!Array.isArray(jobs)) {
-    return { json, changed: false, applied: [] }
-  }
-
-  const stampedIds: string[] = []
-  const nextJobs = jobs.map((job) => {
-    if (typeof job !== 'object' || job === null || Array.isArray(job)) return job
-    const record = job as Record<string, unknown>
-    if ('scheduledByRole' in record) return job
-    const id = typeof record.id === 'string' ? record.id : '<unknown>'
-    stampedIds.push(id)
-    return { ...record, scheduledByRole: 'owner' }
-  })
-
-  if (stampedIds.length === 0) {
-    return { json, changed: false, applied: [] }
-  }
-
-  return {
-    json: { ...obj, jobs: nextJobs },
-    changed: true,
-    applied: [{ kind: 'stamp-scheduled-by-role-owner', jobIds: stampedIds }],
-  }
-}
-
-// Builds a one-line git commit subject (plus enumerating body) for a
-// cron.json migration. Returns null when no steps were applied — callers
-// should not commit in that case. Mirrors `buildConfigMigrationCommitMessage`
-// in src/config/config.ts.
-export function buildCronMigrationCommitMessage(applied: readonly CronMigrationStep[]): string | null {
-  const first = applied[0]
-  if (first === undefined) return null
-
-  const subject =
-    applied.length === 1
-      ? `cron.json: ${shortCronStepLabel(first)}`
-      : `cron.json: migrate legacy shape (${applied.length} steps)`
-
-  const bodyLines: string[] = applied.map((step) => `- ${describeCronStep(step)}`)
-  return `${subject}\n\n${bodyLines.join('\n')}\n`
-}
-
-function shortCronStepLabel(step: CronMigrationStep): string {
-  switch (step.kind) {
-    case 'stamp-scheduled-by-role-owner':
-      return `stamp scheduledByRole: "owner" on ${step.jobIds.length} legacy job${step.jobIds.length === 1 ? '' : 's'}`
-  }
-}
-
-function describeCronStep(step: CronMigrationStep): string {
-  switch (step.kind) {
-    case 'stamp-scheduled-by-role-owner':
-      return `stamp scheduledByRole: "owner" on jobs without provenance (PR #171 backfill): ${step.jobIds.join(', ')}`
-  }
-}
-
-export type ParseCronJsonOptions = ParseCronOptions & {
-  // Apply `migrateLegacyCronShape` before schema validation. Defaults to true
-  // so the guard accepts the same legacy shapes `loadCron` would auto-migrate
-  // on disk; pass false to validate the exact bytes (used in tests).
-  migrate?: boolean
-}
+export type ParseCronJsonOptions = ParseCronOptions
 
 export function parseCronJson(raw: string, options: ParseCronJsonOptions = {}): ParseCronResult {
   let json: unknown
@@ -166,9 +74,7 @@ export function parseCronJson(raw: string, options: ParseCronJsonOptions = {}): 
     return { ok: false, reason: `cron.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}` }
   }
 
-  const shouldMigrate = options.migrate ?? true
-  const migrated = shouldMigrate ? migrateLegacyCronShape(json) : { json, changed: false, applied: [] }
-  return parseCronFile(migrated.json, options.subagents !== undefined ? { subagents: options.subagents } : {})
+  return parseCronFile(json, options.subagents !== undefined ? { subagents: options.subagents } : {})
 }
 
 export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): ParseCronResult {

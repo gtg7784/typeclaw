@@ -239,46 +239,6 @@ describe('getAuth', () => {
 
     expect(a).toBe(b)
   })
-
-  test('legacy v1 envelope is read on first boot (transparent upgrade)', async () => {
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
-    )
-    await writeFile(
-      join(cwd, 'secrets.json'),
-      JSON.stringify({ version: 1, llm: { fireworks: { type: 'api_key', key: 'fw_v1' } }, channels: {} }),
-    )
-    reloadConfig(cwd)
-    delete process.env.NODE_ENV
-
-    const auth = getAuth()
-
-    expect(auth.authStorage.hasAuth('fireworks')).toBe(true)
-    expect(await auth.authStorage.getApiKey('fireworks')).toBe('fw_v1')
-  })
-
-  test('migrates a legacy auth.json to secrets.json on first getAuth()', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
-    await writeFile(
-      join(cwd, 'auth.json'),
-      JSON.stringify({
-        version: 1,
-        llm: { openai: { type: 'oauth', access: 'a', refresh: 'r', expires: 1 } },
-        channels: {},
-      }),
-    )
-    reloadConfig(cwd)
-    process.env.OPENAI_API_KEY = 'sk-migration-test'
-
-    getAuth()
-
-    await expect(readFile(join(cwd, 'auth.json'), 'utf8')).rejects.toThrow()
-    const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    const openai = file.providers['openai']
-    expect(openai).toBeDefined()
-    expect((openai as { type: string }).type).toBe('oauth')
-  })
 })
 
 async function readSecretsFile(path: string): Promise<{ providers: Record<string, unknown> }> {

@@ -191,7 +191,7 @@ async function intendedContent(
 }
 
 function parseJobsFromContent(content: string): readonly ParsedCronJob[] | undefined {
-  const result = parseCronJson(content, { migrate: false })
+  const result = parseCronJson(content)
   if (!result.ok) return undefined
   return result.file.jobs
 }
@@ -203,7 +203,7 @@ async function readExistingJobs(targetPath: string): Promise<readonly ParsedCron
   } catch {
     return []
   }
-  const result = parseCronJson(raw, { migrate: true })
+  const result = parseCronJson(raw)
   if (!result.ok) return []
   return result.file.jobs
 }

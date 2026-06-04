@@ -60,15 +60,15 @@ This role matches any TUI session OR the named Slack author OR the named Discord
 
 ## Rejected forms
 
-| Form              | Why rejected                                                                                                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `slack:*/*`       | redundant (matches everything `slack:*` already matches)                                                                                                                         |
-| `slack:*/C0ABCDE` | impossible (wildcard workspace with specific chat)                                                                                                                               |
-| `slack:T0123/*`   | redundant (matches everything `slack:T0123` already matches)                                                                                                                     |
-| `team:T0123`      | legacy prefix; auto-rewritten to `slack:T0123` on load                                                                                                                           |
-| `guild:9999`      | legacy prefix; auto-rewritten to `discord:9999`                                                                                                                                  |
-| `tg:42`           | legacy prefix; auto-rewritten to `telegram:42`                                                                                                                                   |
-| `channel:<id>`    | workspace-less channel id; canonical DSL requires `<adapter>:<workspace>/<chat>`. Dropped with a warning during legacy migration; operator re-adds with the workspace coordinate |
+| Form              | Why rejected                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------ |
+| `slack:*/*`       | redundant (matches everything `slack:*` already matches)                                         |
+| `slack:*/C0ABCDE` | impossible (wildcard workspace with specific chat)                                               |
+| `slack:T0123/*`   | redundant (matches everything `slack:T0123` already matches)                                     |
+| `team:T0123`      | legacy prefix; not supported — rejected by the parser with a hint to use `slack:T0123`           |
+| `guild:9999`      | legacy prefix; not supported — rejected by the parser with a hint to use `discord:9999`          |
+| `tg:42`           | legacy prefix; not supported — rejected by the parser with a hint to use `telegram:42`           |
+| `channel:<id>`    | workspace-less channel id; not supported — canonical DSL requires `<adapter>:<workspace>/<chat>` |
 
 ## Built-in role match additions
 

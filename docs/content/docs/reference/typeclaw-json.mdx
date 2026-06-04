@@ -111,13 +111,6 @@ typeclaw reload
 
 Re-reads `typeclaw.json` and applies hot-reloadable fields. Boot-only fields (`port`, `mounts`, `plugins`, `portForward`, `network`, `tunnels`) are captured once at container start; reload reports which changes require a restart.
 
-## Legacy auto-migration
+## Auto-migration
 
-TypeClaw auto-migrates legacy shapes on load and commits the rewrite with a descriptive subject:
-
-| Legacy                       | Migrated to                                          |
-| ---------------------------- | ---------------------------------------------------- |
-| top-level `dockerfile`       | `docker.file`                                        |
-| top-level `gitignore`        | `git.ignore`                                         |
-| top-level `model`            | `models.default`                                     |
-| `channels.<adapter>.allow[]` | `roles.member.match[]` (translated to canonical DSL) |
+One migration step still runs on load: if `typeclaw.json` contains a `channels.github.eventAllowlist` that was seeded by `typeclaw init`, it is dropped and the file is rewritten with a descriptive commit subject. All other legacy shapes (`dockerfile`, `gitignore`, `model`, `channels.<adapter>.allow[]`) are no longer migrated — use the current field names directly.

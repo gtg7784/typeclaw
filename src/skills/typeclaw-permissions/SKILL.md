@@ -81,7 +81,7 @@ Things the DSL rejects (the parser emits actionable errors at boot, but you shou
 - `slack:*/*` — `*/*` is redundant; use `slack:*` for "any Slack chat".
 - `slack:*/C0ABCDE` — workspace-less chat ID is impossible; pick a workspace.
 - `slack:T0123/*` — workspace-only is enough; drop the trailing `/*`.
-- `team:T0123`, `guild:G123`, `tg:42` — these are legacy prefixes from the old `channels.<adapter>.allow[]` field. They are auto-migrated on load but **don't write them in new code** — use `slack:T0123`, `discord:G123`, `telegram:42` directly.
+- `team:T0123`, `guild:G123`, `tg:42` — these are legacy prefixes that are no longer supported. The parser rejects them with a hint to use the canonical form: `slack:T0123`, `discord:G123`, `telegram:42`.
 - `autor:U_ME` — typo of `author:`. The parser will suggest the fix at boot.
 
 ## Permission strings you will see
