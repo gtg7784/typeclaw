@@ -4,6 +4,11 @@ import { listSessions, type ListSessionsOptions, type SessionSummary } from './s
 export type ListViewerItemsOptions = ListSessionsOptions & {
   containerRunning: boolean
   includeLogs?: boolean
+  // Defaults to true. The detach-to-list path (after `typeclaw tui` esc) sets
+  // this false: detaching ENDS the server-side session, so the just-killed
+  // (most-recent) tui transcript — and any older tui transcript the heuristic
+  // would otherwise promote — must NOT be offered as a writable live row.
+  allowWritable?: boolean
 }
 
 export type ViewerList = {
@@ -19,7 +24,8 @@ export type ViewerList = {
 // available offline) so it sits below the divider in the picker.
 export async function listViewerItems(opts: ListViewerItemsOptions): Promise<ViewerList> {
   const sessions = await listSessions(opts)
-  const writableSessionId = opts.containerRunning ? pickWritableSession(sessions) : null
+  const allowWritable = opts.allowWritable !== false
+  const writableSessionId = opts.containerRunning && allowWritable ? pickWritableSession(sessions) : null
 
   const items: ViewerItem[] = sessions.map((summary) =>
     summary.sessionId === writableSessionId

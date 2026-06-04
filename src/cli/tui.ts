@@ -43,9 +43,11 @@ export const tui = defineCommand({
 
     // Esc detached from the live session: drop into the viewer list so the user
     // can pick another session or the container logs — `tui` is just a deep-link
-    // into the session viewer, pre-opened on the live session.
+    // into the session viewer, pre-opened on the live session. allowWritable
+    // is false because detaching ended the live session, so no row may be
+    // offered as a writable "live TUI" anymore.
     if (result.ok && result.escToPicker === true) {
-      const viewerExit = await runInspectViewer({ cwd })
+      const viewerExit = await runInspectViewer({ cwd, allowWritable: false })
       process.exit(viewerExit)
       return
     }

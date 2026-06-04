@@ -64,6 +64,21 @@ describe('listViewerItems', () => {
     expect(items.filter((i) => i.kind === 'session')).toHaveLength(2)
   })
 
+  test('allowWritable:false suppresses the writable row even with the container up (detach handoff)', async () => {
+    await seed(`a_${ID_A}.jsonl`, { kind: 'tui' }, 1000)
+    await seed(`b_${ID_B}.jsonl`, { kind: 'tui' }, 3000)
+
+    const { items, writableSessionId } = await listViewerItems({
+      sessionsDir,
+      containerRunning: true,
+      allowWritable: false,
+    })
+
+    expect(writableSessionId).toBeNull()
+    expect(items.filter((i) => i.kind === 'tui')).toHaveLength(0)
+    expect(items.filter((i) => i.kind === 'session')).toHaveLength(2)
+  })
+
   test('appends a logs row by default, suppressible via includeLogs:false', async () => {
     await seed(`a_${ID_A}.jsonl`, { kind: 'tui' }, 1000)
 

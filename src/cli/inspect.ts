@@ -93,6 +93,9 @@ export type RunInspectViewerOptions = {
   filterArg?: string
   sinceArg?: string
   color?: boolean
+  // Set false by the `tui` detach handoff: the live session was just ended, so
+  // no row should be offered as writable (see listViewerItems).
+  allowWritable?: boolean
 }
 
 // The interactive session-viewer: list → open → back to list. Shared by the
@@ -174,6 +177,7 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
       const listOpts: Parameters<typeof listViewerItems>[0] = {
         sessionsDir,
         containerRunning,
+        allowWritable: opts.allowWritable !== false,
         limit: 20,
         onWarn: stderr,
       }
