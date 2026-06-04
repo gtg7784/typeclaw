@@ -83,9 +83,9 @@ export function createChannelReplyTool({
       resolve_review_thread: Type.Optional(
         Type.Boolean({
           description:
-            'GitHub only. Set `true` when this reply acknowledges that a review-comment thread YOU authored has been addressed, to resolve (close) that thread atomically with the reply. ' +
-            'The thread is resolved BEFORE the acknowledgement is posted, and only if its root comment is yours — so it never closes a human reviewer\'s thread, and a failed resolve blocks the misleading "looks resolved" reply. ' +
-            'Valid only on a github session replying inside a thread (the origin must carry a `thread`). Ignored elsewhere.',
+            'GitHub review threads ONLY — ignored on Slack, Discord, Telegram, KakaoTalk, and any non-github session, and ignored on a github reply that is not inside a `thread`. On those, leave this unset and ignore the rest of this description. ' +
+            'On a github reply inside a review thread you authored: when your `text` acknowledges the concern is fixed/verified/addressed (e.g. "verified at <sha>", "thanks, that resolves it"), treat setting this `true` as the expected close-out — do it in the SAME call. This is a strong instruction, not a schema requirement: the field stays optional and nothing rejects an acknowledgement that omits it, but a bare ack without it leaves the thread open, because a successful reply ends the turn and the resolve cannot run in a later one. So this flag is the only way the close-out actually happens. ' +
+            "It is safe to set by default: the runtime resolves BEFORE posting and ONLY if the thread's root comment is yours — it refuses (and blocks the reply) on a human reviewer's thread, so you never close someone else's open question. You need not pre-check authorship; just set it on your acknowledgement and let the runtime enforce ownership. Leave it unset when you intend to keep the thread open (partial fix, disagreement, mid-discussion).",
         }),
       ),
     }),
