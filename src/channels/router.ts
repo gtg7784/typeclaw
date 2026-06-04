@@ -4322,19 +4322,97 @@ export function extractPlainTextChannelToolCallText(text: string): string | null
   const trimmed = text.trim()
   if (!/^(?:channel_reply|channel_send)\s*\(/.test(trimmed)) return null
 
-  const keyRe = /(?:[{,\s])(?:"text"|'text'|text)\s*:\s*/g
-  const keyMatch = keyRe.exec(trimmed)
-  if (keyMatch === null) return null
+  // Walk the serialization once, honoring a `text` key only at the top level of
+  // the argument object (braceDepth 1, outside any array). Two failure classes
+  // motivate the bookkeeping: a `text:` inside an earlier quoted value, e.g.
+  // `channel_send({ reason: "see text: here", text: "real" })`, and a `text:`
+  // inside a *nested* object, e.g. `channel_reply({ meta: { text: "x" }, text:
+  // "real" })`. Skipping string literals defeats the first; tracking
+  // brace/bracket depth and matching keys only at top level defeats the second.
+  // Either way the scanner lands on the real reply instead of leaking the wrong
+  // value or dropping the message.
+  let braceDepth = 0
+  let bracketDepth = 0
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]!
 
-  let i = keyMatch.index + keyMatch[0].length
-  const quote = trimmed[i]
+    if (ch === '"' || ch === "'") {
+      i = skipStringLiteral(trimmed, i, ch)
+      continue
+    }
+
+    if (ch === '{') {
+      braceDepth++
+      if (braceDepth === 1 && bracketDepth === 0) {
+        const value = readTextKeyValueAt(trimmed, i + 1)
+        if (value !== undefined) return value
+      }
+      continue
+    }
+    if (ch === '}') {
+      if (braceDepth > 0) braceDepth--
+      continue
+    }
+    if (ch === '[') {
+      bracketDepth++
+      continue
+    }
+    if (ch === ']') {
+      if (bracketDepth > 0) bracketDepth--
+      continue
+    }
+
+    if (ch === ',' && braceDepth === 1 && bracketDepth === 0) {
+      const value = readTextKeyValueAt(trimmed, i + 1)
+      if (value !== undefined) return value
+    }
+  }
+
+  return null
+}
+
+// Returns the recovered value (string or null) when a `text` key starts at
+// `from`, or undefined when no `text` key is present there so the scanner keeps
+// walking. The null/undefined split lets a malformed `text` value short-circuit
+// to suppression while a non-`text` delimiter is simply skipped.
+function readTextKeyValueAt(s: string, from: number): string | null | undefined {
+  const afterKey = matchTextKey(s, from)
+  if (afterKey === null) return undefined
+
+  const quote = s[afterKey]
   if (quote !== '"' && quote !== "'") return null
-  i++
+  return readStringValue(s, afterKey + 1, quote)
+}
 
+// Returns the closing-quote index, or the last index when the literal is
+// truncated, so the caller's `i++` resumes past the consumed string.
+function skipStringLiteral(s: string, openIdx: number, quote: string): number {
+  let escaped = false
+  for (let i = openIdx + 1; i < s.length; i++) {
+    const ch = s[i]!
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === quote) return i
+  }
+  return s.length
+}
+
+function matchTextKey(s: string, from: number): number | null {
+  const m = /^\s*(?:"text"|'text'|text)\s*:\s*/.exec(s.slice(from))
+  return m === null ? null : from + m[0].length
+}
+
+function readStringValue(s: string, from: number, quote: string): string | null {
   let value = ''
   let escaped = false
-  for (; i < trimmed.length; i++) {
-    const ch = trimmed[i]!
+  for (let i = from; i < s.length; i++) {
+    const ch = s[i]!
     if (escaped) {
       value += ESCAPE_REPLACEMENTS[ch] ?? ch
       escaped = false
@@ -4347,7 +4425,6 @@ export function extractPlainTextChannelToolCallText(text: string): string | null
     if (ch === quote) break
     value += ch
   }
-
   return value.trim().length > 0 ? value : null
 }
 

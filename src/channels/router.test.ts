@@ -2582,6 +2582,48 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=send'))).toBe(true)
   })
 
+  test('recovers the real text arg even when an earlier field value contains a "text:" substring', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({ reason: "contains text: foo", text: "real reply" })')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('real reply')
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
+  test('recovers the top-level text arg even when a nested object carries its own "text" key', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({ meta: { text: "debug" }, text: "real reply" })')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('real reply')
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+  })
+
   test('suppresses a leaked channel_reply(...) whose extracted text is itself a no-reply signal', async () => {
     const dir = await tempDir()
     const logs: string[] = []
@@ -2741,6 +2783,48 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     test('returns null for prose mentioning the tool name', () => {
       expect(extractPlainTextChannelToolCallText('Use channel_reply with a "text" field.')).toBeNull()
+    })
+
+    test('skips a "text:" substring inside an earlier double-quoted field value', () => {
+      expect(
+        extractPlainTextChannelToolCallText('channel_reply({ reason: "contains text: foo", text: "real reply" })'),
+      ).toBe('real reply')
+    })
+
+    test('skips a "text:" substring inside an earlier single-quoted field value', () => {
+      expect(extractPlainTextChannelToolCallText("channel_reply({ note: 'the text: thing', text: 'right one' })")).toBe(
+        'right one',
+      )
+    })
+
+    test('skips destination strings that merely contain "text:" on channel_send', () => {
+      expect(extractPlainTextChannelToolCallText('channel_send({ chat: "no text: here", text: "hi" })')).toBe('hi')
+    })
+
+    test('returns null when the only "text:" lives inside a quoted value', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({ reason: "no text: key here" })')).toBeNull()
+    })
+
+    test('skips a "text" key inside a nested object and extracts the top-level text', () => {
+      expect(
+        extractPlainTextChannelToolCallText('channel_reply({ meta: { text: "debug" }, text: "real reply" })'),
+      ).toBe('real reply')
+    })
+
+    test('skips deeply nested "text" keys and extracts the top-level text', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({ a: { b: { text: "deep" } }, text: "top" })')).toBe(
+        'top',
+      )
+    })
+
+    test('skips a "text" key nested inside an array element', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({ items: [{ text: "arr" }], text: "outer" })')).toBe(
+        'outer',
+      )
+    })
+
+    test('returns null when "text" exists only inside a nested object', () => {
+      expect(extractPlainTextChannelToolCallText('channel_reply({ meta: { text: "only nested" } })')).toBeNull()
     })
   })
 
