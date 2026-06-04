@@ -32,7 +32,7 @@ Results are discriminated by `source`:
 - `source: "topic"` — fields `shardPath`, `slug`, `heading`, `excerpt`, `fullBody?`
 - `source: "stream"` — fields `streamPath`, `date`, `eventId?` (citation-format `streams/yyyy-MM-dd#<id>` for fragments; absent for legacy prose), `topic`, `excerpt`, `fullBody?`
 
-Topic matches come first (alphabetical by slug); then stream matches (newest day first). `full: true` returns the entire shard or fragment body. `maxResults` truncates streams before topics when exhausted.
+Ordering depends on mode. Exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first), and `maxResults` truncates streams before topics. Word-fallback results are instead ranked by matched-word count — that same topic-first/stream-newest order is only the tiebreak within a score band, so a higher-scoring stream can precede a lower-scoring topic, and `maxResults` drops the lowest-scored tail regardless of source. `full: true` returns the entire shard or fragment body.
 
 ## Per-shard truncation
 
