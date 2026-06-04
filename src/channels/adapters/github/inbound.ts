@@ -435,8 +435,29 @@ export function resolveBotMentionLogins(selfLogin: string | null, authType: 'pat
   return decoyLogin !== null ? [selfLogin, decoyLogin] : [selfLogin]
 }
 
+// GitHub login chars are ASCII letters, digits, and hyphen. A `@login` token is
+// a real mention of `login` only when the char right after it is not one of
+// these — otherwise `@${login}` is a prefix of a longer, different login. This
+// matters for the App decoy slug: `resolveBotMentionLogins('typeclaw[bot]')`
+// yields the bare slug `typeclaw`, and a naive substring check would treat
+// `@typeclaw-bot` (a different user) as a self-mention. The trailing `[` of
+// `@typeclaw[bot]` is not a login char, so the full actor handle still matches.
+const LOGIN_CHAR = /[A-Za-z0-9-]/
+
 function textMentionsBot(text: string, mentionLogins: BotMentionLogins): boolean {
-  return mentionLogins.some((login) => text.includes(`@${login}`))
+  return mentionLogins.some((login) => mentionsLogin(text, login))
+}
+
+function mentionsLogin(text: string, login: string): boolean {
+  const token = `@${login}`
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(token, from)
+    if (at === -1) return false
+    const next = text[at + token.length]
+    if (next === undefined || !LOGIN_CHAR.test(next)) return true
+    from = at + 1
+  }
 }
 
 function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null {
