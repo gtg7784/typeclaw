@@ -155,4 +155,26 @@ describe('attachToolNotFoundNudge', () => {
     emit(notFoundEvent('web_search'))
     expect(steered).toHaveLength(0)
   })
+
+  test('nudges only once per missing tool name (a wedged model re-calling the same wrong name does not re-steer)', () => {
+    // Without dedup, each re-steer makes the model emit a fresh assistant
+    // turn that overwrites the subagent's captured final message. See
+    // attachFinalMessageCapture in subagents.ts.
+    const { session, emit, steered } = fakeSession()
+    attachToolNotFoundNudge(session, KNOWN)
+    emit(notFoundEvent('web_search'))
+    emit(notFoundEvent('web_search'))
+    emit(notFoundEvent('web_search'))
+    expect(steered).toHaveLength(1)
+  })
+
+  test('still nudges for a different wrong tool name after deduping the first', () => {
+    const { session, emit, steered } = fakeSession()
+    attachToolNotFoundNudge(session, KNOWN)
+    emit(notFoundEvent('web_search'))
+    emit(notFoundEvent('web_fetch'))
+    expect(steered).toHaveLength(2)
+    expect(steered[0]).toContain('`websearch`')
+    expect(steered[1]).toContain('`webfetch`')
+  })
 })

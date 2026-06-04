@@ -799,6 +799,78 @@ describe('startSubagent', () => {
     }
   })
 
+  function emittingSession(messages: { role?: string; content: unknown }[]): AgentSession {
+    let listener: ((event: unknown) => void) | null = null
+    return {
+      prompt: async () => {
+        for (const message of messages) listener?.({ type: 'message_end', message })
+      },
+      dispose: () => {},
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+  }
+
+  async function captureFinal(messages: { role?: string; content: unknown }[]): Promise<string | undefined> {
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => emittingSession(messages),
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_cap',
+    })
+    const result = await completion
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    return result.finalMessage
+  }
+
+  test('a trailing summary does not clobber an earlier <review> block (the production regression)', async () => {
+    const review = '<review>\n<verdict>request-changes</verdict>\n</review>'
+    const final = await captureFinal([
+      { role: 'assistant', content: review },
+      { role: 'assistant', content: 'Review delivered in the <review> block above.' },
+    ])
+    expect(final).toBe(review)
+  })
+
+  test('a revised <review> block wins over an earlier one (last valid block, not first)', async () => {
+    const stale = '<review>\n<verdict>approve</verdict>\n</review>'
+    const revised = '<review>\n<verdict>request-changes</verdict>\n</review>'
+    const final = await captureFinal([
+      { role: 'assistant', content: stale },
+      { role: 'assistant', content: revised },
+    ])
+    expect(final).toBe(revised)
+  })
+
+  test('a bare <review> mention inside fenced text is not treated as a review block', async () => {
+    const incidental = 'The diff adds a `<review>` literal but never closes it; flagging that.'
+    const final = await captureFinal([{ role: 'assistant', content: incidental }])
+    expect(final).toBe(incidental)
+  })
+
+  test('falls back to the last assistant message when no <review> block is present', async () => {
+    const final = await captureFinal([
+      { role: 'assistant', content: 'first pass' },
+      { role: 'assistant', content: 'second pass' },
+    ])
+    expect(final).toBe('second pass')
+  })
+
+  test('a non-assistant message_end (user/toolResult echo) does not clobber the assistant final message', async () => {
+    const final = await captureFinal([
+      { role: 'assistant', content: 'the real answer' },
+      { role: 'toolResult', content: 'tool echo that should be ignored' },
+    ])
+    expect(final).toBe('the real answer')
+  })
+
   test('completion resolves ok=false with error message when prompt throws', async () => {
     // given
     const session = {

@@ -403,13 +403,29 @@ function raceSubagentCompletion(
   })
 }
 
+// A complete top-level <review>...</review> block. The reviewer's contract
+// is that this block IS its result; a trailing summary turn ("delivered
+// above") must not become the captured final message. `[\s\S]` spans newlines
+// (the block is multi-line); non-greedy stops at the first close so an
+// incidental `<review>` literal in reviewed text cannot swallow real content.
+const REVIEW_BLOCK_RE = /<review>[\s\S]*?<\/review>/
+
 function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
+  let lastAssistant: string | null = null
+  let lastReview: string | null = null
   try {
     session.subscribe((event: unknown) => {
-      const ev = event as { type?: string; message?: { content?: unknown } }
+      const ev = event as { type?: string; message?: { role?: string; content?: unknown } }
       if (ev?.type !== 'message_end') return
+      // Real assistant messages carry role 'assistant'; older test doubles omit
+      // it. user/toolResult echoes must never overwrite the assistant's answer.
+      const role = ev.message?.role
+      if (role !== undefined && role !== 'assistant') return
       const text = extractFinalMessageText(ev.message?.content)
-      if (text !== null) onFinalMessage(text)
+      if (text === null) return
+      lastAssistant = text
+      if (REVIEW_BLOCK_RE.test(text)) lastReview = text
+      onFinalMessage(lastReview ?? lastAssistant)
     })
   } catch {
     // session.subscribe is a stable upstream API; defensive try is for test
