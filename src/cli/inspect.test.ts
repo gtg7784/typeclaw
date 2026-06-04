@@ -57,13 +57,13 @@ describe('createTailScope wiring', () => {
     scope.dispose()
   })
 
-  test('bare ESC aborts with back intent after the debounce window', async () => {
+  test('bare ESC aborts with back intent after the idle window', async () => {
     const tty = new FakeTty()
     const proc = new FakeProc()
     const scope = createTailScope({ debounceMs: 10, input: tty as never, proc: proc as never })
     tty.feed([0x1b])
     expect(scope.signal.aborted).toBe(false)
-    await tick(30)
+    await tick(600)
     expect(scope.signal.aborted).toBe(true)
     expect(scope.intent()).toBe('back')
     scope.dispose()
