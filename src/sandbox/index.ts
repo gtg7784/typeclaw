@@ -8,6 +8,7 @@ export {
   type ProtectedZones,
   type WritableZones,
 } from './writable-zones'
+export { ensureSessionTmpDir, isUnderTmp, mapVirtualTmpPath, SESSION_TMP_ROOT, sessionTmpDir } from './session-tmp'
 export { formatCommand, shellQuote } from './quote'
 export { SandboxPolicyError, SandboxUnavailableError } from './errors'
 export {
