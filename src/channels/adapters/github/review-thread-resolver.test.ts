@@ -9,6 +9,7 @@ type ThreadFixture = {
   isResolved: boolean
   rootCommentId: number
   rootAuthorLogin: string
+  rootAuthorType?: 'Bot' | 'User'
 }
 
 type Page = { threads: ThreadFixture[]; hasNextPage: boolean; endCursor: string | null }
@@ -22,7 +23,14 @@ const threadsPayload = (page: Page) => ({
           nodes: page.threads.map((t) => ({
             id: t.id,
             isResolved: t.isResolved,
-            comments: { nodes: [{ databaseId: t.rootCommentId, author: { login: t.rootAuthorLogin } }] },
+            comments: {
+              nodes: [
+                {
+                  databaseId: t.rootCommentId,
+                  author: { __typename: t.rootAuthorType ?? 'Bot', login: t.rootAuthorLogin },
+                },
+              ],
+            },
           })),
         },
       },
@@ -98,13 +106,21 @@ describe('github review-thread resolver', () => {
   })
 
   it('resolves the bot App thread when GraphQL reports the bare slug and self-login carries [bot]', async () => {
-    // given: GraphQL names the App author by bare slug while getSelf returns slug[bot]
+    // given: a Bot author named by bare slug while getSelf returns slug[bot]
     const seen = { mutations: [] as string[], queryCount: 0 }
     const resolve = resolverFor(
       fakeGraphql({
         pages: [
           {
-            threads: [{ id: 'PRRT_BOT', isResolved: false, rootCommentId: 100, rootAuthorLogin: 'typeey' }],
+            threads: [
+              {
+                id: 'PRRT_BOT',
+                isResolved: false,
+                rootCommentId: 100,
+                rootAuthorLogin: 'typeey',
+                rootAuthorType: 'Bot',
+              },
+            ],
             hasNextPage: false,
             endCursor: null,
           },
@@ -122,13 +138,58 @@ describe('github review-thread resolver', () => {
     expect(seen.mutations).toEqual(['PRRT_BOT'])
   })
 
+  it('refuses a human User whose login equals the bot slug (no suffix-strip across User authors)', async () => {
+    // given: a human User `typeey` whose login collides with the App slug, self-login `typeey[bot]`
+    const seen = { mutations: [] as string[], queryCount: 0 }
+    const resolve = resolverFor(
+      fakeGraphql({
+        pages: [
+          {
+            threads: [
+              {
+                id: 'PRRT_USER',
+                isResolved: false,
+                rootCommentId: 150,
+                rootAuthorLogin: 'typeey',
+                rootAuthorType: 'User',
+              },
+            ],
+            hasNextPage: false,
+            endCursor: null,
+          },
+        ],
+        seen,
+      }),
+      'typeey[bot]',
+    )
+
+    // when
+    const result = await resolve(req(150))
+
+    // then
+    expect(result).toEqual({
+      ok: false,
+      error: 'refusing to resolve thread authored by @typeey (not @typeey[bot])',
+      code: 'not-author',
+    })
+    expect(seen.mutations).toEqual([])
+  })
+
   it('refuses to resolve a thread authored by a human', async () => {
     const seen = { mutations: [] as string[], queryCount: 0 }
     const resolve = resolverFor(
       fakeGraphql({
         pages: [
           {
-            threads: [{ id: 'PRRT_2', isResolved: false, rootCommentId: 200, rootAuthorLogin: 'devxoul' }],
+            threads: [
+              {
+                id: 'PRRT_2',
+                isResolved: false,
+                rootCommentId: 200,
+                rootAuthorLogin: 'devxoul',
+                rootAuthorType: 'User',
+              },
+            ],
             hasNextPage: false,
             endCursor: null,
           },
