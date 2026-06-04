@@ -297,6 +297,7 @@ function renderChannelOrigin(
     chat: string
     chatName?: string
     thread: string | null
+    reactionRef?: ReactionRef
     participants?: readonly ChannelParticipant[]
     membership?: MembershipCount
     self?: ChannelSelfIdentity
@@ -354,7 +355,14 @@ function renderChannelOrigin(
   const conversationLine = renderConversationLine(origin)
   if (conversationLine !== null) lines.push('', conversationLine)
 
-  if (platformInfo.supportsReactions) {
+  // Gate on `reactionRef`, not just the static `supportsReactions` platform
+  // fact: a turn only has a message to react to when the triggering inbound
+  // carried one. Reminder-only turns (restart-resume, subagent-completion,
+  // idle/todo continuation) wake the session with no inbound, so
+  // `buildLiveOrigin` omits `reactionRef`. Prompting "react like a teammate"
+  // there made the model call `channel_react`, which then denied with "this
+  // conversation has no message to react to".
+  if (platformInfo.supportsReactions && origin.reactionRef !== undefined) {
     lines.push(
       '',
       '**React like a teammate would.** You can drop an emoji on the message that',
