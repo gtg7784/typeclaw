@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { createHmac } from 'node:crypto'
 
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import { createDeliveryDedup } from './dedup'
@@ -406,6 +407,44 @@ describe('classifyGithubInbound', () => {
       })
     })
 
+    describe('pull_request.ready_for_review (treated as opened)', () => {
+      it("synthesizes a review trigger when reviewOn is 'opened'", () => {
+        const msg = classifyGithubInbound('pull_request', readyForReviewPayload(), 'typeclaw-bot', {
+          reviewOn: 'opened',
+        })
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.text).toContain('@alice opened PR #7: "Add the thing"')
+        expect(msg?.text).toContain('Please review the changes line-by-line and post your feedback.')
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.authorName).toBe('alice')
+      })
+
+      it('stays awareness-only when reviewOn defaults to review_requested', () => {
+        const msg = classifyGithubInbound('pull_request', readyForReviewPayload(), 'typeclaw-bot')
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+
+      it("stays awareness-only when reviewOn is 'off'", () => {
+        const msg = classifyGithubInbound('pull_request', readyForReviewPayload(), 'typeclaw-bot', {
+          reviewOn: 'off',
+        })
+        expect(msg?.chat).toBe('pr:7')
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+
+      it('suppresses the review trigger when the bot marked its own PR ready', () => {
+        const payload = readyForReviewPayload()
+        ;(payload.sender as Record<string, unknown>).login = 'typeclaw-bot'
+        ;(payload.pull_request as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 99, type: 'Bot' }
+        const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot', { reviewOn: 'opened' })
+        expect(msg?.isBotMention).toBe(false)
+        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+      })
+    })
+
     describe("reviewOn: 'off'", () => {
       it('drops a review_requested event entirely', () => {
         const msg = classifyGithubInbound(
@@ -624,6 +663,18 @@ describe('createGithubWebhookHandler — review.on wiring', () => {
     await handler(signedRequest(JSON.stringify(openedPayload()), 'pull_request', 'on-default-1'))
     expect(routed).toHaveLength(1)
     expect(routed[0]?.isBotMention).toBe(false)
+  })
+
+  it("admits a ready_for_review delivery under the default allowlist and routes it as a review trigger when reviewOn is 'opened'", async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler({
+      ...baseOptions(routed, () => 'opened'),
+      allowlist: () => [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+    })
+    await handler(signedRequest(JSON.stringify(readyForReviewPayload()), 'pull_request', 'on-rfr-1'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.isBotMention).toBe(true)
+    expect(routed[0]?.text).toContain('Please review the changes line-by-line')
   })
 })
 
@@ -1301,6 +1352,18 @@ function openedPayload(options: { updatedAt?: string; draft?: boolean } = {}): R
   if (options.draft !== undefined) pull_request.draft = options.draft
   return {
     action: 'opened',
+    repository: repo(),
+    pull_request,
+    sender: { login: 'alice', id: 10, type: 'User' },
+  }
+}
+
+function readyForReviewPayload(options: { updatedAt?: string; draft?: boolean } = {}): Record<string, unknown> {
+  const pull_request = pullRequestForReview(options.updatedAt ?? '2026-01-01T00:00:00Z')
+  // ready_for_review fires on the draft→ready transition, so draft is false by then.
+  pull_request.draft = options.draft ?? false
+  return {
+    action: 'ready_for_review',
     repository: repo(),
     pull_request,
     sender: { login: 'alice', id: 10, type: 'User' },
