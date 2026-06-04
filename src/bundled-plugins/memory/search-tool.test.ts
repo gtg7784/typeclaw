@@ -402,6 +402,103 @@ describe('memorySearchTool — stream events', () => {
   })
 })
 
+// Descriptive multi-word queries (more than one whitespace-separated word
+// that no single body contains as one contiguous substring even though every
+// word is present individually) used to return {"matches":[]}. Fallback
+// OR-matches the whitespace-split tokens, but ONLY when the exact phrase
+// finds nothing.
+describe('memorySearchTool — multi-word token fallback', () => {
+  test('phrase that no body contains as a contiguous substring still matches via tokens', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(
+      agentDir,
+      'report-cron',
+      'Quarterly report summary cron',
+      'Posts a summary of the quarterly regional revenue report.\n',
+    )
+
+    const result = await call(agentDir, { query: 'quarterly summary regional report id' })
+
+    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['report-cron'])
+  })
+
+  test('exact-phrase match still wins and does NOT fall back to tokens', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'phrase-shard', 'Phrase shard', 'the blue green deploy runs nightly.\n')
+    await writeShard(agentDir, 'token-shard', 'Token shard', 'deploy something unrelated here.\n')
+
+    const result = await call(agentDir, { query: 'blue green deploy' })
+
+    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['phrase-shard'])
+  })
+
+  test('token fallback ranks more-tokens-matched ahead of fewer, surface order as tiebreak', async () => {
+    const agentDir = await makeAgentDir()
+    // 'one-hit' sorts first alphabetically but matches fewer tokens, so the
+    // tokens-matched ranking must reorder it behind 'three-hit'.
+    await writeShard(agentDir, 'one-hit', 'One hit', 'only gearbox appears here.\n')
+    await writeShard(agentDir, 'three-hit', 'Three hit', 'widget gearbox assembly all here.\n')
+
+    const result = await call(agentDir, { query: 'widget gearbox assembly torque spec' })
+
+    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['three-hit', 'one-hit'])
+  })
+
+  test('token fallback covers stream events too, ranked after topics', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'topic-shard', 'Topic shard', 'widget assembly live here.\n')
+    await writeStream(agentDir, '2026-05-20', [fragment('s1', 'Stream frag', 'torque spec recorded.\n')])
+
+    const result = await call(agentDir, { query: 'widget assembly torque spec' })
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual([
+      'topic:topic-shard',
+      'stream:streams/2026-05-20#s1',
+    ])
+  })
+
+  test('single-word query is unaffected (no fallback path, still empty on no match)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'daily-notes', 'Daily notes', 'A body about memory.\n')
+
+    await expect(call(agentDir, { query: 'absent' })).resolves.toEqual({ matches: [] })
+  })
+
+  test('regex mode never tokenizes — whitespace stays part of the pattern', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'only-foo', 'Only foo', 'foo stands alone here.\n')
+
+    const result = await call(agentDir, { query: 'foo bar', asRegex: true })
+
+    expect(result).toEqual({ matches: [] })
+  })
+
+  test('token fallback excerpt anchors on the first line matching any token', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(
+      agentDir,
+      'window',
+      'Window',
+      'line 1\nline 2\nline 3\nline 4\nthe gearbox line 5\nline 6\nline 7\nline 8\nline 9\n',
+    )
+
+    const result = await call(agentDir, { query: 'widget gearbox assembly' })
+
+    expect('matches' in result ? result.matches[0]?.excerpt : undefined).toBe(
+      'line 2\nline 3\nline 4\nthe gearbox line 5\nline 6\nline 7\nline 8',
+    )
+  })
+
+  test('duplicate and whitespace-only tokens collapse (no double-counting in ranking)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'one-word', 'One word', 'gearbox contract noted.\n')
+
+    const result = await call(agentDir, { query: '  gearbox   gearbox  ' })
+
+    expect('matches' in result ? result.matches.map(topicSlug) : []).toEqual(['one-word'])
+  })
+})
+
 function topicSlug(m: TopicMatch | StreamMatch): string | undefined {
   return m.source === 'topic' ? m.slug : undefined
 }
