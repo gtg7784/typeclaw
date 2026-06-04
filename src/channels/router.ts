@@ -32,6 +32,7 @@ import {
   StickyLedger,
   type EngagementDecision,
 } from './engagement'
+import { resetReviewTurn } from './github-review-turn-ledger'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
   type MembershipCount,
@@ -1844,6 +1845,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.skipLockedSendTurn = null
         live.policyDeniedToolSendsThisTurn.clear()
+        resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
         await fireSessionTurnStart(live, text)
         try {
