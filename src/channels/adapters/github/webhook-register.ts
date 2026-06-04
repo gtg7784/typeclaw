@@ -54,11 +54,16 @@ export async function registerGithubWebhooks(
   options: RegisterGithubWebhooksOptions,
 ): Promise<WebhookRegistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
+  // Dedupe before fanning out: the serial loop self-corrected on a repeated
+  // repo (the second pass saw the first pass's hook and updated it), but
+  // concurrent passes would both list an empty set and each POST a hook,
+  // creating a duplicate. Collapsing to distinct slugs restores convergence.
+  const distinctRepos = [...new Set(options.repos)]
   // Repos are independent (own installation token, own hooks), so register them
   // concurrently. Every task resolves to a result (failures are caught into a
   // `failed` entry, never thrown), so the batch never rejects and order is kept.
   const repos = await Promise.all(
-    options.repos.map(async (repo): Promise<WebhookRepoResult> => {
+    distinctRepos.map(async (repo): Promise<WebhookRepoResult> => {
       let token: string
       try {
         token = await options.token(repo)
