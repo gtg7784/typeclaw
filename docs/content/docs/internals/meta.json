@@ -10,6 +10,7 @@
     "tunnels",
     "message-stream",
     "engagement",
+    "todo-continuation",
     "github-decoy-reviewer",
     "web-search",
     "xvfb",
