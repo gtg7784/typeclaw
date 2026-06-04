@@ -522,9 +522,10 @@ async function applyBashSandbox(
   // (node_modules/, agentDir root, non-allowlisted tracked files) stays EROFS, so
   // bash cannot sidestep the non-workspace-write guard — and `git checkout` of a
   // protected worktree path fails at the kernel. .git is RW so members can
-  // commit; .git/hooks + .git/config are re-protected RO (protected, rendered
-  // after writable) so a hook-plant / core.hooksPath does not become code
-  // execution in the unsandboxed runtime git ops. Trusted/owner never reach here
+  // commit; .git/hooks + .git/config (and any writable core.hooksPath target)
+  // are re-protected RO (protected, rendered after writable, ensured to exist so
+  // an absent path can't be created+executed) so a hook-plant / core.hooksPath
+  // never becomes code execution in the unsandboxed runtime git ops. Trusted/owner never reach here
   // (their masks are empty) and keep full unsandboxed access. subtractMasked
   // drops any writable zone masked for this role so an RW bind never re-exposes a
   // hidden path (e.g. a guest's masked workspace/).

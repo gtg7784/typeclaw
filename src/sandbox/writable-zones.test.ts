@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -111,17 +111,52 @@ describe('resolveProtectedZones', () => {
 
     const { dirs, files } = await resolveProtectedZones(agentDir)
 
-    expect(dirs).toEqual([join(agentDir, '.git/hooks')])
+    expect(dirs).toContain(join(agentDir, '.git/hooks'))
     expect(files).toEqual([join(agentDir, '.git/config')])
   })
 
-  test('drops absent protected entries so bwrap never binds a missing source', async () => {
+  test('ensures and protects .git/hooks + .git/config even when absent', async () => {
     await mkdir(join(agentDir, '.git'))
 
     const { dirs, files } = await resolveProtectedZones(agentDir)
 
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    // given .git existed but hooks/config did not, they are created AND returned
+    expect(dirs).toContain(join(agentDir, '.git/hooks'))
+    expect(files).toEqual([join(agentDir, '.git/config')])
+    expect((await stat(join(agentDir, '.git/hooks'))).isDirectory()).toBe(true)
+    expect((await stat(join(agentDir, '.git/config'))).isFile()).toBe(true)
+  })
+
+  test('rejects a symlinked .git/hooks rather than protecting the wrong target', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+    try {
+      await mkdir(join(agentDir, '.git'))
+      await symlink(outside, join(agentDir, '.git', 'hooks'))
+
+      await expect(resolveProtectedZones(agentDir)).rejects.toThrow(/symlink/i)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('also protects a core.hooksPath that points inside the agent dir', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[core]\n\thooksPath = workspace/hooks\n')
+
+    const { dirs } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).toContain(join(agentDir, 'workspace/hooks'))
+    expect((await lstat(join(agentDir, 'workspace/hooks'))).isDirectory()).toBe(true)
+  })
+
+  test('ignores a core.hooksPath that resolves outside the agent dir', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[core]\n\thooksPath = /etc\n')
+
+    const { dirs } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).not.toContain('/etc')
+    expect(dirs).toContain(join(agentDir, '.git/hooks'))
   })
 })
 

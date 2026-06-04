@@ -1,5 +1,5 @@
-import { lstat } from 'node:fs/promises'
-import path, { join } from 'node:path'
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import path, { isAbsolute, join, resolve } from 'node:path'
 
 export type WritableZones = {
   dirs: string[]
@@ -66,18 +66,81 @@ export async function resolveWritableZones(agentDir: string): Promise<WritableZo
   return { dirs, files }
 }
 
-// Re-protected read-only on top of the writable .git bind. Absent entries are
-// dropped so bwrap never binds a missing source.
+// Read-only re-protections rendered on top of the writable .git bind. Unlike
+// the writable resolvers, this MUST NOT drop absent entries: .git is writable,
+// so a path absent at jail-build time would otherwise be CREATED by sandboxed
+// bash (e.g. a planted .git/hooks/pre-commit) and then executed by the
+// unsandboxed runtime git ops. So we ensure each protected path exists first,
+// then always RO-bind it — a read-only bind of a real dir blocks creating
+// children inside it (EROFS), and a read-only bind of config keeps its real
+// content readable (commits need user.name/email) while blocking mutation.
+//
+// We also resolve the effective core.hooksPath from the real (about-to-be-RO)
+// config: if it already points at a writable location (e.g. workspace/hooks),
+// the .git/hooks RO-bind alone would not cover it, so that dir is protected too.
 export async function resolveProtectedZones(agentDir: string): Promise<ProtectedZones> {
-  const dirs = await collectExisting(
-    PROTECTED_GIT_DIRS.map((d) => join(agentDir, d)),
-    'dir',
-  )
-  const files = await collectExisting(
-    PROTECTED_GIT_FILES.map((f) => join(agentDir, f)),
-    'file',
-  )
+  const dirs: string[] = []
+  for (const rel of PROTECTED_GIT_DIRS) {
+    dirs.push(await ensureProtectedDir(join(agentDir, rel)))
+  }
+  const files: string[] = []
+  for (const rel of PROTECTED_GIT_FILES) {
+    files.push(await ensureProtectedFile(join(agentDir, rel)))
+  }
+
+  const hooksPathDir = await resolveEffectiveHooksPath(agentDir)
+  if (hooksPathDir !== undefined && !dirs.includes(hooksPathDir)) {
+    dirs.push(await ensureProtectedDir(hooksPathDir))
+  }
+
   return { dirs, files }
+}
+
+// Fail closed: a symlink at a protected path would make the RO bind follow it
+// elsewhere, so reject it rather than silently protect the wrong target.
+async function ensureProtectedDir(target: string): Promise<string> {
+  await mkdir(target, { recursive: true })
+  await assertNotSymlink(target)
+  return target
+}
+
+async function ensureProtectedFile(target: string): Promise<string> {
+  if (!(await isRealEntry(target, 'file'))) {
+    try {
+      await writeFile(target, '', { flag: 'wx' })
+    } catch {
+      // Lost a race (or it appeared); the symlink check below still guards it.
+    }
+  }
+  await assertNotSymlink(target)
+  return target
+}
+
+async function assertNotSymlink(target: string): Promise<void> {
+  const stats = await lstat(target)
+  if (stats.isSymbolicLink()) {
+    throw new Error(`sandbox: refusing to protect symlinked path ${target}`)
+  }
+}
+
+// Reads core.hooksPath straight from .git/config text (the file is about to be
+// RO-bound, so its content is the trusted baseline). Returns the resolved
+// absolute dir only when it lands inside agentDir — an outside path is not
+// writable by the jail and a relative path resolves against the repo root, per
+// gitconfig semantics.
+async function resolveEffectiveHooksPath(agentDir: string): Promise<string | undefined> {
+  let text: string
+  try {
+    text = await readFile(join(agentDir, '.git', 'config'), 'utf8')
+  } catch {
+    return undefined
+  }
+  const match = text.match(/^\s*hooksPath\s*=\s*(.+?)\s*$/m)
+  if (match === null) return undefined
+  const raw = match[1]?.trim()
+  if (raw === undefined || raw.length === 0) return undefined
+  const resolved = isAbsolute(raw) ? resolve(raw) : resolve(agentDir, raw)
+  return isInside(agentDir, resolved) ? resolved : undefined
 }
 
 // SECURITY: a writable RW bind renders AFTER the masks and last-op-wins, so an
