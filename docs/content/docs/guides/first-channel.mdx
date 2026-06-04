@@ -16,7 +16,7 @@ typeclaw channel add slack-bot
 
 The CLI prompts for the bot token (`xoxb-…`) and app token (`xapp-…`). It writes them into `secrets.json` under `channels.slack-bot` and updates `typeclaw.json` to enable the adapter. `secrets.json` is gitignored — nothing leaks into your repo.
 
-You get those two tokens from a Slack app. The fastest way to create one with exactly the scopes the adapter exercises — and nothing more — is to paste this manifest into **api.slack.com/apps → Create New App → From a manifest**:
+You get those two tokens from a Slack app. The fastest way to create one with exactly the scopes the adapter exercises — and nothing more — is to paste this manifest into **api.slack.com/apps → Create New App → From a manifest**, then install it to your workspace:
 
 ```yaml
 display_information:
@@ -55,6 +55,8 @@ settings:
 `reactions:write` is the one people miss: without it the agent's automatic `:eyes:` acknowledgement and any explicit `channel_react` call fail with Slack's `missing_scope` error, which surfaces in the host logs on every engaged message until the scope is granted. The rest map one-to-one to what the adapter calls — `chat:write` to send, `reactions:write` to react, `files:read`/`files:write` for attachments, the `*:history`/`*:read` pairs to read channel context and members, `users:read`/`team:read` to resolve authors and workspace names.
 
 If you already created the app without `reactions:write`, add it under **OAuth & Permissions → Bot Token Scopes**, then **reinstall the app to the workspace** so the new scope takes effect.
+
+The manifest only covers the `xoxb-…` bot token — installing the app gives you that one under **OAuth & Permissions → Bot User OAuth Token**. The `xapp-…` token is a separate, app-level token you create by hand: go to **Basic Information → App-Level Tokens → Generate Token and Scopes**, add the **`connections:write`** scope (required for Socket Mode), and generate. That `xapp-…` value is the app token the CLI asks for.
 
 The adapter uses Slack's Socket Mode, so you don't need a public URL. Skip ngrok.
 
