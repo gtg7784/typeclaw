@@ -3,6 +3,7 @@ import type { Unsubscribe } from '@/stream'
 import { createLogRing, type LogLineSubscriber, type LogRing } from '../log-ring'
 import { extractQuickTunnelUrl } from '../quick-url-parser'
 import type { TunnelConfig, TunnelProviderHandle, TunnelState } from '../types'
+import { isBinaryNotFound, MISSING_BINARY_DETAIL } from './cloudflared-binary'
 
 const DEFAULT_BINARY = 'cloudflared'
 const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 10_000, 30_000]
@@ -61,10 +62,20 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
     attemptEmittedUrl = false
     state.status = 'starting'
     state.detail = 'starting cloudflared'
-    const spawned = Bun.spawn(
-      [binary, 'tunnel', '--url', `http://127.0.0.1:${upstreamPort}`, '--no-autoupdate', '--metrics', '127.0.0.1:0'],
-      { stdout: 'ignore', stderr: 'pipe' },
-    )
+    let spawned: Bun.Subprocess<'ignore', 'ignore', 'pipe'>
+    try {
+      spawned = Bun.spawn(
+        [binary, 'tunnel', '--url', `http://127.0.0.1:${upstreamPort}`, '--no-autoupdate', '--metrics', '127.0.0.1:0'],
+        { stdout: 'ignore', stderr: 'pipe' },
+      )
+    } catch (err) {
+      if (isBinaryNotFound(err)) {
+        state.status = 'permanently-failed'
+        state.detail = MISSING_BINARY_DETAIL
+        return
+      }
+      throw err
+    }
     proc = spawned
 
     void pumpStderr(spawned.stderr, logs, (line) => {

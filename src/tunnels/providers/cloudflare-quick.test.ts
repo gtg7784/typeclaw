@@ -107,6 +107,28 @@ sleep 30
     }
   })
 
+  it('flips to permanently-failed with restart guidance when the cloudflared binary is missing', async () => {
+    const scratchDir = createScratchDir()
+    const provider = createCloudflareQuickProvider({
+      config,
+      upstreamPort: 8975,
+      binary: join(scratchDir, 'cloudflared-does-not-exist'),
+      onUrlChange: () => {},
+      stopGraceMs: 10,
+    })
+
+    try {
+      await provider.start()
+      const snap = provider.snapshot()
+      expect(snap.status).toBe('permanently-failed')
+      expect(snap.detail).toContain('docker.file.cloudflared')
+      expect(snap.detail).toContain('typeclaw restart')
+    } finally {
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
   it('restarts a crashed process with backoff until a URL is emitted', async () => {
     const scratchDir = createScratchDir()
     const countFile = join(scratchDir, 'count.txt')

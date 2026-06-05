@@ -50,8 +50,9 @@ const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string
   { pattern: /set\s+-o\s+posix[\s\S]{0,40}(?:^|[\s;|&(`])set(?:[\s;|&)`]|$)/m, label: 'set -o posix; set (env dump)' },
   {
     // jq/yq read+emit arbitrary files just like cat (e.g. `jq . .env`,
-    // `yq '.x' .env`) and both ship in the container baseline, so they are
-    // first-class .env exfil vectors and must be gated here, not just the
+    // `yq '.x' .env`). `jq` ships in the container baseline; `yq` no longer
+    // does, but a user can re-add it via `docker.file.append`, so both stay
+    // gated here as first-class .env exfil vectors — not just the
     // pager/dumper family.
     pattern: /(cat|less|more|head|tail|bat|xxd|od|hexdump|strings|jq|yq)\s+[^\n;|&`]*\.env(\s|$|[;|&`])/,
     label: 'reading .env file',

@@ -14,11 +14,27 @@ import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start
 
 let root: string
 
+// Pin the host locale to non-CJK so refreshDockerfile()/start() (which call
+// hostLocaleIsCjk() for cjkFonts: 'auto') produce output that matches the
+// bare buildDockerfile() these tests compare against, regardless of the test
+// machine's actual locale (a CJK CI runner would otherwise diverge).
+const SAVED_LOCALE_ENV: Record<string, string | undefined> = {}
+const LOCALE_ENV_VARS = ['LC_ALL', 'LC_CTYPE', 'LANG'] as const
+
 beforeEach(async () => {
+  for (const key of LOCALE_ENV_VARS) {
+    SAVED_LOCALE_ENV[key] = process.env[key]
+    delete process.env[key]
+  }
+  process.env.LANG = 'C'
   root = await mkdtemp(join(tmpdir(), 'typeclaw-container-start-'))
 })
 
 afterEach(async () => {
+  for (const key of LOCALE_ENV_VARS) {
+    if (SAVED_LOCALE_ENV[key] === undefined) delete process.env[key]
+    else process.env[key] = SAVED_LOCALE_ENV[key]
+  }
   await rm(root, { recursive: true, force: true })
 })
 

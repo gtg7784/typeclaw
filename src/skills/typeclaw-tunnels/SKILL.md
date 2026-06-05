@@ -111,7 +111,9 @@ Use `typeclaw tunnel logs <name> -f` while restarting the agent if you need to w
 
 ### `cloudflared` is not installed
 
-Both Cloudflare providers (`cloudflare-quick` and `cloudflare-named`) require `docker.file.cloudflared: true`. If it is missing, `typeclaw tunnel add` writes it automatically; otherwise add it to `typeclaw.json` by hand and run `typeclaw restart` so the Dockerfile is regenerated and the image rebuilds.
+`docker.file.cloudflared` defaults to `false`, so a fresh image ships without the `cloudflared` binary. Both Cloudflare providers (`cloudflare-quick` and `cloudflare-named`) require `docker.file.cloudflared: true`. `typeclaw tunnel add` and `typeclaw channel add github` (with a Cloudflare provider) write it automatically; a hand-edited `typeclaw.json` must set it explicitly. After setting it, run `typeclaw restart` so the Dockerfile is regenerated and the image rebuilds.
+
+If a tunnel is configured but the binary is missing, the tunnel goes **`permanently-failed`** and `typeclaw tunnel status` shows the detail `cloudflared binary not found in image; set docker.file.cloudflared: true in typeclaw.json and run typeclaw restart` — fix it the same way.
 
 ### Named tunnel says "permanently-failed" with `tokenEnv` in the detail
 

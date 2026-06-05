@@ -14,6 +14,7 @@ import {
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { commitSystemFile } from '@/git/system-commit'
 import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
+import { hostLocaleIsCjk } from '@/shared/host-locale'
 import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
@@ -660,7 +661,10 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     const typeclawConfig = await readTypeclawConfig(root)
     await writeFile(
       join(root, DOCKERFILE),
-      buildDockerfile(typeclawConfig.docker.file, { baseImageVersion: resolveBaseImageVersion(root) }),
+      buildDockerfile(typeclawConfig.docker.file, {
+        baseImageVersion: resolveBaseImageVersion(root),
+        cjkFontsAuto: hostLocaleIsCjk(),
+      }),
       { flag: 'wx' },
     ).catch(ignoreExists)
 

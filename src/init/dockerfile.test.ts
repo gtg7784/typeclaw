@@ -21,10 +21,6 @@ import {
   NETWORK_BLOCK_IPV4_NETS,
   NETWORK_BLOCK_IPV6_NETS,
   TYPECLAW_ENTRYPOINT_PATH,
-  YQ_RELEASE_URL_BASE,
-  YQ_SHA256_AMD64,
-  YQ_SHA256_ARM64,
-  YQ_VERSION,
 } from './dockerfile'
 
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
@@ -889,18 +885,33 @@ describe('Chrome runtime deps (amd64)', () => {
 })
 
 describe('cjkFonts toggle', () => {
-  test('default is true: fonts-noto-cjk lands in the main apt-get install line so CJK glyphs render in Chromium screenshots/PDFs out of the box', () => {
-    const pkgs = aptPackages(buildDockerfile())
-    expect(pkgs).toContain('fonts-noto-cjk')
-  })
-
-  test('cjkFonts: false omits fonts-noto-cjk entirely — opt-out actually saves the ~56MB layer', () => {
-    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: false }))
+  test('default is auto: with no host-locale signal, fonts-noto-cjk is omitted so the common (non-CJK) case skips the ~89MB layer', () => {
+    const out = buildDockerfile()
     expect(out).not.toContain('fonts-noto-cjk')
   })
 
-  test('cjkFonts default lives on the toggle apt layer, not the Chrome-runtime-libs branch (so opt-out works without re-architecting the launch-deps invariant)', () => {
-    const out = buildDockerfile()
+  test("cjkFonts: 'auto' with cjkFontsAuto=true installs fonts-noto-cjk so a CJK host renders glyphs out of the box", () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: 'auto' }), { cjkFontsAuto: true })
+    expect(aptPackages(out)).toContain('fonts-noto-cjk')
+  })
+
+  test("cjkFonts: 'auto' with cjkFontsAuto=false omits fonts-noto-cjk", () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: 'auto' }), { cjkFontsAuto: false })
+    expect(out).not.toContain('fonts-noto-cjk')
+  })
+
+  test('explicit cjkFonts: true overrides auto-detection — installs even when cjkFontsAuto=false', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: true }), { cjkFontsAuto: false })
+    expect(aptPackages(out)).toContain('fonts-noto-cjk')
+  })
+
+  test('explicit cjkFonts: false overrides auto-detection — omits even when cjkFontsAuto=true', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: false }), { cjkFontsAuto: true })
+    expect(out).not.toContain('fonts-noto-cjk')
+  })
+
+  test('fonts-noto-cjk lives on the toggle apt layer, not the Chrome-runtime-libs branch (so opt-out works without re-architecting the launch-deps invariant)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: true }))
     expect(aptPackages(out)).toContain('fonts-noto-cjk')
     expect(amd64ElseBranchPackages(out)).not.toContain('fonts-noto-cjk')
     expect(arm64IfBranchPackages(out)).not.toContain('fonts-noto-cjk')
@@ -919,7 +930,7 @@ describe('cjkFonts toggle', () => {
     expect(out).not.toContain('fonts-noto-cjk')
   })
 
-  test('base Dockerfile does NOT install fonts-noto-cjk — fonts ride the per-agent toggle apt layer, never the shared base image, so cjkFonts: false truly skips the ~56MB even on GHCR-base agents', () => {
+  test('base Dockerfile does NOT install fonts-noto-cjk — fonts ride the per-agent toggle apt layer, never the shared base image, so cjkFonts: false truly skips the ~89MB even on GHCR-base agents', () => {
     expect(buildBaseDockerfile()).not.toContain('fonts-noto-cjk')
   })
 })
@@ -964,58 +975,6 @@ describe('curl-impersonate layer', () => {
   })
 })
 
-describe('yq layer', () => {
-  test('embeds the pinned version in the release URL so a bump is a deliberate, reviewable change, not a moving "latest" target', () => {
-    const out = buildDockerfile()
-    expect(out).toContain(`${YQ_RELEASE_URL_BASE}/${YQ_VERSION}/yq_linux_`)
-  })
-
-  test('verifies the binary sha256 so a tampered download fails the build', () => {
-    const out = buildDockerfile()
-    expect(out).toContain(YQ_SHA256_AMD64)
-    expect(out).toContain(YQ_SHA256_ARM64)
-    expect(out).toContain('sha256sum -c -')
-  })
-
-  test('branches by TARGETARCH so the same Dockerfile produces correct binaries on amd64 and arm64', () => {
-    const out = buildDockerfile()
-    expect(out).toMatch(/TARGETARCH.*arm64.*echo arm64.*echo amd64/s)
-  })
-
-  test('installs to /usr/local/bin (on $PATH) and smoke-tests at build time so a broken binary fails the build, not the first sandboxed pipeline', () => {
-    const out = buildDockerfile()
-    expect(out).toContain('mv yq /usr/local/bin/yq')
-    expect(out).toContain('/usr/local/bin/yq --version')
-  })
-
-  test('ships unconditionally regardless of toggles, mirroring jq — a sandbox-visible read-only pipeline tool, not a feature gate', () => {
-    const allOff = buildDockerfile(
-      dockerfileSchema.parse({
-        tmux: false,
-        gh: false,
-        python: false,
-        ffmpeg: false,
-        cjkFonts: false,
-        xvfb: false,
-        cloudflared: false,
-      }),
-    )
-    expect(allOff).toContain('mv yq /usr/local/bin/yq')
-  })
-
-  test('yq layer is between curl-impersonate and agent-browser so an agent-browser bump does not invalidate it and the apt baseline (curl, ca-certificates) is satisfied', () => {
-    const out = buildDockerfile()
-    const curlImpersonateIdx = out.indexOf('curl-impersonate.tar.gz')
-    const yqIdx = out.indexOf('mv yq /usr/local/bin/yq')
-    const agentBrowserIdx = out.indexOf('bun install -g agent-browser')
-    expect(curlImpersonateIdx).toBeGreaterThan(-1)
-    expect(yqIdx).toBeGreaterThan(-1)
-    expect(agentBrowserIdx).toBeGreaterThan(-1)
-    expect(curlImpersonateIdx).toBeLessThan(yqIdx)
-    expect(yqIdx).toBeLessThan(agentBrowserIdx)
-  })
-})
-
 describe('cloudflared layer', () => {
   test('cloudflared: true emits the pinned cloudflared download layer', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: true }))
@@ -1031,11 +990,11 @@ describe('cloudflared layer', () => {
     expect(out).not.toContain('/usr/local/bin/cloudflared --version')
   })
 
-  test('default config includes the cloudflared layer (default flipped to true so cloudflare-quick tunnels work out of the box)', () => {
+  test('default config omits the cloudflared layer (default false to skip the ~38MB binary; tunnel add / channel add flip it on and prompt for restart)', () => {
     const out = buildDockerfile()
 
-    expect(out).toContain(`${CLOUDFLARED_RELEASE_URL_BASE}/${CLOUDFLARED_VERSION}/cloudflared-linux-`)
-    expect(out).toContain('/usr/local/bin/cloudflared --version')
+    expect(out).not.toContain('cloudflared-linux-')
+    expect(out).not.toContain('/usr/local/bin/cloudflared --version')
   })
 
   test('cloudflared layer appears after curl-impersonate and before the entrypoint shim', () => {
@@ -1070,14 +1029,6 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     expect(base).toContain(CURL_IMPERSONATE_SHA256_AMD64)
     expect(base).toContain(CURL_IMPERSONATE_SHA256_ARM64)
     expect(base).toContain(`/usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version`)
-  })
-
-  test('base Dockerfile pins the same yq version, sha256s, and install path as the per-agent Dockerfile so sandboxed `... | yq` resolves regardless of which Dockerfile produced the image', () => {
-    const base = buildBaseDockerfile()
-    expect(base).toContain(`${YQ_RELEASE_URL_BASE}/${YQ_VERSION}/yq_linux_`)
-    expect(base).toContain(YQ_SHA256_AMD64)
-    expect(base).toContain(YQ_SHA256_ARM64)
-    expect(base).toContain('mv yq /usr/local/bin/yq')
   })
 
   test('base Dockerfile installs the full Playwright-tested chromium runtime dep set on amd64 — same list the per-agent Dockerfile depends on Chrome to find at launch time', () => {

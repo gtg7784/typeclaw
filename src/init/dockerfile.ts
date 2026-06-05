@@ -12,6 +12,12 @@ export const DOCKERFILE = 'Dockerfile'
 export type BuildDockerfileOptions = {
   // Null or omitted = emit the full inline heavy stack (dev mode, tests).
   baseImageVersion?: string | null
+  // Host-locale decision for `cjkFonts: 'auto'`. Callers that have a host
+  // locale (start/init) pass the resolved boolean; when omitted, `'auto'`
+  // falls back to NOT installing (the slim default) so a context without a
+  // host signal — e.g. a bare `buildDockerfile()` in tests — stays small and
+  // deterministic.
+  cjkFontsAuto?: boolean
 }
 
 // Apt packages that EVERY image must have — git for the agent runtime,
@@ -97,33 +103,6 @@ export const CURL_IMPERSONATE_SHA256_ARM64 = '6766bc67fd3e8e2313875f32b36b5a3fab
 // drops chrome136 fails loudly at search time instead of silently regressing
 // the impersonation to whatever `curl_chrome` resolves to.
 export const CURL_IMPERSONATE_PROFILE = 'chrome136'
-
-// yq is the YAML/JSON/XML processor the `explorer` and `reviewer` subagent
-// prompts advertise alongside `jq` as a sanctioned one-shot read-only
-// pipeline tool (`... | yq`). Like `jq` (shipped in baseline), a binary that
-// is not in the container base image is invisible inside the per-tool bwrap
-// sandbox that wraps agent bash calls — the sandbox only `--ro-bind`s `/usr`
-// + `/bin` from the container, and there is no per-call install path. So `yq`
-// ships unconditionally, same rationale as `jq`/`bubblewrap`/`util-linux`.
-//
-// This is Mike Farah's Go `yq` (https://github.com/mikefarah/yq), NOT the
-// Python jq-wrapper of the same name in Debian's `yq` apt package. The
-// prompts pair `yq` with `jq` for jq-style expression pipelines, which is
-// Farah's syntax — the Python tool's CLI is incompatible. Distributed as a
-// per-arch static binary (no apt package on trixie for the Go variant), so
-// it follows the pinned-version + per-arch SHA256 + `sha256sum -c` pattern of
-// curl-impersonate and cloudflared rather than the apt baseline list.
-//
-// To bump: pick a release from https://github.com/mikefarah/yq/releases,
-// then for each arch download yq_linux_<arch> and `shasum -a 256` it (or read
-// the SHA-256 column from the release's `checksums` file, cross-indexed via
-// `checksums_hashes_order`). Update all three constants in the same commit;
-// the build fails loudly at `sha256sum -c` on a mismatch. Version literal is
-// the release tag exactly as it appears on GitHub (with `v` prefix).
-export const YQ_VERSION = 'v4.53.2'
-export const YQ_SHA256_AMD64 = 'd56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b'
-export const YQ_SHA256_ARM64 = '03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea'
-export const YQ_RELEASE_URL_BASE = 'https://github.com/mikefarah/yq/releases/download'
 
 // cloudflared powers `cloudflare-quick` tunnels. Pinned-version + per-arch
 // SHA256 mirrors the curl-impersonate pattern above: bumping requires updating
@@ -1068,22 +1047,26 @@ type AptFeature = {
   toAptArgs: (toggle: DockerfileFeatureToggle) => string[]
 }
 
-const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'cjkFonts' | 'xvfb', AptFeature> = {
+const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'xvfb', AptFeature> = {
   ffmpeg: { toAptArgs: (v) => singlePackageArgs('ffmpeg', v) },
   gh: { toAptArgs: (v) => singlePackageArgs('gh', v) },
   tmux: { toAptArgs: (v) => singlePackageArgs('tmux', v) },
   python: {
     toAptArgs: (v) => (v === true ? ['python3', 'python3-pip', 'python3-venv', 'python-is-python3'] : []),
   },
-  cjkFonts: { toAptArgs: (v) => (v === true ? [CJK_FONTS_PACKAGE] : []) },
   xvfb: { toAptArgs: (v) => (v === true ? ['xvfb'] : []) },
+}
+
+function resolveCjkFonts(value: boolean | 'auto', auto: boolean): boolean {
+  return value === 'auto' ? auto : value
 }
 
 export function buildDockerfile(
   config: DockerfileConfig = defaultConfig(),
   options: BuildDockerfileOptions = {},
 ): string {
-  const toggleAptArgs = collectToggleAptArgs(config)
+  const cjkFonts = resolveCjkFonts(config.cjkFonts, options.cjkFontsAuto ?? false)
+  const toggleAptArgs = collectToggleAptArgs(config, cjkFonts)
   const ghKeyringLayer = renderGhKeyringLayer(config.gh)
   const cloudflaredLayer = renderCloudflaredLayer(config.cloudflared)
   const customLines = renderCustomDockerfileLines(config.append)
@@ -1215,8 +1198,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 
 ${LAYER_2_5_CURL_IMPERSONATE}
 
-${LAYER_2_6_YQ}
-
 ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
@@ -1296,8 +1277,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 
 ${LAYER_2_5_CURL_IMPERSONATE}
 
-${LAYER_2_6_YQ}
-
 ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
@@ -1351,24 +1330,6 @@ RUN ARCH_TARBALL="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-linux-gnu;
  && tar -xzf curl-impersonate.tar.gz -C /usr/local/bin/ \\
  && rm curl-impersonate.tar.gz \\
  && /usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version > /dev/null`
-
-// Layer 2.6: install pinned Mike Farah `yq` (Go) so the explorer/reviewer
-// subagents' advertised `... | yq` pipelines resolve inside the bwrap
-// sandbox. Unconditional like the apt baseline (jq, git): a missing binary
-// is invisible to sandboxed bash, so this is not behind a toggle. Placed
-// after curl-impersonate (curl + ca-certificates from baseline guaranteed
-// present) and before agent-browser so an agent-browser bump doesn't
-// invalidate this layer. See the YQ_* constants above for the bump recipe
-// and the Go-vs-Python `yq` rationale.
-const LAYER_2_6_YQ = `# Layer 2.6 (stable): pinned Mike Farah yq for sandbox-visible YAML pipelines.
-RUN ARCH_BIN="$(if [ "$TARGETARCH" = "arm64" ]; then echo arm64; else echo amd64; fi)" \\
- && ARCH_SHA="$(if [ "$TARGETARCH" = "arm64" ]; then echo ${YQ_SHA256_ARM64}; else echo ${YQ_SHA256_AMD64}; fi)" \\
- && cd /tmp \\
- && curl -fsSL -o yq "${YQ_RELEASE_URL_BASE}/${YQ_VERSION}/yq_linux_\${ARCH_BIN}" \\
- && echo "\${ARCH_SHA}  yq" | sha256sum -c - \\
- && chmod +x yq \\
- && mv yq /usr/local/bin/yq \\
- && /usr/local/bin/yq --version > /dev/null`
 
 const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable, arm64 only): point agent-browser at the apt-installed
 # chromium. Independent of the npm install below so it stays cached across
@@ -1510,8 +1471,8 @@ function defaultConfig(): DockerfileConfig {
     gh: true,
     python: true,
     tmux: true,
-    cjkFonts: true,
-    cloudflared: true,
+    cjkFonts: 'auto',
+    cloudflared: false,
     xvfb: true,
     claudeCode: false,
     codexCli: false,
@@ -1519,11 +1480,13 @@ function defaultConfig(): DockerfileConfig {
   }
 }
 
-function collectToggleAptArgs(config: DockerfileConfig): string[] {
+function collectToggleAptArgs(config: DockerfileConfig, cjkFonts: boolean): string[] {
   const args: string[] = []
-  for (const key of ['ffmpeg', 'gh', 'python', 'tmux', 'cjkFonts', 'xvfb'] as const) {
+  for (const key of ['ffmpeg', 'gh', 'python', 'tmux'] as const) {
     args.push(...APT_FEATURES[key].toAptArgs(config[key]))
   }
+  if (cjkFonts) args.push(CJK_FONTS_PACKAGE)
+  args.push(...APT_FEATURES.xvfb.toAptArgs(config.xvfb))
   return args
 }
 

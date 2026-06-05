@@ -107,7 +107,6 @@ sleep 30
     const binary = installFakeCloudflared(scratchDir, 'exit 0')
     const provider = createCloudflareNamedProvider({
       config,
-      binary,
       onUrlChange: () => {},
       resolveToken: () => '',
       stopGraceMs: 10,
@@ -116,6 +115,28 @@ sleep 30
     try {
       await provider.start()
       expect(provider.snapshot().status).toBe('permanently-failed')
+    } finally {
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
+  it('flips to permanently-failed with restart guidance when the cloudflared binary is missing', async () => {
+    const scratchDir = createScratchDir()
+    const provider = createCloudflareNamedProvider({
+      config,
+      binary: join(scratchDir, 'cloudflared-does-not-exist'),
+      onUrlChange: () => {},
+      resolveToken: () => 'eyJhIjoiZmFrZS10b2tlbiJ9',
+      stopGraceMs: 10,
+    })
+
+    try {
+      await provider.start()
+      const snap = provider.snapshot()
+      expect(snap.status).toBe('permanently-failed')
+      expect(snap.detail).toContain('docker.file.cloudflared')
+      expect(snap.detail).toContain('typeclaw restart')
     } finally {
       await provider.stop()
       rmSync(scratchDir, { recursive: true, force: true })

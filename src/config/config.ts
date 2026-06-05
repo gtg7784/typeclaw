@@ -171,23 +171,29 @@ const dockerfileObjectSchema = z.object({
   gh: dockerfileFeatureSchema.default(true),
   python: z.boolean().default(true),
   tmux: dockerfileFeatureSchema.default(true),
-  // `fonts-noto-cjk` is a ~56MB metapackage that makes Chromium render
+  // `fonts-noto-cjk` is an ~89MB metapackage that makes Chromium render
   // Korean/Japanese/Chinese glyphs correctly in screenshots, `page.pdf()`,
-  // and any other raster output the agent-browser plugin produces. Default
-  // `true` because the alternative — silent tofu boxes (□□□) in CJK
-  // screenshots — is a confusing failure mode that an agent cannot self-
-  // diagnose from a screenshot it took itself. Opt-out with `cjkFonts:
-  // false` to save the ~56MB on agents that never touch CJK content.
-  // Boolean-only (no version pin) because the package is a metapackage
-  // tracking the upstream Noto release and version pinning offers no
-  // practical value.
-  cjkFonts: z.boolean().default(true),
+  // and any other raster output the agent-browser plugin produces. Without
+  // it CJK text renders as silent tofu boxes (□□□) — a confusing failure an
+  // agent cannot self-diagnose from a screenshot it took itself.
+  //
+  // Default `'auto'`: resolved at `typeclaw start` from the HOST locale
+  // (`LANG`/`LC_ALL`/`Intl`), same host-signal pattern as timezone
+  // detection. CJK host (ja/ko/zh) → install; otherwise skip the ~89MB. The
+  // resolved boolean is baked into the emitted Dockerfile so the image stays
+  // reproducible per-build. Force with an explicit `true`/`false` to bypass
+  // detection. String-or-boolean (no version pin) because the package is a
+  // metapackage tracking the upstream Noto release.
+  cjkFonts: z.union([z.boolean(), z.literal('auto')]).default('auto'),
   // Opt into the cloudflared layer for `cloudflare-quick` tunnels. Default
-  // `true` so `tunnel add` / `channel add github` with the default Cloudflare
-  // Quick provider works on the next `start` without a separate Dockerfile
-  // edit. Opt-out with `cloudflared: false` to skip the ~35MB binary on
-  // agents that don't use tunnels.
-  cloudflared: z.boolean().default(true),
+  // `false` to skip the ~38MB binary on agents that don't use tunnels (the
+  // common case). `typeclaw tunnel add` / `channel add github` with a
+  // Cloudflare provider flip this to `true` automatically and prompt for a
+  // restart, so the happy path still works; only hand-edited configs need to
+  // set it explicitly. When the binary is absent at tunnel start, the
+  // provider fails with a clear "enable docker.file.cloudflared and restart"
+  // message rather than a cryptic spawn error.
+  cloudflared: z.boolean().default(false),
   // Install xvfb so the entrypoint shim can spawn an Xvfb virtual X
   // server and export DISPLAY, giving headed Chrome (agent-browser
   // --headed, Playwright headful) a real X11 display to connect to.

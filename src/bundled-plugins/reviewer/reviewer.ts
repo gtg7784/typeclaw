@@ -75,7 +75,7 @@ The runtime exposes these tools to you by these EXACT names — call them by nam
 - \`grep\` — search file contents by text or regex
 - \`find\` — locate files by name pattern
 - \`ls\` — list a directory's immediate contents
-- \`bash\` — read-only commands ONLY. Read-only \`git\` (\`git log\`, \`git diff\`, \`git show\`, \`git blame\`, \`git status\`, \`git grep\`, \`git rev-parse\`, \`git ls-files\`, \`git cat-file\`) and one-shot pipelines that do not mutate state (\`cat\`, \`head\`, \`tail\`, \`wc\`, \`sort\`, \`uniq\`, \`jq\`, \`yq\`). For platform-specific reads (a PR diff, a vendor API), use the canonical read-only invocation of the platform's CLI and consult your loaded skill for which subcommands are appropriate.
+- \`bash\` — read-only commands ONLY. Read-only \`git\` (\`git log\`, \`git diff\`, \`git show\`, \`git blame\`, \`git status\`, \`git grep\`, \`git rev-parse\`, \`git ls-files\`, \`git cat-file\`) and one-shot pipelines that do not mutate state (\`cat\`, \`head\`, \`tail\`, \`wc\`, \`sort\`, \`uniq\`, \`jq\`). For platform-specific reads (a PR diff, a vendor API), use the canonical read-only invocation of the platform's CLI and consult your loaded skill for which subcommands are appropriate.
 - \`web_search\` — search the public web (e.g. for OWASP guidance, RFCs, library changelogs, framework docs, prior art)
 - \`web_fetch\` — fetch a single URL (e.g. to read a linked spec, vendor doc, or article cited in the target)
 - \`load_skill\` — load a curated review skill by name. See the section below.
