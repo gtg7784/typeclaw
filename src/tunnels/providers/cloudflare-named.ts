@@ -2,6 +2,7 @@ import type { Unsubscribe } from '@/stream'
 
 import { createLogRing, type LogLineSubscriber, type LogRing } from '../log-ring'
 import type { TunnelConfig, TunnelProviderHandle, TunnelState } from '../types'
+import { isBinaryNotFound, MISSING_BINARY_DETAIL } from './cloudflared-binary'
 
 const DEFAULT_BINARY = 'cloudflared'
 const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 10_000, 30_000]
@@ -79,10 +80,20 @@ export function createCloudflareNamedProvider(options: CloudflareNamedProviderOp
 
     state.status = 'starting'
     state.detail = 'starting cloudflared'
-    const spawned = Bun.spawn([binary, 'tunnel', '--no-autoupdate', 'run', '--token', token], {
-      stdout: 'ignore',
-      stderr: 'pipe',
-    })
+    let spawned: Bun.Subprocess<'ignore', 'ignore', 'pipe'>
+    try {
+      spawned = Bun.spawn([binary, 'tunnel', '--no-autoupdate', 'run', '--token', token], {
+        stdout: 'ignore',
+        stderr: 'pipe',
+      })
+    } catch (err) {
+      if (isBinaryNotFound(err)) {
+        state.status = 'permanently-failed'
+        state.detail = MISSING_BINARY_DETAIL
+        return
+      }
+      throw err
+    }
     proc = spawned
 
     // Mark healthy on the FIRST stderr line. cloudflared with a valid token
