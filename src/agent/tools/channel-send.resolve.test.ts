@@ -303,4 +303,57 @@ describe('channel_send re-review stranding guard', () => {
     expect((result.details as { ok: boolean; error?: string }).ok).toBe(false)
     expect((result.content[0] as { text: string }).text).toContain('dismiss')
   })
+
+  test('blocks a no-thread close-out PR comment while the bot still blocks the PR', async () => {
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      text: 'Verified — that closes it, thanks!',
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect(sent).toBe(0)
+  })
+
+  test('allows a no-thread plain discussion comment on a PR', async () => {
+    let sent = 0
+    let queried = false
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        getReviewState: async () => {
+          queried = true
+          return { ok: true, selfBlocking: true, approve: true }
+        },
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      text: 'Thanks for the context — that makes sense.',
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(true)
+    expect(sent).toBe(1)
+    expect(queried).toBe(false)
+  })
 })

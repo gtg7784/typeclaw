@@ -24,15 +24,16 @@ const BLOCK_REQUEST_CHANGES: readonly RegExp[] = [
   /\bthis is blocked\b/,
 ]
 
-// Only consulted by the caller when thread!=null (a review thread). Bare
-// "resolved" is intentionally NOT here — it collides with the warn-tier "looks
-// resolved?"; resolve claims must carry a definite marker (marked/that/this/
-// thanks) or a verify clause.
+// Bare "resolved" is intentionally NOT here — it collides with the warn-tier
+// "looks resolved?"; resolve claims must carry a definite marker (marked/that/
+// this/thanks) or a verify clause. "that/this closes it" is the canonical PR
+// #644 incident phrasing and must classify as a close-out claim.
 const BLOCK_RESOLVE: readonly RegExp[] = [
   /\bmarked resolved\b/,
   /\bthread resolved\b/,
   /\bthat resolves it\b/,
   /\bthis resolves it\b/,
+  /\b(that|this) closes it\b/,
   /\bclosing this out\b/,
   /\bconfirmed fixed\b/,
   // verify clause + a fix/resolve verb, allowing a short gap ("verified at <sha>, that fixes it").

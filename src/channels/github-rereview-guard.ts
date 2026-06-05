@@ -28,8 +28,11 @@ const ALLOW: RereviewGuardDecision = { block: false }
 export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<RereviewGuardDecision> {
   if (input.adapter !== 'github') return ALLOW
   if (!/^pr:\d+$/.test(input.chat)) return ALLOW
-  if (input.thread === null) return ALLOW
-  if (!isCloseoutAttempt(input.wantsResolve, input.text)) return ALLOW
+  // No `thread === null` exemption: a top-level PR comment carries no thread but
+  // a close-out ack in it ("Verified — that closes it") strands the block just
+  // as a thread reply would. Only the resolve ACTION needs a thread; the
+  // text-claim path fires regardless (caught by isCloseoutAttempt below).
+  if (!isCloseoutAttempt(input.wantsResolve, input.thread, input.text)) return ALLOW
 
   const state = await input.getReviewState({ adapter: 'github', workspace: input.workspace, chat: input.chat })
 
@@ -41,11 +44,12 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
   return { block: true, reason: state.approve ? STICKY_BLOCK_APPROVE_ENABLED : STICKY_BLOCK_APPROVE_DISABLED }
 }
 
-// Trigger when the model asks to resolve the thread, OR when its reply reads as a
-// close-out/verdict claim even without the flag — both strand the block if the
-// bot still owes a verdict. Plain discussion replies (ignore/warn) do not fire.
-function isCloseoutAttempt(wantsResolve: boolean, text: string | undefined): boolean {
-  if (wantsResolve) return true
+// Trigger when the model asks to resolve a thread (only meaningful with a
+// thread), OR when its reply reads as a close-out/verdict claim — the latter
+// strands the block whether or not it sits in a thread, so it fires for any PR
+// chat. Plain discussion replies (ignore/warn) do not fire.
+function isCloseoutAttempt(wantsResolve: boolean, thread: string | null, text: string | undefined): boolean {
+  if (wantsResolve && thread !== null) return true
   const claim = classifyReviewClaim(text ?? '')
   return claim === 'block-resolve' || claim === 'block-approve'
 }

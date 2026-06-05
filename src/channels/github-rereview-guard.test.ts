@@ -81,8 +81,22 @@ describe('re-review stranding guard', () => {
     expect(decision).toEqual({ block: false })
   })
 
-  it('never fires when there is no thread to resolve', async () => {
-    const decision = await evaluateRereviewGuard(input({ thread: null }))
+  it('allows a no-thread plain discussion reply on a PR', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({ thread: null, wantsResolve: false, text: 'Thanks — I think this approach works.' }),
+    )
     expect(decision).toEqual({ block: false })
+  })
+
+  it('blocks a no-thread close-out PR comment while the bot still blocks the PR', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        text: 'Verified — that resolves it, thanks!',
+        getReviewState: stateOk(true),
+      }),
+    )
+    expect(decision.block).toBe(true)
   })
 })
