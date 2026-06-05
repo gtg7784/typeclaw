@@ -83,6 +83,7 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     // transcripts; render per event once live.
     let live = false
     const onEvent = (event: InspectEvent): void => {
+      append(new Text(formatEventTime(event.ts), 0, 0))
       append(componentFor(event))
       if (live) tui.requestRender()
     }
@@ -165,6 +166,15 @@ function compact(payload: unknown): string {
   }
   const s = JSON.stringify(payload) ?? String(payload)
   return s.length > 200 ? `${s.slice(0, 200)}…` : s
+}
+
+function formatEventTime(ts: number): string {
+  if (ts === 0) return colors.dim('--:--:--')
+  const d = new Date(ts)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return colors.dim(`${hh}:${mm}:${ss}`)
 }
 
 function header(summary: SessionSummary): string {

@@ -24,6 +24,19 @@ export function formatUserPromptHistory(text: string): string {
     .join('\n')
 }
 
+export function formatTimestamp(ts: number | undefined): string {
+  if (ts === undefined || ts === 0) return colors.dim('--:--:--')
+  const d = new Date(ts)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return colors.dim(`${hh}:${mm}:${ss}`)
+}
+
+export function withTimestamp(ts: number | undefined, body: string): string {
+  return `${formatTimestamp(ts)} ${body}`
+}
+
 function stripHiddenBlocks(text: string): string {
   return text.replace(/<hatching>[\s\S]*?<\/hatching>\s*/g, '').trimStart()
 }
