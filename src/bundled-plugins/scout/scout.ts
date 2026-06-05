@@ -85,6 +85,8 @@ export function createScoutSubagent(): Subagent<ScoutPayload> {
     tools: [webSearchTool, webFetchTool],
     payloadSchema: scoutPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'fast single-pass web lookup in a fresh context — searches and fetches, returns citation-backed findings without the raw pages touching your context',
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 512_000,

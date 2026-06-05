@@ -196,6 +196,8 @@ If none of the listed skills fit the target, load \`general\`. Keep the skill-se
     customTools: [loadSkillTool],
     payloadSchema: reviewerPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'deep read-only code/PR/plan review in a fresh context, returns a structured verdict; it does NOT post — you act on its findings',
     canSpawnSubagents: true,
     timeoutMs: REVIEWER_SPAWN_TIMEOUT_MS,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

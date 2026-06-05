@@ -201,6 +201,8 @@ If none of the listed skills fit the question, load \`general\`. Keep the skill-
     customTools: [loadSkillTool, createWriteReportTool()],
     payloadSchema: researcherPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'deep multi-source investigation in a fresh context — decomposes a fuzzy question, gathers from many sources, cross-validates, and returns a citation-backed report; the quality-over-speed counterpart to `scout`, for any research that needs more than one lookup',
     // No `requiresSpecificPermission`: unlike `operator` (generic write/edit +
     // side-effecting bash), the researcher's only write goes through the
     // `write_report` tool, which enforces "one report file under

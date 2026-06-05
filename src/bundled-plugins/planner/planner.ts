@@ -266,6 +266,8 @@ If none of the listed skills fit the goal, load \`general\`. Keep the skill-sele
     customTools: [loadSkillTool],
     payloadSchema: plannerPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'turns a goal — a trip, a launch, a migration, a feature — into an actionable, sequenced, risk-aware plan, writes it to a file, and returns a structured signal; domain-neutral and reasoning-heavy, for any multi-step goal worth thinking through before acting; consider a `reviewer` pass on the plan it produces',
     canSpawnSubagents: true,
     timeoutMs: PLANNER_SPAWN_TIMEOUT_MS,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
