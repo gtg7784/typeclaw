@@ -4829,6 +4829,52 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(errors.some((m) => /LLM call failed: billing not active/.test(m))).toBe(true)
   })
 
+  test('posts a REDACTED LLM soft-error notice to the channel (raw provider text never leaks)', async () => {
+    // given: a turn ending with stopReason=error whose raw provider text carries
+    // potentially sensitive detail. Without surfacing it the channel sees silence
+    // (the "why didn't Paul respond" failure mode); surfacing it RAW would leak
+    // backend details into a public/multi-user channel. The router must post the
+    // redacted safeMessage instead.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async (_text) => {
+          fake.emit({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'You have hit your ChatGPT usage limit (team plan). Try again in ~40 min.',
+            },
+          })
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_soft_err_posts',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sent.some((t) => /rate-limited/i.test(t))).toBe(true)
+    expect(sent.some((t) => /team plan/.test(t))).toBe(false)
+  })
+
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {
     // given
     const dir = await tempDir()
