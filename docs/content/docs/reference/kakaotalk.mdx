@@ -17,18 +17,53 @@ Transport: **LOCO protocol** (no public URL required). Setup walkthrough: [Add a
 
 ## Auth
 
-Sub-device login using email and password. Credentials are stored **encrypted at rest** (AES-256-GCM; the key lives outside the agent folder).
+Sub-device login using email and password. Passwords are stored **encrypted at rest** (AES-256-GCM; the key lives outside the agent folder).
 
-Stored in [`secrets.json#channels.kakaotalk`](/docs/reference/secrets-json) as an accounts map with these fields:
+Unlike the other adapters, `secrets.json#channels.kakaotalk` is not a flat credential object — it wraps one or more account records:
 
-| Field               | Notes                          |
-| ------------------- | ------------------------------ |
-| `oauth_token`       | Current session token          |
-| `user_id`           | KakaoTalk user ID              |
-| `device_uuid`       | Registered device UUID         |
-| `device_type`       | Device type identifier         |
-| `email`             | Login email                    |
-| `encryptedPassword` | AES-256-GCM encrypted password |
+```json
+{
+  "channels": {
+    "kakaotalk": {
+      "currentAccount": "<accountId>",
+      "accounts": {
+        "<accountId>": {
+          "account_id": "<accountId>",
+          "oauth_token": "…",
+          "user_id": "…",
+          "device_uuid": "…",
+          "device_type": "pc",
+          "created_at": "…",
+          "updated_at": "…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                  | Notes                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| `currentAccount`       | `string \| null` — active account id, or `null` if none |
+| `accounts.<accountId>` | Map of account id → account record (fields below)       |
+
+Each record under `accounts.<accountId>`:
+
+| Field               | Notes                                                            |
+| ------------------- | ---------------------------------------------------------------- |
+| `account_id`        | Account identifier (matches the map key)                         |
+| `oauth_token`       | Current session token                                            |
+| `user_id`           | KakaoTalk user ID                                                |
+| `device_uuid`       | Registered device UUID                                           |
+| `device_type`       | `'pc'` or `'tablet'`                                             |
+| `created_at`        | Record creation timestamp                                        |
+| `updated_at`        | Last-update timestamp                                            |
+| `refresh_token`     | _optional_ — refresh token when present                          |
+| `auth_method`       | _optional_ — `'login'` or `'extract'`                            |
+| `email`             | _optional_ — login email (needed for automatic renewal)          |
+| `encryptedPassword` | _optional_ — AES-256-GCM envelope (needed for automatic renewal) |
+
+A `pendingLogin` record may also appear under `channels.kakaotalk` mid-reauth; see [`secrets.json`](/docs/reference/secrets-json) for the full schema.
 
 CLI: `typeclaw channel add kakaotalk` (interactive). **Do not use `channel set`** for credential rotation — use `typeclaw channel reauth kakaotalk` instead.
 
