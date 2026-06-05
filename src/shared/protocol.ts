@@ -202,22 +202,34 @@ export type ClaimErrorPayload = {
   reason: string
 }
 
+// `ts` (ms since epoch) is the server send time, stamped centrally in `send()`,
+// for the variants the TUI renders into scrollback. Optional on the wire so an
+// old CLI parses a new server's frames; control frames the TUI never timestamps
+// (queue_state, doctor, tunnel, claim, command_*) omit it by design.
 export type ServerMessage =
   // serverVersion is optional so an old CLI talking to a new server still
   // parses cleanly. The server impl always emits it; consumers that care
   // about host/agent skew (the TUI command in particular) read it to warn
   // the user when their CLI is on a different version than the container.
   | { type: 'connected'; sessionId: string; serverVersion?: string }
-  | { type: 'text_delta'; delta: string }
-  | { type: 'tool_start'; toolCallId: string; name: string; args: unknown }
-  | { type: 'tool_end'; toolCallId: string; name: string; error: boolean; result: unknown; durationMs: number }
-  | { type: 'done' }
-  | { type: 'error'; message: string }
+  | { type: 'text_delta'; delta: string; ts?: number }
+  | { type: 'tool_start'; toolCallId: string; name: string; args: unknown; ts?: number }
+  | {
+      type: 'tool_end'
+      toolCallId: string
+      name: string
+      error: boolean
+      result: unknown
+      durationMs: number
+      ts?: number
+    }
+  | { type: 'done'; ts?: number }
+  | { type: 'error'; message: string; ts?: number }
   | { type: 'reload_result'; results: ReloadResultPayload[] }
   | { type: 'restart_result'; status: 'accepted' | 'failed'; message?: string; error?: string }
   | { type: 'notification'; payload: unknown; replyTo?: string; meta?: Record<string, string> }
   | { type: 'queue_state'; pending: QueueStateItem[] }
-  | { type: 'prompt_started'; messageId: string; text: string }
+  | { type: 'prompt_started'; messageId: string; text: string; ts?: number }
   | { type: 'doctor_result'; requestId: DoctorRequestId; checks: DoctorCheckPayload[] }
   | { type: 'doctor_fix_result'; requestId: DoctorRequestId; result: DoctorFixPayload }
   | { type: 'cron_list_result'; requestId: CronListRequestId; result: CronListResultPayload }

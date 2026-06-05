@@ -199,8 +199,18 @@ export function safeWsSend(ws: { send: (data: string) => void }, msg: ServerMess
   }
 }
 
+const TIMESTAMPED_SERVER_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
+  'text_delta',
+  'tool_start',
+  'tool_end',
+  'done',
+  'error',
+  'prompt_started',
+])
+
 function send(ws: Ws, msg: ServerMessage): boolean {
-  return safeWsSend(ws, msg)
+  const stamped = TIMESTAMPED_SERVER_MESSAGES.has(msg.type) ? { ...msg, ts: Date.now() } : msg
+  return safeWsSend(ws, stamped)
 }
 
 function sendTunnelLog(ws: TunnelLogsWs, msg: TunnelLogsServerMessage): boolean {

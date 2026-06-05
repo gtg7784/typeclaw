@@ -3,7 +3,14 @@ import { Editor, Key, Markdown, matchesKey, ProcessTerminal, type Terminal, Text
 import { parseCommand } from '@/commands'
 
 import { createClient as createClientDefault, type Client } from './client'
-import { formatQueuePanel, formatToolEnd, formatToolStart, formatUserPromptHistory } from './format'
+import {
+  formatQueuePanel,
+  formatTimestamp,
+  formatToolEnd,
+  formatToolStart,
+  formatUserPromptHistory,
+  withTimestamp,
+} from './format'
 import { colors, editorTheme, markdownTheme } from './theme'
 
 export type ClientFactory = (url: string) => Promise<Client>
@@ -173,8 +180,13 @@ export function createTui({
       onReplyDone = null
     }
 
-    const ensureAssistantBlock = (): Markdown => {
+    // A Markdown block can't carry an ANSI timestamp prefix (it'd be parsed as
+    // markdown), so the assistant turn's timestamp is a separate dim Text line
+    // emitted just above the block when it's first created — stamped with the
+    // first delta's server `ts`.
+    const ensureAssistantBlock = (ts: number | undefined): Markdown => {
       if (currentAssistant) return currentAssistant
+      appendHistory(new Text(formatTimestamp(ts), 0, 0))
       const md = new Markdown('', 0, 0, markdownTheme)
       currentAssistant = md
       currentAssistantText = ''
@@ -185,12 +197,12 @@ export function createTui({
     client.onMessage((msg) => {
       switch (msg.type) {
         case 'prompt_started': {
-          appendHistory(new Text(formatUserPromptHistory(msg.text), 0, 0))
+          appendHistory(new Text(withTimestamp(msg.ts, formatUserPromptHistory(msg.text)), 0, 0))
           tui.requestRender()
           break
         }
         case 'text_delta': {
-          const block = ensureAssistantBlock()
+          const block = ensureAssistantBlock(msg.ts)
           currentAssistantText += msg.delta
           block.setText(currentAssistantText)
           tui.requestRender()
@@ -198,13 +210,15 @@ export function createTui({
         }
         case 'tool_start': {
           sealAssistantBlock()
-          appendHistory(new Text(formatToolStart(msg.name, msg.args), 0, 0))
+          appendHistory(new Text(withTimestamp(msg.ts, formatToolStart(msg.name, msg.args)), 0, 0))
           tui.requestRender()
           break
         }
         case 'tool_end': {
           sealAssistantBlock()
-          appendHistory(new Text(formatToolEnd(msg.name, msg.error, msg.result, msg.durationMs), 0, 0))
+          appendHistory(
+            new Text(withTimestamp(msg.ts, formatToolEnd(msg.name, msg.error, msg.result, msg.durationMs)), 0, 0),
+          )
           tui.requestRender()
           break
         }
@@ -214,7 +228,7 @@ export function createTui({
           break
         }
         case 'error': {
-          appendHistory(new Text(colors.red(`error: ${msg.message}`), 0, 0))
+          appendHistory(new Text(withTimestamp(msg.ts, colors.red(`error: ${msg.message}`)), 0, 0))
           finishAssistantTurn()
           tui.requestRender()
           break

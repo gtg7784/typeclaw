@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatToolEnd, formatToolStart } from './format'
+import { formatTimestamp, formatToolEnd, formatToolStart, withTimestamp } from './format'
 
 const stripAnsi = (s: string) =>
   // oxlint-disable-next-line no-control-regex -- intentionally strips ANSI sequences from rendered output
@@ -231,5 +231,22 @@ describe('formatToolEnd results', () => {
   test('result without content key falls back to pretty JSON', () => {
     const out = visible(formatToolEnd('mystery', false, { details: { x: 1 } }, 1))
     expect(out).toContain('"details"')
+  })
+})
+
+describe('formatTimestamp', () => {
+  test('renders HH:MM:SS for a real timestamp', () => {
+    const ts = new Date(2026, 0, 2, 9, 5, 7).getTime()
+    expect(visible(formatTimestamp(ts))).toBe('09:05:07')
+  })
+
+  test('renders the placeholder for undefined and ts=0', () => {
+    expect(visible(formatTimestamp(undefined))).toBe('--:--:--')
+    expect(visible(formatTimestamp(0))).toBe('--:--:--')
+  })
+
+  test('withTimestamp prefixes the body with the time', () => {
+    const ts = new Date(2026, 0, 2, 23, 59, 59).getTime()
+    expect(visible(withTimestamp(ts, 'hello'))).toBe('23:59:59 hello')
   })
 })

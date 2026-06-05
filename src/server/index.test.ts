@@ -256,7 +256,9 @@ describe('createServer tool event forwarding', () => {
     session.emit({ type: 'tool_execution_start', toolCallId: 'tc-1', toolName: 'Read', args: { path: '/x' } })
 
     const msg = await waitFor((m) => m.type === 'tool_start')
-    expect(msg).toEqual({ type: 'tool_start', toolCallId: 'tc-1', name: 'Read', args: { path: '/x' } })
+    if (msg.type !== 'tool_start') throw new Error('unreachable')
+    expect(msg).toMatchObject({ type: 'tool_start', toolCallId: 'tc-1', name: 'Read', args: { path: '/x' } })
+    expect(typeof msg.ts).toBe('number')
     ws.close()
   })
 
