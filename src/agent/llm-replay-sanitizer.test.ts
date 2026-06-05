@@ -58,7 +58,7 @@ describe('sanitizeMessagesForLlmReplay', () => {
     expect(stats).toEqual({ droppedOrphans: 0, droppedDuplicates: 0, droppedErrorAssistants: 0 })
   })
 
-  it('drops a toolResult whose producing assistant was error/aborted (the dobby poison)', () => {
+  it('drops a toolResult whose producing assistant was error/aborted (the error-poison case)', () => {
     const input = [user('restart'), assistant(['toolu_x'], 'error'), toolResult('toolu_x'), user('you back?')]
     const { messages, stats } = sanitizeMessagesForLlmReplay(input)
     expect(ids(messages)).toEqual(['user', 'user'])

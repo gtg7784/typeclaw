@@ -436,7 +436,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       )
 
       // Ack the message BEFORE classify/route so the sender's unread "1"
-      // (노란숫자) clears even when we drop the message (self-author,
+      // (the yellow unread badge) clears even when we drop the message (self-author,
       // unknown chat, empty text, etc.). The receiver of a kakao adapter is
       // expected to behave like a "read it as soon as it arrives" client —
       // the agent has observed the bytes, so the user should see the read
@@ -729,7 +729,7 @@ function dropHint(reason: InboundDropReason): string {
     case 'unknown_chat':
       return ' (chat not in cache after refresh and provisional registration; check earlier resolver-refresh-failed warnings)'
     case 'bot_message':
-      return ' (LOCO message_type=71 is KakaoTalk notification/feed; official accounts like 카카오 고객센터 / 카카오계정 / login alerts)'
+      return ' (LOCO message_type=71 is KakaoTalk notification/feed; official accounts like KakaoTalk Customer Center / Kakao Account / login alerts)'
     case 'empty_text':
     case 'pre_connect':
     case 'self_author':

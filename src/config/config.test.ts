@@ -367,13 +367,13 @@ describe('configSchema alias field', () => {
   })
 
   test('accepts a non-empty alias array', () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['bongbong', '봉봉'] })
-    expect(parsed.alias).toEqual(['bongbong', '봉봉'])
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['toto', '토토'] })
+    expect(parsed.alias).toEqual(['toto', '토토'])
   })
 
   test('trims surrounding whitespace from each entry', () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['  bongbong  ', '\t봉봉\n'] })
-    expect(parsed.alias).toEqual(['bongbong', '봉봉'])
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['  toto  ', '\t토토\n'] })
+    expect(parsed.alias).toEqual(['toto', '토토'])
   })
 
   test('rejects empty-string entries', () => {

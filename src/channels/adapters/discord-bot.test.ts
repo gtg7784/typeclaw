@@ -492,8 +492,8 @@ describe('createDiscordMembershipResolver', () => {
       messages: [
         {
           externalMessageId: '1',
-          authorId: 'devxoul',
-          authorName: 'devxoul',
+          authorId: 'alice',
+          authorName: 'alice',
           text: 'hi',
           ts: 0,
           isBot: false,
@@ -501,8 +501,8 @@ describe('createDiscordMembershipResolver', () => {
         },
         {
           externalMessageId: '2',
-          authorId: 'bongbong',
-          authorName: 'bongbong',
+          authorId: 'toto',
+          authorName: 'toto',
           text: 'hey',
           ts: 0,
           isBot: true,

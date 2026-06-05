@@ -14,9 +14,9 @@ describe('detectSecrets', () => {
   test('returns an empty list for ordinary memory fragment text', () => {
     const fragment = [
       '<!-- fragment source=ses_abc entry=11111111 -->',
-      '## Bug Fix: Returned Product in Delivery Banner',
-      '**Project:** vReview (PRD-vreview-bugs channel C03R8SVSLUV)',
-      '**Issue:** returned product appearing in delivery banner',
+      '## Bug Fix: Stale Item in Notification Banner',
+      '**Project:** Acme App (acme-bugs channel C0123456789)',
+      '**Issue:** stale item appearing in notification banner',
       '',
     ].join('\n')
 

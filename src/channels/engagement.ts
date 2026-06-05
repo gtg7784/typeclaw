@@ -112,7 +112,7 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // The `!matchesAnyAlias` guard preserves the ladder invariant "explicit
   // address to us beats structural targeting of others": a message that names
   // us by alias engages on the alias rule below even when it ALSO tags a third
-  // party (the "봉봉아 펭펭아 둘 다 봐" multi-bot case), so we must not pre-empt
+  // party (the "Toto, Lala, both take a look" multi-bot case), so we must not pre-empt
   // it here. We only step aside for a credited author whose message is aimed
   // PURELY elsewhere.
   if (
@@ -143,8 +143,8 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // same priority as an explicit mention — operators add aliases
   // precisely because they expect the bot to respond when called by
   // name. Suppression on `mentionsOthers` would defeat the point: the
-  // user can address two bots by name in one message ("봉봉아 펭펭아 둘
-  // 다 봐") and both should engage. Each bot only knows its own
+  // user can address two bots by name in one message ("Toto, Lala, both
+  // take a look") and both should engage. Each bot only knows its own
   // aliases, so cross-bot suppression isn't possible at this layer
   // anyway — the router-side peer-name suppression in the solo-human
   // fallback handles that case (follow-up).
@@ -176,8 +176,8 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // who don't want to type `@bot` in their own DM-like channel; peer bots
   // have no such ergonomic excuse. Letting peer bots ride the fallback
   // produced bot-to-bot conversations in 1-human-N-bot channels (observed:
-  // Winky and 돌쇠 introducing themselves to each other after a single
-  // "얘들아" from the human, then continuing to address each other for
+  // Momo and Kiki introducing themselves to each other after a single
+  // "hey folks" from the human, then continuing to address each other for
   // ~6 turns). The router's loop guard only trips after 5 consecutive
   // peer engagements, which is too late to prevent the embarrassment.
   //

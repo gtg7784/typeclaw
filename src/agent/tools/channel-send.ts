@@ -311,7 +311,7 @@ function recordResolvedThreadFromSend(sessionId: string, workspace: string, chat
 // as the session's origin (same adapter+workspace+chat) but DROPPED the
 // thread. This catches the "model forgot to copy thread verbatim" failure
 // mode without blocking legitimate intent — if leaving the thread was on
-// purpose ("새 스레드에서 시작하자"), the model can ignore this hint; if it
+// purpose (e.g. "let's start in a new thread"), the model can ignore this hint; if it
 // wasn't, the next channel_send (or channel_reply) can correct course.
 //
 // Only fires when the origin had a thread to begin with — channel-root

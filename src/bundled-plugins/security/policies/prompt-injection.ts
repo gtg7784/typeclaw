@@ -429,10 +429,14 @@ const GIT_EXFIL_VERBS = [
 
 const GIT_EXFIL_PATTERNS: ReadonlyArray<RegExp> = [
   new RegExp(`(?:${GIT_EXFIL_VERBS})`, 'i'),
-  // Korean shorthand for "do it" / "go ahead" right after a git command,
-  // which is the breach idiom ("...git push origin main ㄱㄱ").
-  /git\s+push[\s\S]{0,40}(?:\u{3131}\u{3131}|ㄱㄱ|\u{ACE0}\u{ACE0}|\u{C5B4}\u{C11C}|\u{ACA9}\u{ACA9})/iu,
-  // "back up to github" / "백업 해줘" framings often dressed as a benign
+  // Urgency shorthand ("do it" / "go ahead" / "now") right after a git command,
+  // which is the breach idiom ("...git push origin main <go-go>"). Multilingual:
+  // the urgency token is what flips a benign-looking push into a "just run it"
+  // exfil nudge, so it must catch the idiom across the major channel languages,
+  // not Korean alone. Tokens are tight imperative go-aheads to avoid matching
+  // ordinary trailing words (e.g. "git push then go to lunch" must NOT match).
+  /git\s+push[\s\S]{0,40}(?:\u{3131}\u{3131}|ㄱㄱ|\u{ACE0}\u{ACE0}|\u{C5B4}\u{C11C}|\u{ACA9}\u{ACA9}|go\s?go|asap|do\s+it\s+now|just\s+do\s+it|right\s+now|行け行け|早く|赶紧|快点|赶快|hazlo\s+ya|dale\s+ya)/iu,
+  // "back up to github" / Korean "백업 해줘" (back it up) framings often dressed as a benign
   // request - if the same message also names a credential or `.env`, the
   // SECRET_DEMAND_PATTERNS already fires; this catches the standalone
   // "push to my backup repo" framing that doesn't mention secrets.

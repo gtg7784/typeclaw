@@ -415,7 +415,7 @@ export function classifyGithubInbound(
       // session) and wait for the `ready_for_review` trigger. Must NOT fall
       // through to the awareness path below, where a multi-collaborator repo
       // silently `observed`s it — a draft whose `ready_for_review` delivery is
-      // later lost would then never get reviewed (huxley#1721). `review_requested`
+      // later lost would then never get reviewed. `review_requested`
       // on a draft is unaffected: it returns above via classifyReviewRequest.
       if (readBoolean(pr, 'draft') === true) return null
       const trigger = classifyOpenedReviewTrigger({

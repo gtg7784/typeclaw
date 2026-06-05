@@ -186,7 +186,7 @@ describe('github review-thread resolver', () => {
                 id: 'PRRT_2',
                 isResolved: false,
                 rootCommentId: 200,
-                rootAuthorLogin: 'devxoul',
+                rootAuthorLogin: 'octocat',
                 rootAuthorType: 'User',
               },
             ],
@@ -202,7 +202,7 @@ describe('github review-thread resolver', () => {
 
     expect(result).toEqual({
       ok: false,
-      error: 'refusing to resolve thread authored by @devxoul (not @bot[bot])',
+      error: 'refusing to resolve thread authored by @octocat (not @bot[bot])',
       code: 'not-author',
     })
     expect(seen.mutations).toEqual([])

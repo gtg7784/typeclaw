@@ -130,13 +130,13 @@ describe('decideEngagement (alias)', () => {
   test('engages when text contains a self-alias (case-insensitive)', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: '봉봉아 cron 좀 봐줘' }),
+      message: inbound({ text: '토토아 check the cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -144,13 +144,13 @@ describe('decideEngagement (alias)', () => {
   test('engages on Latin alias regardless of case', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: 'Hey BONGBONG, deploy please' }),
+      message: inbound({ text: 'Hey TOTO, deploy please' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['bongbong'],
+      selfAliases: ['toto'],
     })
     expect(decision).toBe('engage')
   })
@@ -164,7 +164,7 @@ describe('decideEngagement (alias)', () => {
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉', 'bongbong'],
+      selfAliases: ['토토', 'toto'],
     })
     expect(decision).toBe('observe')
   })
@@ -172,7 +172,7 @@ describe('decideEngagement (alias)', () => {
   test('empty alias list is a no-op (preserves prior behavior)', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: '봉봉아 cron 좀 봐줘' }),
+      message: inbound({ text: '토토아 check the cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
@@ -189,13 +189,13 @@ describe('decideEngagement (alias)', () => {
     // multi-target addressing.
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: '봉봉아 펭펭아 둘 다 봐', mentionsOthers: true }),
+      message: inbound({ text: '토토아 라라아 both take a look', mentionsOthers: true }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -203,13 +203,13 @@ describe('decideEngagement (alias)', () => {
   test('matches any alias in the list (multi-name agents)', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: 'Hey Bongbong, what time?' }),
+      message: inbound({ text: 'Hey Toto, what time?' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉', 'bongbong', 'bb'],
+      selfAliases: ['토토', 'toto', 'bb'],
     })
     expect(decision).toBe('engage')
   })
@@ -221,7 +221,7 @@ describe('decideEngagement (alias)', () => {
         text: 'following up on this',
         referenceContext: {
           kind: 'reply',
-          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: '봉봉아 please check' }],
+          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: '토토아 please check' }],
         },
       }),
       config: baseConfig,
@@ -229,7 +229,7 @@ describe('decideEngagement (alias)', () => {
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('observe')
   })
@@ -238,7 +238,7 @@ describe('decideEngagement (alias)', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
       message: inbound({
-        text: '봉봉아 following up',
+        text: '토토아 following up',
         referenceContext: {
           kind: 'reply',
           sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: 'unrelated parent' }],
@@ -249,7 +249,7 @@ describe('decideEngagement (alias)', () => {
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -260,13 +260,13 @@ describe('decideEngagement (alias)', () => {
     // mention-only would.
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ isBotMention: true, text: '<@123> 봉봉아 cron' }),
+      message: inbound({ isBotMention: true, text: '<@123> 토토아 cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -278,13 +278,13 @@ describe('decideEngagement (alias)', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     decideEngagement({
-      message: inbound({ text: '봉봉아 cron' }),
+      message: inbound({ text: '토토아 cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 1000,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
   })
@@ -473,7 +473,7 @@ describe('decideEngagement (solo-human fallback)', () => {
     const ledger = new StickyLedger()
     const participants: ChannelParticipant[] = [
       participant('alice'),
-      { ...participant('peer1'), authorName: 'Winky', isBot: true },
+      { ...participant('peer1'), authorName: 'Momo', isBot: true },
     ]
 
     const decision = decideEngagement({
@@ -481,7 +481,7 @@ describe('decideEngagement (solo-human fallback)', () => {
         text: 'what do you think?',
         referenceContext: {
           kind: 'reply',
-          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: 'Winky should answer' }],
+          sources: [{ adapter: 'discord-bot', authorId: 'bob', authorName: 'Bob', text: 'Momo should answer' }],
         },
       }),
       config: baseConfig,
@@ -764,13 +764,13 @@ describe('decideEngagement (sticky in groups)', () => {
   test('alias engages in a multi-human group', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: '봉봉아 deploy please' }),
+      message: inbound({ text: '토토아 deploy please' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 1000,
       participants: crowded,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -810,15 +810,15 @@ describe('decideEngagement (sticky in groups)', () => {
 describe('decideEngagement (peer-bot-name suppressor)', () => {
   test('observes when text contains a peer-bot authorName from participants', () => {
     const ledger = new StickyLedger()
-    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('라라'), isBot: true }]
     const decision = decideEngagement({
-      message: inbound({ text: '펭펭아 cron 좀' }),
+      message: inbound({ text: '라라아 check the cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('observe')
   })
@@ -836,25 +836,26 @@ describe('decideEngagement (peer-bot-name suppressor)', () => {
       ledger,
       now: 0,
       participants,
-      selfAliases: ['bongbong'],
+      selfAliases: ['toto'],
     })
     expect(decision).toBe('observe')
   })
 
   test('peer-name in text does NOT block self-alias engagement (own claim wins)', () => {
-    // Mixed-target message: "봉봉아 펭펭아 둘 다 봐" — self matches AND
+    // Mixed-target message: "토토아 라라아 both take a look" — self matches AND
     // peer matches. The alias trigger fires earlier in the gate chain
-    // and engages cleanly; we never reach the peer suppressor.
+    // and engages cleanly; we never reach the peer suppressor. The Korean
+    // names + vocative particle '아' exercise substring alias matching.
     const ledger = new StickyLedger()
-    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('라라'), isBot: true }]
     const decision = decideEngagement({
-      message: inbound({ text: '봉봉아 펭펭아 둘 다 봐' }),
+      message: inbound({ text: '토토아 라라아 both take a look' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
@@ -886,22 +887,22 @@ describe('decideEngagement (peer-bot-name suppressor)', () => {
     // engages. Follow-up message after the peer has spoken once is fine.
     const ledger = new StickyLedger()
     const decision = decideEngagement({
-      message: inbound({ text: '펭펭아 cron 좀' }),
+      message: inbound({ text: '라라아 check the cron' }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 0,
       participants: [participant('alice')],
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
 
   test('peer suppressor fires before solo-human fallback even with effectiveHumans=1', () => {
     const ledger = new StickyLedger()
-    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('라라'), isBot: true }]
     const decision = decideEngagement({
-      message: inbound({ text: '펭펭아 그거 어떻게 됐어?' }),
+      message: inbound({ text: '라라아 any update on that?' }),
       config: baseConfig,
       key: KEY,
       ledger,
@@ -915,9 +916,10 @@ describe('decideEngagement (peer-bot-name suppressor)', () => {
 
   test('peer suppressor does not block explicit triggers (mention still wins)', () => {
     const ledger = new StickyLedger()
-    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('라라'), isBot: true }]
     const decision = decideEngagement({
-      message: inbound({ isBotMention: true, text: '<@me> hi, also 펭펭아 fyi' }),
+      message: inbound({ isBotMention: true, text: '<@me> hi, also 라라아 fyi' }),
+      // '라라아' = peer name '라라' + Korean particle; keeps peer-name suppression coverage.
       config: baseConfig,
       key: KEY,
       ledger,
@@ -1136,10 +1138,10 @@ describe('decideEngagement (multi-human sticky target check)', () => {
     const participants: readonly ChannelParticipant[] = [
       participant('alice'),
       participant('bob'),
-      { ...participant('펭펭'), isBot: true },
+      { ...participant('라라'), isBot: true },
     ]
     const decision = decideEngagement({
-      message: inbound({ authorId: 'alice', text: '펭펭아 그거 어떻게 됐어?' }),
+      message: inbound({ authorId: 'alice', text: '라라아 그거 어떻게 됐어?' }),
       config: baseConfig,
       key: KEY,
       ledger,
@@ -1196,23 +1198,23 @@ describe('decideEngagement (multi-human sticky target check)', () => {
   })
 
   test('a credited author who names a third party BUT also aliases us engages (alias precedence)', () => {
-    // "봉봉아 펭펭아 둘 다 봐" — names us AND a peer. The alias rule must win;
+    // "토토아 라라아 both take a look" — names us AND a peer. The alias rule must win;
     // the pre-sticky check must not steal engagement from an explicit address.
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     const participants: readonly ChannelParticipant[] = [
       participant('alice'),
       participant('bob'),
-      { ...participant('펭펭'), isBot: true },
+      { ...participant('라라'), isBot: true },
     ]
     const decision = decideEngagement({
-      message: inbound({ authorId: 'alice', text: '봉봉아 펭펭아 둘 다 봐', mentionsOthers: true }),
+      message: inbound({ authorId: 'alice', text: '토토아 라라아 both take a look', mentionsOthers: true }),
       config: baseConfig,
       key: KEY,
       ledger,
       now: 1000,
       participants,
-      selfAliases: ['봉봉'],
+      selfAliases: ['토토'],
     })
     expect(decision).toBe('engage')
   })
