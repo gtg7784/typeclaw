@@ -493,9 +493,16 @@ function discordFailureForStatus(status: number): MembershipResolverFailure {
   return { kind: 'transient' }
 }
 
+// Discord message type for THREAD_STARTER_MESSAGE — the first message in a
+// thread created from an existing message. `referenced_message` is also
+// populated for type 19 (REPLY) and 23 (CONTEXT_MENU_COMMAND), so the opener
+// fallback below must gate on this type alone, not on the field's presence.
+const DISCORD_MESSAGE_TYPE_THREAD_STARTER = 21
+
 type DiscordRawHistoryMessage = {
   id: string
   channel_id: string
+  type?: number
   author: { id: string; username?: string; global_name?: string | null; bot?: boolean }
   content: string
   timestamp: string
@@ -577,7 +584,8 @@ function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | nu
   // while keeping the starter's own id/timestamp so dedup against the triggering
   // message and chronological ordering stay correct.
   const opener = msg.referenced_message ?? undefined
-  const source = opener !== undefined && bodyOf(msg) === '' ? opener : msg
+  const isThreadStarter = msg.type === DISCORD_MESSAGE_TYPE_THREAD_STARTER
+  const source = isThreadStarter && opener !== undefined && bodyOf(msg) === '' ? opener : msg
 
   const isBot = source.author.bot === true || (botUserId !== null && source.author.id === botUserId)
   const ts = Date.parse(msg.timestamp)
