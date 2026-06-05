@@ -20,6 +20,7 @@ describe('planner subagent — load-bearing prompt phrases', () => {
       '<path>',
       '<summary>',
       '<verdict>',
+      '<review-suggestion>',
       '<questions>',
       'ready',
       'needs-input',
@@ -171,6 +172,31 @@ describe('planner subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('on every verdict')
     expect(lower).not.toContain('do not write a file')
     expect(PLANNER_SYSTEM_PROMPT).toContain('write a minimal partial draft')
+  })
+
+  test('prompt recommends spawning the reviewer subagent after a ready plan (the requested improvement)', () => {
+    // After producing a plan, the planner should hand the parent a second pair of
+    // eyes. It cannot review its own plan or talk to the user, so it RECOMMENDS a
+    // review via the <review-suggestion> signal rather than running one itself.
+    const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('suggesting a review')
+    expect(PLANNER_SYSTEM_PROMPT).toContain('<review-suggestion>')
+    expect(PLANNER_SYSTEM_PROMPT).toContain('`reviewer`')
+    expect(lower).toContain('plan-review')
+  })
+
+  test('prompt gates the review suggestion to a ready verdict (a partial/infeasible plan is not worth reviewing)', () => {
+    const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('only on a `ready` verdict')
+  })
+
+  test('prompt forbids the planner running the review itself (parent owns execution; no commission-and-discard)', () => {
+    // The planner is a one-shot headless session whose final message is relayed
+    // verbatim. It must RECOMMEND the review, not spawn the reviewer itself — a
+    // review it commissions and discards at end-of-run reaches no one.
+    const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('you do not run the review')
+    expect(lower).toContain('do not spawn `reviewer` yourself')
   })
 })
 
