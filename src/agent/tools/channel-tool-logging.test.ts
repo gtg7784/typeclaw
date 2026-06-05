@@ -53,6 +53,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     removeReaction: async () => ({ ok: true }),
     registerTyping: () => {},
     unregisterTyping: () => {},
+    setTypingCapability: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

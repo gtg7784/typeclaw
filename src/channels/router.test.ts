@@ -1376,6 +1376,58 @@ describe('ChannelRouter auto-react on engage', () => {
     expect(called).toBe(false)
   })
 
+  test('does not add :eyes: when the adapter has a visible typing indicator', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.setTypingCapability('discord-bot', true)
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('adds :eyes: again once typing capability is cleared', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    router.setTypingCapability('discord-bot', true)
+    router.setTypingCapability('discord-bot', false)
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ adapter: 'discord-bot', emoji: 'eyes', reactionRef: REACTION_REF })
+    await router.__testing!.flushDebounce(KEY)
+  })
+
+  test('typing capability is per-adapter and does not suppress :eyes: on other adapters', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    // given a different adapter declares typing
+    router.setTypingCapability('slack-bot', true)
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ adapter: 'discord-bot', emoji: 'eyes', reactionRef: REACTION_REF })
+    await router.__testing!.flushDebounce(KEY)
+  })
+
   test('a throwing reaction callback never blocks engagement (session still created, reply still sends)', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)

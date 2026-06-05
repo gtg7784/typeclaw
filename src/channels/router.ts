@@ -659,6 +659,11 @@ export type ChannelRouter = {
   removeReaction: (req: RemoveReactionRequest) => Promise<ReactionResult>
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
+  // Deliberately separate from registerTyping: github registers a no-op typing
+  // callback (no typing API) yet must stay typing-less, so "has a callback" is
+  // the wrong signal. autoReactOnEngage reads this to post :eyes: only as a
+  // fallback when no visible typing exists. Unset defaults to false.
+  setTypingCapability: (adapter: ChannelKey['adapter'], supported: boolean) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   // Self-identity is a per-adapter singleton (one bot account per adapter),
@@ -953,6 +958,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const reactionCallbacks = new Map<ChannelKey['adapter'], Set<ReactionCallback>>()
   const removeReactionCallbacks = new Map<ChannelKey['adapter'], Set<RemoveReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
+  const typingCapableAdapters = new Set<ChannelKey['adapter']>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
   const selfIdentityResolvers = new Map<ChannelKey['adapter'], ChannelSelfIdentityResolver>()
@@ -2447,13 +2453,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   // Best-effort acknowledgment: drop an :eyes: on the triggering inbound the
-  // moment we decide to engage, replacing the old "On it" ack comment on
-  // GitHub. Fire-and-forget so a reaction failure (missing permission, the
-  // adapter not supporting reactions, a transient API error) can NEVER block
-  // engagement, enqueueing, or the agent's actual reply. No reactionRef =
-  // nothing reactable (synthetic inbounds, reaction-less adapters) = silent skip.
+  // moment we decide to engage — but ONLY when the channel has no visible
+  // "typing…" indicator. Where typing renders (slack/discord/telegram) the
+  // heartbeat already signals "the bot is working", so the reaction would be
+  // redundant noise; the :eyes: is the fallback ack for typing-less channels
+  // (github, kakaotalk), replacing the old "On it" comment on GitHub.
+  // Fire-and-forget so a reaction failure (missing permission, the adapter not
+  // supporting reactions, a transient API error) can NEVER block engagement,
+  // enqueueing, or the agent's actual reply. No reactionRef = nothing reactable
+  // (synthetic inbounds, reaction-less adapters) = silent skip.
   const autoReactOnEngage = (event: InboundMessage): Promise<ReactionRef | null> | null => {
     if (event.reactionRef === undefined) return null
+    if (typingCapableAdapters.has(event.adapter)) return null
     const addResult = react({
       adapter: event.adapter,
       workspace: event.workspace,
@@ -2520,6 +2531,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const unregisterTyping = (adapter: ChannelKey['adapter'], cb: TypingCallback): void => {
     typingCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const setTypingCapability = (adapter: ChannelKey['adapter'], supported: boolean): void => {
+    if (supported) typingCapableAdapters.add(adapter)
+    else typingCapableAdapters.delete(adapter)
   }
 
   const registerChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
@@ -3550,6 +3566,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     removeReaction,
     registerTyping,
     unregisterTyping,
+    setTypingCapability,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
     registerSelfIdentity,
