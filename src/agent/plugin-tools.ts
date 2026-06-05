@@ -45,9 +45,10 @@ import {
   subtractMasked,
 } from '@/sandbox'
 
-import { createLoopGuard, type LoopGuard } from './loop-guard'
+import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import type { SessionOrigin } from './session-origin'
+import { SUBAGENT_OUTPUT_TOOL_NAME, type SubagentOutputToolDetails } from './tools/subagent-output'
 import { webFetchTool } from './tools/webfetch'
 import { webSearchTool } from './tools/websearch'
 
@@ -241,10 +242,10 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         return errorResult(`blocked: ${blockResult.reason}`)
       }
 
-      const loopDecision = sharedLoopGuard.check(opts.sessionId, opts.toolName, before.args)
-      if (loopDecision.kind === 'block') {
+      const loopGate = gateLoopGuard(opts.sessionId, opts.toolName, before.args)
+      if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort)
-        return errorResult(loopDecision.message)
+        return errorResult(loopGate.message)
       }
 
       const toolCtx: ToolContext = {
@@ -262,9 +263,12 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         return errorResult(message)
       }
 
-      if (loopDecision.kind === 'warn') {
-        result = appendLoopWarning(result, loopDecision.message)
+      const resolved = loopGate.resolve(result)
+      if ('deferredBlock' in resolved) {
+        fireLoopAbort(opts.getAbort)
+        return errorResult(resolved.deferredBlock)
       }
+      result = resolved.result
 
       await opts.hooks.runToolAfter({
         tool: opts.toolName,
@@ -301,10 +305,10 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
-      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
-      if (loopDecision.kind === 'block') {
+      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
+      if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort)
-        throw new Error(loopDecision.message)
+        throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
@@ -321,15 +325,12 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
-      const hookResult: ToolResult = {
-        content: result.content as ContentPart[],
-        details: result.details,
+      const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
+      if ('deferredBlock' in resolved) {
+        fireLoopAbort(opts.getAbort)
+        throw new Error(resolved.deferredBlock)
       }
-      if (loopDecision.kind === 'warn') {
-        const warned = appendLoopWarning(hookResult, loopDecision.message)
-        hookResult.content = warned.content
-        hookResult.details = warned.details
-      }
+      const hookResult = resolved.result
       await opts.hooks.runToolAfter({
         tool: tool.name,
         sessionId: opts.sessionId,
@@ -337,7 +338,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
         result: hookResult,
       })
       return {
-        content: hookResult.content,
+        content: hookResult.content as ContentPart[],
         details: hookResult.details as TDetails,
       }
     },
@@ -364,10 +365,10 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
-      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
-      if (loopDecision.kind === 'block') {
+      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
+      if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort)
-        throw new Error(loopDecision.message)
+        throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
@@ -384,15 +385,12 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
-      const hookResult: ToolResult = {
-        content: result.content as ContentPart[],
-        details: result.details,
+      const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
+      if ('deferredBlock' in resolved) {
+        fireLoopAbort(opts.getAbort)
+        throw new Error(resolved.deferredBlock)
       }
-      if (loopDecision.kind === 'warn') {
-        const warned = appendLoopWarning(hookResult, loopDecision.message)
-        hookResult.content = warned.content
-        hookResult.details = warned.details
-      }
+      const hookResult = resolved.result
       await opts.hooks.runToolAfter({
         tool: tool.name,
         sessionId: opts.sessionId,
@@ -400,7 +398,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
         result: hookResult,
       })
       return {
-        content: hookResult.content,
+        content: hookResult.content as ContentPart[],
         details: hookResult.details as TDetails,
       }
     },
@@ -442,10 +440,10 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       // loop-detection state, or pi's execute.
       const bashEnvOverlay = readBashEnvOverlay(mutableArgs)
       delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
-      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
-      if (loopDecision.kind === 'block') {
+      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
+      if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort)
-        throw new Error(loopDecision.message)
+        throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
@@ -472,15 +470,12 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       const result = await bashEnvStore.run(bashEnvOverlay, () =>
         tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate),
       )
-      const hookResult: ToolResult = {
-        content: result.content as ContentPart[],
-        details: result.details,
+      const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
+      if ('deferredBlock' in resolved) {
+        fireLoopAbort(opts.getAbort)
+        throw new Error(resolved.deferredBlock)
       }
-      if (loopDecision.kind === 'warn') {
-        const warned = appendLoopWarning(hookResult, loopDecision.message)
-        hookResult.content = warned.content
-        hookResult.details = warned.details
-      }
+      const hookResult = resolved.result
       await opts.hooks.runToolAfter({
         tool: tool.name,
         sessionId: opts.sessionId,
@@ -607,6 +602,72 @@ async function applyTmpPathRedirect(
 function appendLoopWarning(result: ToolResult, message: string): ToolResult {
   const content: ContentPart[] = [...(result.content as ContentPart[]), { type: 'text', text: message }]
   return { content, details: result.details }
+}
+
+// `subagent_output` is a read-only poll whose loop/no-loop classification only
+// becomes knowable AFTER execution: a result of `status: 'running'` is a
+// still-pending wait (legitimate), while a repeated terminal result is a real
+// loop. The loop guard's `check` is result-blind and pre-execution, so for this
+// one tool we DEFER enforcing a block until the status is known — otherwise the
+// exact poll that would reveal 'running' gets blocked before it can run (the
+// boundary-call hazard for round-robin fan-out polling). Every other tool
+// enforces its block immediately, as before.
+// A block is deferred only for a `subagent_output` poll the guard still marks
+// `deferable` — i.e. whose signature has not yet proven terminal. Once a poll of
+// that signature returns completed/failed, `deferable` is false and the block is
+// enforced pre-execute, so a finished task is not re-polled forever.
+function shouldDeferLoopBlock(toolName: string, decision: LoopGuardDecision): boolean {
+  return toolName === SUBAGENT_OUTPUT_TOOL_NAME && decision.kind === 'block' && decision.deferable
+}
+
+function subagentPollStatus(toolName: string, result: ToolResult): 'running' | 'terminal' | undefined {
+  if (toolName !== SUBAGENT_OUTPUT_TOOL_NAME) return undefined
+  const details = result.details as SubagentOutputToolDetails | undefined
+  if (details?.ok !== true) return undefined
+  return details.status === 'running' ? 'running' : 'terminal'
+}
+
+type LoopGuardGate = {
+  // True when the guard wants to block AND the block is enforced now (every tool
+  // except a deferable `subagent_output` poll). The caller aborts + errors.
+  blockNow: boolean
+  message: string
+  // Resolves the guard against the tool's result. Returns the result to surface
+  // (possibly warn-annotated), or `{ deferredBlock: message }` when a deferred
+  // `subagent_output` block must now be enforced because the poll did not return
+  // a still-running status.
+  resolve: (result: ToolResult) => { result: ToolResult } | { deferredBlock: string }
+}
+
+// Single chokepoint for the loop-guard pre-check + post-execute resolution so
+// all four tool wrappers share identical deferred-block / pending-retract
+// semantics. `check` runs here (recording the observation); the returned
+// `resolve` is called after execute with the tool's result, feeding the poll's
+// running/terminal status back to the guard so future blocks stop deferring.
+function gateLoopGuard(sessionId: string, toolName: string, args: unknown): LoopGuardGate {
+  const decision = sharedLoopGuard.check(sessionId, toolName, args)
+  const defer = shouldDeferLoopBlock(toolName, decision)
+  return {
+    blockNow: decision.kind === 'block' && !defer,
+    message: decision.kind === 'ok' ? '' : decision.message,
+    resolve(result) {
+      const pollStatus = subagentPollStatus(toolName, result)
+      if (pollStatus !== undefined) {
+        sharedLoopGuard.noteResult(decision.receipt, pollStatus)
+      }
+      if (pollStatus === 'running') {
+        sharedLoopGuard.retract(decision.receipt)
+        return { result }
+      }
+      if (defer && decision.kind === 'block') {
+        return { deferredBlock: decision.message }
+      }
+      if (decision.kind === 'warn') {
+        return { result: appendLoopWarning(result, decision.message) }
+      }
+      return { result }
+    },
+  }
 }
 
 // Clears one tool's loop-guard residue for a session on the process-wide shared

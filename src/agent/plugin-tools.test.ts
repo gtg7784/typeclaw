@@ -1546,4 +1546,84 @@ describe('loop guard integration', () => {
     }
     expect(aborts).toBe(0)
   })
+
+  // A subagent_output poll that returns status:'running' is a still-pending
+  // wait, not a loop. The wrapper retracts it from the guard so round-robin
+  // fan-out polling never false-blocks (the production incident).
+  function makeSubagentOutputTool(statusFor: (taskId: string, callIdx: number) => 'running' | 'completed') {
+    let callIdx = 0
+    const calls: string[] = []
+    const tool = definePiTool({
+      name: 'subagent_output',
+      label: 'subagent_output',
+      description: '',
+      parameters: Type.Object({ task_id: Type.String() }),
+      async execute(_id, params: { task_id: string }) {
+        const status = statusFor(params.task_id, callIdx++)
+        calls.push(params.task_id)
+        return {
+          content: [{ type: 'text' as const, text: status }],
+          details: { ok: true, status, taskId: params.task_id, subagent: 'scout', durationMs: 1 },
+        }
+      },
+    })
+    return { tool, calls }
+  }
+
+  test('never blocks subagent_output polls that keep returning running', async () => {
+    const { tool, calls } = makeSubagentOutputTool(() => 'running')
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'poll-running', hooks: createHookBus() })
+
+    // Replay the incident shape: 6 task_ids polled round-robin for many waves.
+    const tasks = ['bg_1', 'bg_2', 'bg_3', 'bg_4', 'bg_5', 'bg_6']
+    for (let wave = 0; wave < 12; wave++) {
+      for (const task_id of tasks) {
+        const r = (await wrapped.execute(`c${wave}`, { task_id }, undefined, undefined, {} as never)) as {
+          isError?: boolean
+        }
+        expect(r.isError).not.toBe(true)
+      }
+    }
+    expect(calls.length).toBe(72)
+  })
+
+  test('still blocks a subagent_output poll that repeats a terminal result', async () => {
+    // Every poll of bg_done returns 'completed' (terminal). The 5th poll is the
+    // block boundary: it executes once (deferred) to reveal 'completed', is
+    // marked terminal-known, then throws. From the 6th on the signature is known
+    // terminal, so the block is enforced PRE-execute and the tool stops running.
+    const { tool, calls } = makeSubagentOutputTool(() => 'completed')
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'poll-terminal', hooks: createHookBus() })
+
+    // Four polls execute and each marks the signature terminal-known.
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { task_id: 'bg_done' }, undefined, undefined, {} as never)
+    }
+    expect(calls.length).toBe(4)
+    // The 5th poll hits the hard-block threshold; because the signature is
+    // already terminal-known the block is NOT deferred — it fires pre-execute,
+    // so the tool does not run and never will for further identical polls.
+    for (let i = 5; i < 10; i++) {
+      await expect(wrapped.execute(`c${i}`, { task_id: 'bg_done' }, undefined, undefined, {} as never)).rejects.toThrow(
+        /loop-guard/,
+      )
+    }
+    expect(calls.length).toBe(4)
+  })
+
+  test('repeated back-to-back polls of one still-running task never block', async () => {
+    // A tight loop on ONE task_id (consecutive detector territory). Every poll
+    // returns 'running', so every one is retracted — the streak never sticks and
+    // the boundary poll past the hard-block threshold still executes.
+    const { tool, calls } = makeSubagentOutputTool(() => 'running')
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'poll-consecutive', hooks: createHookBus() })
+
+    for (let i = 0; i < 10; i++) {
+      const r = (await wrapped.execute(`c${i}`, { task_id: 'bg_b' }, undefined, undefined, {} as never)) as {
+        isError?: boolean
+      }
+      expect(r.isError).not.toBe(true)
+    }
+    expect(calls.length).toBe(10)
+  })
 })

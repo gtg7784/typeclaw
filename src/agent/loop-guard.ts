@@ -52,9 +52,40 @@ const DEFAULT_PATH_TARGET = '.'
 
 const MAX_SESSIONS = 256
 
+// The one tool with result-sensitive loop semantics: a poll returning 'running'
+// is a legitimate wait, so its block is deferred until status is known (see
+// `noteResult` / `deferable`). Kept as a local literal rather than importing the
+// tool module to keep this primitive dependency-free; it must match
+// SUBAGENT_OUTPUT_TOOL_NAME in tools/subagent-output.ts.
+const SUBAGENT_OUTPUT_TOOL = 'subagent_output'
+
 export type LoopReason = 'consecutive' | 'windowed'
 
+// Identifies the single observation a `check` recorded so a caller can retract
+// exactly that one after learning post-execution it was not a loop (e.g. a
+// `subagent_output` poll that returned `status: 'running'`). Narrower than
+// `forgetTool`, which drops the whole tool window: retract undoes one call, so
+// unrelated task_ids and terminal-result polls keep their accumulated signal.
+export type LoopGuardReceipt = {
+  sessionId: string
+  tool: string
+  signature: string
+  windowSignature: string
+}
+
+// Post-execution classification of a `subagent_output` poll, fed back via
+// `noteResult`. 'running' is a still-pending wait; 'terminal' is completed/failed
+// — a repeated terminal poll is a real loop.
+export type LoopObservedResult = 'running' | 'terminal'
+
 export type LoopGuardDecision =
+  | { kind: 'ok'; receipt: LoopGuardReceipt }
+  | { kind: 'warn'; count: number; reason: LoopReason; message: string; receipt: LoopGuardReceipt }
+  | { kind: 'block'; count: number; reason: LoopReason; message: string; receipt: LoopGuardReceipt; deferable: boolean }
+
+// A decision before its receipt is attached. The detector helpers produce these;
+// `check` stamps the receipt on at its single return site.
+type Verdict =
   | { kind: 'ok' }
   | { kind: 'warn'; count: number; reason: LoopReason; message: string }
   | { kind: 'block'; count: number; reason: LoopReason; message: string }
@@ -71,6 +102,21 @@ export type LoopGuard = {
   // premature polls poisoned the window. Narrower than `forget`, so an
   // unrelated tool's accumulating loop on the same session is preserved.
   forgetTool: (sessionId: string, tool: string) => void
+  // Undoes the one observation a prior `check` recorded, identified by its
+  // receipt. Pops that signature from the windowed history and, when the
+  // current consecutive streak is the call this receipt named (it is the most
+  // recent `check` on the session, since tool execution within a turn is
+  // sequential), rewinds the streak by one. Used post-execution for a
+  // `subagent_output` poll that returned `status: 'running'` — a still-pending
+  // wait, not a loop — so it never accumulates toward either detector.
+  retract: (receipt: LoopGuardReceipt) => void
+  // Records the post-execution class of a `subagent_output` poll. Once a
+  // signature is seen 'terminal', `check` stops marking its blocks `deferable`,
+  // so further identical polls hard-block PRE-execute instead of running again
+  // just to re-confirm a completed task. 'running' clears any prior terminal
+  // mark for that signature (a task can only move running→terminal, but a
+  // signature can be reused across episodes).
+  noteResult: (receipt: LoopGuardReceipt, result: LoopObservedResult) => void
 }
 
 type SessionState = {
@@ -84,6 +130,10 @@ type SessionState = {
   // still present in the window.
   window: string[]
   windowWarned: Set<string>
+  // Exact signatures whose `subagent_output` poll has been observed terminal.
+  // A block on such a signature is enforced pre-execute (not deferred), so a
+  // completed task is not re-polled forever just to re-learn it is done.
+  termKnown: Set<string>
 }
 
 export type CreateLoopGuardOptions = {
@@ -134,7 +184,7 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
     }
   }
 
-  function evaluateConsecutive(state: SessionState, tool: string): LoopGuardDecision {
+  function evaluateConsecutive(state: SessionState, tool: string): Verdict {
     if (state.count >= hardBlock) {
       return {
         kind: 'block',
@@ -150,25 +200,30 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
     return { kind: 'ok' }
   }
 
-  function evaluateWindowed(state: SessionState, tool: string, windowSig: string): LoopGuardDecision {
+  function evaluateWindowed(state: SessionState, tool: string, windowSig: string): Verdict {
     const count = state.window.reduce((n, sig) => (sig === windowSig ? n + 1 : n), 0)
     if (count >= windowHardBlock) {
-      return {
-        kind: 'block',
-        count,
-        reason: 'windowed',
-        message: formatWindowedBlockMessage(tool, count),
-      }
+      return { kind: 'block', count, reason: 'windowed', message: formatWindowedBlockMessage(tool, count) }
     }
     if (count >= windowSoftWarn && !state.windowWarned.has(windowSig)) {
       state.windowWarned.add(windowSig)
-      return {
-        kind: 'warn',
-        count,
-        reason: 'windowed',
-        message: formatWindowedWarnMessage(tool, count),
-      }
+      return { kind: 'warn', count, reason: 'windowed', message: formatWindowedWarnMessage(tool, count) }
     }
+    return { kind: 'ok' }
+  }
+
+  function resolveVerdict(state: SessionState, tool: string, windowSig: string): Verdict {
+    const consecutive = evaluateConsecutive(state, tool)
+    if (consecutive.kind === 'block') return consecutive
+
+    // Back-to-back identical calls are the consecutive detector's domain; let
+    // it own them so a tight streak doesn't also trip the windowed detector.
+    // The windowed detector exists for INTERLEAVED cycles, so it only acts
+    // when this call breaks the immediate streak (count === 1).
+    const windowed = state.count === 1 ? evaluateWindowed(state, tool, windowSig) : { kind: 'ok' as const }
+    if (windowed.kind === 'block') return windowed
+    if (consecutive.kind === 'warn') return consecutive
+    if (windowed.kind === 'warn') return windowed
     return { kind: 'ok' }
   }
 
@@ -176,6 +231,7 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
     check(sessionId, tool, args) {
       const signature = makeCallSignature(tool, args)
       const windowSig = makeWindowSignature(tool, args)
+      const receipt: LoopGuardReceipt = { sessionId, tool, signature, windowSignature: windowSig }
       const existing = sessions.get(sessionId)
 
       const state: SessionState = existing ?? {
@@ -184,6 +240,7 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
         warned: false,
         window: [],
         windowWarned: new Set(),
+        termKnown: new Set(),
       }
 
       if (state.signature !== signature) {
@@ -204,18 +261,14 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
 
       touch(sessionId, state)
 
-      const consecutive = evaluateConsecutive(state, tool)
-      if (consecutive.kind === 'block') return consecutive
-
-      // Back-to-back identical calls are the consecutive detector's domain; let
-      // it own them so a tight streak doesn't also trip the windowed detector.
-      // The windowed detector exists for INTERLEAVED cycles, so it only acts
-      // when this call breaks the immediate streak (count === 1).
-      const windowed = state.count === 1 ? evaluateWindowed(state, tool, windowSig) : { kind: 'ok' as const }
-      if (windowed.kind === 'block') return windowed
-      if (consecutive.kind === 'warn') return consecutive
-      if (windowed.kind === 'warn') return windowed
-      return { kind: 'ok' }
+      const verdict = resolveVerdict(state, tool, windowSig)
+      if (verdict.kind === 'block') {
+        // A `subagent_output` block is deferable (let the boundary call execute
+        // to learn its status) only until this signature has proven terminal.
+        const deferable = tool === SUBAGENT_OUTPUT_TOOL && !state.termKnown.has(signature)
+        return { ...verdict, receipt, deferable }
+      }
+      return { ...verdict, receipt }
     },
     reset(sessionId) {
       sessions.delete(sessionId)
@@ -240,6 +293,39 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
         state.count = 0
         state.warned = false
       }
+      for (const sig of state.termKnown) {
+        if (signatureBelongsToTool(sig, tool)) state.termKnown.delete(sig)
+      }
+    },
+    retract(receipt) {
+      const state = sessions.get(receipt.sessionId)
+      if (state === undefined) return
+
+      // Pop the receipt's windowed observation. It is the most recent push for
+      // this signature (retraction runs immediately after the call's execute,
+      // before any other tool runs on the session), so remove the last match.
+      const lastIdx = state.window.lastIndexOf(receipt.windowSignature)
+      if (lastIdx !== -1) {
+        state.window.splice(lastIdx, 1)
+        if (!state.window.includes(receipt.windowSignature)) {
+          state.windowWarned.delete(receipt.windowSignature)
+        }
+      }
+
+      // Rewind the consecutive streak by one only if it is still the call this
+      // receipt named. A retracted soft-warned streak re-arms its warning so the
+      // next genuine repeat warns as if this call never happened.
+      if (state.signature === receipt.signature && state.count > 0) {
+        state.count -= 1
+        if (state.count < softWarn) state.warned = false
+        if (state.count === 0) state.signature = ''
+      }
+    },
+    noteResult(receipt, result) {
+      const state = sessions.get(receipt.sessionId)
+      if (state === undefined) return
+      if (result === 'terminal') state.termKnown.add(receipt.signature)
+      else state.termKnown.delete(receipt.signature)
     },
   }
 }

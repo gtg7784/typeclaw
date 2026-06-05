@@ -58,9 +58,13 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
       'Fetch the current state of a subagent you previously spawned. Returns one of three statuses: ' +
       "'running' (with a human-readable status_summary and a tail of recent progress events), " +
       "'completed' (with the final message), or 'failed' (with the error). " +
-      'Returns immediately with a snapshot — never blocks. ' +
-      'For backgrounded spawns, end your turn after spawning and wait for the completion <system-reminder>; ' +
-      'then call this once to fetch the result. Use it for ad-hoc status checks too — never in a polling loop.',
+      'Returns immediately with a snapshot — never blocks, so calling it again right away just returns the same ' +
+      "'running' snapshot and wastes a turn. " +
+      'For backgrounded spawns, END YOUR TURN after spawning and wait for the completion <system-reminder>; ' +
+      'it arrives on its own when the subagent finishes — you do NOT need to poll for it. ' +
+      'Then call this once to fetch the result. ' +
+      'Do NOT poll in a loop, and do NOT round-robin across several task_ids while they run — ' +
+      'that is treated as a loop and will be blocked. Use it only for a single ad-hoc status check.',
     parameters: Type.Object({
       task_id: Type.String({
         description: 'The task_id returned by a previous spawn_subagent call.',
