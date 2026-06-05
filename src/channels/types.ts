@@ -70,6 +70,12 @@ export type InboundMessage = {
   // bounded loop guard so two or more bots cannot ping-pong forever.
   authorIsBot: boolean
   isBotMention: boolean
+  // When true, engagement treats this inbound as explicit-only: it skips
+  // content-blind sticky credit AND plain-text alias matching, leaving only
+  // structural DM / @mention / reply triggers. Used for GitHub PR review-thread
+  // traffic so the bot observes review comments unless explicitly addressed.
+  // Adapters that omit this keep the normal sticky + alias behavior.
+  suppressSticky?: boolean
   replyToBotMessageId: string | null
   // True when the message contains at least one user mention AND none of
   // those mentions resolve to the bot. Used by the engagement layer to

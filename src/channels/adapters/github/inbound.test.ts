@@ -42,6 +42,69 @@ describe('classifyGithubInbound', () => {
     expect(msg?.thread).toBe('101')
   })
 
+  describe('PR review-thread explicit-only engagement fields', () => {
+    it('marks a reply to the bot review comment as explicit-only and reply-to-bot', () => {
+      const msg = classifyGithubInbound('pull_request_review_comment', reviewCommentPayload(), 'typeclaw-bot', {
+        reviewCommentParent: { isSelf: true, parentId: 101 },
+      })
+      expect(msg?.replyToBotMessageId).toBe('101')
+      expect(msg?.replyToOtherMessageId).toBe(null)
+      expect(msg?.suppressSticky).toBe(true)
+    })
+
+    it('marks a reply to someone else review comment as explicit-only and reply-to-other', () => {
+      const msg = classifyGithubInbound('pull_request_review_comment', reviewCommentPayload(), 'typeclaw-bot', {
+        reviewCommentParent: { isSelf: false, parentId: 101 },
+      })
+      expect(msg?.replyToBotMessageId).toBe(null)
+      expect(msg?.replyToOtherMessageId).toBe('101')
+      expect(msg?.suppressSticky).toBe(true)
+    })
+
+    it('marks a top-level review comment as explicit-only without reply fields', () => {
+      const msg = classifyGithubInbound(
+        'pull_request_review_comment',
+        reviewCommentPayload({ inReplyToId: null }),
+        'typeclaw-bot',
+      )
+      expect(msg?.thread).toBe('102')
+      expect(msg?.replyToBotMessageId).toBe(null)
+      expect(msg?.replyToOtherMessageId).toBe(null)
+      expect(msg?.suppressSticky).toBe(true)
+    })
+
+    it('preserves @mention detection on explicit-only review comments', () => {
+      const msg = classifyGithubInbound(
+        'pull_request_review_comment',
+        reviewCommentPayload({ body: '@typeclaw-bot please look' }),
+        'typeclaw-bot',
+      )
+      expect(msg?.isBotMention).toBe(true)
+      expect(msg?.suppressSticky).toBe(true)
+    })
+
+    it('marks top-level submitted reviews as explicit-only without reply fields', () => {
+      const msg = classifyGithubInbound(
+        'pull_request_review',
+        {
+          action: 'submitted',
+          repository: repo(),
+          pull_request: { number: 7, id: 700, user: user() },
+          review: { id: 5002, body: 'please fix', submitted_at: '2026-01-01T00:00:00Z', user: user() },
+        },
+        'typeclaw-bot',
+      )
+      expect(msg?.replyToBotMessageId).toBe(null)
+      expect(msg?.replyToOtherMessageId).toBe(null)
+      expect(msg?.suppressSticky).toBe(true)
+    })
+
+    it('leaves PR issue comments on normal engagement behavior', () => {
+      const msg = classifyGithubInbound('issue_comment', issueCommentPayload({ pullRequest: true }), 'typeclaw-bot')
+      expect(msg?.suppressSticky).toBeUndefined()
+    })
+  })
+
   describe('reactionRef stamping', () => {
     it('stamps an issue-comment ref for a comment on a PR (reacts to the comment, not the PR body)', () => {
       const msg = classifyGithubInbound('issue_comment', issueCommentPayload({ pullRequest: true }), 'typeclaw-bot')
@@ -924,6 +987,55 @@ describe('createGithubWebhookHandler', () => {
   })
 })
 
+describe('createGithubWebhookHandler — review comment parent lookup', () => {
+  function handlerWithParentLookup(
+    routed: InboundMessage[],
+    parentUser: Record<string, unknown>,
+  ): (req: Request) => Promise<Response> {
+    return createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['pull_request_review_comment.created'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot[bot]',
+      authToken: async () => 'tok',
+      fetchImpl: fakeFetch((url, init) => {
+        expect(url).toBe('https://api.github.com/repos/acme/project/pulls/comments/101')
+        expect(init?.method ?? 'GET').toBe('GET')
+        return new Response(JSON.stringify({ id: 101, user: parentUser }), { status: 200 })
+      }),
+      logger,
+      route: (msg) => {
+        routed.push(msg)
+      },
+    })
+  }
+
+  it('routes review-comment replies to self with replyToBotMessageId', async () => {
+    const routed: InboundMessage[] = []
+    const handler = handlerWithParentLookup(routed, { login: 'typeclaw-bot[bot]', id: 99, type: 'Bot' })
+
+    await handler(signedRequest(JSON.stringify(reviewCommentPayload()), 'pull_request_review_comment', 'parent-self'))
+
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.replyToBotMessageId).toBe('101')
+    expect(routed[0]?.replyToOtherMessageId).toBe(null)
+    expect(routed[0]?.suppressSticky).toBe(true)
+  })
+
+  it('routes review-comment replies to other authors with replyToOtherMessageId', async () => {
+    const routed: InboundMessage[] = []
+    const handler = handlerWithParentLookup(routed, { login: 'alice', id: 10, type: 'User' })
+
+    await handler(signedRequest(JSON.stringify(reviewCommentPayload()), 'pull_request_review_comment', 'parent-other'))
+
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.replyToBotMessageId).toBe(null)
+    expect(routed[0]?.replyToOtherMessageId).toBe('101')
+    expect(routed[0]?.suppressSticky).toBe(true)
+  })
+})
+
 describe('createGithubWebhookHandler — self-author drop', () => {
   function selfAuthoredHandler(
     routed: InboundMessage[],
@@ -1604,12 +1716,19 @@ function issueCommentPayload(options: { pullRequest: boolean; body?: string }): 
   }
 }
 
-function reviewCommentPayload(): Record<string, unknown> {
+function reviewCommentPayload(options: { inReplyToId?: number | null; body?: string } = {}): Record<string, unknown> {
+  const inReplyToId = options.inReplyToId === undefined ? 101 : options.inReplyToId
   return {
     action: 'created',
     repository: repo(),
     pull_request: { number: 7 },
-    comment: { id: 102, in_reply_to_id: 101, body: 'review', created_at: '2026-01-01T00:00:00Z', user: user() },
+    comment: {
+      id: 102,
+      ...(inReplyToId !== null ? { in_reply_to_id: inReplyToId } : {}),
+      body: options.body ?? 'review',
+      created_at: '2026-01-01T00:00:00Z',
+      user: user(),
+    },
   }
 }
 

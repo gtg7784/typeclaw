@@ -89,6 +89,8 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
   if (config.trigger.includes('reply') && message.replyToBotMessageId !== null) return 'engage'
 
+  const explicitOnly = message.suppressSticky === true
+
   // Multi-human pre-sticky target check. In a busy group the conversational
   // target shifts every message: the author we're mid-exchange with (and hold
   // a sticky credit for) may, on THIS turn, structurally address a third party
@@ -118,6 +120,7 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (
     effectiveHumans > 1 &&
     config.stickiness !== 'off' &&
+    !explicitOnly &&
     !matchesAnyAlias(message.text, selfAliases) &&
     targetsSomeoneElse(message, participants, botInThread)
   ) {
@@ -134,7 +137,9 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // groups wholesale (the prior approach) dropped genuine follow-ups outright;
   // the pre-check above is narrower — it only steps aside when the message is
   // STRUCTURALLY addressed elsewhere, leaving plain follow-ups engaged.
-  if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
+  // GitHub review-thread traffic must not spend content-blind sticky credit
+  // unless the bot was explicitly addressed.
+  if (!explicitOnly && config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
 
@@ -148,7 +153,7 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // aliases, so cross-bot suppression isn't possible at this layer
   // anyway — the router-side peer-name suppression in the solo-human
   // fallback handles that case (follow-up).
-  if (matchesAnyAlias(message.text, selfAliases)) return 'engage'
+  if (!explicitOnly && matchesAnyAlias(message.text, selfAliases)) return 'engage'
 
   // Solo-human fallback: the strict mention/reply/dm gate keeps the bot
   // quiet in multi-human conversations, but in a 1-human channel that

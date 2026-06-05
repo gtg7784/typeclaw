@@ -4,6 +4,7 @@ import type { GithubReviewOn } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import type { GithubAuthContext } from './auth'
+import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { removeRequestedReviewer } from './decoy-reviewer'
 import type { DeliveryDedup } from './dedup'
 import { isGithubEventAllowed } from './event-allowlist'
@@ -94,10 +95,12 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     }
 
     const teamIsBotMember = await resolveTeamMembership(event, payload, options)
+    const reviewCommentParent = await resolveReviewCommentParent(event, payload, selfId, selfLogin, options)
     const classified = classifyGithubInbound(event, payload, selfLogin, {
       teamIsBotMember,
       authType: options.authType?.() ?? 'pat',
       reviewOn: options.reviewOn?.() ?? 'review_requested',
+      ...(reviewCommentParent !== null ? { reviewCommentParent } : {}),
     })
     if (classified === null) return ok()
 
@@ -286,7 +289,12 @@ export function classifyGithubInbound(
   event: string,
   payload: Record<string, unknown>,
   selfLogin: string | null,
-  options?: { teamIsBotMember?: boolean; authType?: 'pat' | 'app'; reviewOn?: GithubReviewOn },
+  options?: {
+    teamIsBotMember?: boolean
+    authType?: 'pat' | 'app'
+    reviewOn?: GithubReviewOn
+    reviewCommentParent?: ReviewCommentParent
+  },
 ): InboundMessage | null {
   const repository = readRepository(payload)
   if (repository === null) return null
@@ -326,7 +334,10 @@ export function classifyGithubInbound(
     const number = readNumber(pr, 'number')
     const id = readNumber(comment, 'id')
     if (number === null || id === null) return null
-    const root = readNumber(comment, 'in_reply_to_id') ?? id
+    const parentId = readNumber(comment, 'in_reply_to_id')
+    const root = parentId ?? id
+    const parent =
+      parentId !== null && options?.reviewCommentParent?.parentId === parentId ? options.reviewCommentParent : null
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: String(root) },
       comment.body,
@@ -335,6 +346,12 @@ export function classifyGithubInbound(
       mention,
       comment.created_at,
       { kind: 'pr-review-comment', owner: repository.owner, repo: repository.name, commentId: id },
+      false,
+      {
+        suppressSticky: true,
+        replyToBotMessageId: parent?.isSelf === true ? String(parent.parentId) : null,
+        replyToOtherMessageId: parent?.isSelf === false ? String(parent.parentId) : null,
+      },
     )
   }
 
@@ -467,6 +484,7 @@ export function classifyGithubInbound(
       review.submitted_at,
       null,
       !hasBody,
+      { suppressSticky: true },
     )
   }
 
@@ -507,6 +525,14 @@ type ReviewRequestInput = {
   selfLogin: string | null
   authType: 'pat' | 'app'
   teamIsBotMember: boolean | undefined
+}
+
+type ReviewCommentParent = { isSelf: boolean; parentId: number }
+
+type BuildInboundOptions = {
+  suppressSticky?: boolean
+  replyToBotMessageId?: string | null
+  replyToOtherMessageId?: string | null
 }
 
 // A GitHub App can never be a `requested_reviewer` — that field only holds
@@ -701,6 +727,7 @@ function buildInbound(
   rawTs: unknown,
   reactionTarget: GithubReactionTarget | null,
   synthesizedAwareness = false,
+  options?: BuildInboundOptions,
 ): InboundMessage | null {
   if (user === null) return null
   const text = typeof rawText === 'string' ? rawText : ''
@@ -715,6 +742,8 @@ function buildInbound(
   // that handle is the author, never a third-party mention of the bot, so the
   // body-text mention heuristic must not fire on it.
   const isBotMention = !synthesizedAwareness && textMentionsBot(text, mention)
+  const replyToBotMessageId = options?.replyToBotMessageId ?? null
+  const replyToOtherMessageId = options?.replyToOtherMessageId ?? key.replyToOtherMessageId
   return {
     ...key,
     text,
@@ -724,7 +753,9 @@ function buildInbound(
     authorName: user.login,
     authorIsBot: user.type === 'Bot',
     isBotMention,
-    replyToBotMessageId: null,
+    ...(options?.suppressSticky === true ? { suppressSticky: true } : {}),
+    replyToBotMessageId,
+    replyToOtherMessageId,
     ts: typeof rawTs === 'string' ? Date.parse(rawTs) || 0 : 0,
   }
 }
@@ -788,6 +819,39 @@ async function resolveTeamMembership(
   } catch (err) {
     options.logger.warn(`[github] team membership lookup failed: ${describe(err)}`)
     return false
+  }
+}
+
+async function resolveReviewCommentParent(
+  event: string,
+  payload: Record<string, unknown>,
+  selfId: string | null,
+  selfLogin: string | null,
+  options: GithubWebhookHandlerOptions,
+): Promise<ReviewCommentParent | null> {
+  if (event !== 'pull_request_review_comment') return null
+  const comment = readRecord(payload.comment)
+  const parentId = readNumber(comment, 'in_reply_to_id')
+  if (parentId === null) return null
+  const repository = readRepository(payload)
+  if (repository === null) return null
+  const authToken = options.authToken
+  if (authToken === undefined) return null
+
+  try {
+    const token = await authToken({ repoSlug: `${repository.owner}/${repository.name}` })
+    const fetchImpl = options.fetchImpl ?? fetch
+    const response = await fetchImpl(
+      `${GITHUB_API_BASE}/repos/${repository.owner}/${repository.name}/pulls/comments/${parentId}`,
+      { headers: githubJsonHeaders(token) },
+    )
+    if (!response.ok) return null
+    const raw = (await response.json().catch(() => null)) as unknown
+    const user = readUser(readRecord(raw)?.user)
+    if (user === null) return null
+    return { parentId, isSelf: isSelfAuthor(user, selfId, selfLogin) }
+  } catch {
+    return null
   }
 }
 
