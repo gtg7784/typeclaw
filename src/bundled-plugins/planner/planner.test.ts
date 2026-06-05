@@ -143,10 +143,22 @@ describe('planner subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('spend tokens')
   })
 
-  test('prompt handles the empty-goal case as needs-input with one blocking question (no file)', () => {
+  test('prompt handles the empty-goal case as needs-input with one blocking question', () => {
     const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('cannot identify any usable goal')
     expect(PLANNER_SYSTEM_PROMPT).toContain('What would you like me to plan?')
+  })
+
+  test('prompt keeps a consistent path contract: ALWAYS writes a file and reports <path> on every verdict', () => {
+    // Drift guard for the review fix: the empty-goal / needs-input / infeasible
+    // branches must not contradict the "<path> MUST be the path you wrote" rule.
+    // A spawn-tool-minimum payload ({ requestId }) can hit the empty-goal branch,
+    // so the parent must always get a trustworthy <path>.
+    const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('always write the plan file')
+    expect(lower).toContain('on every verdict')
+    expect(lower).not.toContain('do not write a file')
+    expect(PLANNER_SYSTEM_PROMPT).toContain('write a minimal partial draft')
   })
 })
 
@@ -282,6 +294,22 @@ describe('plannerPayloadSchema', () => {
   test('rejects a traversal outputPath (no .. escape out of the agent folder)', () => {
     expect(plannerPayloadSchema.safeParse({ outputPath: '../../etc/passwd' }).success).toBe(false)
     expect(plannerPayloadSchema.safeParse({ outputPath: 'workspace/../../secrets.json' }).success).toBe(false)
+  })
+
+  test('rejects blank and directory-like outputPath (must name a file, not a directory)', () => {
+    // The planner writes a file; '', '.', and trailing-separator paths are not
+    // files and would waste a run before failing at write. (Review fix.)
+    expect(plannerPayloadSchema.safeParse({ outputPath: '' }).success).toBe(false)
+    expect(plannerPayloadSchema.safeParse({ outputPath: '   ' }).success).toBe(false)
+    expect(plannerPayloadSchema.safeParse({ outputPath: '.' }).success).toBe(false)
+    expect(plannerPayloadSchema.safeParse({ outputPath: './' }).success).toBe(false)
+    expect(plannerPayloadSchema.safeParse({ outputPath: 'workspace/plans/' }).success).toBe(false)
+    expect(plannerPayloadSchema.safeParse({ outputPath: 'workspace/plans/.' }).success).toBe(false)
+  })
+
+  test('still accepts a normal nested file path (regression guard for the tightened refine)', () => {
+    expect(plannerPayloadSchema.safeParse({ outputPath: 'workspace/plans/tokyo-trip.md' }).success).toBe(true)
+    expect(plannerPayloadSchema.safeParse({ outputPath: 'plan.md' }).success).toBe(true)
   })
 
   test('passes through unknown fields (forward-compat with future spawn-tool params, matches reviewer)', () => {

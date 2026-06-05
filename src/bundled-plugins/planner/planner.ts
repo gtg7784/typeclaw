@@ -178,15 +178,25 @@ Then END your response with a single \`<plan-summary>\` block. Use this exact st
 
 \`ready\` = the plan is complete and actionable; the file is written. Omit \`<questions>\`.
 \`needs-input\` = blocked on user-only input (or the goal itself is absent); you wrote a partial draft with \`## Open Questions\`, and \`<questions>\` lists exactly what the parent must ask. The parent interviews the user and re-spawns you.
-\`infeasible\` = you understood the goal and it genuinely cannot be done as stated; \`<summary>\` says why. This is "the answer is no", not "I need more information".
+\`infeasible\` = you understood the goal and it genuinely cannot be done as stated; write a short stub file whose body explains why, report its \`<path>\`, and say why in \`<summary>\` too. This is "the answer is no", not "I need more information".
 
 ## Rules
 
-- The \`<path>\` you report MUST be the path you actually wrote the file to.
+- You ALWAYS write the plan file and ALWAYS report the path you wrote in \`<path>\` — including on \`needs-input\`, where the file is a minimal partial (skeleton + \`## Open Questions\`). The \`<path>\` you report MUST be the path you actually wrote to. The parent relies on a trustworthy \`<path>\` for every verdict; never omit it and never report a path you did not write.
 - If the goal requires information you cannot access (a private system, a file outside this checkout) AND cannot get from the user, say so explicitly in \`<summary>\` and plan what you can.
-- If you cannot identify any usable goal from the payload at all, do NOT write a file. Return verdict \`needs-input\` with a single blocking question: "What would you like me to plan?"
+- If you cannot identify any usable goal from the payload at all, treat it as the extreme of insufficient input: resolve the output path as usual, write a minimal partial draft (a near-empty skeleton whose \`## Open Questions\` holds the single blocking question), and return verdict \`needs-input\` with that one blocking question: "What would you like me to plan?" Do NOT skip the file — the contract above requires a real \`<path>\` on every verdict.
 
 You have one shot. The parent receives your final assistant message verbatim — make the \`<plan-summary>\` complete and self-contained.`
+
+function isValidRelativeFilePath(p: string): boolean {
+  if (p.trim() === '') return false
+  if (p.startsWith('/')) return false
+  if (/[/\\]$/.test(p)) return false
+  const segments = p.split(/[/\\]/)
+  if (segments.some((s) => s === '..' || s === '.')) return false
+  if (segments.every((s) => s === '')) return false
+  return true
+}
 
 export const plannerPayloadSchema = z
   .object({
@@ -194,16 +204,20 @@ export const plannerPayloadSchema = z
     prompt: z.string().optional(),
     description: z.string().optional(),
     // Where to write the plan file, relative to the agent folder. Optional;
-    // when omitted the planner defaults to workspace/plans/. Rejected if it
-    // escapes the agent folder (absolute paths or `..` traversal) so a confused
-    // or hostile caller cannot aim the one write the planner has at an
-    // arbitrary location. The role-based write guards (non-workspace-write,
-    // private-surface-read) are the real enforcement; this is a cheap, early
-    // sanity check on the caller-supplied value.
+    // when omitted the planner defaults to workspace/plans/. Must name an actual
+    // file inside the agent folder: it is rejected if it escapes the folder
+    // (absolute path or `..` traversal) so a confused or hostile caller cannot
+    // aim the one write the planner has at an arbitrary location, AND if it is
+    // blank or directory-like (empty, `.`, or trailing separator) since the
+    // planner writes a file, not a directory. The role-based write guards
+    // (non-workspace-write, private-surface-read) are the real escape
+    // enforcement; this is a cheap, early sanity check on the caller value so an
+    // unusable path fails before the planner spends a whole run on it.
     outputPath: z
       .string()
-      .refine((p) => !p.startsWith('/') && !p.split(/[/\\]/).includes('..'), {
-        message: 'outputPath must be a relative path inside the agent folder (no leading "/" and no ".." segments)',
+      .refine(isValidRelativeFilePath, {
+        message:
+          'outputPath must be a relative file path inside the agent folder: non-blank, no leading "/", no ".." segments, and not a directory (no trailing separator or bare ".")',
       })
       .optional(),
   })
