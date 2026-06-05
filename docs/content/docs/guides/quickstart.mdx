@@ -45,7 +45,7 @@ mkdir my-agent && cd my-agent
 typeclaw init
 ```
 
-`init` is an interactive wizard. It asks which AI provider you want, which model, and how to sign in (API key or, for OpenAI/Anthropic, a browser login). Answer the prompts and it sets everything up for you — including a couple of starter files and folders.
+`init` is an interactive wizard. It asks which AI provider you want, which model, and how to sign in (API key or, for OpenAI/Anthropic, a browser login) — and it offers to wire up your first channel (Slack, Discord, GitHub, …) right then too. Answer the prompts and it sets everything up for you. By the time `init` finishes, you have a working provider and, if you said yes, a channel already connected.
 
 <Accordions>
 
@@ -58,7 +58,7 @@ typeclaw init
 - a `Dockerfile` and `package.json` — so the agent can build its container
 - starter folders: `workspace/` (the agent's free-write space), `public/`, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`
 
-The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick OpenAI or Anthropic you can log in through the browser with an existing paid subscription instead of pasting a key. It validates your key on the spot, so you'll know immediately if it's wrong.
+The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick OpenAI or Anthropic you can log in through the browser with an existing paid subscription instead of pasting a key. It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/first-channel).
 
 </Accordion>
 
