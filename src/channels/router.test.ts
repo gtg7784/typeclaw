@@ -4962,6 +4962,58 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(sent.some((t) => /team plan/.test(t))).toBe(false)
   })
 
+  test('posts the LLM soft-error notice ONCE per turn even when the SDK retries (PR #652)', async () => {
+    // given: a single turn whose underlying SDK retries internally — each retry
+    // emits its own message_end with stopReason=error. The channel must surface
+    // one notice for the turn, not one per retry (PR #652 saw 5 duplicates).
+    const dir = await tempDir()
+    const sent: string[] = []
+    let promptCount = 0
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async (_text) => {
+          promptCount++
+          // Three retry errors within one prompt() call (one turn).
+          for (let i = 0; i < 3; i++) {
+            fake.emit({
+              type: 'message_end',
+              message: { role: 'assistant', stopReason: 'error', errorMessage: `transient upstream blip ${i}` },
+            })
+          }
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_retry_dedup',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    // when: one user turn that retries 3 times
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    const noticesAfterFirstTurn = sent.filter((t) => /upstream LLM provider failed/i.test(t)).length
+
+    // when: a second, separate user turn that also fails
+    await router.route(inbound({ text: 'still there?' }))
+    await router.__testing!.flushDebounce(KEY)
+    const totalNotices = sent.filter((t) => /upstream LLM provider failed/i.test(t)).length
+
+    // then: one notice per turn, not one per retry
+    expect(promptCount).toBe(2)
+    expect(noticesAfterFirstTurn).toBe(1)
+    expect(totalNotices).toBe(2)
+  })
+
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {
     // given
     const dir = await tempDir()
