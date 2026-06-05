@@ -303,15 +303,18 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('hidden assumptions')
   })
 
-  test('doc-review skill covers any document, not only technical docs (drift guard against re-narrowing)', () => {
-    // The skill must lead with universal doc craft so policy/process/onboarding/
-    // help-center/legal docs fit, with the Diátaxis + runnable-sample lens scoped
-    // to the technical-docs sub-case rather than framing the whole skill.
+  test('doc-review leads with universal craft and does not prime a document-type taxonomy (anti-bias guard)', () => {
+    // Enumerating kinds (README/policy/onboarding/...) in the description or
+    // opening biases the reviewer toward the named kinds and against the
+    // unnamed ones — the same enumeration bias plan-review forbids. The skill
+    // must route by function ("a document written to inform or instruct") and
+    // tell the reviewer not to assume a kind, then carry it with universal
+    // craft.
     expect(DOC_REVIEW_SKILL.name).toBe('doc-review')
-    expect(DOC_REVIEW_SKILL.description.length).toBeGreaterThan(0)
+    expect(DOC_REVIEW_SKILL.description).toContain('inform or instruct')
     const lower = DOC_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('do not assume a kind')
     expect(lower).toContain('audience fit')
-    expect(lower).toContain('policy')
     expect(lower).toContain('examples and claims')
     expect(lower).toContain('prerequisite')
   })

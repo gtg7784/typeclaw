@@ -3,11 +3,11 @@ import type { LoadableSkill } from '@/plugin'
 export const DOC_REVIEW_SKILL_NAME = 'doc-review'
 
 export const DOC_REVIEW_SKILL_DESCRIPTION =
-  'Review any document for its reader: technical docs (README, API reference, tutorial), but also policy, process, onboarding, help-center, legal-lite, specs, and knowledge-base pages. Covers purpose/audience fit, completeness, accuracy of examples and claims, navigability, staleness, terminology consistency, and accessibility.'
+  'Review a document written to inform or instruct a reader. Covers purpose and audience fit, completeness for the stated job, accuracy of examples and claims, navigability, staleness, terminology consistency, and accessibility — for any kind of document, with a scoped lens for technical docs when the target is one.'
 
 export const DOC_REVIEW_SKILL_CONTENT = `# doc-review
 
-You have been asked to review a document. "Document" is broad on purpose: a README or API reference, but equally a policy, a runbook, an onboarding guide, a help-center article, a spec, a contract summary, a knowledge-base page. The craft below is universal; the technical-docs section near the end is one specialization you apply only when the target is developer documentation. Apply all of this on top of the reviewer's neutral output contract (severity-tagged findings, evidence quotes, suggestions, verdict).
+You have been asked to review a document — anything written to inform or instruct a reader. Do not assume a kind. The craft below is universal and applies whatever the document turns out to be; the technical-docs section near the end is one specialization you apply only when the target is in fact developer documentation. Read the target, let it tell you what it is, and review it on its own terms. Apply all of this on top of the reviewer's neutral output contract (severity-tagged findings, evidence quotes, suggestions, verdict).
 
 ## How to acquire the target
 
