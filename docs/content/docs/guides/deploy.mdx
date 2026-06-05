@@ -49,13 +49,7 @@ No file edit needed — environment wins over `secrets.json`. The full resolutio
 
 <Accordion title="Restart automatically after a reboot or crash">
 
-Two layers. To restart the container if it crashes, have the agent add Docker's restart policy to its run arguments (`docker.runArgs.append` in `typeclaw.json`):
-
-```json
-{ "docker": { "runArgs": { "append": ["--restart", "unless-stopped"] } } }
-```
-
-To bring the agent up after the _host itself_ reboots, use a small systemd unit that runs `typeclaw start` in the agent folder. Together they keep the agent alive across both crashes and reboots.
+Wrap the agent in a small **systemd unit** that runs `typeclaw start` in the agent folder, with `Restart=on-failure` and `WantedBy=multi-user.target`. That covers both cases: systemd restarts the launcher if it fails, and brings the agent back up after the host itself reboots. This is the supported path — TypeClaw deliberately runs the container without Docker's own `--restart` policy so a crashed container's logs survive for `typeclaw logs`.
 
 </Accordion>
 

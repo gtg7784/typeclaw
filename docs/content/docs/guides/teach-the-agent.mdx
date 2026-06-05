@@ -13,7 +13,7 @@ This is the "teach the agent" guide, and the punchline is: **you don't teach it 
 
 Use it. Give it real tasks over a few days.
 
-That's the whole instruction. While you work, the agent quietly notes what happened. Overnight, it reflects on those notes and distills them into lasting memory — the conventions of your team, the quirks of your repos, the commands that worked, the mistakes worth not repeating. The next time you talk to it, it already knows.
+That's the whole instruction. While you work, the agent quietly notes what happened. On its own schedule — every half hour by default — it reflects on those notes and distills them into lasting memory: the conventions of your team, the quirks of your repos, the commands that worked, the mistakes worth not repeating. The next time you talk to it, it already knows.
 
 <Callout type="info" title="No setup, no files to write">
   Memory is on automatically — there's nothing to enable and nothing for you to write. The agent manages its own memory
@@ -38,7 +38,7 @@ You don't have to, but you can nudge what kinds of things it pays attention to �
 - people-and-team facts (preferences, ownership, conventions)
 - tools and commands that worked well for a given task
 
-Ask it to "remember more about who owns what in our codebase," and the nightly reflection will lean that way.
+Ask it to "remember more about who owns what in our codebase," and its next reflection pass will lean that way.
 
 ## Going deeper
 
@@ -48,8 +48,8 @@ Ask it to "remember more about who owns what in our codebase," and the nightly r
 
 Under the hood the bundled `memory` plugin runs on three cadences:
 
-- **Observe** — after each idle stretch, it appends notable fragments from the session to a daily memory file. Cheap, frequent, lossy on purpose.
-- **Dream** — on a nightly schedule, it reads the day's fragments and consolidates them into long-term `MEMORY.md`, and writes a reusable skill whenever it spots a procedure it keeps repeating.
+- **Observe** — after each idle stretch, it appends notable fragments from the session to that day's memory stream. Cheap, frequent, lossy on purpose.
+- **Dream** — on a recurring schedule (every 30 minutes by default), it reads the new fragments and consolidates them into long-term memory, and writes a reusable skill whenever it spots a procedure it keeps repeating.
 - **Apply** — the next session sees the updated memory and the new skills, loaded only when relevant.
 
 The full reasoning — why self-distilled memory beats hand-written prompts, and why it's called "dreaming" — lives in the [memory loop concept](/docs/concepts/memory-loop). This guide is the what-to-do; that page is the why.
@@ -58,18 +58,18 @@ The full reasoning — why self-distilled memory beats hand-written prompts, and
 
 <Accordion title="Tuning the schedule (optional)">
 
-The timing is configurable in `typeclaw.json` if you ever need it — how soon after a session goes quiet the agent takes notes, and when the nightly consolidation runs:
+The timing is configurable in `typeclaw.json` if you ever need it — how soon after a session goes quiet the agent takes notes, and how often the consolidation pass runs:
 
 ```json
 {
   "memory": {
     "idleMs": 60000,
-    "dreaming": { "schedule": "0 4 * * *" }
+    "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
 ```
 
-`dreaming.schedule` is a standard cron expression (default 4am local). Both are restart-required. Field details in the [bundled-plugins reference](/docs/reference/bundled-plugins). Just ask the agent to "do your nightly memory pass at 2am instead" and it'll make the change.
+`dreaming.schedule` is a standard cron expression (default every 30 minutes). Both are restart-required. Field details in the [bundled-plugins reference](/docs/reference/bundled-plugins). Just ask the agent to "run your memory pass once an hour instead" and it'll make the change.
 
 </Accordion>
 
