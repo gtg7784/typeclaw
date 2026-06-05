@@ -411,6 +411,13 @@ export function classifyGithubInbound(
     // the PR is non-draft once ready — preserving "review when no longer draft".
     const isOpenLike = action === 'opened' || action === 'ready_for_review'
     if (isOpenLike && reviewOn === 'opened') {
+      // Draft opened under `review.on: "opened"`: skip cleanly (null wakes no
+      // session) and wait for the `ready_for_review` trigger. Must NOT fall
+      // through to the awareness path below, where a multi-collaborator repo
+      // silently `observed`s it — a draft whose `ready_for_review` delivery is
+      // later lost would then never get reviewed (huxley#1721). `review_requested`
+      // on a draft is unaffected: it returns above via classifyReviewRequest.
+      if (readBoolean(pr, 'draft') === true) return null
       const trigger = classifyOpenedReviewTrigger({
         payload,
         pr,
@@ -643,12 +650,6 @@ function classifyOpenedReviewTrigger(input: OpenedReviewTriggerInput): InboundMe
   // distinct login, so a decoy-opened PR would otherwise wake a self-review.
   const decoyLogin = resolveDecoyReviewerLogin(selfLogin, authType)
   if (sender.login === selfLogin || (decoyLogin !== null && sender.login === decoyLogin)) return null
-
-  // A draft PR is work-in-progress, so the automatic `opened` path skips it: null
-  // here drops to awareness-only context (like a non-`opened` reviewOn) instead of
-  // waking a review. An explicit `review_requested` still triggers on a draft via
-  // classifyReviewRequest, preserving "skip until explicitly requested".
-  if (readBoolean(pr, 'draft') === true) return null
 
   const title = readString(pr, 'title') ?? `#${number}`
   const head = readString(readRecord(pr.head), 'ref')
