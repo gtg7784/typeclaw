@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { classifyReviewClaim, type ReviewClaim } from './github-review-claim'
+import { classifyReviewClaim, isPositiveWarnCloseout, type ReviewClaim } from './github-review-claim'
 
 const cases: ReadonlyArray<[string, ReviewClaim]> = [
   ['Approved!', 'block-approve'],
@@ -59,4 +59,27 @@ describe('classifyReviewClaim', () => {
   test('negation demotes even when a block phrase is present', () => {
     expect(classifyReviewClaim("looks good but I haven't approved it")).toBe('ignore')
   })
+})
+
+describe('isPositiveWarnCloseout', () => {
+  test.each(['LGTM', 'looks good', 'looks fine', 'seems fine', 'should be good', 'looks resolved'])(
+    'true for approval/resolve-shaped warn: %p',
+    (text) => {
+      expect(isPositiveWarnCloseout(text)).toBe(true)
+    },
+  )
+
+  test.each(['this needs changes IMO', 'still needs work here'])(
+    'false for negative warn that re-asserts a block: %p',
+    (text) => {
+      expect(isPositiveWarnCloseout(text)).toBe(false)
+    },
+  )
+
+  test.each(['Approved!', 'Confirmed fixed.', 'Can you clarify the second point?', ''])(
+    'false for non-warn tiers: %p',
+    (text) => {
+      expect(isPositiveWarnCloseout(text)).toBe(false)
+    },
+  )
 })

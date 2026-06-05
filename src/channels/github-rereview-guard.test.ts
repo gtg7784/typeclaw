@@ -162,4 +162,27 @@ describe('re-review stranding guard', () => {
     )
     expect(decision.block).toBe(true)
   })
+
+  // A negative warn phrase re-asserts the block instead of stranding it, so the
+  // guard must not query state or block it (PR #652 review). Only positive,
+  // approval-shaped warns are closeout attempts.
+  it.each(['still needs work', 'this needs changes before it lands'])(
+    'does not fire on a negative warn reply that re-asserts the block: %p',
+    async (text) => {
+      let queried = false
+      const decision = await evaluateRereviewGuard(
+        input({
+          thread: null,
+          wantsResolve: false,
+          text,
+          getReviewState: async () => {
+            queried = true
+            return { ok: true, selfBlocking: true, approve: true }
+          },
+        }),
+      )
+      expect(decision).toEqual({ block: false })
+      expect(queried).toBe(false)
+    },
+  )
 })

@@ -1,4 +1,4 @@
-import { classifyReviewClaim } from './github-review-claim'
+import { classifyReviewClaim, isPositiveWarnCloseout } from './github-review-claim'
 import type { ReviewStateResult } from './types'
 
 // The re-review stranding guard. A bot that resolves a review thread (or posts a
@@ -52,16 +52,19 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
 // thread), OR when its reply reads as a close-out/verdict claim — the latter
 // strands the block whether or not it sits in a thread, so it fires for any PR
 // chat. Unlike the pure false-receipt classifier, this guard has the objective
-// review state available, so a warn-tier "looks good"/"lgtm" reply is escalated
-// to a closeout too: it only blocks when the bot actually holds a live
-// CHANGES_REQUESTED, so casual approval-shaped chatter on an unblocked PR still
-// posts. `continue:true` exempts warn-tier (mid-turn planning, not the receipt),
-// but never the explicit resolve action. Plain `ignore` text never fires.
+// review state available, so an approval-shaped warn reply ("looks good"/"lgtm")
+// is escalated to a closeout too: it only blocks when the bot actually holds a
+// live CHANGES_REQUESTED, so casual approval-shaped chatter on an unblocked PR
+// still posts. Only POSITIVE warn phrases escalate — negative ones ("needs
+// changes", "still needs work") re-assert a block rather than strand it, so they
+// stay non-firing. `continue:true` exempts the warn escalation (mid-turn
+// planning, not the receipt), but never the explicit resolve action. Plain
+// `ignore` text never fires.
 function isCloseoutAttempt(input: RereviewGuardInput): boolean {
   if (input.wantsResolve && input.thread !== null) return true
   const claim = classifyReviewClaim(input.text ?? '')
   if (claim === 'block-resolve' || claim === 'block-approve') return true
-  return claim === 'warn' && !input.isContinue
+  return !input.isContinue && isPositiveWarnCloseout(input.text ?? '')
 }
 
 function unverifiableReason(error: string): string {

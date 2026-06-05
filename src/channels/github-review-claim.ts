@@ -41,18 +41,25 @@ const BLOCK_RESOLVE: readonly RegExp[] = [
   /\b(thanks,?|fixed,?) (looks )?resolved\b/,
 ]
 
-// Casual phrasing that might be chatter, not a formal close-out: allow + nudge.
-const WARN: readonly RegExp[] = [
+// Approval/resolve-shaped warn phrases: casual chatter that, on a PR the bot is
+// still blocking, READS as a close-out and so can strand the block. Split out so
+// the re-review guard can escalate only these — never the negative warn phrases
+// below, which re-assert a block rather than strand it.
+const WARN_POSITIVE_CLOSEOUT: readonly RegExp[] = [
   /\blgtm\b/,
   /\blooks good\b/,
   /\blooks fine\b/,
   /\bseems fine\b/,
   /\bshould be (fine|good)\b/,
-  /\bneeds changes\b/,
-  /\bstill needs work\b/,
   /\blooks resolved\b/,
   /\bseems resolved\b/,
 ]
+
+// Negative warn phrases re-assert a block ("not done yet") instead of closing it
+// out, so they are NOT close-out attempts — the re-review guard must ignore them.
+const WARN_NEGATIVE: readonly RegExp[] = [/\bneeds changes\b/, /\bstill needs work\b/]
+
+const WARN: readonly RegExp[] = [...WARN_POSITIVE_CLOSEOUT, ...WARN_NEGATIVE]
 
 // Negation / future-intent / past-reference markers DEMOTE a positive match to
 // ignore. Blocking "I haven't approved" / "I'll approve" / "approved it earlier"
@@ -78,6 +85,15 @@ export function classifyReviewClaim(rawText: string): ReviewClaim {
   if (BLOCK_RESOLVE.some((re) => re.test(text))) return 'block-resolve'
   if (WARN.some((re) => re.test(text))) return 'warn'
   return 'ignore'
+}
+
+// True only for warn-tier replies whose phrasing reads as an approval/resolve
+// close-out (e.g. "looks good", "lgtm"), excluding negative warn phrases like
+// "needs changes" that re-assert a block. The re-review guard uses this to
+// escalate just the stranding-shaped warns, not the whole warn bucket.
+export function isPositiveWarnCloseout(rawText: string): boolean {
+  if (classifyReviewClaim(rawText) !== 'warn') return false
+  return WARN_POSITIVE_CLOSEOUT.some((re) => re.test(normalize(rawText)))
 }
 
 // Strips markdown/emoji noise so "**Approved!**" and "approved" classify alike,
