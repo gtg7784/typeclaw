@@ -1519,7 +1519,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.error(`[channels] ${keyId}: ensureLive failed: ${describe(err)}`)
       throw err
     } finally {
-      creating.delete(keyId)
+      // Owner-checked delete: only clear the in-flight marker if it still points
+      // at THIS promise. A watchdog timeout can orphan a slow creation whose
+      // `finally` runs while a later inbound has already installed its own
+      // `creating` entry for the same key; an unconditional delete would drop
+      // that newer entry and let a third inbound cold-start a duplicate session
+      // (observed: 3 concurrent sessions approving the same PR).
+      if (creating.get(keyId) === promise) creating.delete(keyId)
     }
   }
 

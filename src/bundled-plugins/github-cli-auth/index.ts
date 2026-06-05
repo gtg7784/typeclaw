@@ -1,6 +1,8 @@
 import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import { definePlugin } from '@/plugin'
 
+import { createApproveIdempotencyGuard } from './approve-idempotency'
+import { createGithubEffectiveApprovalResolver } from './effective-approval'
 import { analyzeGhCommand } from './gh-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
@@ -9,6 +11,14 @@ import { classifyGhToken } from './token-class'
 export default definePlugin({
   plugin: async (ctx) => {
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
+    const approveGuard = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: createGithubEffectiveApprovalResolver({
+        resolveToken: async (workspace) => {
+          const result = await resolveTokenForRepo(workspace)
+          return result.kind === 'token' ? result.token : null
+        },
+      }),
+    })
     return {
       hooks: {
         'tool.before': async (event) => {
@@ -16,8 +26,17 @@ export default definePlugin({
           const command = event.args.command
           if (typeof command !== 'string' || !command.includes('gh')) return
 
-          const reviewDump = await noteReviewCommand({ callId: event.callId, command })
-          if (reviewDump !== null) return reviewDump
+          const review = await noteReviewCommand({ callId: event.callId, command })
+          if (review.detected !== null) {
+            const block = await approveGuard.guard({
+              callId: event.callId,
+              workspace: review.detected.workspace,
+              prNumber: review.detected.prNumber,
+              verdict: review.detected.verdict,
+            })
+            if (block !== null) return block
+          }
+          if (review.dump !== null) return review.dump
 
           const decision = analyzeGhCommand(command)
           if (decision.kind === 'pass-through') return
@@ -46,7 +65,12 @@ export default definePlugin({
         },
         'tool.after': async (event) => {
           checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
-          commitReviewIfSucceeded({ sessionId: event.sessionId, callId: event.callId, result: event.result })
+          const committed = commitReviewIfSucceeded({
+            sessionId: event.sessionId,
+            callId: event.callId,
+            result: event.result,
+          })
+          approveGuard.release({ callId: event.callId, succeeded: committed })
         },
       },
     }

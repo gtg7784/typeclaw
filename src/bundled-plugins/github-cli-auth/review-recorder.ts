@@ -17,24 +17,30 @@ const pending = new Map<string, DetectedReview>()
 
 const MAX_INPUT_BYTES = 1_000_000
 
-export async function noteReviewCommand(args: { callId: string; command: string }): Promise<ReviewDumpDecision> {
+export type NoteReviewResult = {
+  dump: ReviewDumpDecision
+  detected: DetectedReview | null
+}
+
+export async function noteReviewCommand(args: { callId: string; command: string }): Promise<NoteReviewResult> {
   const inputFileContents = await readInputFile(args.command)
   const detected = detectReviewSubmission({ command: args.command, inputFileContents })
   if (detected !== null) pending.set(args.callId, detected)
-  return detectReviewDump({ command: args.command, inputFileContents })
+  return { dump: detectReviewDump({ command: args.command, inputFileContents }), detected }
 }
 
-export function commitReviewIfSucceeded(args: { sessionId: string; callId: string; result: ToolResult }): void {
+export function commitReviewIfSucceeded(args: { sessionId: string; callId: string; result: ToolResult }): boolean {
   const detected = pending.get(args.callId)
-  if (detected === undefined) return
+  if (detected === undefined) return false
   pending.delete(args.callId)
-  if (!looksSucceeded(detected, collectText(args.result.content))) return
+  if (!looksSucceeded(detected, collectText(args.result.content))) return false
   recordReview({
     sessionId: args.sessionId,
     workspace: detected.workspace,
     prNumber: detected.prNumber,
     verdict: detected.verdict,
   })
+  return true
 }
 
 async function readInputFile(command: string): Promise<string | null> {
