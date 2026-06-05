@@ -16,7 +16,8 @@ export default definePlugin({
           const command = event.args.command
           if (typeof command !== 'string' || !command.includes('gh')) return
 
-          await noteReviewCommand({ callId: event.callId, command })
+          const reviewDump = await noteReviewCommand({ callId: event.callId, command })
+          if (reviewDump !== null) return reviewDump
 
           const decision = analyzeGhCommand(command)
           if (decision.kind === 'pass-through') return
