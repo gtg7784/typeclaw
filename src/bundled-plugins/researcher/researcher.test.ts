@@ -104,6 +104,18 @@ describe('researcher subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('delegate the gathering, never the conclusion')
   })
 
+  test('prompt makes delegating to scout/explorer the DEFAULT for fetching, not just for big sweeps', () => {
+    // The expensive deep model bleeds context if it fetches routine pages
+    // itself. The prompt must push the model to delegate quick fetches to
+    // scout/explorer by default and keep its own web_search/web_fetch/read/grep
+    // for surgical touches only. If this softens back to "delegate big sweeps,
+    // fetch the rest yourself", the context-economy intent is lost.
+    const lower = RESEARCHER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('delegate first; fetch yourself only as a last resort')
+    expect(lower).toContain('your default for gathering is to delegate')
+    expect(lower).toContain('quick or broad')
+  })
+
   test('prompt still forbids side effects through a delegate (no laundering write access via a subagent)', () => {
     const lower = RESEARCHER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('a subagent you spawn cannot do for you')
