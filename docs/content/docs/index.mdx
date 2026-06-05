@@ -1,27 +1,104 @@
 ---
 title: What is TypeClaw?
-description: A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime
+description: A general-purpose AI agent that lives in its own container and answers from Slack, GitHub, cron, or your terminal
 icon: Info
 ---
 
-TypeClaw is an agent runtime built end-to-end in TypeScript. The core, the plugins, the channel adapters, the CLI, the TUI — all the same language. Every agent runs inside its own Docker container. Plugins are plain TS modules with no IPC and no FFI. The host CLI is a launcher; everything else lives in the container.
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Card, Cards } from 'fumadocs-ui/components/card'
+
+TypeClaw is an AI agent you run yourself. It lives in its own container, and you talk to it from a terminal, from Slack or Discord, or by requesting it on a GitHub pull request. It can run jobs on a schedule, browse real web pages, and it gets sharper over time by learning from its own work.
+
+You give it an inbox and a job. It does the rest.
+
+## See it do something real
+
+Request the agent as a reviewer on a GitHub pull request, and it reads the diff, thinks it through, and posts a real line-by-line review back — no human pressing a button.
+
+<Callout type="info" title="This is live, right now">
+  [`@typeey`](https://github.com/typeey) — TypeClaw's own mascot agent — reviews pull requests on the real
+  [`typeclaw/typeclaw`](https://github.com/typeclaw/typeclaw) repo exactly this way. Request it as a reviewer, it writes
+  a formal review and posts it. The [Code reviewer recipe](/docs/recipes/code-reviewer) is the full setup behind that
+  live example.
+</Callout>
+
+That's one job. The same agent can sit in your team's Slack, summarize your repos every morning, run a dev server you reach at `localhost`, or just answer questions in a terminal. One agent, many inboxes.
+
+## Get started
+
+<Cards>
+  <Card
+    title="Quickstart — 5 minutes"
+    href="/docs/guides/quickstart"
+    description="Install it, start it, get your first reply. No prior setup, nothing to configure first."
+  />
+  <Card
+    title="Add a channel"
+    href="/docs/guides/add-a-channel"
+    description="Give the agent another inbox — Slack, Discord, Telegram, or GitHub — beyond the one you set up at init."
+  />
+  <Card
+    title="Code reviewer"
+    href="/docs/recipes/code-reviewer"
+    description="The full recipe behind @typeey: request the agent on a PR and have it post a deep review back."
+  />
+  <Card
+    title="How it's built"
+    href="/docs/concepts/architecture"
+    description="The one idea — the container is the trust boundary — that the rest of the design falls out of."
+  />
+</Cards>
+
+## What you get
+
+- 🐳 **Runs in its own container** — each agent is sandboxed, with your folders mounted in and its own `.env`. Nothing it does can reach the rest of your machine.
+- 💬 **Many inboxes** — [Slack](/docs/reference/slack-bot), [Discord](/docs/reference/discord-bot), [GitHub](/docs/reference/github), [Telegram](/docs/reference/telegram-bot), [KakaoTalk](/docs/reference/kakaotalk), and a built-in terminal UI. Same agent, wherever you are.
+- 👥 **Knows the room** — in a group chat it knows who's present, tells humans from bots, and stays in the conversation after replying without needing to be re-mentioned.
+- ⏰ **Works on a schedule** — give it cron jobs (a prompt or a shell command) and it runs them on its own clock.
+- 🌱 **Gets better on its own** — it watches its own work, distills what it learns into long-term memory and reusable skills, and applies them next time. No prompt-tuning from you.
+- 📚 **Skills on demand** — step-by-step procedures it loads only when a task needs them, so they cost nothing until used.
+- 🔌 **Extend it in TypeScript** — add tools, skills, and channels with a plain `.ts` file. No separate plugin language, no IPC.
+- 🌐 **Reachable when you need it** — dev servers inside the container show up on your `localhost` automatically; public URLs via Cloudflare (zero signup) when something outside needs to reach in.
 
 ## How these docs are organised
 
-Four sections, four reading modes.
+Five ways in, depending on what you're here for.
 
-- **Guides** — walk through a task from start to finish. Read top to bottom the first time. Each guide picks up where the last one ended.
-- **Concepts** — the mental models the rest of the docs lean on. Read once when something doesn't click; skim later. No commands, no schemas — just the shape.
-- **Reference** — schemas, flags, field tables, grammars. Random-access. Here because you already know what you want.
-- **Internals** — implementation notes for contributors and curious readers. Terse, file-path-heavy, load-bearing invariants. Read when you want to know _why_ a piece of the runtime is shaped the way it is, or before changing it.
+<Cards>
+  <Card
+    title="Guides"
+    href="/docs/guides/quickstart"
+    description="Walk through a task start to finish. Read top to bottom the first time; each one picks up where the last ended."
+  />
+  <Card
+    title="Recipes"
+    href="/docs/recipes/code-reviewer"
+    description="Complete, real-world setups that wire several pieces together — like the live PR reviewer."
+  />
+  <Card
+    title="Concepts"
+    href="/docs/concepts/architecture"
+    description="The mental models the rest leans on. Read one when something doesn't click. No commands, just the shape."
+  />
+  <Card
+    title="Reference"
+    href="/docs/reference/cli"
+    description="Schemas, flags, field tables, grammars. Random-access — you already know what you're looking for."
+  />
+  <Card
+    title="Internals"
+    href="/docs/internals"
+    description="Implementation notes for contributors and the curious. Terse, file-path-heavy, the why behind the design."
+  />
+</Cards>
 
-If you're new, [Getting started](/docs/guides/getting-started) is the right first read.
+If you're brand new, start with the [5-minute Quickstart](/docs/guides/quickstart).
 
-## Why TypeClaw
+## Why another agent runtime?
 
-There are great agent runtimes out there. None of them were quite the shape I wanted.
+Under the hood, TypeClaw is **TypeScript end to end** — the agent core, the plugins, the channel adapters, the CLI, and the terminal UI are all one language and one codebase. That's the bet: there are other good agent runtimes, but each one drew a line somewhere I didn't want.
 
-| Runtime          | What it gets right | Why it didn't fit                        |
+| Runtime          | What it gets right | Where it drew the line                   |
 | ---------------- | ------------------ | ---------------------------------------- |
 | **OpenClaw**     | Feature-rich       | Heavy                                    |
 | **NanoClaw**     | Simple             | No plugin system                         |
@@ -29,17 +106,4 @@ There are great agent runtimes out there. None of them were quite the shape I wa
 | **ZeroClaw**     | Light              | Rust — same problem, different ecosystem |
 | **Hermes Agent** | Awesome            | Python                                   |
 
-If you like one of those, use it. If you want one TypeScript codebase from the entrypoint down to the message bus, TypeClaw is the answer.
-
-## What you get
-
-- 🐳 **Sandboxed by default** — every agent is its own container, with bind-mounted host folders and a per-agent `.env`
-- 🔌 **Plugins as TS modules** — contribute tools, skills, subagents, channel adapters, and typed config from one source file
-- 💬 **Multi-channel** — [Slack](/docs/reference/slack-bot), [Discord](/docs/reference/discord-bot), [GitHub](/docs/reference/github), [KakaoTalk](/docs/reference/kakaotalk), [Telegram](/docs/reference/telegram-bot), and a websocket TUI; one agent, many inboxes
-- 👥 **Group-chat aware** — the agent knows who's in the room, distinguishes humans from bots, and stays engaged after a reply without re-mentioning
-- ⏰ **Cron** — schedule prompts or shell commands with per-job coalescing
-- 📚 **Skills on demand** — markdown procedures loaded only when relevant, zero token cost until used
-- 🌱 **Self-improving memory** — the agent observes its own work, distills it into long-term memory and reusable skills
-- 🔄 **Hot reload** — change `typeclaw.json`, run `typeclaw reload`, no restart for most fields
-- 🌐 **Auto port-forward** — dev servers inside the container appear on `localhost`, even loopback-only ones
-- 🌍 **Public tunnels** — Cloudflare Quick (zero signup) or bring-your-own external URL
+If one of those fits you, use it. If you want a single TypeScript codebase from the entrypoint down to the message bus — and an agent you can extend without leaving that language — that's TypeClaw.

@@ -2,13 +2,14 @@
   "title": "Guides",
   "icon": "BookOpen",
   "pages": [
-    "getting-started",
-    "first-channel",
-    "first-cron",
-    "first-tunnel",
+    "quickstart",
     "teach-the-agent",
+    "first-cron",
+    "add-a-provider",
+    "add-a-channel",
     "write-a-plugin",
     "lock-down-a-public-channel",
+    "first-tunnel",
     "deploy"
   ]
 }

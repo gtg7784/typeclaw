@@ -1,60 +1,79 @@
 ---
 title: Teach the agent
-description: How the self-improving loop works, and what to do with it
+description: The agent gets sharper over time on its own — here's what that means for you
 icon: BrainCircuit
 ---
 
-TypeClaw's bundled `memory` plugin turns lived experience into reusable knowledge. There's no curation step, no example library to maintain, no system prompt to tune. The agent observes, the agent consolidates, the agent applies. Your job is to use the agent — that's the input.
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
 
-## The loop
+This is the "teach the agent" guide, and the punchline is: **you don't teach it — it teaches itself.** There's no example library to maintain, no prompt to tune, no training step you run. You use the agent for real work, and it gets sharper.
 
-The memory plugin runs three subagents on different cadences.
+## What you do
 
-**Observe.** After every idle turn, a `memory-logger` subagent reads the session transcript and appends notable fragments to `memory/yyyy-MM-dd.md`. It runs constantly, it's cheap, and it's lossy by design — the goal isn't a literal log, it's a texture of the day.
+Use it. Give it real tasks over a few days.
 
-**Dream.** On a cron schedule (default 4am local), a `dreaming` subagent reads the day's fragments and writes two kinds of output:
+That's the whole instruction. While you work, the agent quietly notes what happened. On its own schedule — every half hour by default — it reflects on those notes and distills them into lasting memory: the conventions of your team, the quirks of your repos, the commands that worked, the mistakes worth not repeating. The next time you talk to it, it already knows.
 
-- consolidations into `MEMORY.md`, the long-term memory loaded into every prompt
-- a new skill at `memory/skills/<name>/SKILL.md` whenever it spots a repeatable procedure
+<Callout type="info" title="No setup, no files to write">
+  Memory is on automatically — there's nothing to enable and nothing for you to write. The agent manages its own memory
+  files; you never touch them. The only thing you contribute is using the agent.
+</Callout>
 
-Every dream is git-committed with a one-line summary, so growth is auditable. `git log memory/` shows exactly what the agent learned and when.
+## The agent dreams
 
-**Apply.** The next prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand by the `skill` tool. The agent doesn't have to remember to use them — they're just there, with names and descriptions tuned for retrieval.
+That reflection step has a name: the agent **dreams**. While you work, it jots down fragments of what happened into a daily memory stream. Then, on its own schedule, it dreams — and that does two things:
 
-## What you actually do
+- **Stream becomes long-term memory.** It distills the day's fragments into lasting notes about your team, your repos, and your conventions — memory it carries into every future conversation.
+- **Repeated work becomes a skill.** When it notices it's done the same multi-step task more than once, it writes itself a reusable skill for it — muscle memory, so next time it just knows the steps.
 
-Nothing. That's the point.
+Modeled on how sleep consolidates a day's experience, it runs in the background between conversations — and commits every pass to git, so `git log memory/` shows exactly what it learned and when.
 
-Use the agent. Push it to do real work over a few days. The dreaming subagent does the distillation at 4am. Read `MEMORY.md` and `memory/skills/` after a week and you'll see what stuck.
+## How to see what it learned
 
-If you want to nudge it toward different kinds of memory, the dreaming subagent's prompt is overridable in `typeclaw.json#memory.dreaming.prompt`. The default nudges it toward:
+After a week of real use, look at what stuck:
 
-- procedures the agent ran more than once
-- mistakes the agent made (and how to avoid them)
+- Ask the agent directly: _"what have you learned about our deploy process?"_
+- Or read its memory: the agent keeps a `MEMORY.md` and a `memory/` folder in its agent folder, and commits every update to git — so `git log memory/` is a literal history of what it learned and when.
+
+You'll see it pick up your conventions without you ever having written them down.
+
+## Steering what it remembers
+
+You don't have to, but you can nudge what kinds of things it pays attention to — just tell it. By default it leans toward:
+
+- procedures it ran more than once
+- mistakes it made, and how to avoid them
 - people-and-team facts (preferences, ownership, conventions)
-- tools and commands that worked well for specific tasks
+- tools and commands that worked well for a given task
 
-## Why "dreaming"
+Ask it to "remember more about who owns what in our codebase," and its next reflection pass will lean that way.
 
-It's not a metaphor for occasional weird outputs. It's modeled on how mammalian sleep consolidates episodic memory — short-term fragments compress into long-term form during downtime. The 4am default is just so the agent isn't doing it while you're trying to work with it.
+## Going deeper
 
-## Configuration
+The full reasoning — why self-distilled memory beats hand-written prompts, the citation-superset safety net that guarantees a dream never drops what it cited, and the exact shard format — lives in the [memory loop concept](/docs/concepts/memory-loop). This guide is the what-it-does; that page is the how and why.
+
+<Accordions>
+
+<Accordion title="Tuning the schedule (optional)">
+
+The timing is configurable in `typeclaw.json` if you ever need it — how soon after a session goes quiet the agent takes notes, and how often the consolidation pass runs:
 
 ```json
 {
   "memory": {
     "idleMs": 60000,
-    "dreaming": {
-      "schedule": "0 4 * * *"
-    }
+    "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
 ```
 
-`idleMs` is how long after a session goes idle before `memory-logger` runs (default 60s). `dreaming.schedule` is a standard cron expression. Both fields are restart-required — the plugin reads them once at factory time.
+`dreaming.schedule` is a standard cron expression (default every 30 minutes). Both are restart-required. Field details in the [bundled-plugins reference](/docs/reference/bundled-plugins). Just ask the agent to "run your memory pass once an hour instead" and it'll make the change.
 
-For the deeper read on why this exists and what it's solving, see [/concepts/memory-loop](/docs/concepts/memory-loop).
+</Accordion>
+
+</Accordions>
 
 ---
 
-Next: [Write a plugin](/docs/guides/write-a-plugin) — extend the agent with your own tools, skills, and channels.
+Next: [Schedule a job](/docs/guides/first-cron) — put the agent to work on its own clock.

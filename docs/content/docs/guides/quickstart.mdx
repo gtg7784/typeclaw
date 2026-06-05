@@ -1,0 +1,160 @@
+---
+title: Quickstart
+description: Install TypeClaw, start it, and get your first reply — in about five minutes
+icon: Rocket
+---
+
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+By the end of this page you'll have a TypeClaw agent running on your machine and answering you in a terminal. Five steps, nothing to configure ahead of time. The deeper "why" for each step is tucked into the expandable boxes — skip them on your first pass.
+
+## Before you start
+
+You need two things installed:
+
+- **[Bun](https://bun.sh/)** (version 1.1 or newer) — the runtime TypeClaw is built on.
+- **[OrbStack](https://orbstack.dev/)** (recommended) or **[Docker](https://www.docker.com/)** — your agent runs inside a container. OrbStack is lighter and faster to start on macOS; Docker Desktop works just as well.
+
+You'll also need access to one AI provider — an API key from OpenAI, Anthropic, Fireworks, or Z.AI, or an existing ChatGPT or Claude subscription you can log in with (via the `openai-codex` or `anthropic` providers). The wizard in step 2 walks you through it.
+
+## Five steps to your first reply
+
+<Steps>
+
+<Step>
+
+### Install TypeClaw
+
+```sh
+bun add -g typeclaw
+```
+
+This installs the `typeclaw` command globally.
+
+</Step>
+
+<Step>
+
+### Create your agent and run the setup wizard
+
+Pick a name for your agent — the folder name becomes the agent's name — then run `init` inside it:
+
+```sh
+mkdir my-agent && cd my-agent
+typeclaw init
+```
+
+`init` is an interactive wizard. It asks which AI provider you want, which model, and how to sign in (an API key, or a browser login if you pick a subscription-backed provider like OpenAI Codex or Anthropic) — and it offers to wire up your first channel (Slack, Discord, GitHub, …) right then too. Answer the prompts and it sets everything up for you. By the time `init` finishes, you have a working provider and, if you said yes, a channel already connected.
+
+<Accordions>
+
+<Accordion title="What the wizard actually creates and asks">
+
+`init` writes these into your agent folder:
+
+- `typeclaw.json` — your agent's main config
+- `.env` and `secrets.json` — where credentials live (both git-ignored, so they never end up in a repo)
+- a `Dockerfile` and `package.json` — so the agent can build its container
+- starter folders: `workspace/` (the agent's free-write space), `public/`, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`
+
+The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick a subscription-backed provider — **OpenAI Codex** (your ChatGPT plan) or **Anthropic** (your Claude plan) — you can log in through the browser instead of pasting a key. (Plain `openai` is API-key only.) It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/add-a-channel).
+
+</Accordion>
+
+<Accordion title="I skipped the provider question — how do I add one later?">
+
+Add a provider and pick a default model by hand:
+
+```sh
+typeclaw provider add openai --key sk-...       # or anthropic, fireworks, zai
+typeclaw provider add openai-codex --oauth      # log in with a ChatGPT subscription
+typeclaw provider add anthropic --oauth         # log in with a Claude subscription
+typeclaw model set default openai/gpt-5.4-nano
+```
+
+Run `typeclaw model list --available` to see every model you can choose. Full details in the [CLI reference](/docs/reference/cli#providers).
+
+</Accordion>
+
+</Accordions>
+
+</Step>
+
+<Step>
+
+### Start the agent
+
+```sh
+typeclaw start
+```
+
+The first run builds your agent's container, which takes a few minutes — you'll see Docker build output scroll past. Later starts take seconds. When it's done, your agent is running in the background.
+
+<Accordions>
+
+<Accordion title="It looks stuck on the first start — is that normal?">
+
+Yes. The very first `typeclaw start` builds a Docker image from scratch, so expect a few minutes of build log output and some quiet stretches. It is not frozen. Once it finishes, the prompt returns and the agent is live. Every start after that reuses the image and is nearly instant.
+
+</Accordion>
+
+</Accordions>
+
+</Step>
+
+<Step>
+
+### Talk to it
+
+```sh
+typeclaw tui
+```
+
+This opens a terminal chat window connected to your agent. Type a message, press enter, and watch it respond. That's the whole loop.
+
+Want a single quick answer without opening the chat UI?
+
+```sh
+typeclaw tui "hello, who are you?"
+```
+
+</Step>
+
+<Step>
+
+### Stop it when you're done
+
+```sh
+typeclaw stop
+```
+
+That cleanly shuts the container down. To start again later, just run `typeclaw start` from the same folder.
+
+<Accordions>
+
+<Accordion title="Other handy commands">
+
+```sh
+typeclaw restart       # stop, then start again
+typeclaw logs -f       # watch the agent's output live
+typeclaw status        # is it running?
+```
+
+If the agent ever crashes, the container is left in place on purpose so you can read `typeclaw logs` to see what happened.
+
+</Accordion>
+
+</Accordions>
+
+</Step>
+
+</Steps>
+
+## What just happened
+
+Your agent runs inside its own Docker container. The `typeclaw` commands you ran — `start`, `stop`, `tui` — don't _contain_ the agent; they're just a remote control that talks to the container. The agent can't reach the rest of your computer: its world is the agent folder you just created plus the container. The host CLI itself never runs the agent loop or loads its plugins — so the agent's state stays in that one folder and its container, not scattered across your machine. That separation is the core idea behind TypeClaw, and it's what makes it safe to give the agent real work. The full picture is in [How it's built](/docs/concepts/architecture).
+
+---
+
+Next: [Teach the agent](/docs/guides/teach-the-agent) — it gets sharper the more you use it, on its own.

@@ -1,23 +1,53 @@
 ---
-title: Write a plugin
-description: Tools, skills, subagents, channels — all from a plain TypeScript module
+title: Add a plugin
+description: Extend the agent with new tools, skills, and channels — by asking it to build them
 icon: Plug
 ---
 
-A TypeClaw plugin is a TypeScript module. No IPC. No FFI. No subprocess. It runs in the same Bun process as the agent loop, gets a `PluginContext` with the live permission service and message stream, and can contribute tools, skills, subagents, channel adapters, cron jobs, and typed config.
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
 
-This guide walks through a minimal plugin — one tool, one config block — end to end. The full API surface is at [/reference/plugin-api](/docs/reference/plugin-api).
+A plugin is how the agent gains a new capability — a tool it can call, a channel it can speak on, a scheduled job, a skill. And like everything else in TypeClaw, **you don't write it; the agent does.** You describe the capability you want, and the agent writes the plugin, wires it in, and restarts itself to load it.
 
-## Scaffold
+## Just ask
 
-Plugins are TypeScript files in your agent folder. By convention they live under `plugins/`:
+From the terminal or any channel where you're the owner, describe the capability:
 
-```sh
-mkdir plugins
-touch plugins/notify.ts
-```
+> _Build me a plugin with a tool that posts a message to this webhook: https://hooks.example.com/notify_
 
-## Write the plugin
+The agent writes the plugin file, registers it, and restarts to pick it up. After that, the new tool is part of its repertoire — it'll use it whenever a task calls for it.
+
+<Callout type="info" title="The agent does the whole loop">
+  Writing the TypeScript, adding the plugin to `typeclaw.json`, and restarting the container to load it — the agent does
+  all three on its own. A plugin is just code in the agent's own folder, and the agent can write code. You bring the
+  idea; it brings the implementation.
+</Callout>
+
+## What you can ask for
+
+A plugin can contribute any of these — phrase your request around the outcome, not the machinery:
+
+- **A tool** — a new action the agent can take ("post to this webhook", "query our metrics API")
+- **A channel** — a new platform it can send and receive on
+- **A scheduled job** — recurring work, on a cron schedule
+- **A skill** — a procedure it loads on demand for a certain kind of task
+- **A subagent** — a focused helper with its own brief, for heavy or specialized work
+
+You can also ask it to give the plugin **its own settings** (an API endpoint, a threshold, a schedule) that you can tweak later in `typeclaw.json` without touching the code.
+
+## Tweaking and removing
+
+Because the plugin and its settings live in the agent folder, changing them is conversational too: _"point that webhook plugin at a different URL"_, or _"remove the notify plugin."_ The agent edits the file or config and restarts as needed.
+
+## Going deeper
+
+The rest of this page is for when you want to understand — or hand-write — the contract the agent is using.
+
+<Accordions>
+
+<Accordion title="What a plugin actually looks like">
+
+A plugin is a single TypeScript module with one default export: a `definePlugin(...)` call. It runs in the same process as the agent — no IPC, no subprocess — and receives a `PluginContext` (the live permission service, the message stream, the agent folder path). A minimal one-tool plugin:
 
 ```ts
 import { definePlugin } from 'typeclaw/plugin'
@@ -26,19 +56,14 @@ import { z } from 'zod'
 export default definePlugin({
   name: 'notify',
   permissions: ['notify.send.notification'],
-  configSchema: z.object({
-    webhook: z.string().url(),
-  }),
+  configSchema: z.object({ webhook: z.string().url() }),
   factory(ctx) {
     const { webhook } = ctx.config
-
     return {
       tools: {
         send_notification: {
           description: 'Post a short notification to the configured webhook',
-          inputSchema: z.object({
-            text: z.string().describe('the message body'),
-          }),
+          inputSchema: z.object({ text: z.string().describe('the message body') }),
           async execute({ text }) {
             const res = await fetch(webhook, {
               method: 'POST',
@@ -54,66 +79,59 @@ export default definePlugin({
 })
 ```
 
-Four things going on:
+- `name` — scopes the config block and the permission strings
+- `permissions` — every permission this plugin declares and consumes; lets the runtime expand the `owner` wildcard and catch typos
+- `configSchema` — Zod schema for the config block, which lives at `typeclaw.json#notify`
+- `factory(ctx)` — returns the contributions; `ctx.config` is the parsed, frozen config block
 
-- `name` — unique identifier, used to scope the config block and the permission strings
-- `permissions` — every permission this plugin both declares and consumes. Listing them here lets the runtime expand the `owner` wildcard correctly and catch typos in `typeclaw.json#roles.<name>.permissions[]`
-- `configSchema` — Zod schema for the plugin's config block, which lives at `typeclaw.json#notify`
-- `factory(ctx)` — returns the plugin's contributions. `ctx.config` is your parsed, frozen config block
+Full contract: [plugin API reference](/docs/reference/plugin-api).
 
-## Wire it up
+</Accordion>
 
-In `typeclaw.json`:
+<Accordion title="Where plugins live and how they're registered">
+
+Custom plugins live under `packages/<plugin-name>/` — the agent folder is a bun monorepo and `packages/` is its workspace root, so a plugin there is a real workspace package (its dependencies get installed, it's importable, it lands in git). Registering it means adding its path to `plugins[]` in `typeclaw.json`, with its config block alongside:
 
 ```json
 {
-  "plugins": ["./plugins/notify.ts"],
-  "notify": {
-    "webhook": "https://hooks.slack.com/services/…"
-  }
+  "plugins": ["./packages/notify"],
+  "notify": { "webhook": "https://hooks.example.com/notify" }
 }
 ```
 
-```sh
-typeclaw restart
-```
+`plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
 
-`plugins[]` is restart-required (plugins are loaded once at container start). After restart, the agent can call `send_notification` like any other tool.
+</Accordion>
 
-## What plugins can contribute
+<Accordion title="What plugins can't do">
 
-The example above contributes one tool. The full set:
+Plugins can't change which other plugins load, rewrite the Dockerfile, or escape the container — the trust boundary is the container, not the plugin ([plugins and stages](/docs/concepts/plugins-and-stages)).
 
-- **Tools** — Zod-typed functions the agent can call
-- **Skills** — markdown procedures the agent loads on demand via the `skill` tool
-- **Subagents** — focused worker sessions with their own system prompt and payload schema; spawned via `ctx.spawnSubagent` or from cron with a `subagent` field
-- **Channel adapters** — new inbound/outbound message platforms
-- **Cron jobs** — scheduled prompts or exec commands contributed at boot
-- **Typed config blocks** — namespaced under `typeclaw.json#<plugin-name>`, validated by your Zod schema
+They also can't drive the agent. A plugin _defines_ tools the agent may call; it doesn't issue tool calls itself. For scheduled work, contribute a cron job; for reactive work, subscribe to the message stream.
 
-See [/reference/plugin-api](/docs/reference/plugin-api) for the full contracts.
+</Accordion>
 
-## What plugins can't do
+<Accordion title="Config snapshots and live reload">
 
-Plugins can't change which other plugins are loaded, rewrite the Dockerfile, or escape the container. The trust boundary is the container, not the plugin — see [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages) for the why.
+`ctx.config` is a snapshot taken at load time. Most fields are restart-required by default — the safe choice. A field you explicitly mark reloadable updates on `typeclaw reload` without a restart. Default-to-restart, opt-in-to-reload is deliberate: implicit live reload is riskier than explicit.
 
-Plugins also can't issue tool calls themselves. They define tools the agent can call; they don't drive the agent. If you need scheduled work, contribute a cron job. If you need reactive work, subscribe to the message stream.
+</Accordion>
 
-## Reading config and reloads
+<Accordion title="The bundled plugins are the best examples">
 
-`ctx.config` is a snapshot at factory time for fields you declared as restart-required. For fields you mark reloadable in your `configSchema` (via `.describe()` annotations the loader honors), the snapshot updates on `typeclaw reload`. Default is restart-required, which is the right choice for most fields — explicit opt-in to live reload is safer than implicit.
+Twelve plugins ship with TypeClaw and load automatically — their source is the richest reference for non-trivial work:
 
-## Bundled plugins as examples
+- `memory` — multiple subagents, a cron contribution, a typed config block
+- `agent-browser` — channel-adapter-shaped tooling, host port-broker integration
+- `security` — a large `tool.before` hook surface with dynamic permission expansion
+- `reviewer`, `guard`, `backup`, `tool-result-cap`, `scout`, `explorer`, `operator`, `bun-hygiene`, `github-cli-auth`
 
-Nine plugins ship with TypeClaw and load automatically. Their source is the best reference for non-trivial contributions:
+Catalog: [bundled plugins reference](/docs/reference/bundled-plugins).
 
-- `memory` — three subagents, cron contribution, typed config block
-- `agent-browser` — channel-adapter-shaped tooling, host port broker integration
-- `security` — large `tool.before` hook surface, dynamic permission expansion
-- `guard`, `backup`, `tool-result-cap`, `scout`, `explorer`, `operator`
+</Accordion>
 
-See the bundled catalog at [/reference/bundled-plugins](/docs/reference/bundled-plugins).
+</Accordions>
 
 ---
 
-Next: [Lock down a public channel](/docs/guides/lock-down-a-public-channel) — when the bot is in #general and you don't trust every author equally.
+Next: [Lock down a public channel](/docs/guides/lock-down-a-public-channel) — once the agent is somewhere strangers can reach it, decide who can do what.

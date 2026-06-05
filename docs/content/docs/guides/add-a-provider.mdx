@@ -1,0 +1,86 @@
+---
+title: Add a provider
+description: Give the agent more than one model — a cheaper one for routine work, a stronger one for hard problems
+icon: BrainCog
+---
+
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
+
+You picked one model provider during `typeclaw init`. That's enough to run — but you'll often want more than one: a fast, cheap model for routine chatter and a stronger, pricier one for the hard problems. TypeClaw lets you wire up several providers and point different kinds of work at different models.
+
+## Add another provider
+
+Adding a provider is one command. Pick the one you have an account with:
+
+```sh
+typeclaw provider add anthropic --key sk-ant-...
+typeclaw provider add openai-codex --oauth    # log in with a ChatGPT subscription
+typeclaw provider add fireworks --key fw_...
+```
+
+The supported providers are `openai`, `openai-codex`, `anthropic`, `fireworks`, `zai`, and `zai-coding`. The key (or browser login) is stored in `secrets.json`, git-ignored like the rest of your credentials.
+
+<Callout type="info" title="Use a subscription you already pay for">
+  `openai-codex` and `anthropic` support `--oauth` — log in through the browser with an existing ChatGPT or Claude
+  subscription instead of pasting an API key.
+</Callout>
+
+## Point work at the right model
+
+Models are addressed through **profiles** — named slots the agent reaches for depending on the job. The main one is `default`; there are also conventional `fast`, `deep`, and `vision` slots.
+
+```sh
+typeclaw model set default openai/gpt-5.4-nano
+typeclaw model add deep anthropic/claude-opus-4-8
+typeclaw model add fast fireworks/accounts/fireworks/routers/kimi-k2p6-turbo
+```
+
+Now routine turns run on the cheap `default`, and work that asks for `deep` (like a code review) gets the heavyweight model. Run `typeclaw model list --available` to see every model ref you can use.
+
+## Going deeper
+
+<Accordions>
+
+<Accordion title="What the profiles mean">
+
+- **`default`** — every session uses this unless it asks for something else.
+- **`fast`** — cheap/low-latency work.
+- **`deep`** — hard reasoning; bundled subagents like the code `reviewer` ask for this.
+- **`vision`** — image-capable model, used when a task includes images.
+
+You can also define your own named profiles. An unknown profile name falls back to `default` with a one-time warning. A profile can map to a single model or a fallback chain.
+
+</Accordion>
+
+<Accordion title="Rotating, removing, and inspecting">
+
+```sh
+typeclaw provider set <id>          # rotate a provider's credential
+typeclaw provider remove <id>       # drop a provider
+typeclaw provider list              # what's configured, and where each key resolves from
+typeclaw model list                 # current profile -> model mapping
+typeclaw model remove fast          # drop a profile
+```
+
+Full command surface in the [CLI reference](/docs/reference/cli#providers); credential storage and resolution order in [Secrets policy](/docs/concepts/secrets-policy).
+
+</Accordion>
+
+<Accordion title="Custom env-var names (multiple agents, different keys)">
+
+By default each provider reads a canonical env var (e.g. `OPENAI_API_KEY`). To bind a provider to a custom variable — handy when several agents on one host each need a different key — use `--env`:
+
+```sh
+typeclaw provider add openai --env MY_AGENT_OPENAI_KEY
+```
+
+See the [secrets reference](/docs/reference/secrets-json) for the binding shape.
+
+</Accordion>
+
+</Accordions>
+
+---
+
+Next: [Add a channel](/docs/guides/add-a-channel) — open the agent up to your team in Slack, Discord, or beyond.

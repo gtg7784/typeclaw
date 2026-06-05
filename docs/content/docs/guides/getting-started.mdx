@@ -1,78 +1,15 @@
 ---
 title: Getting started
-description: From install to first reply, in one sitting
+description: Moved — start with the 5-minute Quickstart
 icon: Rocket
 ---
 
-By the end of this you'll have a TypeClaw agent running in its own container, listening on a websocket, and answering prompts from a terminal UI. Everything from here on out builds on this setup.
+import { Callout } from 'fumadocs-ui/components/callout'
 
-## Prerequisites
+This page has moved. The fastest path from install to your first reply is now the **[Quickstart](/docs/guides/quickstart)**.
 
-- [Bun](https://bun.sh/) ≥ 1.1
-- Docker or [OrbStack](https://orbstack.dev/)
+<Callout type="info" title="Go to the Quickstart">
+  [Quickstart →](/docs/guides/quickstart) — install TypeClaw, start it, and get your first reply in about five minutes.
+</Callout>
 
-## Install
-
-```sh
-bun add -g typeclaw
-```
-
-## Scaffold an agent folder
-
-Pick a directory. The folder name becomes the agent's name.
-
-```sh
-mkdir my-agent && cd my-agent
-typeclaw init
-```
-
-`init` is an interactive wizard. It writes `typeclaw.json`, a managed `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, and a few placeholder folders (`workspace/` for free-write, `public/` for guest-visible output, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`). It can also wire your first LLM provider during setup — say yes when it asks.
-
-If you skipped the provider question (or want to add another later):
-
-```sh
-typeclaw provider add fireworks      # API key or OAuth
-typeclaw model set default fireworks/kimi-k2
-```
-
-Every session uses the `default` model profile unless it asks for something more specific. See [/reference/typeclaw-json#models](/docs/reference/typeclaw-json#models) if you want fallback chains.
-
-## Start the container
-
-```sh
-typeclaw start
-```
-
-First run builds the per-agent Docker image — a few minutes. Subsequent runs start in seconds. `start` also spawns `hostd`, a host-side daemon that handles auto port-forward and container self-restart. You won't interact with it directly; it just needs to exist.
-
-## Talk to the agent
-
-```sh
-typeclaw tui
-```
-
-A terminal UI attaches over a websocket. Send a prompt, watch the agent think. That's the loop.
-
-For a one-shot prompt without the UI:
-
-```sh
-typeclaw tui "hello, who are you?"
-```
-
-## What's actually running
-
-The agent is in a Docker container called after your folder. The host CLI you just used is a launcher — `start`, `stop`, `tui`, `reload`, etc. all talk to the container over a port or to `hostd` over a Unix socket. The container has no Docker access, the host has no agent state. This split is covered in [/concepts/architecture](/docs/concepts/architecture).
-
-## Stop / restart
-
-```sh
-typeclaw stop
-typeclaw restart       # stop + start with the same flags
-typeclaw logs -f       # follow container output
-```
-
-`stop` is clean — `docker stop` then `docker rm`, no leftovers in `docker ps -a`. Crashes are different: the container survives so you can read `typeclaw logs`.
-
----
-
-Next: [Add a channel](/docs/guides/first-channel) — wire the agent into Slack, Discord, or GitHub.
+From there the guides build on each other in order: [teach the agent](/docs/guides/teach-the-agent), [schedule a job](/docs/guides/first-cron), [add a provider](/docs/guides/add-a-provider), [add a channel](/docs/guides/add-a-channel), [add a plugin](/docs/guides/write-a-plugin), [lock down a public channel](/docs/guides/lock-down-a-public-channel), [expose a port](/docs/guides/first-tunnel), and [deploy](/docs/guides/deploy).
