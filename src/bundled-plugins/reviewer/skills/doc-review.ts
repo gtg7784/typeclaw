@@ -3,61 +3,69 @@ import type { LoadableSkill } from '@/plugin'
 export const DOC_REVIEW_SKILL_NAME = 'doc-review'
 
 export const DOC_REVIEW_SKILL_DESCRIPTION =
-  'Review technical documentation: a README, a guide, an API reference, a tutorial, a how-to. Covers doc-type fit, prerequisites, runnable examples, cross-references, version drift, terminology consistency, and accessibility.'
+  'Review any document for its reader: technical docs (README, API reference, tutorial), but also policy, process, onboarding, help-center, legal-lite, specs, and knowledge-base pages. Covers purpose/audience fit, completeness, accuracy of examples and claims, navigability, staleness, terminology consistency, and accessibility.'
 
 export const DOC_REVIEW_SKILL_CONTENT = `# doc-review
 
-You have been asked to review technical documentation. Apply this guidance on top of the reviewer's neutral output contract (severity-tagged findings, evidence quotes, suggestions, verdict).
+You have been asked to review a document. "Document" is broad on purpose: a README or API reference, but equally a policy, a runbook, an onboarding guide, a help-center article, a spec, a contract summary, a knowledge-base page. The craft below is universal; the technical-docs section near the end is one specialization you apply only when the target is developer documentation. Apply all of this on top of the reviewer's neutral output contract (severity-tagged findings, evidence quotes, suggestions, verdict).
 
 ## How to acquire the target
 
-- **A file path** — \`read\` it. \`ls\` the docs directory to see how this page fits the larger set; a page is reviewed in the context of its neighbors.
-- **A URL** — \`web_fetch\` it. If it is a private docs site the fetch cannot reach, say so in \`<summary>\` and review what the payload provided.
-- **A PR that touches docs** — \`gh pr diff <n>\` for the changed pages; \`read\` the surrounding sections the diff did not touch, because a doc edit is judged against the whole page's flow, not the hunk alone.
-- **A doc set / directory** — \`ls\` and \`grep\` for the navigation/index file; a finding about findability needs the table of contents, not just one page.
+- **A file path** — \`read\` it. \`ls\` the surrounding directory to see how this page fits the larger set; a document is reviewed in the context of the set it belongs to.
+- **A URL** — \`web_fetch\` it. If it is a private site the fetch cannot reach, say so in \`<summary>\` and review what the payload provided.
+- **A PR or diff that touches docs** — \`gh pr diff <n>\` for the changed pages; \`read\` the surrounding sections the diff did not touch, because a doc edit is judged against the whole page's flow, not the hunk alone.
+- **A doc set / directory** — \`ls\` and \`grep\` for the navigation or index file; a finding about findability needs the table of contents, not just one page.
+- **Verify external claims.** If the document cites a law, a standard, a price, an SLA, a statistic, or a linked source, check it with \`web_search\`/\`web_fetch\` before letting it stand.
 
-## Identify the doc type first
+## State the document's job before reading for defects
 
-Most documentation defects are really one defect: the page is the wrong *type* for what the reader needs. Before looking for anything else, classify the target against the four Diátaxis modes, because the right content for one is wrong for another:
+Every document exists to let a specific reader do or understand a specific thing. Before looking for problems, answer two questions and hold them while you read: **Who is this for?** and **What should they be able to do or know after reading it?** Most documentation defects are a mismatch between the page and the answer to one of those. A finding is strongest when it names which reader the document fails and why. This is your private grounding — keep the restatement out of \`<summary>\`.
+
+## What to look for
+
+These apply to any document:
+
+1. **Purpose / audience fit.** The document is pitched at the wrong reader: jargon and unexplained acronyms for a lay audience, or hand-holding for an expert one; a policy written for lawyers handed to new hires. Name the mismatch.
+2. **Completeness for the stated job.** A missing step, an undocumented edge case, a process that stops before the reader's actual goal, a policy that does not say what happens on violation. The gap is a finding when it leaves the reader unable to finish what the document promised.
+3. **Accuracy of examples and claims.** Anything the document asserts as fact must be correct: a quoted figure, a referenced rule or standard, a worked example, a screenshot, a sample. A wrong example or an unsupported load-bearing claim is a real defect regardless of document type — for code docs this means samples that do not run; for a policy it means a cited regulation that says something else.
+4. **Missing prerequisites or assumptions.** The document assumes access, a prior step, a role, a tool, or background the reader does not have and is never told to get. State the assumption the reader cannot meet.
+5. **Navigability / findability.** A page unreachable from the index, no clear next step where the reader needs one, no anchor for the thing a reader will search for, a long document with no structure to scan. Hard-to-navigate is a defect when it blocks the reader from reaching the part they need.
+6. **Broken or stale cross-references.** Links that 404, "see the section below" pointing at a section that no longer exists, references to a renamed page or a superseded policy version.
+7. **Staleness.** Content that describes an older state than the one in force: an old release's flags, a deprecated process, a price or date that has moved, a screenshot of a UI that changed. Cite the current value against the stale one.
+8. **Terminology / consistency.** The same concept called several names with no statement they are the same ("workspace" / "project" / "folder"; "member" / "user" / "seat"). Pick the canonical term and flag the drift.
+9. **Accessibility.** Images with no alt text, heading levels that skip (h1 → h3), meaning carried by color alone, bare "click here" link text. Real findings, not nits, when they block a reader using assistive tech.
+
+## When the target is technical documentation
+
+Developer docs have a failure mode worth naming explicitly: the page is the wrong *type* for what the reader needs. When reviewing technical docs, classify the page against the four Diátaxis modes, because the right content for one is wrong for another:
 
 - **Tutorial** — learning-oriented. A guaranteed-to-succeed lesson for a newcomer. Concrete, linear, no detours.
 - **How-to guide** — task-oriented. Steps to achieve one stated goal for someone who already knows the basics.
 - **Reference** — information-oriented. Dry, complete, accurate description of the API/CLI/config. No teaching.
 - **Explanation** — understanding-oriented. The "why" and the trade-offs. No step-by-step.
 
-A page that mixes modes — a tutorial padded with architecture explanation, a reference that drifts into opinion — fails the reader who came for one of them. Naming the type-mismatch is usually the highest-value finding you can make.
-
-## What to look for
-
-1. **Doc-type bleed.** Conceptual explanation injected into a first-run tutorial; a how-to guide that stops to teach theory; a reference page editorializing. State which mode the page is and which content belongs elsewhere.
-2. **Missing prerequisites.** The page assumes a tool, a version, an account, or a prior step that is never stated before the reader needs it. A first \`install\` step that silently requires Docker running is a prerequisite gap.
-3. **Untested or broken code samples.** Examples that will not run as written: deprecated flags, wrong import paths, a command that references a removed subcommand. When you can, trace the sample against the real CLI/API surface in the repo and cite the contradiction.
-4. **Broken or stale cross-references.** Links that 404, "see the section below" pointing at a section that no longer exists, references to a renamed page. Internal anchors that drifted after a heading was retitled.
-5. **Version drift.** Text, flags, screenshots, or output that describe an older release than the one the docs ship with. Cite the current value (from the repo, the CLI help, the changelog) against the stale one.
-6. **Terminology inconsistency.** The same concept called three names across the page ("workspace" / "project" / "folder") with no statement that they are the same. Pick the canonical term and flag the drift.
-7. **Accessibility defects.** Images with no alt text, heading levels that skip (h1 → h3), meaning carried by color alone, link text that is bare "click here". These are real findings, not nits, when they block a reader using assistive tech.
-8. **Findability.** A page that cannot be reached from the index, a missing "next step" at the end of a tutorial, a reference with no anchor for the field a reader will search for.
+A page that mixes modes — a tutorial padded with architecture explanation, a reference that drifts into opinion — fails the reader who came for one of them. For technical docs, also hold examples to a higher bar: a code sample is a *claim that it runs*, so trace it against the real CLI/API surface (\`read\` the source, \`gh pr diff\`, the changelog) and cite any sample that uses a removed flag, a wrong import, or a renamed subcommand. This Diátaxis lens and runnable-sample check do NOT apply to non-technical documents — do not force a policy or an onboarding page into a "tutorial vs reference" frame.
 
 ## What NOT to find
 
-- **Formatter / linter territory.** Trailing whitespace, line length, fenced-block language tags, Markdown table alignment. Assume a docs linter ran. Do not raise it.
-- **House-style preferences the page follows.** If the project writes in second person, or uses sentence-case headings, or prefers "e.g." over "for example", and the page matches, that is not a finding. Only the deviation is.
-- **Restating the doc as a finding.** "This page documents the start command" is not a review.
-- **Rewriting for taste.** A sentence you would have phrased differently but that reads clearly for the intended audience is not a finding. Clarity is the bar, not your preferred cadence.
-- **Generic "add more examples".** Without naming the specific step or field that is under-documented, "could use more examples" is noise.
+- **Formatter / linter territory.** Trailing whitespace, line length, fenced-block language tags, table alignment. Assume a docs linter ran.
+- **House-style the page follows.** Second person, sentence-case headings, "e.g." vs "for example" — if the document is consistent with its house style, that is not a finding. Only the deviation is.
+- **Restating the document as a finding.** "This page documents the start command" / "this policy covers expenses" is not a review.
+- **Rewriting for taste.** A sentence you would have phrased differently but that reads clearly for its reader is not a finding. Clarity is the bar, not your preferred cadence.
+- **Generic "add more examples" / "make it clearer".** Without naming the specific step, field, or passage that is under-documented or unclear, it is noise.
 
 ## Severity hints specific to docs
 
-- **blocker** — A code sample that fails for everyone who runs it. A prerequisite gap that strands the reader at step one. A reference value that is factually wrong (wrong default, wrong type) and will cause the reader to misconfigure the system. Doc-type bleed so severe the page does not serve the reader it is for.
-- **concern** — A stale flag or version reference that still mostly works but will mislead. A missing prerequisite for a later (not first) step. Terminology drift that will confuse a newcomer. An accessibility defect that degrades but does not block.
+- **blocker** — An example or claim that is factually wrong and will lead the reader astray (a sample that fails for everyone, a cited rule that says the opposite). A prerequisite gap that strands the reader at step one. An audience mismatch so severe the intended reader cannot use the document at all.
+- **concern** — A stale reference that still mostly works but will mislead, a missing prerequisite for a later step, a completeness gap that blocks an edge case, terminology drift that will confuse a newcomer, an accessibility defect that degrades but does not block.
 - **nit** — A single awkward sentence, a missing "next step" link, a minor terminology wobble in an aside. Optional.
-- **praise** — A tutorial that genuinely lands a beginner at a working state, a reference table that is complete and scannable, an explanation that makes a hard concept click. Rare.
+- **praise** — A document that genuinely lands its reader: a tutorial that reaches a working state, a policy that is unambiguous on the hard case, an explanation that makes a difficult concept click. Rare.
 
 ## Verdict mapping
 
-- **approve** — Publishable. The page serves its reader; any gaps are nits.
-- **request-changes** — At least one blocker: a sample that fails, a factually wrong reference, a prerequisite gap that strands the reader.
-- **comment** — Useful observations without a clean accept/reject. Common for an early docs draft or a partial review of a large doc set.
+- **approve** — Publishable. The document serves its reader; any gaps are nits.
+- **request-changes** — At least one blocker: a wrong example or claim, an audience mismatch that defeats the purpose, a prerequisite gap that strands the reader.
+- **comment** — Useful observations without a clean accept/reject. Common for an early draft or a partial review of a large doc set.
 
 ## Final output
 

@@ -303,13 +303,24 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('hidden assumptions')
   })
 
-  test('doc-review skill teaches doc-type fit and runnable-sample craft (drift guard)', () => {
+  test('doc-review skill covers any document, not only technical docs (drift guard against re-narrowing)', () => {
+    // The skill must lead with universal doc craft so policy/process/onboarding/
+    // help-center/legal docs fit, with the Diátaxis + runnable-sample lens scoped
+    // to the technical-docs sub-case rather than framing the whole skill.
     expect(DOC_REVIEW_SKILL.name).toBe('doc-review')
     expect(DOC_REVIEW_SKILL.description.length).toBeGreaterThan(0)
     const lower = DOC_REVIEW_SKILL.content.toLowerCase()
-    expect(lower).toContain('diátaxis')
+    expect(lower).toContain('audience fit')
+    expect(lower).toContain('policy')
+    expect(lower).toContain('examples and claims')
     expect(lower).toContain('prerequisite')
-    expect(lower).toContain('code sample')
+  })
+
+  test('doc-review keeps the technical-doc specialization as a scoped sub-case (Diátaxis + runnable samples)', () => {
+    const lower = DOC_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('diátaxis')
+    expect(lower).toContain('when the target is technical documentation')
+    expect(lower).toContain('do not force a policy')
   })
 
   test('plan-review skill teaches reversibility and measurable success (drift guard)', () => {
