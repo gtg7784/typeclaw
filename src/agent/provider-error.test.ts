@@ -4,28 +4,26 @@ import type { AgentSession } from './index'
 import { detectProviderError, subscribeProviderErrors } from './provider-error'
 
 describe('detectProviderError', () => {
-  test('returns the errorMessage for assistant message with stopReason=error', () => {
+  test('preserves the raw errorMessage on `message` for operator surfaces (logs/TUI)', () => {
     const result = detectProviderError({
       role: 'assistant',
       stopReason: 'error',
       errorMessage: 'Your account is not active, please check your billing details on our website.',
     })
 
-    expect(result).toEqual({
-      message: 'Your account is not active, please check your billing details on our website.',
-    })
+    expect(result?.message).toBe('Your account is not active, please check your billing details on our website.')
   })
 
-  test('falls back to a generic message when stopReason=error has no errorMessage', () => {
+  test('falls back to a generic raw message when stopReason=error has no errorMessage', () => {
     const result = detectProviderError({ role: 'assistant', stopReason: 'error' })
 
-    expect(result).toEqual({ message: 'LLM call failed' })
+    expect(result?.message).toBe('LLM call failed')
   })
 
-  test('falls back to a generic message when errorMessage is an empty string', () => {
+  test('falls back to a generic raw message when errorMessage is an empty string', () => {
     const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: '' })
 
-    expect(result).toEqual({ message: 'LLM call failed' })
+    expect(result?.message).toBe('LLM call failed')
   })
 
   test('returns null for stopReason=aborted (user-initiated, not a provider failure)', () => {
@@ -61,6 +59,45 @@ describe('detectProviderError', () => {
     })
 
     expect(result).toBeNull()
+  })
+})
+
+describe('detectProviderError safeMessage redaction', () => {
+  test('maps rate/usage-limit errors to a canonical channel-safe sentence', () => {
+    const raw = 'You have hit your ChatGPT usage limit (team plan). Try again in ~40 min.'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toMatch(/rate-limited/i)
+    expect(result?.safeMessage).not.toContain('team plan')
+  })
+
+  test('maps billing/quota errors to a billing-safe sentence without echoing the raw text', () => {
+    const raw =
+      'Your account is not active, please check your billing details on our website https://x.test/acct/secret-123.'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toMatch(/billing\/quota/i)
+    expect(result?.safeMessage).not.toContain('secret-123')
+    expect(result?.safeMessage).not.toContain('https://')
+  })
+
+  test('collapses unknown / malformed-response failures to a generic notice (no raw leak)', () => {
+    const raw = 'malformed response: {"id":"resp_abc","debug":"Bearer sk-live-LEAK","body":"<html>500</html>"}'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+    expect(result?.safeMessage).not.toContain('sk-live-LEAK')
+    expect(result?.safeMessage).not.toContain('resp_abc')
+  })
+
+  test('still exposes the raw text on `message` even when `safeMessage` is redacted', () => {
+    const raw = 'malformed response: Bearer sk-live-LEAK'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.message).toBe(raw)
+    expect(result?.safeMessage).not.toBe(raw)
   })
 })
 

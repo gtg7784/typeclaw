@@ -1369,16 +1369,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
         // A provider soft-error (rate/usage limit, billing, malformed response)
         // ends the turn with no assistant text, so the human otherwise sees
-        // silence. Surface the provider message via a 'system' send — the same
-        // one-shot bypass path validateChannelTurn uses, so it lands regardless
-        // of per-turn send caps and skips the duplicate guard.
+        // silence. Surface the REDACTED `safeMessage` (never the raw provider
+        // text, which can carry response bodies / URLs / tokens) via a 'system'
+        // send — the same one-shot bypass path validateChannelTurn uses, so it
+        // lands regardless of per-turn send caps and skips the duplicate guard.
         void send(
           {
             adapter: live.key.adapter,
             workspace: live.key.workspace,
             chat: live.key.chat,
             thread: live.key.thread,
-            text: `⚠️ ${err.message}`,
+            text: `⚠️ ${err.safeMessage}`,
           },
           { source: 'system' },
         )

@@ -4829,10 +4829,12 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(errors.some((m) => /LLM call failed: billing not active/.test(m))).toBe(true)
   })
 
-  test('posts LLM soft errors back to the originating channel so the human is not left in silence', async () => {
-    // given: a turn that ends with stopReason=error (rate/usage limit) and
-    // therefore emits no assistant text. Without surfacing it, the channel
-    // sees no reply at all — the exact "why didn't Paul respond" failure mode.
+  test('posts a REDACTED LLM soft-error notice to the channel (raw provider text never leaks)', async () => {
+    // given: a turn ending with stopReason=error whose raw provider text carries
+    // potentially sensitive detail. Without surfacing it the channel sees silence
+    // (the "why didn't Paul respond" failure mode); surfacing it RAW would leak
+    // backend details into a public/multi-user channel. The router must post the
+    // redacted safeMessage instead.
     const dir = await tempDir()
     const sent: string[] = []
     const router = createChannelRouter({
@@ -4869,7 +4871,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     await router.__testing!.flushDebounce(KEY)
 
     // then
-    expect(sent.some((t) => /usage limit \(team plan\)/.test(t))).toBe(true)
+    expect(sent.some((t) => /rate-limited/i.test(t))).toBe(true)
+    expect(sent.some((t) => /team plan/.test(t))).toBe(false)
   })
 
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {

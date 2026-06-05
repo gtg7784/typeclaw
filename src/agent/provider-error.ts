@@ -13,7 +13,39 @@ import type { AgentSession } from './index'
 // not by this helper.
 
 export type DetectedProviderError = {
+  // Raw provider text. Safe for logs and operator-only surfaces (TUI,
+  // `typeclaw logs`), but NOT for channels — see `safeMessage`.
   message: string
+  // Redacted, user-facing variant for public/multi-user channels. Known-safe
+  // operational classes (rate/usage limit, billing/quota) map to a canonical
+  // sentence; everything else (malformed-response SDK dumps, unknown failures)
+  // collapses to a generic notice so provider response bodies, URLs, or tokens
+  // can never leak to a channel.
+  safeMessage: string
+}
+
+const GENERIC_SAFE_NOTICE = 'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.'
+
+// Each entry pairs a narrow matcher against the raw provider text with the
+// canonical, leak-free sentence shown in channels. Matchers are intentionally
+// specific: a miss falls through to GENERIC_SAFE_NOTICE rather than echoing raw
+// text, so adding a new class is opt-in and never widens what we expose.
+const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
+  {
+    match: /\b(usage limit|rate limit|rate.?limited|too many requests|429)\b/i,
+    safe: 'The upstream LLM provider is rate-limited (usage limit reached). Try again shortly.',
+  },
+  {
+    match: /\b(billing|quota|insufficient.*(credit|fund|balance)|payment|account is not active)\b/i,
+    safe: 'The upstream LLM provider rejected the request for a billing/quota reason. Operators can check `typeclaw logs` for details.',
+  },
+]
+
+function toSafeMessage(raw: string): string {
+  for (const { match, safe } of SAFE_CLASSES) {
+    if (match.test(raw)) return safe
+  }
+  return GENERIC_SAFE_NOTICE
 }
 
 export function detectProviderError(message: unknown): DetectedProviderError | null {
@@ -25,7 +57,7 @@ export function detectProviderError(message: unknown): DetectedProviderError | n
   // ignore aborts (no surface to render them on).
   if (m.stopReason !== 'error') return null
   const text = typeof m.errorMessage === 'string' && m.errorMessage.length > 0 ? m.errorMessage : 'LLM call failed'
-  return { message: text }
+  return { message: text, safeMessage: toSafeMessage(text) }
 }
 
 export type ProviderErrorListener = (error: DetectedProviderError) => void
