@@ -246,6 +246,27 @@ function publicSubagentNames(registry: SubagentRegistry): string[] {
     .sort()
 }
 
+// Render the "## Subagent orchestration" roster from the registry so it can
+// never drift from the actually-registered public subagents (the bug that left
+// `researcher`/`planner` unlisted). Same filter+sort as `publicSubagentNames`,
+// so this roster and the `spawn_subagent` tool description agree by
+// construction. Throws if a public subagent lacks `rosterDescription` — a
+// fail-loud contract that turns "silently missing from the prompt" into a build
+// error caught by the drift-guard test.
+export function renderPublicSubagentRoster(registry: SubagentRegistry): string {
+  return publicSubagentNames(registry)
+    .map((name) => {
+      const description = registry[name]?.rosterDescription?.trim()
+      if (description === undefined || description === '') {
+        throw new Error(
+          `public subagent "${name}" is missing rosterDescription (required for the orchestration roster)`,
+        )
+      }
+      return `\`${name}\` (${description})`
+    })
+    .join(', ')
+}
+
 function isPublicSubagent(sub: Subagent<unknown>): boolean {
   return sub.visibility === 'public'
 }

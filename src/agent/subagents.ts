@@ -48,6 +48,13 @@ export type SubagentShared<P = unknown> = {
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
   visibility?: 'public' | 'internal'
+  // One-line purpose blurb for the main agent's "## Subagent orchestration"
+  // roster, rendered from the registry by `renderPublicSubagentRoster` instead
+  // of hand-maintained in the prompt (the drift that once left `researcher` and
+  // `planner` unlisted). Required for `visibility: 'public'`; ignored otherwise.
+  // On `SubagentShared` so the plugin→internal shim carries it via rest-spread
+  // (see `pluginSubagentShim`), like `visibility`.
+  rosterDescription?: string
   requiresSpecificPermission?: boolean
   // Opt-in: when true, this subagent's session is wired with the orchestration
   // tools (spawn_subagent/subagent_output/subagent_cancel) so it can delegate

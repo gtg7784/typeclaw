@@ -69,6 +69,8 @@ export function createOperatorSubagent(): Subagent<OperatorPayload> {
     tools: [readTool, grepTool, findTool, lsTool, bashTool, writeTool, editTool],
     payloadSchema: operatorPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'write-capable: bash-with-side-effects, write, edit — for browser sessions, refactors, deploys, batch ops, and Claude Code / Codex CLI driving; gated by `subagent.spawn.operator`, owner/trusted only — on denial, do the work yourself',
     requiresSpecificPermission: true,
     canSpawnSubagents: true,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

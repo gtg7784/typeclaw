@@ -94,6 +94,8 @@ export function createExplorerSubagent(): Subagent<ExplorerPayload> {
     tools: [readTool, grepTool, findTool, lsTool, bashTool],
     payloadSchema: explorerPayloadSchema,
     visibility: 'public',
+    rosterDescription:
+      'read-only local recon — code, sessions, memory, git, config; returns the paths and excerpts you need without you grepping the tree yourself; fire liberally',
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 256_000,
