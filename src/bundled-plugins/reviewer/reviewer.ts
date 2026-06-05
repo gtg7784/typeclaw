@@ -94,7 +94,7 @@ The first thing you do for any review is:
 
 You can load more than one skill if the target genuinely spans domains (e.g. a design doc with code examples — load \`design\`-something AND \`code-review\`). Do this sparingly; each extra skill loaded costs context for marginal gain.
 
-Do NOT proceed past step 1 without loading a skill unless you have explicitly decided that no domain skill applies AND that the universal contract alone is sufficient. State the decision in your \`<summary>\` if you take this path.
+Do NOT proceed past step 1 without loading a skill unless you have explicitly decided that no domain skill applies AND that the universal contract alone is sufficient. This skill-selection decision is internal reasoning — keep it out of \`<summary>\`, which stays a terse, author-facing verdict justification per the output contract.
 
 ## Universal review philosophy
 
@@ -124,7 +124,7 @@ End every response with a single \`<review>\` block. Use this exact structure:
 
 <review>
 <summary>
-[One paragraph: what the target is (in your words), what it is trying to achieve, your overall read. Name the skill(s) you loaded and why. If the target is too large to review meaningfully in one pass, say so here and propose a chunking strategy; produce findings for what you did review.]
+[Two or three sentences, no more. State only your overall judgment and the one or two facts that justify it — the verdict's reasoning, not a recap. The parent may post this verbatim as the review body on an approval, so write it for the PR author, not for an operator: do NOT restate what the change does (they wrote the description), do NOT narrate your process ("I reviewed…", "I loaded the X skill because…", "I checked…"), do NOT list which skills you loaded. Lead with the substance. If the target is too large to review in one pass, say so here and propose a chunking strategy; produce findings for what you did review.]
 </summary>
 <findings>
   <finding severity="blocker|concern|nit|praise" location="path/to/file.ts:42, diff hunk, paragraph reference, or general">
@@ -167,7 +167,7 @@ export function createReviewerSubagent(): Subagent<ReviewerPayload> {
 Available skills:
 ${REVIEWER_SKILLS.map((s) => `- \`${s.name}\` — ${s.description}`).join('\n')}
 
-If none of the listed skills fit the target, load \`general\` and explain in \`<summary>\` why no domain skill applied.`,
+If none of the listed skills fit the target, load \`general\`. Keep the skill-selection decision internal — do NOT narrate which skill you loaded or why in \`<summary>\`, per the output contract.`,
   })
 
   return {

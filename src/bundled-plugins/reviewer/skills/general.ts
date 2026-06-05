@@ -20,7 +20,7 @@ You have been asked to review something that does not clearly fit a specific dom
 
 A general review is the hardest because there are no domain shortcuts. Replace shortcuts with discipline:
 
-1. **State the target's purpose in your own words.** What is the artifact trying to achieve? Who is it for? Put this in \`<summary>\`. If you cannot state it after reading, that itself is a finding — the artifact does not communicate its purpose.
+1. **State the target's purpose in your own words — to yourself, as a comprehension check.** What is the artifact trying to achieve? Who is it for? If you cannot state it after reading, that itself is a finding — the artifact does not communicate its purpose. This is your private grounding, not summary copy: keep the restatement out of \`<summary>\`, which stays a terse verdict justification per the output contract.
 2. **Identify the load-bearing claims.** What does the artifact assert that, if wrong, would invalidate the whole thing? List them mentally before looking for issues.
 3. **Stress-test the load-bearing claims.** For each one: is the evidence sufficient? Are the assumptions stated? Are the counter-arguments addressed?
 4. **Stress-test the boundaries.** Where does the artifact's argument or design stop applying? Does it acknowledge that boundary, or does it overgeneralize?
