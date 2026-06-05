@@ -223,7 +223,7 @@ export type ServerMessage =
       durationMs: number
       ts?: number
     }
-  | { type: 'done'; ts?: number }
+  | { type: 'done'; ts?: number; usage?: { input: number; output: number; totalTokens: number; cost: number } }
   | { type: 'error'; message: string; ts?: number }
   | { type: 'reload_result'; results: ReloadResultPayload[] }
   | { type: 'restart_result'; status: 'accepted' | 'failed'; message?: string; error?: string }

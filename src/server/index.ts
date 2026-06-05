@@ -184,6 +184,10 @@ type SessionState = {
   // not re-target this session's lifecycle hooks.
   runtimeSnapshot: PluginRuntimeState | null
   unsubTurnOutcome: Unsubscribe | null
+  // Latest turn's usage, captured from `message_end` by forwardSessionEvents and
+  // read at the `done` send site (which lives outside that subscriber). Reset at
+  // each turn start so a turn with no usage event sends a plain `done`.
+  lastUsage: { input: number; output: number; totalTokens: number; cost: number } | null
   dispose: () => Promise<void>
 }
 
@@ -520,6 +524,7 @@ export function createServer({
               activeClaimCode: null,
               runtimeSnapshot: runtimeSnapshot ?? null,
               unsubTurnOutcome: null,
+              lastUsage: null,
               dispose,
             }
             sessionStates.set(ws, state)
@@ -533,7 +538,7 @@ export function createServer({
             }
 
             liveSessionRegistry?.register({ sessionId: sessionFileId, session })
-            forwardSessionEvents(ws, session, logger, sessionFileId)
+            forwardSessionEvents(ws, state, logger, sessionFileId)
 
             if (stream) {
               state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
@@ -759,9 +764,10 @@ export function createServer({
                 origin: state.origin,
               })
             }
+            state.lastUsage = null
             try {
               await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${msg.text}`)
-              send(ws, { type: 'done' })
+              send(ws, doneMessage(state))
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err)
               logger.error(`[server] ${state.sessionFileId}: prompt failed: ${message}`)
@@ -859,10 +865,10 @@ function isWebSocketUpgrade(req: Request): boolean {
   return req.headers.get('upgrade')?.toLowerCase() === 'websocket'
 }
 
-function forwardSessionEvents(ws: Ws, session: AgentSession, logger: ServerLogger, sessionFileId: string): void {
+function forwardSessionEvents(ws: Ws, state: SessionState, logger: ServerLogger, sessionFileId: string): void {
   const toolStartedAt = new Map<string, number>()
 
-  session.subscribe((event) => {
+  state.session.subscribe((event) => {
     switch (event.type) {
       case 'message_update':
         if (event.assistantMessageEvent.type === 'text_delta') {
@@ -877,6 +883,7 @@ function forwardSessionEvents(ws: Ws, session: AgentSession, logger: ServerLogge
         // because no text deltas were ever emitted, which looks like a freeze.
         // The server's existing try/catch around `session.prompt()` only
         // catches throws, so it never sees these.
+        state.lastUsage = readDoneUsage(event.message)
         forwardAssistantError(ws, event.message, logger, sessionFileId)
         break
       case 'tool_execution_start':
@@ -1048,9 +1055,10 @@ async function drain(
       }
 
       await fireTurnStart(item.text)
+      state.lastUsage = null
       try {
         await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${item.text}`)
-        send(ws, { type: 'done' })
+        send(ws, doneMessage(state))
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.error(`[server] ${state.sessionFileId}: prompt failed: ${message}`)
@@ -1443,6 +1451,17 @@ function buildMessageEndPayload(sessionId: string, message: unknown): InspectFra
     ...(usage !== null ? { usage } : {}),
   }
   return payload
+}
+
+function doneMessage(state: SessionState): ServerMessage {
+  return state.lastUsage === null ? { type: 'done' } : { type: 'done', usage: state.lastUsage }
+}
+
+function readDoneUsage(message: unknown): { input: number; output: number; totalTokens: number; cost: number } | null {
+  if (typeof message !== 'object' || message === null) return null
+  const usage = readMessageUsage((message as Record<string, unknown>).usage)
+  if (usage === null) return null
+  return { input: usage.input, output: usage.output, totalTokens: usage.totalTokens, cost: usage.cost }
 }
 
 function readMessageUsage(
