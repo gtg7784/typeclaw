@@ -5,16 +5,16 @@ import { detectReviewDump } from './gh-review-inline-detect'
 const REVIEWS_CMD = 'gh api -X POST /repos/acme/widgets/pulls/7/reviews --input /tmp/r.json'
 
 const DUMPED_BODY = [
-  '## 리뷰 요약',
-  '두 가지 concern이 있어 REQUEST CHANGES 드립니다.',
-  '### 🔴 Concern',
-  '1. 언어 표시 명칭 하드코딩 `apps/admin/src/lib/i18n/languages.ts:12-20`',
-  '2. 영어 sentence case 위반 `apps/admin/src/lib/i18n/translations/en.ts:807,809`',
-  '### 🟡 Nit',
-  '1. aria-expanded 누락 (`translation-panel.tsx:107-111`)',
-  '2. 마크업 중복 (`translation-panel.tsx:81-86,97-102`)',
+  '## Review summary',
+  'Two concerns, requesting changes.',
+  '### Concern',
+  '1. hardcoded display name `apps/admin/src/lib/i18n/languages.ts:12-20`',
+  '2. sentence case violation `apps/admin/src/lib/i18n/translations/en.ts:807,809`',
+  '### Nit',
+  '1. missing aria-expanded (`translation-panel.tsx:107-111`)',
+  '2. duplicated markup (`translation-panel.tsx:81-86,97-102`)',
   '3. emoji deprecated (`languages.ts:4`)',
-  '4. 캐러셀 aria-hidden 누락 (`translation-panel.tsx:283-309`)',
+  '4. carousel missing aria-hidden (`translation-panel.tsx:283-309`)',
 ].join('\n')
 
 function payload(value: Record<string, unknown>): string {
