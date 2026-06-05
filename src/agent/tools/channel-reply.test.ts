@@ -17,6 +17,7 @@ function fakeRouter(
   options: {
     consecutiveCount?: number
     resolveReviewThread?: ChannelRouter['resolveReviewThread']
+    getReviewState?: ChannelRouter['getReviewState']
   } = {},
 ): ChannelRouter {
   return {
@@ -49,6 +50,9 @@ function fakeRouter(
     registerReviewThreadResolver: () => {},
     unregisterReviewThreadResolver: () => {},
     resolveReviewThread: options.resolveReviewThread ?? (async () => ({ ok: true })),
+    registerReviewStateResolver: () => {},
+    unregisterReviewStateResolver: () => {},
+    getReviewState: options.getReviewState ?? (async () => ({ ok: true, selfBlocking: false, approve: true })),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],

@@ -19,6 +19,7 @@ afterEach(() => resetReviewTurn(SESSION))
 function fakeRouter(handlers: {
   onSend?: (msg: OutboundMessage) => SendResult
   onResolve?: (req: ReviewThreadResolveRequest) => ReviewThreadResolveResult
+  getReviewState?: ChannelRouter['getReviewState']
 }): ChannelRouter {
   return {
     route: async () => {},
@@ -50,6 +51,9 @@ function fakeRouter(handlers: {
     registerReviewThreadResolver: () => {},
     unregisterReviewThreadResolver: () => {},
     resolveReviewThread: async (req) => handlers.onResolve?.(req) ?? { ok: true },
+    registerReviewStateResolver: () => {},
+    unregisterReviewStateResolver: () => {},
+    getReviewState: handlers.getReviewState ?? (async () => ({ ok: true, selfBlocking: false, approve: true })),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],

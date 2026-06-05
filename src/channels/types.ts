@@ -382,6 +382,37 @@ export type ReviewThreadResolveResult =
 // support review threads never register one; the router answers `unsupported`.
 export type ReviewThreadResolver = (req: ReviewThreadResolveRequest) => Promise<ReviewThreadResolveResult>
 
+// A query for "does the bot still owe this PR a verdict?" — i.e. is the bot's
+// latest formal review on the PR a sticky CHANGES_REQUESTED that no later
+// APPROVE/dismissal has cleared. Used by the re-review stranding guard to stop
+// the bot from resolving a thread / posting a close-out ack while it still
+// holds a blocking review (the PR #644 failure: thread resolved + chat ack, but
+// reviewDecision stuck at CHANGES_REQUESTED because neither carries review
+// state). `workspace` is the repo slug `owner/name`; `chat` is `pr:<N>`.
+export type ReviewStateRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+}
+
+// `selfBlocking` is the answer the guard acts on: true means the bot's latest
+// effective formal review is its own CHANGES_REQUESTED (COMMENTED reviews are
+// ignored — they never clear the sticky block, GitHub's own rule). `approve`
+// mirrors `channels.github.review.approve` so the guard's denial text can tell
+// the model whether to land a fresh APPROVE or to DISMISS its prior review.
+//
+// On `ok: false` the caller MUST fail closed: an unverifiable review state is
+// treated like a live block, so the bot never claims close-out when the runtime
+// could not confirm the platform-side verdict.
+export type ReviewStateResult =
+  | { ok: true; selfBlocking: boolean; approve: boolean }
+  | { ok: false; error: string; code?: 'unsupported' | 'not-found' | 'permission-denied' | 'transient' }
+
+// Registered per-adapter on the ChannelRouter, last-write-wins like the
+// review-thread resolver. Adapters that never register one make `getReviewState`
+// answer `unsupported`.
+export type ReviewStateResolver = (req: ReviewStateRequest) => Promise<ReviewStateResult>
+
 export function channelKeyId(key: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }

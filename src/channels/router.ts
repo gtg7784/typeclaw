@@ -75,6 +75,9 @@ import type {
   ReactionRequest,
   ReactionResult,
   ResolvedChannelNames,
+  ReviewStateRequest,
+  ReviewStateResolver,
+  ReviewStateResult,
   ReviewThreadResolveRequest,
   ReviewThreadResolveResult,
   ReviewThreadResolver,
@@ -635,6 +638,12 @@ export type ChannelRouter = {
   registerReviewThreadResolver: (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver) => void
   unregisterReviewThreadResolver: (adapter: ChannelKey['adapter'], resolver: ReviewThreadResolver) => void
   resolveReviewThread: (req: ReviewThreadResolveRequest) => Promise<ReviewThreadResolveResult>
+  // Re-review stranding guard support: answers whether the bot still holds a
+  // blocking CHANGES_REQUESTED on a PR. Opt-in per adapter like the thread
+  // resolver; `getReviewState` answers `unsupported` when none is registered.
+  registerReviewStateResolver: (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver) => void
+  unregisterReviewStateResolver: (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver) => void
+  getReviewState: (req: ReviewStateRequest) => Promise<ReviewStateResult>
   lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
   listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
   // Execute a command by name against an existing live session, bypassing
@@ -905,6 +914,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const reviewThreadResolvers = new Map<ChannelKey['adapter'], ReviewThreadResolver>()
+  const reviewStateResolvers = new Map<ChannelKey['adapter'], ReviewStateResolver>()
   const stickyLedger = new StickyLedger()
   // The /help handler reads the live registry to enumerate commands, so it
   // forward-references `commands`. Safe at runtime — the handler only runs on
@@ -2598,6 +2608,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
+  const registerReviewStateResolver = (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver): void => {
+    reviewStateResolvers.set(adapter, resolver)
+  }
+
+  const unregisterReviewStateResolver = (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver): void => {
+    if (reviewStateResolvers.get(adapter) === resolver) {
+      reviewStateResolvers.delete(adapter)
+    }
+  }
+
+  const getReviewState = async (req: ReviewStateRequest): Promise<ReviewStateResult> => {
+    const resolver = reviewStateResolvers.get(req.adapter)
+    if (resolver === undefined) {
+      return { ok: false, error: `adapter "${req.adapter}" does not support review-state lookup`, code: 'unsupported' }
+    }
+    return await resolver(req).catch(
+      (err): ReviewStateResult => ({ ok: false, error: describe(err), code: 'transient' }),
+    )
+  }
+
   const lookupInboundAttachment = (args: ChannelKey & { id: number }): InboundAttachment | null => {
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return null
@@ -3422,6 +3452,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerReviewThreadResolver,
     unregisterReviewThreadResolver,
     resolveReviewThread,
+    registerReviewStateResolver,
+    unregisterReviewStateResolver,
+    getReviewState,
     lookupInboundAttachment,
     listInboundAttachmentIds,
     executeCommand,
