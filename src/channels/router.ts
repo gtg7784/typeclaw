@@ -2453,13 +2453,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   // Best-effort acknowledgment: drop an :eyes: on the triggering inbound the
-  // moment we decide to engage, replacing the old "On it" ack comment on
-  // GitHub. Fire-and-forget so a reaction failure (missing permission, the
-  // adapter not supporting reactions, a transient API error) can NEVER block
-  // engagement, enqueueing, or the agent's actual reply. No reactionRef =
-  // nothing reactable (synthetic inbounds, reaction-less adapters) = silent skip.
+  // moment we decide to engage — but ONLY when the channel has no visible
+  // "typing…" indicator. Where typing renders (slack/discord/telegram) the
+  // heartbeat already signals "the bot is working", so the reaction would be
+  // redundant noise; the :eyes: is the fallback ack for typing-less channels
+  // (github, kakaotalk), replacing the old "On it" comment on GitHub.
+  // Fire-and-forget so a reaction failure (missing permission, the adapter not
+  // supporting reactions, a transient API error) can NEVER block engagement,
+  // enqueueing, or the agent's actual reply. No reactionRef = nothing reactable
+  // (synthetic inbounds, reaction-less adapters) = silent skip.
   const autoReactOnEngage = (event: InboundMessage): Promise<ReactionRef | null> | null => {
     if (event.reactionRef === undefined) return null
+    if (typingCapableAdapters.has(event.adapter)) return null
     const addResult = react({
       adapter: event.adapter,
       workspace: event.workspace,

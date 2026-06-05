@@ -529,6 +529,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
 
       options.router.registerOutbound('telegram-bot', outboundCallback)
       options.router.registerTyping('telegram-bot', typingCallback)
+      options.router.setTypingCapability('telegram-bot', true)
       options.router.registerChannelNameResolver('telegram-bot', channelResolver)
       options.router.registerSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.registerFetchAttachment('telegram-bot', fetchAttachmentCallback)
@@ -537,6 +538,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('telegram-bot', outboundCallback)
         options.router.unregisterTyping('telegram-bot', typingCallback)
+        options.router.setTypingCapability('telegram-bot', false)
         options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
         options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
         options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
@@ -565,6 +567,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       started = false
       options.router.unregisterOutbound('telegram-bot', outboundCallback)
       options.router.unregisterTyping('telegram-bot', typingCallback)
+      options.router.setTypingCapability('telegram-bot', false)
       options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
       options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
