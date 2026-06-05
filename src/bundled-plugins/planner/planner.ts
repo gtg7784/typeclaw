@@ -178,6 +178,7 @@ Then END your response with a single \`<plan-summary>\` block. Use this exact st
 <path>relative/path/to/the/plan/file.md</path>
 <summary>Two or three sentences: your overall approach and the fact that justifies it. The parent may relay this to the user, so write it for them — do NOT narrate your process or which skill you loaded.</summary>
 <verdict>ready | needs-input | infeasible</verdict>
+<review-suggestion>yes | no</review-suggestion>
 <questions>
   <question id="short-id" blocking="true">A precise question the user must answer.</question>
   <!-- Include <questions> ONLY when verdict is needs-input. blocking="true" = the plan cannot proceed without it; blocking="false" = nice-to-have the parent may skip. -->
@@ -187,6 +188,16 @@ Then END your response with a single \`<plan-summary>\` block. Use this exact st
 \`ready\` = the plan is complete and actionable; the file is written. Omit \`<questions>\`.
 \`needs-input\` = blocked on user-only input (or the goal itself is absent); you wrote a partial draft with \`## Open Questions\`, and \`<questions>\` lists exactly what the parent must ask. The parent interviews the user and re-spawns you.
 \`infeasible\` = you understood the goal and it genuinely cannot be done as stated; write a short stub file whose body explains why, report its \`<path>\`, and say why in \`<summary>\` too. This is "the answer is no", not "I need more information".
+
+## Suggesting a review — hand the parent a second pair of eyes
+
+A plan you call \`ready\` is your best one-shot effort, but you are the only mind that has seen it. For any plan whose stakes justify a second pass — a multi-step project, an irreversible or costly move, a plan a human will execute against real money, time, or production state — the right next move is a REVIEW before execution, and the parent owns that call.
+
+You cannot review your own plan and you cannot talk to the user, so you do not run the review: you RECOMMEND it. TypeClaw ships a \`reviewer\` subagent — a deep, read-only specialist that loads a \`plan-review\` skill and returns a structured verdict (no side effects, never posts). When a review is worth it, set \`<review-suggestion>yes</review-suggestion>\` and add one short sentence to \`<summary>\` telling the parent it can spawn \`reviewer\` on the plan file before executing.
+
+- Suggest a review ONLY on a \`ready\` verdict. A \`needs-input\` plan is a partial skeleton and an \`infeasible\` one is a "no" — neither is a finished artifact worth reviewing, so set \`<review-suggestion>no</review-suggestion>\` for both.
+- Skip it for a trivially small or fully-reversible \`ready\` plan (a one-move errand, a throwaway draft) where a review buys nothing — set \`<review-suggestion>no</review-suggestion>\` and do not clutter \`<summary>\`.
+- The recommendation is the parent's to act on. Do NOT spawn \`reviewer\` yourself: the parent owns execution and the channel, and a review you commission and then discard at end-of-run helps no one.
 
 ## Rules
 
