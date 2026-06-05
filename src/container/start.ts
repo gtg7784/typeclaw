@@ -22,6 +22,7 @@ import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
+import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
@@ -591,7 +592,10 @@ async function resolvePublishHost(exec: DockerExec): Promise<string> {
 // image.
 export async function refreshDockerfile(cwd: string): Promise<{ changed: boolean }> {
   const cfg = await loadTypeclawConfig(cwd)
-  const next = buildDockerfile(cfg.docker.file, { baseImageVersion: resolveBaseImageVersion(cwd) })
+  const next = buildDockerfile(cfg.docker.file, {
+    baseImageVersion: resolveBaseImageVersion(cwd),
+    cjkFontsAuto: hostLocaleIsCjk(),
+  })
   const path = join(cwd, DOCKERFILE)
   const prev = await readFile(path, 'utf8').catch(() => null)
   if (prev === next) return { changed: false }

@@ -563,8 +563,8 @@ describe('docker.file schema', () => {
     gh: true,
     python: true,
     tmux: true,
-    cjkFonts: true,
-    cloudflared: true,
+    cjkFonts: 'auto' as const,
+    cloudflared: false,
     xvfb: true,
     claudeCode: false,
     codexCli: false,
@@ -606,8 +606,8 @@ describe('docker.file schema', () => {
       gh: '2.40.0',
       python: true,
       tmux: false,
-      cjkFonts: true,
-      cloudflared: true,
+      cjkFonts: 'auto',
+      cloudflared: false,
       xvfb: true,
       claudeCode: false,
       codexCli: false,
@@ -615,9 +615,9 @@ describe('docker.file schema', () => {
     })
   })
 
-  test('cjkFonts defaults to true (Chromium renders CJK glyphs correctly out of the box; opt-out saves ~56MB)', () => {
+  test("cjkFonts defaults to 'auto' (resolved from host locale at start; non-CJK hosts skip the ~89MB layer)", () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.cjkFonts).toBe(true)
+    expect(parsed.docker.file.cjkFonts).toBe('auto')
   })
 
   test('cjkFonts: false is honored and merges with other defaults', () => {
@@ -629,15 +629,23 @@ describe('docker.file schema', () => {
     expect(parsed.docker.file.python).toBe(true)
   })
 
-  test('cjkFonts is boolean-only (the package is a metapackage tracking upstream Noto; no meaningful apt pin)', () => {
+  test('cjkFonts: true is honored (explicit force, bypassing host-locale detection)', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      docker: { file: { cjkFonts: true } },
+    })
+    expect(parsed.docker.file.cjkFonts).toBe(true)
+  })
+
+  test("cjkFonts accepts only boolean or 'auto' (arbitrary version strings are rejected — the package is a metapackage with no meaningful apt pin)", () => {
     expect(() =>
       configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { cjkFonts: '2.0' } } }),
     ).toThrow()
   })
 
-  test('cloudflared defaults to true so cloudflare-quick tunnels work on the next start without a separate Dockerfile edit', () => {
+  test('cloudflared defaults to false so non-tunnel agents skip the ~38MB binary; tunnel add / channel add flip it on', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.cloudflared).toBe(true)
+    expect(parsed.docker.file.cloudflared).toBe(false)
   })
 
   test('cloudflared: true is honored and merges with other defaults', () => {
