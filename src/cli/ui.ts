@@ -4,6 +4,7 @@ import { cancel, intro, isCancel, log, note, outro, spinner as clackSpinner } fr
 
 import { buildDiscordInviteUrl, deriveAppIdFromBotToken } from '@/channels/adapters/discord-bot-invite'
 import { type AutoUpgradeOutcome, describeAutoUpgrade } from '@/init/auto-upgrade'
+import { COMPACT_WORDMARK, WORDMARK_LINES, WORDMARK_WIDTH } from '@/shared/wordmark'
 
 export { cancel, intro, isCancel, log, note, outro }
 
@@ -59,6 +60,69 @@ export const c = {
 export function link(text: string, url: string): string {
   if (!colorsEnabled()) return `${text} (${url})`
   return `\u001b]8;;${url}\u0007${text}\u001b]8;;\u0007`
+}
+
+// Brand truecolor sampled from the typeey mascot, matching src/tui/theme.ts.
+// `c`/styleText only carry the 16 named colors, so the cornflower/amber accents
+// are emitted as raw 24-bit SGR — gated on colorsEnabled() so NO_COLOR and
+// piped output never see an escape.
+const CORNFLOWER_FG = '\x1b[38;2;91;127;212m'
+const AMBER_FG = '\x1b[38;2;231;143;55m'
+const RESET = '\x1b[0m'
+const BOLD = '\x1b[1m'
+const DIM = '\x1b[2m'
+
+const INIT_TAGLINE = 'the TypeScript-native agent runtime'
+
+export function cornflower(s: string): string {
+  if (!colorsEnabled()) return s
+  return `${CORNFLOWER_FG}${s}${RESET}`
+}
+
+export type InitWelcomeOptions = {
+  isTty: boolean
+  columns: number
+  colorsEnabled: boolean
+}
+
+export function renderInitWelcome(opts: InitWelcomeOptions): string {
+  // Non-TTY (piped/CI): emit nothing so captured/redirected output stays clean.
+  if (!opts.isTty) return ''
+  const tagline = opts.colorsEnabled ? `${DIM}${INIT_TAGLINE}${RESET}` : INIT_TAGLINE
+  if (opts.columns < WORDMARK_WIDTH + 2) {
+    const mark = opts.colorsEnabled ? `${BOLD}${CORNFLOWER_FG}${COMPACT_WORDMARK}${RESET}` : COMPACT_WORDMARK
+    return `${mark}\n${tagline}`
+  }
+  const art = opts.colorsEnabled
+    ? WORDMARK_LINES.map((line) => `${CORNFLOWER_FG}${line}${RESET}`).join('\n')
+    : WORDMARK_LINES.join('\n')
+  return `${art}\n${tagline}`
+}
+
+export function printInitWelcome(output: NodeJS.WritableStream = process.stdout): void {
+  const banner = renderInitWelcome({
+    isTty: Boolean(process.stdout.isTTY),
+    columns: process.stdout.columns ?? 80,
+    colorsEnabled: colorsEnabled(),
+  })
+  if (banner === '') return
+  // Pad above (clear the shell prompt) and below (separate from clack's intro).
+  output.write(`\n${banner}\n\n`)
+}
+
+export function renderHatchedFlourish(opts: { isTty: boolean; colorsEnabled: boolean }): string {
+  if (!opts.isTty) return ''
+  if (!opts.colorsEnabled) return '✦ hatched!'
+  return `${AMBER_FG}✦${RESET} ${CORNFLOWER_FG}hatched!${RESET}`
+}
+
+export function printHatchedFlourish(output: NodeJS.WritableStream = process.stdout): void {
+  const line = renderHatchedFlourish({
+    isTty: Boolean(process.stdout.isTTY),
+    colorsEnabled: colorsEnabled(),
+  })
+  if (line === '') return
+  output.write(`${line}\n`)
 }
 
 export type Spinner = {
