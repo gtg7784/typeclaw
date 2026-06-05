@@ -44,6 +44,7 @@ function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): Cha
     removeReaction: async () => ({ ok: true }),
     registerTyping: () => {},
     unregisterTyping: () => {},
+    setTypingCapability: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

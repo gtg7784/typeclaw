@@ -36,6 +36,7 @@ function fakeRouter(handlers: {
     removeReaction: async () => ({ ok: true }),
     registerTyping: () => {},
     unregisterTyping: () => {},
+    setTypingCapability: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

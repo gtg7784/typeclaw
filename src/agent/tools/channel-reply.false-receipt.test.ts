@@ -27,6 +27,7 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
     removeReaction: async () => ({ ok: true }),
     registerTyping: () => {},
     unregisterTyping: () => {},
+    setTypingCapability: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

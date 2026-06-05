@@ -18,6 +18,7 @@ function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): C
     react,
     registerTyping: () => {},
     unregisterTyping: () => {},
+    setTypingCapability: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

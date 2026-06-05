@@ -659,6 +659,11 @@ export type ChannelRouter = {
   removeReaction: (req: RemoveReactionRequest) => Promise<ReactionResult>
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
+  // Deliberately separate from registerTyping: github registers a no-op typing
+  // callback (no typing API) yet must stay typing-less, so "has a callback" is
+  // the wrong signal. autoReactOnEngage reads this to post :eyes: only as a
+  // fallback when no visible typing exists. Unset defaults to false.
+  setTypingCapability: (adapter: ChannelKey['adapter'], supported: boolean) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   // Self-identity is a per-adapter singleton (one bot account per adapter),
@@ -953,6 +958,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const reactionCallbacks = new Map<ChannelKey['adapter'], Set<ReactionCallback>>()
   const removeReactionCallbacks = new Map<ChannelKey['adapter'], Set<RemoveReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
+  const typingCapableAdapters = new Set<ChannelKey['adapter']>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
   const selfIdentityResolvers = new Map<ChannelKey['adapter'], ChannelSelfIdentityResolver>()
@@ -2522,6 +2528,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     typingCallbacks.get(adapter)?.delete(cb)
   }
 
+  const setTypingCapability = (adapter: ChannelKey['adapter'], supported: boolean): void => {
+    if (supported) typingCapableAdapters.add(adapter)
+    else typingCapableAdapters.delete(adapter)
+  }
+
   const registerChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
     let set = channelNameResolvers.get(adapter)
     if (!set) {
@@ -3550,6 +3561,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     removeReaction,
     registerTyping,
     unregisterTyping,
+    setTypingCapability,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
     registerSelfIdentity,
