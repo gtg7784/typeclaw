@@ -26,9 +26,20 @@ export function createGithubEffectiveApprovalResolver(deps: {
     const reviews = await fetchReviews(fetchImpl, token, owner, repo, prNumber)
     if (reviews === null) return { ok: false }
 
-    const alreadyApproved = reviews.some((r) => r.state === 'APPROVED' && isSelf(r.login, r.isBot, self))
-    return { ok: true, alreadyApproved }
+    const lastDecisive = reviews.filter((r) => isSelf(r.login, r.isBot, self) && isDecisive(r.state)).at(-1)
+    return { ok: true, alreadyApproved: lastDecisive?.state === 'APPROVED' }
   }
+}
+
+// A bot's effective review is its LATEST decisive one. COMMENTED/PENDING are
+// non-deciding noise that must not clear an earlier APPROVED/CHANGES_REQUESTED;
+// a later CHANGES_REQUESTED or DISMISSED supersedes an earlier APPROVED. The
+// reviews endpoint returns rows in chronological order, so the last decisive
+// row wins. Mirrors src/channels/adapters/github/review-state.ts.
+const DECISIVE = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'])
+
+function isDecisive(state: string): boolean {
+  return DECISIVE.has(state)
 }
 
 type ReviewRow = { state: string; login: string; isBot: boolean }

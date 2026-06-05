@@ -55,6 +55,48 @@ describe('github effective-approval resolver', () => {
     expect(await resolve({ workspace: WS, prNumber: 7 })).toEqual({ ok: true, alreadyApproved: false })
   })
 
+  test('reports not approved when a later bot CHANGES_REQUESTED supersedes an earlier APPROVED', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/30/reviews': jsonResponse([
+          { state: 'APPROVED', user: { login: 'review-bot', type: 'User' } },
+          { state: 'CHANGES_REQUESTED', user: { login: 'review-bot', type: 'User' } },
+        ]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 30 })).toEqual({ ok: true, alreadyApproved: false })
+  })
+
+  test('reports approved when a later bot APPROVED supersedes an earlier CHANGES_REQUESTED', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/31/reviews': jsonResponse([
+          { state: 'CHANGES_REQUESTED', user: { login: 'review-bot', type: 'User' } },
+          { state: 'APPROVED', user: { login: 'review-bot', type: 'User' } },
+        ]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 31 })).toEqual({ ok: true, alreadyApproved: true })
+  })
+
+  test('a later bot COMMENTED does not clear an earlier bot APPROVED', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/32/reviews': jsonResponse([
+          { state: 'APPROVED', user: { login: 'review-bot', type: 'User' } },
+          { state: 'COMMENTED', user: { login: 'review-bot', type: 'User' } },
+        ]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 32 })).toEqual({ ok: true, alreadyApproved: true })
+  })
+
   test('matches a GitHub App bot whose reviews login carries the [bot] suffix', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
