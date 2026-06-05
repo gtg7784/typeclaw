@@ -1,21 +1,28 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { SLACK_SLASH_COMMAND_NAMES } from '@/channels/adapters/slack-bot'
+import { WORDMARK_LINES } from '@/shared/wordmark'
 
 import {
   c,
+  cornflower,
   done,
   errorLine,
   link,
   prepareStdinForClack,
   printDiscordInviteHint,
   printSlackAppManifestSetup,
+  renderHatchedFlourish,
+  renderInitWelcome,
   renderStartSuccess,
   SLACK_APP_MANIFEST,
   spinner,
   successLine,
   type StartLikeResult,
 } from './ui'
+
+const CORNFLOWER_ESCAPE = '\x1b[38;2;91;127;212m'
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`)
 
 const ENV_KEYS = ['NO_COLOR', 'FORCE_COLOR'] as const
 
@@ -86,6 +93,67 @@ describe('link', () => {
   test('falls back to "text (url)" when NO_COLOR is set', () => {
     const out = withNoColor(() => link('Docs', 'https://example.com'))
     expect(out).toBe('Docs (https://example.com)')
+  })
+})
+
+describe('cornflower', () => {
+  test('wraps text in 24-bit cornflower SGR under forced color', () => {
+    const out = withForcedColor(() => cornflower('●'))
+    expect(out).toBe(`${CORNFLOWER_ESCAPE}●\x1b[0m`)
+  })
+
+  test('returns the raw string under NO_COLOR', () => {
+    expect(withNoColor(() => cornflower('●'))).toBe('●')
+  })
+})
+
+describe('renderInitWelcome', () => {
+  test('emits the full 6-row art with cornflower color when colors are on', () => {
+    const out = renderInitWelcome({ isTty: true, columns: 120, colorsEnabled: true })
+    expect(out).toContain(CORNFLOWER_ESCAPE)
+    expect(out).toContain(WORDMARK_LINES[0]!)
+    expect(out).toContain('the TypeScript-native agent runtime')
+  })
+
+  test('emits plain art with ZERO escapes when colors are off (NO_COLOR)', () => {
+    const out = renderInitWelcome({ isTty: true, columns: 120, colorsEnabled: false })
+    expect(out).toContain(WORDMARK_LINES[0]!)
+    expect(ANSI_PATTERN.test(out)).toBe(false)
+  })
+
+  test('falls back to the compact wordmark on a narrow terminal', () => {
+    const out = renderInitWelcome({ isTty: true, columns: 40, colorsEnabled: true })
+    expect(out).toContain('typeclaw')
+    expect(out).not.toContain(WORDMARK_LINES[0]!)
+  })
+
+  test('narrow + NO_COLOR yields a plain single-line wordmark with no escapes', () => {
+    const out = renderInitWelcome({ isTty: true, columns: 40, colorsEnabled: false })
+    expect(out.split('\n')[0]).toBe('typeclaw')
+    expect(ANSI_PATTERN.test(out)).toBe(false)
+  })
+
+  test('emits nothing when stdout is not a TTY (piped/CI)', () => {
+    expect(renderInitWelcome({ isTty: false, columns: 120, colorsEnabled: true })).toBe('')
+  })
+})
+
+describe('renderHatchedFlourish', () => {
+  test('emits a single brand-colored line when colors are on', () => {
+    const out = renderHatchedFlourish({ isTty: true, colorsEnabled: true })
+    expect(out).toContain('hatched!')
+    expect(out).toContain(CORNFLOWER_ESCAPE)
+    expect(out).not.toContain('\n')
+  })
+
+  test('emits a plain line with no escapes under NO_COLOR', () => {
+    const out = renderHatchedFlourish({ isTty: true, colorsEnabled: false })
+    expect(out).toBe('✦ hatched!')
+    expect(ANSI_PATTERN.test(out)).toBe(false)
+  })
+
+  test('emits nothing when stdout is not a TTY', () => {
+    expect(renderHatchedFlourish({ isTty: false, colorsEnabled: true })).toBe('')
   })
 })
 

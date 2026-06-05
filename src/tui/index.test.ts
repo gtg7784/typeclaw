@@ -53,6 +53,15 @@ class FakeTerminal implements Terminal {
   visible(): string {
     return stripAnsi(this.joined())
   }
+
+  // pi-tui repaints the whole viewport on each render and each repaint is one
+  // write, so counting frames that contain a substring distinguishes a widget
+  // that was removed (appears in a bounded number of frames) from one that
+  // lingers (appears in every later repaint too). `visible()` can't see this —
+  // it's the flattened byte history where removed widgets still show once.
+  frameCount(substring: string): number {
+    return this.written.filter((frame) => stripAnsi(frame).includes(substring)).length
+  }
 }
 
 type FakeClient = Client & {
@@ -190,6 +199,54 @@ describe('createTui', () => {
     expect(client.sent).toEqual([{ type: 'prompt', text: '<hatching>secret</hatching>\n\nHello!' }])
     expect(terminal.visible()).toContain('> Hello!')
     expect(terminal.visible()).not.toContain('secret')
+  })
+
+  test('renders the startup banner with the session id on connect', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-banner', serverVersion: '1.2.3' })
+
+    // when
+    const tui = createTui({ url: 'ws://ignored', createClient: async () => client, createTerminal: () => terminal })
+    const runPromise = tui.run()
+    await flush()
+
+    // then
+    const visible = terminal.visible()
+    expect(visible).toContain('session')
+    expect(visible).toContain('sid-banner')
+    expect(visible).toContain('v1.2.3')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('updates the bottom status bar with token usage when a turn completes', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient({ autoDoneOnPrompt: false })
+    client.emit({ type: 'connected', sessionId: 'sid-usage' })
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: 'go',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    client.emit({ type: 'done', usage: { input: 1000, output: 11300, totalTokens: 12300, cost: 0.0042 } })
+    await flush()
+
+    // then
+    const visible = terminal.visible()
+    expect(visible).toContain('12.3k tok')
+    expect(visible).toContain('$0.0042')
+
+    client.triggerClose()
+    await runPromise
   })
 
   test('streams assistant text into the chat history (user input is not overwritten)', async () => {
@@ -516,7 +573,7 @@ describe('createTui', () => {
     expect(client.sent).toEqual([{ type: 'reload' }])
     expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
     const visible = terminal.visible()
-    expect(visible).toContain('reloading...')
+    expect(visible).toContain('reloading…')
     expect(visible).toContain('● [cron] loaded 1 job')
     expect(visible).toContain('● [channels] bad config')
 
@@ -591,9 +648,14 @@ describe('createTui', () => {
     expect(client.sent).toEqual([{ type: 'restart' }])
     expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
     const visible = terminal.visible()
-    expect(visible).toContain('restart requested... reconnecting when the new container is up')
+    expect(visible).toContain('restart requested… reconnecting when the new container is up')
     expect(visible).toContain('restart scheduled; reconnecting when the new container is up')
     expect(visible).toContain('restart failed: denied')
+    // Regression guard: the loader is torn down on the first restart_result, so
+    // it appears in exactly one repaint (the pre-result spin). If it leaked into
+    // later frames the restart status would read as still-in-flight after the
+    // server already replied.
+    expect(terminal.frameCount('restart requested…')).toBe(1)
 
     client.triggerClose()
     await runPromise

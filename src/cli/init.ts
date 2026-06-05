@@ -36,7 +36,16 @@ import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from 
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
-import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
+import {
+  c,
+  cornflower,
+  done,
+  errorLine,
+  printDiscordInviteHint,
+  printHatchedFlourish,
+  printInitWelcome,
+  printSlackAppManifestSetup,
+} from './ui'
 
 // ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
 // aliases both to the same "cancel" action — there's no way to tell them
@@ -119,6 +128,7 @@ export const init = defineCommand({
       }
     }
 
+    printInitWelcome()
     intro('Initializing TypeClaw...')
     log.info('Press ESC at any prompt to go back. Press ESC twice in a row to abort.')
 
@@ -272,7 +282,8 @@ export const init = defineCommand({
           'Claim ownership before chatting',
         )
       }
-      done({ title: c.green('Hatched. Your agent is ready.'), hints })
+      printHatchedFlourish()
+      done({ title: `${cornflower('✓')} ${c.bold('Hatched.')} Your agent is ready.`, hints })
     }
   },
 })
