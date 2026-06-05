@@ -1,13 +1,25 @@
-import { Editor, Key, Markdown, matchesKey, ProcessTerminal, type Terminal, Text, TUI } from '@mariozechner/pi-tui'
+import {
+  Editor,
+  Key,
+  Loader,
+  Markdown,
+  matchesKey,
+  ProcessTerminal,
+  type Terminal,
+  Text,
+  TUI,
+} from '@mariozechner/pi-tui'
 
 import { parseCommand } from '@/commands'
 
+import { formatBanner } from './banner'
 import { createClient as createClientDefault, type Client } from './client'
 import {
+  formatAssistantHeader,
   formatQueuePanel,
-  formatTimestamp,
   formatToolEnd,
   formatToolStart,
+  formatUsageSummary,
   formatUserPromptHistory,
   withTimestamp,
 } from './format'
@@ -118,29 +130,58 @@ export function createTui({
     if (handshake === null) return { reason: 'connectFailed' }
 
     const { sessionId, serverVersion } = handshake
-    status.setText(colors.dim(`session: ${sessionId}`))
+    // The banner card already carries session id, version, and url, so it
+    // supersedes the old one-line session status in place (status is child[0],
+    // pinned above all scrollback).
+    status.setText(formatBanner({ sessionId, displayUrl, ...(serverVersion !== undefined ? { serverVersion } : {}) }))
     tui.requestRender()
 
     const editor = new Editor(tui, editorTheme, { paddingX: 0 })
+    const statusBar = new Text('', 0, 0)
     let replyInFlight = false
     let onReplyDone: (() => void) | null = null
     let currentAssistant: Markdown | null = null
     let currentAssistantText = ''
     let queuePanel: Text | null = null
+    let thinkingLoader: Loader | null = null
+    let reloadLoader: Loader | null = null
+    let restartLoader: Loader | null = null
+    let usageLabel: string | null = null
+    let connectionLabel = 'connected'
+
+    const shortSessionId = sessionId.length > 14 ? `${sessionId.slice(0, 14)}…` : sessionId
+    const refreshStatusBar = () => {
+      const parts = [
+        colors.dim(connectionLabel),
+        colors.dim(`session ${shortSessionId}`),
+        serverVersion !== undefined ? colors.dim(`v${serverVersion}`) : null,
+        usageLabel !== null ? colors.accent(usageLabel) : null,
+      ].filter((part): part is string => part !== null)
+      statusBar.setText(parts.join(colors.dim('  ·  ')))
+    }
+    refreshStatusBar()
 
     // Pi-tui's Container.addChild appends to the end of the children array.
-    // The editor must remain the LAST child at all times so it stays pinned
-    // to the bottom of the viewport, with chat history scrolling above it.
-    // The queue panel, when present, sits immediately ABOVE the editor (so
-    // the layout is [...history, queuePanel?, editor]). Any new history entry
-    // is inserted by stripping the queue panel + editor from the tail,
-    // appending the entry, then re-appending them in order.
-    const appendHistory = (component: Text | Markdown) => {
-      if (queuePanel) tui.removeChild(queuePanel)
-      tui.removeChild(editor)
-      tui.addChild(component)
+    // The bottom tail is pinned as [...history, queuePanel?, editor, statusBar]:
+    // the editor stays above the persistent status bar, and the queue panel,
+    // when present, sits just above the editor. Any new history entry is
+    // inserted by stripping that tail, appending the entry, then re-appending
+    // the tail in order so nothing ever renders below the status bar.
+    const reattachTail = () => {
       if (queuePanel) tui.addChild(queuePanel)
       tui.addChild(editor)
+      tui.addChild(statusBar)
+    }
+    const detachTail = () => {
+      if (queuePanel) tui.removeChild(queuePanel)
+      tui.removeChild(editor)
+      tui.removeChild(statusBar)
+    }
+
+    const appendHistory = (component: Text | Markdown) => {
+      detachTail()
+      tui.addChild(component)
+      reattachTail()
     }
 
     const updateQueuePanel = (pending: ReadonlyArray<{ id: string; text: string; ts: number }>) => {
@@ -156,12 +197,34 @@ export function createTui({
       if (queuePanel) {
         queuePanel.setText(text)
       } else {
-        queuePanel = new Text(text, 0, 0)
         tui.removeChild(editor)
+        tui.removeChild(statusBar)
+        queuePanel = new Text(text, 0, 0)
         tui.addChild(queuePanel)
         tui.addChild(editor)
+        tui.addChild(statusBar)
       }
       tui.requestRender()
+    }
+
+    const showThinking = () => {
+      if (thinkingLoader !== null) return
+      const loader = new Loader(tui, colors.accent, colors.dim, 'thinking…')
+      thinkingLoader = loader
+      appendHistory(loader)
+      loader.start()
+      tui.requestRender()
+    }
+    const hideThinking = () => {
+      if (thinkingLoader === null) return
+      thinkingLoader.stop()
+      tui.removeChild(thinkingLoader)
+      thinkingLoader = null
+    }
+    const stopAllLoaders = () => {
+      thinkingLoader?.stop()
+      reloadLoader?.stop()
+      restartLoader?.stop()
     }
 
     // Reset between text segments so a new Markdown block is created after
@@ -174,19 +237,20 @@ export function createTui({
     }
 
     const finishAssistantTurn = () => {
+      hideThinking()
       sealAssistantBlock()
       replyInFlight = false
       onReplyDone?.()
       onReplyDone = null
     }
 
-    // A Markdown block can't carry an ANSI timestamp prefix (it'd be parsed as
-    // markdown), so the assistant turn's timestamp is a separate dim Text line
-    // emitted just above the block when it's first created — stamped with the
-    // first delta's server `ts`.
+    // A Markdown block can't carry an ANSI header prefix (it'd be parsed as
+    // markdown), so the assistant turn's boxed header (label + timestamp) is a
+    // separate Text line emitted just above the block when it's first created —
+    // stamped with the first delta's server `ts`.
     const ensureAssistantBlock = (ts: number | undefined): Markdown => {
       if (currentAssistant) return currentAssistant
-      appendHistory(new Text(formatTimestamp(ts), 0, 0))
+      appendHistory(new Text(formatAssistantHeader(ts), 0, 0))
       const md = new Markdown('', 0, 0, markdownTheme)
       currentAssistant = md
       currentAssistantText = ''
@@ -198,10 +262,12 @@ export function createTui({
       switch (msg.type) {
         case 'prompt_started': {
           appendHistory(new Text(withTimestamp(msg.ts, formatUserPromptHistory(msg.text)), 0, 0))
+          if (replyInFlight) showThinking()
           tui.requestRender()
           break
         }
         case 'text_delta': {
+          hideThinking()
           const block = ensureAssistantBlock(msg.ts)
           currentAssistantText += msg.delta
           block.setText(currentAssistantText)
@@ -209,6 +275,7 @@ export function createTui({
           break
         }
         case 'tool_start': {
+          hideThinking()
           sealAssistantBlock()
           appendHistory(new Text(withTimestamp(msg.ts, formatToolStart(msg.name, msg.args)), 0, 0))
           tui.requestRender()
@@ -223,6 +290,10 @@ export function createTui({
           break
         }
         case 'done': {
+          if (msg.usage !== undefined) {
+            usageLabel = formatUsageSummary(msg.usage)
+            refreshStatusBar()
+          }
           finishAssistantTurn()
           tui.requestRender()
           break
@@ -238,6 +309,11 @@ export function createTui({
           break
         }
         case 'reload_result': {
+          if (reloadLoader !== null) {
+            reloadLoader.stop()
+            tui.removeChild(reloadLoader)
+            reloadLoader = null
+          }
           for (const result of msg.results) {
             const text = result.ok
               ? `${colors.green('●')} ${colors.bold(`[${result.scope}]`)} ${result.summary}`
@@ -271,6 +347,9 @@ export function createTui({
     }
 
     client.onClose(() => {
+      stopAllLoaders()
+      connectionLabel = 'disconnected'
+      refreshStatusBar()
       appendHistory(new Text(colors.dim('disconnected'), 0, 0))
       tui.requestRender()
       // A user-initiated detach/exit already closed the WS deliberately and
@@ -293,14 +372,27 @@ export function createTui({
       }
       if (command === 'reload') {
         client.send({ type: 'reload' })
-        appendHistory(new Text(colors.dim('reloading...'), 0, 0))
+        if (reloadLoader === null) {
+          const loader = new Loader(tui, colors.accent, colors.dim, 'reloading…')
+          reloadLoader = loader
+          appendHistory(loader)
+          loader.start()
+        }
         tui.requestRender()
         return true
       }
       client.send({ type: 'restart' })
-      appendHistory(
-        new Text(colors.yellow(colors.dim('restart requested... reconnecting when the new container is up')), 0, 0),
-      )
+      if (restartLoader === null) {
+        const loader = new Loader(
+          tui,
+          colors.yellow,
+          colors.dim,
+          'restart requested… reconnecting when the new container is up',
+        )
+        restartLoader = loader
+        appendHistory(loader)
+        loader.start()
+      }
       tui.requestRender()
       return true
     }
@@ -322,6 +414,7 @@ export function createTui({
     // settles 'lostConnection'. settle() is idempotent, so the first call wins —
     // settling the deliberate outcome first keeps the later onClose a no-op.
     const teardown = (): void => {
+      stopAllLoaders()
       tui.stop()
       client.close()
     }
@@ -365,6 +458,7 @@ export function createTui({
       void send(text)
     }
     tui.addChild(editor)
+    tui.addChild(statusBar)
     tui.setFocus(editor)
     tui.requestRender()
 

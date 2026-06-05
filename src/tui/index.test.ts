@@ -192,6 +192,54 @@ describe('createTui', () => {
     expect(terminal.visible()).not.toContain('secret')
   })
 
+  test('renders the startup banner with the session id on connect', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-banner', serverVersion: '1.2.3' })
+
+    // when
+    const tui = createTui({ url: 'ws://ignored', createClient: async () => client, createTerminal: () => terminal })
+    const runPromise = tui.run()
+    await flush()
+
+    // then
+    const visible = terminal.visible()
+    expect(visible).toContain('session')
+    expect(visible).toContain('sid-banner')
+    expect(visible).toContain('v1.2.3')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('updates the bottom status bar with token usage when a turn completes', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient({ autoDoneOnPrompt: false })
+    client.emit({ type: 'connected', sessionId: 'sid-usage' })
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: 'go',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    client.emit({ type: 'done', usage: { input: 1000, output: 11300, totalTokens: 12300, cost: 0.0042 } })
+    await flush()
+
+    // then
+    const visible = terminal.visible()
+    expect(visible).toContain('12.3k tok')
+    expect(visible).toContain('$0.0042')
+
+    client.triggerClose()
+    await runPromise
+  })
+
   test('streams assistant text into the chat history (user input is not overwritten)', async () => {
     // given: an in-flight stream that we drive chunk by chunk while the user types
     const terminal = new FakeTerminal()
@@ -516,7 +564,7 @@ describe('createTui', () => {
     expect(client.sent).toEqual([{ type: 'reload' }])
     expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
     const visible = terminal.visible()
-    expect(visible).toContain('reloading...')
+    expect(visible).toContain('reloading…')
     expect(visible).toContain('● [cron] loaded 1 job')
     expect(visible).toContain('● [channels] bad config')
 
@@ -591,7 +639,7 @@ describe('createTui', () => {
     expect(client.sent).toEqual([{ type: 'restart' }])
     expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
     const visible = terminal.visible()
-    expect(visible).toContain('restart requested... reconnecting when the new container is up')
+    expect(visible).toContain('restart requested… reconnecting when the new container is up')
     expect(visible).toContain('restart scheduled; reconnecting when the new container is up')
     expect(visible).toContain('restart failed: denied')
 

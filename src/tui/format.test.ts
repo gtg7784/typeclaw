@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatTimestamp, formatToolEnd, formatToolStart, withTimestamp } from './format'
+import {
+  formatAssistantHeader,
+  formatCost,
+  formatTimestamp,
+  formatTokenCount,
+  formatToolEnd,
+  formatToolStart,
+  formatUsageSummary,
+  withTimestamp,
+} from './format'
 
 const stripAnsi = (s: string) =>
   // oxlint-disable-next-line no-control-regex -- intentionally strips ANSI sequences from rendered output
@@ -248,5 +257,41 @@ describe('formatTimestamp', () => {
   test('withTimestamp prefixes the body with the time', () => {
     const ts = new Date(2026, 0, 2, 23, 59, 59).getTime()
     expect(visible(withTimestamp(ts, 'hello'))).toBe('23:59:59 hello')
+  })
+})
+
+describe('formatAssistantHeader', () => {
+  test('renders a typeclaw box header carrying the timestamp', () => {
+    const ts = new Date(2026, 0, 2, 9, 5, 7).getTime()
+    const out = visible(formatAssistantHeader(ts))
+    expect(out).toContain('╭─ typeclaw · 09:05:07')
+  })
+
+  test('falls back to the placeholder clock for undefined ts', () => {
+    expect(visible(formatAssistantHeader(undefined))).toContain('--:--:--')
+  })
+})
+
+describe('token and cost formatting', () => {
+  test('sub-1k token counts render verbatim', () => {
+    expect(formatTokenCount(999)).toBe('999')
+  })
+
+  test('thousands render with a single decimal, trailing .0 stripped', () => {
+    expect(formatTokenCount(1500)).toBe('1.5k')
+    expect(formatTokenCount(12300)).toBe('12.3k')
+    expect(formatTokenCount(12000)).toBe('12k')
+  })
+
+  test('hundreds of thousands round to whole k', () => {
+    expect(formatTokenCount(125000)).toBe('125k')
+  })
+
+  test('cost renders to four decimals', () => {
+    expect(formatCost(0.0042)).toBe('$0.0042')
+  })
+
+  test('usage summary combines tokens and cost', () => {
+    expect(formatUsageSummary({ totalTokens: 12300, cost: 0.0042 })).toBe('⚡ 12.3k tok · $0.0042')
   })
 })
