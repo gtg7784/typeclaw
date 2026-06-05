@@ -17,6 +17,10 @@ export type RereviewGuardInput = {
   thread: string | null
   text: string | undefined
   wantsResolve: boolean
+  // A mid-turn status reply (continue:true) is not the turn's receipt, so it
+  // suppresses the warn-tier escalation below — but never the explicit resolve,
+  // which is a real mutation. Mirrors the false-receipt guard's continue rule.
+  isContinue: boolean
   getReviewState: (req: { adapter: 'github'; workspace: string; chat: string }) => Promise<ReviewStateResult>
   workspace: string
 }
@@ -32,7 +36,7 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
   // a close-out ack in it ("Verified — that closes it") strands the block just
   // as a thread reply would. Only the resolve ACTION needs a thread; the
   // text-claim path fires regardless (caught by isCloseoutAttempt below).
-  if (!isCloseoutAttempt(input.wantsResolve, input.thread, input.text)) return ALLOW
+  if (!isCloseoutAttempt(input)) return ALLOW
 
   const state = await input.getReviewState({ adapter: 'github', workspace: input.workspace, chat: input.chat })
 
@@ -47,11 +51,17 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
 // Trigger when the model asks to resolve a thread (only meaningful with a
 // thread), OR when its reply reads as a close-out/verdict claim — the latter
 // strands the block whether or not it sits in a thread, so it fires for any PR
-// chat. Plain discussion replies (ignore/warn) do not fire.
-function isCloseoutAttempt(wantsResolve: boolean, thread: string | null, text: string | undefined): boolean {
-  if (wantsResolve && thread !== null) return true
-  const claim = classifyReviewClaim(text ?? '')
-  return claim === 'block-resolve' || claim === 'block-approve'
+// chat. Unlike the pure false-receipt classifier, this guard has the objective
+// review state available, so a warn-tier "looks good"/"lgtm" reply is escalated
+// to a closeout too: it only blocks when the bot actually holds a live
+// CHANGES_REQUESTED, so casual approval-shaped chatter on an unblocked PR still
+// posts. `continue:true` exempts warn-tier (mid-turn planning, not the receipt),
+// but never the explicit resolve action. Plain `ignore` text never fires.
+function isCloseoutAttempt(input: RereviewGuardInput): boolean {
+  if (input.wantsResolve && input.thread !== null) return true
+  const claim = classifyReviewClaim(input.text ?? '')
+  if (claim === 'block-resolve' || claim === 'block-approve') return true
+  return claim === 'warn' && !input.isContinue
 }
 
 function unverifiableReason(error: string): string {

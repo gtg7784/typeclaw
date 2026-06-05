@@ -919,4 +919,45 @@ describe('channel_reply re-review stranding guard', () => {
     expect(result.details.ok).toBe(true)
     expect(queried).toBe(false)
   })
+
+  test('blocks a warn-tier "Looks good" PR comment while the bot still blocks the PR (PR #649)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }) },
+      ),
+      origin: { adapter: 'github', workspace: 'acme/widgets', chat: 'pr:649', thread: null },
+    })
+
+    const result = await runTool(tool, {
+      text: 'Looks good — the remaining leak paths are fixed. Tests are green, so this is a solid cleanup. ✨',
+    })
+
+    expect(result.details.ok).toBe(false)
+    expect(calls).toHaveLength(0)
+    expect((result.content[0] as { text: string }).text).toContain('APPROVE')
+  })
+
+  test('allows a warn-tier "Looks good" PR comment when the bot holds no block', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { getReviewState: async () => ({ ok: true, selfBlocking: false, approve: true }) },
+      ),
+      origin: { adapter: 'github', workspace: 'acme/widgets', chat: 'pr:649', thread: null },
+    })
+
+    const result = await runTool(tool, { text: 'Looks good, nice work!' })
+
+    expect(result.details.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
 })

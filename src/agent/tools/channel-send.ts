@@ -187,6 +187,7 @@ export function createChannelSendTool({
         thread: params.thread ?? null,
         text: bodyText,
         wantsResolve,
+        isContinue: false,
         getReviewState: (req) => router.getReviewState(req),
       })
       if (rereview.block) {
