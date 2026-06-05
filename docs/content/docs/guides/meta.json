@@ -3,10 +3,10 @@
   "icon": "BookOpen",
   "pages": [
     "quickstart",
-    "first-channel",
     "first-cron",
-    "first-tunnel",
     "teach-the-agent",
+    "first-tunnel",
+    "add-a-channel",
     "write-a-plugin",
     "lock-down-a-public-channel",
     "deploy"

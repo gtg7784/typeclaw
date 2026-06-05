@@ -1,6 +1,6 @@
 ---
 title: Add a channel
-description: Wire the agent into Slack (or Discord, Telegram, GitHub) and have it answer
+description: Give the agent another inbox — Slack, Discord, Telegram, GitHub, or KakaoTalk
 icon: MessagesSquare
 ---
 
@@ -8,9 +8,11 @@ import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
 import { Callout } from 'fumadocs-ui/components/callout'
 import { Steps, Step } from 'fumadocs-ui/components/steps'
 
-A **channel** is any platform the agent talks through — Slack, Discord, Telegram, GitHub, KakaoTalk, plus the terminal UI you used in the [Quickstart](/docs/guides/quickstart). Same agent, many inboxes.
+A **channel** is any platform the agent talks through — Slack, Discord, Telegram, GitHub, KakaoTalk. Same agent, many inboxes.
 
-If you set up a channel during `typeclaw init`, you already have one wired — skip ahead to [pairing yourself](#pair-yourself-with-the-agent), or read on to add another. This guide wires up **Slack**, the most common case; the other platforms follow the same shape, with only the sign-in details differing (covered at the bottom).
+You already wired your **first** channel during `typeclaw init` (and the claim prompt there paired you as its owner). This guide is for adding **another** one — a second platform, or your first if you chose "skip" back in `init`. The flow is the same either way.
+
+It walks through **Slack**, the most common case; the other platforms follow the same shape, with only the sign-in details differing (covered at the bottom).
 
 ## Wire the agent into Slack
 
@@ -115,19 +117,19 @@ The agent picks up the new Slack connection without a full restart. (Slack uses 
 
 <Step>
 
-### Pair yourself with the agent
+### Pair yourself on the new platform
 
 If you message the bot in Slack right now, **nothing happens. That's not a bug.**
 
-TypeClaw doesn't answer people it doesn't recognize. Every incoming message is matched to a role, and anyone unrecognized is treated as a `guest` — who isn't allowed to talk to the agent at all. The message is dropped before the agent ever sees it. This is the safety floor: a stranger can't make your agent do anything until you've explicitly let them in.
+Being owner on your _first_ channel doesn't carry over automatically — the agent recognizes you per platform, by the account you're speaking from. On a brand-new platform you're an unrecognized author, which resolves to `guest`: no permission to talk, so the message is dropped before the agent ever sees it. That's the safety floor — a stranger on any platform can't make your agent do anything until you've explicitly let them in.
 
-To recognize _yourself_ as the owner:
+So pair yourself here too:
 
 ```sh
 typeclaw role claim --as owner --channel slack-bot
 ```
 
-The CLI prints a one-time code. DM that code to your bot from your Slack account. The agent matches it, records you as `owner`, and from then on it answers you.
+The CLI prints a one-time code. DM that code to your bot from your Slack account. The agent matches it, records you as `owner` on Slack, and from then on it answers you there.
 
 <Accordions>
 
@@ -232,4 +234,4 @@ The `typeclaw role claim` flow above is the easy way to get this right without h
 
 ---
 
-Next: [Schedule something](/docs/guides/first-cron) — make the agent do work on its own clock.
+Next: [Write a plugin](/docs/guides/write-a-plugin) — extend the agent with your own tools, skills, and channels.
