@@ -1033,11 +1033,18 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
   const mode: SystemPromptMode = options.mode ?? deriveSystemPromptMode(options.origin)
+  // Slim mode (cron/subagent) has no orchestration section, so it never reads
+  // the roster. Skip rendering it there — `renderPublicSubagentRoster` throws on
+  // a public subagent with a missing/blank `rosterDescription`, and a slim
+  // session must not fail on a roster it will never show.
   const subagentRoster =
-    options.subagentRegistry !== undefined
-      ? renderPublicSubagentRoster(options.subagentRegistry)
-      : DEFAULT_SUBAGENT_ROSTER
-  const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : buildDefaultSystemPrompt(subagentRoster)
+    mode === 'slim'
+      ? undefined
+      : options.subagentRegistry !== undefined
+        ? renderPublicSubagentRoster(options.subagentRegistry)
+        : DEFAULT_SUBAGENT_ROSTER
+  const basePrompt =
+    mode === 'slim' ? SLIM_SYSTEM_PROMPT : buildDefaultSystemPrompt(subagentRoster ?? DEFAULT_SUBAGENT_ROSTER)
 
   // Kick off the three independent I/O paths concurrently. Sequential awaits
   // here used to be the dominant cold-start cost amplifier: loadSelf is 2

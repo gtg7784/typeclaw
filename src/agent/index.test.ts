@@ -77,6 +77,35 @@ describe('createResourceLoader', () => {
     expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
   })
 
+  test('slim mode does not render or validate the public-subagent roster', async () => {
+    // given — a public subagent with a blank rosterDescription, which would
+    // make renderPublicSubagentRoster throw if it were called
+    const badRegistry: SubagentRegistry = {
+      offender: { systemPrompt: 'x', visibility: 'public', rosterDescription: '' },
+    }
+
+    // when / then — a slim session never shows the roster, so it must not throw
+    const loader = await createResourceLoader({
+      agentDir,
+      mode: 'slim',
+      subagentRegistry: badRegistry,
+    })
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(SLIM_SYSTEM_PROMPT)).toBe(true)
+  })
+
+  test('full mode surfaces a bad public rosterDescription as a thrown error', async () => {
+    // given
+    const badRegistry: SubagentRegistry = {
+      offender: { systemPrompt: 'x', visibility: 'public', rosterDescription: '' },
+    }
+
+    // when / then
+    await expect(createResourceLoader({ agentDir, mode: 'full', subagentRegistry: badRegistry })).rejects.toThrow(
+      /offender.*rosterDescription/,
+    )
+  })
+
   test('does not append SYSTEM.md files discovered by pi defaults', async () => {
     // Pi's DefaultResourceLoader auto-appends ~/.pi/agent/APPEND_SYSTEM.md and
     // .pi/APPEND_SYSTEM.md. Typeclaw owns the whole system prompt, so nothing
