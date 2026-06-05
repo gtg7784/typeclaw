@@ -1,14 +1,52 @@
 ---
 title: Schedule a job
-description: Cron the agent — prompts or shell commands, with per-job coalescing
+description: Have the agent do work on its own clock — just ask it to
 icon: Clock
 ---
 
-The agent doesn't need a human in the loop to do work. Cron jobs live in `cron.json` and fire on a schedule. Two kinds: `prompt` (a fresh agent session with a starter prompt) and `exec` (a shell command inside the container).
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
 
-## Write a job
+The agent doesn't need you in the loop to do work. You can give it jobs that run on a schedule — "every morning, summarize yesterday's commits and post them to #standup" — and it does them on its own clock.
 
-Create `cron.json` in your agent folder if it doesn't exist:
+## Just ask the agent
+
+The simplest way to schedule a job is to tell the agent what you want, in plain language, from the terminal or any channel where you're the owner:
+
+> _"Every weekday at 9am, summarize yesterday's commits in workspace/ and post the summary to #standup."_
+
+The agent sets up the schedule itself. Behind the scenes it's writing a small config file for you and reloading — you don't touch it. Ask it to "list my scheduled jobs" or "stop the standup summary" the same way.
+
+<Callout type="info" title="You don't edit config by hand">
+  Schedules live in a file the **agent** manages, not you. Asking it in plain language is the intended path — it knows
+  the format, validates it, and reloads itself. The exact file shape is in the [cron.json
+  reference](/docs/reference/cron-json) if you ever want to read what it wrote.
+</Callout>
+
+## Two kinds of job
+
+When you ask, you're really choosing between two things the agent can schedule:
+
+- **A prompt** — the agent wakes up on schedule with a starter instruction, like a fresh little task ("summarize the commits…"). This is what you want most of the time.
+- **A shell command** — a plain command runs inside the container on schedule (a backup script, a sync job). Ask for this when there's no thinking involved, just a command to run.
+
+You don't need to know which is which to ask — describe the outcome and the agent picks the right kind.
+
+## You're protected from a stranger scheduling things
+
+Here's the safety property that makes this trustworthy: **a job can only do what the person who scheduled it was allowed to do.**
+
+When you, as owner, ask for the standup summary, the job is stamped with your authority and can post to channels. If a low-privilege stranger in some channel tried to get the agent to schedule something, that job would be stamped with _their_ (near-zero) authority — so it couldn't post, couldn't push, couldn't touch anything. Privilege is fixed at scheduling time and can't be escalated when the job later runs.
+
+You don't configure any of this; it's automatic. The full reasoning is in the [Permissions model](/docs/concepts/permissions-model), and locking down public channels is its own [guide](/docs/guides/lock-down-a-public-channel).
+
+## Going deeper
+
+<Accordions>
+
+<Accordion title="What the agent actually writes (cron.json)">
+
+Scheduled jobs live in `cron.json` in the agent folder. A prompt job looks like this:
 
 ```json
 {
@@ -25,16 +63,13 @@ Create `cron.json` in your agent folder if it doesn't exist:
 }
 ```
 
-Every job needs an `id`, a 5-field cron `schedule` (no seconds), a `kind`, and a `scheduledByRole`. The role decides what the firing session is allowed to do — see [/concepts/permissions-model](/docs/concepts/permissions-model) for why provenance matters.
+Every job needs an `id`, a 5-field cron `schedule` (no seconds), a `kind`, and a `scheduledByRole` — the authority the firing session runs with. The full schema and field reference is at [cron.json](/docs/reference/cron-json). You can read this file to see what the agent set up; you generally won't write it by hand.
 
-```sh
-typeclaw reload
-typeclaw cron list
-```
+</Accordion>
 
-The job is now live. `cron list` shows every job registered in the running agent, including any plugins that contribute their own jobs.
+<Accordion title="A shell-command job (exec)">
 
-## A shell command instead
+An `exec` job runs a command instead of waking the agent:
 
 ```json
 {
@@ -46,22 +81,28 @@ The job is now live. `cron list` shows every job registered in the running agent
 }
 ```
 
-`command` is an argv array, not a shell string. If you want shell features (pipes, redirections), use `["sh", "-c", "your | command"]` — but be deliberate about it, because the agent's shell guards run on whatever you put in there.
+`command` is an argument list, not a shell line. For shell features like pipes you'd use `["sh", "-c", "your | command"]` — and the agent's shell guards still apply to whatever runs.
 
-## What happens when a slow job overlaps
+</Accordion>
 
-If a job is still running when its next tick fires, the next tick is **dropped** for that specific job — not queued. A 25-minute job that runs every 15 minutes will run, skip, run, skip, run; it won't pile up into 96 backlogged runs overnight.
+<Accordion title="What happens if a job runs long">
 
-This is per-job. Other jobs keep firing on their own schedules.
+If a job is still running when its next scheduled time comes around, that next run is **skipped** for that one job — not queued up. A 25-minute job set to run every 15 minutes will run, skip, run, skip; it never piles up into a backlog. Other jobs keep firing on their own schedules independently.
 
-## What "scheduledByRole" actually does
+</Accordion>
 
-When a `prompt` job fires, a session is created with the role stamped in `scheduledByRole`. The agent runs as that role. So a job stamped `scheduledByRole: "owner"` can post to channels, run git commands, and edit files inside the agent's permissioned surface; a job stamped `scheduledByRole: "guest"` can't even reply in a channel.
+<Accordion title="Checking what's scheduled from the CLI">
 
-This closes a class of laundering attacks where a low-privilege session would otherwise schedule itself a high-privilege future run. The role is stamped at scheduling time and enforced at firing time, end of story.
+```sh
+typeclaw cron list
+```
 
-If you hand-author a `cron.json` entry and forget `scheduledByRole`, TypeClaw rejects the file with an error on load. Add `"scheduledByRole": "owner"` (or whichever role is appropriate) yourself before running `typeclaw reload`.
+Shows every job registered in the running agent, including jobs that bundled plugins contribute on their own (like the nightly memory consolidation). The CLI is read-only here — it lists jobs but doesn't add them; that's the agent's job.
+
+</Accordion>
+
+</Accordions>
 
 ---
 
-Next: [Expose a port](/docs/guides/first-tunnel) — make the agent reachable from the public internet (or just from your other machine).
+Next: [Expose a port](/docs/guides/first-tunnel) — make the agent reachable from your other machine, or the public internet.

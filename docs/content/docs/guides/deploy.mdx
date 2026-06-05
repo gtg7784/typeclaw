@@ -1,14 +1,17 @@
 ---
 title: Deploy
-description: Running TypeClaw on a server, in CI, or across multiple agents
+description: Run the agent on a server instead of your laptop — almost nothing changes
 icon: Server
 ---
 
-TypeClaw was built to be deployable as-is — the same `typeclaw start` you run on your laptop works on a server. There's no separate runtime, no "production mode" config flag. What changes is the surrounding context: secrets come from env vars, you probably want auto-restart on host reboot, and you might want to run more than one agent on the same box.
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
 
-## The shape doesn't change
+The reassuring part: deploying is the same thing you already do. There's no "production mode," no separate build, no special runtime. The `typeclaw start` you run on your laptop is the same command you run on a server.
 
-Same agent folder. Same `typeclaw.json`. Same `typeclaw start`. The container is the unit; everything else is just how you launch it.
+## The whole deployment
+
+Copy the agent folder to your server and start it:
 
 ```sh
 ssh server
@@ -16,95 +19,84 @@ cd /opt/my-agent
 typeclaw start
 ```
 
-The first call on a host spawns `hostd` (the host-side daemon). It survives container restarts and reconnects. Killing the daemon is rarely useful; restarting your container is.
+That's it. Same folder, same config, same command. The container is the unit of deployment; the server is just a different place to launch it.
 
-## Secrets via env, not files
+What actually changes between laptop and server is small and optional: where credentials come from, whether it restarts itself after a reboot, and whether you're running more than one agent. Each is a box below — open the ones you need.
 
-On your laptop, `.env` and `secrets.json` are the natural places to store credentials. On a server those files are still gitignored, but you usually want a CI-managed env to override them. TypeClaw's policy is env-wins:
+<Callout type="info" title="Why deployment is boring (and that's the goal)">
+  The host side of TypeClaw is just a launcher — it starts a container and talks to it. It holds no agent state and
+  loads no plugin code. So there's nothing to "drift" on a server: it's a folder and a Docker image, the same on every
+  machine. The reasoning is in [How it's built](/docs/concepts/architecture).
+</Callout>
+
+## Common server needs
+
+<Accordions>
+
+<Accordion title="Credentials from the environment instead of files">
+
+On a server you usually want secrets to come from your environment (or your CI's secret store) rather than the `secrets.json` file. TypeClaw checks the environment first, so just export them before starting:
 
 ```sh
-export FIREWORKS_API_KEY=fw_xxx
-export SLACK_BOT_TOKEN=xoxb-xxx
+export FIREWORKS_API_KEY=...
+export SLACK_BOT_TOKEN=...
 typeclaw start
 ```
 
-Set in the host environment, no edit to `secrets.json` needed. The runtime resolves credentials from `process.env[canonicalName]` first, then `secrets.json` second. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for the full resolution order.
+No file edit needed — environment wins over `secrets.json`. The full resolution order is in [Secrets policy](/docs/concepts/secrets-policy). (If you run several agents that each need a _different_ key for the same provider, you can bind a custom env-var name per agent — the agent can set that up for you; see the [secrets reference](/docs/reference/secrets-json).)
 
-For custom env-var names (multiple agents with different OpenAI keys, say) bind explicitly in `secrets.json`:
+</Accordion>
 
-```json
-{
-  "providers": {
-    "openai": { "type": "api_key", "key": { "env": "MY_AGENT_OPENAI_KEY" } }
-  }
-}
-```
+<Accordion title="Restart automatically after a reboot or crash">
 
-## Auto-restart on host reboot
-
-Docker's restart policy handles this. TypeClaw doesn't add restart flags itself, but it doesn't fight them either — anything you'd normally set on `docker run` you can drop into `typeclaw.json#docker.runArgs.append`:
+Two layers. To restart the container if it crashes, have the agent add Docker's restart policy to its run arguments (`docker.runArgs.append` in `typeclaw.json`):
 
 ```json
-{
-  "docker": {
-    "runArgs": { "append": ["--restart", "unless-stopped"] }
-  }
-}
+{ "docker": { "runArgs": { "append": ["--restart", "unless-stopped"] } } }
 ```
 
-This is fine because the host stage `start` command rewrites the docker invocation on every call; the append is reapplied each time. For the boot-time piece — bringing the agent up after the host itself reboots — use a systemd unit that runs `typeclaw start` in the agent folder.
+To bring the agent up after the _host itself_ reboots, use a small systemd unit that runs `typeclaw start` in the agent folder. Together they keep the agent alive across both crashes and reboots.
 
-## Multiple agents on one host
+</Accordion>
 
-Each agent folder is its own container, its own state, its own port. There's no shared lifecycle, no orchestration manifest, no inter-agent networking magic — just folders that happen to share a host.
+<Accordion title="Running several agents on one server">
 
-`typeclaw compose` is a thin loop that runs per-agent commands across every immediate subdirectory of cwd:
+Each agent is its own folder, its own container, its own state — there's no shared anything. `typeclaw compose` is a thin convenience loop over every agent folder in the current directory:
 
 ```sh
-cd ~/agents/             # contains agent-a/, agent-b/, agent-c/
-typeclaw compose start             # docker run all of them
-typeclaw compose status            # one row per agent
-typeclaw compose logs -f           # interleaved
-typeclaw compose restart
-typeclaw compose stop
-typeclaw compose usage --since 7d  # token spend across the fleet
-typeclaw compose doctor            # diagnose all of them, summarized
+cd ~/agents/                       # holds agent-a/, agent-b/, ...
+typeclaw compose start
+typeclaw compose status
+typeclaw compose logs -f
+typeclaw compose usage --since 7d  # spend across all of them
+typeclaw compose doctor
 ```
 
-That's the whole compose model. It's deliberately small.
+That's the entire model — deliberately small. More in the [compose reference](/docs/reference/compose).
 
-## CI and version pinning
+</Accordion>
 
-Each agent's Dockerfile pins `ghcr.io/typeclaw/typeclaw-base:X.Y.Z` to the installed `typeclaw` version. CI that runs `typeclaw start` against an agent folder must either:
+<Accordion title="Upgrades, rollbacks, and CI">
 
-- install the same `typeclaw` version your agent's `package.json` declares (the normal path), or
-- accept that the per-agent Dockerfile will pin a base image tag matching whatever's in `node_modules/typeclaw/package.json#version`
+Each agent pins its base image to the exact `typeclaw` version in its `package.json`. To upgrade, bump that dependency and run `typeclaw start` — it regenerates and rebuilds with the new version. To roll back, downgrade the dependency and start again; old base images stay available, so the pin always finds them. Roll-forward and rollback are each one command. The release process is in [AGENTS.md](https://github.com/typeclaw/typeclaw/blob/main/AGENTS.md#release).
 
-If you bump `typeclaw` in your agent's `package.json`, the next `typeclaw start` regenerates the Dockerfile with the new pin, auto-rebuilds, and starts the new container. Roll-forward is one command.
+</Accordion>
 
-Rolling back is just downgrading the dependency and running `start` again. Old base images stay on GHCR; the version pin keeps reaching back to them. The release workflow is documented at [/AGENTS.md#release](https://github.com/typeclaw/typeclaw/blob/main/AGENTS.md#release).
-
-## Diagnosing the deployment
+<Accordion title="Checking on a deployment">
 
 ```sh
-typeclaw status                    # container + daemon state
-typeclaw doctor                    # host, agent folder, plugins
-typeclaw doctor --json             # for scripting / CI
-typeclaw doctor --only docker,config
-typeclaw usage                     # token spend summary
-typeclaw inspect <session-id>      # replay or tail a session
+typeclaw status                  # running? daemon connected?
+typeclaw doctor                  # check host, folder, plugins
+typeclaw usage                   # token spend
+typeclaw inspect <session-id>    # replay or live-tail a session
 ```
 
-`doctor` is safe to run anywhere; everything it does is read-only by default. `doctor --fix` is also safe — every fix is git-committed so you can audit and revert.
+`doctor` is read-only by default; `doctor --fix` is safe too — every fix it makes is git-committed so you can review and revert. `doctor --json` is there for CI.
 
-## What the host CLI does and doesn't do
+</Accordion>
 
-The host CLI is a launcher. It speaks to:
+</Accordions>
 
-- Docker, for `start` / `stop` / `restart` / `logs`
-- `hostd` over a Unix socket, for port-forward and supervisor RPCs
-- The agent's websocket, for `tui` / `reload` / `status`
+---
 
-It does not load plugins, run tools, or touch agent state. Everything the agent does, the agent does inside its container. This is the split that makes deployments boring — there's no "host configuration drift", there's just a folder and a docker image.
-
-For the full picture, [/concepts/architecture](/docs/concepts/architecture) is the load-bearing read.
+That's the guide chain. From here, the [Concepts](/docs/concepts/architecture) explain the why behind the design, and the [Reference](/docs/reference/cli) has every command, flag, and config field.

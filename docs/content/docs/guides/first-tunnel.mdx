@@ -1,71 +1,79 @@
 ---
 title: Expose a port
-description: Public URLs for inbound webhooks and ad-hoc browser exposure
+description: Reach a server inside the container — on your own machine, or from the public internet
 icon: Globe
 ---
 
-Two things people mean when they say "expose a port":
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
+import { Callout } from 'fumadocs-ui/components/callout'
 
-- **localhost access** — your dev server running inside the container should appear on `http://localhost:5173` on your laptop. TypeClaw does this automatically; no setup needed. Skip to the bottom of this page if that's all you want.
-- **public URL** — a `https://something.trycloudflare.com` URL that GitHub or your friend can hit. That's what tunnels are for.
+"Expose a port" means two different things, and most of the time you want the easy one:
 
-Both come from the same primitive: proxy `127.0.0.1:<port>` inside the container out to something. Different "something" depending on which one you want.
+- **Reach it yourself** — a dev server the agent is running inside its container should just show up at `http://localhost:5173` on your machine. This needs **zero setup** — it already works.
+- **Let the outside in** — a public `https://…` URL that GitHub's webhooks, or a friend, can reach. This is what a _tunnel_ is for, and you set it up with one command.
 
-## Public tunnel for a webhook
+## Reach a server on your own machine
 
-The GitHub adapter is the canonical case. GitHub's webhook delivery needs a URL it can POST to; your container is behind NAT.
+Nothing to do. When the agent starts a dev server inside its container — say a Vite app on port 5173 — TypeClaw automatically makes it appear at `http://localhost:5173` on your machine. Open it in your browser; the agent's server answers.
 
-```sh
-typeclaw channel add github
-```
+This even works for servers that only bind to "localhost" inside the container (plain `vite`, `next dev`), which a normal Docker port mapping can't reach. You don't have to do anything for it.
 
-The wizard offers to create a Cloudflare Quick tunnel automatically. Accept, and `typeclaw.json` ends up with:
+<Accordions>
+
+<Accordion title="Limiting or turning off auto port-forward">
+
+It's on by default for every port. To restrict it to a specific set, or switch it off, the agent can set the `portForward` field in `typeclaw.json` (a restart-required change):
 
 ```json
-{
-  "tunnels": [
-    {
-      "name": "github-webhook",
-      "provider": "cloudflare-quick",
-      "for": { "kind": "channel", "name": "github" }
-    }
-  ]
-}
+{ "portForward": { "allow": [5173, 3000] } }
 ```
 
-The `for: { kind: 'channel', name: 'github' }` link means the GitHub adapter subscribes to URL changes for this tunnel. Cloudflare Quick rotates the URL every time cloudflared restarts; the adapter notices and re-registers the webhook with GitHub. No config edits, no stale URLs.
+An empty list (`{ "portForward": { "allow": [] } }`) turns it off entirely. Field details are in the [typeclaw.json reference](/docs/reference/typeclaw-json). Just ask the agent to "only forward port 5173" and it makes the change.
 
-`tunnels[]` is restart-required (the tunnel manager reads it once at boot), so the first time you add a tunnel you need:
+</Accordion>
+
+</Accordions>
+
+## Give it a public URL
+
+When something _outside_ your network needs to reach the agent — GitHub delivering webhooks is the classic case — you need a public URL, because your container sits behind your router. That's a tunnel.
+
+Tunnels are set up from the command line (this one's on you, not the agent):
 
 ```sh
+typeclaw tunnel add demo --provider cloudflare-quick --upstream-port 5173
 typeclaw restart
 ```
 
-URL rotations from a running tunnel are live — those don't need a restart.
-
-## Ad-hoc exposure
-
-You built a dashboard and you want to show someone:
+That gives you a free `https://…trycloudflare.com` URL — no signup, no account — pointing at port 5173 inside the container. Manage it with:
 
 ```sh
-typeclaw tunnel add demo \
-  --provider cloudflare-quick \
-  --for-manual \
-  --upstream-port 5173
-
 typeclaw tunnel list
 typeclaw tunnel status demo
 typeclaw tunnel logs demo
 typeclaw tunnel remove demo
 ```
 
-`--for-manual` flags the tunnel as user-owned (vs `--for-channel` which scopes it to an adapter's webhook). `--upstream-port` is the container-side port the tunnel proxies to.
+<Callout type="info" title="For GitHub, the channel wizard does this for you">
+  If the public URL is for GitHub webhooks, you don't set the tunnel up separately — `typeclaw channel add github`
+  offers to create one as part of wiring the channel, and keeps it pointed at the right place automatically even when
+  the URL rotates. See [Add a channel](/docs/guides/first-channel) and the [Code reviewer
+  recipe](/docs/recipes/code-reviewer).
+</Callout>
 
-Trap to be aware of: some services pair a host-facing compatibility proxy with a separate in-container server (the bundled `agent-browser` plugin is the canonical example). The tunnel's `upstreamPort` must name the **in-container server**, not the proxy. Tunneling the proxy port silently double-hops and looks fine until something downstream times out.
+<Callout type="warn" title="One trap: tunnel the real server, not a proxy in front of it">
+  A few things (the bundled `agent-browser` dashboard is the example) run a small proxy on one port and the actual
+  server on another. Point the tunnel at the **actual server's** port. Tunnel the proxy by mistake and everything looks
+  fine until requests mysteriously time out.
+</Callout>
 
-## Your own URL
+## Going deeper
 
-If you already run a reverse proxy:
+<Accordions>
+
+<Accordion title="Already have your own domain / reverse proxy?">
+
+If you run your own reverse proxy and just want TypeClaw to use a URL you control, the agent can add an `external` tunnel to `typeclaw.json` that names your URL directly — no Cloudflare subprocess, no extra binary:
 
 ```json
 {
@@ -76,31 +84,23 @@ If you already run a reverse proxy:
 }
 ```
 
-No subprocess, no signup, no extra binary. TypeClaw uses the URL as-is; you handle the actual proxying upstream.
+You handle the proxying upstream; TypeClaw uses the URL as-is. Full shape in the [tunnel providers reference](/docs/reference/tunnel-providers).
 
-## Localhost access (auto port-forward)
+</Accordion>
 
-Different beast. When a process inside the container binds to `127.0.0.1:5173`, TypeClaw's hostd notices, opens a `Bun.listen` on the host's `127.0.0.1:5173`, and proxies bytes between them. You open `http://localhost:5173` in your browser; the agent's dev server answers.
+<Accordion title="How a channel tunnel stays linked to its adapter">
 
-This works for loopback-bound servers too (Vite without `--host`, Next.js dev) — which `docker run -p` cannot reach because the bridge IP doesn't route to the container's loopback. The relay runs inside the container's netns, so it does.
+A tunnel created for a channel carries a `for: { kind: 'channel', name: 'github' }` link. The adapter watches that tunnel for URL changes — Cloudflare's free tunnels get a fresh URL on every restart — and re-registers the webhook automatically, so you never chase a stale URL. This is why the GitHub wizard's tunnel "just keeps working." Reference: [tunnel providers](/docs/reference/tunnel-providers).
 
-It's on by default. To restrict:
+</Accordion>
 
-```json
-{
-  "portForward": { "allow": [5173, 3000] }
-}
-```
+<Accordion title="Why localhost forwarding works when Docker's -p doesn't">
 
-Or turn it off entirely:
+A server that binds only to `127.0.0.1` inside the container isn't reachable through a normal Docker port mapping, because the bridge network doesn't route to the container's loopback. TypeClaw's host daemon runs the forwarder _inside_ the container's network namespace and relays bytes out to your machine's `localhost`, so loopback-only dev servers (Vite without `--host`, Next.js dev) show up anyway. The deeper mechanics are in [Internals → tunnels](/docs/internals/tunnels).
 
-```json
-{
-  "portForward": { "allow": [] }
-}
-```
+</Accordion>
 
-`portForward` is restart-required (the broker is wired at container start).
+</Accordions>
 
 ---
 
