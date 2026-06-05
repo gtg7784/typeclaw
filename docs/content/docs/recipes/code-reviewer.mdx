@@ -51,7 +51,7 @@ It walks the whole setup interactively:
 - **Webhook port + secret** — defaults to `8975`; leave the secret blank and it auto-generates one.
 - **Repos** — comma-separated `owner/repo` you want the agent to watch.
 
-When it finishes, it **installs the repository webhooks for you** and enables the adapter. If the container is running, it offers to restart so the change takes effect; otherwise `typeclaw start` picks it up. See [Add a channel](/docs/guides/first-channel) for the shared flow and [/reference/channel-adapters](/docs/reference/channel-adapters) for the GitHub config the wizard writes.
+When it finishes, it **installs the repository webhooks for you** and enables the adapter. If the container is running, it offers to restart so the change takes effect; otherwise `typeclaw start` picks it up. See [Add a channel](/docs/guides/first-channel) for the shared flow and the [`github` adapter reference](/docs/reference/github) for the config the wizard writes.
 
 <Callout type="info" title="Or just ask the agent">
   If the agent is already running with an `owner` paired, you can skip the CLI and ask it in the TUI or a 1:1 DM — _"add
@@ -61,7 +61,7 @@ When it finishes, it **installs the repository webhooks for you** and enables th
 
 ## Scope events to pull-request activity
 
-The default GitHub event allowlist already covers reviews. If you want to narrow it to just the review path, the relevant events are `pull_request.review_requested`, `pull_request.review_request_removed`, `pull_request_review.submitted`, and `pull_request_review_comment.created` — keep `review_request_removed` so the agent still sees when a review request is withdrawn. Tell the agent to tighten `channels.github.eventAllowlist`, or adjust it and run `typeclaw reload`. See [/reference/channel-adapters](/docs/reference/channel-adapters) for the full event list.
+The default GitHub event allowlist already covers reviews. If you want to narrow it to just the review path, the relevant events are `pull_request.review_requested`, `pull_request.review_request_removed`, `pull_request_review.submitted`, and `pull_request_review_comment.created` — keep `review_request_removed` so the agent still sees when a review request is withdrawn. Tell the agent to tighten `channels.github.eventAllowlist`, or adjust it and run `typeclaw reload`. See the [`github` adapter reference](/docs/reference/github) for the full event list.
 
 <Callout type="info" title="App auth and the Contents permission">
   On a **public** repo an App only needs **Pull requests: read/write** to read the diff and post reviews. On a

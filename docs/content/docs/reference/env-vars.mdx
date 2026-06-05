@@ -54,15 +54,15 @@ Both follow the same rules: trailing slashes are stripped; a non-http(s) value f
 
 ## Channel credentials (env-wins)
 
-| Variable             | Adapter        | Field      |
-| -------------------- | -------------- | ---------- |
-| `SLACK_BOT_TOKEN`    | `slack-bot`    | `botToken` |
-| `SLACK_APP_TOKEN`    | `slack-bot`    | `appToken` |
-| `DISCORD_BOT_TOKEN`  | `discord-bot`  | `token`    |
-| `TELEGRAM_BOT_TOKEN` | `telegram-bot` | `token`    |
-| `GITHUB_TOKEN`       | `github`       | PAT path   |
+| Variable             | Adapter                                        | Field      |
+| -------------------- | ---------------------------------------------- | ---------- |
+| `SLACK_BOT_TOKEN`    | [`slack-bot`](/docs/reference/slack-bot)       | `botToken` |
+| `SLACK_APP_TOKEN`    | [`slack-bot`](/docs/reference/slack-bot)       | `appToken` |
+| `DISCORD_BOT_TOKEN`  | [`discord-bot`](/docs/reference/discord-bot)   | `token`    |
+| `TELEGRAM_BOT_TOKEN` | [`telegram-bot`](/docs/reference/telegram-bot) | `token`    |
+| `GITHUB_TOKEN`       | [`github`](/docs/reference/github)             | PAT path   |
 
-KakaoTalk does not have an env-wins path — credentials live exclusively in `secrets.json#channels.kakaotalk` because the renewal cron needs the structured per-account record.
+[KakaoTalk](/docs/reference/kakaotalk) does not have an env-wins path — credentials live exclusively in `secrets.json#channels.kakaotalk` because the renewal cron needs the structured per-account record.
 
 ## Container-side standard variables
 

@@ -1,0 +1,85 @@
+---
+title: Discord bot
+description: Gateway adapter — intents, invite URL, slash commands, and capabilities
+icon: MessagesSquare
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **gateway intents** (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+
+## Auth
+
+One token, stored in [`secrets.json`](/docs/reference/secrets-json):
+
+| Field                        | Value             |
+| ---------------------------- | ----------------- |
+| `channels.discord-bot.token` | Discord bot token |
+
+CLI: `typeclaw channel add discord-bot` (interactive, prints invite URL), `typeclaw channel set discord-bot` (rotate).
+
+<Callout type="warn" title="MESSAGE_CONTENT intent is required">
+  The `MESSAGE_CONTENT` privileged intent must be enabled in the Discord developer portal AND present in the gateway
+  bitmask. Without it, inbound messages arrive with empty content — the bot receives events but can't read what was
+  said.
+</Callout>
+
+## Invite
+
+The bot must be invited with `bot` + `applications.commands` scopes and permission bitfield `277025508416`. `typeclaw channel add discord-bot` prints a ready-to-click URL. Manual template:
+
+```
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=277025508416
+```
+
+If slash command registration returns 403, re-invite with `applications.commands` in scope.
+
+## Capabilities
+
+| Feature                  | Supported | Notes                                                                                                                               |
+| ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Outbound messages        | yes       |                                                                                                                                     |
+| Reactions (add + remove) | yes       |                                                                                                                                     |
+| Typing indicator         | yes       | Fire-and-forget; auto-expires ~10s; re-fired every 8s; no explicit stop                                                             |
+| Channel-name resolution  | yes       |                                                                                                                                     |
+| Self identity            | yes       |                                                                                                                                     |
+| History                  | yes       | Limit 100 messages                                                                                                                  |
+| Attachments              | yes       | Land in channel root even when session is in a thread (SDK posts multipart-only; text and file can't go in one threaded round-trip) |
+| Membership               | yes       | Requires `GUILD_MEMBERS` privileged intent; returns 403 without it                                                                  |
+
+## Slash commands
+
+`/help`, `/stop`, `/reload`, `/restart`. Auto-registered on connect.
+
+## Config
+
+```json
+{
+  "channels": {
+    "discord-bot": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `discord-bot`. Credentials live in [`secrets.json#channels.discord-bot`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)

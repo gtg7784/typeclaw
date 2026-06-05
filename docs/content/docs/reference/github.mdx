@@ -1,0 +1,145 @@
+---
+title: GitHub
+description: Webhook adapter — PAT vs App auth, review behavior, repos, and config
+icon: Github
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **webhook delivery** (public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+
+<Callout type="warn" title="Public URL required">
+The `github` adapter needs a public URL to receive webhook events. Set `channels.github.webhookUrl` in `typeclaw.json`, or configure a tunnel entry with `for: { kind: 'channel', name: 'github' }`. Without one, webhook registration is skipped and no events arrive. See [Add a tunnel](/docs/guides/first-tunnel).
+</Callout>
+
+## Auth
+
+Two modes. Both require `channels.github.webhookSecret` in [`secrets.json`](/docs/reference/secrets-json).
+
+### PAT mode
+
+```json
+{
+  "channels": {
+    "github": {
+      "auth": { "type": "pat", "token": "github_pat_…" },
+      "webhookSecret": "…"
+    }
+  }
+}
+```
+
+Fine-grained PAT. The bot acts as a real GitHub user. `GH_TOKEN` is seeded for ad-hoc `gh` commands.
+
+### GitHub App mode
+
+```json
+{
+  "channels": {
+    "github": {
+      "auth": { "type": "app", "appId": 123456, "privateKey": "-----BEGIN RSA PRIVATE KEY-----\n…" },
+      "webhookSecret": "…"
+    }
+  }
+}
+```
+
+Installations are auto-resolved per repo. A GitHub App can't be a `requested_reviewer` — use its [decoy user account](/docs/internals/github-decoy-reviewer) instead. `GH_TOKEN` is seeded only when all repos share one owner.
+
+## Adapter-specific config fields
+
+These extend the [shared base config](/docs/reference/channel-adapters) for `channels.github`:
+
+| Field            | Type                                      | Default              | Notes                                                     |
+| ---------------- | ----------------------------------------- | -------------------- | --------------------------------------------------------- |
+| `webhookUrl`     | string                                    | —                    | Public URL for webhook delivery; tunnel used when omitted |
+| `webhookPort`    | number                                    | `8975`               | Container-side port the webhook server listens on         |
+| `eventAllowlist` | string[]                                  | (11 defaults)        | Events that trigger the adapter                           |
+| `repos`          | string[]                                  | `[]`                 | `owner/name` pairs; hooks auto-registered on start        |
+| `review.on`      | `'review_requested' \| 'opened' \| 'off'` | `'review_requested'` | When to fire a review                                     |
+| `review.approve` | boolean                                   | `true`               | `false` downgrades APPROVE verdicts to COMMENT            |
+
+Default `eventAllowlist`:
+
+```
+issue_comment.created
+pull_request_review_comment.created
+discussion_comment.created
+issues.opened
+pull_request.opened
+pull_request.ready_for_review
+pull_request.review_requested
+pull_request.review_request_removed
+pull_request.synchronize
+discussion.created
+pull_request_review.submitted
+```
+
+## Capabilities
+
+| Feature                  | Supported | Notes                                     |
+| ------------------------ | --------- | ----------------------------------------- |
+| Outbound messages        | yes       |                                           |
+| Reactions (add + remove) | yes       |                                           |
+| Typing indicator         | no        | GitHub has no typing API                  |
+| Channel-name resolution  | yes       |                                           |
+| Self identity            | yes       |                                           |
+| History                  | yes       |                                           |
+| Attachments              | yes       |                                           |
+| Membership               | yes       |                                           |
+| Review threads           | yes       |                                           |
+| Review state             | yes       | APPROVE or COMMENT (see `review.approve`) |
+
+## Review behavior
+
+Reviews fire on the event named in `review.on` (default `review_requested`).
+
+- **PAT mode**: the bot is requested by its GitHub login.
+- **App mode**: request the [decoy user account](/docs/internals/github-decoy-reviewer); the App itself can't be a reviewer.
+- Team-reviewer requests are honored when the bot is a member of the requested team.
+
+## Webhook lifecycle
+
+- Hooks auto-register for each entry in `repos[]` on start.
+- On stop, only hooks created by this session are deleted.
+- A ~2s delay before registration allows for Cloudflare edge warmup.
+- On tunnel URL change, the adapter restarts and re-registers automatically.
+
+## Full config example
+
+```json
+{
+  "channels": {
+    "github": {
+      "enabled": true,
+      "webhookUrl": "https://hooks.example.com/github",
+      "webhookPort": 8975,
+      "repos": ["acme-corp/api", "acme-corp/frontend"],
+      "review": { "on": "review_requested", "approve": true },
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+CLI: `typeclaw channel add github` (interactive; offers to create a Cloudflare tunnel).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Add a tunnel](/docs/guides/first-tunnel)
+- [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`secrets.json` reference](/docs/reference/secrets-json)

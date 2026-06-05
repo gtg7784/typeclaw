@@ -12,7 +12,8 @@ true for assignees (`assignee` is also a user) and for `@`-mentions (an App's
 `[bot]` handle is not a mentionable account in the normal sense).
 
 This breaks the natural "assign the bot to review my PR" workflow for any
-TypeClaw agent running under App auth (`channels.github.auth.type: "app"`).
+TypeClaw agent running the [`github`](/docs/reference/github) adapter under App
+auth (`channels.github.auth.type: "app"`).
 
 ## The decoy-user pattern
 
