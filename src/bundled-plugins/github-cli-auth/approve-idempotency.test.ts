@@ -31,12 +31,35 @@ describe('approve idempotency guard', () => {
 
   test('blocks a second APPROVE while the first is still pending (concurrent sessions, same container)', async () => {
     const g = makeGuard({})
-    // First APPROVE reserves the PR but has not completed (tool.after not called yet).
+    // given: a first APPROVE that reserved the PR but has not completed (tool.after not called yet)
     const first = await g.guard({ callId: 'a1', workspace: WS, prNumber: 7, verdict: 'APPROVE' })
     expect(first).toBeNull()
     const second = await g.guard({ callId: 'a2', workspace: WS, prNumber: 7, verdict: 'APPROVE' })
     expect(second).not.toBeNull()
     expect(second?.block).toBe(true)
+  })
+
+  test('two APPROVE calls racing through guard() before either awaits the remote check yield exactly one allow', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => {
+        await gate
+        return { ok: true, alreadyApproved: false }
+      },
+    })
+    const both = Promise.all([
+      g.guard({ callId: 'a1', workspace: WS, prNumber: 21, verdict: 'APPROVE' }),
+      g.guard({ callId: 'a2', workspace: WS, prNumber: 21, verdict: 'APPROVE' }),
+    ])
+    release()
+    const [r1, r2] = await both
+    const allowed = [r1, r2].filter((r) => r === null)
+    const blocked = [r1, r2].filter((r) => r !== null)
+    expect(allowed).toHaveLength(1)
+    expect(blocked).toHaveLength(1)
   })
 
   test('blocks an APPROVE when the bot already effectively approved the PR on GitHub', async () => {

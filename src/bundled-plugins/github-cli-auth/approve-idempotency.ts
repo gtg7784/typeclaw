@@ -40,16 +40,23 @@ export function createApproveIdempotencyGuard(deps: {
     async guard(args): Promise<ApproveBlock | null> {
       if (args.verdict !== 'APPROVE') return null
       const key = prKey(args.workspace, args.prNumber)
+
+      // Reserve BEFORE the await so two calls racing into guard() for the same
+      // PR cannot both observe an empty set: the loser sees the winner's
+      // reservation and is blocked. The reservation is provisional until the
+      // remote check clears it.
       if (approvedOrPending.has(key)) return { block: true, reason: DUPLICATE_REASON }
+      approvedOrPending.add(key)
+      reservedByCall.set(args.callId, key)
 
       const remote = await deps.resolveEffectiveApproval({ workspace: args.workspace, prNumber: args.prNumber })
       if (remote.ok && remote.alreadyApproved) {
-        approvedOrPending.add(key)
+        // Already approved upstream: keep the PR locked but drop this call's
+        // claim so release() won't later unlock a PR that is genuinely approved.
+        reservedByCall.delete(args.callId)
         return { block: true, reason: DUPLICATE_REASON }
       }
 
-      approvedOrPending.add(key)
-      reservedByCall.set(args.callId, key)
       return null
     },
 
