@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { InboundMessage } from '@/channels/types'
 
 import { reconcileOpenPrs, type ReconcileOpenPrsOptions } from './reconcile-open-prs'
+import type { TeamMembershipChecker } from './team-membership'
 
 type PrFixture = {
   number: number
@@ -16,6 +17,7 @@ type PrFixture = {
   baseRef?: string
   updatedAt?: string
   requestedReviewers?: string[]
+  requestedTeams?: string[]
   selfReviewed?: boolean
   reviewerLogin?: string
   reviewerType?: 'User' | 'Bot'
@@ -32,7 +34,12 @@ function prJson(pr: PrFixture): Record<string, unknown> {
     head: { ref: pr.headRef ?? 'feature' },
     base: { ref: pr.baseRef ?? 'main' },
     requested_reviewers: (pr.requestedReviewers ?? []).map((login) => ({ login })),
+    requested_teams: (pr.requestedTeams ?? []).map((slug) => ({ slug })),
   }
+}
+
+function teamChecker(memberSlugs: readonly string[]): TeamMembershipChecker {
+  return async ({ slug }) => memberSlugs.includes(slug)
 }
 
 function reviewsJson(pr: PrFixture): Array<Record<string, unknown>> {
@@ -143,6 +150,34 @@ describe('reconcileOpenPrs', () => {
       }),
     )
     expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
+  test("reviewOn 'review_requested' replays when review is requested from a team the bot is in", async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        reviewOn: 'review_requested',
+        isBotInTeam: teamChecker(['reviewers']),
+        fetchImpl: fakeGithub([
+          { number: 7, id: 700, requestedTeams: ['reviewers'] },
+          { number: 8, id: 800, requestedTeams: ['other-team'] },
+        ]),
+      }),
+    )
+    expect(routed.map((m) => m.chat)).toEqual(['pr:7'])
+  })
+
+  test("reviewOn 'review_requested' skips team requests when no membership checker is provided", async () => {
+    const routed: InboundMessage[] = []
+    await reconcileOpenPrs(
+      baseOptions({
+        routed,
+        reviewOn: 'review_requested',
+        fetchImpl: fakeGithub([{ number: 7, id: 700, requestedTeams: ['reviewers'] }]),
+      }),
+    )
+    expect(routed).toHaveLength(0)
   })
 
   test('App decoy: matches the bare-slug requested reviewer and skips a decoy-opened PR', async () => {

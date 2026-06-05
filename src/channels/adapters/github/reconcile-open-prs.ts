@@ -3,6 +3,7 @@ import type { InboundMessage } from '@/channels/types'
 
 import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
+import type { TeamMembershipChecker } from './team-membership'
 
 // Catches up on review work that a live webhook delivery missed. The github
 // adapter only acts on deliveries it receives, so a `pull_request.opened` /
@@ -25,6 +26,11 @@ export type ReconcileOpenPrsOptions = {
   token: (context?: GithubAuthContext) => Promise<string>
   route: (message: InboundMessage) => void
   logger: { info: (m: string) => void; warn: (m: string) => void }
+  // Resolves whether the bot is a member of a requested team, gating
+  // team-requested reviews under review.on 'review_requested' (mirrors the
+  // live webhook path's isMyTeam check in classifyReviewRequest). Omitted in
+  // tests that don't exercise team requests; treated as "not a member".
+  isBotInTeam?: TeamMembershipChecker
   fetchImpl?: typeof fetch
 }
 
@@ -97,14 +103,30 @@ async function prNeedsReview(input: {
 
   if (options.reviewOn === 'review_requested') {
     // Only the explicit request wakes a review under this mode. A draft can
-    // still carry a request, so draft state is irrelevant here.
-    return isReviewRequestedFromSelf(pr, selfLogin, decoyLogin)
+    // still carry a request, so draft state is irrelevant here. Mirrors the
+    // live path's `isMeAsUser || isMyTeam`: a direct user request, OR a team
+    // request the bot is a member of.
+    if (isUserReviewRequestedFromSelf(pr, selfLogin, decoyLogin)) return true
+    return await isTeamReviewRequestedFromSelf(pr, target, selfLogin, options.isBotInTeam)
   }
 
   // reviewOn === 'opened': a non-draft PR the bot has not yet reviewed. Draft
   // PRs wait for the ready_for_review trigger, matching the live-webhook path.
   if (pr.draft) return false
   return !(await botAlreadyReviewed(fetchImpl, token, target, pr.number, selfLogin))
+}
+
+async function isTeamReviewRequestedFromSelf(
+  pr: OpenPr,
+  target: RepoTarget,
+  selfLogin: string,
+  isBotInTeam: TeamMembershipChecker | undefined,
+): Promise<boolean> {
+  if (isBotInTeam === undefined || pr.requestedTeamSlugs.length === 0) return false
+  for (const slug of pr.requestedTeamSlugs) {
+    if (await isBotInTeam({ org: target.owner, slug, login: selfLogin })) return true
+  }
+  return false
 }
 
 function buildSyntheticInbound(pr: OpenPr, target: RepoTarget): InboundMessage {
@@ -149,6 +171,7 @@ type OpenPr = {
   baseRef: string | null
   updatedAt: string
   requestedReviewerLogins: string[]
+  requestedTeamSlugs: string[]
 }
 
 function parseRepo(slug: string): RepoTarget | null {
@@ -204,7 +227,7 @@ async function botAlreadyReviewed(
   return false
 }
 
-function isReviewRequestedFromSelf(pr: OpenPr, selfLogin: string, decoyLogin: string | null): boolean {
+function isUserReviewRequestedFromSelf(pr: OpenPr, selfLogin: string, decoyLogin: string | null): boolean {
   return pr.requestedReviewerLogins.some(
     (login) => isSelfLogin(login, login.endsWith(BOT_LOGIN_SUFFIX), selfLogin) || login === decoyLogin,
   )
@@ -254,6 +277,7 @@ type PrRow = {
   head?: { ref?: unknown }
   base?: { ref?: unknown }
   requested_reviewers?: Array<{ login?: unknown }>
+  requested_teams?: Array<{ slug?: unknown }>
 }
 
 type ReviewRow = { user?: { login?: string; type?: string } }
@@ -277,5 +301,6 @@ function parsePrRow(row: PrRow): OpenPr | null {
     requestedReviewerLogins: (row.requested_reviewers ?? []).flatMap((r) =>
       typeof r.login === 'string' ? [r.login] : [],
     ),
+    requestedTeamSlugs: (row.requested_teams ?? []).flatMap((t) => (typeof t.slug === 'string' ? [t.slug] : [])),
   }
 }

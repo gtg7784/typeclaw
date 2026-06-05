@@ -349,6 +349,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           token: authToken,
           route: routeInbound,
           logger,
+          isBotInTeam,
           fetchImpl,
         }).catch((err: unknown) => {
           logger.warn(`[github] reconcile pass failed: ${err instanceof Error ? err.message : String(err)}`)
