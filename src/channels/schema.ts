@@ -192,8 +192,9 @@ export const SEEDED_GITHUB_EVENT_ALLOWLISTS: readonly (readonly string[])[] = [
 // prefix is implied by this field living under the review config); `off` is the
 // disable sentinel, matching the `engagement.stickiness: 'off'` convention:
 //   - 'review_requested' — review only when the bot is requested (default)
-//   - 'opened'           — review every non-draft PR as soon as it opens; draft
-//                          PRs are skipped until an explicit review_requested
+//   - 'opened'           — review every non-draft PR as soon as it opens; a draft
+//                          PR wakes no session and is reviewed once it turns ready
+//                          (ready_for_review) or the bot is explicitly requested
 //   - 'off'              — disable code review entirely
 export const GITHUB_REVIEW_ON_VALUES = ['review_requested', 'opened', 'off'] as const
 

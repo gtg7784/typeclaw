@@ -395,6 +395,16 @@ describe('classifyGithubInbound', () => {
       expect(msg?.text).toContain('requested your review on PR #7')
     })
 
+    it('review_requested on a draft PR triggers a review under the default config', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot', draft: true }),
+        'typeclaw-bot',
+      )
+      expect(msg?.isBotMention).toBe(true)
+      expect(msg?.text).toContain('requested your review on PR #7')
+    })
+
     describe("reviewOn: 'opened'", () => {
       it('synthesizes a review trigger for an opened PR', () => {
         const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { reviewOn: 'opened' })
@@ -427,13 +437,11 @@ describe('classifyGithubInbound', () => {
         expect(msg?.text).toContain('requested your review on PR #7')
       })
 
-      it('skips the auto-review on a draft PR, landing it as awareness-only context', () => {
+      it('skips a draft PR cleanly (null), deferring to the ready_for_review trigger', () => {
         const msg = classifyGithubInbound('pull_request', openedPayload({ draft: true }), 'typeclaw-bot', {
           reviewOn: 'opened',
         })
-        expect(msg?.chat).toBe('pr:7')
-        expect(msg?.isBotMention).toBe(false)
-        expect(msg?.text).not.toContain('Please review the changes line-by-line')
+        expect(msg).toBe(null)
       })
 
       it('still auto-reviews when draft is explicitly false', () => {
@@ -453,6 +461,14 @@ describe('classifyGithubInbound', () => {
         )
         expect(msg?.isBotMention).toBe(true)
         expect(msg?.text).toContain('requested your review on PR #7')
+      })
+
+      it('reviews a skipped draft once it turns ready (ready_for_review fires on the draft→ready transition)', () => {
+        const msg = classifyGithubInbound('pull_request', readyForReviewPayload(), 'typeclaw-bot', {
+          reviewOn: 'opened',
+        })
+        expect(msg?.isBotMention).toBe(true)
+        expect(msg?.text).toContain('Please review the changes line-by-line')
       })
 
       it('suppresses the review trigger when the bot opened its own PR (handler drops the self-authored event)', () => {
