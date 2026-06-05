@@ -6,11 +6,20 @@ type ReviewFixture = { id: number; login: string; state: string; isBot?: boolean
 
 type Page = { reviews: ReviewFixture[]; hasNextPage: boolean }
 
-function fakeRest(options: { pages: Page[]; seen?: { urls: string[] } }) {
+function fakeRest(options: { pages: Page[]; seen?: { urls: string[] }; reviewDecision?: string | null }) {
   let pageIndex = 0
   return Object.assign(
     async (url: string | URL | Request): Promise<Response> => {
-      if (options.seen) options.seen.urls.push(String(url))
+      const href = String(url)
+      if (options.seen) options.seen.urls.push(href)
+      if (href.endsWith('/graphql')) {
+        return new Response(
+          JSON.stringify({
+            data: { repository: { pullRequest: { reviewDecision: options.reviewDecision ?? null } } },
+          }),
+          { status: 200 },
+        )
+      }
       const page = options.pages[Math.min(pageIndex, options.pages.length - 1)]
       pageIndex += 1
       const headers: Record<string, string> = {}
@@ -43,6 +52,17 @@ const req = (overrides: Partial<{ workspace: string; chat: string }> = {}) => ({
 })
 
 describe('github review-state resolver', () => {
+  it('carries GitHub reviewDecision when a formal review is still required', async () => {
+    const resolve = resolverFor(
+      fakeRest({
+        pages: [{ reviews: [], hasNextPage: false }],
+        reviewDecision: 'REVIEW_REQUIRED',
+      }),
+    )
+    const result = await resolve(req())
+    expect(result).toEqual({ ok: true, selfBlocking: false, approve: true, reviewDecision: 'REVIEW_REQUIRED' })
+  })
+
   it('reports selfBlocking when the bot’s latest formal review is CHANGES_REQUESTED', async () => {
     const resolve = resolverFor(
       fakeRest({
@@ -155,7 +175,8 @@ describe('github review-state resolver', () => {
     )
     const result = await resolve(req())
     expect(result).toEqual({ ok: true, selfBlocking: false, approve: true })
-    expect(seen.urls.length).toBe(2)
+    expect(seen.urls.some((url) => url.includes('/pulls/644/reviews'))).toBe(true)
+    expect(seen.urls).toContain('https://api.github.com/next')
   })
 
   it('carries the approval policy through to the result', async () => {

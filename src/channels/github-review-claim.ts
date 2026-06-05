@@ -68,15 +68,40 @@ const DEMOTE_TO_IGNORE: readonly RegExp[] = [
   /\b(haven'?t|have not|did ?n'?t|did not|not yet|never)\b[^.!?]*\b(approv|request|resolv|block)/,
   /\b(can'?t|cannot|won'?t|will not|wouldn'?t)\b[^.!?]*\b(approv|request|resolv|block)/,
   /\bnot (approved|resolved|blocked|requesting)\b/,
+  /\b(not|no longer|hardly|barely)\b[^.!?]*\b(lgtm|looks good|looks fine|seems fine|should be (fine|good)|looks resolved|seems resolved)\b/,
   /\b(i'?ll|i will|going to|gonna|about to|planning to)\b[^.!?]*\b(approv|review|request|resolv)/,
   /\b(approved|resolved|requested changes)\b[^.!?]*\b(earlier|already|yesterday|before|last (review|time)|previously)\b/,
+  /\b(pre|self|co|re|un|non|ai|admin|user|machine|auto) approved\b/,
 ]
 
-export function classifyReviewClaim(rawText: string): ReviewClaim {
-  const text = normalize(rawText)
-  if (text === '') return 'ignore'
+const QUESTION_CONTEXT =
+  /(?:^|\b)(who|what|when|where|why|how|was|were|is|are|did|do|does|has|have|can|could|would|should)\b[^.!?]*\?/
 
+export function classifyReviewClaim(rawText: string): ReviewClaim {
+  const segments = claimSegments(rawText)
+  if (segments.length === 0) return 'ignore'
+
+  const claims = segments.map(classifySegment)
+
+  if (claims.includes('block-approve')) return 'block-approve'
+  if (claims.includes('block-request-changes')) return 'block-request-changes'
+  if (claims.includes('block-resolve')) return 'block-resolve'
+  if (claims.includes('warn')) return 'warn'
+  return 'ignore'
+}
+
+// True only for warn-tier replies whose phrasing reads as an approval/resolve
+// close-out (e.g. "looks good", "lgtm"), excluding negative warn phrases like
+// "needs changes" that re-assert a block. The re-review guard uses this to
+// escalate just the stranding-shaped warns, not the whole warn bucket.
+export function isPositiveWarnCloseout(rawText: string): boolean {
+  if (classifyReviewClaim(rawText) !== 'warn') return false
+  return claimSegments(rawText).some((segment) => WARN_POSITIVE_CLOSEOUT.some((re) => re.test(segment)))
+}
+
+function classifySegment(text: string): ReviewClaim {
   if (DEMOTE_TO_IGNORE.some((re) => re.test(text))) return 'ignore'
+  if (QUESTION_CONTEXT.test(text)) return 'ignore'
 
   // Block-tier wins over warn-tier: an unambiguous "approved" in a casual message
   // is still a formal claim.
@@ -87,13 +112,19 @@ export function classifyReviewClaim(rawText: string): ReviewClaim {
   return 'ignore'
 }
 
-// True only for warn-tier replies whose phrasing reads as an approval/resolve
-// close-out (e.g. "looks good", "lgtm"), excluding negative warn phrases like
-// "needs changes" that re-assert a block. The re-review guard uses this to
-// escalate just the stranding-shaped warns, not the whole warn bucket.
-export function isPositiveWarnCloseout(rawText: string): boolean {
-  if (classifyReviewClaim(rawText) !== 'warn') return false
-  return WARN_POSITIVE_CLOSEOUT.some((re) => re.test(normalize(rawText)))
+function claimSegments(text: string): string[] {
+  return redactQuotedAndCode(text)
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(normalize)
+    .filter((segment) => segment !== '')
+}
+
+function redactQuotedAndCode(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, ' ')
+    .replace(/^\s*>.*$/gm, ' ')
 }
 
 // Strips markdown/emoji noise so "**Approved!**" and "approved" classify alike,

@@ -38,6 +38,14 @@ const cases: ReadonlyArray<[string, ReviewClaim]> = [
   ['Going to review this shortly.', 'ignore'],
   ['I approved it earlier, in my last review.', 'ignore'],
   ['Yes, I requested changes yesterday.', 'ignore'],
+  ['not LGTM yet — tests are still red', 'ignore'],
+  ['This is not looks good territory yet.', 'ignore'],
+  ['Please do not just say `LGTM`; submit the review.', 'ignore'],
+  ['The comment "LGTM" is not enough here.', 'ignore'],
+  ['Was this approved already?', 'ignore'],
+  ['Who approved this?', 'ignore'],
+  ['The pre-approved template text is unrelated.', 'ignore'],
+  ['I confirmed the issue is not resolved yet.', 'ignore'],
   ['Can you clarify the second point?', 'ignore'],
   ['', 'ignore'],
 ]
@@ -58,6 +66,11 @@ describe('classifyReviewClaim', () => {
 
   test('negation demotes even when a block phrase is present', () => {
     expect(classifyReviewClaim("looks good but I haven't approved it")).toBe('ignore')
+  })
+
+  test('separate non-negated sentence can still carry the receipt', () => {
+    expect(classifyReviewClaim("I didn't approve the previous revision. This one is approved.")).toBe('block-approve')
+    expect(classifyReviewClaim("I haven't approved yet. LGTM on the current diff.")).toBe('warn')
   })
 })
 

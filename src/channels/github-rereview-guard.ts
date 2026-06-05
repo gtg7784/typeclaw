@@ -43,7 +43,12 @@ export async function evaluateRereviewGuard(input: RereviewGuardInput): Promise<
   // Fail closed: an unverifiable review state is treated as a live block, so the
   // bot never strands a re-review on a transient API failure.
   if (!state.ok) return { block: true, reason: unverifiableReason(state.error) }
-  if (!state.selfBlocking) return ALLOW
+  if (!state.selfBlocking) {
+    if (state.reviewDecision === 'REVIEW_REQUIRED' && isPositiveWarnCloseout(input.text ?? '')) {
+      return { block: true, reason: INITIAL_REVIEW_REQUIRED }
+    }
+    return ALLOW
+  }
 
   return { block: true, reason: state.approve ? STICKY_BLOCK_APPROVE_ENABLED : STICKY_BLOCK_APPROVE_DISABLED }
 }
@@ -87,3 +92,9 @@ const STICKY_BLOCK_APPROVE_DISABLED =
   'dismiss your prior review via ' +
   '`gh api -X PUT /repos/<owner>/<repo>/pulls/<N>/reviews/<review_id>/dismissals -f message="..." -f event=DISMISS` ' +
   'if the blockers are fixed (or submit REQUEST_CHANGES if not), THEN resolve the thread / reply.'
+
+const INITIAL_REVIEW_REQUIRED =
+  'This PR still requires a formal GitHub review. A flat `LGTM` / `looks good` PR comment does not create ' +
+  'review state, so it leaves the PR awaiting review. Submit the reviewer verdict via ' +
+  '`gh api -X POST /repos/<owner>/<repo>/pulls/<N>/reviews` with event `APPROVE` when approval is enabled, ' +
+  'or event `COMMENT` when approval is disabled, then narrate only if needed.'

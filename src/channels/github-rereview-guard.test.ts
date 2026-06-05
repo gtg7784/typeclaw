@@ -17,8 +17,12 @@ function input(overrides: Partial<RereviewGuardInput> = {}): RereviewGuardInput 
 }
 
 const stateOk =
-  (selfBlocking: boolean, approve = true): RereviewGuardInput['getReviewState'] =>
-  async () => ({ ok: true, selfBlocking, approve })
+  (
+    selfBlocking: boolean,
+    approve = true,
+    reviewDecision?: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED',
+  ): RereviewGuardInput['getReviewState'] =>
+  async () => ({ ok: true, selfBlocking, approve, ...(reviewDecision !== undefined ? { reviewDecision } : {}) })
 
 describe('re-review stranding guard', () => {
   it('blocks a resolve while the bot holds a live CHANGES_REQUESTED (PR #644 scenario)', async () => {
@@ -123,6 +127,36 @@ describe('re-review stranding guard', () => {
       input({ thread: null, wantsResolve: false, text: 'lgtm, nice work', getReviewState: stateOk(false) }),
     )
     expect(decision).toEqual({ block: false })
+  })
+
+  it('blocks a warn-tier LGTM when GitHub still requires a formal review (PR #653)', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        text: 'LGTM — the dedupe is scoped to the per-session turn boundary exactly as described.',
+        getReviewState: stateOk(false, true, 'REVIEW_REQUIRED'),
+      }),
+    )
+    expect(decision.block).toBe(true)
+    if (decision.block) expect(decision.reason).toContain('formal GitHub review')
+  })
+
+  it('does not query review state for casual discussion even when reviews may be required', async () => {
+    let queried = false
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        text: 'Thanks for the context — that makes sense.',
+        getReviewState: async () => {
+          queried = true
+          return { ok: true, selfBlocking: false, approve: true, reviewDecision: 'REVIEW_REQUIRED' }
+        },
+      }),
+    )
+    expect(decision).toEqual({ block: false })
+    expect(queried).toBe(false)
   })
 
   it('fails closed on a warn-tier reply when review state cannot be verified', async () => {
