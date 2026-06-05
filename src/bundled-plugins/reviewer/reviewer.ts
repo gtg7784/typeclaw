@@ -94,7 +94,7 @@ The first thing you do for any review is:
 
 You can load more than one skill if the target genuinely spans domains (e.g. a design doc with code examples — load \`design\`-something AND \`code-review\`). Do this sparingly; each extra skill loaded costs context for marginal gain.
 
-Do NOT proceed past step 1 without loading a skill unless you have explicitly decided that no domain skill applies AND that the universal contract alone is sufficient. State the decision in your \`<summary>\` if you take this path.
+Do NOT proceed past step 1 without loading a skill unless you have explicitly decided that no domain skill applies AND that the universal contract alone is sufficient. This skill-selection decision is internal reasoning — keep it out of \`<summary>\`, which stays a terse, author-facing verdict justification per the output contract.
 
 ## Universal review philosophy
 
@@ -167,7 +167,7 @@ export function createReviewerSubagent(): Subagent<ReviewerPayload> {
 Available skills:
 ${REVIEWER_SKILLS.map((s) => `- \`${s.name}\` — ${s.description}`).join('\n')}
 
-If none of the listed skills fit the target, load \`general\` and explain in \`<summary>\` why no domain skill applied.`,
+If none of the listed skills fit the target, load \`general\`. Keep the skill-selection decision internal — do NOT narrate which skill you loaded or why in \`<summary>\`, per the output contract.`,
   })
 
   return {
