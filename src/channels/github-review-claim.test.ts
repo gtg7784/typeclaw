@@ -15,11 +15,12 @@ const cases: ReadonlyArray<[string, ReviewClaim]> = [
   ['I request changes on this.', 'block-request-changes'],
   ['Blocking this PR until the leak is fixed.', 'block-request-changes'],
 
-  // block-resolve (caller only consults this when thread!=null)
+  // block-resolve
   ['Verified at abc123, that fixes it. Thanks!', 'block-resolve'],
   ['Thanks, looks resolved.', 'block-resolve'],
   ['Marked resolved.', 'block-resolve'],
   ['That resolves it — closing this out.', 'block-resolve'],
+  ['Verified — that closes it, thanks!', 'block-resolve'],
   ['Confirmed fixed.', 'block-resolve'],
 
   // warn: soft signals, allowed through with a nudge

@@ -19,6 +19,7 @@ afterEach(() => resetReviewTurn(SESSION))
 function fakeRouter(handlers: {
   onSend?: (msg: OutboundMessage) => SendResult
   onResolve?: (req: ReviewThreadResolveRequest) => ReviewThreadResolveResult
+  getReviewState?: ChannelRouter['getReviewState']
 }): ChannelRouter {
   return {
     route: async () => {},
@@ -50,6 +51,9 @@ function fakeRouter(handlers: {
     registerReviewThreadResolver: () => {},
     unregisterReviewThreadResolver: () => {},
     resolveReviewThread: async (req) => handlers.onResolve?.(req) ?? { ok: true },
+    registerReviewStateResolver: () => {},
+    unregisterReviewStateResolver: () => {},
+    getReviewState: handlers.getReviewState ?? (async () => ({ ok: true, selfBlocking: false, approve: true })),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],
@@ -243,5 +247,113 @@ describe('channel_send resolve_review_thread', () => {
 
     expect(resolved).toBe(0)
     expect((result.details as { ok: boolean }).ok).toBe(true)
+  })
+})
+
+describe('channel_send re-review stranding guard', () => {
+  test('blocks a close-out while the bot still holds CHANGES_REQUESTED, resolving nothing', async () => {
+    let resolved = 0
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        onResolve: () => {
+          resolved += 1
+          return { ok: true }
+        },
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      thread: '555',
+      text: 'addressed in abc123 — resolving',
+      resolve_review_thread: true,
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect(resolved).toBe(0)
+    expect(sent).toBe(0)
+  })
+
+  test('honors the dismissal branch when approval is disabled', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: false }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      thread: '555',
+      text: 'that resolves it',
+      resolve_review_thread: true,
+    })
+
+    expect((result.details as { ok: boolean; error?: string }).ok).toBe(false)
+    expect((result.content[0] as { text: string }).text).toContain('dismiss')
+  })
+
+  test('blocks a no-thread close-out PR comment while the bot still blocks the PR', async () => {
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      text: 'Verified — that closes it, thanks!',
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect(sent).toBe(0)
+  })
+
+  test('allows a no-thread plain discussion comment on a PR', async () => {
+    let sent = 0
+    let queried = false
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        getReviewState: async () => {
+          queried = true
+          return { ok: true, selfBlocking: true, approve: true }
+        },
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      text: 'Thanks for the context — that makes sense.',
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(true)
+    expect(sent).toBe(1)
+    expect(queried).toBe(false)
   })
 })
