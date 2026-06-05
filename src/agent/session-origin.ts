@@ -630,9 +630,9 @@ function renderParticipants(
 // mention syntax) and Telegram (uses `@username`, where `authorId` is a
 // numeric id and NOT the username). See issue #188.
 //
-// Symptom in the wild before PR #183 + this fix: 돌쇠 addressing Winky as
-// "Winky님" (plain text) on Discord, which never trips Winky's `isBotMention`
-// check, so Winky observes silently and the conversation stalls. The
+// Symptom in the wild before PR #183 + this fix: Kiki addressing Momo as
+// "Momo님" (plain text) on Discord, which never trips Momo's `isBotMention`
+// check, so Momo observes silently and the conversation stalls. The
 // angle-id branch here is exactly the fix for that case; the at-username
 // and alias branches keep the platform contract honest for KakaoTalk and
 // Telegram instead of self-contradicting the per-adapter mention guidance

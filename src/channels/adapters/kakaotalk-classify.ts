@@ -7,8 +7,8 @@ import type { InboundAttachment, InboundMessage, InboundReferenceContext } from 
 export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect' | 'bot_message'
 
 // LOCO message_type 71 is KakaoTalk's notification/feed channel — official
-// accounts like "카카오 고객센터" and "카카오계정" (login alerts, security
-// notices, system messages). These arrive in @kakao-group buckets because
+// accounts like "KakaoTalk Customer Center" and "Kakao Account" (login alerts,
+// security notices, system messages). These arrive in @kakao-group buckets because
 // they aren't normal user chats, but they are not human conversation and
 // the agent should never reply to them. Not enumerated in
 // agent-messenger's `KAKAO_MESSAGE_TYPE` because that const only covers

@@ -40,8 +40,10 @@ describe('checkOutboundFlood — benign outbound messages pass', () => {
   })
 
   test('long mixed-language reply with scattered laughter passes', () => {
+    // Mixed Latin + Korean (ㅋㅋㅋ is Korean text-laughter) — the flood filter
+    // must not trip on scattered laughter inside otherwise-substantive prose.
     const text =
-      '확인했습니다 ㅋㅋㅋ 지금 배포 상태는 정상이고, next step은 로그를 한 번 더 보는 거예요. 이상 있으면 바로 공유드릴게요 ㅋㅋㅋ'
+      'Confirmed ㅋㅋㅋ the deploy is healthy now, next step은 to check the logs one more time. I will share right away if anything looks off ㅋㅋㅋ'
     expect(checkOutboundFlood(text)).toEqual({ ok: true })
   })
 })

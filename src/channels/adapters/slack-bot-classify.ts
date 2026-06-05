@@ -86,7 +86,7 @@ export function classifyInbound(
   // without any new config surface.
   const hasGroupMention = GROUP_MENTION_PATTERN.test(rawText)
   const isBotMention = hasGroupMention || rawText.includes(`<@${context.botUserId}>`)
-  // Top-level alias addressing (e.g. "윙키야") is engagement-equivalent
+  // Top-level alias addressing (e.g. "Momo!" / "@Momo" by name) is engagement-equivalent
   // to a `<@bot>` mention (see engagement.ts: alias is unconditional and
   // ranks alongside explicit triggers). Anchor `thread` on the inbound
   // ts in that case too, so the bot's reply threads under the user's

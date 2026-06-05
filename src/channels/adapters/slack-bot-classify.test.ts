@@ -300,12 +300,12 @@ describe('slack-bot classifyInbound — route path', () => {
     // callback set `thread_ts` and turn the bot's reply into the first
     // thread reply under the user's message — same conversational
     // affordance as a Slack-native @mention.
-    const event = buildEvent({ text: '윙키야 안녕' })
+    const event = buildEvent({ text: '모모야 안녕' })
 
     const verdict = classifyInbound(event, baseConfig, {
       teamId: TEAM_ID,
       botUserId: BOT_USER_ID,
-      selfAliases: ['윙키', 'winky'],
+      selfAliases: ['모모', 'momo'],
     })
 
     expect(verdict.kind).toBe('route')
@@ -315,12 +315,12 @@ describe('slack-bot classifyInbound — route path', () => {
   })
 
   test('alias matching is case-insensitive and substring-based, mirroring the engagement layer', () => {
-    const event = buildEvent({ text: 'WinKy please look at this' })
+    const event = buildEvent({ text: 'MoMo please look at this' })
 
     const verdict = classifyInbound(event, baseConfig, {
       teamId: TEAM_ID,
       botUserId: BOT_USER_ID,
-      selfAliases: ['winky'],
+      selfAliases: ['momo'],
     })
 
     expect(verdict.kind).toBe('route')
@@ -337,7 +337,7 @@ describe('slack-bot classifyInbound — route path', () => {
     // the precedence (e.g. anchoring on event.ts whenever an alias
     // matches, even mid-thread, which would silently re-root replies).
     const event = buildEvent({
-      text: '윙키 in this thread',
+      text: '모모 in this thread',
       ts: '1700000010.000200',
       thread_ts: '1700000000.000100',
       parent_user_id: 'UCAROL',
@@ -346,7 +346,7 @@ describe('slack-bot classifyInbound — route path', () => {
     const verdict = classifyInbound(event, baseConfig, {
       teamId: TEAM_ID,
       botUserId: BOT_USER_ID,
-      selfAliases: ['윙키'],
+      selfAliases: ['모모'],
     })
 
     expect(verdict.kind).toBe('route')
@@ -355,12 +355,12 @@ describe('slack-bot classifyInbound — route path', () => {
   })
 
   test('alias-only addressing in a DM does NOT anchor a thread (DMs are flat)', () => {
-    const event = buildEvent({ channel_type: 'im', channel: 'D0DM', text: '윙키야' })
+    const event = buildEvent({ channel_type: 'im', channel: 'D0DM', text: '모모야' })
 
     const verdict = classifyInbound(event, baseConfig, {
       teamId: TEAM_ID,
       botUserId: BOT_USER_ID,
-      selfAliases: ['윙키'],
+      selfAliases: ['모모'],
     })
 
     expect(verdict.kind).toBe('route')
@@ -412,7 +412,7 @@ describe('slack-bot classifyInbound — route path', () => {
     const verdict = classifyInbound(event, baseConfig, {
       teamId: TEAM_ID,
       botUserId: BOT_USER_ID,
-      selfAliases: ['윙키'],
+      selfAliases: ['모모'],
     })
 
     expect(verdict.kind).toBe('route')

@@ -360,12 +360,10 @@ describe('createKakaotalkAdapter — outbound', () => {
       adapter: 'kakaotalk',
       workspace: '@kakao-dm',
       chat: '111',
-      text: '고쳐진 것\n1. **JSON 노출** — `formatAuthorLine` 추가됨',
+      text: 'Fixed\n1. **JSON leak** — `formatAuthorLine` added',
     })
     expect(result.ok).toBe(true)
-    expect(client.sendMessageCalls).toEqual([
-      { chatId: '111', text: '고쳐진 것\n1. JSON 노출 — formatAuthorLine 추가됨' },
-    ])
+    expect(client.sendMessageCalls).toEqual([{ chatId: '111', text: 'Fixed\n1. JSON leak — formatAuthorLine added' }])
 
     await adapter.stop()
     await router.stop()

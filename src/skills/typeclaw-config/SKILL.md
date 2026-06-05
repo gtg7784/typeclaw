@@ -223,32 +223,32 @@ The agent folder's directory name (`basename(agentDir)`) is **always** an implic
 
 ### Match semantics
 
-- **Substring** match against the inbound text. `"봉봉"` matches `"봉봉아 cron"`, `"봉봉씨 안녕"`, `"누가 봉봉을 불러"`, all of them. Korean particles aren't stripped — substring is enough because the bot name appears at the start of every particled form.
-- **Case-insensitive** via `toLocaleLowerCase()` on both sides. `"Bongbong"` in the alias list matches `"BONGBONG"`, `"bongbong"`, `"BongBong"`.
+- **Substring** match against the inbound text. `"토토"` matches `"토토아 cron"`, `"토토씨 안녕"`, `"누가 토토을 불러"`, all of them. Korean particles aren't stripped — substring is enough because the bot name appears at the start of every particled form.
+- **Case-insensitive** via `toLocaleLowerCase()` on both sides. `"Toto"` in the alias list matches `"TOTO"`, `"toto"`, `"ToTo"`.
 - **No word-boundary detection.** A short or generic alias like `"bot"` will match every message containing `"robot"` or `"bottom"`. Pick distinctive names — the operator owns curation.
 
 ### Engagement priority
 
-The alias path runs **after** explicit triggers (mention/reply/dm) and the sticky check. So a message with both an `<@id>` mention and an alias substring engages once, normally. A message with only the alias substring engages on the alias path. The alias path is **NOT suppressed by `mentionsOthers`**: addressing two bots in one message (`"봉봉아 펭펭아 둘 다 봐"`) engages both bots — each on their own alias.
+The alias path runs **after** explicit triggers (mention/reply/dm) and the sticky check. So a message with both an `<@id>` mention and an alias substring engages once, normally. A message with only the alias substring engages on the alias path. The alias path is **NOT suppressed by `mentionsOthers`**: addressing two bots in one message (`"토토아 라라아 둘 다 봐"`) engages both bots — each on their own alias.
 
-There's also a symmetric **peer-name suppressor**: if the message contains a peer bot's observed display name (from `participants[]`, populated as peers speak in the channel) and **does not** contain any of this agent's aliases, the solo-human fallback is suppressed and the agent observes. This is what makes `"펭펭아 cron 좀"` in a 1-human-multi-bot channel correctly observe instead of all bots replying. First-time addressing of a never-seen peer slips through; the suppressor catches it after the peer's first message.
+There's also a symmetric **peer-name suppressor**: if the message contains a peer bot's observed display name (from `participants[]`, populated as peers speak in the channel) and **does not** contain any of this agent's aliases, the solo-human fallback is suppressed and the agent observes. This is what makes `"라라아 cron 좀"` in a 1-human-multi-bot channel correctly observe instead of all bots replying. First-time addressing of a never-seen peer slips through; the suppressor catches it after the peer's first message.
 
 ### Example
 
 ```json
 {
-  "alias": ["bongbong", "봉봉"]
+  "alias": ["toto", "토토"]
 }
 ```
 
-The agent in folder `봉봉/` already answers to `"봉봉"` from the dir name. This adds the Latin transliteration so users can also write `"Hey bongbong, deploy?"`.
+The agent in folder `토토/` already answers to `"토토"` from the dir name. This adds the Latin transliteration so users can also write `"Hey toto, deploy?"`.
 
 ### When the user asks "respond to my casual nickname for you" / "I want to call you X"
 
 1. **Read `typeclaw.json`.**
 2. **If `alias` exists**, append the new name (preserve existing entries; dedupe trivially — the runtime also dedupes).
 3. **If `alias` is absent**, create it as `["<new name>"]`.
-4. **You don't need to add the dir name** unless the new name IS a variation of the dir name itself (e.g. dir is `bongbong` and the user wants `Bongbong` casing — the implicit dir alias matches case-insensitively, so this isn't needed either).
+4. **You don't need to add the dir name** unless the new name IS a variation of the dir name itself (e.g. dir is `toto` and the user wants `Toto` casing — the implicit dir alias matches case-insensitively, so this isn't needed either).
 5. **Trim whitespace** before adding. The schema rejects empty/whitespace-only entries; the runtime trims surrounding whitespace from valid entries.
 6. **Write, commit**: "Edited `alias` — live-reloadable. Run `reload` to pick up the change without restart."
 

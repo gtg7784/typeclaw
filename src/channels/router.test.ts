@@ -442,7 +442,7 @@ describe('ChannelRouter session lifecycle', () => {
     const transcriptPathFor = (sessionId: string): string =>
       `/tmp/fake-sessions/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`
     const firstRun = makeRouter(dir, { transcriptPathFor })
-    await firstRun.router.route(inbound({ text: '재시작해줘' }))
+    await firstRun.router.route(inbound({ text: 'please restart' }))
     await firstRun.router.__testing!.flushDebounce(KEY)
     await firstRun.router.stop()
 
@@ -450,7 +450,7 @@ describe('ChannelRouter session lifecycle', () => {
     // for the same channel
     const factoryCalls: SessionFactoryArgs[] = []
     const secondRun = makeRouter(dir, { transcriptPathFor, factoryCalls })
-    await secondRun.router.route(inbound({ text: '다시 해봐', externalMessageId: 'm-followup' }))
+    await secondRun.router.route(inbound({ text: 'try again', externalMessageId: 'm-followup' }))
     await secondRun.router.__testing!.flushDebounce(KEY)
 
     // then: the factory was called with BOTH existingSessionId AND existingSessionFile
@@ -885,13 +885,13 @@ describe('ChannelRouter engagement and prompt composition', () => {
         workspace: 'typeclaw/typeclaw',
         chat: 'issue:398',
         authorId: '12345',
-        authorName: 'devxoul',
+        authorName: 'octocat',
         text: '@typeey can you review this PR',
       }),
     )
     await router.__testing!.flushDebounce(key)
 
-    expect(sessions[0]!.prompts[0]).toContain('@devxoul (devxoul): @typeey can you review this PR')
+    expect(sessions[0]!.prompts[0]).toContain('@octocat (octocat): @typeey can you review this PR')
     expect(sessions[0]!.prompts[0]).not.toContain('<@12345>')
   })
 
@@ -1122,17 +1122,17 @@ describe('ChannelRouter alias engagement', () => {
 
     await router.route(
       inbound({
-        text: `Hey ${dirName.toUpperCase()}, cron 좀 봐줘`,
+        text: `Hey ${dirName.toUpperCase()}, can you check the cron`,
         isBotMention: false,
-        authorId: 'devxoul',
-        authorName: 'devxoul',
+        authorId: 'first-human',
+        authorName: 'first-human',
       }),
     )
     await router.__testing!.flushDebounce(KEY)
     await router.route(
       inbound({
         externalMessageId: 'm2',
-        text: `Hey ${dirName}, cron 좀 봐줘`,
+        text: `Hey ${dirName}, can you check the cron`,
         isBotMention: false,
         authorId: 'second-human',
         authorName: 'second-human',
@@ -1143,26 +1143,27 @@ describe('ChannelRouter alias engagement', () => {
     expect(sessions[0]!.prompts).toHaveLength(2)
   })
 
-  test('engages on configured alias substring', async () => {
+  test('engages on configured alias substring (Korean particle suffix)', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {
       config: { ...baseConfig, engagement: { trigger: [], stickiness: 'off' } },
-      configuredAliases: () => ['봉봉', 'bongbong'],
+      configuredAliases: () => ['토토', 'toto'],
     })
 
+    // '토토아' = alias '토토' + Korean vocative particle '아'; substring match must still fire.
     await router.route(
       inbound({
-        text: '봉봉아 cron 좀 봐줘',
+        text: '토토아 check the cron',
         isBotMention: false,
-        authorId: 'devxoul',
-        authorName: 'devxoul',
+        authorId: 'first-human',
+        authorName: 'first-human',
       }),
     )
     await router.__testing!.flushDebounce(KEY)
     await router.route(
       inbound({
         externalMessageId: 'm2',
-        text: '봉봉아 cron 좀 봐줘',
+        text: '토토아 check the cron',
         isBotMention: false,
         authorId: 'second-human',
         authorName: 'second-human',
@@ -1183,10 +1184,10 @@ describe('ChannelRouter alias engagement', () => {
 
     await router.route(
       inbound({
-        text: '봉봉아 cron',
+        text: '토토아 cron',
         isBotMention: false,
-        authorId: 'devxoul',
-        authorName: 'devxoul',
+        authorId: 'first-human',
+        authorName: 'first-human',
       }),
     )
     await router.route(
@@ -1200,19 +1201,19 @@ describe('ChannelRouter alias engagement', () => {
     )
     await router.__testing!.flushDebounce(KEY)
 
-    aliases = ['봉봉']
+    aliases = ['토토']
     await router.route(
       inbound({
         externalMessageId: 'm3',
-        text: '봉봉아 cron',
+        text: '토토아 cron',
         isBotMention: false,
-        authorId: 'devxoul',
-        authorName: 'devxoul',
+        authorId: 'first-human',
+        authorName: 'first-human',
       }),
     )
     await router.__testing!.flushDebounce(KEY)
 
-    expect(sessions[0]!.prompts.some((p) => p.includes('봉봉아 cron'))).toBe(true)
+    expect(sessions[0]!.prompts.some((p) => p.includes('토토아 cron'))).toBe(true)
   })
 })
 
@@ -1254,10 +1255,10 @@ describe('ChannelRouter sticky credits', () => {
     await router.__testing!.flushDebounce(KEY)
     nowRef.value = 1200
     sessions[0]!.onPrompt = async () => {
-      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ㅇㅇ 방금 보냄' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yep just sent it' })
     }
     await router.route(
-      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot 보냄?' }),
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot did you send it?' }),
     )
     await router.__testing!.flushDebounce(KEY)
     sessions[0]!.onPrompt = undefined
@@ -1266,14 +1267,14 @@ describe('ChannelRouter sticky credits', () => {
     // when alice posts a plain follow-up with no mention (the regressed case)
     nowRef.value = 2000
     await router.route(
-      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: '어디다 보냄' }),
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: 'where did you send it' }),
     )
     await router.__testing!.flushDebounce(KEY)
 
     // then we engage (sticky woke us) and the nudge rides along so the model
     // can still self-select silence for true chatter
     expect(sessions[0]!.prompts).toHaveLength(1)
-    expect(sessions[0]!.prompts[0]).toContain('어디다 보냄')
+    expect(sessions[0]!.prompts[0]).toContain('where did you send it')
     expect(sessions[0]!.prompts[0]).toContain('You are in a group chat with multiple people.')
   })
 })
@@ -2876,9 +2877,9 @@ describe('ChannelRouter channel-turn protocol', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: '16배속 가자' }))
+    await router.route(inbound({ text: 'go 16x speed' }))
     sessions[0]!.onPrompt = () => {
-      sessions[0]!.setAssistantMidTurn('16배속으로 실행 중! 잠깐 기다렸다가 스크린샷 찍어볼게요!')
+      sessions[0]!.setAssistantMidTurn('Running at 16x speed! Hold on a sec and I will grab a screenshot!')
     }
     await router.__testing!.flushDebounce(KEY)
 
@@ -2886,7 +2887,7 @@ describe('ChannelRouter channel-turn protocol', () => {
       logs.some((m) => m.includes('recovering assistant_text_without_channel_tool') && m.includes('source=mid-turn')),
     ).toBe(true)
     expect(sent).toHaveLength(1)
-    expect(sent[0]!.text).toBe('16배속으로 실행 중! 잠깐 기다렸다가 스크린샷 찍어볼게요!')
+    expect(sent[0]!.text).toBe('Running at 16x speed! Hold on a sec and I will grab a screenshot!')
   })
 
   test('mid-turn recovery: applies the NO_REPLY guard to recovered prose', async () => {
@@ -3147,7 +3148,7 @@ describe('ChannelRouter channel-turn protocol', () => {
       const assistantMsg: AssistantMessage = {
         role: 'assistant',
         content: [
-          { type: 'text', text: '죄송해요. 크론 이슈는 지금 바로 확인해볼게요.' },
+          { type: 'text', text: 'Sorry about that. I will look into the cron issue right now.' },
           { type: 'toolCall', id: 'functions.stream_snapshot:0', name: 'stream_snapshot', arguments: { limit: 20 } },
         ],
         api: 'openai-completions',
@@ -3195,7 +3196,7 @@ describe('ChannelRouter channel-turn protocol', () => {
       logs.some((m) => m.includes('recovering assistant_text_without_channel_tool') && m.includes('source=pre-tool')),
     ).toBe(true)
     expect(sent).toHaveLength(1)
-    expect(sent[0]!.text).toBe('죄송해요. 크론 이슈는 지금 바로 확인해볼게요.')
+    expect(sent[0]!.text).toBe('Sorry about that. I will look into the cron issue right now.')
   })
 
   test('pre-tool recovery: still applies NO_REPLY / Kimi-leak / empty-sentinel guards', async () => {
@@ -5424,8 +5425,8 @@ describe('ChannelRouter peer-bot loop guard', () => {
     // acknowledge" line together form the trust boundary that stops persona-rich
     // models (e.g. Kimi) from acknowledging the notice as if it were human
     // speech. Production symptom this guards against:
-    // "알겠습니다, Neo! 대화 여기까지 할게요." — the model treating the loop guard
-    // heading as Neo telling it to wrap up.
+    // e.g. "Understood, I'll wrap up the conversation here." — the model treating
+    // the loop guard heading as a human telling it to wrap up.
 
     // given a tripped guard
     const dir = await tempDir()
@@ -5876,7 +5877,7 @@ describe('ChannelRouter cold-start prefetch', () => {
       messages: [
         historyMessage({
           externalMessageId: 'root',
-          text: '이 사진 머임??\n[Slack attachment #1: file image/png name=photo.png]',
+          text: 'what is this photo??\n[Slack attachment #1: file image/png name=photo.png]',
           attachments: [{ id: 1, kind: 'file', ref: 'F123', filename: 'photo.png', mimetype: 'image/png' }],
         }),
       ],
@@ -7917,7 +7918,7 @@ describe('ChannelRouter inbound attachment lookup', () => {
 
     let lookedUp: ReturnType<typeof router.lookupInboundAttachment> = null
     let listedDuringTurn: readonly number[] = []
-    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    await router.route(inbound({ text: 'read this', attachments: [PHOTO] }))
     sessions[0]!.onPrompt = () => {
       lookedUp = router.lookupInboundAttachment({ ...KEY, id: 1 })
       listedDuringTurn = router.listInboundAttachmentIds(KEY)
@@ -7934,7 +7935,7 @@ describe('ChannelRouter inbound attachment lookup', () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
 
-    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    await router.route(inbound({ text: 'read this', attachments: [PHOTO] }))
     await router.__testing!.flushDebounce(KEY)
 
     // After the turn fully drains, the attachment is no longer part of any

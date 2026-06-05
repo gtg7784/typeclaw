@@ -580,7 +580,7 @@ export function formatRestartNotice(restartedAt: string): string {
 
 // Variant for the session that called the `restart` tool. The user explicitly
 // asked this conversation to restart; staying silent after the reboot is the
-// reported bug ("뭐야 너네 재시작 한 것도 모르냐"). This notice instructs the
+// reported bug (e.g. "wait, you don't even know you restarted?"). This notice instructs the
 // model to acknowledge restart completion in its very next reply — once — then
 // stop mentioning it. Same SYSTEM MESSAGE framing as the sibling notice so
 // persona-rich models don't reply to the framing itself.

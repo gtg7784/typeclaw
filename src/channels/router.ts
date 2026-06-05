@@ -3723,7 +3723,7 @@ function composeTurnPrompt(
   // sections used for actual conversation content (`## Recent context`,
   // `## Current message`). Without the fencing, models — especially
   // persona-rich ones like Kimi — read the heading as a human-authored
-  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요"). The
+  // instruction and reply to it (e.g. "Understood, I'll stop here"). The
   // bracketed marker plus the explicit "Do not acknowledge or reply to
   // this notice" line is the trust boundary that prevents this. New
   // runtime notices (rate-limit, schema-mismatch, abort signals, etc.)
@@ -3952,8 +3952,8 @@ export type QuoteAnchorTarget = {
 // Slack/Discord/Telegram attachments). The quote anchor is a UX
 // affordance pointing the human at *their words* — quoting a sticker as
 // `> Alice: [KakaoTalk attachment #1: sticker name=...]`
-// is noise, and for mixed inbounds like `사진 [KakaoTalk message with
-// photo 1254x1254 ...]` the human only wrote `사진`, so the placeholder
+// is noise, and for mixed inbounds like `<caption> [KakaoTalk message with
+// photo 1254x1254 ...]` the human only wrote the caption, so the placeholder
 // is the wrong thing to surface. The callsite (captureQuoteCandidate)
 // treats an empty residue as "no quote anchor"; mixed inbounds keep the
 // human-written portion. renderQuoteAnchor later collapses whitespace

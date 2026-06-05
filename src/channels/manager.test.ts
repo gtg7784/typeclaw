@@ -445,7 +445,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
   })
 
   test('forwards aliasesRef to the router so configured aliases trigger engagement', async () => {
-    // given: a manager wired with `aliasesRef` returning ["윙키", "winky"], a
+    // given: a manager wired with `aliasesRef` returning ["모모", "momo"], a
     //   slack-bot config with strict-mention trigger and stickiness off
     //   (so the ONLY remaining engagement paths are alias-substring match
     //   at engagement.ts:102 or the solo-human fallback at :174), and a
@@ -471,7 +471,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     const mgr = createChannelManager({
       agentDir,
       channelsConfigRef: () => cfg,
-      aliasesRef: () => ['윙키', 'winky'],
+      aliasesRef: () => ['모모', 'momo'],
       env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' },
       createSlackAdapter: () => makeFakeAdapter(),
       createSessionForChannel: async () => ({
@@ -502,7 +502,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     //   the session exists), then a non-alias inbound from human B brings
     //   the participant count to two (defeating the solo-human fallback),
     //   and finally a NON-mention inbound from A whose text contains only
-    //   the configured alias "윙키" arrives — every structural trigger
+    //   the configured alias "모모" arrives — every structural trigger
     //   (mention, reply, dm, sticky) is off, leaving alias-match as the
     //   sole gate
     await mgr.router.route(
@@ -514,22 +514,22 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     )
     await mgr.router.__testing!.flushDebounce(key)
     const promptsBeforeAlias = prompts.length
-    await mgr.router.route(baseInbound({ externalMessageId: 'm3', text: '윙키야', authorId: 'U_A', authorName: 'A' }))
+    await mgr.router.route(baseInbound({ externalMessageId: 'm3', text: '모모야', authorId: 'U_A', authorName: 'A' }))
     await mgr.router.__testing!.flushDebounce(key)
 
     // then: the alias-only inbound produces exactly one new prompt; if the
     //   manager dropped `aliasesRef` on the floor (the bug this fix
     //   addresses), `selfAliases` would fall back to `[basename(agentDir)]`
-    //   only, "윙키야" would not match any alias, and with the solo-human
+    //   only, "모모야" would not match any alias, and with the solo-human
     //   fallback disabled by U_B's prior inbound the message would be
     //   silently observed — promptsAfterAlias would equal promptsBeforeAlias
     const promptsAfterAlias = prompts.length
     expect(promptsAfterAlias - promptsBeforeAlias).toBe(1)
-    expect(prompts[prompts.length - 1]).toContain('윙키야')
+    expect(prompts[prompts.length - 1]).toContain('모모야')
   })
 
   test('forwards selfAliasesRef to the slack adapter so the classifier can anchor threads on alias-only inbounds', async () => {
-    // given: a manager wired with `aliasesRef` returning ["윙키", "winky"]
+    // given: a manager wired with `aliasesRef` returning ["모모", "momo"]
     //   AND a `createSlackAdapter` test seam that captures the options the
     //   manager passes. The point of this test is the wiring itself: if a
     //   future refactor drops `selfAliasesRef` from manager.ts, every
@@ -543,7 +543,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     const mgr = createChannelManager({
       agentDir,
       channelsConfigRef: () => cfg,
-      aliasesRef: () => ['윙키', 'winky'],
+      aliasesRef: () => ['모모', 'momo'],
       env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' },
       createSlackAdapter: (opts) => {
         captured = opts
@@ -559,8 +559,8 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     //   alias the router seeds at construction (basename(agentDir))
     expect(captured?.selfAliasesRef).toBeDefined()
     const aliases = captured!.selfAliasesRef!()
-    expect(aliases).toContain('윙키')
-    expect(aliases).toContain('winky')
+    expect(aliases).toContain('모모')
+    expect(aliases).toContain('momo')
 
     await mgr.stop()
   })

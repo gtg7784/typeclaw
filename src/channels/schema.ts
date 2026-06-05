@@ -243,7 +243,7 @@ const githubChannelSchema = adapterSchema.extend({
 // KakaoTalk uses the same shape as every other adapter. There used to be an
 // `autoMarkRead` opt-in here; the adapter now fires a LOCO NOTIREAD ack on
 // every inbound MSG event unconditionally (see kakaotalk.ts) so the sender's
-// unread "1" (노란숫자) clears as soon as the agent observes the message.
+// unread "1" (the yellow unread badge) clears as soon as the agent observes the message.
 // Existing configs with `autoMarkRead: <bool>` continue to parse — Zod's
 // default `.object()` strips unknown keys silently — but the field has no
 // effect. Risk note: auto-acking every received message is a distinct
