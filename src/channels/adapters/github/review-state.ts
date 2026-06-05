@@ -31,11 +31,20 @@ export function createGithubReviewStateResolver(deps: {
     }
 
     const token = await deps.token({ repoSlug: `${target.owner}/${target.repo}` })
-    const reviews = await fetchSelfReviews(fetchImpl, token, target, selfLogin)
+    const [reviews, reviewDecision] = await Promise.all([
+      fetchSelfReviews(fetchImpl, token, target, selfLogin),
+      fetchReviewDecision(fetchImpl, token, target),
+    ])
     if (!reviews.ok) return { ok: false, error: reviews.error, code: reviews.code }
+    if (!reviewDecision.ok) return { ok: false, error: reviewDecision.error, code: reviewDecision.code }
 
     const lastDecisive = reviews.states.filter(isDecisive).at(-1) ?? null
-    return { ok: true, selfBlocking: lastDecisive === 'CHANGES_REQUESTED', approve }
+    return {
+      ok: true,
+      selfBlocking: lastDecisive === 'CHANGES_REQUESTED',
+      approve,
+      ...(reviewDecision.reviewDecision !== null ? { reviewDecision: reviewDecision.reviewDecision } : {}),
+    }
   }
 }
 
@@ -53,6 +62,12 @@ function parseTarget(workspace: string, chat: string): Target | null {
 
 type SelfReviewsResult =
   | { ok: true; states: string[] }
+  | { ok: false; error: string; code: 'not-found' | 'permission-denied' | 'transient' }
+
+type ReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED'
+
+type ReviewDecisionResult =
+  | { ok: true; reviewDecision: ReviewDecision | null }
   | { ok: false; error: string; code: 'not-found' | 'permission-denied' | 'transient' }
 
 async function fetchSelfReviews(
@@ -92,6 +107,47 @@ async function fetchSelfReviews(
     url = nextLink(response.headers.get('link'))
   }
   return { ok: true, states }
+}
+
+async function fetchReviewDecision(
+  fetchImpl: typeof fetch,
+  token: string,
+  target: Target,
+): Promise<ReviewDecisionResult> {
+  let response: Response
+  try {
+    response = await fetchImpl(`${GITHUB_API_BASE}/graphql`, {
+      method: 'POST',
+      headers: githubJsonHeaders(token),
+      body: JSON.stringify({
+        query:
+          'query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewDecision}}}',
+        variables: { owner: target.owner, repo: target.repo, number: target.prNumber },
+      }),
+    })
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), code: 'transient' }
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    return {
+      ok: false,
+      error: `GitHub reviewDecision ${response.status}${text !== '' ? `: ${text}` : ''}`,
+      code: classifyStatus(response.status),
+    }
+  }
+  const raw = (await response.json().catch(() => null)) as ReviewDecisionResponse | null
+  if (raw === null) return { ok: false, error: 'GitHub reviewDecision returned non-JSON', code: 'transient' }
+  if (Array.isArray(raw.errors) && raw.errors.length > 0) {
+    return {
+      ok: false,
+      error: `GitHub reviewDecision errors: ${raw.errors.map(describeGraphqlError).join('; ')}`,
+      code: 'transient',
+    }
+  }
+  const value = raw.data?.repository?.pullRequest?.reviewDecision ?? null
+  if (value === null || isReviewDecision(value)) return { ok: true, reviewDecision: value }
+  return { ok: false, error: `GitHub reviewDecision returned unknown value: ${String(value)}`, code: 'transient' }
 }
 
 // A formal CHANGES_REQUESTED is sticky until a later APPROVED/DISMISSED; only
@@ -135,3 +191,16 @@ function classifyStatus(status: number): 'not-found' | 'permission-denied' | 'tr
 }
 
 type ReviewRow = { id?: number; state?: unknown; user?: { login?: string; type?: string } }
+
+type ReviewDecisionResponse = {
+  data?: { repository?: { pullRequest?: { reviewDecision?: unknown } | null } | null }
+  errors?: Array<{ message?: unknown }>
+}
+
+function isReviewDecision(value: unknown): value is ReviewDecision {
+  return value === 'APPROVED' || value === 'CHANGES_REQUESTED' || value === 'REVIEW_REQUIRED'
+}
+
+function describeGraphqlError(error: { message?: unknown }): string {
+  return typeof error.message === 'string' ? error.message : JSON.stringify(error)
+}

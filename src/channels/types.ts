@@ -395,18 +395,23 @@ export type ReviewStateRequest = {
   chat: string
 }
 
-// `selfBlocking` is the answer the guard acts on: true means the bot's latest
-// effective formal review is its own CHANGES_REQUESTED (COMMENTED reviews are
-// ignored — they never clear the sticky block, GitHub's own rule). `approve`
-// mirrors `channels.github.review.approve` so the guard's denial text can tell
-// the model whether to land a fresh APPROVE or to DISMISS its prior review.
+// `selfBlocking` is the answer the guard acts on for re-reviews: true means the
+// bot's latest effective formal review is its own CHANGES_REQUESTED (COMMENTED
+// reviews are ignored — they never clear the sticky block, GitHub's own rule).
+// `reviewDecision` is GitHub's aggregate PR review status when GraphQL can
+// provide it; REVIEW_REQUIRED means an approval-shaped flat comment would still
+// leave the PR awaiting a formal review. `approve` mirrors
+// `channels.github.review.approve` so the guard's denial text can tell the model
+// whether to land a fresh APPROVE or to DISMISS its prior review.
 //
 // On `ok: false` the caller MUST fail closed: an unverifiable review state is
 // treated like a live block, so the bot never claims close-out when the runtime
 // could not confirm the platform-side verdict.
 export type ReviewStateResult =
-  | { ok: true; selfBlocking: boolean; approve: boolean }
+  | { ok: true; selfBlocking: boolean; approve: boolean; reviewDecision?: GithubReviewDecision }
   | { ok: false; error: string; code?: 'unsupported' | 'not-found' | 'permission-denied' | 'transient' }
+
+export type GithubReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED'
 
 // Registered per-adapter on the ChannelRouter, last-write-wins like the
 // review-thread resolver. Adapters that never register one make `getReviewState`
