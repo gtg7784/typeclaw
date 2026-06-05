@@ -58,7 +58,7 @@ typeclaw init
 - a `Dockerfile` and `package.json` — so the agent can build its container
 - starter folders: `workspace/` (the agent's free-write space), `public/`, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`
 
-The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick OpenAI or Anthropic you can log in through the browser with an existing paid subscription instead of pasting a key. It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/first-channel).
+The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick OpenAI or Anthropic you can log in through the browser with an existing paid subscription instead of pasting a key. It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/add-a-channel).
 
 </Accordion>
 
@@ -156,4 +156,4 @@ Your agent runs inside its own Docker container. The `typeclaw` commands you ran
 
 ---
 
-Next: [Add a channel](/docs/guides/first-channel) — let the agent answer from Slack, Discord, or GitHub instead of just your terminal.
+Next: [Schedule a job](/docs/guides/first-cron) — put the agent to work on its own clock.
