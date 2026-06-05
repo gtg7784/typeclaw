@@ -1,0 +1,93 @@
+---
+title: KakaoTalk
+description: LOCO adapter — encrypted login, token renewal, and capabilities
+icon: MessageCircle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **LOCO protocol** (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+
+<Callout type="warn" title="Use a dedicated account">
+  Auto-acking every received message is a distinct non-human fingerprint. KakaoTalk abuse detection may ban accounts
+  that exhibit this pattern. Run this adapter only on dedicated agent accounts you can afford to lose.
+</Callout>
+
+## Auth
+
+Sub-device login using email and password. Credentials are stored **encrypted at rest** (AES-256-GCM; the key lives outside the agent folder).
+
+Stored in [`secrets.json#channels.kakaotalk`](/docs/reference/secrets-json) as an accounts map with these fields:
+
+| Field               | Notes                          |
+| ------------------- | ------------------------------ |
+| `oauth_token`       | Current session token          |
+| `user_id`           | KakaoTalk user ID              |
+| `device_uuid`       | Registered device UUID         |
+| `device_type`       | Device type identifier         |
+| `email`             | Login email                    |
+| `encryptedPassword` | AES-256-GCM encrypted password |
+
+CLI: `typeclaw channel add kakaotalk` (interactive). **Do not use `channel set`** for credential rotation — use `typeclaw channel reauth kakaotalk` instead.
+
+## Capabilities
+
+| Feature                 | Supported | Notes                                                          |
+| ----------------------- | --------- | -------------------------------------------------------------- |
+| Outbound messages       | yes       |                                                                |
+| Reactions               | no        |                                                                |
+| Typing indicator        | no        |                                                                |
+| Channel-name resolution | yes       |                                                                |
+| Self identity           | no        |                                                                |
+| History                 | yes       | Limit 200 messages                                             |
+| Attachments             | yes       | Files sent before text; no combined text+file send in one call |
+| Membership              | no        |                                                                |
+
+## Token renewal
+
+Tokens expire after ~7 days. A host-side renewal cron refreshes them automatically. When a token goes stale, renewal can trigger a container restart via the host daemon. If automatic renewal fails, re-authenticate with:
+
+```sh
+typeclaw channel reauth kakaotalk
+```
+
+## Quirks
+
+- **KICKOUT recovery**: if the same `device_uuid` logs in elsewhere, the adapter detects the KICKOUT event and retries with bounded backoff (2s / 10s / 60s, 5-minute budget total).
+- **Mark-read**: fires on every inbound message, clearing the unread "1" (노란숫자), except in open chats.
+- **Provisional registration**: chats not surfaced by `getChats` are registered provisionally on first message.
+- **No combined send**: files are sent first, then text, as separate API calls.
+
+## Config
+
+```json
+{
+  "channels": {
+    "kakaotalk": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `kakaotalk`. Credentials live in [`secrets.json#channels.kakaotalk`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
+- [`secrets.json` reference](/docs/reference/secrets-json)

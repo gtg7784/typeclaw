@@ -1,0 +1,70 @@
+---
+title: Telegram bot
+description: Long-polling adapter — bot token setup, capabilities, and limits
+icon: Send
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **long polling** (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+
+## Auth
+
+One token, stored in [`secrets.json`](/docs/reference/secrets-json):
+
+| Field                         | Value                                |
+| ----------------------------- | ------------------------------------ |
+| `channels.telegram-bot.token` | Telegram bot token (from @BotFather) |
+
+CLI: `typeclaw channel add telegram-bot` (interactive), `typeclaw channel set telegram-bot` (rotate).
+
+<Callout type="warn" title="Only one poller per token">
+  Only one process can long-poll a given bot token at a time. Running two instances against the same token causes them
+  to steal updates from each other — messages will be silently dropped.
+</Callout>
+
+## Capabilities
+
+| Feature                 | Supported | Notes                                                                                                                                            |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Outbound messages       | yes       | MarkdownV2 formatting; reserved chars are escaped automatically                                                                                  |
+| Reactions               | no        |                                                                                                                                                  |
+| Typing indicator        | yes       | `sendChatAction`; auto-expires ~5s; no explicit stop                                                                                             |
+| Channel-name resolution | yes       |                                                                                                                                                  |
+| Self identity           | yes       |                                                                                                                                                  |
+| History                 | no        | `channel_history` tool will fail for Telegram                                                                                                    |
+| Attachments             | yes       | Sent as separate calls; land in chat root even for forum topics (`sendDocument` ignores `message_thread_id`); caption shares the 1024-char limit |
+| Membership              | partial   | Bot API can't split bot/human counts; group reports humans = total-1, bots = 1                                                                   |
+
+## Config
+
+```json
+{
+  "channels": {
+    "telegram-bot": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `telegram-bot`. Credentials live in [`secrets.json#channels.telegram-bot`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)

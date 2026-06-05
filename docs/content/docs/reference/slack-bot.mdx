@@ -1,0 +1,81 @@
+---
+title: Slack bot
+description: Socket Mode adapter — scopes, tokens, thread stickiness, and capabilities
+icon: MessageSquare
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **Socket Mode** (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+
+## Auth
+
+Two tokens, both stored in [`secrets.json`](/docs/reference/secrets-json):
+
+| Field                         | Value                                  |
+| ----------------------------- | -------------------------------------- |
+| `channels.slack-bot.botToken` | `xoxb-…` bot token                     |
+| `channels.slack-bot.appToken` | `xapp-…` app-level token (Socket Mode) |
+
+CLI: `typeclaw channel add slack-bot` (interactive), `typeclaw channel set slack-bot` (rotate).
+
+<Callout type="warn" title="reactions:write is required">
+  The bot token must have the `reactions:write` scope. Without it, Slack returns `missing_scope` on the auto-`:eyes:`
+  engage reaction and every `channel_react` call. See the app manifest in [Add a channel](/docs/guides/first-channel)
+  for the full scope list.
+</Callout>
+
+## Capabilities
+
+| Feature                  | Supported | Notes                                                                                                                   |
+| ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Outbound messages        | yes       | Slack `markdown` block; ~11,500 char chunk limit                                                                        |
+| Multi-chunk messages     | yes       | Additional chunks thread under the first                                                                                |
+| Reactions (add + remove) | yes       | Requires `reactions:write` scope                                                                                        |
+| Typing indicator         | limited   | Only in Slack AI Assistant threads via `assistant.threads.setStatus`; top-level and non-threaded chats get no indicator |
+| Channel-name resolution  | yes       |                                                                                                                         |
+| Self identity            | yes       |                                                                                                                         |
+| History                  | yes       | Limit 200 messages                                                                                                      |
+| Attachments              | yes       |                                                                                                                         |
+| Membership               | yes       |                                                                                                                         |
+
+## Thread stickiness
+
+Replies in the same Slack thread route to the same session. New top-level messages start fresh sessions. The `app_mention` event is required for the bot to hear mentions in channels where it is not a member.
+
+## Slash commands
+
+`/help`, `/stop`, `/reload`, `/restart`. Thread `!cmd` syntax also works.
+
+## Config
+
+```json
+{
+  "channels": {
+    "slack-bot": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `slack-bot`. Credentials live in [`secrets.json#channels.slack-bot`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
