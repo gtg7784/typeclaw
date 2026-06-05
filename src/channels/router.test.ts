@@ -18,9 +18,12 @@ import {
   CHANNEL_MAX_OUTPUT_TOKENS,
   createChannelRouter,
   DUPLICATE_SEND_ERROR,
+  EMPTY_TURN_FALLBACK_TEXT,
+  EMPTY_TURN_RETRY_NUDGE,
   extractPlainTextChannelToolCallText,
   getPlainTextChannelToolCallKind,
   MAX_CHANNEL_SENDS_PER_TURN,
+  MAX_EMPTY_TURN_RETRIES,
   MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
   OUTBOUND_FLOOD_ERROR,
@@ -2905,7 +2908,9 @@ describe('ChannelRouter channel-turn protocol', () => {
   // The leaf-assistant branch recovers ONLY 'stop' and 'toolUse'. length /
   // error / aborted carry visible text too, but it's a truncation or an
   // errored partial, not a deliberate reply — recovering it would post broken
-  // output. This is the load-bearing scoping of the mid-turn fix.
+  // output. This is the load-bearing scoping of the mid-turn fix. The truncated
+  // prose is NEVER posted; instead the empty-turn guard retries the turn and,
+  // on exhaustion, posts the fallback (asserted in the empty-turn suite below).
   for (const stopReason of ['length', 'error', 'aborted'] as const) {
     test(`mid-turn recovery: does NOT recover a leaf assistant with stopReason='${stopReason}'`, async () => {
       const dir = await tempDir()
@@ -2923,11 +2928,93 @@ describe('ChannelRouter channel-turn protocol', () => {
       }
       await router.__testing!.flushDebounce(KEY)
 
-      expect(sent).toHaveLength(0)
+      expect(sent.some((s) => s.text.includes('partial truncated output'))).toBe(false)
       expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
-      expect(logs.some((m) => m.includes('no recoverable assistant text in branch'))).toBe(true)
     })
   }
+
+  test('empty-turn guard: pure reasoning-loop retries then recovers when a later attempt replies', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      // First prompt: degenerate empty `length` leaf (no send). Retry nudge
+      // arrives as the second prompt; on it the model finally replies.
+      if (attempt === 1) {
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
+        return
+      }
+      expect(text).toContain(EMPTY_TURN_RETRY_NUDGE)
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here is your answer' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent.map((s) => s.text)).toEqual(['here is your answer'])
+    expect(sent.some((s) => s.text === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_retry attempt=1'))).toBe(true)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+  })
+
+  test('empty-turn guard: pure reasoning-loop posts the fallback after retries are exhausted', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn('never-ending loop output', 'length')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // 1 original prompt + MAX_EMPTY_TURN_RETRIES retry prompts.
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_EMPTY_TURN_RETRIES)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes(`empty_turn_retry attempt=${MAX_EMPTY_TURN_RETRIES}`))).toBe(true)
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=retries_exhausted'))).toBe(true)
+  })
+
+  test('empty-turn guard: a turn that thrashed the send path skips retry and posts the fallback once', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'say something' }))
+    sessions[0]!.onPrompt = async () => {
+      // The model committed to silence, then thrashed the send path (denied
+      // skip-locked) and left no recoverable prose. Re-prompting would just
+      // re-thrash, so the guard skips retry and posts the fallback once.
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'changed my mind' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'denied attempt' })
+      sessions[0]!.setAssistantMidTurn('stranded loop output', 'length')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=send_thrash'))).toBe(true)
+  })
 
   test('mid-turn recovery: does NOT fire when the model successfully replied (channel send happened)', async () => {
     const dir = await tempDir()
