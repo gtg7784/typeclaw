@@ -47,14 +47,16 @@ describe('researcher subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('spawn `scout` directly')
   })
 
-  test('prompt scopes side effects to exactly ONE write (the report file) and forbids all others', () => {
-    // The researcher is the one read-mostly subagent with a write tool. The
-    // contract that keeps it safe is "one report file, nowhere else". If this
-    // erodes, the subagent becomes a general write vector.
+  test('prompt scopes side effects to exactly ONE write via the enforced write_report tool, no general writer', () => {
+    // The researcher is the one read-mostly subagent that can write a file. The
+    // contract that keeps it safe is "one report file via write_report, nowhere
+    // else, no general write/bash-write". If this erodes, the subagent becomes a
+    // general write vector — the exact gap a security review flagged.
     const lower = RESEARCHER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('one scoped write')
     expect(lower).toContain('only side effect')
-    expect(lower).toContain('non-workspace-write')
+    expect(lower).toContain('write_report')
+    expect(lower).toContain('no general file-write tool')
   })
 
   test('prompt forbids bash for write/mutating operations (bash stays read-only)', () => {
@@ -73,7 +75,7 @@ describe('researcher subagent — load-bearing prompt phrases', () => {
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('`bash`')
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('`web_search`')
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('`web_fetch`')
-    expect(RESEARCHER_SYSTEM_PROMPT).toContain('`write`')
+    expect(RESEARCHER_SYSTEM_PROMPT).toContain('`write_report`')
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('`load_skill`')
   })
 
@@ -144,7 +146,6 @@ describe('researcher subagent — load-bearing prompt phrases', () => {
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('public/research-')
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('## Your role in this session')
     expect(RESEARCHER_SYSTEM_PROMPT).toContain('fs.see.private')
-    expect(RESEARCHER_SYSTEM_PROMPT).toContain('denied by permissions')
   })
 })
 
@@ -172,24 +173,28 @@ describe('researcher subagent declaration', () => {
     expect(sub.canSpawnSubagents).toBe(true)
   })
 
-  test('tools list adds exactly one writer (write) on top of the reviewer read set, with NO edit', () => {
+  test('builtin tools are READ-ONLY: no generic write or edit (the writer is the enforced write_report custom tool)', () => {
     const sub = createResearcherSubagent()
     const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
-    expect(toolNames).toEqual(['bash', 'find', 'grep', 'ls', 'read', 'web_fetch', 'web_search', 'write'])
-    // Drift guard: the researcher gets `write` for its report ONLY. `edit`
-    // (in-place mutation) is deliberately withheld — a report is written once,
-    // and withholding edit shrinks the side-effect surface.
-    expect(toolNames).toContain('write')
+    expect(toolNames).toEqual(['bash', 'find', 'grep', 'ls', 'read', 'web_fetch', 'web_search'])
+    // Security drift guard (the review finding): the generic `write` tool's
+    // runtime boundary (the non-workspace-write guard) is too broad for a
+    // guest-spawnable subagent — it allowlists IDENTITY.md/cron.json/etc. and
+    // honors acknowledgeGuards. The researcher must NOT hold it; its only writer
+    // is the dedicated, code-enforced write_report custom tool. If a future edit
+    // re-adds writeTool/editTool here, the hole reopens and this fails.
+    expect(toolNames).not.toContain('write')
     expect(toolNames).not.toContain('edit')
   })
 
-  test('customTools contains exactly one tool: load_skill (the runtime-skill-loader)', () => {
+  test('customTools are exactly [load_skill, write_report] — the skill loader and the only file writer', () => {
     const sub = createResearcherSubagent()
     expect(sub.customTools).toBeDefined()
-    expect(sub.customTools).toHaveLength(1)
-    const loadSkill = sub.customTools?.[0]
-    if (loadSkill === undefined) throw new Error('load_skill tool missing')
+    expect(sub.customTools).toHaveLength(2)
+    const [loadSkill, writeReport] = sub.customTools ?? []
+    if (loadSkill === undefined || writeReport === undefined) throw new Error('expected load_skill + write_report')
     expect(loadSkill.description).toContain('`general`')
+    expect(writeReport.description.toLowerCase()).toContain('research report')
   })
 
   test('load_skill parameter schema accepts the shipped skill name and rejects unknown ones', () => {
@@ -212,10 +217,16 @@ describe('researcher subagent declaration', () => {
     expect(sub.toolResultBudget?.maxTotalBytes).toBeGreaterThan(0)
   })
 
-  test('tool-result budget covers write + load_skill so report bytes and skill bodies count against the cap', () => {
+  test('tool-result budget covers the builtin read/web tools and omits custom tools (which surface under __plugin_* names)', () => {
+    // Custom tools (load_skill, write_report) are renamed to
+    // `__plugin_researcher_researcher_<i>` at wrap time, so a name-keyed budget
+    // entry for them would be dead config. The budget keys only the builtins.
     const sub = createResearcherSubagent()
-    expect(sub.toolResultBudget?.toolNames).toContain('write')
-    expect(sub.toolResultBudget?.toolNames).toContain('load_skill')
+    const names = sub.toolResultBudget?.toolNames ?? []
+    expect([...names].sort()).toEqual(['bash', 'find', 'grep', 'ls', 'read', 'web_fetch', 'web_search'])
+    expect(names).not.toContain('write')
+    expect(names).not.toContain('load_skill')
+    expect(names).not.toContain('write_report')
   })
 
   test('budget sits between explorer (256KB) and operator (1MB) — deep but bounded, bulk is delegated', () => {
