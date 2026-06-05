@@ -249,3 +249,58 @@ describe('channel_send resolve_review_thread', () => {
     expect((result.details as { ok: boolean }).ok).toBe(true)
   })
 })
+
+describe('channel_send re-review stranding guard', () => {
+  test('blocks a close-out while the bot still holds CHANGES_REQUESTED, resolving nothing', async () => {
+    let resolved = 0
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        onResolve: () => {
+          resolved += 1
+          return { ok: true }
+        },
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      thread: '555',
+      text: 'addressed in abc123 — resolving',
+      resolve_review_thread: true,
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect(resolved).toBe(0)
+    expect(sent).toBe(0)
+  })
+
+  test('honors the dismissal branch when approval is disabled', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        getReviewState: async () => ({ ok: true, selfBlocking: true, approve: false }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      thread: '555',
+      text: 'that resolves it',
+      resolve_review_thread: true,
+    })
+
+    expect((result.details as { ok: boolean; error?: string }).ok).toBe(false)
+    expect((result.content[0] as { text: string }).text).toContain('dismiss')
+  })
+})

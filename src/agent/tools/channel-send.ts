@@ -2,6 +2,7 @@ import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { checkFalseReceipt } from '@/channels/github-false-receipt'
+import { evaluateRereviewGuard } from '@/channels/github-rereview-guard'
 import { recordResolvedThread } from '@/channels/github-review-turn-ledger'
 import {
   containsKimiToolDelimiter,
@@ -175,6 +176,26 @@ export function createChannelSendTool({
         }
       }
       const falseReceiptNotice = falseReceipt.kind === 'warn' ? falseReceipt.notice : null
+
+      // Re-review stranding guard (mirrors channel_reply): block a thread
+      // close-out / verdict ack while the bot still holds its own
+      // CHANGES_REQUESTED on this PR, before the resolve mutates the thread.
+      const rereview = await evaluateRereviewGuard({
+        adapter,
+        workspace: params.workspace,
+        chat: params.chat,
+        thread: params.thread ?? null,
+        text: bodyText,
+        wantsResolve,
+        getReviewState: (req) => router.getReviewState(req),
+      })
+      if (rereview.block) {
+        logger.warn(formatChannelToolFailure('channel_send', rereview.reason))
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${rereview.reason}` }],
+          details: { ok: false, error: rereview.reason },
+        }
+      }
 
       // Resolve BEFORE posting (mirrors channel_reply): a failed resolve must
       // block the acknowledgement so the bot never posts "addressed — resolving"

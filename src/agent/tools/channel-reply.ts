@@ -2,6 +2,7 @@ import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { checkFalseReceipt } from '@/channels/github-false-receipt'
+import { evaluateRereviewGuard } from '@/channels/github-rereview-guard'
 import {
   containsKimiToolDelimiter,
   isNoReplySignal,
@@ -158,6 +159,27 @@ export function createChannelReplyTool({
         }
       }
       const falseReceiptNotice = falseReceipt.kind === 'warn' ? falseReceipt.notice : null
+
+      // Re-review stranding guard: block a thread close-out / verdict ack while
+      // the bot still holds its own CHANGES_REQUESTED on this PR, so it can't
+      // silently leave the PR blocked (PR #644). Runs before the resolve so a
+      // blocked close-out never mutates the thread.
+      const rereview = await evaluateRereviewGuard({
+        adapter: origin.adapter,
+        workspace: origin.workspace,
+        chat: origin.chat,
+        thread: origin.thread,
+        text,
+        wantsResolve: params.resolve_review_thread === true,
+        getReviewState: (req) => router.getReviewState(req),
+      })
+      if (rereview.block) {
+        logger.warn(formatChannelToolFailure('channel_reply', rereview.reason))
+        return {
+          content: [{ type: 'text' as const, text: `channel_reply denied: ${rereview.reason}` }],
+          details: { ok: false, error: rereview.reason },
+        }
+      }
 
       // Resolve BEFORE posting: a successful channel_reply ends the turn, so a
       // resolve attempted "after" the ack would never run (the exact bug this

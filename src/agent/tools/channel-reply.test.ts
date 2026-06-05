@@ -834,3 +834,89 @@ describe('channel_reply resolve_review_thread', () => {
     expect(resolveCalled).toBe(false)
   })
 })
+
+describe('channel_reply re-review stranding guard', () => {
+  test('blocks a thread close-out while the bot still holds CHANGES_REQUESTED, resolving nothing', async () => {
+    const calls: OutboundMessage[] = []
+    let resolveCalled = false
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        {
+          resolveReviewThread: async () => {
+            resolveCalled = true
+            return { ok: true }
+          },
+          getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
+        },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Verified — that closes it, thanks!', resolve_review_thread: true })
+
+    expect(result.details.ok).toBe(false)
+    expect(resolveCalled).toBe(false)
+    expect(calls).toHaveLength(0)
+    expect((result.content[0] as { text: string }).text).toContain('APPROVE')
+  })
+
+  test('allows the close-out once the bot no longer blocks the PR', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { getReviewState: async () => ({ ok: true, selfBlocking: false, approve: true }) },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Verified — that closes it, thanks!', resolve_review_thread: true })
+
+    expect(result.details.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
+
+  test('fails closed when review state cannot be verified', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        { getReviewState: async () => ({ ok: false, error: 'GitHub reviews 503', code: 'transient' }) },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Verified — that closes it, thanks!', resolve_review_thread: true })
+
+    expect(result.details.ok).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('does not query review state for a plain discussion reply', async () => {
+    let queried = false
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true }), {
+        getReviewState: async () => {
+          queried = true
+          return { ok: true, selfBlocking: true, approve: true }
+        },
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Thanks for the context — makes sense.' })
+
+    expect(result.details.ok).toBe(true)
+    expect(queried).toBe(false)
+  })
+})
