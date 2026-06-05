@@ -3,12 +3,13 @@
   "icon": "BookOpen",
   "pages": [
     "quickstart",
-    "first-cron",
     "teach-the-agent",
-    "first-tunnel",
+    "first-cron",
+    "add-a-provider",
     "add-a-channel",
     "write-a-plugin",
     "lock-down-a-public-channel",
+    "first-tunnel",
     "deploy"
   ]
 }
