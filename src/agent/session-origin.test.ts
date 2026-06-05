@@ -372,7 +372,7 @@ describe('renderSessionOrigin', () => {
     const participants: ChannelParticipant[] = [
       {
         authorId: '999',
-        authorName: 'Winky',
+        authorName: 'Momo',
         firstMessageAt: now - 1000,
         lastMessageAt: now - 1000,
         messageCount: 5,
@@ -395,7 +395,7 @@ describe('renderSessionOrigin', () => {
 
     // then: the example uses the peer bot's real id and name
     expect(out).toContain('<@999> hello')
-    expect(out).toContain('Winky')
+    expect(out).toContain('Momo')
     expect(out).toContain('Plain-text names do not notify')
   })
 
@@ -426,7 +426,7 @@ describe('renderSessionOrigin', () => {
       },
       {
         authorId: '999',
-        authorName: 'Winky',
+        authorName: 'Momo',
         firstMessageAt: now - 60_000,
         lastMessageAt: now - 60_000,
         messageCount: 2,
@@ -886,7 +886,7 @@ describe('renderSessionOrigin', () => {
     const participants: ChannelParticipant[] = [
       {
         authorId: '999',
-        authorName: 'Winky',
+        authorName: 'Momo',
         firstMessageAt: now - 1000,
         lastMessageAt: now - 1000,
         messageCount: 5,
@@ -897,7 +897,7 @@ describe('renderSessionOrigin', () => {
       { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: '222', thread: null, participants },
       now,
     )
-    expect(out).toContain('- <@999> (Winky) —')
+    expect(out).toContain('- <@999> (Momo) —')
     expect(out).toContain('`<@authorId>` works for any author you have seen')
   })
 
@@ -908,7 +908,7 @@ describe('renderSessionOrigin', () => {
     const participants: ChannelParticipant[] = [
       {
         authorId: '999',
-        authorName: 'Winky',
+        authorName: 'Momo',
         firstMessageAt: now - 1000,
         lastMessageAt: now - 1000,
         messageCount: 5,
@@ -977,9 +977,9 @@ describe('renderSessionOrigin channel self-identity', () => {
       workspace: '-100',
       chat: '-100',
       thread: null,
-      self: { id: '42', username: 'dobby_bot' },
+      self: { id: '42', username: 'acme_bot' },
     })
-    expect(out).toMatch(/You are `@dobby_bot` on Telegram/)
+    expect(out).toMatch(/You are `@acme_bot` on Telegram/)
     expect(out).toContain('addressed to YOU')
   })
 
@@ -990,9 +990,9 @@ describe('renderSessionOrigin channel self-identity', () => {
       workspace: 'acme',
       chat: 'acme/repo#1',
       thread: null,
-      self: { id: '555', username: 'dobby' },
+      self: { id: '555', username: 'acme' },
     })
-    expect(out).toMatch(/You are `@dobby` on GitHub/)
+    expect(out).toMatch(/You are `@acme` on GitHub/)
   })
 
   test('kakaotalk origin renders no self-mention line (no in-band mention syntax)', () => {

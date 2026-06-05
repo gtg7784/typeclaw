@@ -41,11 +41,11 @@ describe('parseListHooksPermissionStatus', () => {
 describe('buildPermissionGuidance', () => {
   test('PAT guidance names the failing repos with status codes', () => {
     const msg = buildPermissionGuidance('pat', [
-      { repo: 'indentcorp/huxley', status: 404 },
-      { repo: 'indentcorp/dobby', status: 403 },
+      { repo: 'acme/widgets', status: 404 },
+      { repo: 'acme/gadgets', status: 403 },
     ])
-    expect(msg).toContain('indentcorp/huxley (404)')
-    expect(msg).toContain('indentcorp/dobby (403)')
+    expect(msg).toContain('acme/widgets (404)')
+    expect(msg).toContain('acme/gadgets (403)')
   })
 
   test('PAT guidance uses the exact github.com UI label "Resource owner"', () => {

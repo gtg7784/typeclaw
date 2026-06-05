@@ -20,7 +20,7 @@ export async function wikipediaSearch(query: string, limit: number, signal?: Abo
   })
   const response = await fetch(`${OPENSEARCH_URL}?${params.toString()}`, {
     headers: {
-      'User-Agent': 'TypeClaw/0.1 (https://github.com/devxoul/typeclaw)',
+      'User-Agent': 'TypeClaw/0.1 (https://github.com/typeclaw/typeclaw)',
       Accept: 'application/json',
     },
     signal,

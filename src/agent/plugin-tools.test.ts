@@ -771,8 +771,8 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
 
   test('regression: managedConfig guard blocks an edit that would produce invalid typeclaw.json, on the customTool override path', async () => {
     // PR #283's failure mode: pi 0.67.3 ignores `tools:` for implementation
-    // overrides, so the channel-session `edit` tool that landed commit
-    // 6d1c42c in ~/typeclaw/servant ran pi's internal builtin and bypassed
+    // overrides, so the channel-session `edit` tool that landed in a host
+    // agent folder ran pi's internal builtin and bypassed
     // both `tool.before` and `runFinalWriteGuards`. The fix routes wrapped
     // builtin pi tools through `customTools`, which IS the override path
     // pi honors. This test pins the post-fix behavior end-to-end: a tool

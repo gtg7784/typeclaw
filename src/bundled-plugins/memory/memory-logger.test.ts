@@ -168,7 +168,7 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('you no longer emit a separate watermark marker')
   })
 
-  test('forbids stamping every fragment with the same "latest evaluated" entry id (the winky bug)', () => {
+  test('forbids stamping every fragment with the same "latest evaluated" entry id (the momo bug)', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toMatch(/per-fragment|each fragment.*own entry|do not stamp every fragment/i)
   })
@@ -285,21 +285,21 @@ describe('memoryLoggerSubagent', () => {
     const key = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_abc',
       parentTranscriptPath: '/x',
-      agentDir: '/agents/winky',
+      agentDir: '/agents/momo',
     })
-    expect(key).toBe('/agents/winky')
+    expect(key).toBe('/agents/momo')
   })
 
   test('two payloads from different sessions of the same agent produce the same inFlightKey', () => {
     const keyA = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_a',
       parentTranscriptPath: '/x',
-      agentDir: '/agents/winky',
+      agentDir: '/agents/momo',
     })
     const keyB = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_b',
       parentTranscriptPath: '/y',
-      agentDir: '/agents/winky',
+      agentDir: '/agents/momo',
     })
     expect(keyA).toBe(keyB)
   })
@@ -308,7 +308,7 @@ describe('memoryLoggerSubagent', () => {
     const keyA = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_x',
       parentTranscriptPath: '/x',
-      agentDir: '/agents/winky',
+      agentDir: '/agents/momo',
     })
     const keyB = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_x',
