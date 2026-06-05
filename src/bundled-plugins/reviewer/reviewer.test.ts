@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test'
 
 import { REVIEWER_SKILLS, REVIEWER_SYSTEM_PROMPT, createReviewerSubagent, reviewerPayloadSchema } from './reviewer'
 import { CODE_REVIEW_SKILL } from './skills/code-review'
+import { DATA_REVIEW_SKILL } from './skills/data-review'
+import { DOC_REVIEW_SKILL } from './skills/doc-review'
 import { GENERAL_REVIEW_SKILL } from './skills/general'
+import { PLAN_REVIEW_SKILL } from './skills/plan-review'
+import { SECURITY_AUDIT_SKILL } from './skills/security-audit'
+import { WRITING_REVIEW_SKILL } from './skills/writing-review'
 
 describe('reviewer subagent — load-bearing prompt phrases', () => {
   test.each(
@@ -152,22 +157,35 @@ describe('reviewer subagent declaration', () => {
     // names surface so the model can pick from the prompt-visible enum.
     expect(loadSkill.description).toContain('`code-review`')
     expect(loadSkill.description).toContain('`general`')
+    expect(loadSkill.description).toContain('`security-audit`')
   })
 
-  test('load_skill parameter schema accepts the shipped skill names and rejects unknown ones', () => {
+  test('load_skill parameter schema accepts every shipped skill name and rejects unknown ones', () => {
     const sub = createReviewerSubagent()
     const loadSkill = sub.customTools?.[0]
     if (loadSkill === undefined) throw new Error('load_skill tool missing')
-    expect(loadSkill.parameters.safeParse({ name: 'code-review' }).success).toBe(true)
-    expect(loadSkill.parameters.safeParse({ name: 'general' }).success).toBe(true)
-    expect(loadSkill.parameters.safeParse({ name: 'plan-review' }).success).toBe(false)
+    for (const skill of REVIEWER_SKILLS) {
+      expect(loadSkill.parameters.safeParse({ name: skill.name }).success).toBe(true)
+    }
+    expect(loadSkill.parameters.safeParse({ name: 'not-a-real-skill' }).success).toBe(false)
     expect(loadSkill.parameters.safeParse({ name: '' }).success).toBe(false)
   })
 
-  test('REVIEWER_SKILLS includes code-review and general (initial ship set)', () => {
+  test('REVIEWER_SKILLS ships the domain-neutral review set with general last as the fallback', () => {
     const names = REVIEWER_SKILLS.map((s) => s.name)
     expect(names).toContain('code-review')
+    expect(names).toContain('doc-review')
+    expect(names).toContain('plan-review')
+    expect(names).toContain('security-audit')
+    expect(names).toContain('writing-review')
+    expect(names).toContain('data-review')
     expect(names).toContain('general')
+    expect(names.at(-1)).toBe('general')
+  })
+
+  test('REVIEWER_SKILLS has no duplicate names (load_skill enum stays unambiguous)', () => {
+    const names = REVIEWER_SKILLS.map((s) => s.name)
+    expect(new Set(names).size).toBe(names.length)
   })
 
   test('declares a tool-result budget so a runaway subagent cannot exhaust parent context', () => {
@@ -285,9 +303,72 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('hidden assumptions')
   })
 
+  test('doc-review skill teaches doc-type fit and runnable-sample craft (drift guard)', () => {
+    expect(DOC_REVIEW_SKILL.name).toBe('doc-review')
+    expect(DOC_REVIEW_SKILL.description.length).toBeGreaterThan(0)
+    const lower = DOC_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('diátaxis')
+    expect(lower).toContain('prerequisite')
+    expect(lower).toContain('code sample')
+  })
+
+  test('plan-review skill teaches reversibility and measurable success (drift guard)', () => {
+    expect(PLAN_REVIEW_SKILL.name).toBe('plan-review')
+    expect(PLAN_REVIEW_SKILL.description.length).toBeGreaterThan(0)
+    const lower = PLAN_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('one-way')
+    expect(lower).toContain('success criteria')
+    expect(lower).toContain('alternatives considered')
+  })
+
+  test('plan-review skill enforces bias-free maturity-neutral review (the load-bearing first-review rule)', () => {
+    // Without this, the reviewer guesses whether a plan is draft-vs-final and
+    // either blocker-spams a sketch or rubber-stamps a flawed proposal. The
+    // rule is to review the idea as written and fold missing context into ONE
+    // finding, not N blockers.
+    const lower = PLAN_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('do not guess its maturity')
+    expect(lower).toContain('missing context is missing context, not a defect')
+  })
+
+  test('security-audit skill teaches the input-to-sink threat lens with OWASP/CWE anchors (drift guard)', () => {
+    expect(SECURITY_AUDIT_SKILL.name).toBe('security-audit')
+    expect(SECURITY_AUDIT_SKILL.description.length).toBeGreaterThan(0)
+    const lower = SECURITY_AUDIT_SKILL.content.toLowerCase()
+    expect(lower).toContain('injection')
+    expect(lower).toContain('ssrf')
+    expect(lower).toContain('owasp')
+    expect(lower).toContain('exploitab')
+  })
+
+  test('writing-review skill teaches editorial craft beyond grammar (drift guard)', () => {
+    expect(WRITING_REVIEW_SKILL.name).toBe('writing-review')
+    expect(WRITING_REVIEW_SKILL.description.length).toBeGreaterThan(0)
+    const lower = WRITING_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('lede')
+    expect(lower).toContain('audience')
+    expect(lower).toContain('unsupported claim')
+  })
+
+  test('data-review skill covers both the shape (schema/migration) and the data itself (drift guard)', () => {
+    expect(DATA_REVIEW_SKILL.name).toBe('data-review')
+    expect(DATA_REVIEW_SKILL.description.length).toBeGreaterThan(0)
+    const lower = DATA_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('migration')
+    expect(lower).toContain('referential integrity')
+    expect(lower).toContain('schema-invalid')
+    expect(lower).toContain('not null')
+  })
+
   test('every shipped skill references the reviewer neutral output contract (so domain skills compose with the universal shape)', () => {
     for (const skill of REVIEWER_SKILLS) {
       expect(skill.content).toContain('<review>')
+    }
+  })
+
+  test('every shipped skill closes by deferring to the neutral output block (no domain skill invents its own format)', () => {
+    for (const skill of REVIEWER_SKILLS) {
+      expect(skill.content).toContain('Do NOT invent your own output format')
     }
   })
 })
