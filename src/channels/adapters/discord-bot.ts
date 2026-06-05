@@ -499,10 +499,14 @@ type DiscordRawHistoryMessage = {
   author: { id: string; username?: string; global_name?: string | null; bot?: boolean }
   content: string
   timestamp: string
-  message_reference?: { message_id?: string }
+  message_reference?: { message_id?: string; channel_id?: string }
   attachments?: DiscordFile[]
   embeds?: DiscordGatewayEmbed[]
   sticker_items?: DiscordGatewayStickerItem[]
+  // A thread started from an existing message has a type-21 starter whose
+  // top-level content/author are empty; the real opener lives only here.
+  // `null` = referenced message deleted; absent = API did not resolve it.
+  referenced_message?: DiscordRawHistoryMessage | null
 }
 
 // Discord treats threads as separate channels with their own snowflake ids,
@@ -565,7 +569,17 @@ export function createDiscordHistoryCallback(deps: {
 }
 
 function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
-  const isBot = msg.author.bot === true || (botUserId !== null && msg.author.id === botUserId)
+  // A thread started from an existing message exposes that opener only as the
+  // type-21 starter's `referenced_message` — the starter itself has empty
+  // content and a bot/system author. Without this, the agent never sees the
+  // message the thread was created from. Take the opener's author and body
+  // (the live inbound path does the equivalent via enrichDiscordMessageReferences),
+  // while keeping the starter's own id/timestamp so dedup against the triggering
+  // message and chronological ordering stay correct.
+  const opener = msg.referenced_message ?? undefined
+  const source = opener !== undefined && bodyOf(msg) === '' ? opener : msg
+
+  const isBot = source.author.bot === true || (botUserId !== null && source.author.id === botUserId)
   const ts = Date.parse(msg.timestamp)
   // The REST history fetch bypasses the inbound classifier, so attachments,
   // embeds, and stickers on already-posted messages (e.g. an image on a thread
@@ -573,23 +587,25 @@ function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | nu
   // otherwise they are silently dropped and look_at_channel_attachment can
   // never resolve them. Mirror the classifier's splitInbound: bake placeholders
   // into text and carry the structured attachments so the router can resolve ids.
-  const attachments = describeDiscordMedia(msg)
-  const text =
-    attachments.length === 0
-      ? msg.content
-      : msg.content === ''
-        ? attachments.map(renderPlaceholder).join('\n')
-        : `${msg.content}\n${attachments.map(renderPlaceholder).join('\n')}`
+  const attachments = describeDiscordMedia(source)
+  const text = bodyOf(source)
   return {
     externalMessageId: msg.id,
-    authorId: msg.author.id,
-    authorName: msg.author.global_name ?? msg.author.username ?? msg.author.id,
+    authorId: source.author.id,
+    authorName: source.author.global_name ?? source.author.username ?? source.author.id,
     text,
     ts: Number.isFinite(ts) ? ts : 0,
     isBot,
     replyToBotMessageId: msg.message_reference?.message_id ?? null,
     ...(attachments.length > 0 ? { attachments } : {}),
   }
+}
+
+function bodyOf(msg: DiscordRawHistoryMessage): string {
+  const attachments = describeDiscordMedia(msg)
+  if (attachments.length === 0) return msg.content
+  const placeholders = attachments.map(renderPlaceholder).join('\n')
+  return msg.content === '' ? placeholders : `${msg.content}\n${placeholders}`
 }
 
 function clampLimit(requested: number, max: number): number {
