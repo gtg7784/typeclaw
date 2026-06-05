@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { commandForInstall, formatCommand, planSelfUpdate, resolveSelfPackageJsonPath } from './index'
@@ -359,6 +360,9 @@ describe('formatCommand', () => {
 
 describe('resolveSelfPackageJsonPath', () => {
   test('points at this package manifest', () => {
-    expect(resolveSelfPackageJsonPath()).toEndWith(join('typeclaw', 'package.json'))
+    const packageJsonPath = resolveSelfPackageJsonPath()
+
+    expect(packageJsonPath).toEndWith('package.json')
+    expect(JSON.parse(readFileSync(packageJsonPath, 'utf8'))).toMatchObject({ name: 'typeclaw' })
   })
 })
