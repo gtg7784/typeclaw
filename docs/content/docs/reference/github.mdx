@@ -8,7 +8,7 @@ import { Callout } from 'fumadocs-ui/components/callout'
 
 Part of the [channel adapters](/docs/reference/channel-adapters) family.
 
-Transport: **webhook delivery** (public URL required). Setup walkthrough: [Add a channel](/docs/guides/first-channel).
+Transport: **webhook delivery** (public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
 
 <Callout type="warn" title="Public URL required">
 The `github` adapter needs a public URL to receive webhook events. Set `channels.github.webhookUrl` in `typeclaw.json`, or configure a tunnel entry with `for: { kind: 'channel', name: 'github' }`. Without one, webhook registration is skipped and no events arrive. See [Add a tunnel](/docs/guides/first-tunnel).
