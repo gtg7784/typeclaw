@@ -127,6 +127,18 @@ describe('planner subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('never delegate the judgment')
   })
 
+  test('prompt names scout and explorer as the preferred workers for quick search / gathering', () => {
+    // The two bundled cheap workers map onto the planner's two gathering modes:
+    // scout = web research (prices/timelines/options), explorer = local
+    // codebase/config search. Naming them makes "offload the bulk" actionable
+    // instead of abstract, and steers a quick search to the cheap model.
+    expect(PLANNER_SYSTEM_PROMPT).toContain('`scout`')
+    expect(PLANNER_SYSTEM_PROMPT).toContain('`explorer`')
+    const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('web research')
+    expect(lower).toContain('local filesystem search')
+  })
+
   test('prompt still forbids side effects through a delegate (no laundering write access via a subagent)', () => {
     const lower = PLANNER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('a subagent you spawn cannot do for you')
