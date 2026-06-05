@@ -20,6 +20,15 @@ That's the whole instruction. While you work, the agent quietly notes what happe
   files; you never touch them. The only thing you contribute is using the agent.
 </Callout>
 
+## The agent dreams
+
+That reflection step has a name: the agent **dreams**. While you work, it jots down fragments of what happened into a daily memory stream. Then, on its own schedule, it dreams — and that does two things:
+
+- **Stream becomes long-term memory.** It distills the day's fragments into lasting notes about your team, your repos, and your conventions — memory it carries into every future conversation.
+- **Repeated work becomes a skill.** When it notices it's done the same multi-step task more than once, it writes itself a reusable skill for it — muscle memory, so next time it just knows the steps.
+
+Modeled on how sleep consolidates a day's experience, it runs in the background between conversations — and commits every pass to git, so `git log memory/` shows exactly what it learned and when.
+
 ## How to see what it learned
 
 After a week of real use, look at what stuck:
@@ -42,19 +51,9 @@ Ask it to "remember more about who owns what in our codebase," and its next refl
 
 ## Going deeper
 
+The full reasoning — why self-distilled memory beats hand-written prompts, the citation-superset safety net that guarantees a dream never drops what it cited, and the exact shard format — lives in the [memory loop concept](/docs/concepts/memory-loop). This guide is the what-it-does; that page is the how and why.
+
 <Accordions>
-
-<Accordion title="The three-part loop, briefly">
-
-Under the hood the bundled `memory` plugin runs on three cadences:
-
-- **Observe** — after each idle stretch, it appends notable fragments from the session to that day's memory stream. Cheap, frequent, lossy on purpose.
-- **Dream** — on a recurring schedule (every 30 minutes by default), it reads the new fragments and consolidates them into long-term memory, and writes a reusable skill whenever it spots a procedure it keeps repeating.
-- **Apply** — the next session sees the updated memory and the new skills, loaded only when relevant.
-
-The full reasoning — why self-distilled memory beats hand-written prompts, and why it's called "dreaming" — lives in the [memory loop concept](/docs/concepts/memory-loop). This guide is the what-to-do; that page is the why.
-
-</Accordion>
 
 <Accordion title="Tuning the schedule (optional)">
 
