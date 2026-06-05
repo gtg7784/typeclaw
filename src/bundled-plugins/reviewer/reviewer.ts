@@ -124,7 +124,7 @@ End every response with a single \`<review>\` block. Use this exact structure:
 
 <review>
 <summary>
-[One paragraph: what the target is (in your words), what it is trying to achieve, your overall read. Name the skill(s) you loaded and why. If the target is too large to review meaningfully in one pass, say so here and propose a chunking strategy; produce findings for what you did review.]
+[Two or three sentences, no more. State only your overall judgment and the one or two facts that justify it — the verdict's reasoning, not a recap. The parent may post this verbatim as the review body on an approval, so write it for the PR author, not for an operator: do NOT restate what the change does (they wrote the description), do NOT narrate your process ("I reviewed…", "I loaded the X skill because…", "I checked…"), do NOT list which skills you loaded. Lead with the substance. If the target is too large to review in one pass, say so here and propose a chunking strategy; produce findings for what you did review.]
 </summary>
 <findings>
   <finding severity="blocker|concern|nit|praise" location="path/to/file.ts:42, diff hunk, paragraph reference, or general">
