@@ -53,6 +53,15 @@ class FakeTerminal implements Terminal {
   visible(): string {
     return stripAnsi(this.joined())
   }
+
+  // pi-tui repaints the whole viewport on each render and each repaint is one
+  // write, so counting frames that contain a substring distinguishes a widget
+  // that was removed (appears in a bounded number of frames) from one that
+  // lingers (appears in every later repaint too). `visible()` can't see this —
+  // it's the flattened byte history where removed widgets still show once.
+  frameCount(substring: string): number {
+    return this.written.filter((frame) => stripAnsi(frame).includes(substring)).length
+  }
 }
 
 type FakeClient = Client & {
@@ -642,6 +651,11 @@ describe('createTui', () => {
     expect(visible).toContain('restart requested… reconnecting when the new container is up')
     expect(visible).toContain('restart scheduled; reconnecting when the new container is up')
     expect(visible).toContain('restart failed: denied')
+    // Regression guard: the loader is torn down on the first restart_result, so
+    // it appears in exactly one repaint (the pre-result spin). If it leaked into
+    // later frames the restart status would read as still-in-flight after the
+    // server already replied.
+    expect(terminal.frameCount('restart requested…')).toBe(1)
 
     client.triggerClose()
     await runPromise

@@ -324,6 +324,11 @@ export function createTui({
           break
         }
         case 'restart_result': {
+          if (restartLoader !== null) {
+            restartLoader.stop()
+            tui.removeChild(restartLoader)
+            restartLoader = null
+          }
           const text =
             msg.status === 'accepted'
               ? colors.green(colors.dim(msg.message ?? 'restart scheduled; reconnecting when the new container is up'))
