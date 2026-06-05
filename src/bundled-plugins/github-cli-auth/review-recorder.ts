@@ -4,6 +4,7 @@ import { recordReview } from '@/channels/github-review-turn-ledger'
 import type { ContentPart, ToolResult } from '@/plugin'
 
 import { detectReviewSubmission, type DetectedReview } from './gh-review-detect'
+import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-detect'
 
 // Bridges the bash `gh` interceptor to the false-receipt ledger: at tool.before
 // we detect a review-submission command (resolving its --input file), stash it by
@@ -16,10 +17,11 @@ const pending = new Map<string, DetectedReview>()
 
 const MAX_INPUT_BYTES = 1_000_000
 
-export async function noteReviewCommand(args: { callId: string; command: string }): Promise<void> {
+export async function noteReviewCommand(args: { callId: string; command: string }): Promise<ReviewDumpDecision> {
   const inputFileContents = await readInputFile(args.command)
   const detected = detectReviewSubmission({ command: args.command, inputFileContents })
   if (detected !== null) pending.set(args.callId, detected)
+  return detectReviewDump({ command: args.command, inputFileContents })
 }
 
 export function commitReviewIfSucceeded(args: { sessionId: string; callId: string; result: ToolResult }): void {
