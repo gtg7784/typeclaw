@@ -9,6 +9,7 @@ function input(overrides: Partial<RereviewGuardInput> = {}): RereviewGuardInput 
     thread: '12345',
     text: 'Verified — that closes it, thanks!',
     wantsResolve: true,
+    isContinue: false,
     workspace: 'acme/widgets',
     getReviewState: async () => ({ ok: true, selfBlocking: true, approve: true }),
     ...overrides,
@@ -99,4 +100,89 @@ describe('re-review stranding guard', () => {
     )
     expect(decision.block).toBe(true)
   })
+
+  // Regression: PR #649. The bot held a live CHANGES_REQUESTED, the author said
+  // "Addressed", and the bot replied "Looks good — … solid cleanup ✨" as a plain
+  // PR comment. That text classifies as warn-tier, not block-approve, so the old
+  // guard short-circuited to ALLOW and the comment stranded the block.
+  it('blocks a warn-tier "looks good" re-review reply while the bot still blocks the PR', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        text: 'Looks good — the remaining leak paths are fixed. Tests are green, so this is a solid cleanup. ✨',
+        getReviewState: stateOk(true),
+      }),
+    )
+    expect(decision.block).toBe(true)
+    if (decision.block) expect(decision.reason).toContain('APPROVE')
+  })
+
+  it('allows a warn-tier "looks good" when the bot holds no outstanding block', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({ thread: null, wantsResolve: false, text: 'lgtm, nice work', getReviewState: stateOk(false) }),
+    )
+    expect(decision).toEqual({ block: false })
+  })
+
+  it('fails closed on a warn-tier reply when review state cannot be verified', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        text: 'looks good to me',
+        getReviewState: async () => ({ ok: false, error: 'GitHub reviews 503', code: 'transient' }),
+      }),
+    )
+    expect(decision.block).toBe(true)
+    if (decision.block) expect(decision.reason).toContain('Could not verify')
+  })
+
+  it('exempts a mid-turn warn-tier status reply (continue:true) from the state query', async () => {
+    let queried = false
+    const decision = await evaluateRereviewGuard(
+      input({
+        thread: null,
+        wantsResolve: false,
+        isContinue: true,
+        text: 'Looks good so far — spawning the reviewer now, back shortly.',
+        getReviewState: async () => {
+          queried = true
+          return { ok: true, selfBlocking: true, approve: true }
+        },
+      }),
+    )
+    expect(decision).toEqual({ block: false })
+    expect(queried).toBe(false)
+  })
+
+  it('still resolves-blocks an explicit thread resolve even mid-turn (continue:true)', async () => {
+    const decision = await evaluateRereviewGuard(
+      input({ thread: '999', wantsResolve: true, isContinue: true, text: 'one sec', getReviewState: stateOk(true) }),
+    )
+    expect(decision.block).toBe(true)
+  })
+
+  // A negative warn phrase re-asserts the block instead of stranding it, so the
+  // guard must not query state or block it (PR #652 review). Only positive,
+  // approval-shaped warns are closeout attempts.
+  it.each(['still needs work', 'this needs changes before it lands'])(
+    'does not fire on a negative warn reply that re-asserts the block: %p',
+    async (text) => {
+      let queried = false
+      const decision = await evaluateRereviewGuard(
+        input({
+          thread: null,
+          wantsResolve: false,
+          text,
+          getReviewState: async () => {
+            queried = true
+            return { ok: true, selfBlocking: true, approve: true }
+          },
+        }),
+      )
+      expect(decision).toEqual({ block: false })
+      expect(queried).toBe(false)
+    },
+  )
 })

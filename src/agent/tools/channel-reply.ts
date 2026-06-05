@@ -171,6 +171,7 @@ export function createChannelReplyTool({
         thread: origin.thread,
         text,
         wantsResolve: params.resolve_review_thread === true,
+        isContinue: keepTurnAlive,
         getReviewState: (req) => router.getReviewState(req),
       })
       if (rereview.block) {
