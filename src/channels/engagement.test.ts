@@ -126,6 +126,91 @@ describe('decideEngagement (explicit triggers)', () => {
   })
 })
 
+describe('decideEngagement (explicit-only inbounds)', () => {
+  test('engages an explicit-only inbound when it mentions the bot', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ suppressSticky: true, isBotMention: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('engages an explicit-only inbound when it replies to the bot', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ suppressSticky: true, replyToBotMessageId: 'parent-1' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('observes an explicit-only inbound with sticky credit and preserves the credit', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ suppressSticky: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
+  })
+
+  test('observes an explicit-only inbound whose text matches an alias', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ suppressSticky: true, text: 'Toto please look' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+      selfAliases: ['toto'],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('observes an explicit-only inbound authored by a peer bot', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ suppressSticky: true, authorId: 'peer-bot', authorName: 'peer-bot', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('non-explicit sticky credit still engages a normal inbound', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+  })
+})
+
 describe('decideEngagement (alias)', () => {
   test('engages when text contains a self-alias (case-insensitive)', () => {
     const ledger = new StickyLedger()
