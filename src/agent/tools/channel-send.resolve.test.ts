@@ -356,4 +356,34 @@ describe('channel_send re-review stranding guard', () => {
     expect(sent).toBe(1)
     expect(queried).toBe(false)
   })
+
+  test('blocks a no-thread LGTM comment while GitHub still requires formal review', async () => {
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent += 1
+          return { ok: true }
+        },
+        getReviewState: async () => ({
+          ok: true,
+          selfBlocking: false,
+          approve: true,
+          reviewDecision: 'REVIEW_REQUIRED',
+        }),
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:653',
+      text: 'LGTM — the dedupe is scoped to the per-session turn boundary exactly as described.',
+    })
+
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect(sent).toBe(0)
+    expect((result.content[0] as { text: string }).text).toContain('formal GitHub review')
+  })
 })

@@ -960,4 +960,33 @@ describe('channel_reply re-review stranding guard', () => {
     expect(result.details.ok).toBe(true)
     expect(calls).toHaveLength(1)
   })
+
+  test('blocks a warn-tier LGTM PR comment while GitHub still requires formal review (PR #653)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        },
+        {
+          getReviewState: async () => ({
+            ok: true,
+            selfBlocking: false,
+            approve: true,
+            reviewDecision: 'REVIEW_REQUIRED',
+          }),
+        },
+      ),
+      origin: { adapter: 'github', workspace: 'acme/widgets', chat: 'pr:653', thread: null },
+    })
+
+    const result = await runTool(tool, {
+      text: 'LGTM — the dedupe is scoped to the per-session turn boundary exactly as described.',
+    })
+
+    expect(result.details.ok).toBe(false)
+    expect(calls).toHaveLength(0)
+    expect((result.content[0] as { text: string }).text).toContain('formal GitHub review')
+  })
 })
