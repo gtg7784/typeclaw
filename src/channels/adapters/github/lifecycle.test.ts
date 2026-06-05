@@ -1201,4 +1201,86 @@ describe('createGithubAdapter lifecycle', () => {
       expect(calls.some((c) => c.url.includes('/repos/victim/private/'))).toBe(false)
     })
   })
+
+  describe('start() open-PR reconciliation', () => {
+    function reviewConfig(on: 'opened' | 'review_requested' | 'off') {
+      return (): ChannelAdapterConfig & GithubAdapterConfig => {
+        const config = githubConfig(['acme/widgets'])
+        config.review = { on, approve: true }
+        return config
+      }
+    }
+
+    test("reviewOn 'opened' scans open PRs and checks reviews for an un-reviewed one", async () => {
+      const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+        if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+        const hooks = url.match(/\/repos\/[^/]+\/[^/]+\/hooks\b/)
+        if (hooks) {
+          if (method === 'GET') return Response.json([])
+          if (method === 'POST') return Response.json({ id: 1 }, { status: 201 })
+        }
+        if (url.match(/\/pulls\/7\/reviews/)) return Response.json([])
+        if (url.includes('/pulls?'))
+          return Response.json([
+            {
+              number: 7,
+              id: 700,
+              title: 'Add thing',
+              draft: false,
+              updated_at: '2026-01-01T00:00:00Z',
+              user: { login: 'alice', id: 10, type: 'User' },
+              head: { ref: 'feature' },
+              base: { ref: 'main' },
+              requested_reviewers: [],
+            },
+          ])
+        return new Response('unexpected', { status: 500 })
+      })
+
+      const adapter = createGithubAdapter({
+        router: freshRouter(),
+        configRef: reviewConfig('opened'),
+        secrets: patSecrets(),
+        agentDir: '/tmp/agent',
+        logger: silentLogger(),
+        fetchImpl,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+      })
+
+      await adapter.start()
+      await adapter.stop()
+
+      expect(calls.some((c) => c.url.includes('/repos/acme/widgets/pulls?state=open'))).toBe(true)
+      expect(calls.some((c) => c.url.includes('/repos/acme/widgets/pulls/7/reviews'))).toBe(true)
+    })
+
+    test("reviewOn 'off' does not scan open PRs", async () => {
+      const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+        if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+        const hooks = url.match(/\/repos\/[^/]+\/[^/]+\/hooks\b/)
+        if (hooks) {
+          if (method === 'GET') return Response.json([])
+          if (method === 'POST') return Response.json({ id: 1 }, { status: 201 })
+        }
+        return new Response('unexpected', { status: 500 })
+      })
+
+      const adapter = createGithubAdapter({
+        router: freshRouter(),
+        configRef: reviewConfig('off'),
+        secrets: patSecrets(),
+        agentDir: '/tmp/agent',
+        logger: silentLogger(),
+        fetchImpl,
+        httpListenImpl: () => ({ stop: async () => {} }),
+        webhookRegistrationDelayMs: 0,
+      })
+
+      await adapter.start()
+      await adapter.stop()
+
+      expect(calls.some((c) => c.url.includes('/pulls'))).toBe(false)
+    })
+  })
 })
