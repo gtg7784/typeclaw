@@ -51,7 +51,7 @@ It walks the whole setup interactively:
 - **Webhook port + secret** — defaults to `8975`; leave the secret blank and it auto-generates one.
 - **Repos** — comma-separated `owner/repo` you want the agent to watch.
 
-When it finishes, it **installs the repository webhooks for you** and enables the adapter. If the container is running, it offers to restart so the change takes effect; otherwise `typeclaw start` picks it up. See [Add a channel](/docs/guides/first-channel) for the shared flow and the [`github` adapter reference](/docs/reference/github) for the config the wizard writes.
+When it finishes, it **installs the repository webhooks for you** and enables the adapter. If the container is running, it offers to restart so the change takes effect; otherwise `typeclaw start` picks it up. See [Add a channel](/docs/guides/add-a-channel) for the shared flow and the [`github` adapter reference](/docs/reference/github) for the config the wizard writes.
 
 <Callout type="info" title="Or just ask the agent">
   If the agent is already running with an `owner` paired, you can skip the CLI and ask it in the TUI or a 1:1 DM — _"add
