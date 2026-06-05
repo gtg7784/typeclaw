@@ -38,22 +38,75 @@ describe('detectReviewDump — blocks the dumped review', () => {
     })
     expect(result?.block).toBe(true)
   })
+
+  test('partial inline still blocks on stranded body anchors', () => {
+    const result = detectReviewDump({
+      command: REVIEWS_CMD,
+      inputFileContents: payload({
+        event: 'REQUEST_CHANGES',
+        body: DUMPED_BODY,
+        comments: [
+          { path: 'apps/admin/src/lib/i18n/languages.ts', line: 12, body: 'x' },
+          { path: 'apps/admin/src/lib/i18n/translations/en.ts', line: 807, body: 'y' },
+          { path: 'apps/admin/src/components/translation-panel.tsx', line: 107, body: 'z' },
+        ],
+      }),
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('span comment does not cover an anchor outside its range', () => {
+    const result = detectReviewDump({
+      command: REVIEWS_CMD,
+      inputFileContents: payload({
+        event: 'REQUEST_CHANGES',
+        body: 'a `x.ts:10`\nb `y.ts:20`\nc `z.ts:30`',
+        comments: [{ path: 'x.ts', start_line: 10, line: 12, body: 'covers x only' }],
+      }),
+    })
+    expect(result?.block).toBe(true)
+  })
 })
 
 describe('detectReviewDump — allows legitimate reviews', () => {
-  test('REQUEST_CHANGES with findings properly in comments[] is allowed', () => {
+  test('every body anchor covered inline (range, list, full-path) is allowed', () => {
+    const result = detectReviewDump({
+      command: REVIEWS_CMD,
+      inputFileContents: payload({
+        event: 'REQUEST_CHANGES',
+        body: 'a `languages.ts:12-20`\nb `en.ts:807,809`\nc `panel.tsx:107-111`',
+        comments: [
+          { path: 'apps/admin/src/lib/i18n/languages.ts', line: 15, body: 'in range' },
+          { path: 'apps/admin/src/lib/i18n/translations/en.ts', line: 809, body: 'in list' },
+          { path: 'src/components/panel.tsx', line: 107, body: 'at line' },
+        ],
+      }),
+    })
+    expect(result).toBeNull()
+  })
+
+  test('summary body with no anchors is allowed regardless of comments', () => {
     const result = detectReviewDump({
       command: REVIEWS_CMD,
       inputFileContents: payload({
         event: 'REQUEST_CHANGES',
         body: 'Two blockers, see inline.',
+        comments: [{ path: 'a.ts', line: 12, body: 'x' }],
+      }),
+    })
+    expect(result).toBeNull()
+  })
+
+  test('span comment covers an anchor inside its start_line..line range', () => {
+    const result = detectReviewDump({
+      command: REVIEWS_CMD,
+      inputFileContents: payload({
+        event: 'REQUEST_CHANGES',
+        body: 'a `x.ts:10`\nb `x.ts:20`\nc `x.ts:30`',
         comments: [
-          { path: 'a.ts', line: 12, body: 'x' },
-          { path: 'b.ts', line: 8, body: 'y' },
-          { path: 'c.ts', line: 3, body: 'z' },
-          { path: 'd.ts', line: 1, body: 'w' },
-          { path: 'e.ts', line: 4, body: 'v' },
-          { path: 'f.ts', line: 9, body: 'u' },
+          { path: 'x.ts', start_line: 8, line: 12, body: 'covers 10' },
+          { path: 'x.ts', line: 20, body: 'covers 20' },
+          { path: 'x.ts', line: 30, body: 'covers 30' },
         ],
       }),
     })
