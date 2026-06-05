@@ -1,7 +1,7 @@
 import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
-import type { ChannelSelfIdentityResolver } from '@/channels/types'
+import type { ChannelSelfIdentityResolver, InboundMessage } from '@/channels/types'
 import { resolveSecret } from '@/secrets/resolve'
 import type { GithubSecretsBlock } from '@/secrets/schema'
 
@@ -21,6 +21,7 @@ import {
   parseListHooksPermissionStatus,
 } from './permission-guidance'
 import { createGithubReactionCallback, createGithubRemoveReactionCallback } from './reactions'
+import { reconcileOpenPrs } from './reconcile-open-prs'
 import { createGithubReviewStateResolver } from './review-state'
 import { createGithubReviewThreadResolver } from './review-thread-resolver'
 import { createTeamMembershipChecker } from './team-membership'
@@ -160,6 +161,19 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   const typing = async (): Promise<void> => {}
   const dedup = createDeliveryDedup()
   const isBotInTeam = createTeamMembershipChecker({ token: authToken, fetchImpl })
+  // Shared inbound entry. Both the live webhook handler and the startup
+  // reconciliation pass route through this so a replayed PR takes the exact
+  // same path a real delivery would.
+  const routeInbound = (message: InboundMessage): void => {
+    rememberWorkspace(message.workspace, message.chat)
+    // Ack-first: wrap in Promise.resolve so a synchronous throw inside
+    // router.route() cannot prevent the 200 response from being returned.
+    void Promise.resolve()
+      .then(() => options.router.route(message))
+      .catch((err: unknown) => {
+        logger.error(`[github] route failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
+  }
   const handler = createGithubWebhookHandler({
     webhookSecret,
     dedup,
@@ -173,16 +187,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     authToken,
     fetchImpl,
     logger,
-    route: (message) => {
-      rememberWorkspace(message.workspace, message.chat)
-      // Ack-first: wrap in Promise.resolve so a synchronous throw inside
-      // router.route() cannot prevent the 200 response from being returned.
-      void Promise.resolve()
-        .then(() => options.router.route(message))
-        .catch((err: unknown) => {
-          logger.error(`[github] route failed: ${err instanceof Error ? err.message : String(err)}`)
-        })
-    },
+    route: routeInbound,
   })
 
   return {
@@ -329,6 +334,26 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           r.action === 'created' || r.action === 'updated' ? [{ repo: r.repo, hookId: r.hookId }] : [],
         )
         logRegistrationOutcome(logger, registration, options.secrets.auth.type)
+      }
+      // Catch up on PRs whose opened/ready_for_review/review_requested delivery
+      // was missed (tunnel-URL churn, dropped delivery, downtime). Best-effort
+      // and last so a failure here never blocks the adapter from coming up; the
+      // helper swallows per-repo errors internally. Runs on every start(), so a
+      // tunnel-driven restart re-checks too. `off` short-circuits inside.
+      if (repos.length > 0) {
+        await reconcileOpenPrs({
+          repos,
+          reviewOn: cfg.review.on,
+          selfLogin,
+          authType: options.secrets.auth.type,
+          token: authToken,
+          route: routeInbound,
+          logger,
+          isBotInTeam,
+          fetchImpl,
+        }).catch((err: unknown) => {
+          logger.warn(`[github] reconcile pass failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
       }
     },
     async stop(): Promise<void> {
