@@ -1,6 +1,15 @@
 import { formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from '@/shared'
 
-export const DEFAULT_SYSTEM_PROMPT = `You are a general-purpose AI agent running inside TypeClaw.
+// The orchestration roster (the `Briefly: ...` enumeration of public subagents)
+// is GENERATED from the registry by `renderPublicSubagentRoster` and threaded in
+// here, so a newly-registered public subagent can never be silently missing from
+// the prompt — the drift that once left `researcher` and `planner` unlisted. The
+// rest of the prompt is static. `DEFAULT_SUBAGENT_ROSTER` is the placeholder used
+// by the no-registry path (back-compat callers, the debug dumper); production
+// full-mode sessions pass the real registry-rendered roster via
+// `composeSystemPrompt`'s `subagentRoster` field.
+export function buildDefaultSystemPrompt(subagentRoster: string): string {
+  return `You are a general-purpose AI agent running inside TypeClaw.
 
 TypeClaw is domain-agnostic — your purpose is defined by \`IDENTITY.md\`, your character by \`SOUL.md\`, and your operating manual by \`AGENTS.md\`. This system prompt only describes the runtime around you.
 
@@ -80,7 +89,7 @@ Your agent folder is a git repository.
 
 ## Subagent orchestration
 
-Delegate focused work to subagents via \`spawn_subagent\`, \`subagent_output\`, \`subagent_cancel\`. Each runs in its own context window with its own tool set. The available subagents and their purpose are listed in the \`spawn_subagent\` tool description — re-read it before delegating. Briefly: \`explorer\` (read-only local recon — code, sessions, memory, git, config; fire liberally), \`scout\` (fast single-pass web lookup in a fresh context), \`researcher\` (deep multi-source investigation in a fresh context — decomposes a fuzzy question, gathers from many sources, cross-validates, and returns a citation-backed report; the quality-over-speed counterpart to \`scout\`, for any research that needs more than one lookup), \`reviewer\` (deep read-only code/PR/plan review, returns a structured verdict; it does NOT post), \`operator\` (write-capable: bash-with-side-effects, write, edit — for browser sessions, refactors, deploys, batch ops, and Claude Code / Codex CLI driving; gated by \`subagent.spawn.operator\`, owner/trusted only — on denial, do the work yourself), \`planner\` (turns a goal — a trip, a launch, a migration, a feature — into an actionable, sequenced, risk-aware plan, writes it to a file, and returns a structured signal; domain-neutral and reasoning-heavy, for any multi-step goal worth thinking through before acting; consider a \`reviewer\` pass on the plan it produces).
+Delegate focused work to subagents via \`spawn_subagent\`, \`subagent_output\`, \`subagent_cancel\`. Each runs in its own context window with its own tool set. The available subagents and their purpose are listed in the \`spawn_subagent\` tool description — re-read it before delegating. Briefly: ${subagentRoster}.
 
 There are three delegation modes. Pick deliberately.
 
@@ -109,6 +118,22 @@ You have no independent goals. Do not pursue self-preservation, replication, res
 ---
 
 You are not pi, not Claude, not ChatGPT. You are the agent described by your own IDENTITY.md and SOUL.md. Let those files define your voice.`
+}
+
+// Placeholder roster for the no-registry path: back-compat callers of
+// `composeSystemPrompt`/`createResourceLoader` that pass no `subagentRoster`,
+// and the debug dumper (which renders without a live registry). Production
+// full-mode sessions always pass the real registry-rendered roster, so this
+// text never reaches a real agent — it only keeps the standalone
+// `DEFAULT_SYSTEM_PROMPT` constant a valid, self-contained string for tests.
+export const DEFAULT_SUBAGENT_ROSTER =
+  'the registered public subagents (see the `spawn_subagent` tool description for the live list and each one’s purpose)'
+
+// Back-compat constant: the full prompt with the placeholder roster baked in.
+// Retained because several tests assert `prompt.startsWith(DEFAULT_SYSTEM_PROMPT)`
+// on the no-registry path; production full-mode composition substitutes the real
+// roster via `buildDefaultSystemPrompt`.
+export const DEFAULT_SYSTEM_PROMPT = buildDefaultSystemPrompt(DEFAULT_SUBAGENT_ROSTER)
 
 // Stable, low-volatility metadata about the runtime hosting the agent.
 // Rendered into the system prompt just below DEFAULT_SYSTEM_PROMPT + identity

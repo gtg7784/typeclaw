@@ -53,7 +53,12 @@ import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
-import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
+import {
+  buildDefaultSystemPrompt,
+  DEFAULT_SUBAGENT_ROSTER,
+  renderRuntimeBlock,
+  SLIM_SYSTEM_PROMPT,
+} from './system-prompt'
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import {
   createBudgetState,
@@ -69,7 +74,7 @@ import { createChannelSendTool } from './tools/channel-send'
 import { createGrantRoleTool } from './tools/grant-role'
 import { createRestartTool } from './tools/restart'
 import { createSkipResponseTool } from './tools/skip-response'
-import { createSpawnSubagentTool } from './tools/spawn-subagent'
+import { createSpawnSubagentTool, renderPublicSubagentRoster } from './tools/spawn-subagent'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { createSubagentCancelTool } from './tools/subagent-cancel'
 import { createSubagentOutputTool } from './tools/subagent-output'
@@ -256,6 +261,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.permissions ? { permissions: options.permissions } : {}),
           ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
+          ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -899,6 +905,12 @@ export type CreateResourceLoaderOptions = {
   mcpManager?: McpManager
   permissions?: PermissionService
   runtimeVersion?: string
+  // Public subagents whose names + `rosterDescription`s render the full-mode
+  // "## Subagent orchestration" roster. When omitted (no-registry callers, the
+  // debug dumper), the prompt falls back to `DEFAULT_SUBAGENT_ROSTER`. Threaded
+  // from `createSessionWithDispose`, where the merged registry is already in
+  // scope.
+  subagentRegistry?: SubagentRegistry
   // Explicit override for the prompt mode. When omitted, the mode is derived
   // from `origin.kind`: cron + subagent → slim, tui + channel → full. Pass
   // 'full' to force the heavy prompt even on an unattended origin (rarely
@@ -957,6 +969,11 @@ export type SystemPromptMode = 'full' | 'slim'
 export type SystemPromptComposition = {
   mode?: SystemPromptMode
   self: string
+  // Pre-rendered full-mode orchestration roster (from `renderPublicSubagentRoster`).
+  // Kept as a ready string so this composer stays pure and registry-free; the
+  // registry-aware caller renders it. Ignored in slim mode (no roster section).
+  // Falls back to `DEFAULT_SUBAGENT_ROSTER` when omitted.
+  subagentRoster?: string
   runtimeVersion?: string
   origin?: SessionOrigin
   roleContext?: SessionRoleContext
@@ -990,7 +1007,10 @@ export type SystemPromptComposition = {
 // suffix anyway — and removes the staleness failure mode where a session
 // opened Friday answered "today is Friday" on Thursday.
 export function composeSystemPrompt(parts: SystemPromptComposition): string {
-  const base = parts.mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
+  const base =
+    parts.mode === 'slim'
+      ? SLIM_SYSTEM_PROMPT
+      : buildDefaultSystemPrompt(parts.subagentRoster ?? DEFAULT_SUBAGENT_ROSTER)
   let prompt = `${base}\n\n${parts.self}`
   if (parts.runtimeVersion !== undefined) {
     prompt = `${prompt}\n\n${renderRuntimeBlock(parts.runtimeVersion)}`
@@ -1013,7 +1033,11 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
   const mode: SystemPromptMode = options.mode ?? deriveSystemPromptMode(options.origin)
-  const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
+  const subagentRoster =
+    options.subagentRegistry !== undefined
+      ? renderPublicSubagentRoster(options.subagentRegistry)
+      : DEFAULT_SUBAGENT_ROSTER
+  const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : buildDefaultSystemPrompt(subagentRoster)
 
   // Kick off the three independent I/O paths concurrently. Sequential awaits
   // here used to be the dominant cold-start cost amplifier: loadSelf is 2
@@ -1077,6 +1101,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   const systemPrompt = composeSystemPrompt({
     mode,
     self,
+    subagentRoster,
     ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
     ...(options.origin !== undefined ? { origin: options.origin } : {}),
     ...(roleContext !== undefined ? { roleContext } : {}),
