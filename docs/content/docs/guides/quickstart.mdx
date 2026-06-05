@@ -16,7 +16,7 @@ You need two things installed:
 - **[Bun](https://bun.sh/)** (version 1.1 or newer) — the runtime TypeClaw is built on.
 - **[OrbStack](https://orbstack.dev/)** (recommended) or **[Docker](https://www.docker.com/)** — your agent runs inside a container. OrbStack is lighter and faster to start on macOS; Docker Desktop works just as well.
 
-You'll also need access to one AI provider — an API key from OpenAI, Anthropic, Fireworks, or Z.AI, or an existing ChatGPT/Claude subscription you can log in with. The wizard in step 2 walks you through it.
+You'll also need access to one AI provider — an API key from OpenAI, Anthropic, Fireworks, or Z.AI, or an existing ChatGPT or Claude subscription you can log in with (via the `openai-codex` or `anthropic` providers). The wizard in step 2 walks you through it.
 
 ## Five steps to your first reply
 
@@ -45,7 +45,7 @@ mkdir my-agent && cd my-agent
 typeclaw init
 ```
 
-`init` is an interactive wizard. It asks which AI provider you want, which model, and how to sign in (API key or, for OpenAI/Anthropic, a browser login) — and it offers to wire up your first channel (Slack, Discord, GitHub, …) right then too. Answer the prompts and it sets everything up for you. By the time `init` finishes, you have a working provider and, if you said yes, a channel already connected.
+`init` is an interactive wizard. It asks which AI provider you want, which model, and how to sign in (an API key, or a browser login if you pick a subscription-backed provider like OpenAI Codex or Anthropic) — and it offers to wire up your first channel (Slack, Discord, GitHub, …) right then too. Answer the prompts and it sets everything up for you. By the time `init` finishes, you have a working provider and, if you said yes, a channel already connected.
 
 <Accordions>
 
@@ -58,7 +58,7 @@ typeclaw init
 - a `Dockerfile` and `package.json` — so the agent can build its container
 - starter folders: `workspace/` (the agent's free-write space), `public/`, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`
 
-The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick OpenAI or Anthropic you can log in through the browser with an existing paid subscription instead of pasting a key. It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/add-a-channel).
+The provider step asks, in order: **which provider**, **which model**, then **API key or OAuth**. If you pick a subscription-backed provider — **OpenAI Codex** (your ChatGPT plan) or **Anthropic** (your Claude plan) — you can log in through the browser instead of pasting a key. (Plain `openai` is API-key only.) It validates your key on the spot, so you'll know immediately if it's wrong. After the provider, it offers to set up a **channel** — pick one and it runs that channel's credential flow then and there, or skip and add channels later from [Add a channel](/docs/guides/add-a-channel).
 
 </Accordion>
 
@@ -67,8 +67,9 @@ The provider step asks, in order: **which provider**, **which model**, then **AP
 Add a provider and pick a default model by hand:
 
 ```sh
-typeclaw provider add openai --key sk-...      # or anthropic, fireworks, zai
-typeclaw provider add anthropic --oauth        # log in with a Claude subscription
+typeclaw provider add openai --key sk-...       # or anthropic, fireworks, zai
+typeclaw provider add openai-codex --oauth      # log in with a ChatGPT subscription
+typeclaw provider add anthropic --oauth         # log in with a Claude subscription
 typeclaw model set default openai/gpt-5.4-nano
 ```
 
@@ -152,7 +153,7 @@ If the agent ever crashes, the container is left in place on purpose so you can 
 
 ## What just happened
 
-Your agent runs inside its own Docker container. The `typeclaw` commands you ran — `start`, `stop`, `tui` — don't _contain_ the agent; they're just a remote control that talks to the container. The agent can't reach the rest of your computer, and your computer doesn't hold any of the agent's state. That separation is the core idea behind TypeClaw, and it's what makes it safe to give the agent real work. The full picture is in [How it's built](/docs/concepts/architecture).
+Your agent runs inside its own Docker container. The `typeclaw` commands you ran — `start`, `stop`, `tui` — don't _contain_ the agent; they're just a remote control that talks to the container. The agent can't reach the rest of your computer: its world is the agent folder you just created plus the container. The host CLI itself never runs the agent loop or loads its plugins — so the agent's state stays in that one folder and its container, not scattered across your machine. That separation is the core idea behind TypeClaw, and it's what makes it safe to give the agent real work. The full picture is in [How it's built](/docs/concepts/architecture).
 
 ---
 
