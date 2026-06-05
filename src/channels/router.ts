@@ -1422,8 +1422,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         unsubTypingActivity: null,
         unsubTodoOutcome: null,
       }
+      // Tracks the `turnSeq` a provider-error notice was last POSTED for, so the
+      // channel surfaces at most one notice per turn. The upstream SDK retries
+      // internally, and each retry emits its own `message_end` with
+      // `stopReason: 'error'` — without this gate a single failing turn posts N
+      // identical "⚠️ upstream provider failed" notices (one per retry). Logs
+      // still record every attempt; only the user-facing notice is deduped.
+      let lastProviderErrorNoticeTurn: number | undefined
       live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
+        // Suppress duplicate notices for the SAME turn (retry storm). Set the
+        // marker BEFORE the async send so a synchronous burst of retry events
+        // can't each slip past the check and enqueue their own notice.
+        if (lastProviderErrorNoticeTurn === live.turnSeq) return
+        lastProviderErrorNoticeTurn = live.turnSeq
         // A provider soft-error (rate/usage limit, billing, malformed response)
         // ends the turn with no assistant text, so the human otherwise sees
         // silence. Surface the REDACTED `safeMessage` (never the raw provider
