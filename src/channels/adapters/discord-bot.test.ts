@@ -790,6 +790,206 @@ describe('createDiscordHistoryCallback', () => {
     expect(msg.attachments!.map((a) => a.id)).toEqual([1, 2])
   })
 
+  test('resolves a thread-starter (empty body + referenced_message) to the opener author and text', async () => {
+    // given: Discord returns the type-21 starter with empty content/bot author;
+    // the real opener lives only in referenced_message
+    const { fn } = fakeFetch([
+      {
+        id: 'starter-1',
+        channel_id: 'thread-t1',
+        type: 21,
+        author: { id: 'system-bot', username: 'Discord', bot: true },
+        content: '',
+        timestamp: '2026-04-27T00:00:01Z',
+        message_reference: { message_id: 'opener-1', channel_id: 'parent-c1' },
+        referenced_message: {
+          id: 'opener-1',
+          channel_id: 'parent-c1',
+          author: { id: 'u-human', username: 'alice', global_name: 'Alice', bot: false },
+          content: 'the question that started the thread',
+          timestamp: '2026-04-26T23:59:00Z',
+        },
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'thread-t1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe('the question that started the thread')
+    expect(msg.authorId).toBe('u-human')
+    expect(msg.authorName).toBe('Alice')
+    expect(msg.isBot).toBe(false)
+    // keeps the starter's own id/ts so dedup and ordering stay correct
+    expect(msg.externalMessageId).toBe('starter-1')
+    expect(msg.ts).toBe(Date.parse('2026-04-27T00:00:01Z'))
+  })
+
+  test('carries the opener attachments when a thread-starter opener has media but no text', async () => {
+    // given
+    const { fn } = fakeFetch([
+      {
+        id: 'starter-1',
+        channel_id: 'thread-t1',
+        type: 21,
+        author: { id: 'system-bot', username: 'Discord', bot: true },
+        content: '',
+        timestamp: '2026-04-27T00:00:01Z',
+        message_reference: { message_id: 'opener-1', channel_id: 'parent-c1' },
+        referenced_message: {
+          id: 'opener-1',
+          channel_id: 'parent-c1',
+          author: { id: 'u-human', username: 'alice', bot: false },
+          content: '',
+          timestamp: '2026-04-26T23:59:00Z',
+          attachments: [{ url: 'https://cdn.example/p.png', filename: 'p.png', content_type: 'image/png' }],
+        },
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'thread-t1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe('[Discord attachment #1: file image/png name=p.png]')
+    expect(msg.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'https://cdn.example/p.png', filename: 'p.png', mimetype: 'image/png' },
+    ])
+    expect(msg.authorId).toBe('u-human')
+  })
+
+  test('keeps the starter own body when it has content (does not override with referenced_message)', async () => {
+    // given: a normal reply (type 19) carries both its own content and a referenced_message
+    const { fn } = fakeFetch([
+      {
+        id: 'reply-1',
+        channel_id: 'c1',
+        type: 19,
+        author: { id: 'u-bob', username: 'bob', bot: false },
+        content: 'my reply text',
+        timestamp: '2026-04-27T00:00:02Z',
+        message_reference: { message_id: 'orig-1', channel_id: 'c1' },
+        referenced_message: {
+          id: 'orig-1',
+          channel_id: 'c1',
+          author: { id: 'u-alice', username: 'alice', bot: false },
+          content: 'the original',
+          timestamp: '2026-04-27T00:00:01Z',
+        },
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'c1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe('my reply text')
+    expect(msg.authorId).toBe('u-bob')
+    expect(msg.replyToBotMessageId).toBe('orig-1')
+  })
+
+  test('does NOT remap an empty-body non-starter (type 19/23) carrying referenced_message', async () => {
+    // given: an empty-body REPLY (19) and CONTEXT_MENU_COMMAND (23) both carry
+    // referenced_message but are not thread starters; they must stay attributed
+    // to their own author, never the referenced message's
+    const { fn } = fakeFetch([
+      {
+        id: 'reply-1',
+        channel_id: 'c1',
+        type: 19,
+        author: { id: 'u-bob', username: 'bob', bot: false },
+        content: '',
+        timestamp: '2026-04-27T00:00:02Z',
+        message_reference: { message_id: 'orig-1', channel_id: 'c1' },
+        referenced_message: {
+          id: 'orig-1',
+          channel_id: 'c1',
+          author: { id: 'u-alice', username: 'alice', bot: false },
+          content: 'the original',
+          timestamp: '2026-04-27T00:00:01Z',
+        },
+      },
+      {
+        id: 'ctx-1',
+        channel_id: 'c1',
+        type: 23,
+        author: { id: 'u-carol', username: 'carol', bot: false },
+        content: '',
+        timestamp: '2026-04-27T00:00:03Z',
+        message_reference: { message_id: 'orig-1', channel_id: 'c1' },
+        referenced_message: {
+          id: 'orig-1',
+          channel_id: 'c1',
+          author: { id: 'u-alice', username: 'alice', bot: false },
+          content: 'the original',
+          timestamp: '2026-04-27T00:00:01Z',
+        },
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'c1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const byId = Object.fromEntries(result.messages.map((m) => [m.externalMessageId, m]))
+    expect(byId['reply-1']!.authorId).toBe('u-bob')
+    expect(byId['reply-1']!.text).toBe('')
+    expect(byId['ctx-1']!.authorId).toBe('u-carol')
+    expect(byId['ctx-1']!.text).toBe('')
+  })
+
+  test('leaves an empty-body starter untouched when referenced_message is null (opener deleted)', async () => {
+    // given
+    const { fn } = fakeFetch([
+      {
+        id: 'starter-1',
+        channel_id: 'thread-t1',
+        type: 21,
+        author: { id: 'system-bot', username: 'Discord', bot: true },
+        content: '',
+        timestamp: '2026-04-27T00:00:01Z',
+        message_reference: { message_id: 'opener-1', channel_id: 'parent-c1' },
+        referenced_message: null,
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'thread-t1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe('')
+    expect(msg.authorId).toBe('system-bot')
+  })
+
   test('marks author.bot as isBot', async () => {
     // given
     const { fn } = fakeFetch([
