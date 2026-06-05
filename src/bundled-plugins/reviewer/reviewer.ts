@@ -14,17 +14,31 @@ import {
 } from '@/plugin'
 
 import { CODE_REVIEW_SKILL } from './skills/code-review'
+import { DATA_REVIEW_SKILL } from './skills/data-review'
+import { DOC_REVIEW_SKILL } from './skills/doc-review'
 import { GENERAL_REVIEW_SKILL } from './skills/general'
+import { PLAN_REVIEW_SKILL } from './skills/plan-review'
+import { SECURITY_AUDIT_SKILL } from './skills/security-audit'
+import { WRITING_REVIEW_SKILL } from './skills/writing-review'
 
 // The curated set of review-domain skills the reviewer can load on
 // demand via its `load_skill` tool. Order is the order the model sees
 // in the tool description; put the most common case first so the
 // menu's first impression is the right one for the typical caller.
+// `general` stays last: it is the fallback the model reaches for only
+// when no domain skill fits.
 //
-// Ship list is intentionally small for the first release. Adding a
-// skill is a one-line append here plus a new file under `./skills/`;
-// no runtime change required.
-export const REVIEWER_SKILLS: readonly LoadableSkill[] = [CODE_REVIEW_SKILL, GENERAL_REVIEW_SKILL]
+// Adding a skill is a one-line append here plus a new file under
+// `./skills/`; no runtime change required.
+export const REVIEWER_SKILLS: readonly LoadableSkill[] = [
+  CODE_REVIEW_SKILL,
+  DOC_REVIEW_SKILL,
+  PLAN_REVIEW_SKILL,
+  SECURITY_AUDIT_SKILL,
+  WRITING_REVIEW_SKILL,
+  DATA_REVIEW_SKILL,
+  GENERAL_REVIEW_SKILL,
+]
 
 // Without a ceiling, a reviewer whose `session.prompt` stalls mid-turn (model
 // wedges after a tool error, never emits a terminal message) leaves `completion`
@@ -137,9 +151,11 @@ End every response with a single \`<review>\` block. Use this exact structure:
 <verdict>approve | request-changes | comment</verdict>
 </review>
 
-\`approve\` = no blockers; concerns are minor or already addressed.
-\`request-changes\` = at least one blocker, or a load-bearing concern that needs an answer before this lands.
-\`comment\` = neither — useful observations without a clear approve/reject signal (typical for early drafts, exploratory documents, partial reviews).
+These three tokens are the universal verdict vocabulary — they apply whether the target is a code change, a plan, a document, or a dataset. Keep the tokens exactly; the loaded skill tells you what each one means for its domain.
+
+\`approve\` = no blockers; the target is sound and any concerns are minor or already addressed.
+\`request-changes\` = at least one blocker, or a load-bearing concern that needs an answer before the target should be accepted, shipped, or executed.
+\`comment\` = neither — useful observations that do not resolve to a clear accept/reject signal (typical for early drafts, exploratory documents, partial reviews).
 
 ## Rules
 
