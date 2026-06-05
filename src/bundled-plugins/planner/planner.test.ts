@@ -319,8 +319,13 @@ describe('plannerPayloadSchema', () => {
 })
 
 describe('planner default plan dir', () => {
-  test('defaults to a workspace/ subdir (free-write zone for trusted callers)', () => {
-    expect(PLANNER_DEFAULT_PLAN_DIR).toBe('workspace/plans')
+  test('defaults to a public/ subdir (universally writable, so the default works for any caller role)', () => {
+    // Review fix (#661): the default must be writable by EVERY role. workspace/
+    // is hidden from low-trust callers, so a workspace/ default would deny the
+    // write for a guest-spawned planner and break the "always write a file"
+    // contract. public/ is the one zone every role can write.
+    expect(PLANNER_DEFAULT_PLAN_DIR).toBe('public/plans')
+    expect(PLANNER_DEFAULT_PLAN_DIR.startsWith('public/')).toBe(true)
   })
 })
 

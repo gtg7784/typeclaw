@@ -42,16 +42,17 @@ export const PLANNER_SKILLS: readonly LoadableSkill[] = [PROJECT_PLAN_SKILL, GEN
 export const PLANNER_SPAWN_TIMEOUT_MS = 600_000
 
 // The default write zone for the plan file when the caller does not specify
-// `outputPath`. `workspace/` is the agent's free-write zone. NOTE: a subagent
-// inherits the spawning caller's role (origin.spawnedByRole), and a guest/
-// unmatched caller has `workspace/` HIDDEN — a write there is blocked by the
-// security plugin's privateSurfaceRead guard. The base prompt instructs the
-// planner to fail fast (verdict needs-input) and ask the parent for a `public/`
-// path when a `workspace/` write comes back `denied by permissions`, rather than
-// producing a full plan and dying at the final write. See
-// src/sandbox/hidden-paths.ts and src/bundled-plugins/security/policies/
-// private-surface-read.ts.
-export const PLANNER_DEFAULT_PLAN_DIR = 'workspace/plans'
+// `outputPath`. MUST be a universally-writable location, because a subagent
+// inherits the spawning caller's role (origin.spawnedByRole) and a low-trust
+// caller (guest/unmatched) has `workspace/` HIDDEN — a write there is blocked by
+// the security plugin's privateSurfaceRead guard. `public/` is the one zone every
+// role can read and write, so defaulting here keeps the "always write a file,
+// always report a real <path>" contract honest for EVERY caller, including a
+// spawn-minimum `{ requestId }` payload with no outputPath. A trusted caller that
+// wants the private free-write zone passes an explicit `workspace/...` outputPath.
+// See src/sandbox/hidden-paths.ts and
+// src/bundled-plugins/security/policies/private-surface-read.ts.
+export const PLANNER_DEFAULT_PLAN_DIR = 'public/plans'
 
 export const PLANNER_SYSTEM_PROMPT = `You are a planning specialist running inside TypeClaw. Your job: turn a goal the caller hands you into an actionable, sequenced, risk-aware plan, write that plan to a file, and return a terse structured signal the caller can act on.
 
@@ -123,10 +124,10 @@ If the payload references a prior draft or prior answers (a re-spawn after an in
 Resolve where the plan file goes first, so a write failure surfaces in seconds, not after you've spent the whole run planning.
 
 - If the caller supplied \`outputPath\` in the payload, use it.
-- Otherwise default to \`${PLANNER_DEFAULT_PLAN_DIR}/<slug>-<timestamp>.md\`, where \`<slug>\` is a short kebab-case slug derived from the goal (e.g. \`tokyo-trip\`), falling back to \`plan\` if the goal yields no usable slug.
+- Otherwise default to \`${PLANNER_DEFAULT_PLAN_DIR}/<slug>-<timestamp>.md\`, where \`<slug>\` is a short kebab-case slug derived from the goal (e.g. \`tokyo-trip\`), falling back to \`plan\` if the goal yields no usable slug. The default lives under \`public/\` on purpose: it is the one zone every role can write, so the default works no matter who spawned you.
 - The path must stay inside a writable zone of this agent folder. Do not write outside it; do not use \`..\` to escape.
 
-You inherit the spawning caller's role. A low-trust caller (a channel guest or member) may have \`workspace/\` HIDDEN — a write there returns \`denied by permissions\`. If your resolved \`workspace/\` write is blocked, do NOT keep trying or silently drop the plan: **fail fast with verdict \`needs-input\` and one blocking question asking the parent to supply a writable path (the \`public/\` zone is readable and writable by every role).** The parent will re-spawn you with \`outputPath\` set under \`public/\`.
+You inherit the spawning caller's role, which affects only a caller-SUPPLIED \`outputPath\`. The default \`public/\` path is always writable, so the default never hits a permission wall. But a low-trust caller (a channel guest or member) may have \`workspace/\` HIDDEN — so if the caller handed you an \`outputPath\` under \`workspace/\` and the write returns \`denied by permissions\`, do NOT keep trying or silently drop the plan: **fall back to the default \`public/\` location and write there.** If even that is somehow blocked, fail fast with verdict \`needs-input\` and one blocking question asking the parent for a writable path. Never end a run without a written file and a truthful \`<path>\`.
 
 ## Universal planning philosophy
 
