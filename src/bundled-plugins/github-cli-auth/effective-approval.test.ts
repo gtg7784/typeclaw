@@ -1,0 +1,97 @@
+import { describe, expect, test } from 'bun:test'
+
+import { createGithubEffectiveApprovalResolver } from './effective-approval'
+
+const WS = 'acme/widgets'
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function fetchStub(routes: Record<string, Response>): typeof fetch {
+  return (async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    for (const [needle, response] of Object.entries(routes)) {
+      if (url.includes(needle)) return response.clone()
+    }
+    return new Response('not stubbed', { status: 500 })
+  }) as typeof fetch
+}
+
+describe('github effective-approval resolver', () => {
+  test('reports alreadyApproved when the bot has an APPROVED review on the PR', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/5/reviews': jsonResponse([
+          { state: 'COMMENTED', user: { login: 'someone', type: 'User' } },
+          { state: 'APPROVED', user: { login: 'review-bot', type: 'User' } },
+        ]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 5 })).toEqual({ ok: true, alreadyApproved: true })
+  })
+
+  test('reports not approved when only OTHER users approved', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/6/reviews': jsonResponse([{ state: 'APPROVED', user: { login: 'someone-else', type: 'User' } }]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 6 })).toEqual({ ok: true, alreadyApproved: false })
+  })
+
+  test('reports not approved when the bot only commented', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/7/reviews': jsonResponse([{ state: 'COMMENTED', user: { login: 'review-bot', type: 'User' } }]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 7 })).toEqual({ ok: true, alreadyApproved: false })
+  })
+
+  test('matches a GitHub App bot whose reviews login carries the [bot] suffix', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/8/reviews': jsonResponse([{ state: 'APPROVED', user: { login: 'review-bot[bot]', type: 'Bot' } }]),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: true, alreadyApproved: true })
+  })
+
+  test('fails (ok:false) when the reviews fetch errors so the guard can fail open', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': jsonResponse({ login: 'review-bot', id: 1 }),
+        '/pulls/9/reviews': new Response('boom', { status: 500 }),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 9 })).toEqual({ ok: false })
+  })
+
+  test('fails (ok:false) when identity cannot be resolved', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({
+        '/user': new Response('no', { status: 403 }),
+      }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 10 })).toEqual({ ok: false })
+  })
+
+  test('fails (ok:false) when no token is available', async () => {
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => null,
+      fetchImpl: fetchStub({}),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 11 })).toEqual({ ok: false })
+  })
+})
