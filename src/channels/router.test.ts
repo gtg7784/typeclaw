@@ -4829,6 +4829,49 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(errors.some((m) => /LLM call failed: billing not active/.test(m))).toBe(true)
   })
 
+  test('posts LLM soft errors back to the originating channel so the human is not left in silence', async () => {
+    // given: a turn that ends with stopReason=error (rate/usage limit) and
+    // therefore emits no assistant text. Without surfacing it, the channel
+    // sees no reply at all — the exact "why didn't Paul respond" failure mode.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async (_text) => {
+          fake.emit({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'You have hit your ChatGPT usage limit (team plan). Try again in ~40 min.',
+            },
+          })
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_soft_err_posts',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sent.some((t) => /usage limit \(team plan\)/.test(t))).toBe(true)
+  })
+
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {
     // given
     const dir = await tempDir()
