@@ -181,6 +181,44 @@ export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
 // including reasoning). Deliberately NOT lowered in `providers.ts`, where
 // `maxTokens` is the model's true capability that compaction math reads.
 export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
+// Ceiling on automatic re-prompts for a turn that ended with NO user-facing
+// reply AND no attempted send — the pure "the model burned its budget thinking
+// and produced nothing" failure. The canonical trigger is Fireworks'
+// kimi-k2p6-turbo spiraling into a long reasoning loop on an ambiguous request
+// until it hits CHANNEL_MAX_OUTPUT_TOKENS (`stopReason: 'length'`); the same
+// path also catches a provider/router `aborted` leaf that left no recoverable
+// prose. Each retry injects EMPTY_TURN_RETRY_NUDGE as a reminder-only turn (no
+// new inbound) so `drain()` re-runs `session.prompt()` against the same branch.
+// Bounded because a genuinely stuck model would otherwise re-loop forever; on
+// exhaustion the user gets EMPTY_TURN_FALLBACK_TEXT instead of dead air. Reset
+// at turn start alongside `turnSeq`. Deliberately NOT applied to turns that
+// ATTEMPTED a send this turn (skip-locked or policy-denied) — those already
+// thrashed the send path, so a re-prompt would just re-thrash; they skip
+// straight to the fallback. See validateChannelTurn's candidate===null branch.
+export const MAX_EMPTY_TURN_RETRIES = 2
+// Reminder-only nudge injected before an empty-turn retry. Uses the repo's
+// SYSTEM MESSAGE framing (see composeTurnPrompt) so persona-rich models do not
+// reply to the notice itself. Neutral by design: it asks for a direct reply
+// without prescribing length or tone, matching the chosen "just retry" posture.
+export const EMPTY_TURN_RETRY_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your previous turn ended without sending any reply to the channel. This is',
+  'an automated signal from the channel router, not a message from anyone in',
+  'the chat. **Do not acknowledge or reply to this notice itself.**',
+  '',
+  'Respond to the last user message now with a direct answer via your channel',
+  'reply tool. If you genuinely have nothing to say, reply with `NO_REPLY`.',
+  '',
+  '---',
+].join('\n')
+// Posted to the channel (via the `source:'system'` one-shot bypass) when an
+// empty turn cannot be recovered AND retries are exhausted (or are skipped
+// because the turn thrashed the send path). Replaces the historical silent
+// drop so the human is never left staring at dead air after a degenerate turn.
+export const EMPTY_TURN_FALLBACK_TEXT =
+  "⚠️ I got stuck putting together a reply and couldn't finish. Could you rephrase or try again?"
 // Rolling window for outbound send-rate telemetry. 5s matches Discord's
 // rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
 // 1 msg/s sustained. The window is observational; exceeding the burst
@@ -484,6 +522,14 @@ type LiveSession = {
   // livelock the byte-identical loop-guard misses. Reset at turn start and
   // cleared per-target on a successful delivery to that target.
   policyDeniedToolSendsThisTurn: Map<string, number>
+  // Count of automatic empty-turn re-prompts already spent on the CURRENT
+  // logical turn, bounded by `MAX_EMPTY_TURN_RETRIES`. A "logical turn" spans
+  // the original user batch plus any router-injected retry nudges, so this is
+  // reset only when a real user/reminder batch starts a fresh turn — NOT on the
+  // reminder-only iterations the retry itself queues. `validateChannelTurn`
+  // increments it before injecting EMPTY_TURN_RETRY_NUDGE and reads it to decide
+  // retry-vs-fallback. See the candidate===null branch.
+  emptyTurnRetries: number
   // Stamped by `markTurnSkipped` (called from the `skip_response` tool)
   // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
   // if it matches the just-completed turn, recovery is skipped entirely
@@ -1362,6 +1408,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         successfulSendsAtTurnStart: 0,
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
+        emptyTurnRetries: 0,
         skippedTurn: null,
         skipLockedSendTurn: null,
         pendingQuoteCandidate: null,
@@ -1830,6 +1877,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
+          // A real user batch starts a fresh logical turn → restore the full
+          // empty-turn retry budget. Reset here (batch.length > 0) and NOT in
+          // the per-prompt block below, so the reminder-only iterations the
+          // retry itself queues do not refill the budget and loop forever.
+          live.emptyTurnRetries = 0
         } else if (live.lastTurnAuthorId !== null) {
           live.currentTurnEngageReactions = []
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
@@ -2898,15 +2950,64 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
     if (live.successfulChannelSends > successfulSendsBeforePrompt) return
 
+    const postEmptyTurnFallback = async (cause: string): Promise<void> => {
+      logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
+      const result = await send(
+        {
+          adapter: live.key.adapter,
+          workspace: live.key.workspace,
+          chat: live.key.chat,
+          thread: live.key.thread,
+          text: EMPTY_TURN_FALLBACK_TEXT,
+        },
+        { source: 'system' },
+      )
+      if (!result.ok) {
+        logger.warn(`[channels] ${live.keyId}: empty-turn fallback send failed: ${result.error}`)
+      }
+    }
+
     const candidate = recoverableAssistantText(live.session)
     if (candidate === null) {
-      // Observability: previously a silent bail-out. The most common cause is a
-      // turn that ends mid-loop with NO assistant message at all (leaf is a
-      // session header / model_change / similar non-message entry, or a session
-      // that just started). Logged at debug-level info so operators can grep for
-      // unexpected silent turns; not warn-level because legitimate empty-state
-      // sessions hit this on every TUI-only check before the first user prompt.
-      logger.info(`[channels] ${live.keyId}: no recoverable assistant text in branch`)
+      // No recoverable assistant prose: the turn ended with no usable reply.
+      // Two distinct shapes, handled differently (Option B):
+      //
+      //   1. The model THRASHED the send path this turn — it tried to send but
+      //      every attempt was denied (skip-locked, or policy-denied/duplicate/
+      //      cap, tracked on skipLockedSendTurn / policyDeniedToolSendsThisTurn).
+      //      Re-prompting would just re-thrash, so skip retry and post the
+      //      user-facing fallback once.
+      //
+      //   2. The PURE reasoning-loop — no send was ever attempted; the model
+      //      burned its budget thinking and produced nothing (the canonical
+      //      kimi `stopReason: 'length'` / `aborted` degeneration). Re-prompt up
+      //      to MAX_EMPTY_TURN_RETRIES with a neutral nudge; on exhaustion, fall
+      //      back. The nudge is injected as a reminder-only turn so drain()'s
+      //      while-loop re-runs session.prompt() against the same branch.
+      //
+      // The legitimate empty-state case (a TUI-only check before any user
+      // prompt, no inbound this turn) is excluded: no batch means no real turn
+      // to retry or apologize for — keep the historical silent bail there.
+      const attemptedSendThisTurn =
+        live.skipLockedSendTurn === live.turnSeq || live.policyDeniedToolSendsThisTurn.size > 0
+
+      // Only a TRUNCATED assistant leaf (length/error/aborted) from a real
+      // conversational turn is a degeneration worth retrying. A cold/empty turn
+      // (no inbound author, or no assistant message at all) keeps the historical
+      // silent bail — re-prompting it would manufacture replies to nothing.
+      if (live.currentTurnAuthorId === null || !assistantLeafTruncated(live.session)) {
+        logger.info(`[channels] ${live.keyId}: no recoverable assistant text in branch`)
+        return
+      }
+      if (!attemptedSendThisTurn && live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
+        live.emptyTurnRetries++
+        logger.warn(
+          `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES}`,
+        )
+        live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+        return
+      }
+      await postEmptyTurnFallback(attemptedSendThisTurn ? 'send_thrash' : 'retries_exhausted')
       return
     }
 
@@ -4164,6 +4265,20 @@ function recoverableAssistantText(
     cursor = parent
   }
   return null
+}
+
+// True only when the leaf is an assistant message that was CUT OFF mid-output:
+// `length` (hit the token cap — the canonical kimi reasoning-loop), `error`, or
+// `aborted`. This is the precise signature of "the model was producing but got
+// truncated", as distinct from a turn that produced no assistant message at all
+// (leaf undefined / a non-assistant entry), which is a benign empty/cold turn —
+// NOT something to re-prompt. The empty-turn retry guard keys off this so it
+// fires for real degenerations and stays silent for cold sessions.
+function assistantLeafTruncated(session: AgentSession): boolean {
+  const leaf = session.sessionManager.getLeafEntry()
+  if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
+  const stop = leaf.message.stopReason
+  return stop === 'length' || stop === 'error' || stop === 'aborted'
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
