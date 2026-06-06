@@ -75,7 +75,13 @@ const DEMOTE_TO_IGNORE: readonly RegExp[] = [
   /\b(can'?t|cannot|won'?t|will not|wouldn'?t)\b[^.!?]*\b(approv|request|resolv|block|address)/,
   /\bnot (approved|resolved|blocked|requesting|addressed)\b/,
   /\b(not|no longer|hardly|barely)\b[^.!?]*\b(lgtm|looks good|looks fine|seems fine|should be (fine|good)|looks resolved|seems resolved)\b/,
-  /\b(i'?ll|i will|going to|gonna|about to|planning to|need(s)? to|have to|to)\b[^.!?]*\b(approv|review|request|resolv|address)/,
+  /\b(i'?ll|i will|going to|gonna|about to|planning to)\b[^.!?]*\b(approv|review|request|resolv)/,
+  // "address" demotion is restricted to explicit future/obligation forms only.
+  // A standalone `to` marker (e.g. "...to address my feedback") would match
+  // hard-claim prose like "Approved — thanks for updating the docs to address
+  // my feedback" and demote it to ignore BEFORE the BLOCK_APPROVE check, hiding
+  // a real verdict (the recovery path would then post it unguarded — PR #675).
+  /\b(i'?ll|i will|going to|gonna|about to|planning to|need(s)? to|have to|want(s)? to|trying to)\b[^.!?]*\baddress/,
   /\b(approved|resolved|requested changes)\b[^.!?]*\b(earlier|already|yesterday|before|last (review|time)|previously)\b/,
   /\b(pre|self|co|re|un|non|ai|admin|user|machine|auto) approved\b/,
 ]
