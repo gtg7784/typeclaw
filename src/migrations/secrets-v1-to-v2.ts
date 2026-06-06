@@ -36,51 +36,69 @@ export const MIGRATION_ID = '0001-secrets-v1-to-v2'
 
 export type SecretsMigrationResult = { changed: boolean; summary: string }
 
-// Detect-and-apply in one call so detect and apply can never disagree about
-// the on-disk shape (no TOCTOU between a separate detect() read and the apply
-// read). Idempotent: a folder already at v2 (or with no legacy file) returns
+// Idempotent: a folder already at v2 (or with no legacy file) returns
 // `changed: false`. Errors that indicate ambiguous/unsafe state throw with an
 // actionable message rather than guessing.
+//
+// Concurrency: secrets.json is the lock resource SecretsBackend (provider add,
+// OAuth refresh, channel add) and credential exporters use, so we hold ITS lock
+// across the entire precedence resolution AND upgrade. The lock requires the
+// file to exist, so when only auth.json is present we first seed secrets.json
+// with exclusive create-if-absent semantics (never overwriting a file a
+// concurrent writer may have just written), then lock, then re-read precedence
+// from fresh on-disk state under the lock.
 export function migrateSecretsV1ToV2(agentDir: string): SecretsMigrationResult {
   const legacyPath = join(agentDir, LEGACY_FILENAME)
   const targetPath = join(agentDir, TARGET_FILENAME)
 
-  // Resolve the auth.json -> secrets.json filename precedence first, under a
-  // lock on whichever file we end up operating on, so a concurrent boot-time
-  // writer (SecretsBackend, hostd, credential exporters) can't interleave.
-  const resolvedPath = resolveLegacyFilename(legacyPath, targetPath)
-  if (resolvedPath === null) return { changed: false, summary: 'no secrets file to migrate' }
+  if (!existsSync(legacyPath) && !existsSync(targetPath)) {
+    return { changed: false, summary: 'no secrets file to migrate' }
+  }
 
-  return withFileLock(resolvedPath, () => upgradeFileInPlace(resolvedPath))
+  seedTargetIfAbsent(targetPath)
+
+  return withFileLock(targetPath, () => {
+    resolvePrecedenceUnderLock(legacyPath, targetPath)
+    return upgradeFileInPlace(targetPath)
+  })
 }
 
-// auth.json precedence, preserving the exact semantics of the deleted
-// migrateLegacyAuthJson so no credential is ever silently dropped:
-//   - only auth.json            -> rename to secrets.json, operate on it
-//   - only secrets.json         -> operate on secrets.json
-//   - neither                   -> nothing to do
-//   - both, auth.json empty     -> unlink auth.json, operate on secrets.json
-//   - both, secrets.json empty  -> auth.json wins (rename over the empty seed)
-//   - both non-empty            -> hard error (can't pick a source of truth)
-function resolveLegacyFilename(legacyPath: string, targetPath: string): string | null {
-  const hasLegacy = existsSync(legacyPath)
-  const hasTarget = existsSync(targetPath)
-
-  if (!hasLegacy) return hasTarget ? targetPath : null
-
-  if (!hasTarget) {
-    renameWithRaceFallback(legacyPath, targetPath)
-    return targetPath
+// Creates an empty v2 envelope at secrets.json only if it does not already
+// exist, using exclusive create ('wx') so a concurrent writer that wrote real
+// credentials between our existsSync check and here is never clobbered — the
+// EEXIST is swallowed because the file we need to lock now exists, which is all
+// we required. A freshly-seeded empty envelope is indistinguishable from "no
+// target" to resolvePrecedenceUnderLock (isEmptyEnvelope returns true), so
+// "only auth.json" collapses into the "secrets.json empty -> auth wins" branch.
+function seedTargetIfAbsent(targetPath: string): void {
+  if (existsSync(targetPath)) return
+  try {
+    writeFileSync(targetPath, stringifyEmptyEnvelope(), { encoding: 'utf8', mode: FILE_MODE, flag: 'wx' })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
   }
+}
+
+// auth.json precedence, run ENTIRELY under the secrets.json lock so the read,
+// the rename/unlink decision, and the rename itself can't interleave with a
+// concurrent secrets.json writer. Preserves the deleted migrateLegacyAuthJson
+// semantics so no credential is ever silently dropped:
+//   - no auth.json              -> operate on secrets.json as-is
+//   - droppable auth.json       -> unlink auth.json, operate on secrets.json
+//   - secrets.json empty seed   -> auth.json wins (rename over the empty seed)
+//   - both non-empty            -> hard error (can't pick a source of truth)
+function resolvePrecedenceUnderLock(legacyPath: string, targetPath: string): void {
+  if (!existsSync(legacyPath)) return
 
   if (isDroppableLegacyFile(legacyPath)) {
     unlinkSync(legacyPath)
-    return targetPath
+    return
   }
 
   if (isEmptyEnvelope(targetPath)) {
     renameWithRaceFallback(legacyPath, targetPath)
-    return targetPath
+    chmodSync(targetPath, FILE_MODE)
+    return
   }
 
   throw new Error(
@@ -248,6 +266,10 @@ function readJsonOrNull(path: string): unknown {
   } catch {
     return null
   }
+}
+
+function stringifyEmptyEnvelope(): string {
+  return `${JSON.stringify({ $schema: SCHEMA_REL, version: SECRETS_FILE_VERSION, providers: {}, channels: {} }, null, 2)}\n`
 }
 
 function writeEnvelopeAtomic(path: string, envelope: unknown): void {

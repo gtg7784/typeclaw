@@ -284,3 +284,33 @@ describe('migrateSecretsV1ToV2 — unsafe / unrecognized input', () => {
     expect(() => migrateSecretsV1ToV2(dir)).toThrow(/JSON/i)
   })
 })
+
+describe('migrateSecretsV1ToV2 — concurrency', () => {
+  test('releases the secrets.json lock after a successful migration', () => {
+    writeSecrets('auth.json', {
+      version: 1,
+      llm: {},
+      channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd' } },
+    })
+
+    migrateSecretsV1ToV2(dir)
+
+    expect(existsSync(join(dir, 'secrets.json.lock'))).toBe(false)
+  })
+
+  test('seeding never overwrites an existing non-empty secrets.json (no clobber when only that file is present)', () => {
+    const v2 = {
+      $schema: './node_modules/typeclaw/secrets.schema.json',
+      version: 2,
+      providers: { openai: { type: 'api_key', key: { value: 'keep-me' } } },
+      channels: {},
+    }
+    writeSecrets('secrets.json', v2)
+    const before = readFileSync(join(dir, 'secrets.json'), 'utf8')
+
+    const result = migrateSecretsV1ToV2(dir)
+
+    expect(result.changed).toBe(false)
+    expect(readFileSync(join(dir, 'secrets.json'), 'utf8')).toBe(before)
+  })
+})
