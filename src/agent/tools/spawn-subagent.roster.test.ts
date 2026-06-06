@@ -10,7 +10,7 @@ import type { Subagent as PluginSubagent } from '@/plugin'
 
 import { composeSystemPrompt } from '../index'
 import type { Subagent, SubagentRegistry } from '../subagents'
-import { renderPublicSubagentRoster } from './spawn-subagent'
+import { renderPublicSubagentRoster, spawnSubagentDescription } from './spawn-subagent'
 
 // Mirror the production plugin→internal shim (`pluginSubagentShim` in
 // src/run/index.ts): strip the plugin-only fields so the bundled factories'
@@ -132,5 +132,21 @@ describe('composeSystemPrompt with the registry-rendered roster', () => {
 
     // then
     expect(prompt).not.toContain('## Subagent orchestration')
+  })
+})
+
+describe('spawnSubagentDescription', () => {
+  // The tool description must NOT frame `scout` as a way to handle research — that
+  // wording is the exact downgrade path the explicit-research rule closes. The
+  // earlier (reverted) version said "the `scout` subagent for a quick web lookup"
+  // as an explicit-research alternative; this pins it gone. Matches scout used FOR
+  // research, deliberately excluding the auto-generated alphabetical roster list
+  // ("researcher, reviewer, scout") where the substrings only collide by accident.
+  test('does not frame scout as a research handler (no downgrade path on the tool surface)', () => {
+    const description = spawnSubagentDescription(BUNDLED_PUBLIC)
+    const withoutRoster = description.replace(/Available subagents:[^.]*\./i, '')
+
+    expect(withoutRoster).not.toMatch(/scout\b[^.]*\bresearch/i)
+    expect(withoutRoster).not.toMatch(/research[^.]*\bscout\b/i)
   })
 })

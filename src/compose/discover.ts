@@ -1,6 +1,7 @@
 import { readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
+import { loadConfigSyncOrDefaults } from '@/config'
 import { containerNameFromCwd } from '@/container'
 import { isInitialized } from '@/init'
 
@@ -17,7 +18,9 @@ export type AgentEntry = {
 //
 // Underscore-prefixed names are also skipped so operators can park a disabled
 // or in-progress agent next to live ones (e.g. `_archived-coder/`) without
-// compose touching it.
+// compose touching it. Agents with `compose.exclude: true` in typeclaw.json
+// are skipped too — the in-config opt-out for operators who don't want to rename
+// the folder.
 //
 // Returns an empty array when rootCwd doesn't exist or is empty — discovery is
 // not the place to fail; the caller decides what to do with zero agents.
@@ -40,6 +43,7 @@ export function discoverAgents(rootCwd: string): AgentEntry[] {
     if (entry.name.startsWith('_')) continue
     const cwd = join(root, entry.name)
     if (!isInitialized(cwd)) continue
+    if (loadConfigSyncOrDefaults(cwd).compose.exclude) continue
     agents.push({ name: entry.name, cwd, containerName: containerNameFromCwd(cwd) })
   }
 

@@ -2,7 +2,27 @@ import { describe, expect, test } from 'bun:test'
 
 import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
 
-import { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
+
+describe('subagent orchestration — explicit research routing', () => {
+  // Guards the regression where an explicit "do a research" directive was answered
+  // inline (web_search / training memory) instead of delegated. The invariant the
+  // reviewer demanded: explicit research is MANDATORY-`researcher`, not satisfiable
+  // by a scout/explorer-only route or an inline answer. Soften any of these and the
+  // downgrade path reopens.
+  test('explicit research mandates `researcher` and forbids the inline-answer downgrade', () => {
+    const ruleStart = DEFAULT_SYSTEM_PROMPT.indexOf('When the user *explicitly* says')
+    expect(ruleStart).toBeGreaterThan(-1)
+    const rule = DEFAULT_SYSTEM_PROMPT.slice(ruleStart, ruleStart + 320)
+    expect(rule).toContain('MUST spawn `researcher`')
+    expect(rule).toContain('training memory')
+    expect(rule).toContain('does not satisfy the request')
+  })
+
+  test('scout/explorer fan-out is explicitly marked as not replacing `researcher`', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('does not replace `researcher`')
+  })
+})
 
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
