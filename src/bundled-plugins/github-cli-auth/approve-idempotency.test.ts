@@ -83,13 +83,39 @@ describe('approve idempotency guard', () => {
     expect(retry).toBeNull()
   })
 
-  test('a succeeded APPROVE keeps the PR locked against duplicates', async () => {
-    const g = makeGuard({})
+  test('after a succeeded APPROVE the next attempt defers to the resolver, which blocks once GitHub reports APPROVED', async () => {
+    const g = makeGuard({ [`${WS}#15`]: 'APPROVED' })
     await g.guard({ callId: 'a1', workspace: WS, prNumber: 15, verdict: 'APPROVE' })
     g.release({ callId: 'a1', succeeded: true })
     const dup = await g.guard({ callId: 'a2', workspace: WS, prNumber: 15, verdict: 'APPROVE' })
     expect(dup).not.toBeNull()
     expect(dup?.block).toBe(true)
+  })
+
+  test('a superseded approval no longer strands the bot: after a succeeded APPROVE is later demoted to CHANGES_REQUESTED, a re-APPROVE is allowed', async () => {
+    // given: the first APPROVE landed and the in-flight lock was released
+    const g = makeGuard({})
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 16, verdict: 'APPROVE' })
+    g.release({ callId: 'a1', succeeded: true })
+    // when: GitHub's effective state has since moved to CHANGES_REQUESTED (resolver defaults to NONE)
+    const reapprove = await g.guard({ callId: 'a2', workspace: WS, prNumber: 16, verdict: 'APPROVE' })
+    // then: no stale local lock blocks the genuine re-approval
+    expect(reapprove).toBeNull()
+  })
+
+  test('a remote-already-approved block releases the in-flight lock so a later supersession can re-approve', async () => {
+    let approved = true
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => ({ ok: true, alreadyApproved: approved }),
+    })
+    guards.push(g)
+    const blocked = await g.guard({ callId: 'a1', workspace: WS, prNumber: 18, verdict: 'APPROVE' })
+    expect(blocked?.block).toBe(true)
+    // when: the standing approval is later superseded upstream
+    approved = false
+    const reapprove = await g.guard({ callId: 'a2', workspace: WS, prNumber: 18, verdict: 'APPROVE' })
+    // then: the earlier block did not leave a stale lock behind
+    expect(reapprove).toBeNull()
   })
 
   test('ignores non-APPROVE verdicts (REQUEST_CHANGES is allowed to repeat)', async () => {
