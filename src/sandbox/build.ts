@@ -104,9 +104,11 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     // FIREWORKS_API_KEY — into the sandbox). See sandbox.mdx.
     argv.push('--tmpfs', '/proc')
 
-    // Re-expose ONLY the interpreter ELF at /proc/self/exe so JS runtimes
-    // (bunx/npx/pnpx) can self-locate; /proc/N/environ stays masked by the
-    // tmpfs above. --symlink (not --ro-bind /proc/self/exe): /proc/self at
+    // Re-expose ONLY the bun ELF at /proc/self/exe so sandboxed package runners
+    // can self-locate; /proc/N/environ stays masked by the tmpfs above. The
+    // caller passes bun's path (see resolveProcSelfExe): in this bun-centric
+    // container bunx/npx/pnpx all resolve to bun, so bun IS the runtime reading
+    // /proc/self/exe. --symlink (not --ro-bind /proc/self/exe): /proc/self at
     // setup time is bwrap's pid, so a bind would capture bwrap's own binary.
     // Must come AFTER --tmpfs /proc (last-op-wins) or the tmpfs erases it.
     if (policy.procSelfExe !== undefined) {
