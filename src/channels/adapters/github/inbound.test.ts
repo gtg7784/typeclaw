@@ -1581,6 +1581,7 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
     expect(msg.text).toContain('deadbee')
     expect(msg.text).toContain('100, 200')
     expect(msg.externalMessageId).toBe('pr-7-recheck-deadbeef999')
+    expect(msg.text).toContain('end your turn without replying')
   })
 
   it('does not route a self-authored synchronize (bot pushed its own PR)', async () => {
@@ -1666,6 +1667,10 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
     expect(msg.text).toContain('CHANGES_REQUESTED')
     expect(msg.text).toContain('beef111')
     expect(msg.externalMessageId).toBe('pr-7-recheck-beef111')
+    // A held block never self-clears, so the inbound must demand a fresh verdict
+    // and must NOT offer the silent-exit escape hatch that would strand the block.
+    expect(msg.text).toContain('always end with a new verdict')
+    expect(msg.text).not.toContain('end your turn without replying')
   })
 
   it('does not route when the latest self review is APPROVED and no threads remain', async () => {
@@ -1704,6 +1709,7 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
     expect(routed).toHaveLength(1)
     expect(routed[0]!.text).toContain('100')
     expect(routed[0]!.text).toContain('CHANGES_REQUESTED')
+    expect(routed[0]!.text).not.toContain('end your turn without replying')
   })
 
   it('skips the CHANGES_REQUESTED re-review when review.on is off', async () => {

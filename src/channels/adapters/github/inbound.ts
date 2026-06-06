@@ -320,16 +320,18 @@ function followupInstruction(rootCommentIds: readonly number[], selfBlocking: bo
         `acknowledgement and resolve_review_thread: true (the thread id is the root comment id); ` +
         `if not, leave it open. `
       : ''
+  // A held CHANGES_REQUESTED never clears itself: GitHub keeps the block until a
+  // fresh APPROVE/COMMENT/dismiss, so a blocking follow-up must always end with a
+  // submitted verdict — the "end without replying" escape hatch is reserved for
+  // the thread-only path, where leaving every thread open is a valid no-op.
   const blockingPart = selfBlocking
-    ? `Your latest review on this PR is still CHANGES_REQUESTED. Re-review the current head against the ` +
-      `concerns from that blocking review. If the new commits resolve them, submit a fresh review that ` +
-      `clears the block (APPROVE when appropriate, or COMMENT if approval is disabled). If concerns ` +
-      `remain, submit a new CHANGES_REQUESTED review explaining what is still blocking. `
+    ? `Your latest review on this PR is still CHANGES_REQUESTED, which keeps the PR blocked until you ` +
+      `submit a fresh review. Re-review the current head against the concerns from that blocking review ` +
+      `and always end with a new verdict: if the commits resolve your concerns, submit an APPROVE ` +
+      `(or COMMENT if approval is disabled) to clear the block; if concerns remain, submit a new ` +
+      `CHANGES_REQUESTED explaining what is still blocking. `
     : ''
-  const tail =
-    rootCommentIds.length > 0 && !selfBlocking
-      ? 'If none are addressed, end your turn without replying.'
-      : 'If nothing needs changing, end your turn without replying.'
+  const tail = selfBlocking ? '' : 'If none are addressed, end your turn without replying.'
   return `${threadPart}${blockingPart}${tail}`
 }
 
