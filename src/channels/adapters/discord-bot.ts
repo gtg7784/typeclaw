@@ -39,6 +39,7 @@ import {
   type InboundDropReason,
   renderPlaceholder,
 } from './discord-bot-classify'
+import { convertDiscordTables } from './discord-bot-format'
 import { createDiscordReactionCallback, createDiscordRemoveReactionCallback } from './discord-bot-reactions'
 import { enrichDiscordMessageReferences } from './discord-bot-reference'
 import {
@@ -647,7 +648,7 @@ export function createOutboundCallback(deps: {
     if (msg.adapter !== 'discord-bot') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
     }
-    const text = msg.text ?? ''
+    const text = convertDiscordTables(msg.text ?? '')
     const attachments = msg.attachments ?? []
     if (text === '' && attachments.length === 0) {
       return { ok: false, error: 'message has neither text nor attachments' }
