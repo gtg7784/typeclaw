@@ -1261,6 +1261,14 @@ describe('discord-bot createOutboundCallback', () => {
     expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: { thread_id: 't1' } }])
   })
 
+  test('converts a markdown table into Discord inline-code rows before sending', async () => {
+    const { client, sends } = makeFakeClient()
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const table = ['| a | b |', '|---|---|', '| 1 | 2 |'].join('\n')
+    await cb(makeMsg({ text: table }))
+    expect(sends).toEqual([{ chat: 'c1', content: '**`a  b`**\n`1  2`', options: undefined }])
+  })
+
   test('forwards replyTo.externalMessageId as the reply_to send option (native reply)', async () => {
     const { client, sends } = makeFakeClient()
     const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
