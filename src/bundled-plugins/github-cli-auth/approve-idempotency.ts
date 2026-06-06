@@ -22,18 +22,30 @@ const DUPLICATE_REASON =
   'If you intended to change your verdict, request changes or dismiss the prior review instead of re-approving.'
 
 // Makes formal `gh ... event=APPROVE` idempotent per PR across turns, sessions,
-// and restarts. The per-turn review ledger only guards prose claims and resets
-// every turn, so without this an APPROVE can fire again whenever the same PR
-// fans out into a second session or a follow-up turn. We reserve the PR in an
-// in-process set before the command runs (stops same-container concurrent
-// double-approve) and consult GitHub for the bot's effective review state
-// (stops cross-restart re-approval). Reads fail OPEN: a transient GitHub error
-// must never permanently strand the bot from approving a PR it has not yet
-// approved — the in-process reservation still blocks the concurrent case.
+// and restarts. Two layers, each with a single job:
+//
+//   1. An in-process set of *in-flight* reservations (`pendingApprovals`) that
+//      blocks a second APPROVE while a first is still mid-flight in the same
+//      container — the concurrent-double-approve case the remote read can't see
+//      yet (GitHub hasn't recorded the in-flight review).
+//   2. The authoritative GitHub effective-state read, the SOLE source of truth
+//      for "the bot already holds a standing APPROVED review." It understands
+//      supersession: a later CHANGES_REQUESTED / DISMISSED demotes an earlier
+//      APPROVED, so the bot may legitimately re-approve.
+//
+// The set is strictly an in-flight lock — never a persistent "already approved"
+// memory. A completed APPROVE drops its reservation in release(), so the next
+// APPROVE re-consults GitHub instead of being shadowed by a stale local entry.
+// That separation fixes the strand bug: once a standing approval is superseded
+// (PR back to CHANGES_REQUESTED), a stale local lock must not keep blocking a
+// genuine re-approve — only the remote read decides, and it now reports
+// alreadyApproved=false. Reads fail OPEN: a transient GitHub error must never
+// permanently strand a first approval; the in-flight reservation still covers
+// the concurrent case.
 export function createApproveIdempotencyGuard(deps: {
   resolveEffectiveApproval: EffectiveApprovalResolver
 }): ApproveIdempotencyGuard {
-  const approvedOrPending = new Set<string>()
+  const pendingApprovals = new Set<string>()
   const reservedByCall = new Map<string, string>()
 
   return {
@@ -43,17 +55,21 @@ export function createApproveIdempotencyGuard(deps: {
 
       // Reserve BEFORE the await so two calls racing into guard() for the same
       // PR cannot both observe an empty set: the loser sees the winner's
-      // reservation and is blocked. The reservation is provisional until the
-      // remote check clears it.
-      if (approvedOrPending.has(key)) return { block: true, reason: DUPLICATE_REASON }
-      approvedOrPending.add(key)
+      // in-flight reservation and is blocked. The reservation is provisional
+      // and is always cleared on a terminal path (block below or release()).
+      if (pendingApprovals.has(key)) return { block: true, reason: DUPLICATE_REASON }
+      pendingApprovals.add(key)
       reservedByCall.set(args.callId, key)
 
       const remote = await deps.resolveEffectiveApproval({ workspace: args.workspace, prNumber: args.prNumber })
       if (remote.ok && remote.alreadyApproved) {
-        // Already approved upstream: keep the PR locked but drop this call's
-        // claim so release() won't later unlock a PR that is genuinely approved.
+        // Standing approval upstream. Block, and release the in-flight lock now:
+        // a blocked command never reaches tool.after, so release() won't run for
+        // this callId. Leaving the key set would resurrect the strand bug — the
+        // GitHub read is authoritative for the standing-approval case, not a
+        // lingering local entry.
         reservedByCall.delete(args.callId)
+        pendingApprovals.delete(key)
         return { block: true, reason: DUPLICATE_REASON }
       }
 
@@ -64,7 +80,11 @@ export function createApproveIdempotencyGuard(deps: {
       const key = reservedByCall.get(args.callId)
       if (key === undefined) return
       reservedByCall.delete(args.callId)
-      if (!args.succeeded) approvedOrPending.delete(key)
+      // Always drop the in-flight lock, success or fail. On success the standing
+      // approval now lives on GitHub, so future APPROVEs are caught by the remote
+      // read (which tracks supersession); the local lock must not outlive the
+      // in-flight window and shadow that read.
+      pendingApprovals.delete(key)
     },
   }
 }
