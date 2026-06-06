@@ -1,0 +1,324 @@
+import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+import lockfile from 'proper-lockfile'
+
+import { parseSecretsFile, SECRETS_FILE_VERSION } from '@/secrets/schema'
+
+// PR #638 removed the in-memory v1->v2 upgrade that `parseSecretsFile` used to
+// perform, so a `secrets.json` still in v1 now fails to parse:
+// `hydrateChannelEnvFromSecrets` swallows the failure as `{}`, no token env vars
+// are injected, and channel adapters (Discord, Slack, Telegram) never connect.
+// This is the one-shot on-disk replacement, run once at boot rather than on
+// every parse, so the v2-only runtime keeps working without a read-time shim.
+
+const SCHEMA_REL = './node_modules/typeclaw/secrets.schema.json'
+const FILE_MODE = 0o600
+
+const LEGACY_FILENAME = 'auth.json'
+const TARGET_FILENAME = 'secrets.json'
+
+// Frozen, migration-local reverse map (env-var name -> { adapterId, field }).
+// Intentionally a private copy rather than an inversion of
+// `CHANNEL_FIELD_ENV` in src/secrets/defaults.ts: re-importing live runtime
+// defaults would (a) re-couple current code to deleted legacy surface area,
+// and (b) let a future change to the runtime env-var names silently rewrite
+// the semantics of this historical migration. A v1 file written years ago must
+// migrate the same way regardless of what the live adapters key off today.
+const LEGACY_CHANNEL_ENV_TO_FIELD: Record<string, { adapterId: string; field: string }> = {
+  DISCORD_BOT_TOKEN: { adapterId: 'discord-bot', field: 'token' },
+  SLACK_BOT_TOKEN: { adapterId: 'slack-bot', field: 'botToken' },
+  SLACK_APP_TOKEN: { adapterId: 'slack-bot', field: 'appToken' },
+  TELEGRAM_BOT_TOKEN: { adapterId: 'telegram-bot', field: 'token' },
+}
+
+export const MIGRATION_ID = '0001-secrets-v1-to-v2'
+
+export type SecretsMigrationResult = { changed: boolean; summary: string }
+
+// Detect-and-apply in one call so detect and apply can never disagree about
+// the on-disk shape (no TOCTOU between a separate detect() read and the apply
+// read). Idempotent: a folder already at v2 (or with no legacy file) returns
+// `changed: false`. Errors that indicate ambiguous/unsafe state throw with an
+// actionable message rather than guessing.
+export function migrateSecretsV1ToV2(agentDir: string): SecretsMigrationResult {
+  const legacyPath = join(agentDir, LEGACY_FILENAME)
+  const targetPath = join(agentDir, TARGET_FILENAME)
+
+  // Resolve the auth.json -> secrets.json filename precedence first, under a
+  // lock on whichever file we end up operating on, so a concurrent boot-time
+  // writer (SecretsBackend, hostd, credential exporters) can't interleave.
+  const resolvedPath = resolveLegacyFilename(legacyPath, targetPath)
+  if (resolvedPath === null) return { changed: false, summary: 'no secrets file to migrate' }
+
+  return withFileLock(resolvedPath, () => upgradeFileInPlace(resolvedPath))
+}
+
+// auth.json precedence, preserving the exact semantics of the deleted
+// migrateLegacyAuthJson so no credential is ever silently dropped:
+//   - only auth.json            -> rename to secrets.json, operate on it
+//   - only secrets.json         -> operate on secrets.json
+//   - neither                   -> nothing to do
+//   - both, auth.json empty     -> unlink auth.json, operate on secrets.json
+//   - both, secrets.json empty  -> auth.json wins (rename over the empty seed)
+//   - both non-empty            -> hard error (can't pick a source of truth)
+function resolveLegacyFilename(legacyPath: string, targetPath: string): string | null {
+  const hasLegacy = existsSync(legacyPath)
+  const hasTarget = existsSync(targetPath)
+
+  if (!hasLegacy) return hasTarget ? targetPath : null
+
+  if (!hasTarget) {
+    renameWithRaceFallback(legacyPath, targetPath)
+    return targetPath
+  }
+
+  if (isEmptyOrUnparseableEnvelope(legacyPath)) {
+    unlinkSync(legacyPath)
+    return targetPath
+  }
+
+  if (isEmptyEnvelope(targetPath)) {
+    renameWithRaceFallback(legacyPath, targetPath)
+    return targetPath
+  }
+
+  throw new Error(
+    `Both ${LEGACY_FILENAME} and a non-empty ${TARGET_FILENAME} exist in the agent folder. ` +
+      `Inspect manually and remove the stale file before re-running.`,
+  )
+}
+
+function upgradeFileInPlace(path: string): SecretsMigrationResult {
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return { changed: false, summary: 'secrets file unreadable; skipped' }
+  }
+  if (raw.trim() === '') return { changed: false, summary: 'secrets file empty; skipped' }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(`secrets file is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // Already current: parseSecretsFile only accepts v2 post-#638, so a successful
+  // parse means there is nothing to do.
+  if (parseSecretsFile(parsed).ok) return { changed: false, summary: 'already v2; no change' }
+
+  const upgraded = upgradeToV2(parsed)
+  if (upgraded === null) {
+    throw new Error(
+      'secrets file is neither a valid v2 envelope nor a recognized legacy (v1 / pre-envelope) shape; ' +
+        'leaving it untouched for manual inspection',
+    )
+  }
+
+  // Re-validate the product of our own transform before persisting. A transform
+  // that emitted an invalid v2 file would brick the next read; failing here is
+  // strictly safer than writing garbage.
+  const check = parseSecretsFile(upgraded)
+  if (!check.ok) {
+    throw new Error(`internal: migrated secrets file failed v2 validation: ${check.reason}`)
+  }
+
+  writeEnvelopeAtomic(path, check.file)
+  return { changed: true, summary: `upgraded secrets file to v${SECRETS_FILE_VERSION}` }
+}
+
+// Recognizes the two pre-v2 shapes the deleted parseSecretsFile branches used
+// to accept and returns a v2-shaped object. Returns null when the input matches
+// neither (caller turns that into a loud, no-write error).
+//
+//   v1 envelope:      { version: 1, llm: {...}, channels: { adapter: { ENV: value } } }
+//   pre-envelope flat: { providerId: { type, key } } at the top level
+function upgradeToV2(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+
+  if (obj.version === 1) {
+    return upgradeV1Envelope(obj)
+  }
+
+  if (looksLikeFlatProviders(obj)) {
+    return upgradeV1Envelope({ version: 1, llm: obj, channels: {} })
+  }
+
+  return null
+}
+
+function upgradeV1Envelope(obj: Record<string, unknown>): Record<string, unknown> {
+  const llm = isPlainObject(obj.llm) ? obj.llm : {}
+  const legacyChannels = isPlainObject(obj.channels) ? obj.channels : {}
+
+  const providers: Record<string, unknown> = {}
+  for (const [providerId, cred] of Object.entries(llm)) {
+    if (!isPlainObject(cred)) continue
+    if (cred.type === 'api_key' && typeof cred.key === 'string') {
+      providers[providerId] = { type: 'api_key', key: { value: cred.key } }
+    } else {
+      // OAuth and any unknown credential type pass through verbatim — they are
+      // not env-injectable and the v2 schema accepts them via catchall.
+      providers[providerId] = cred
+    }
+  }
+
+  const channels: Record<string, Record<string, unknown>> = {}
+  for (const [adapterId, slot] of Object.entries(legacyChannels)) {
+    if (!isPlainObject(slot)) continue
+    const upgradedSlot: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(slot)) {
+      if (typeof value !== 'string') {
+        // A non-string value means this isn't the flat env-keyed v1 channel
+        // shape (e.g. a kakaotalk block, which is structured). Preserve it
+        // verbatim so the catchall keeps it valid; do not try to reshape.
+        upgradedSlot[key] = value
+        continue
+      }
+      const mapping = LEGACY_CHANNEL_ENV_TO_FIELD[key]
+      if (mapping && mapping.adapterId === adapterId) {
+        upgradedSlot[mapping.field] = { value }
+      } else {
+        // Unknown env-var key on a known adapter, or an unknown adapter:
+        // preserve under the original key but still wrap as a v2 Secret so the
+        // resulting file is valid v2.
+        upgradedSlot[key] = { value }
+      }
+    }
+    channels[adapterId] = upgradedSlot
+  }
+
+  const result: Record<string, unknown> = {
+    $schema: typeof obj.$schema === 'string' ? obj.$schema : SCHEMA_REL,
+    version: SECRETS_FILE_VERSION,
+    providers,
+    channels,
+  }
+  return result
+}
+
+// A flat pre-envelope file is a top-level record of provider credentials. Every
+// value must be a credential object with a `type` field; anything else means we
+// don't recognize the shape and should not guess.
+function looksLikeFlatProviders(obj: Record<string, unknown>): boolean {
+  const entries = Object.entries(obj).filter(([k]) => k !== '$schema')
+  if (entries.length === 0) return false
+  return entries.every(([, value]) => isPlainObject(value) && typeof value.type === 'string')
+}
+
+function isEmptyEnvelope(path: string): boolean {
+  const parsed = readJsonOrNull(path)
+  if (parsed === undefined) return true
+  if (parsed === null) return false
+  const result = parseSecretsFile(parsed)
+  if (!result.ok) return false
+  return Object.keys(result.file.providers).length === 0 && Object.keys(result.file.channels).length === 0
+}
+
+// Looser variant for the legacy file: an auth.json that is empty, blank, or
+// no-longer-parseable carries no recoverable credentials, so it is safe to drop
+// in favor of an existing secrets.json. We do NOT treat a parseable-but-legacy
+// auth.json as empty — that still has credentials worth migrating, which is the
+// both-non-empty hard-error path.
+function isEmptyOrUnparseableEnvelope(path: string): boolean {
+  const parsed = readJsonOrNull(path)
+  if (parsed === undefined) return true
+  if (parsed === null) return false
+  const v2 = parseSecretsFile(parsed)
+  if (v2.ok) {
+    return Object.keys(v2.file.providers).length === 0 && Object.keys(v2.file.channels).length === 0
+  }
+  // Parseable JSON in a known legacy shape => has migratable content.
+  return upgradeToV2(parsed) === null
+}
+
+// undefined = file missing/blank (treat as empty); null = present but invalid
+// JSON (treat as "has content we can't safely drop").
+function readJsonOrNull(path: string): unknown {
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+  if (raw.trim() === '') return undefined
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function writeEnvelopeAtomic(path: string, envelope: unknown): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(envelope, null, 2)}\n`, { encoding: 'utf8', mode: FILE_MODE })
+  try {
+    renameSync(tmp, path)
+  } catch (err) {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // best-effort cleanup of the temp file when rename fails
+    }
+    throw err
+  }
+  chmodSync(path, FILE_MODE)
+}
+
+// renameSync is atomic per syscall, but two concurrent migration runs can both
+// observe auth.json exists and secrets.json does not, then race on the rename.
+// One wins; the loser gets ENOENT because the source is already gone — that is
+// a successful migration from its POV, so recheck the target and swallow it.
+function renameWithRaceFallback(from: string, to: string): void {
+  try {
+    renameSync(from, to)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && existsSync(to)) return
+    throw err
+  }
+}
+
+// Mirror SecretsBackend's lock discipline so a concurrent credential write
+// (provider add, OAuth refresh, channel add) can't interleave with the
+// read-transform-write. proper-lockfile needs the target to exist; the target
+// always exists by the time we lock (resolveLegacyFilename guarantees it).
+function withFileLock<T>(path: string, fn: () => T): T {
+  let release: (() => void) | undefined
+  try {
+    release = acquireSyncLockWithRetry(path)
+    return fn()
+  } finally {
+    release?.()
+  }
+}
+
+const SYNC_LOCK_RETRIES = 10
+const SYNC_LOCK_DELAY_MS = 20
+
+function acquireSyncLockWithRetry(path: string): () => void {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= SYNC_LOCK_RETRIES; attempt++) {
+    try {
+      return lockfile.lockSync(path, { realpath: false })
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code: unknown }).code)
+          : undefined
+      if (code !== 'ELOCKED' || attempt === SYNC_LOCK_RETRIES) throw error
+      lastError = error
+      const start = Date.now()
+      while (Date.now() - start < SYNC_LOCK_DELAY_MS) {
+        // intentionally empty: synchronous busy-wait to match SecretsBackend
+      }
+    }
+  }
+  throw (lastError as Error | undefined) ?? new Error('Failed to acquire secrets store lock')
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

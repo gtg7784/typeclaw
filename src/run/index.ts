@@ -42,6 +42,7 @@ import {
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
 import { createMcpManager } from '@/mcp'
+import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
 import type { CronHandlerContext } from '@/plugin/types'
@@ -193,6 +194,12 @@ export async function startAgent({
     loadedPlugins: pluginsLoaded.loadedPlugins,
     materializedSkills: null,
   })
+
+  // Graduate any pre-0.20.0 on-disk shapes (v1 secrets.json, legacy auth.json)
+  // to the current v2 envelope before anything reads secrets — otherwise the
+  // v2-only parser rejects the file and hydrate below sees no channels. Runs
+  // exactly once per folder; a folder already at v2 is a no-op.
+  runStartupMigrations(cwd)
 
   // Channel adapters read `process.env[TOKEN_ENV]` (see channels/manager.ts).
   // Hydrate fills any unset env var from secrets.json#channels via env-wins:
