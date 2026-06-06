@@ -6,7 +6,15 @@ export type SandboxMount =
 
 export type SandboxNetwork = 'none' | 'inherit'
 
-export type SandboxProcStrategy = 'tmpfs' | 'none'
+// 'tmpfs' (default): empty /proc + a single /proc/self/exe symlink. Works on
+// every host but gives no /proc/self/{fd,maps}, so a JS package runner's CHILD
+// (the spawned bin) crashes with ENOTDIR reading /proc/self/fd. 'none': no
+// /proc at all. 'real-proc': mount a fresh procfs scoped to a NEW pid namespace
+// so the child gets a real /proc/self/{fd,maps} WITHOUT seeing the agent
+// runtime's pids (no /proc/<agent>/environ leak). 'real-proc' requires the
+// outer container to hold CAP_SYS_ADMIN (mount(2) of proc); start.ts only grants
+// it when the operator opts in via typeclaw.json#sandbox.realProc.
+export type SandboxProcStrategy = 'tmpfs' | 'none' | 'real-proc'
 
 export type SandboxEnvPolicy = {
   set?: Record<string, string>

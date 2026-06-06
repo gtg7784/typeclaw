@@ -36,14 +36,35 @@ export function buildSandboxedCommand(command: string, policy: SandboxPolicy = {
 
 function buildArgv(command: string, policy: SandboxPolicy): string[] {
   const bwrap = policy.bwrapPath ?? 'bwrap'
-  const argv: string[] = [bwrap, '--unshare-all']
+  const procStrategy = policy.proc ?? 'tmpfs'
+  const realProc = procStrategy === 'real-proc'
 
-  if (policy.network === 'inherit') {
-    // --unshare-all already unshared the net namespace; --share-net rejoins
-    // the outer container's network. Other namespaces (user/pid/mount/ipc/
-    // uts/cgroup) stay unshared. Default ('none' / undefined) leaves the net
-    // namespace isolated — prompt-injected bash cannot exfiltrate over the
-    // network without the consumer explicitly opting in.
+  // 'real-proc' splits PID-namespace ownership from bwrap. `unshare --pid
+  // --fork --mount --mount-proc` (util-linux, baseline) creates the new PID +
+  // mount namespaces as REAL root and mounts a fresh procfs scoped to that PID
+  // namespace — which OrbStack permits only with CAP_SYS_ADMIN and NOT from
+  // bwrap's user namespace (bwrap's --proc is blocked there). bwrap then runs
+  // INSIDE that namespace and must NOT re-unshare pid (it would create a second
+  // PID ns with no matching procfs and reintroduce the ENOTDIR crash), so we
+  // unshare each namespace EXCEPT pid explicitly instead of --unshare-all. The
+  // freshly mounted /proc contains only the sandbox subtree, so --ro-bind /proc
+  // (below) binds that scoped procfs, never the agent runtime's /proc/N/environ.
+  const argv: string[] = realProc
+    ? ['unshare', '--pid', '--fork', '--mount', '--mount-proc', '--', bwrap]
+    : [bwrap, '--unshare-all']
+  if (realProc) {
+    argv.push('--unshare-user', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup')
+  }
+
+  if (policy.network !== 'inherit') {
+    // Default ('none' / undefined) isolates the net namespace — prompt-injected
+    // bash cannot exfiltrate over the network unless the consumer opts in.
+    // --unshare-all already covers this in the non-real-proc path; under
+    // real-proc the explicit unshares above omit net, so add it here.
+    if (realProc) argv.push('--unshare-net')
+  } else if (!realProc) {
+    // --unshare-all unshared the net namespace; --share-net rejoins the outer
+    // container's network. Under real-proc we simply never add --unshare-net.
     argv.push('--share-net')
   }
 
@@ -97,7 +118,15 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     '/lib64',
   )
 
-  if ((policy.proc ?? 'tmpfs') === 'tmpfs') {
+  if (realProc) {
+    // The outer `unshare --mount-proc` already mounted a fresh procfs scoped to
+    // the new PID namespace. --ro-bind /proc /proc binds THAT procfs (not the
+    // outer container's), so the child gets real /proc/self/{fd,maps} and the
+    // agent runtime's pids — and their /proc/N/environ secrets — are simply
+    // absent from this namespace. No /proc/self/exe symlink is needed: a real
+    // /proc/self/exe already resolves correctly.
+    argv.push('--ro-bind', '/proc', '/proc')
+  } else if (procStrategy === 'tmpfs') {
     // --tmpfs /proc, never --proc /proc (OrbStack's kernel blocks
     // mount("proc",...) from user namespaces) and never --dev-bind /proc /proc
     // (leaks the outer container's /proc/N/environ — including
@@ -111,6 +140,9 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     // /proc/self/exe. --symlink (not --ro-bind /proc/self/exe): /proc/self at
     // setup time is bwrap's pid, so a bind would capture bwrap's own binary.
     // Must come AFTER --tmpfs /proc (last-op-wins) or the tmpfs erases it.
+    // This restores only the runner's SELF-location; a spawned child still
+    // reads /proc/self/fd + /proc/self/maps, which the empty tmpfs lacks, so
+    // external-package execution requires the 'real-proc' strategy above.
     if (policy.procSelfExe !== undefined) {
       argv.push('--ro-bind', policy.procSelfExe, policy.procSelfExe)
       argv.push('--symlink', policy.procSelfExe, '/proc/self/exe')

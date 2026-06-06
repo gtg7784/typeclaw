@@ -338,6 +338,25 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
+// `realProc` opts the per-tool bwrap sandbox into the 'real-proc' strategy
+// (src/sandbox/build.ts): a fresh procfs scoped to a new PID namespace so
+// external-package runners (`bunx`, `bun add <pkg>`, `bun run <pkg-bin>`) get a
+// working /proc/self/{fd,maps} and stop aborting with Bun's "NotDir". Default
+// `false` keeps the universally-portable '--tmpfs /proc' profile, under which
+// sandboxed external-package execution is unsupported by design. Turning it on
+// makes `typeclaw start` grant the container CAP_SYS_ADMIN (required to mount
+// proc for the new PID namespace), which is a deliberate posture change on the
+// single-tenant outer boundary — see docs/internals/sandbox.mdx. PID isolation
+// and the /proc/N/environ leak guard are both preserved; the trade is the
+// CAP_SYS_ADMIN grant, not sandbox strength.
+export const sandboxSchema = z
+  .object({
+    realProc: z.boolean().default(false),
+  })
+  .default({ realProc: false })
+
+export type SandboxConfig = z.infer<typeof sandboxSchema>
+
 // Host-stage `typeclaw compose` knobs. `exclude: true` skips this agent during
 // compose discovery (same effect as parking it under an `_`-prefixed dir, but
 // without renaming the folder). The container never reads this block — it's a
@@ -508,6 +527,7 @@ export const configSchema = z
     channels: channelsSchema,
     portForward: portForwardSchema,
     network: networkSchema,
+    sandbox: sandboxSchema,
     docker: dockerSchema,
     git: gitSchema,
     roles: rolesConfigSchema.optional(),
@@ -651,6 +671,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   channels: 'applied',
   portForward: 'restart-required',
   network: 'restart-required',
+  sandbox: 'restart-required',
   tunnels: 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',

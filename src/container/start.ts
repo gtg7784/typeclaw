@@ -514,6 +514,20 @@ export async function planStart({
     }
   }
 
+  // sandbox.realProc opts the per-tool bwrap sandbox into the 'real-proc'
+  // strategy (src/sandbox/build.ts), which prefixes the sandbox with
+  // `unshare --pid --fork --mount --mount-proc`. Mounting a fresh procfs for the
+  // new PID namespace needs real CAP_SYS_ADMIN — seccomp=unconfined alone is not
+  // enough (it only unblocks the unshare/clone SYSCALLS; the kernel still
+  // rejects mount(2) of proc without the capability). This is the deliberate
+  // posture change documented in docs/internals/sandbox.mdx: the default keeps
+  // the narrower seccomp-only profile, and the operator grants the broad
+  // "new root" capability ONLY by opting into real-proc. Placed before the
+  // image tag (like --cap-add=NET_ADMIN) so docker applies it at run time.
+  if (cfg.sandbox.realProc) {
+    runArgs.push('--cap-add=SYS_ADMIN')
+  }
+
   if (hostdControl) {
     runArgs.push('--add-host', HOST_GATEWAY_ALIAS)
   }

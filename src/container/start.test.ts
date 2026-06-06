@@ -79,6 +79,7 @@ type ScaffoldedConfig = {
   docker?: { file?: DockerfileBlock }
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
+  sandbox?: { realProc?: boolean }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -89,6 +90,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     ...(overrides.docker ? { docker: overrides.docker } : {}),
     ...(overrides.git ? { git: overrides.git } : {}),
     ...(overrides.network ? { network: overrides.network } : {}),
+    ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -604,6 +606,51 @@ describe('planStart network egress filter', () => {
     await writeTypeclawConfig(root, { network: { blockInternal: true, allow: ['not-a-cidr'] } })
 
     await expect(planStart({ cwd: root, hostPort: 8973, imageExists: true })).rejects.toThrow()
+  })
+})
+
+describe('planStart sandbox.realProc cap grant', () => {
+  test('does NOT grant SYS_ADMIN by default (the secure tmpfs-proc profile stays the default)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain('--cap-add=SYS_ADMIN')
+  })
+
+  test('does NOT grant SYS_ADMIN when sandbox.realProc is explicitly false', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { sandbox: { realProc: false } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain('--cap-add=SYS_ADMIN')
+  })
+
+  test('grants SYS_ADMIN when sandbox.realProc is true (needed to mount proc for the new pid ns)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { sandbox: { realProc: true } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('--cap-add=SYS_ADMIN')
+  })
+
+  test('the SYS_ADMIN cap appears before the image tag so docker applies it at run time', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { sandbox: { realProc: true } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const capIdx = plan.runArgs.indexOf('--cap-add=SYS_ADMIN')
+    const imageIdx = plan.runArgs.indexOf(plan.imageTag)
+
+    expect(capIdx).toBeGreaterThan(-1)
+    expect(imageIdx).toBeGreaterThan(-1)
+    expect(capIdx).toBeLessThan(imageIdx)
   })
 })
 
