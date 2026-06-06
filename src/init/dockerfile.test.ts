@@ -21,6 +21,13 @@ import {
   NETWORK_BLOCK_IPV4_NETS,
   NETWORK_BLOCK_IPV6_NETS,
   TYPECLAW_ENTRYPOINT_PATH,
+  TYPST_CMARKER_SHA256,
+  TYPST_CMARKER_VERSION,
+  TYPST_PACKAGES_DIR,
+  TYPST_RELEASE_URL_BASE,
+  TYPST_SHA256_AMD64,
+  TYPST_SHA256_ARM64,
+  TYPST_VERSION,
 } from './dockerfile'
 
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
@@ -1011,6 +1018,72 @@ describe('cloudflared layer', () => {
   })
 })
 
+describe('typst layer', () => {
+  test('embeds the pinned version in the release URL — bumping is a deliberate, reviewable change, not a moving "latest" target', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(`${TYPST_RELEASE_URL_BASE}/${TYPST_VERSION}/typst-`)
+  })
+
+  test('verifies the typst tarball sha256 per-arch so a tampered binary fails the build', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(TYPST_SHA256_AMD64)
+    expect(out).toContain(TYPST_SHA256_ARM64)
+    expect(out).toContain('sha256sum -c -')
+  })
+
+  test('branches by TARGETARCH so the same Dockerfile installs the correct musl triple on amd64 and arm64', () => {
+    const out = buildDockerfile()
+    expect(out).toMatch(/TARGETARCH.*arm64.*aarch64-unknown-linux-musl/s)
+    expect(out).toContain('x86_64-unknown-linux-musl')
+  })
+
+  test('installs typst to /usr/local/bin (on $PATH) and smoke-tests it at build time so a broken download fails the build, not the first render', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('tar -xJf typst.tar.xz -C /usr/local/bin --strip-components=1')
+    expect(out).toContain('/usr/local/bin/typst --version')
+  })
+
+  test('vendors the pinned cmarker package into the Typst cache and verifies its sha256 so @preview/cmarker resolves offline', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(`https://packages.typst.org/preview/cmarker-${TYPST_CMARKER_VERSION}.tar.gz`)
+    expect(out).toContain(TYPST_CMARKER_SHA256)
+    expect(out).toContain(`${TYPST_PACKAGES_DIR}/preview/cmarker/${TYPST_CMARKER_VERSION}`)
+  })
+
+  test('points TYPST_PACKAGE_CACHE_PATH and TYPST_PACKAGE_PATH at the vendored dir so compilation is hermetic', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(`ENV TYPST_PACKAGE_CACHE_PATH=${TYPST_PACKAGES_DIR}`)
+    expect(out).toContain(`ENV TYPST_PACKAGE_PATH=${TYPST_PACKAGES_DIR}`)
+  })
+
+  test('typst ships unconditionally (no toggle): default config and an all-toggles-off config both include it', () => {
+    const def = buildDockerfile()
+    const minimal = buildDockerfile(
+      dockerfileSchema.parse({ gh: false, python: false, tmux: false, xvfb: false, cjkFonts: false }),
+    )
+    expect(def).toContain('typst.tar.xz')
+    expect(minimal).toContain('typst.tar.xz')
+  })
+
+  test('typst layer is between curl-impersonate and agent-browser so an agent-browser bump does not invalidate it', () => {
+    const out = buildDockerfile()
+    const curlIdx = out.indexOf('curl-impersonate.tar.gz')
+    const typstIdx = out.indexOf('typst.tar.xz')
+    const agentBrowserIdx = out.indexOf('bun install -g agent-browser')
+    expect(curlIdx).toBeGreaterThan(-1)
+    expect(typstIdx).toBeGreaterThan(-1)
+    expect(agentBrowserIdx).toBeGreaterThan(-1)
+    expect(curlIdx).toBeLessThan(typstIdx)
+    expect(typstIdx).toBeLessThan(agentBrowserIdx)
+  })
+
+  test('the versioned head inherits typst from the base image (no re-download) but still sets the package-path env', () => {
+    const out = buildDockerfile(undefined, { baseImageVersion: '9.9.9' })
+    expect(out).not.toContain('typst.tar.xz')
+    expect(out).toContain(`ENV TYPST_PACKAGE_CACHE_PATH=${TYPST_PACKAGES_DIR}`)
+  })
+})
+
 // The base image (ghcr.io/typeclaw/typeclaw-base) and the per-agent
 // Dockerfile (emitted by `typeclaw start`) MUST agree on every toolchain
 // version, library path, and binary location. When they don't, the
@@ -1029,6 +1102,16 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     expect(base).toContain(CURL_IMPERSONATE_SHA256_AMD64)
     expect(base).toContain(CURL_IMPERSONATE_SHA256_ARM64)
     expect(base).toContain(`/usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version`)
+  })
+
+  test('base Dockerfile pins the same typst version + sha256s and vendors the same cmarker as the per-agent Dockerfile', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain(TYPST_VERSION)
+    expect(base).toContain(TYPST_SHA256_AMD64)
+    expect(base).toContain(TYPST_SHA256_ARM64)
+    expect(base).toContain('/usr/local/bin/typst --version')
+    expect(base).toContain(TYPST_CMARKER_SHA256)
+    expect(base).toContain(`${TYPST_PACKAGES_DIR}/preview/cmarker/${TYPST_CMARKER_VERSION}`)
   })
 
   test('base Dockerfile installs the full Playwright-tested chromium runtime dep set on amd64 — same list the per-agent Dockerfile depends on Chrome to find at launch time', () => {
