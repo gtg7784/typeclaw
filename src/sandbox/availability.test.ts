@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { _resetBwrapAvailabilityCacheForTests, ensureBwrapAvailable } from './availability'
+import { _resetBwrapAvailabilityCacheForTests, ensureBwrapAvailable, resolveProcSelfExe } from './availability'
 import { SandboxUnavailableError } from './errors'
 
 afterEach(() => {
@@ -33,5 +33,16 @@ describe('ensureBwrapAvailable', () => {
   })()
   test.skipIf(!bwrapPresent)('resolves when bwrap is on PATH', async () => {
     await expect(ensureBwrapAvailable()).resolves.toBeUndefined()
+  })
+})
+
+describe('resolveProcSelfExe', () => {
+  // The /proc/self/exe re-expose is bun-only by design (the container has no
+  // real node; node/bunx/npx/pnpx all resolve to bun). Asserting it returns the
+  // running bun binary pins that contract: if it ever returned something else,
+  // sandboxed self-location would point at the wrong ELF.
+  test('returns the running bun binary (process.execPath)', () => {
+    expect(resolveProcSelfExe()).toBe(process.execPath)
+    expect(resolveProcSelfExe()).toMatch(/bun/i)
   })
 })

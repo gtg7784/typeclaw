@@ -3,7 +3,12 @@ import { ACKNOWLEDGE_GUARDS, type GuardBlock, isGuardAcknowledged } from '../gua
 export const GUARD_GLOBAL_INSTALL = 'globalInstall'
 export const GUARD_NON_BUN_PACKAGE_MANAGER = 'nonBunPackageManager'
 
-const NON_BUN_MANAGERS = new Set(['npm', 'npx', 'pnpm', 'pnpx', 'yarn'])
+// Only install managers are blocked. The ephemeral runners npx/pnpx (and bunx,
+// which is `bun`) are intentionally absent: they run a tool once without
+// touching the dependency tree or writing a competing lockfile, so they don't
+// undermine the bun-standardization this set protects. classify() skips any
+// command word not in here, so leaving them out is what allows them.
+const NON_BUN_MANAGERS = new Set(['npm', 'pnpm', 'yarn'])
 const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'add'])
 
 export function checkBunHygieneGuard(options: { tool: string; args: Record<string, unknown> }): GuardBlock | undefined {
@@ -310,8 +315,8 @@ function blockNonBunManager(manager: string, args: Record<string, unknown>): Gua
   return {
     block: true,
     reason: [
-      `Guard \`${GUARD_NON_BUN_PACKAGE_MANAGER}\` blocked \`${manager}\`. This container standardizes on bun.`,
-      'Use `bun install` / `bun add <pkg>` instead of npm/pnpm/yarn, and `bunx <pkg>` instead of npx/pnpx.',
+      `Guard \`${GUARD_NON_BUN_PACKAGE_MANAGER}\` blocked \`${manager}\`. This container standardizes on bun for dependency management.`,
+      'Use `bun install` / `bun add <pkg>` instead of npm/pnpm/yarn. Ephemeral runners (`bunx`, `npx`, `pnpx`) are allowed for one-off tool execution.',
       `Retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_NON_BUN_PACKAGE_MANAGER}: true\` if this package manager is genuinely required (e.g. a project pinned to a different lockfile).`,
     ].join(' '),
   }

@@ -33,3 +33,15 @@ async function probe(bwrap: string): Promise<boolean> {
 export function _resetBwrapAvailabilityCacheForTests(): void {
   availabilityCache.clear()
 }
+
+// The bun binary this process runs as (process.execPath). build.ts re-exposes
+// it at /proc/self/exe over the masked /proc so sandboxed package runners can
+// self-locate. This is correct ONLY in the bun-centric container: the base
+// image (oven/bun:1-slim) ships no real node — `node` is a bun symlink and
+// bunx/npx/pnpx all resolve to bun (Bun's fake-node model), so every runtime
+// reading /proc/self/exe IS bun. A real node binary would self-locate to the
+// wrong ELF here; if node is ever added to the image this must resolve the
+// actual interpreter instead.
+export function resolveProcSelfExe(): string {
+  return process.execPath
+}

@@ -3,7 +3,7 @@
 The bundled bun-hygiene plugin. Registers a `tool.before` hook that blocks two classes of `bash` command:
 
 1. **Global package installs** — `npm install -g`, `pnpm add -g`, `yarn global add`, `bun add -g`, and their `--global` / bundled-flag variants.
-2. **Non-bun package managers** — any `npm`, `npx`, `pnpm`, `pnpx`, or `yarn` invocation.
+2. **Non-bun install managers** — any `npm`, `pnpm`, or `yarn` invocation. The ephemeral runners `npx` and `pnpx` are **allowed** (alongside `bunx`): they execute a tool once without touching the dependency tree or writing a competing lockfile, so they don't undermine the bun-standardization this guard protects.
 
 This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` entry to add. Both guards carry an `acknowledgeGuards` escape hatch (below) for the cases where the agent genuinely needs the blocked command.
 
@@ -11,16 +11,16 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 
 **Global installs don't persist.** The agent folder is bind-mounted at `/agent`; everything else in the container — including `~/.bun`, `~/.npm`, and the global `node_modules` a global install writes to — is ephemeral and wiped on every `typeclaw restart`. An agent that runs `npm install -g some-cli` gets a tool that works for the rest of the session and silently vanishes on the next boot, leading to confusing "command not found" failures that look like regressions. The fix is to either add the dependency to `package.json` (`bun add <pkg>`, which lives in the bind-mounted folder and survives) or run it once without installing (`bunx <pkg>`).
 
-**The container standardizes on bun.** TypeClaw is Bun-native end to end (see the root README). Mixing in `npm`/`pnpm`/`yarn` produces competing lockfiles and install trees, and `npx` pulls a second package-execution path when `bunx` already covers it. Steering every package-manager call to bun keeps the dependency state coherent.
+**The container standardizes on bun for dependency management.** TypeClaw is Bun-native end to end (see the root README). Mixing in `npm`/`pnpm`/`yarn` installs produces competing lockfiles and install trees, so those are steered to bun. Ephemeral runners (`npx`/`pnpx`/`bunx`) are not install managers — they run a tool once and leave no lockfile or `node_modules` behind — so they're allowed for one-off execution.
 
 Both guards **block with guidance** rather than silently rewriting the command — the agent sees exactly why the command was rejected and what to run instead, the same UX as the bundled `security` and `guard` policies.
 
 ## Guards
 
-| Guard                  | Triggers on                                                                                       | Guidance in the block reason                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `globalInstall`        | `npm`/`pnpm` install/add with `-g`/`--global`, `yarn global add`, `bun add -g` / `bun install -g` | Use `bun add <pkg>` (persists) or `bunx <pkg>` (ephemeral run).            |
-| `nonBunPackageManager` | `npm`, `npx`, `pnpm`, `pnpx`, `yarn` at a command boundary                                        | Use `bun install` / `bun add <pkg>`, and `bunx <pkg>` instead of npx/pnpx. |
+| Guard                  | Triggers on                                                                                       | Guidance in the block reason                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `globalInstall`        | `npm`/`pnpm` install/add with `-g`/`--global`, `yarn global add`, `bun add -g` / `bun install -g` | Use `bun add <pkg>` (persists) or `bunx <pkg>` (ephemeral run).        |
+| `nonBunPackageManager` | `npm`, `pnpm`, `yarn` at a command boundary (`npx`/`pnpx`/`bunx` are allowed)                     | Use `bun install` / `bun add <pkg>`. Ephemeral runners are fine as-is. |
 
 A global install (e.g. `npm install -g x`) trips **only** `globalInstall`, not both — the global install is the more specific violation, so acknowledging `globalInstall` lets the command through without a second acknowledgement for `nonBunPackageManager`.
 
@@ -43,9 +43,9 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 
 For each segment, the guard strips leading **preamble wrappers** (`sudo`, `env`, `command`, `exec`, `nice`, `nohup`, `stdbuf`, `setsid`, `time`, `xargs`, and any `VAR=val` assignment) — including their options, and the argument a flag consumes (`sudo -u nobody`, `nice -n 10`, `env -i`) — to find the real command word, then classifies:
 
-1. command word is `npm`/`npx`/`pnpm`/`pnpx`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall` (for `yarn`, the `global add` sequence must appear adjacent and in command position, so `yarn add global foo` — a local install of a package named `global` — is not misflagged);
-2. command word is a non-bun manager (not via global) → `nonBunPackageManager`;
-3. otherwise → allowed.
+1. command word is `npm`/`pnpm`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall` (for `yarn`, the `global add` sequence must appear adjacent and in command position, so `yarn add global foo` — a local install of a package named `global` — is not misflagged);
+2. command word is a non-bun install manager `npm`/`pnpm`/`yarn` (not via global) → `nonBunPackageManager`;
+3. otherwise (including the ephemeral runners `npx`/`pnpx`/`bunx`) → allowed.
 
 A `globalInstall` verdict on any segment wins over a plain non-bun verdict. This is a command-position detector, not a full shell parser — it doesn't interpret redirections or expansions beyond boundary marking — but it is linear-time and closes the structural gaps a single regex left open.
 
@@ -70,6 +70,7 @@ Because classification scans a segment's words as a set (after preamble strippin
 ## What is NOT blocked
 
 - `bun`, `bunx`, `bun run`, `bun add`, `bun install` (local) — the intended package commands. (`bun add -g` / `bun install -g` are still blocked as global installs: bun globals live in `~/.bun`, outside `/agent`, and are wiped on restart.)
+- `npx`, `pnpx` — ephemeral runners, allowed for one-off tool execution (they leave no lockfile or install tree). A global install through them is still nothing to block since they don't install into the dependency tree at all.
 - A non-bun manager name appearing as a substring or argument: `my-npm-wrapper`, `./npm`, `cat npm-debug.log`, `git commit -m "drop npm"`, `grep -rn npx src/`, `echo "npm install -g foo"`. Only the **command word** of a segment is classified, so a manager name inside an argument, path, quoted string, or longer token never trips the guard.
 
 ## Ordering against other bundled plugins
@@ -78,5 +79,5 @@ Registered after `guard` in `src/run/bundled-plugins.ts`. It guards a disjoint s
 
 ## Tests
 
-- `policy.test.ts` — pure-function unit tests for the detection logic: every global-install form, every non-bun manager, the allowed-command set (bun/bunx, substrings, paths, quoted text), both bypasses, the global-install-takes-precedence rule, escaped/quoted evasions, leading-assignment preambles, newline-as-separator scoping, falsy `--global=`, option placement, and subshell/substitution detection.
-- `index.test.ts` — composition tests: the plugin registers the `tool.before` hook and wires it to the policy (block on global install, block on npx, allow bunx, honor the bypass).
+- `policy.test.ts` — pure-function unit tests for the detection logic: every global-install form, every non-bun install manager, the ephemeral-runner allowance (`npx`/`pnpx`/`bunx`, including behind preamble wrappers), the allowed-command set (bun/bunx, substrings, paths, quoted text), both bypasses, the global-install-takes-precedence rule, escaped/quoted evasions, leading-assignment preambles, newline-as-separator scoping, falsy `--global=`, option placement, and subshell/substitution detection.
+- `index.test.ts` — composition tests: the plugin registers the `tool.before` hook and wires it to the policy (block on global install, block on `npm install`, allow `bunx`/`npx`, honor the bypass).

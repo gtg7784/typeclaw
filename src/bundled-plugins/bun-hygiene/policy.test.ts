@@ -46,18 +46,25 @@ describe('checkBunHygieneGuard — non-bun package managers', () => {
   test.each([
     'npm install',
     'npm run build',
-    'npx create-next-app',
     'pnpm install',
-    'pnpx cowsay hi',
     'yarn',
     'yarn add lodash',
     'cd app && npm install',
-    'echo done; npx tsc',
+    'echo done; npm run build',
   ])('blocks %p', (command) => {
     const result = bash(command)
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
   })
+
+  // npx/pnpx are ephemeral runners: allowed for one-off tool execution because
+  // they don't touch the dependency tree or write a competing lockfile.
+  test.each(['npx create-next-app', 'pnpx cowsay hi', 'cd app && npx tsc', 'echo done; npx tsc'])(
+    'allows ephemeral runner %p',
+    (command) => {
+      expect(bash(command)).toBeUndefined()
+    },
+  )
 
   test('acknowledging nonBunPackageManager lets it through', () => {
     const result = bash('npm install', {
@@ -80,18 +87,14 @@ describe('checkBunHygieneGuard — non-bun package managers', () => {
 describe('checkBunHygieneGuard — escaped/quoted evasion', () => {
   // The shell strips quotes and backslash escapes before resolving the binary,
   // so these all run the real npm/npx and must be caught despite obfuscation.
-  test.each([
-    '\\npm install',
-    '"npm" install',
-    "'npm' install",
-    'n\\px create-next-app',
-    '"npx" create-next-app',
-    'cd app && \\npm install',
-  ])('blocks obfuscated non-bun manager %p', (command) => {
-    const result = bash(command)
-    expect(result?.block).toBe(true)
-    expect(result?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
-  })
+  test.each(['\\npm install', '"npm" install', "'npm' install", "'pnpm' install", 'cd app && \\npm install'])(
+    'blocks obfuscated non-bun manager %p',
+    (command) => {
+      const result = bash(command)
+      expect(result?.block).toBe(true)
+      expect(result?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+    },
+  )
 
   test.each([
     'np\\m install -g typescript',
@@ -127,7 +130,6 @@ describe('checkBunHygieneGuard — leading assignment / preamble words', () => {
   // behind a bare `VAR=val` assignment, not just behind `sudo` / `env`.
   test.each([
     ['FOO=bar npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
-    ['FOO=bar npx tsc', GUARD_NON_BUN_PACKAGE_MANAGER],
     ['FOO=bar BAR=baz npm install -g typescript', GUARD_GLOBAL_INSTALL],
     ['command npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
     ['exec npm install -g x', GUARD_GLOBAL_INSTALL],
@@ -135,7 +137,6 @@ describe('checkBunHygieneGuard — leading assignment / preamble words', () => {
     // consume) must be skipped so the manager behind them is still found.
     ['env -i npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
     ['sudo -u nobody pnpm add foo', GUARD_NON_BUN_PACKAGE_MANAGER],
-    ['nice -n 10 npx create-next-app', GUARD_NON_BUN_PACKAGE_MANAGER],
     ['env -i npm install -g typescript', GUARD_GLOBAL_INSTALL],
     ['sudo -u nobody npm install -g x', GUARD_GLOBAL_INSTALL],
     ['stdbuf -oL npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
@@ -147,12 +148,16 @@ describe('checkBunHygieneGuard — leading assignment / preamble words', () => {
 
   // The wrapper's consumed argument must not be mistaken for the command word:
   // `sudo -u nobody ls` runs ls (allowed), not a manager.
-  test.each(['nice -n 10 echo hi', 'sudo -u nobody ls -g', 'env -i sh', 'stdbuf -oL cat x'])(
-    'does not block wrapped non-manager command %p',
-    (command) => {
-      expect(bash(command)).toBeUndefined()
-    },
-  )
+  test.each([
+    'nice -n 10 echo hi',
+    'sudo -u nobody ls -g',
+    'env -i sh',
+    'stdbuf -oL cat x',
+    'nice -n 10 npx create-next-app',
+    'sudo -u nobody pnpx cowsay hi',
+  ])('does not block wrapped non-manager command %p', (command) => {
+    expect(bash(command)).toBeUndefined()
+  })
 })
 
 describe('checkBunHygieneGuard — newline is a command separator', () => {
@@ -262,6 +267,9 @@ describe('checkBunHygieneGuard — allowed commands', () => {
     'bun add -d typescript',
     'bunx tsc',
     'bunx create-next-app my-app',
+    'npx tsc',
+    'npx create-next-app my-app',
+    'pnpx cowsay hi',
     'bun run build',
     'ls -g',
     './npm-wrapper.sh',
