@@ -48,6 +48,33 @@ export function createGithubReviewStateResolver(deps: {
   }
 }
 
+export type SelfReviewBlockingResult =
+  | { ok: true; selfBlocking: boolean }
+  | { ok: false; error: string; code: 'not-found' | 'permission-denied' | 'transient' }
+
+// Last DECISIVE self review == CHANGES_REQUESTED? (COMMENTED/PENDING ignored, as
+// in createGithubReviewStateResolver.) Standalone so the synchronize follow-up
+// skips the reviewDecision round-trip the stranding guard needs but this doesn't.
+export async function fetchSelfReviewBlocking(deps: {
+  token: string
+  selfLogin: string
+  owner: string
+  repo: string
+  prNumber: number
+  fetchImpl?: typeof fetch
+}): Promise<SelfReviewBlockingResult> {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  const reviews = await fetchSelfReviews(
+    fetchImpl,
+    deps.token,
+    { owner: deps.owner, repo: deps.repo, prNumber: deps.prNumber },
+    deps.selfLogin,
+  )
+  if (!reviews.ok) return { ok: false, error: reviews.error, code: reviews.code }
+  const lastDecisive = reviews.states.filter(isDecisive).at(-1) ?? null
+  return { ok: true, selfBlocking: lastDecisive === 'CHANGES_REQUESTED' }
+}
+
 type Target = { owner: string; repo: string; prNumber: number }
 
 function parseTarget(workspace: string, chat: string): Target | null {
