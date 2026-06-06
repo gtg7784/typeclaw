@@ -2,7 +2,20 @@ import { describe, expect, test } from 'bun:test'
 
 import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
 
-import { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
+
+describe('subagent orchestration — explicit research routing', () => {
+  // Guards the regression where an explicit "do a research" directive was answered
+  // inline (web_search / training memory) instead of delegated, because the only
+  // research guidance was advisory. Drop this rule and the inline drift returns.
+  test('an explicit research directive is a binding instruction to spawn `researcher`, not answer inline', () => {
+    const ruleStart = DEFAULT_SYSTEM_PROMPT.indexOf('binding instruction to spawn')
+    expect(ruleStart).toBeGreaterThan(-1)
+    const rule = DEFAULT_SYSTEM_PROMPT.slice(ruleStart, ruleStart + 200)
+    expect(rule).toContain('`researcher`')
+    expect(rule).toContain('training memory')
+  })
+})
 
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
