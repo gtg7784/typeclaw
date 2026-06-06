@@ -66,9 +66,9 @@ function computeWidths(rows: string[][]): number[] {
   const widths: number[] = []
   for (const row of rows) {
     for (let c = 0; c < row.length; c++) {
-      const cellLen = row[c]!.length
-      if (widths[c] === undefined || cellLen > widths[c]!) {
-        widths[c] = cellLen
+      const cellWidth = displayWidth(row[c]!)
+      if (widths[c] === undefined || cellWidth > widths[c]!) {
+        widths[c] = cellWidth
       }
     }
   }
@@ -76,10 +76,66 @@ function computeWidths(rows: string[][]): number[] {
 }
 
 function padRow(cells: string[], widths: number[]): string {
-  const padded = widths.map((width, c) => (cells[c] ?? '').padEnd(width))
+  const padded = widths.map((width, c) => padToWidth(cells[c] ?? '', width))
   // Two spaces between columns keeps them visually distinct inside the
   // monospaced span without a vertical-bar separator.
   return padded.join('  ')
+}
+
+function padToWidth(cell: string, width: number): string {
+  const pad = width - displayWidth(cell)
+  return pad > 0 ? cell + ' '.repeat(pad) : cell
+}
+
+// Discord's monospaced inline-code font renders CJK ideographs, full-width
+// punctuation, and most emoji at two columns, while combining/zero-width marks
+// take none. `String.prototype.padEnd` counts UTF-16 code units, so padding by
+// `.length` leaves wide-character tables visually ragged. We iterate by code
+// point and sum per-glyph column widths so every cell pads to the same VISUAL
+// width. The ranges below are the standard East-Asian-Wide / Wide blocks plus
+// the common emoji planes; this is the same wcwidth approximation editors use.
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const ch of text) {
+    width += charWidth(ch.codePointAt(0)!)
+  }
+  return width
+}
+
+function charWidth(cp: number): number {
+  if (isZeroWidth(cp)) return 0
+  if (isWide(cp)) return 2
+  return 1
+}
+
+function isZeroWidth(cp: number): boolean {
+  return (
+    cp === 0x200b || // zero-width space
+    (cp >= 0x0300 && cp <= 0x036f) || // combining diacritical marks
+    (cp >= 0x200c && cp <= 0x200f) || // ZWNJ/ZWJ/directional marks
+    (cp >= 0xfe00 && cp <= 0xfe0f) // variation selectors
+  )
+}
+
+function isWide(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0x303e) || // CJK radicals, Kangxi
+    (cp >= 0x3041 && cp <= 0x33ff) || // Hiragana, Katakana, CJK symbols
+    (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Ext A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified Ideographs
+    (cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
+    (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK Compatibility Forms
+    (cp >= 0xff00 && cp <= 0xff60) || // Fullwidth Forms
+    (cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+    (cp >= 0x2600 && cp <= 0x26ff) || // Miscellaneous Symbols (☀ ♻ ⚠ …)
+    (cp >= 0x2700 && cp <= 0x27bf) || // Dingbats (✅ ✔ ✨ ➡ …)
+    (cp >= 0x2b00 && cp <= 0x2bff) || // Misc Symbols and Arrows (⭐ …)
+    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji, symbols, pictographs
+    (cp >= 0x20000 && cp <= 0x3fffd) // CJK Ext B+ (supplementary ideographic)
+  )
 }
 
 function wrapCode(text: string): string {

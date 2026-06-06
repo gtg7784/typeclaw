@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { convertDiscordTables } from './discord-bot-format'
+import { convertDiscordTables, displayWidth } from './discord-bot-format'
 
 describe('convertDiscordTables — passthrough', () => {
   test('returns empty string for empty input', () => {
@@ -99,5 +99,53 @@ describe('convertDiscordTables — multiple and mixed', () => {
   test('does not touch code fences that contain pipes', () => {
     const input = ['```', '| not | a | table |', '```'].join('\n')
     expect(convertDiscordTables(input)).toBe(input)
+  })
+})
+
+describe('displayWidth', () => {
+  test('counts ASCII as one column each', () => {
+    expect(displayWidth('abc')).toBe(3)
+  })
+
+  test('counts CJK ideographs as two columns each', () => {
+    expect(displayWidth('김철수')).toBe(6)
+    expect(displayWidth('日本語')).toBe(6)
+  })
+
+  test('counts emoji as two columns', () => {
+    expect(displayWidth('✅')).toBe(2)
+  })
+
+  test('ignores zero-width and combining marks', () => {
+    expect(displayWidth('a\u0301')).toBe(1)
+    expect(displayWidth('a\u200bb')).toBe(2)
+  })
+
+  test('mixes widths additively', () => {
+    expect(displayWidth('a김b')).toBe(4)
+  })
+})
+
+describe('convertDiscordTables — wide-character alignment', () => {
+  test('aligns columns by VISUAL width, not code-unit length', () => {
+    const input = ['| name | status |', '|------|--------|', '| 김철수 | ✅ ok |', '| bob | done |'].join('\n')
+
+    const lines = convertDiscordTables(input).split('\n')
+    const visualWidth = (line: string) =>
+      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+
+    const widths = lines.map(visualWidth)
+    expect(new Set(widths).size).toBe(1)
+  })
+
+  test('a CJK cell wider than its header still aligns the body', () => {
+    const input = ['| id | n |', '|----|---|', '| 1 | 김철수 |', '| 22 | x |'].join('\n')
+
+    const lines = convertDiscordTables(input).split('\n')
+    const visualWidth = (line: string) =>
+      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+
+    const widths = lines.map(visualWidth)
+    expect(new Set(widths).size).toBe(1)
   })
 })
