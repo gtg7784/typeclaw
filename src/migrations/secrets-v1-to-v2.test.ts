@@ -256,6 +256,18 @@ describe('migrateSecretsV1ToV2 — legacy auth.json precedence', () => {
 
     expect(() => migrateSecretsV1ToV2(dir)).toThrow(/both/i)
   })
+
+  test('both files, auth.json parseable-but-unrecognized: throws and keeps auth.json instead of dropping it', () => {
+    writeSecrets('auth.json', { something: 'we do not recognize', nested: { a: 1 } })
+    writeSecrets('secrets.json', {
+      version: 2,
+      providers: { openai: { type: 'api_key', key: { value: 'from-secrets' } } },
+      channels: {},
+    })
+
+    expect(() => migrateSecretsV1ToV2(dir)).toThrow(/both/i)
+    expect(existsSync(join(dir, 'auth.json'))).toBe(true)
+  })
 })
 
 describe('migrateSecretsV1ToV2 — unsafe / unrecognized input', () => {

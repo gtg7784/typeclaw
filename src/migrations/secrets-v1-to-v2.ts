@@ -73,7 +73,7 @@ function resolveLegacyFilename(legacyPath: string, targetPath: string): string |
     return targetPath
   }
 
-  if (isEmptyOrUnparseableEnvelope(legacyPath)) {
+  if (isDroppableLegacyFile(legacyPath)) {
     unlinkSync(legacyPath)
     return targetPath
   }
@@ -218,21 +218,19 @@ function isEmptyEnvelope(path: string): boolean {
   return Object.keys(result.file.providers).length === 0 && Object.keys(result.file.channels).length === 0
 }
 
-// Looser variant for the legacy file: an auth.json that is empty, blank, or
-// no-longer-parseable carries no recoverable credentials, so it is safe to drop
-// in favor of an existing secrets.json. We do NOT treat a parseable-but-legacy
-// auth.json as empty — that still has credentials worth migrating, which is the
-// both-non-empty hard-error path.
-function isEmptyOrUnparseableEnvelope(path: string): boolean {
+// True only when a legacy auth.json carries nothing worth keeping, so dropping
+// it in favor of an existing secrets.json is safe: a missing/blank file, or a
+// valid-but-empty v2 envelope. Anything else parseable — a legacy shape with
+// credentials OR a parseable-but-unrecognized object — returns false so
+// resolveLegacyFilename falls through to the both-non-empty hard error rather
+// than silently deleting a file whose contents we can't account for.
+function isDroppableLegacyFile(path: string): boolean {
   const parsed = readJsonOrNull(path)
   if (parsed === undefined) return true
   if (parsed === null) return false
   const v2 = parseSecretsFile(parsed)
-  if (v2.ok) {
-    return Object.keys(v2.file.providers).length === 0 && Object.keys(v2.file.channels).length === 0
-  }
-  // Parseable JSON in a known legacy shape => has migratable content.
-  return upgradeToV2(parsed) === null
+  if (!v2.ok) return false
+  return Object.keys(v2.file.providers).length === 0 && Object.keys(v2.file.channels).length === 0
 }
 
 // undefined = file missing/blank (treat as empty); null = present but invalid
