@@ -48,6 +48,17 @@ const cases: ReadonlyArray<[string, ReviewClaim]> = [
   ['I confirmed the issue is not resolved yet.', 'ignore'],
   ['Can you clarify the second point?', 'ignore'],
   ['', 'ignore'],
+
+  // "addresses the concern" close-out family (PR #672) escalates as a positive warn.
+  ['That addresses the concern nicely.', 'warn'],
+  ['Thanks — addressed your feedback well.', 'warn'],
+  // ...but genuine future/obligation "address" prose stays ignore.
+  ["I'll address your feedback in the next push.", 'ignore'],
+  ['Still need to address the concern before this lands.', 'ignore'],
+  ['Going to address your review comments shortly.', 'ignore'],
+  // A bare `to address` clause must NOT demote a hard claim in the same sentence (PR #675).
+  ['Approved — thanks for updating the docs to address my feedback.', 'block-approve'],
+  ['Requesting changes; please update the tests to address the leak.', 'block-request-changes'],
 ]
 
 describe('classifyReviewClaim', () => {
