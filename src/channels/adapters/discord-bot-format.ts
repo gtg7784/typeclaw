@@ -11,6 +11,7 @@
 // row) and leaves every other byte — prose, code fences, lists — untouched.
 
 const TABLE_SEP_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/
+const FENCE_RE = /^(\s*)(```+|~~~+)(.*)$/
 
 export function convertDiscordTables(input: string): string {
   if (input === '') return ''
@@ -19,9 +20,33 @@ export function convertDiscordTables(input: string): string {
   const lines = input.split('\n')
   const out: string[] = []
   let i = 0
+  let openFence: string | null = null
 
   while (i < lines.length) {
     const line = lines[i]!
+
+    // A code fence (``` / ~~~) suspends table detection until it closes — a
+    // table-shaped block inside a fence is literal text, not a table. The close
+    // must use the same fence char and be at least as long as the opener, per
+    // CommonMark.
+    const fence = FENCE_RE.exec(line)
+    if (fence !== null) {
+      const marker = fence[2]!
+      if (openFence === null) {
+        openFence = marker
+      } else if (marker[0] === openFence[0] && marker.length >= openFence.length) {
+        openFence = null
+      }
+      out.push(line)
+      i++
+      continue
+    }
+    if (openFence !== null) {
+      out.push(line)
+      i++
+      continue
+    }
+
     // A table needs a `|`-bearing header line immediately followed by the
     // alignment row; same disambiguation rule chunkMarkdown uses so a stray
     // leading `|` in prose is not mistaken for a table.
@@ -138,6 +163,29 @@ function isWide(cp: number): boolean {
   )
 }
 
+// CommonMark inline code: the delimiter must be a backtick run LONGER than any
+// run inside the content, otherwise an embedded `` ` `` (e.g. a cell holding
+// `bun test`) closes the span early and corrupts the row. When the content
+// begins or ends with a backtick, one space of padding is inserted on each side
+// so the delimiter is not adjacent to a content backtick; CommonMark strips that
+// single padding space on render, leaving our column widths intact.
 function wrapCode(text: string): string {
-  return `\`${text}\``
+  const fence = '`'.repeat(longestBacktickRun(text) + 1)
+  const needsPad = text.startsWith('`') || text.endsWith('`')
+  const pad = needsPad ? ' ' : ''
+  return `${fence}${pad}${text}${pad}${fence}`
+}
+
+function longestBacktickRun(text: string): number {
+  let longest = 0
+  let run = 0
+  for (const ch of text) {
+    if (ch === '`') {
+      run++
+      if (run > longest) longest = run
+    } else {
+      run = 0
+    }
+  }
+  return longest
 }

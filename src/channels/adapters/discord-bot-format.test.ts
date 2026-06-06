@@ -102,6 +102,45 @@ describe('convertDiscordTables — multiple and mixed', () => {
   })
 })
 
+describe('convertDiscordTables — fenced code blocks', () => {
+  test('leaves a full table inside a ``` fence unchanged', () => {
+    const input = ['```', '| not | table |', '|-----|-------|', '| keep | pipes |', '```'].join('\n')
+    expect(convertDiscordTables(input)).toBe(input)
+  })
+
+  test('leaves a full table inside a ~~~ fence unchanged', () => {
+    const input = ['~~~', '| a | b |', '|---|---|', '| 1 | 2 |', '~~~'].join('\n')
+    expect(convertDiscordTables(input)).toBe(input)
+  })
+
+  test('still converts a table that appears after a closed fence', () => {
+    const input = ['```', 'code', '```', '', '| a | b |', '|---|---|', '| 1 | 2 |'].join('\n')
+    const result = convertDiscordTables(input)
+    expect(result).toContain('```\ncode\n```')
+    expect(result).toContain('**`a  b`**')
+    expect(result).toContain('`1  2`')
+  })
+})
+
+describe('convertDiscordTables — backticks in cells', () => {
+  test('wraps a row containing inline code with a longer delimiter', () => {
+    const input = ['| cmd | result |', '|-----|--------|', '| bun `test` | ok |'].join('\n')
+    const lines = convertDiscordTables(input).split('\n')
+    expect(lines[0]!).toBe('**`cmd         result`**')
+    expect(lines[1]!.startsWith('``')).toBe(true)
+    expect(lines[1]!.endsWith('``')).toBe(true)
+    expect(lines[1]!).toContain('bun `test`')
+  })
+
+  test('escalates the delimiter past a double-backtick run and pads', () => {
+    const input = ['| a | b |', '|---|---|', '| ``x`` | y |'].join('\n')
+    const row = convertDiscordTables(input).split('\n')[1]!
+    expect(row.startsWith('``` ')).toBe(true)
+    expect(row.endsWith(' ```')).toBe(true)
+    expect(row).toContain('``x``')
+  })
+})
+
 describe('displayWidth', () => {
   test('counts ASCII as one column each', () => {
     expect(displayWidth('abc')).toBe(3)
