@@ -66,11 +66,6 @@ export type BuildDockerfileOptions = {
 // for the explorer/reviewer/scout subagents, whose prompts already advertise
 // `jq` as an available pipeline tool, so it ships unconditionally rather than
 // as an opt-in toggle.
-// `xz-utils` provides the `xz` binary that `tar -xJf` shells out to. The
-// oven/bun:1-slim base does not ship it, and the Typst layer (LAYER_2_6_TYPST)
-// downloads a `.tar.xz` release tarball — without `xz` on PATH the extract
-// fails with "xz: Cannot exec: No such file or directory". Baseline (not a
-// toggle) because Layer 2.6 runs unconditionally and depends on it.
 const BASELINE_APT_PACKAGES = [
   'git',
   'ca-certificates',
@@ -80,7 +75,6 @@ const BASELINE_APT_PACKAGES = [
   'util-linux',
   'bubblewrap',
   'jq',
-  'xz-utils',
 ] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
@@ -122,50 +116,6 @@ export const CLOUDFLARED_VERSION = '2025.5.0'
 export const CLOUDFLARED_SHA256_AMD64 = 'a62266fd02041374f1fca0d85694aafdf7e26e171a314467356b471d4ebb2393'
 export const CLOUDFLARED_SHA256_ARM64 = '47e55e6eba2755239f641c2c4f89878643ac0d9eaa127a6c84a2cb43fa2e0f03'
 export const CLOUDFLARED_RELEASE_URL_BASE = 'https://github.com/cloudflare/cloudflared/releases/download'
-
-// Typst powers the bundled `typeclaw-report-to-pdf` skill: markdown -> polished
-// PDF, the lightest professional-quality path we found (a single ~20MB static
-// musl binary, no Pandoc/LaTeX/Chromium/Python in the dependency tree). The
-// skill writes a styled `.typ` wrapper that reads the agent's markdown and
-// renders it via the `cmarker` package (CommonMark -> Typst content), so the
-// agent never has to learn Typst syntax. See src/skills/typeclaw-report-to-pdf.
-//
-// Pinned-version + per-arch SHA256 mirrors the curl-impersonate / cloudflared
-// pattern above: bumping requires updating the version + both hashes in the
-// same commit, and the build fails loudly at `sha256sum -c` if a hash is wrong.
-// To bump: pick a release from https://github.com/typst/typst/releases, then
-//   curl -fsSLO .../typst-x86_64-unknown-linux-musl.tar.xz && shasum -a 256 <file>
-// for each architecture. The version literal is the release tag WITH the `v`
-// prefix as it appears on GitHub (the asset URL embeds `v${VERSION}`).
-//
-// Unlike cloudflared (a tunnel feature, default-off behind a toggle), Typst
-// ships UNCONDITIONALLY in the baseline image — the report-to-pdf skill is a
-// general capability every agent advertises, and the skill is useless if the
-// `typst` binary isn't in the per-tool bwrap sandbox (which only `--ro-bind`s
-// the base image's /usr + /bin; there is no per-call install path). At ~20MB
-// it is far below the agent-browser / Chrome-for-Testing layers it sits beside.
-export const TYPST_VERSION = 'v0.14.2'
-export const TYPST_SHA256_AMD64 = 'a6044cbad2a954deb921167e257e120ac0a16b20339ec01121194ff9d394996d'
-export const TYPST_SHA256_ARM64 = '491b101aa40a3a7ea82a3f8a6232cabb4e6a7e233810082e5ac812d43fdcd47a'
-export const TYPST_RELEASE_URL_BASE = 'https://github.com/typst/typst/releases/download'
-
-// cmarker transpiles CommonMark Markdown to Typst content from within Typst, so
-// the report skill renders the agent's `.md` without a separate md->html step.
-// Vendored into the image at build time (the tarball is exactly what Typst would
-// otherwise fetch from packages.typst.org on first compile) so the container
-// sandbox — which blocks RFC1918 + can run with no egress — resolves
-// `@preview/cmarker` fully offline. Compiler floor is 0.14.0 (cmarker 0.1.8's
-// typst.toml#compiler), satisfied by TYPST_VERSION above. To bump cmarker:
-//   curl -fsSLO https://packages.typst.org/preview/cmarker-<v>.tar.gz && shasum -a 256 <file>
-// and update both constants; the build verifies the tarball before extracting.
-export const TYPST_CMARKER_VERSION = '0.1.8'
-export const TYPST_CMARKER_SHA256 = '157cc40db2716f12c7eabb95df1f60714a4d95ebfb1c6087cf4aec224e49392a'
-
-// Where the vendored Typst preview packages live in the image. Both
-// TYPST_PACKAGE_CACHE_PATH (@preview resolution) and TYPST_PACKAGE_PATH (@local
-// resolution) are pointed here via ENV so `typst compile` is hermetic — Typst
-// checks this dir before ever touching the network.
-export const TYPST_PACKAGES_DIR = '/usr/local/share/typst/packages'
 
 export const TYPECLAW_ENTRYPOINT_PATH = '/usr/local/bin/typeclaw-entrypoint'
 
@@ -1149,11 +1099,6 @@ ${fromAndHeavyLayers}
 
 ENV NODE_ENV=production
 
-# Point Typst at the vendored preview-package dir so the report-to-pdf skill's
-# \`typst compile\` resolves @preview/cmarker offline (no network in the sandbox).
-ENV TYPST_PACKAGE_CACHE_PATH=${TYPST_PACKAGES_DIR}
-ENV TYPST_PACKAGE_PATH=${TYPST_PACKAGES_DIR}
-
 # Keep agent-messenger's fallback config dir inside workspace/ for any future
 # SDK fallback paths. TypeClaw's KakaoTalk adapter does not write there:
 # credentials live in secrets.json#channels.kakaotalk and container writes go
@@ -1253,8 +1198,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 
 ${LAYER_2_5_CURL_IMPERSONATE}
 
-${LAYER_2_6_TYPST}
-
 ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
@@ -1334,8 +1277,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 
 ${LAYER_2_5_CURL_IMPERSONATE}
 
-${LAYER_2_6_TYPST}
-
 ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
@@ -1389,27 +1330,6 @@ RUN ARCH_TARBALL="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-linux-gnu;
  && tar -xzf curl-impersonate.tar.gz -C /usr/local/bin/ \\
  && rm curl-impersonate.tar.gz \\
  && /usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version > /dev/null`
-
-const LAYER_2_6_TYPST = `# Layer 2.6 (stable): pinned Typst + vendored cmarker for the
-# typeclaw-report-to-pdf skill (markdown -> polished PDF). See dockerfile.ts
-# TYPST_* constants for the bump contract. cmarker is extracted into the
-# Typst package cache so \`typst compile\` resolves @preview/cmarker offline.
-RUN ARCH_TRIPLE="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-unknown-linux-musl; else echo x86_64-unknown-linux-musl; fi)" \\
- && ARCH_SHA="$(if [ "$TARGETARCH" = "arm64" ]; then echo ${TYPST_SHA256_ARM64}; else echo ${TYPST_SHA256_AMD64}; fi)" \\
- && cd /tmp \\
- && curl -fsSL -o typst.tar.xz \\
-      "${TYPST_RELEASE_URL_BASE}/${TYPST_VERSION}/typst-\${ARCH_TRIPLE}.tar.xz" \\
- && echo "\${ARCH_SHA}  typst.tar.xz" | sha256sum -c - \\
- && tar -xJf typst.tar.xz -C /usr/local/bin --strip-components=1 "typst-\${ARCH_TRIPLE}/typst" \\
- && rm typst.tar.xz \\
- && /usr/local/bin/typst --version > /dev/null \\
- && mkdir -p ${TYPST_PACKAGES_DIR}/preview/cmarker/${TYPST_CMARKER_VERSION} \\
- && cd /tmp \\
- && curl -fsSL -o cmarker.tar.gz \\
-      "https://packages.typst.org/preview/cmarker-${TYPST_CMARKER_VERSION}.tar.gz" \\
- && echo "${TYPST_CMARKER_SHA256}  cmarker.tar.gz" | sha256sum -c - \\
- && tar -xzf cmarker.tar.gz -C ${TYPST_PACKAGES_DIR}/preview/cmarker/${TYPST_CMARKER_VERSION} \\
- && rm cmarker.tar.gz`
 
 const LAYER_3_AGENT_BROWSER_ARM64_CONFIG = `# Layer 3 (stable, arm64 only): point agent-browser at the apt-installed
 # chromium. Independent of the npm install below so it stays cached across

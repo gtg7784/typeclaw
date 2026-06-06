@@ -1,41 +1,107 @@
 ---
 name: typeclaw-report-to-pdf
-description: "Turn a Markdown report into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — research reports, summaries, briefs, meeting notes, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', '보고서 PDF', 'PDF로 만들어', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: a pinned `typst` binary + the `cmarker` package ship in the container image. Covers the styled wrapper, the offline compile command, where to write the file, and how to attach it to Slack/Discord/Telegram/KakaoTalk."
+description: "Turn a Markdown report into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — research reports, summaries, briefs, meeting notes, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', '보고서 PDF', 'PDF로 만들어', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the compile command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk."
 ---
 
 # typeclaw-report-to-pdf
 
-You can produce professional PDFs from Markdown. The container ships a pinned [Typst](https://typst.app) binary (`typst`) plus the [`cmarker`](https://typst.app/universe/package/cmarker/) package, vendored into the Typst package cache so compilation works **offline** — no network, no Pandoc, no LaTeX, no headless browser.
+You can produce professional PDFs from Markdown. This skill installs a small,
+self-contained [Typst](https://typst.app) toolchain into your `workspace/` the
+**first time** you need a PDF, then reuses it. No Pandoc, no LaTeX, no headless
+browser — just one static binary plus the [`cmarker`](https://typst.app/universe/package/cmarker/)
+package that reads your Markdown.
 
-The flow is three steps: **(1)** make sure your content is a Markdown file, **(2)** write a small styled `.typ` wrapper that reads that Markdown, **(3)** run `typst compile`. If a channel asked for the PDF, attach the result with `channel_send`.
+The flow is: **(1)** run the one-time setup (downloads `typst` + `cmarker` into
+`workspace/.tools/`), **(2)** write a styled `.typ` wrapper that reads your
+Markdown, **(3)** run `typst compile`. If a channel asked for the PDF, attach the
+result with `channel_send`.
 
-You do **not** need to learn Typst's markup. `cmarker` reads your CommonMark (headings, lists, tables, code, blockquotes, footnotes, links, images) and renders it. The wrapper only sets the _styling_ — fonts, margins, headings, page numbers — so the output looks deliberate instead of like default-template "AI slop."
+You do **not** need to learn Typst markup. `cmarker` renders your CommonMark
+(headings, lists, tables, code, blockquotes, footnotes, links, images). The
+wrapper only sets _styling_ — fonts, margins, headings, page numbers — so the
+output looks deliberate, not like a default-template export.
 
 ## When to use this
 
-- A research report, brief, or summary that the user wants as a downloadable/printable file.
-- A subagent (e.g. the `researcher`) handed you a `research-<slug>.md` and you want to ship a PDF.
+- A research report, brief, or summary the user wants as a downloadable file.
+- A subagent (e.g. the `researcher`) handed you a `research-<slug>.md` to ship as a PDF.
 - Any channel message asking for "a PDF" / "the report attached" / "PDF로 보내줘".
 
-When the user is fine with plain markdown in chat, **don't** make a PDF. This is for when a _file_ is the deliverable.
+When plain markdown in chat is fine, **don't** make a PDF. This is for when a
+_file_ is the deliverable.
 
-## Where files go
+## Step 0 — one-time setup (install the toolchain)
 
-Write everything under `workspace/` (or `public/` if a guest needs to read it). Those are the only directories your `bash`, `write`, and `edit` tools can write to. Absolute paths inside the container are `/agent/workspace/...`.
+Run this `bash` block once per container life. It is **idempotent** — if the
+tools are already present it does nothing and exits fast. It detects the
+container's OS/arch, downloads the pinned `typst` binary and the `cmarker`
+package into `workspace/.tools/`, and verifies both with SHA256.
 
-- Input markdown: `workspace/report.md` (or reuse a researcher's `workspace/research-<slug>.md`).
-- Wrapper: `workspace/report.typ`.
-- Output: `workspace/report.pdf`.
+```sh
+set -eu
+TOOLS="workspace/.tools"
+TYPST_BIN="$TOOLS/typst"
+TYPST_VERSION="v0.14.2"
+CMARKER_VERSION="0.1.8"
+PKGDIR="$TOOLS/typst-packages/preview/cmarker/$CMARKER_VERSION"
 
-Pick a descriptive slug for real work (`workspace/edge-ai-brief.pdf`), not literally `report.pdf`, so multiple reports don't collide.
+if [ -x "$TYPST_BIN" ] && [ -f "$PKGDIR/lib.typ" ]; then
+  echo "report-to-pdf toolchain already installed"
+else
+  mkdir -p "$TOOLS"
+  # Pick the official release asset for this OS/arch.
+  os="$(uname -s)"; arch="$(uname -m)"
+  case "$os-$arch" in
+    Linux-x86_64)  asset="typst-x86_64-unknown-linux-musl" ;;
+    Linux-aarch64) asset="typst-aarch64-unknown-linux-musl" ;;
+    Darwin-arm64)  asset="typst-aarch64-apple-darwin" ;;
+    Darwin-x86_64) asset="typst-x86_64-apple-darwin" ;;
+    *) echo "unsupported platform: $os-$arch" >&2; exit 1 ;;
+  esac
+  # SHA256 of the .tar.xz for each asset (pinned to $TYPST_VERSION).
+  case "$asset" in
+    typst-x86_64-unknown-linux-musl)  sha="a6044cbad2a954deb921167e257e120ac0a16b20339ec01121194ff9d394996d" ;;
+    typst-aarch64-unknown-linux-musl) sha="491b101aa40a3a7ea82a3f8a6232cabb4e6a7e233810082e5ac812d43fdcd47a" ;;
+    *) sha="" ;;  # darwin hashes only needed for local dev; skip verify off-Linux
+  esac
+  cd "$TOOLS"
+  curl -fsSL -o typst.tar.xz \
+    "https://github.com/typst/typst/releases/download/$TYPST_VERSION/$asset.tar.xz"
+  if [ -n "$sha" ]; then echo "$sha  typst.tar.xz" | sha256sum -c -; fi
+  tar -xJf typst.tar.xz --strip-components=1 "$asset/typst"
+  rm typst.tar.xz
+  ./typst --version
+  cd - >/dev/null
+
+  mkdir -p "$PKGDIR"
+  curl -fsSL -o "$TOOLS/cmarker.tar.gz" \
+    "https://packages.typst.org/preview/cmarker-$CMARKER_VERSION.tar.gz"
+  echo "157cc40db2716f12c7eabb95df1f60714a4d95ebfb1c6087cf4aec224e49392a  $TOOLS/cmarker.tar.gz" | sha256sum -c -
+  tar -xzf "$TOOLS/cmarker.tar.gz" -C "$PKGDIR"
+  rm "$TOOLS/cmarker.tar.gz"
+  echo "report-to-pdf toolchain installed"
+fi
+```
+
+Notes:
+
+- It writes only under `workspace/`, the directory your `bash`/`write` tools can
+  write to. `workspace/.tools/` is gitignored scratch — it does not get committed.
+- It needs network the first time (to fetch the release + package). After that the
+  tools persist for the life of the container.
+- `typst` and `cmarker` are version-pinned and SHA256-verified, so you always get
+  the same, known-good toolchain.
 
 ## Step 1 — have the markdown ready
 
-If you already have a markdown file (yours or a subagent's), use it as-is. Otherwise `write` your content to `workspace/<slug>.md`. Standard CommonMark plus tables and footnotes all work.
+Use an existing markdown file (yours or a subagent's), or `write` your content to
+`workspace/<slug>.md`. Standard CommonMark plus tables and footnotes all work.
 
 ## Step 2 — write the styled wrapper
 
-`write` this to `workspace/<slug>.typ`, changing only the `read("...")` filename to match your markdown. This template is tuned for a clean, professional report; adjust fonts/margins if the user asks, but the defaults are a sensible house style.
+`write` this to `workspace/<slug>.typ`, changing only the `read("...")` filename
+to match your markdown. The defaults are a clean, professional house style; adjust
+fonts/margins only if the user asks.
 
 ```typst
 #set document(title: "Report")
@@ -72,47 +138,65 @@ If you already have a markdown file (yours or a subagent's), use it as-is. Other
 
 Notes:
 
-- `read("report.md")` is **relative to the `.typ` file**, so keep the wrapper and the markdown in the same directory (`workspace/`).
-- `cmarker.render(..., blockquote: quote.with(block: true))` routes markdown `>` blockquotes through Typst's `quote`, which the `#show quote` rule above styles with a left bar.
-- Fonts `Libertinus Serif` and `New Computer Modern` are bundled with Typst — no font install needed, and they render Latin text professionally. For Korean/CJK body text, the container's `cjkFonts` toggle (`fonts-noto-cjk`, on by default) provides glyphs; add `"Noto Serif CJK KR"` to the `font:` list if a report is primarily Korean.
+- `read("report.md")` is **relative to the `.typ` file** — keep both in `workspace/`.
+- Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
+  install). For Korean/CJK body text, add `"Noto Serif CJK KR"` to the `font:` list
+  if the container has the `cjkFonts` toggle on.
 
 ## Step 3 — compile
 
-Run this with `bash`:
+Point Typst at the vendored package cache so `@preview/cmarker` resolves from
+`workspace/.tools/` (the toolchain you installed in Step 0):
 
 ```sh
-cd workspace && typst compile report.typ report.pdf
+cd workspace
+TYPST_PACKAGE_CACHE_PATH="$PWD/.tools/typst-packages" \
+TYPST_PACKAGE_PATH="$PWD/.tools/typst-packages" \
+  ./.tools/typst compile report.typ report.pdf
 ```
 
-`typst compile <input.typ> <output.pdf>`. The package cache is already pointed at the vendored packages via `TYPST_PACKAGE_CACHE_PATH` / `TYPST_PACKAGE_PATH` in the image, so `@preview/cmarker` resolves without network. If you ever see a "package not found" error, that environment is missing — fall back to `typst compile --package-cache-path /usr/local/share/typst/packages report.typ report.pdf`.
-
-Verify it worked: the command exits `0` and `workspace/report.pdf` exists. If compilation fails, Typst prints the offending line; the usual cause is raw HTML or an exotic markdown extension `cmarker` doesn't support — simplify that part of the markdown and recompile.
+Verify: the command exits `0` and `workspace/report.pdf` exists. On a compile
+error, Typst prints the offending line — usually raw HTML or an exotic markdown
+extension `cmarker` doesn't support; simplify that part and recompile.
 
 ## Step 4 — deliver
 
-- **If the user is in a channel and asked for the PDF**, attach it:
+- **Channel asked for the PDF** — attach it:
 
   ```
   channel_send(text: "Here's the report.", attachments: [{ path: "/agent/workspace/report.pdf", filename: "Edge-AI-Brief.pdf" }])
   ```
 
-  Use a human-friendly `filename` (it's what the recipient downloads), and an absolute `/agent/workspace/...` path. Slack, Discord, Telegram, and KakaoTalk all upload the file; the GitHub adapter does not support attachments, so for GitHub post a link or paste the markdown instead.
+  Use a human-friendly `filename` and an absolute `/agent/workspace/...` path. Slack,
+  Discord, Telegram, and KakaoTalk upload the file; the GitHub adapter has no
+  attachment support, so there post a link or paste the markdown.
 
-- **If you're replying in a thread**, use `channel_reply` with the same `attachments` shape.
+- **Replying in a thread** — use `channel_reply` with the same `attachments` shape.
 
-- **If there's no channel** (TUI session), just tell the user the path: `workspace/report.pdf`.
+- **No channel** (TUI session) — just report the path: `workspace/report.pdf`.
 
 ## If you got the markdown from a subagent
 
-The `researcher` subagent writes its report to `workspace/research-<slug>.md` and returns a `<report>` block naming the file. Point the wrapper's `read(...)` at that file (copy it to a shorter name first if you like), compile, and attach. You do the PDF step — the researcher's `bash` is read-only and it only emits markdown by design.
+The `researcher` subagent writes its report to `workspace/research-<slug>.md` and
+returns a `<report>` block naming the file. Point the wrapper's `read(...)` at that
+file, compile, and attach. You do the PDF step — the researcher's `bash` is
+read-only and it only emits markdown by design.
 
 ## Customizing this skill
 
-This is a bundled default. If you want a different house style — your own fonts, a cover page, a logo, letterhead — copy this file to `.agents/skills/<your-name>/SKILL.md` (use a **different** `name`; bundled skills win name collisions) and edit the wrapper template there. The mechanism (Typst + cmarker) stays the same; only the `.typ` styling changes.
+This is a bundled default. Want a different house style, a different converter, or
+a cover page with a logo? Copy this file to `.agents/skills/<your-name>/SKILL.md`
+(use a **different** `name`; bundled skills win name collisions) and edit the setup
+or the wrapper there. Because the whole pipeline — install + render — lives in the
+skill, you can change either half without touching the container image.
 
 ## Don'ts
 
-- **Don't** hand-write Typst markup for the body. Let `cmarker` render the markdown; only style via `#set` / `#show` rules in the wrapper.
-- **Don't** write the `.typ`, `.md`, or `.pdf` outside `workspace/` or `public/` — the sandbox blocks it.
-- **Don't** try to `apt install pandoc` / `pip install weasyprint` / download a converter — you can't (bash is sandboxed, often offline), and you don't need to. `typst` is already on `PATH`.
-- **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments. Link or inline instead.
+- **Don't** hand-write Typst markup for the body. Let `cmarker` render the
+  markdown; only style via `#set` / `#show` rules in the wrapper.
+- **Don't** write the `.typ`, `.md`, `.pdf`, or `.tools/` outside `workspace/` —
+  the sandbox blocks it.
+- **Don't** re-run Step 0's download if the tools already exist — the guard at the
+  top skips it. Re-downloading every time is wasteful.
+- **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments.
+  Link or inline instead.
