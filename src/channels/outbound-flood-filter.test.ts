@@ -42,14 +42,30 @@ describe('checkOutboundFlood — outbound flood patterns are blocked', () => {
     const result = checkOutboundFlood('ab'.repeat(300))
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected outbound flood')
-    expect(result.reason).toBe('repeated-pattern-period:2')
+    expect(result.reason).toBe('repeated-pattern-span:2:600')
   })
 
   test('blocks repeated short-pattern floods', () => {
     const result = checkOutboundFlood('lol'.repeat(300))
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected outbound flood')
-    expect(result.reason).toBe('repeated-pattern-period:3')
+    expect(result.reason).toBe('repeated-pattern-span:3:900')
+  })
+
+  test('blocks a periodic flood body buried behind a prose prefix', () => {
+    // PR #682 review: a whole-message periodicity test misses a flood with a
+    // varied lead-in. The contiguous-span detector must still catch the body.
+    const result = checkOutboundFlood(`Here is a normal prose lead-in before the flood: ${'lol'.repeat(300)}`)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected outbound flood')
+    expect(result.reason).toBe('repeated-pattern-span:3:900')
+  })
+
+  test('blocks hundreds of byte-identical rows (accepted denial, not real tables)', () => {
+    // Intentional: exact-identical rows past the span floor are information-poor
+    // flood-shaped output. Real tables/diagrams vary per row and pass (below).
+    expect(checkOutboundFlood('| col | col | col |\n'.repeat(60)).ok).toBe(false)
+    expect(checkOutboundFlood('+----+----+----+\n'.repeat(40)).ok).toBe(false)
   })
 })
 
@@ -126,5 +142,21 @@ describe('checkOutboundFlood — benign outbound messages pass', () => {
     const text = `${block}\n\nThat is the full implementation of the guard.`.repeat(6)
     expect(text.length).toBeGreaterThan(1500)
     expect(checkOutboundFlood(text)).toEqual({ ok: true })
+  })
+
+  test('incidental short-range repetition in real text passes', () => {
+    // The contiguous-span detector must not trip on the everyday repetition
+    // that legitimate prose, markdown, and code carry: rules, ellipses,
+    // laughter, table separators, indentation, alternating sequences.
+    const benign = [
+      'A long enough message to clear the length gate, followed by markdown.',
+      'Intro\n\n---\n\nMore text after the horizontal rule and some closing words.',
+      'Thinking..... okay, here is the answer to the question you asked me.',
+      'That was funny — hahahaha — but here is the actual substantive answer now.',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+      'Short alternating run abababababababababab inside an otherwise normal line.',
+      ['def f():', '    a = 1', '    b = 2', '    c = a + b', '    return c'].join('\n'),
+    ]
+    for (const text of benign) expect(checkOutboundFlood(text)).toEqual({ ok: true })
   })
 })
