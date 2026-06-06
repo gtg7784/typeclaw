@@ -23,6 +23,7 @@ import {
   checkNonWorkspaceWriteGuard,
   checkSkillAuthoringGuard,
 } from '@/bundled-plugins/guard/policy'
+import { getConfig } from '@/config/config'
 import type { PermissionService } from '@/permissions/permissions'
 import type {
   BuiltinToolRef,
@@ -582,6 +583,13 @@ async function applyBashSandbox(
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
+  // 'real-proc' gives a sandboxed JS package runner a working /proc/self/{fd,
+  // maps} so `bunx`/`bun add`/`bun run <pkg>` stop aborting with Bun's NotDir.
+  // Opt-in (default 'tmpfs') because it makes start.ts grant the container
+  // CAP_SYS_ADMIN; getConfig() so a reload of sandbox.realProc is observed
+  // (the cap itself is restart-required, but the strategy choice is cheap to
+  // re-read per call). procSelfExe is only consumed by the 'tmpfs' branch.
+  const realProc = getConfig().sandbox.realProc
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [
       { type: 'ro-bind', source: agentDir, dest: agentDir },
@@ -592,6 +600,7 @@ async function applyBashSandbox(
     protected: protectedZones,
     network: 'inherit',
     cwd: agentDir,
+    proc: realProc ? 'real-proc' : 'tmpfs',
     procSelfExe: resolveProcSelfExe(),
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })

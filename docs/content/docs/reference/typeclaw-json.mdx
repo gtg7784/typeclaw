@@ -18,6 +18,7 @@ JSON Schema–validated. `typeclaw init` scaffolds a `$schema` pointer at `./nod
 | `channels`              | `Record<adapter, AdapterConfig>` | live                                         | per-adapter config                                                                     |
 | `portForward`           | `{ allow, deny? }`               | restart-required                             | auto port-forward allow/deny lists; default `{ allow: '*' }`                           |
 | `network`               | `NetworkPolicy`                  | restart-required                             | egress filtering                                                                       |
+| `sandbox`               | `SandboxPolicy`                  | restart-required                             | per-tool bwrap sandbox options                                                         |
 | `tunnels`               | `Tunnel[]`                       | restart-required                             | public URLs (see [/concepts/architecture](/docs/concepts/architecture))                |
 | `roles`                 | `Record<name, Role>`             | `match` live, `permissions` restart-required | permission roles (see [/concepts/permissions-model](/docs/concepts/permissions-model)) |
 | `docker.file`           | `DockerFileOptions`              | rebuild via `start`                          | Dockerfile feature toggles + append lines                                              |
@@ -60,6 +61,20 @@ Provider-family defaults override the SDK's reasoning level at session creation:
 | `blockInternal`      | `true`  | DROP traffic to RFC1918, link-local (incl. cloud IMDS at `169.254.169.254`), CGNAT, multicast/reserved, and IPv6 ULA/link-local/multicast. Loopback always allowed |
 | `autoAllowResolvers` | `true`  | Narrowly carve out port 53 to nameservers in `/etc/resolv.conf` so VPC-internal DNS keeps working                                                                  |
 | `allow`              | `[]`    | Explicit IPv4 CIDRs that punch through wholesale                                                                                                                   |
+
+## `sandbox`
+
+```json
+{
+  "sandbox": {
+    "realProc": false
+  }
+}
+```
+
+| Field      | Default | Effect                                                                                                                                                                                                                                                                |
+| ---------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `realProc` | `false` | Mount a real, PID-namespace-scoped `/proc` in the per-tool sandbox so external package CLIs (`bunx`, `bun add <pkg>`, `bun run <pkg-bin>`) stop crashing with Bun's `NotDir`. Grants the container `CAP_SYS_ADMIN`. See [/internals/sandbox](/docs/internals/sandbox) |
 
 ## `mounts`
 
