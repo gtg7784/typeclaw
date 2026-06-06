@@ -9,6 +9,7 @@ import { removeRequestedReviewer } from './decoy-reviewer'
 import type { DeliveryDedup } from './dedup'
 import { isGithubEventAllowed } from './event-allowlist'
 import { encodeGithubReactionRef, type GithubReactionTarget } from './reactions'
+import { fetchSelfReviewBlocking } from './review-state'
 import { listUnresolvedSelfReviewThreads } from './review-thread-resolver'
 
 export type GithubInboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
@@ -83,14 +84,16 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     }
 
     // A push to an open PR (`synchronize`) is not a message to react to — it is
-    // a trigger to re-check whether the new commits addressed the bot's own
-    // still-open review threads. The check needs a GraphQL round-trip, so it
-    // runs OFF the ACK path (like the decoy-reviewer drop) and only wakes a
-    // session when there is at least one such thread. Returning here also keeps
+    // a trigger to re-evaluate the bot's own outstanding review obligations on
+    // this PR: unresolved review threads it authored AND a sticky
+    // CHANGES_REQUESTED block (which leaves no threads when filed as a top-level
+    // verdict — the black hole this path closes). Both need an API round-trip,
+    // so it runs OFF the ACK path (like the decoy-reviewer drop) and only wakes a
+    // session when an obligation is outstanding. Returning here also keeps
     // synchronize out of the generic awareness-only fallthrough below.
     if (event === 'pull_request' && action === 'synchronize') {
       if (delivery !== '') options.dedup.add(delivery)
-      scheduleReviewThreadRecheck({ payload, selfLogin, options })
+      scheduleReviewFollowup({ payload, selfLogin, options })
       return ok()
     }
 
@@ -187,7 +190,7 @@ function defaultScheduleBackgroundTask(task: () => Promise<void>): void {
   void task().catch(() => {})
 }
 
-function scheduleReviewThreadRecheck(input: {
+function scheduleReviewFollowup(input: {
   payload: Record<string, unknown>
   selfLogin: string | null
   options: GithubWebhookHandlerOptions
@@ -203,13 +206,27 @@ function scheduleReviewThreadRecheck(input: {
   if (repository === null || pullNumber === null) return
   const headSha = readString(readRecord(pr?.head), 'sha')
 
+  // Same webhook head SHA can arrive on several deliveries (a multi-commit push
+  // emits one synchronize per ref update). Dedup the follow-up on the head SHA
+  // so a single push wakes at most one re-review, distinct from the per-delivery
+  // dedup above. When headSha is absent we cannot dedup, so we skip the followup
+  // rather than risk a re-review storm.
+  if (headSha === null) {
+    options.logger.warn(`[github] synchronize for ${repository.owner}/${repository.name}#${pullNumber} has no head sha`)
+    return
+  }
+  const followupKey = `synchronize-followup:${repository.owner}/${repository.name}#${pullNumber}:${headSha}`
+  if (options.dedup.has(followupKey)) return
+  options.dedup.add(followupKey)
+
+  const reviewOn = options.reviewOn?.() ?? 'review_requested'
   const fetchImpl = options.fetchImpl ?? fetch
   const schedule = options.scheduleBackgroundTask ?? defaultScheduleBackgroundTask
   const target = `${repository.owner}/${repository.name}#${pullNumber}`
   schedule(async () => {
     try {
       const token = await authToken({ repoSlug: `${repository.owner}/${repository.name}` })
-      const result = await listUnresolvedSelfReviewThreads({
+      const threads = await listUnresolvedSelfReviewThreads({
         token,
         selfLogin,
         owner: repository.owner,
@@ -217,46 +234,63 @@ function scheduleReviewThreadRecheck(input: {
         prNumber: pullNumber,
         fetchImpl,
       })
-      if (!result.ok) {
-        options.logger.warn(`[github] review-thread recheck failed for ${target}: ${result.error}`)
+      if (!threads.ok) {
+        options.logger.warn(`[github] review-thread recheck failed for ${target}: ${threads.error}`)
         return
       }
-      if (result.threads.length === 0) return
+
+      // A held CHANGES_REQUESTED is the bot's own obligation regardless of how
+      // reviews are triggered, so re-evaluate it on push unless review is off.
+      let selfBlocking = false
+      if (reviewOn !== 'off') {
+        const blocking = await fetchSelfReviewBlocking({
+          token,
+          selfLogin,
+          owner: repository.owner,
+          repo: repository.name,
+          prNumber: pullNumber,
+          fetchImpl,
+        })
+        if (blocking.ok) selfBlocking = blocking.selfBlocking
+        else options.logger.warn(`[github] review-state recheck failed for ${target}: ${blocking.error}`)
+      }
+
+      const rootCommentIds = threads.threads.map((t) => t.rootCommentId)
+      if (rootCommentIds.length === 0 && !selfBlocking) return
       options.route(
-        buildRecheckInbound({
-          repository,
-          pullNumber,
-          headSha,
-          rootCommentIds: result.threads.map((t) => t.rootCommentId),
-          title: readString(pr, 'title'),
-        }),
+        withApprovalPolicy(
+          buildReviewFollowupInbound({
+            repository,
+            pullNumber,
+            headSha,
+            rootCommentIds,
+            selfBlocking,
+            title: readString(pr, 'title'),
+          }),
+          options.allowApprove?.() ?? true,
+        ),
       )
     } catch (err) {
       options.logger.warn(
-        `[github] review-thread recheck failed for ${target}: ${err instanceof Error ? err.message : String(err)}`,
+        `[github] review followup failed for ${target}: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   })
 }
 
-function buildRecheckInbound(input: {
+function buildReviewFollowupInbound(input: {
   repository: { owner: string; name: string }
   pullNumber: number
-  headSha: string | null
+  headSha: string
   rootCommentIds: readonly number[]
+  selfBlocking: boolean
   title: string | null
 }): InboundMessage {
-  const { repository, pullNumber, headSha, rootCommentIds, title } = input
+  const { repository, pullNumber, headSha, rootCommentIds, selfBlocking, title } = input
   const titleSegment = title !== null && title.trim() !== '' ? `: "${title}"` : ''
-  const shaSegment = headSha !== null ? ` (now at ${headSha.slice(0, 7)})` : ''
-  const idList = rootCommentIds.join(', ')
   const text =
-    `PR #${pullNumber}${titleSegment} received new commits${shaSegment}. ` +
-    `You have ${rootCommentIds.length} unresolved review thread(s) you authored on this PR ` +
-    `(root comment id(s): ${idList}). For each, check whether the new commits addressed your ` +
-    `concern. If addressed, reply on that thread via channel_send with a short acknowledgement ` +
-    `and resolve_review_thread: true (the thread id is the root comment id). If not addressed, ` +
-    `leave it open. If none are addressed, end your turn without replying.`
+    `PR #${pullNumber}${titleSegment} received new commits (now at ${headSha.slice(0, 7)}). ` +
+    followupInstruction(rootCommentIds, selfBlocking)
 
   return {
     adapter: 'github',
@@ -264,7 +298,7 @@ function buildRecheckInbound(input: {
     chat: `pr:${pullNumber}`,
     thread: null,
     text,
-    externalMessageId: `pr-${pullNumber}-recheck-${headSha ?? 'unknown'}`,
+    externalMessageId: `pr-${pullNumber}-recheck-${headSha}`,
     authorId: 'github-system',
     authorName: 'github',
     authorIsBot: false,
@@ -275,6 +309,28 @@ function buildRecheckInbound(input: {
     isDm: false,
     ts: 0,
   }
+}
+
+function followupInstruction(rootCommentIds: readonly number[], selfBlocking: boolean): string {
+  const threadPart =
+    rootCommentIds.length > 0
+      ? `You have ${rootCommentIds.length} unresolved review thread(s) you authored on this PR ` +
+        `(root comment id(s): ${rootCommentIds.join(', ')}). For each, check whether the new commits ` +
+        `addressed your concern. If addressed, reply on that thread via channel_send with a short ` +
+        `acknowledgement and resolve_review_thread: true (the thread id is the root comment id); ` +
+        `if not, leave it open. `
+      : ''
+  const blockingPart = selfBlocking
+    ? `Your latest review on this PR is still CHANGES_REQUESTED. Re-review the current head against the ` +
+      `concerns from that blocking review. If the new commits resolve them, submit a fresh review that ` +
+      `clears the block (APPROVE when appropriate, or COMMENT if approval is disabled). If concerns ` +
+      `remain, submit a new CHANGES_REQUESTED review explaining what is still blocking. `
+    : ''
+  const tail =
+    rootCommentIds.length > 0 && !selfBlocking
+      ? 'If none are addressed, end your turn without replying.'
+      : 'If nothing needs changing, end your turn without replying.'
+  return `${threadPart}${blockingPart}${tail}`
 }
 
 export async function verifySignature(body: string, secret: string, sigHeader: string): Promise<boolean> {
