@@ -338,6 +338,20 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
+// Host-stage `typeclaw compose` knobs. `exclude: true` skips this agent during
+// compose discovery (same effect as parking it under an `_`-prefixed dir, but
+// without renaming the folder). The container never reads this block — it's a
+// pure compose CLI hint, so omitting it keeps the agent in every compose
+// operation. Namespaced under `compose` so future compose-only settings have a
+// home without crowding the top level.
+export const composeSchema = z
+  .object({
+    exclude: z.boolean().default(false),
+  })
+  .default({ exclude: false })
+
+export type ComposeConfig = z.infer<typeof composeSchema>
+
 // Reverse-proxy tunnels expose a container-private port to the public internet
 // via a managed subprocess (cloudflared) or a user-supplied external URL.
 // See AGENTS.md `## Tunnels`. Keeping the enum scoped to what's implemented
@@ -490,6 +504,7 @@ export const configSchema = z
     // time. Defaults to `[]`. Hatching appends the agent's chosen name
     // here, so a freshly-hatched bot already has its identity wired up.
     alias: z.array(z.string().trim().min(1)).default([]),
+    compose: composeSchema,
     channels: channelsSchema,
     portForward: portForwardSchema,
     network: networkSchema,
@@ -632,6 +647,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   mcpServers: 'restart-required',
   plugins: 'restart-required',
   alias: 'applied',
+  compose: 'ignored',
   channels: 'applied',
   portForward: 'restart-required',
   network: 'restart-required',
@@ -723,6 +739,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'mounts',
     'plugins',
     'alias',
+    'compose',
     'channels',
     'portForward',
     'network',
