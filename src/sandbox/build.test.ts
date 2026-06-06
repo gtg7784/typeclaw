@@ -311,6 +311,53 @@ describe('buildSandboxedCommand proc strategy', () => {
   })
 })
 
+describe("buildSandboxedCommand proc: 'real-proc'", () => {
+  test('prefixes the command with unshare to own a new pid ns + fresh procfs, then bwrap', () => {
+    const argv = argvOf('bunx cowsay hi', { proc: 'real-proc' })
+    expect(argv.slice(0, 6)).toEqual(['unshare', '--pid', '--fork', '--mount', '--mount-proc', '--'])
+    expect(argv[6]).toBe('bwrap')
+    expect(argv.slice(-3)).toEqual(['bash', '-c', 'bunx cowsay hi'])
+  })
+
+  test('honors a non-default bwrapPath after the unshare prefix', () => {
+    const argv = argvOf('true', { proc: 'real-proc', bwrapPath: '/opt/bwrap' })
+    expect(argv[6]).toBe('/opt/bwrap')
+  })
+
+  test('does NOT pass --unshare-all (it would re-create a pid ns with no matching procfs)', () => {
+    const argv = argvOf('true', { proc: 'real-proc' })
+    expect(argv).not.toContain('--unshare-all')
+    expect(argv).not.toContain('--unshare-pid')
+  })
+
+  test('unshares user/ipc/uts/cgroup explicitly so only the pid ns is owned by the outer unshare', () => {
+    const argv = argvOf('true', { proc: 'real-proc' })
+    expect(argv).toContain('--unshare-user')
+    expect(argv).toContain('--unshare-ipc')
+    expect(argv).toContain('--unshare-uts')
+    expect(argv).toContain('--unshare-cgroup')
+  })
+
+  test('binds the namespace-scoped procfs read-only instead of the tmpfs+symlink fake proc', () => {
+    const joined = argvOf('true', { proc: 'real-proc', procSelfExe: '/usr/local/bin/bun' }).join(' ')
+    expect(joined).toContain('--ro-bind /proc /proc')
+    expect(joined).not.toContain('--tmpfs /proc')
+    expect(joined).not.toContain('/proc/self/exe')
+  })
+
+  test("isolates the net namespace by default (network 'none') via --unshare-net", () => {
+    const argv = argvOf('true', { proc: 'real-proc' })
+    expect(argv).toContain('--unshare-net')
+    expect(argv).not.toContain('--share-net')
+  })
+
+  test("rejoins the container network for network 'inherit' (no --unshare-net, no --share-net needed)", () => {
+    const argv = argvOf('true', { proc: 'real-proc', network: 'inherit' })
+    expect(argv).not.toContain('--unshare-net')
+    expect(argv).not.toContain('--share-net')
+  })
+})
+
 describe('buildSandboxedCommand command filter (opt-in)', () => {
   test('no filter by default: shell operators are allowed', () => {
     expect(() => buildSandboxedCommand('echo "$(date)" | cat')).not.toThrow()
