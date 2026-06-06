@@ -66,6 +66,11 @@ export type BuildDockerfileOptions = {
 // for the explorer/reviewer/scout subagents, whose prompts already advertise
 // `jq` as an available pipeline tool, so it ships unconditionally rather than
 // as an opt-in toggle.
+// `xz-utils` provides the `xz` binary that `tar -xJf` shells out to. The
+// oven/bun:1-slim base does not ship it, and the Typst layer (LAYER_2_6_TYPST)
+// downloads a `.tar.xz` release tarball — without `xz` on PATH the extract
+// fails with "xz: Cannot exec: No such file or directory". Baseline (not a
+// toggle) because Layer 2.6 runs unconditionally and depends on it.
 const BASELINE_APT_PACKAGES = [
   'git',
   'ca-certificates',
@@ -75,6 +80,7 @@ const BASELINE_APT_PACKAGES = [
   'util-linux',
   'bubblewrap',
   'jq',
+  'xz-utils',
 ] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
