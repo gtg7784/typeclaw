@@ -65,6 +65,9 @@ function collectPendingReminders(drain: SubagentBackgroundDrain, delivered: Set<
   const children = drain.liveRegistry.list({ parentSessionId: drain.sessionId })
   const pending: PendingReminder[] = []
   for (const child of children) {
+    // Synchronous spawns return their result inline via the tool call; only
+    // background spawns deliver out-of-band and need a drain reminder.
+    if (child.background !== true) continue
     if (child.status === 'running') continue
     if (delivered.has(child.taskId)) continue
     const completion = child.completion
@@ -81,7 +84,12 @@ function collectPendingReminders(drain: SubagentBackgroundDrain, delivered: Set<
 }
 
 function hasRunningChildren(drain: SubagentBackgroundDrain): boolean {
-  return drain.liveRegistry.list({ parentSessionId: drain.sessionId }).some((c) => c.status === 'running')
+  // Only background children gate termination. A sync child still marked running
+  // in the registry settles via its inline tool call, never via a broadcast
+  // wakeup, so waiting on it would hang the drain forever.
+  return drain.liveRegistry
+    .list({ parentSessionId: drain.sessionId })
+    .some((c) => c.background === true && c.status === 'running')
 }
 
 export type SubagentDrainWatch = {

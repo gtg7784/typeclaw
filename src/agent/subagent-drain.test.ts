@@ -17,6 +17,20 @@ function registerChild(reg: LiveSubagentRegistry, taskId: string): void {
     sessionId: `ses_${taskId}`,
     subagentName: 'scout',
     parentSessionId: PARENT,
+    background: true,
+    startedAt: 0,
+    status: 'running',
+    abort: noopAbort,
+  })
+}
+
+function registerSyncChild(reg: LiveSubagentRegistry, taskId: string): void {
+  reg.register({
+    taskId,
+    sessionId: `ses_${taskId}`,
+    subagentName: 'scout',
+    parentSessionId: PARENT,
+    background: false,
     startedAt: 0,
     status: 'running',
     abort: noopAbort,
@@ -191,6 +205,47 @@ describe('runSubagentDrain — termination', () => {
     })
 
     expect(prompts.length).toBe(1)
+  })
+
+  test('does NOT re-prompt for synchronous children (their result returned inline)', async () => {
+    const { drain, reg } = makeDrain()
+    registerSyncChild(reg, 'sync_a')
+    registerSyncChild(reg, 'sync_b')
+    reg.recordCompletion('sync_a', { ok: true, durationMs: 10, finalMessage: 'A inline' })
+    reg.recordCompletion('sync_b', { ok: true, durationMs: 10, finalMessage: 'B inline' })
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, { drain, prompt: async (t) => void prompts.push(t) })
+
+    expect(prompts).toEqual([])
+  })
+
+  test('drains only background children, ignoring completed sync siblings', async () => {
+    const { drain, reg } = makeDrain()
+    registerSyncChild(reg, 'sync_done')
+    registerChild(reg, 'bg_done')
+    reg.recordCompletion('sync_done', { ok: true, durationMs: 10 })
+    reg.recordCompletion('bg_done', { ok: true, durationMs: 20 })
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, { drain, prompt: async (t) => void prompts.push(t) })
+
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('bg_done')
+    expect(prompts.some((p) => p.includes('sync_done'))).toBe(false)
+  })
+
+  test('a running sync child does not block termination', async () => {
+    const { drain, reg } = makeDrain()
+    registerSyncChild(reg, 'sync_running')
+
+    const watch = beginSubagentDrainWatch(drain)
+    const prompts: string[] = []
+    await runSubagentDrain(watch, { drain, prompt: async (t) => void prompts.push(t) })
+
+    expect(prompts).toEqual([])
   })
 
   test('delivers a FAILED reminder for a failed child', async () => {

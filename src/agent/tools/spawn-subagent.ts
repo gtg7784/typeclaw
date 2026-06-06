@@ -151,6 +151,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         subagentName,
         parentSessionId,
         ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
+        background,
         startedAt,
         status: 'running' as const,
         abort: resolvedHandle.abort,
