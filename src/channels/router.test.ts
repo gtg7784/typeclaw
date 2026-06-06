@@ -2934,6 +2934,85 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  test('recovery suppresses a github close-out ack while the bot holds CHANGES_REQUESTED (PR #672)', async () => {
+    // Regression for PR #672: the bot held a live CHANGES_REQUESTED, the author
+    // pushed a fix, and the model ended its turn with "that addresses the
+    // concern nicely" as PLAIN PROSE — no channel_reply / channel_send. The
+    // re-review guard lives only in those tool handlers, so the recovery path
+    // surfaced the verdict-shaped ack via a source:'system' send, stranding the
+    // PR's reviewDecision at CHANGES_REQUESTED. The egress guard must suppress.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+    router.registerReviewStateResolver('github', async () => ({ ok: true, selfBlocking: true, approve: true }))
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Thanks — that addresses the concern nicely. ✅')
+    }
+    await router.__testing!.flushDebounce(githubKey)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed recovery (github review guard)'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('recovery still surfaces a github reply when the bot does NOT hold a live block', async () => {
+    // The egress guard is scoped: an unblocked PR (no sticky CHANGES_REQUESTED)
+    // must not have ordinary recovered prose dropped. Only a close-out claim
+    // against a live self-block is suppressed.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+    router.registerReviewStateResolver('github', async () => ({ ok: true, selfBlocking: false, approve: true }))
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Looking into the new commits now — will follow up shortly.')
+    }
+    await router.__testing!.flushDebounce(githubKey)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('Looking into the new commits now — will follow up shortly.')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+  })
+
+  test('recovery review guard is a no-op for non-github channels', async () => {
+    // The guard must not perturb discord/slack recovery: a close-out-shaped ack
+    // on a non-github channel carries no review semantics and surfaces normally.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'did you fix it?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Yep — that resolves it, looks good. ✅')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('Yep — that resolves it, looks good. ✅')
+    expect(logs.some((m) => m.includes('suppressed recovery (github review guard)'))).toBe(false)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+  })
+
   test('mid-turn recovery: applies the upstream empty-response sentinel guard to recovered prose', async () => {
     const dir = await tempDir()
     const logs: string[] = []

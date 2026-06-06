@@ -32,6 +32,8 @@ import {
   StickyLedger,
   type EngagementDecision,
 } from './engagement'
+import { checkFalseReceipt } from './github-false-receipt'
+import { evaluateRereviewGuard } from './github-rereview-guard'
 import { resetReviewTurn } from './github-review-turn-ledger'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
@@ -3125,6 +3127,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     //     the model's pre-tool commentary is the only user-facing text we have.
     //     Recovering it means the user gets *something* — strictly better than
     //     the historical silent drop.
+    // Egress-level GitHub review guards. The false-receipt and re-review
+    // stranding guards live inside the channel_reply / channel_send tool
+    // handlers, but recovery surfaces trailing assistant prose through a
+    // `source:'system'` send that never touches those handlers. A model that
+    // ends its turn with a close-out ack ("that addresses the concern") instead
+    // of calling a channel tool would otherwise post a verdict-shaped comment
+    // while still holding its own CHANGES_REQUESTED — stranding the PR (PR #672).
+    // Re-run the guards here and SUPPRESS on block: recovery cannot land the
+    // missing formal review on the model's behalf, and posting the unguarded ack
+    // is worse than dropping it — the next inbound re-prompts the model, which
+    // can then land the verdict properly.
+    const recoveryBlock = await evaluateRecoveryReviewGuards(live, assistantText)
+    if (recoveryBlock !== null) {
+      logger.warn(
+        `[channels] ${live.keyId}: suppressed recovery (github review guard) reason=${JSON.stringify(recoveryBlock)} text_len=${assistantText.length}`,
+      )
+      return
+    }
+
     logger.warn(
       `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool source=${source} text_len=${assistantText.length}`,
     )
@@ -3141,6 +3162,38 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (!result.ok) {
       logger.warn(`[channels] ${live.keyId}: recovery send failed: ${result.error}`)
     }
+  }
+
+  // Returns a block reason when the recovered text would be denied by a github
+  // review guard, or null when it is safe to surface. Non-github channels and
+  // non-PR chats short-circuit inside each guard (adapter / `pr:\d+` checks), so
+  // this is a no-op for everything except GitHub PR sessions.
+  const evaluateRecoveryReviewGuards = async (live: LiveSession, text: string): Promise<string | null> => {
+    const falseReceipt = checkFalseReceipt({
+      sessionId: live.sessionId,
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+      text,
+      isContinue: false,
+      resolveReviewThread: false,
+    })
+    if (falseReceipt.kind === 'block') return falseReceipt.reason
+
+    const rereview = await evaluateRereviewGuard({
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+      text,
+      wantsResolve: false,
+      isContinue: false,
+      getReviewState: (req) => getReviewState(req),
+    })
+    if (rereview.block) return rereview.reason
+
+    return null
   }
 
   const getConsecutiveSendCount = (target: {

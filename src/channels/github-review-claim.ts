@@ -53,6 +53,12 @@ const WARN_POSITIVE_CLOSEOUT: readonly RegExp[] = [
   /\bshould be (fine|good)\b/,
   /\blooks resolved\b/,
   /\bseems resolved\b/,
+  // The canonical PR #672 close-out: "that addresses the concern", "addressed
+  // your feedback". On a PR the bot still blocks, this READS as a verdict and
+  // strands the block, so it escalates through the re-review guard. Demoted to
+  // ignore by the negation/future markers below ("haven't addressed", "to
+  // address").
+  /\baddress(es|ed)\b[^.!?]*\b(concern|feedback|review|comment|issue|point)/,
 ]
 
 // Negative warn phrases re-assert a block ("not done yet") instead of closing it
@@ -65,11 +71,11 @@ const WARN: readonly RegExp[] = [...WARN_POSITIVE_CLOSEOUT, ...WARN_NEGATIVE]
 // ignore. Blocking "I haven't approved" / "I'll approve" / "approved it earlier"
 // (answering a question) is the worst false-positive class, so it is checked first.
 const DEMOTE_TO_IGNORE: readonly RegExp[] = [
-  /\b(haven'?t|have not|did ?n'?t|did not|not yet|never)\b[^.!?]*\b(approv|request|resolv|block)/,
-  /\b(can'?t|cannot|won'?t|will not|wouldn'?t)\b[^.!?]*\b(approv|request|resolv|block)/,
-  /\bnot (approved|resolved|blocked|requesting)\b/,
+  /\b(haven'?t|have not|did ?n'?t|did not|not yet|never)\b[^.!?]*\b(approv|request|resolv|block|address)/,
+  /\b(can'?t|cannot|won'?t|will not|wouldn'?t)\b[^.!?]*\b(approv|request|resolv|block|address)/,
+  /\bnot (approved|resolved|blocked|requesting|addressed)\b/,
   /\b(not|no longer|hardly|barely)\b[^.!?]*\b(lgtm|looks good|looks fine|seems fine|should be (fine|good)|looks resolved|seems resolved)\b/,
-  /\b(i'?ll|i will|going to|gonna|about to|planning to)\b[^.!?]*\b(approv|review|request|resolv)/,
+  /\b(i'?ll|i will|going to|gonna|about to|planning to|need(s)? to|have to|to)\b[^.!?]*\b(approv|review|request|resolv|address)/,
   /\b(approved|resolved|requested changes)\b[^.!?]*\b(earlier|already|yesterday|before|last (review|time)|previously)\b/,
   /\b(pre|self|co|re|un|non|ai|admin|user|machine|auto) approved\b/,
 ]
