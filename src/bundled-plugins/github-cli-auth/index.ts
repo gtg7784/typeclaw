@@ -11,7 +11,7 @@ import { classifyGhToken } from './token-class'
 export default definePlugin({
   plugin: async (ctx) => {
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
-    const approveGuard = createApproveIdempotencyGuard({
+    const verdictGuard = createApproveIdempotencyGuard({
       resolveEffectiveApproval: createGithubEffectiveApprovalResolver({
         resolveToken: async (workspace) => {
           const result = await resolveTokenForRepo(workspace)
@@ -28,7 +28,7 @@ export default definePlugin({
 
           const review = await noteReviewCommand({ callId: event.callId, command })
           if (review.detected !== null) {
-            const block = await approveGuard.guard({
+            const block = await verdictGuard.guard({
               callId: event.callId,
               workspace: review.detected.workspace,
               prNumber: review.detected.prNumber,
@@ -70,7 +70,7 @@ export default definePlugin({
             callId: event.callId,
             result: event.result,
           })
-          approveGuard.release({ callId: event.callId, succeeded: committed })
+          verdictGuard.release({ callId: event.callId, succeeded: committed })
         },
       },
     }

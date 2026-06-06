@@ -19,7 +19,7 @@ function fetchStub(routes: Record<string, Response>): typeof fetch {
 }
 
 describe('github effective-approval resolver', () => {
-  test('reports alreadyApproved when the bot has an APPROVED review on the PR', async () => {
+  test('reports APPROVED when the bot has an APPROVED review on the PR', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
       fetchImpl: fetchStub({
@@ -30,10 +30,10 @@ describe('github effective-approval resolver', () => {
         ]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 5 })).toEqual({ ok: true, alreadyApproved: true })
+    expect(await resolve({ workspace: WS, prNumber: 5 })).toEqual({ ok: true, effective: 'APPROVED' })
   })
 
-  test('reports not approved when only OTHER users approved', async () => {
+  test('reports NONE when only OTHER users approved', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
       fetchImpl: fetchStub({
@@ -41,10 +41,10 @@ describe('github effective-approval resolver', () => {
         '/pulls/6/reviews': jsonResponse([{ state: 'APPROVED', user: { login: 'someone-else', type: 'User' } }]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 6 })).toEqual({ ok: true, alreadyApproved: false })
+    expect(await resolve({ workspace: WS, prNumber: 6 })).toEqual({ ok: true, effective: 'NONE' })
   })
 
-  test('reports not approved when the bot only commented', async () => {
+  test('reports NONE when the bot only commented', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
       fetchImpl: fetchStub({
@@ -52,10 +52,10 @@ describe('github effective-approval resolver', () => {
         '/pulls/7/reviews': jsonResponse([{ state: 'COMMENTED', user: { login: 'review-bot', type: 'User' } }]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 7 })).toEqual({ ok: true, alreadyApproved: false })
+    expect(await resolve({ workspace: WS, prNumber: 7 })).toEqual({ ok: true, effective: 'NONE' })
   })
 
-  test('reports not approved when a later bot CHANGES_REQUESTED supersedes an earlier APPROVED', async () => {
+  test('reports CHANGES_REQUESTED when a later bot CHANGES_REQUESTED supersedes an earlier APPROVED', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
       fetchImpl: fetchStub({
@@ -66,10 +66,10 @@ describe('github effective-approval resolver', () => {
         ]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 30 })).toEqual({ ok: true, alreadyApproved: false })
+    expect(await resolve({ workspace: WS, prNumber: 30 })).toEqual({ ok: true, effective: 'CHANGES_REQUESTED' })
   })
 
-  test('reports approved when a later bot APPROVED supersedes an earlier CHANGES_REQUESTED', async () => {
+  test('reports APPROVED when a later bot APPROVED supersedes an earlier CHANGES_REQUESTED', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',
       fetchImpl: fetchStub({
@@ -80,7 +80,7 @@ describe('github effective-approval resolver', () => {
         ]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 31 })).toEqual({ ok: true, alreadyApproved: true })
+    expect(await resolve({ workspace: WS, prNumber: 31 })).toEqual({ ok: true, effective: 'APPROVED' })
   })
 
   test('a later bot COMMENTED does not clear an earlier bot APPROVED', async () => {
@@ -94,7 +94,7 @@ describe('github effective-approval resolver', () => {
         ]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 32 })).toEqual({ ok: true, alreadyApproved: true })
+    expect(await resolve({ workspace: WS, prNumber: 32 })).toEqual({ ok: true, effective: 'APPROVED' })
   })
 
   test('matches a GitHub App bot whose reviews login carries the [bot] suffix', async () => {
@@ -105,7 +105,7 @@ describe('github effective-approval resolver', () => {
         '/pulls/8/reviews': jsonResponse([{ state: 'APPROVED', user: { login: 'review-bot[bot]', type: 'Bot' } }]),
       }),
     })
-    expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: true, alreadyApproved: true })
+    expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: true, effective: 'APPROVED' })
   })
 
   test('fails (ok:false) when the reviews fetch errors so the guard can fail open', async () => {
