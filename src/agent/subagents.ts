@@ -7,6 +7,12 @@ import type { Stream, Unsubscribe } from '@/stream'
 import { type AgentSession, createSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
 import type { SessionOrigin } from './session-origin'
+import {
+  beginSubagentDrainWatch,
+  runSubagentDrain,
+  type SubagentBackgroundDrain,
+  type SubagentDrainWatch,
+} from './subagent-drain'
 import { renderTurnTimeAnchor } from './system-prompt'
 import type { ToolResultBudget } from './tool-result-budget'
 
@@ -62,6 +68,12 @@ export type SubagentShared<P = unknown> = {
   // registry scoping. Default (unset/false) keeps the subagent a leaf — the
   // historical contract for explorer/scout/memory-logger/etc.
   canSpawnSubagents?: boolean
+  // Opt-in: allow this subagent to spawn background children AND drain their
+  // completions back into its own session (requires canSpawnSubagents). Default
+  // (unset/false) keeps background spawns denied from this subagent — it must
+  // use synchronous spawns. Only meaningful when the runtime wires the drain
+  // capability (createSessionForSubagent provides stream+sessionId+liveRegistry).
+  canBackgroundSpawnSubagents?: boolean
   // Wall-clock ceiling on a single spawn, enforced at the orchestration
   // layer (both `dispatchSpawnSubagent` and the stream-driven
   // `SubagentConsumer`). When exceeded, the orchestrator's `await` settles
@@ -116,6 +128,7 @@ export type CreateSessionForSubagentResult = {
   agentDir?: string
   origin?: SessionOrigin
   getTranscriptPath?: () => string | undefined
+  backgroundDrain?: SubagentBackgroundDrain
 }
 export type CreateSessionForSubagentOptions = {
   name?: string
@@ -152,6 +165,7 @@ type NormalizedSubagentSession = {
   agentDir: string | undefined
   origin: SessionOrigin | undefined
   getTranscriptPath: (() => string | undefined) | undefined
+  backgroundDrain: SubagentBackgroundDrain | undefined
 }
 
 function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagentResult): NormalizedSubagentSession {
@@ -164,6 +178,7 @@ function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagen
       agentDir: result.agentDir,
       origin: result.origin,
       getTranscriptPath: result.getTranscriptPath,
+      backgroundDrain: result.backgroundDrain,
     }
   }
   return {
@@ -174,6 +189,7 @@ function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagen
     agentDir: undefined,
     origin: undefined,
     getTranscriptPath: undefined,
+    backgroundDrain: undefined,
   }
 }
 
@@ -214,14 +230,16 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   }
 
   const runSession: RunSession = async (override) => {
-    const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath } = normalizeSubagentSession(
-      await createSessionForSubagent(subagent, sessionOptions),
-    )
+    const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath, backgroundDrain } =
+      normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
+    let aborted = false
+    let drainWatch: SubagentDrainWatch | undefined
     if (options.onSessionCreated !== undefined) {
       options.onSessionCreated({
         session,
         sessionId,
         abort: async () => {
+          aborted = true
           await session.abort()
         },
       })
@@ -239,12 +257,24 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
       if (hooks && turnEvent !== undefined) {
         await hooks.runSessionTurnStart({ ...turnEvent, userPrompt: userPromptForTurn })
       }
+      if (backgroundDrain !== undefined) {
+        drainWatch = beginSubagentDrainWatch(backgroundDrain)
+      }
       try {
         await session.prompt(`${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`)
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)
         }
+      }
+      if (drainWatch !== undefined && backgroundDrain !== undefined) {
+        await runSubagentDrain(drainWatch, {
+          drain: backgroundDrain,
+          prompt: async (text) => {
+            await session.prompt(`${renderTurnTimeAnchor()}\n\n${text}`)
+          },
+          cancelled: () => aborted,
+        })
       }
       if (hooks && sessionId !== undefined) {
         await hooks.runSessionIdle({
@@ -259,6 +289,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
       if (hooks && sessionId !== undefined) {
         await hooks.runSessionEnd({ sessionId, ...(origin !== undefined ? { origin } : {}) })
       }
+      drainWatch?.stop()
       session.dispose()
       await dispose()
     }

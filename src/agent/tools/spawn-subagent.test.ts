@@ -711,4 +711,31 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
     expect(details.ok).toBe(true)
     expect(details.mode).toBe('background')
   })
+
+  test('background spawn from a subagent IS allowed when allowBackgroundFromSubagent is set', async () => {
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry: new LiveSubagentRegistry(),
+      createSessionForSubagent: async () => stubSession(),
+      agentDir: '/agent',
+      parentSessionId: 'ses_child',
+      getOrigin: () => subagentOrigin,
+      generateTaskId: () => 'bg_allowed',
+      now: () => 1_000,
+      stream: createStream(),
+      allowBackgroundFromSubagent: true,
+    })
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('background')
+  })
 })
