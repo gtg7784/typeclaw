@@ -6,6 +6,7 @@ import type { HookBus } from '@/plugin'
 import { createStream } from '@/stream'
 
 import type { AgentSession } from './index'
+import { LiveSubagentRegistry } from './live-subagents'
 import {
   createSubagentConsumer,
   invokeSubagent,
@@ -1083,6 +1084,116 @@ describe('startSubagent', () => {
     // then
     expect(result).toBeUndefined()
     expect(calls.prompt).toEqual([expect.stringContaining('wrapper')])
+    expect(calls.disposed).toBe(1)
+  })
+})
+
+describe('invokeSubagent — background drain lifecycle', () => {
+  function drainSession(): { session: AgentSession; calls: { prompt: string[]; disposed: number } } {
+    const calls = { prompt: [] as string[], disposed: 0 }
+    const session = {
+      prompt: async (text: string) => {
+        calls.prompt.push(text)
+      },
+      dispose: () => {
+        calls.disposed += 1
+      },
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    return { session, calls }
+  }
+
+  function registerChild(
+    reg: LiveSubagentRegistry,
+    parentSessionId: string,
+    taskId: string,
+    background: boolean,
+  ): void {
+    reg.register({
+      taskId,
+      sessionId: `ses_${taskId}`,
+      subagentName: 'scout',
+      parentSessionId,
+      background,
+      startedAt: 0,
+      status: 'running',
+      abort: async () => {},
+    })
+    reg.recordCompletion(taskId, { ok: true, durationMs: 10 })
+  }
+
+  test('a completed synchronous child does not trigger a drain re-prompt', async () => {
+    // given: an opted-in subagent whose session already has a COMPLETED sync
+    // child in the registry (its result was returned inline by the tool call).
+    const { session, calls } = drainSession()
+    const reg = new LiveSubagentRegistry()
+    const sessionId = 'ses_subagent'
+    registerChild(reg, sessionId, 'sync_child', false)
+    const registry = { greeter: { systemPrompt: 'X', canBackgroundSpawnSubagents: true } satisfies Subagent }
+
+    // when
+    await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => ({
+        session,
+        sessionId,
+        backgroundDrain: { stream: createStream(), sessionId, liveRegistry: reg },
+      }),
+      agentDir: '/agent',
+      userPrompt: 'go',
+    })
+
+    // then: only the initial prompt ran; no reminder for the sync child.
+    expect(calls.prompt.length).toBe(1)
+    expect(calls.disposed).toBe(1)
+  })
+
+  test('a completed background child triggers exactly one drain re-prompt', async () => {
+    // given: same setup but the completed child was a BACKGROUND spawn.
+    const { session, calls } = drainSession()
+    const reg = new LiveSubagentRegistry()
+    const sessionId = 'ses_subagent'
+    registerChild(reg, sessionId, 'bg_child', true)
+    const registry = { greeter: { systemPrompt: 'X', canBackgroundSpawnSubagents: true } satisfies Subagent }
+
+    // when
+    await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => ({
+        session,
+        sessionId,
+        backgroundDrain: { stream: createStream(), sessionId, liveRegistry: reg },
+      }),
+      agentDir: '/agent',
+      userPrompt: 'go',
+    })
+
+    // then: initial prompt + one reminder prompt for the background child.
+    expect(calls.prompt.length).toBe(2)
+    expect(calls.prompt[1]).toContain('bg_child')
+    expect(calls.disposed).toBe(1)
+  })
+
+  test('no backgroundDrain capability keeps the one-shot path (no drain)', async () => {
+    // given: a completed background child exists, but the session result carries
+    // NO backgroundDrain capability — the subagent must stay one-shot.
+    const { session, calls } = drainSession()
+    const reg = new LiveSubagentRegistry()
+    const sessionId = 'ses_subagent'
+    registerChild(reg, sessionId, 'bg_child', true)
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => ({ session, sessionId }),
+      agentDir: '/agent',
+      userPrompt: 'go',
+    })
+
+    // then: exactly one prompt, no drain.
+    expect(calls.prompt.length).toBe(1)
     expect(calls.disposed).toBe(1)
   })
 })

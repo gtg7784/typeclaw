@@ -336,6 +336,8 @@ export async function startAgent({
         ...(subagentOptions?.spawnedByRole !== undefined ? { spawnedByRole: subagentOptions.spawnedByRole } : {}),
         ...(subagentOptions?.spawnedByOrigin !== undefined ? { spawnedByOrigin: subagentOptions.spawnedByOrigin } : {}),
       }
+      const allowBackgroundFromSubagent =
+        entry.pluginSubagent.canBackgroundSpawnSubagents === true && entry.pluginSubagent.canSpawnSubagents === true
       const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
         sessionManager,
@@ -366,6 +368,7 @@ export async function startAgent({
               liveSubagentRegistry,
               subagentRegistry: snap.subagents,
               createSessionForSubagent,
+              allowBackgroundFromSubagent,
             }
           : {}),
         ...(entry.pluginSubagent.profile !== undefined ? { profile: entry.pluginSubagent.profile } : {}),
@@ -387,6 +390,9 @@ export async function startAgent({
         agentDir: cwd,
         origin,
         getTranscriptPath: () => sessionManager.getSessionFile(),
+        ...(allowBackgroundFromSubagent
+          ? { backgroundDrain: { stream, sessionId, liveRegistry: liveSubagentRegistry } }
+          : {}),
       }
     }
     return defaultCreateSessionForSubagent(subagent, subagentOptions)

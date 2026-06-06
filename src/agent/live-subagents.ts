@@ -23,6 +23,11 @@ export type LiveSubagent = {
   // subagent_output/subagent_cancel. Absent when no permission service was
   // active at spawn, in which case the cap fails closed.
   spawnedByRole?: string
+  // True when spawned with run_in_background. Only background spawns deliver
+  // their result out-of-band (via the subagent.completed broadcast and the
+  // parent's drain); synchronous spawns return their result inline as the tool
+  // result, so the drain MUST NOT re-prompt for them. See runSubagentDrain.
+  background?: boolean
   startedAt: number
   status: SubagentStatus
   completion?: SubagentCompletion

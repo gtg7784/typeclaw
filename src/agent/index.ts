@@ -213,6 +213,7 @@ export type CreateSessionOptions = {
   liveSubagentRegistry?: LiveSubagentRegistry
   subagentRegistry?: SubagentRegistry
   createSessionForSubagent?: CreateSessionForSubagent
+  allowBackgroundFromSubagent?: boolean
 }
 
 export type CreateSessionResult = {
@@ -357,6 +358,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
               getOrigin,
               permissions: options.permissions,
               stream: options.stream,
+              allowBackgroundFromSubagent: options.allowBackgroundFromSubagent,
             }),
           ]
         : [
@@ -726,6 +728,7 @@ export function buildSubagentOrchestrationTools(opts: {
   getOrigin: () => SessionOrigin | undefined
   permissions: PermissionService | undefined
   stream: Stream | undefined
+  allowBackgroundFromSubagent?: boolean
 }): ToolDefinition[] {
   if (
     opts.liveRegistry === undefined ||
@@ -745,6 +748,9 @@ export function buildSubagentOrchestrationTools(opts: {
       getOrigin: opts.getOrigin,
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
       ...(opts.stream ? { stream: opts.stream } : {}),
+      ...(opts.allowBackgroundFromSubagent !== undefined
+        ? { allowBackgroundFromSubagent: opts.allowBackgroundFromSubagent }
+        : {}),
     }),
     createSubagentOutputTool({
       liveRegistry: opts.liveRegistry,
