@@ -1,9 +1,9 @@
 ---
-name: typeclaw-report-to-pdf
-description: "Turn a Markdown report into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — research reports, summaries, briefs, meeting notes, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', '보고서 PDF', 'PDF로 만들어', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the compile command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk."
+name: typeclaw-markdown-pdf
+description: "Turn any Markdown into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the compile command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead."
 ---
 
-# typeclaw-report-to-pdf
+# typeclaw-markdown-pdf
 
 You can produce professional PDFs from Markdown. This skill installs a small,
 self-contained [Typst](https://typst.app) toolchain into your `workspace/` the
@@ -46,7 +46,7 @@ CMARKER_VERSION="0.1.8"
 PKGDIR="$TOOLS/typst-packages/preview/cmarker/$CMARKER_VERSION"
 
 if [ -x "$TYPST_BIN" ] && [ -f "$PKGDIR/lib.typ" ]; then
-  echo "report-to-pdf toolchain already installed"
+  echo "markdown-pdf toolchain already installed"
 else
   mkdir -p "$TOOLS"
   # Pick the official release asset for this OS/arch.
@@ -79,7 +79,7 @@ else
   echo "157cc40db2716f12c7eabb95df1f60714a4d95ebfb1c6087cf4aec224e49392a  $TOOLS/cmarker.tar.gz" | sha256sum -c -
   tar -xzf "$TOOLS/cmarker.tar.gz" -C "$PKGDIR"
   rm "$TOOLS/cmarker.tar.gz"
-  echo "report-to-pdf toolchain installed"
+  echo "markdown-pdf toolchain installed"
 fi
 ```
 
