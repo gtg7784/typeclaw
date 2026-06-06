@@ -33,3 +33,10 @@ async function probe(bwrap: string): Promise<boolean> {
 export function _resetBwrapAvailabilityCacheForTests(): void {
   availabilityCache.clear()
 }
+
+// process.execPath is the concrete ELF /proc/self/exe resolves to for this
+// process — the path build.ts re-exposes over the masked /proc so sandboxed
+// bunx/npx/pnpx can self-locate.
+export function resolveProcSelfExe(): string {
+  return process.execPath
+}

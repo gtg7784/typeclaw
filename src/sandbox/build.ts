@@ -103,6 +103,16 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     // (leaks the outer container's /proc/N/environ — including
     // FIREWORKS_API_KEY — into the sandbox). See sandbox.mdx.
     argv.push('--tmpfs', '/proc')
+
+    // Re-expose ONLY the interpreter ELF at /proc/self/exe so JS runtimes
+    // (bunx/npx/pnpx) can self-locate; /proc/N/environ stays masked by the
+    // tmpfs above. --symlink (not --ro-bind /proc/self/exe): /proc/self at
+    // setup time is bwrap's pid, so a bind would capture bwrap's own binary.
+    // Must come AFTER --tmpfs /proc (last-op-wins) or the tmpfs erases it.
+    if (policy.procSelfExe !== undefined) {
+      argv.push('--ro-bind', policy.procSelfExe, policy.procSelfExe)
+      argv.push('--symlink', policy.procSelfExe, '/proc/self/exe')
+    }
   }
 
   for (const mount of policy.mounts ?? []) {

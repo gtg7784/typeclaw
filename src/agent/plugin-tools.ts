@@ -40,6 +40,7 @@ import {
   ensureSessionTmpDir,
   mapVirtualTmpPath,
   resolveHiddenPaths,
+  resolveProcSelfExe,
   resolveProtectedZones,
   resolveWritableZones,
   subtractMasked,
@@ -560,6 +561,7 @@ async function applyBashSandbox(
     protected: protectedZones,
     network: 'inherit',
     cwd: agentDir,
+    procSelfExe: resolveProcSelfExe(),
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })
   mutableArgs.command = commandString

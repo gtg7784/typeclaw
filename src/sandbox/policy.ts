@@ -60,6 +60,14 @@ export type SandboxProtectedPolicy = {
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
+  // Concrete host interpreter ELF (the running bun binary) re-exposed at
+  // /proc/self/exe over the --tmpfs /proc mask. JS runtimes self-locate via
+  // /proc/self/exe; under the empty tmpfs /proc that read fails and bunx panics
+  // in createFakeTemporaryNodeExecutable. A direct --ro-bind of /proc/self/exe
+  // is wrong: at bwrap setup time /proc/self is bwrap's pid, so it captures the
+  // bwrap binary, not the child runtime. The caller resolves this path (I/O);
+  // the builder stays pure.
+  procSelfExe?: string
   mounts?: SandboxMount[]
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy

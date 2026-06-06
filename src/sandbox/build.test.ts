@@ -270,6 +270,45 @@ describe('buildSandboxedCommand proc strategy', () => {
     const argv = argvOf('true', { proc: 'none' })
     expect(argv.join(' ')).not.toContain('--tmpfs /proc')
   })
+
+  test('re-exposes the interpreter at /proc/self/exe via symlink when procSelfExe is set', () => {
+    const joined = argvOf('true', { procSelfExe: '/usr/local/bin/bun' }).join(' ')
+    expect(joined).toContain('--ro-bind /usr/local/bin/bun /usr/local/bin/bun')
+    expect(joined).toContain('--symlink /usr/local/bin/bun /proc/self/exe')
+  })
+
+  // A bare --ro-bind /proc/self/exe at bwrap setup time captures bwrap's own
+  // binary (it runs as the pid /proc/self points at), so the fix must symlink a
+  // resolved concrete path. /proc/self/exe may only appear as the --symlink
+  // DESTINATION, never as a bind SOURCE.
+  test('uses /proc/self/exe only as a symlink target, never as a bind source', () => {
+    const argv = argvOf('true', { procSelfExe: '/usr/local/bin/bun' })
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === '--ro-bind' || argv[i] === '--bind') {
+        expect(argv[i + 1]).not.toBe('/proc/self/exe')
+      }
+    }
+    expect(valueAfter(argv, '--symlink')).toBe('/usr/local/bin/bun')
+  })
+
+  test('renders the /proc/self/exe re-expose AFTER --tmpfs /proc so the tmpfs does not erase it', () => {
+    const argv = argvOf('true', { procSelfExe: '/usr/local/bin/bun' })
+    const procTmpfs = argv.indexOf('/proc')
+    const symlinkDest = argv.indexOf('/proc/self/exe')
+    expect(procTmpfs).toBeGreaterThanOrEqual(0)
+    expect(symlinkDest).toBeGreaterThan(procTmpfs)
+  })
+
+  test('omits the /proc/self/exe re-expose when procSelfExe is unset', () => {
+    const argv = argvOf('true')
+    expect(argv).not.toContain('--symlink')
+    expect(argv.join(' ')).not.toContain('/proc/self/exe')
+  })
+
+  test("omits the /proc/self/exe re-expose for proc: 'none' even with procSelfExe set", () => {
+    const argv = argvOf('true', { proc: 'none', procSelfExe: '/usr/local/bin/bun' })
+    expect(argv.join(' ')).not.toContain('/proc/self/exe')
+  })
 })
 
 describe('buildSandboxedCommand command filter (opt-in)', () => {
