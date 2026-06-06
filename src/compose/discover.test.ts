@@ -15,10 +15,10 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-async function makeAgent(parent: string, name: string): Promise<string> {
+async function makeAgent(parent: string, name: string, config: Record<string, unknown> = {}): Promise<string> {
   const dir = join(parent, name)
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, 'typeclaw.json'), '{}\n')
+  await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config)}\n`)
   return dir
 }
 
@@ -54,6 +54,19 @@ describe('discoverAgents', () => {
     await makeAgent(root, 'coder')
     await makeAgent(root, '_archived-coder')
     await makeAgent(root, '_wip')
+
+    expect(discoverAgents(root).map((a) => a.name)).toEqual(['coder'])
+  })
+
+  test('skips agents with compose.exclude set true', async () => {
+    await makeAgent(root, 'coder')
+    await makeAgent(root, 'parked', { compose: { exclude: true } })
+
+    expect(discoverAgents(root).map((a) => a.name)).toEqual(['coder'])
+  })
+
+  test('keeps agents with compose.exclude explicitly false', async () => {
+    await makeAgent(root, 'coder', { compose: { exclude: false } })
 
     expect(discoverAgents(root).map((a) => a.name)).toEqual(['coder'])
   })
