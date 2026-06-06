@@ -1,13 +1,12 @@
 import { GITHUB_API_BASE, githubJsonHeaders } from '@/channels/adapters/github/auth-pat'
 
-import type { EffectiveApprovalResolver } from './approve-idempotency'
+import type { EffectiveApprovalResolver, EffectiveVerdict } from './approve-idempotency'
 
-// Resolves whether THIS bot already has a standing APPROVED review on a PR, used
-// by the approve-idempotency guard to stop a second formal APPROVE after a
-// restart (the in-process pending set covers the same-container case but is lost
-// when the container bounces). Every failure returns { ok: false } so the guard
-// fails open — a transient read error must never permanently block a genuine
-// first approval.
+// Resolves THIS bot's standing decisive review on a PR, used by the review
+// verdict guard to stop a second formal verdict after a restart (the in-process
+// lease covers the same-container case but is lost when the container bounces).
+// Every failure returns { ok: false } so the guard fails open — a transient read
+// error must never permanently block a genuine first verdict.
 export function createGithubEffectiveApprovalResolver(deps: {
   resolveToken: (workspace: string) => Promise<string | null>
   fetchImpl?: typeof fetch
@@ -27,8 +26,14 @@ export function createGithubEffectiveApprovalResolver(deps: {
     if (reviews === null) return { ok: false }
 
     const lastDecisive = reviews.filter((r) => isSelf(r.login, r.isBot, self) && isDecisive(r.state)).at(-1)
-    return { ok: true, alreadyApproved: lastDecisive?.state === 'APPROVED' }
+    return { ok: true, effective: toEffective(lastDecisive?.state) }
   }
+}
+
+function toEffective(state: string | undefined): EffectiveVerdict {
+  if (state === 'APPROVED') return 'APPROVED'
+  if (state === 'CHANGES_REQUESTED') return 'CHANGES_REQUESTED'
+  return 'NONE'
 }
 
 // A bot's effective review is its LATEST decisive one. COMMENTED/PENDING are
