@@ -24,11 +24,32 @@ describe('checkOutboundFlood — outbound flood patterns are blocked', () => {
     expect(result.reason).toMatch(/^repeated-char-run:/)
   })
 
-  test('blocks alternating low-diversity text', () => {
-    const result = checkOutboundFlood('ab'.repeat(60))
+  test('blocks a long single-character flood', () => {
+    const result = checkOutboundFlood('a'.repeat(500))
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected outbound flood')
-    expect(result.reason).toMatch(/^low-unique-ratio:/)
+    expect(result.reason).toBe('repeated-char-run:500')
+  })
+
+  test('blocks repeated single-emoji floods', () => {
+    const result = checkOutboundFlood('🙂'.repeat(200))
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected outbound flood')
+    expect(result.reason).toMatch(/^repeated-char-run:/)
+  })
+
+  test('blocks alternating low-diversity text', () => {
+    const result = checkOutboundFlood('ab'.repeat(300))
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected outbound flood')
+    expect(result.reason).toBe('repeated-pattern-period:2')
+  })
+
+  test('blocks repeated short-pattern floods', () => {
+    const result = checkOutboundFlood('lol'.repeat(300))
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected outbound flood')
+    expect(result.reason).toBe('repeated-pattern-period:3')
   })
 })
 
@@ -44,6 +65,66 @@ describe('checkOutboundFlood — benign outbound messages pass', () => {
     // must not trip on scattered laughter inside otherwise-substantive prose.
     const text =
       'Confirmed ㅋㅋㅋ the deploy is healthy now, next step은 to check the logs one more time. I will share right away if anything looks off ㅋㅋㅋ'
+    expect(checkOutboundFlood(text)).toEqual({ ok: true })
+  })
+
+  test('a multi-KB markdown report passes (regression for the dropped reply)', () => {
+    // The exact failure shape: a ~3KB markdown decision report. Under the old
+    // uniqueRatio gate its distinctChars/length ratio (~0.027) fell below 0.05
+    // and it was silently dropped. It must now be delivered.
+    const report = [
+      '## Goal',
+      'Find the best alternatives to Kimi K2.6 (Fireworks) using the leaderboard,',
+      'optimized for speed, intelligence, and agentic ability.',
+      '',
+      '## Bottom line',
+      '1. DeepSeek V4 Pro (Max) — best if you want to stay on Fireworks',
+      '2. Gemini 3.1 Pro Preview — best balanced alternative',
+      '3. Claude Opus 4.8 — best for premium agentic reliability',
+      '4. Qwen3.7 Max — strong agentic option, especially for tool-heavy work',
+      '5. MiniMax-M3 — good value option but less compelling overall',
+      '',
+      '---',
+      '',
+      '### Stay on Fireworks',
+      'DeepSeek V4 Pro (Max) — easiest migration path from Kimi K2.6.',
+      'Why it stands out: good quality, strong enough for agentic tasks.',
+      'Tradeoff: not the absolute best raw capability versus premium models.',
+      '',
+      '### Best balanced overall',
+      'Gemini 3.1 Pro Preview — strong mix of quality and throughput.',
+      'Tradeoff: provider switch may matter depending on your stack.',
+      '',
+      '### Best premium agentic option',
+      'Claude Opus 4.8 — best overall intelligence and reasoning reliability.',
+      'Tradeoff: usually not the cheapest option here.',
+    ].join('\n')
+    expect(report.length).toBeGreaterThan(800)
+    expect(checkOutboundFlood(report)).toEqual({ ok: true })
+  })
+
+  test('a very long natural-language reply passes regardless of length', () => {
+    const paragraph =
+      'The agent inspected the channel history, confirmed the deployment is healthy, ' +
+      'and verified that no actionable error remains in the logs. '
+    const text = paragraph.repeat(40)
+    expect(text.length).toBeGreaterThan(3000)
+    expect(checkOutboundFlood(text)).toEqual({ ok: true })
+  })
+
+  test('a long code block passes', () => {
+    const block = [
+      '```ts',
+      'export function checkOutboundFlood(text: string): OutboundFloodCheckResult {',
+      "  const graphemes = Array.from(text.normalize('NFKC'))",
+      '  const longestRun = findLongestRun(graphemes)',
+      '  if (longestRun >= MAX_RUN) return { ok: false, reason: `run:${longestRun}` }',
+      '  return { ok: true }',
+      '}',
+      '```',
+    ].join('\n')
+    const text = `${block}\n\nThat is the full implementation of the guard.`.repeat(6)
+    expect(text.length).toBeGreaterThan(1500)
     expect(checkOutboundFlood(text)).toEqual({ ok: true })
   })
 })
