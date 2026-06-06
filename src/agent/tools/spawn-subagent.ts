@@ -81,7 +81,9 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           description:
             'When true, the spawn returns immediately with a task_id; the subagent runs in the background and a system-reminder is delivered when it completes. ' +
             'When false (default), the spawn blocks until the subagent finishes and returns its final message synchronously. ' +
-            'Use background mode for long-running tasks where you want to keep the conversation moving (Mode B) or for parallel fan-out (Mode A).',
+            'For PARALLEL fan-out, do NOT use background mode: emit several spawn_subagent calls (sync, the default) in a SINGLE turn — they execute concurrently and all their results return together before your next turn. ' +
+            'Reserve background mode for a long-running task you want to keep the conversation moving alongside (Mode B). ' +
+            'NOTE: background mode is unavailable from a subagent session — a subagent runs as one turn, so a backgrounded child would finish with nowhere to deliver its result; use sync spawns batched in one turn instead.',
         }),
       ),
     }),
@@ -103,6 +105,22 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       if (subagentDepth(origin) >= MAX_SUBAGENT_DEPTH) {
         return errorResult(
           `subagent.spawn denied: maximum delegation depth (${MAX_SUBAGENT_DEPTH}) reached; a subagent at this depth cannot spawn further subagents`,
+        )
+      }
+      // A backgrounded child spawned from a subagent is orphaned: a subagent
+      // runs as one `session.prompt()` with no drain loop, and the
+      // `subagent.completed` broadcast routes only to live TUI/channel parents
+      // (subagent-completion-reminder.ts), never to a subagent parentSessionId.
+      // The child finishes after the parent subagent's single turn has ended, so
+      // its result is unreachable and the parent returns a "still gathering"
+      // placeholder. Fail closed at the tool boundary (robust to prompt/model
+      // drift) and steer the model to the sync path, which blocks until the
+      // child's result is in context.
+      if (origin?.kind === 'subagent' && params.run_in_background === true) {
+        return errorResult(
+          'subagent.spawn denied: background spawning is not available from a subagent session because the result cannot be delivered after this turn ends. ' +
+            'Retry with run_in_background=false (or omit it) — the synchronous spawn blocks until the child finishes and returns its result into your context, ' +
+            'which is what you need to fold the result into your output.',
         )
       }
 

@@ -638,3 +638,77 @@ describe('createSpawnSubagentTool — depth guard', () => {
     expect(details.error).toContain('maximum delegation depth')
   })
 })
+
+describe('createSpawnSubagentTool — background-from-subagent guard', () => {
+  function spawnWithOrigin(origin: SessionOrigin) {
+    const liveRegistry = new LiveSubagentRegistry()
+    let launched = 0
+    let counter = 0
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry,
+      createSessionForSubagent: async () => {
+        launched += 1
+        return stubSession()
+      },
+      agentDir: '/agent',
+      parentSessionId: 'ses_child',
+      getOrigin: () => origin,
+      generateTaskId: () => `bg_bg${(counter += 1)}`,
+      now: () => 1_000,
+    })
+    return { tool, launchedCount: () => launched }
+  }
+
+  const subagentOrigin: SessionOrigin = {
+    kind: 'subagent',
+    subagent: 'researcher',
+    parentSessionId: 'ses_child',
+    spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+  }
+
+  test('background spawn from a subagent origin is denied and launches no child', async () => {
+    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('background spawning is not available from a subagent session')
+    expect(details.error).toContain('run_in_background=false')
+    expect(launchedCount()).toBe(0)
+  })
+
+  test('synchronous spawn from a subagent origin is still allowed', async () => {
+    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+    expect(launchedCount()).toBe(1)
+  })
+
+  test('background spawn from a non-subagent (tui) origin is unaffected', async () => {
+    const { tool } = spawnWithOrigin({ kind: 'tui', sessionId: 'ses_root' })
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('background')
+  })
+})
