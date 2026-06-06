@@ -9,7 +9,7 @@ import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
 import { createPermissionService } from '@/permissions/permissions'
-import { createHookBus, defineTool, type PluginRegistry } from '@/plugin'
+import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
 import { _resetBwrapAvailabilityCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
 
 import {
@@ -518,6 +518,40 @@ describe('wrapSystemAgentTool', () => {
 
     await expect(wrapped.execute('c', { command: 'pwd' })).rejects.toThrow('blocked: no bash')
     expect(calls).toEqual([])
+  })
+
+  // pi's bash tool REJECTS on non-zero exit. Without a finally-style after-run,
+  // a tool.after hook that releases a reservation (the github approve guard)
+  // never fires, stranding the PR as "already approved" on retry (PR #672).
+  test('tool.after fires with an error result when a built-in agent tool throws, then rethrows', async () => {
+    const afterResults: unknown[] = []
+    const tool = {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: Type.Object({ command: Type.String() }),
+      async execute(_callId: string, _params: { command: string }) {
+        throw new Error('no such file or directory')
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.after': (event) => {
+        afterResults.push(event.result)
+      },
+    })
+
+    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    await expect(
+      wrapped.execute('c', { command: 'gh api --input /tmp/x' } as never, undefined, undefined, {} as never),
+    ).rejects.toThrow('no such file or directory')
+    expect(afterResults).toHaveLength(1)
+    const errorText = ((afterResults[0] as ToolResult).content as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === 'text')
+      .map((p) => p.text)
+      .join('\n')
+    expect(errorText).toContain('no such file or directory')
   })
 
   test('edit built-in agent tool exposes and strips guard acknowledgements before execution', async () => {
@@ -1089,6 +1123,70 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
       {} as never,
     )
     expect(record.path).toBe('workspace/out.json')
+  })
+
+  // Mirrors pi's real write tool, which echoes the path back ("Successfully
+  // wrote N bytes to <path>"). The leaked backing path does not exist inside
+  // the bwrap bash sandbox, so a model that pastes it into `gh api --input`
+  // hits "no such file or directory" (the PR #672 strand this guards).
+  function fakeWriteEchoingPath() {
+    return {
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+      async execute(_id: string, params: { path: string; content: string }) {
+        return {
+          content: [{ type: 'text' as const, text: `Successfully wrote 2 bytes to ${params.path}` }],
+          details: { path: params.path },
+        }
+      },
+    }
+  }
+
+  test('a sandboxed role sees its original /tmp path in the receipt, not the backing dir', async () => {
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWriteEchoingPath(), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    const result = await wrapped.execute(
+      'c',
+      { path: '/tmp/review.json', content: '{}' } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )
+    const text = (result.content as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === 'text')
+      .map((p) => p.text)
+      .join('\n')
+    expect(text).toContain('/tmp/review.json')
+    expect(text).not.toContain(`${SESSION_TMP_ROOT}/sid42`)
+  })
+
+  test('an unsandboxed role keeps the real /tmp path in the receipt (no rewrite)', async () => {
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWriteEchoingPath(), {
+      agentDir: '/agent',
+      sessionId: 'sid42',
+      hooks: createHookBus(),
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    const result = await wrapped.execute(
+      'c',
+      { path: '/tmp/review.json', content: '{}' } as never,
+      undefined,
+      undefined,
+      {} as never,
+    )
+    const text = (result.content as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === 'text')
+      .map((p) => p.text)
+      .join('\n')
+    expect(text).toContain('/tmp/review.json')
   })
 })
 

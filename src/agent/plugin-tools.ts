@@ -463,13 +463,24 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
         await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId, bashEnvOverlay)
       }
 
-      if (TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined) {
-        await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
-      }
+      const tmpRedirect =
+        TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined
+          ? await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
+          : undefined
 
-      const result = await bashEnvStore.run(bashEnvOverlay, () =>
-        tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate),
-      )
+      let rawResult: ToolResult
+      try {
+        rawResult = await bashEnvStore.run(bashEnvOverlay, () =>
+          tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate),
+        )
+      } catch (error) {
+        // A throwing tool (pi's bash rejects on non-zero exit) must still run
+        // tool.after so cleanup hooks fire — e.g. the github approve guard's
+        // release, whose absence stranded a PR as "already approved" (PR #672).
+        await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(error))
+        throw error
+      }
+      const result = tmpRedirect !== undefined ? restoreTmpPathInResult(rawResult, tmpRedirect) : rawResult
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
         fireLoopAbort(opts.getAbort)
@@ -488,6 +499,26 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       }
     },
   })
+}
+
+function toErrorResult(error: unknown): ToolResult {
+  const message = error instanceof Error ? error.message : String(error)
+  return { content: [{ type: 'text', text: message }], details: { error: message } }
+}
+
+// The original tool error must always propagate, so a failure inside the
+// after-hook itself is swallowed rather than masking the real cause.
+async function runToolAfterSafely(
+  opts: WrapSystemToolOptions,
+  tool: string,
+  callId: string,
+  result: ToolResult,
+): Promise<void> {
+  try {
+    await opts.hooks.runToolAfter({ tool, sessionId: opts.sessionId, callId, result })
+  } catch {
+    // intentionally ignored: never mask the originating tool error
+  }
 }
 
 export function defaultBuiltinPiAgentTools(): AgentTool<any, any>[] {
@@ -579,24 +610,47 @@ const TMP_REDIRECT_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls
 // different files. Rewriting the file tool's on-disk path to the same session
 // backing dir makes every layer resolve /tmp/foo to one file. Unsandboxed roles
 // (empty masks) are left untouched: their bash already shares the real /tmp.
+type TmpRedirect = { original: string; backing: string }
+
 async function applyTmpPathRedirect(
   mutableArgs: Record<string, unknown>,
   permissions: PermissionService,
   origin: SessionOrigin | undefined,
   agentDir: string,
   sessionId: string,
-): Promise<void> {
+): Promise<TmpRedirect | undefined> {
   const rawPath = mutableArgs.path
-  if (typeof rawPath !== 'string') return
+  if (typeof rawPath !== 'string') return undefined
 
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
-  if (dirs.length === 0 && files.length === 0) return
+  if (dirs.length === 0 && files.length === 0) return undefined
 
   const backing = mapVirtualTmpPath(agentDir, sessionId, rawPath)
-  if (backing === undefined) return
+  if (backing === undefined || backing === rawPath) return undefined
 
   await ensureSessionTmpDir(sessionId)
   mutableArgs.path = backing
+  return { original: rawPath, backing }
+}
+
+// The redirect swaps the model-facing /tmp path for its session backing dir
+// before execution; the file tool then echoes that backing path in its receipt
+// text and details. Reverse it on the way out so the model only ever sees the
+// path it asked for — a leaked backing path is unreachable inside the bwrap
+// bash sandbox, so reusing it in `gh api --input` fails (the PR #672 strand).
+function restoreTmpPathInResult(result: ToolResult, redirect: TmpRedirect): ToolResult {
+  const content = (result.content as ContentPart[]).map((part) =>
+    part.type === 'text' ? { ...part, text: part.text.split(redirect.backing).join(redirect.original) } : part,
+  )
+  const details =
+    isRecord(result.details) && result.details.path === redirect.backing
+      ? { ...result.details, path: redirect.original }
+      : result.details
+  return { content, details }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 function appendLoopWarning(result: ToolResult, message: string): ToolResult {
