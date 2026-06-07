@@ -20,7 +20,7 @@ import Link from 'next/link'
 import { AnimatedTerminal } from './_components/animated-terminal'
 import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
-import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP } from './_components/data'
+import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
 import { ThemeToggle } from './_components/theme-toggle'
 import { UseCaseTabs } from './_components/use-case-tabs'
 
@@ -330,7 +330,7 @@ export default function Home() {
             </div>
             typeclaw
             <span className="ml-1 rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-white/[0.06] dark:text-zinc-400">
-              v0.11
+              {VERSION}
             </span>
           </Link>
           <div className="flex items-center gap-1 sm:gap-2">
@@ -359,7 +359,7 @@ export default function Home() {
           <div className="relative z-10 mx-auto max-w-4xl px-6 pt-24 pb-20 text-center sm:pt-32">
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
               <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
-              v0.11 · TypeScript agent runtime
+              {VERSION} · TypeScript agent runtime
             </div>
             <div className="relative mt-8">
               <Image

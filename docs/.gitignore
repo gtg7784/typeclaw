@@ -33,3 +33,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .source
+
+# generated at build time from the root package.json
+/src/generated
