@@ -139,6 +139,11 @@ describe('reviewer subagent declaration', () => {
     expect(sub.canSpawnSubagents).toBe(true)
   })
 
+  test('declares the readonly-reviewer bash policy so its bash is fenced regardless of the spawning role (issue #452)', () => {
+    const sub = createReviewerSubagent()
+    expect(sub.bashPolicy).toEqual({ kind: 'readonly-reviewer' })
+  })
+
   test('tools list is read-only by whitelist: read/grep/find/ls/bash/web_search/web_fetch with NO write/edit', () => {
     const sub = createReviewerSubagent()
     const toolNames = (sub.tools ?? []).map((t) => t.__builtinTool).sort()
