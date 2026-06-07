@@ -87,6 +87,22 @@ describe('reviewer read-only bash policy — repo/working-tree mutation is denie
     expect(allows('git clone https://github.com/o/r.git /agent/evil')).toBe(false)
   })
 
+  test('denies git clone whose DESTINATION is outside /tmp even when a /tmp source token is present (regression: write-target, not any-operand)', () => {
+    // The earlier `.some(isTmpPath)` matched the /tmp source and let git write
+    // the destination at /agent/evil. The destination is the second operand.
+    expect(allows('git clone /tmp/source /agent/evil')).toBe(false)
+    expect(allows('git clone --depth 1 https://github.com/o/r.git /agent/evil')).toBe(false)
+  })
+
+  test('denies git clone with no explicit destination (repo-derived dir under cwd is not provably /tmp)', () => {
+    expect(allows('git clone https://github.com/o/r.git')).toBe(false)
+  })
+
+  test('denies fetch/checkout without -C (operates on the ambient agent repo, not /tmp)', () => {
+    expect(allows('git fetch origin abc')).toBe(false)
+    expect(allows('git checkout abc')).toBe(false)
+  })
+
   test('denies a git -c core.hooksPath override (hook-plant vector)', () => {
     expect(allows('git -c core.hooksPath=/tmp/h status')).toBe(false)
   })
@@ -118,6 +134,27 @@ describe('reviewer read-only bash policy — remote (gh) mutation is denied', ()
 
   test('allows gh api with an explicit GET method', () => {
     expect(allows('gh api -X GET /repos/o/r/pulls/1')).toBe(true)
+  })
+
+  test('denies gh api that implicitly becomes POST via request params (regression: gh switches to POST when -f/-F/--field/--input present)', () => {
+    expect(allows('gh api repos/o/r/issues/1/comments -f body=hi')).toBe(false)
+    expect(allows('gh api repos/o/r/issues/1/comments -F body=@/tmp/x')).toBe(false)
+    expect(allows('gh api repos/o/r/issues/1/comments --field body=hi')).toBe(false)
+    expect(allows('gh api repos/o/r/pulls/1/reviews --input /tmp/review.json')).toBe(false)
+  })
+
+  test('denies gh api graphql outright (a mutation operation writes; cannot statically prove a query safe)', () => {
+    expect(allows("gh api graphql -f query='mutation { addComment }'")).toBe(false)
+    expect(allows("gh api graphql -f query='query { viewer }'")).toBe(false)
+  })
+
+  test('still allows a plain gh api GET with no body params', () => {
+    expect(allows('gh api /repos/o/r/pulls/1')).toBe(true)
+    expect(allows('gh api repos/o/r/contents/x.ts?ref=abc --jq .content')).toBe(true)
+  })
+
+  test('allows gh api with body params only when method is explicitly pinned to GET', () => {
+    expect(allows('gh api -X GET search/code -f q=needle')).toBe(true)
   })
 })
 

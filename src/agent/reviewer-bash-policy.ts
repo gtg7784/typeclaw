@@ -329,12 +329,7 @@ function classifyGit(tokens: string[]): void {
     )
   }
   if (GIT_TMP_SCOPED.has(subcommand)) {
-    const targetUnderTmp = workdir !== null ? isTmpPath(workdir) : tokens.slice(idx + 1).some((t) => isTmpPath(t))
-    if (!targetUnderTmp) {
-      throw new SubagentBashPolicyError(
-        `git ${subcommand} is permitted only against a /tmp scratch checkout; target is not under /tmp.`,
-      )
-    }
+    assertGitTmpScoped(subcommand, workdir, tokens.slice(idx + 1))
     return
   }
   if (GIT_READONLY_SUBCOMMANDS.has(subcommand)) {
@@ -347,6 +342,80 @@ function classifyGit(tokens: string[]): void {
     return
   }
   throw new SubagentBashPolicyError(`git ${subcommand} is not on the reviewer's read-only allowlist.`)
+}
+
+// A /tmp-scoped git subcommand is safe only when the path it WRITES is under
+// /tmp — not merely when some operand mentions /tmp. The earlier `.some(isTmpPath)`
+// let `git clone /tmp/src /agent/evil` through because the source token matched
+// while git wrote the destination at /agent/evil. Validate the actual write
+// target per subcommand: clone writes its destination operand (or, when omitted,
+// a directory derived from the repo under cwd — which we cannot prove is /tmp,
+// so we require an explicit /tmp destination); -C-scoped operations write the
+// -C workdir; a bare fetch/checkout without -C writes the ambient repo, which
+// is not /tmp.
+function assertGitTmpScoped(subcommand: string, workdir: string | null, rest: string[]): void {
+  const deny = (detail: string): never => {
+    throw new SubagentBashPolicyError(`git ${subcommand} is permitted only against a /tmp scratch checkout; ${detail}.`)
+  }
+  if (workdir !== null) {
+    if (!isTmpPath(workdir)) deny('the -C working directory is not under /tmp')
+    return
+  }
+  if (subcommand === 'clone') {
+    // `git clone [flags] <repo> [<dir>]`: the write target is the explicit
+    // <dir> operand when present, else a repo-derived dir under cwd (unprovable
+    // as /tmp). Extracting operands requires skipping value-taking flags
+    // (`--depth 1`, `-b main`, `--branch x`, …) whose VALUE is a bare word that
+    // would otherwise be miscounted as the repo or destination.
+    const operands = cloneOperands(rest)
+    const dest = operands[1]
+    if (dest === undefined) deny('clone needs an explicit /tmp destination directory')
+    if (!isTmpPath(dest!)) deny('the clone destination is not under /tmp')
+    return
+  }
+  // fetch/checkout/init/sparse-checkout/worktree without -C operate on the
+  // ambient repo (the agent checkout), which is never /tmp. Require -C /tmp.
+  deny(`${subcommand} without -C operates on the ambient repo; scope it with -C /tmp/review-*`)
+}
+
+// `git clone` flags that consume the NEXT token as their value (separated form,
+// e.g. `--depth 1`). Their value is a bare word, so it must be skipped when
+// counting positional operands (<repo> [<dir>]). Attached forms (`--depth=1`,
+// `-b=x`) carry their own value and need no skip. Unknown long flags are treated
+// as boolean (no skip); if a future value-taking flag is missed, the worst case
+// is a stricter deny (a real operand shifts), never a looser allow.
+const GIT_CLONE_VALUE_FLAGS = new Set([
+  '--depth',
+  '-b',
+  '--branch',
+  '-o',
+  '--origin',
+  '-u',
+  '--upload-pack',
+  '--reference',
+  '--reference-if-able',
+  '--separate-git-dir',
+  '-c',
+  '--config',
+  '--shallow-since',
+  '--shallow-exclude',
+  '-j',
+  '--jobs',
+  '--filter',
+  '--template',
+])
+
+function cloneOperands(rest: string[]): string[] {
+  const operands: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]!
+    if (t.startsWith('-')) {
+      if (GIT_CLONE_VALUE_FLAGS.has(t)) i++
+      continue
+    }
+    operands.push(t)
+  }
+  return operands
 }
 
 function isGitWriteForm(sub: string, arg: string): boolean {
@@ -372,13 +441,7 @@ function classifyGh(tokens: string[]): void {
     )
   }
   if (obj === 'api') {
-    // gh api defaults to GET; any -X/--method other than GET/HEAD is a write.
-    const method = ghApiMethod(tokens.slice(idx + 1))
-    if (method !== 'GET' && method !== 'HEAD') {
-      throw new SubagentBashPolicyError(
-        `gh api with method ${method} mutates remote state; the reviewer may only GET/HEAD.`,
-      )
-    }
+    assertGhApiReadOnly(tokens.slice(idx + 1))
     return
   }
   if (allowed.has('__any__')) return
@@ -393,16 +456,47 @@ function classifyGh(tokens: string[]): void {
   }
 }
 
-function ghApiMethod(rest: string[]): string {
+// `gh api` does NOT always default to GET. Per `gh api --help`: "adding request
+// parameters will automatically switch the request method to POST". So any of
+// `-f/--field`, `-F/--raw-field`, or `--input` flips the call to POST unless an
+// explicit `--method GET/HEAD` overrides it. We mirror that inference, and we
+// deny the `graphql` endpoint outright unless it is provably a query (a `mutation`
+// operation is a write; even a query we cannot statically prove safe is denied
+// for the reviewer because graphql can mutate through a GET-shaped call).
+const GH_API_BODY_FLAGS = new Set(['-f', '--field', '-F', '--raw-field', '--input', '-d', '--data'])
+
+function assertGhApiReadOnly(rest: string[]): void {
+  let explicitMethod: string | null = null
+  let hasBodyParam = false
+  let isGraphql = false
   for (let i = 0; i < rest.length; i++) {
     const t = rest[i]!
-    if (t === '-X' || t === '--method') return stripQuotes(rest[i + 1] ?? 'GET').toUpperCase()
-    if (t.startsWith('-X')) return stripQuotes(t.slice(2)).toUpperCase()
-    if (t.startsWith('--method=')) return stripQuotes(t.slice('--method='.length)).toUpperCase()
-    // -f/--field/-F on a GET is fine (query params); a body field implies a
-    // write only with a write method, which the -X check already catches.
+    if (t === '-X' || t === '--method') {
+      explicitMethod = stripQuotes(rest[i + 1] ?? '').toUpperCase()
+      continue
+    }
+    if (t.startsWith('-X')) {
+      explicitMethod = stripQuotes(t.slice(2)).toUpperCase()
+      continue
+    }
+    if (t.startsWith('--method=')) {
+      explicitMethod = stripQuotes(t.slice('--method='.length)).toUpperCase()
+      continue
+    }
+    if (GH_API_BODY_FLAGS.has(t) || t.startsWith('-f') || t.startsWith('-F')) hasBodyParam = true
+    if (stripQuotes(t) === 'graphql') isGraphql = true
   }
-  return 'GET'
+  if (isGraphql) {
+    throw new SubagentBashPolicyError(
+      'gh api graphql can mutate (a `mutation` operation is a write, and a GET-shaped call can still mutate); the reviewer may not use the graphql endpoint.',
+    )
+  }
+  const method = explicitMethod ?? (hasBodyParam ? 'POST' : 'GET')
+  if (method !== 'GET' && method !== 'HEAD') {
+    throw new SubagentBashPolicyError(
+      `gh api resolves to ${method} (explicit or inferred from request parameters), which mutates remote state; the reviewer may only GET/HEAD.`,
+    )
+  }
 }
 
 function classifyFsWriter(verb: string, tokens: string[], redirectTargets: string[]): void {
