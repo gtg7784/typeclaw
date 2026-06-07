@@ -108,7 +108,7 @@ fonts/margins only if the user asks.
     #counter(page).display("1 / 1", both: true)
   ]),
 )
-#set text(font: ("Libertinus Serif", "New Computer Modern"), size: 11pt, lang: "en")
+#set text(font: ("Libertinus Serif", "New Computer Modern", "Noto Serif CJK KR"), size: 11pt, lang: "en")
 #set par(justify: true, leading: 0.68em, spacing: 1.1em)
 
 #show heading: set text(weight: "semibold")
@@ -136,9 +136,12 @@ Notes:
 - `read("report.md")` is **relative to the workspace** (the compiler's `workspace`
   is set to `workspace/` — see Step 3). Keep the `.typ` and `.md` in `workspace/`.
 - Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
-  install). For Korean/CJK body text, add `"Noto Serif CJK KR"` to the `font:` list
-  and pass that font dir to `fontPaths` in Step 3 (the container's `cjkFonts` toggle
-  installs `fonts-noto-cjk` under `/usr/share/fonts`).
+  install) and carry the Latin text. `"Noto Serif CJK KR"` is appended as the
+  fallback so Korean/CJK glyphs resolve out of the box — Typst falls through to it
+  per-glyph wherever the Latin fonts have no glyph, leaving Latin runs untouched.
+  It comes from `fonts-noto-cjk` (installed under `/usr/share/fonts` by the
+  container's `cjkFonts` toggle, on by default), which Step 3's renderer loads via
+  `fontPaths`. If your CJK font lives elsewhere, add its dir to that list.
 
 ## Step 3 — render
 
@@ -149,15 +152,23 @@ writes the PDF. Pass the wrapper and output paths as arguments.
 ```ts
 // workspace/.tools/render.ts
 import { NodeCompiler } from '@myriaddreamin/typst-ts-node-compiler'
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 
 const [, , mainFile, outFile] = process.argv
 if (!mainFile || !outFile) throw new Error('usage: render.ts <main.typ> <out.pdf>')
 
+// Load system fonts so CJK glyphs resolve. The compiler does NOT auto-discover
+// system font dirs the way the Typst CLI does — without explicit fontPaths,
+// "Noto Serif CJK KR" (from fonts-noto-cjk under /usr/share/fonts) is invisible
+// and Korean/Japanese/Chinese text renders as .notdef tofu boxes. Filtered with
+// existsSync so a missing dir (e.g. on a dev/host run) is skipped, not fatal.
+const fontPaths = ['/usr/share/fonts', '/usr/local/share/fonts', '/Library/Fonts', '/System/Library/Fonts'].filter(
+  existsSync,
+)
+
 const compiler = NodeCompiler.create({
   workspace: '.', // run from workspace/, so read("report.md") resolves
-  // Add CJK / extra font dirs here if needed:
-  // fontArgs: [{ fontPaths: ["/usr/share/fonts"] }],
+  ...(fontPaths.length > 0 ? { fontArgs: [{ fontPaths }] } : {}),
 })
 const pdf = compiler.pdf({ mainFilePath: mainFile })
 writeFileSync(outFile, Buffer.from(pdf))
