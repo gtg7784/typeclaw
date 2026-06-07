@@ -15,6 +15,7 @@ import type { HookBus, SessionIdleEvent } from '@/plugin'
 
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import {
+  CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS,
   CHANNEL_MAX_OUTPUT_TOKENS,
   createChannelRouter,
   DUPLICATE_SEND_ERROR,
@@ -146,6 +147,14 @@ class FakeSession {
 
 async function tempDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'channels-router-'))
+}
+
+async function streamOnce(session: FakeSession): Promise<void> {
+  await session.agent.streamFn(
+    {} as Parameters<StreamFn>[0],
+    { systemPrompt: '', messages: [], tools: [] } as Parameters<StreamFn>[1],
+    undefined as Parameters<StreamFn>[2],
+  )
 }
 
 function assistantMessage(text: string): AssistantMessage {
@@ -3119,6 +3128,76 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
     expect(logs.some((m) => m.includes(`empty_turn_retry attempt=${MAX_EMPTY_TURN_RETRIES}`))).toBe(true)
     expect(logs.some((m) => m.includes('empty_turn_fallback cause=retries_exhausted'))).toBe(true)
+  })
+
+  test('empty-turn guard: a length-truncated retry raises the output-token budget for the re-prompt', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    const budgetsPerPrompt: Array<number | undefined> = []
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      // Simulate the real session streaming under the installed output cap:
+      // every prompt makes a stream call whose maxTokens the cap fills in.
+      await streamOnce(sessions[0]!)
+      budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
+      if (attempt === 1) {
+        // First turn burns its budget reasoning and truncates with no prose.
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
+        return
+      }
+      // The raised-budget retry lets the model finish and reply.
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here is your answer' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    // Original turn uses the default backstop; the length-retry re-prompt uses
+    // the raised budget so genuine reasoning has room to finish.
+    expect(budgetsPerPrompt[0]).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
+    expect(budgetsPerPrompt[1]).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
+    expect(sent.map((s) => s.text)).toEqual(['here is your answer'])
+    expect(sent.some((s) => s.text === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+  })
+
+  test('empty-turn guard: the raised retry budget does not leak into the next fresh user turn', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      await streamOnce(sessions[0]!)
+      if (attempt < 1 + MAX_EMPTY_TURN_RETRIES) {
+        sessions[0]!.setAssistantMidTurn('thought-loop output', 'length')
+        return
+      }
+      // Final retry also truncates → fallback; budget stays raised this turn.
+      sessions[0]!.setAssistantMidTurn('thought-loop output', 'length')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
+
+    // A brand-new user turn must reset back to the default backstop.
+    sessions[0]!.onPrompt = async () => {
+      await streamOnce(sessions[0]!)
+      sessions[0]!.setAssistantText('ok')
+    }
+    await router.route(inbound({ text: 'fresh question' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
   })
 
   test('empty-turn guard: a turn that thrashed the send path skips retry and posts the fallback once', async () => {

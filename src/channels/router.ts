@@ -183,6 +183,18 @@ export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
 // including reasoning). Deliberately NOT lowered in `providers.ts`, where
 // `maxTokens` is the model's true capability that compaction math reads.
 export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
+// Raised output-token budget threaded into the ONE re-prompt that follows a
+// `stopReason:'length'` empty turn. The default 4096 backstop bounds kimi's
+// degenerate repetition loop, but it is the same ceiling a *legitimate*
+// reasoning-heavy turn hits when it spends the whole pool thinking and emits no
+// prose — re-prompting under the identical cap reproduces the truncation. A
+// `length` truncation that the byte-identical loop guard did NOT catch is
+// evidence of genuine reasoning starved for room, not a repetition loop, so the
+// retry grants 4x headroom for thinking + a reply. Bounded (not 32000) so a
+// turn that IS looping still can't burn the full pi-ai default. Consumed
+// one-shot via `LiveSession.nextPromptMaxTokens`, then reset at the next real
+// user turn so the raised budget never leaks past the turn that needed it.
+export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 16384
 // Ceiling on automatic re-prompts for a turn that ended with NO user-facing
 // reply AND no attempted send — the pure "the model burned its budget thinking
 // and produced nothing" failure. The canonical trigger is Fireworks'
@@ -200,18 +212,24 @@ export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
 export const MAX_EMPTY_TURN_RETRIES = 2
 // Reminder-only nudge injected before an empty-turn retry. Uses the repo's
 // SYSTEM MESSAGE framing (see composeTurnPrompt) so persona-rich models do not
-// reply to the notice itself. Neutral by design: it asks for a direct reply
-// without prescribing length or tone, matching the chosen "just retry" posture.
+// reply to the notice itself. Names the actual failure (the prior turn ran out
+// of its output budget mid-reasoning and produced no reply) and asks the model
+// to keep its thinking short and answer directly — the empty turn was budget
+// exhaustion, not a forgotten tool call, so a "reply directly" nudge alone
+// would re-loop. The matching retry re-prompt also runs with a raised budget
+// (CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS) so the room actually exists.
 export const EMPTY_TURN_RETRY_NUDGE = [
   '---',
   '**[SYSTEM MESSAGE — not from a human]**',
   '',
-  'Your previous turn ended without sending any reply to the channel. This is',
+  'Your previous turn ran out of its output budget before sending a reply — it',
+  'spent the whole turn thinking and produced nothing for the channel. This is',
   'an automated signal from the channel router, not a message from anyone in',
   'the chat. **Do not acknowledge or reply to this notice itself.**',
   '',
-  'Respond to the last user message now with a direct answer via your channel',
-  'reply tool. If you genuinely have nothing to say, reply with `NO_REPLY`.',
+  'Answer the last user message now: keep any reasoning brief and send a direct',
+  'reply via your channel reply tool. If you genuinely have nothing to say,',
+  'reply with `NO_REPLY`.',
   '',
   '---',
 ].join('\n')
@@ -532,6 +550,13 @@ type LiveSession = {
   // increments it before injecting EMPTY_TURN_RETRY_NUDGE and reads it to decide
   // retry-vs-fallback. See the candidate===null branch.
   emptyTurnRetries: number
+  // One-shot output-token budget for the NEXT `session.prompt()` only.
+  // `installChannelOutputCap` reads and clears it per stream call, so it
+  // overrides the default backstop for exactly one re-prompt. Set by the
+  // empty-turn length-retry branch to CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS
+  // and reset to undefined at each fresh user turn so the raised budget cannot
+  // leak past the turn that needed it.
+  nextPromptMaxTokens: number | undefined
   // Stamped by `markTurnSkipped` (called from the `skip_response` tool)
   // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
   // if it matches the just-completed turn, recovery is skipped entirely
@@ -1417,6 +1442,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
         emptyTurnRetries: 0,
+        nextPromptMaxTokens: undefined,
         skippedTurn: null,
         skipLockedSendTurn: null,
         pendingQuoteCandidate: null,
@@ -1704,14 +1730,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // Override pi-ai's hidden `Math.min(model.maxTokens, 32000)` output cap for
   // channel sessions by threading an explicit `maxTokens` into every stream
   // call. See CHANNEL_MAX_OUTPUT_TOKENS for why. Composes the existing streamFn
-  // (pi's default `streamSimple` unless a proxy was installed) and only fills
-  // `maxTokens` when the caller left it unset, so an explicit per-call value
-  // still wins.
+  // (pi's default `streamSimple` unless a proxy was installed). Precedence:
+  // an explicit per-call `maxTokens` always wins; otherwise a one-shot
+  // `live.nextPromptMaxTokens` (set by the empty-turn length-retry) is consumed
+  // and cleared so the raised budget applies to exactly one stream call;
+  // otherwise the default backstop.
   const installChannelOutputCap = (live: LiveSession): void => {
     const { agent } = live.session
     const inner = agent.streamFn
-    agent.streamFn = (model, context, options) =>
-      inner(model, context, { ...options, maxTokens: options?.maxTokens ?? CHANNEL_MAX_OUTPUT_TOKENS })
+    agent.streamFn = (model, context, options) => {
+      let maxTokens = options?.maxTokens
+      if (maxTokens === undefined && live.nextPromptMaxTokens !== undefined) {
+        maxTokens = live.nextPromptMaxTokens
+        live.nextPromptMaxTokens = undefined
+      }
+      return inner(model, context, { ...options, maxTokens: maxTokens ?? CHANNEL_MAX_OUTPUT_TOKENS })
+    }
   }
 
   const startTypingHeartbeat = (live: LiveSession): void => {
@@ -1904,10 +1938,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.lastSentText.clear()
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
           // A real user batch starts a fresh logical turn → restore the full
-          // empty-turn retry budget. Reset here (batch.length > 0) and NOT in
-          // the per-prompt block below, so the reminder-only iterations the
-          // retry itself queues do not refill the budget and loop forever.
+          // empty-turn retry budget and drop any raised output-token budget left
+          // over from a prior turn's length-retry. Reset here (batch.length > 0)
+          // and NOT in the per-prompt block below, so the reminder-only
+          // iterations the retry itself queues do not refill the budget and loop
+          // forever (and the raised cap stays scoped to the turn that set it).
           live.emptyTurnRetries = 0
+          live.nextPromptMaxTokens = undefined
         } else if (live.lastTurnAuthorId !== null) {
           live.currentTurnEngageReactions = []
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
@@ -3038,8 +3075,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (!attemptedSendThisTurn && live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
         live.emptyTurnRetries++
         logger.warn(
-          `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES}`,
+          `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+            `max_tokens=${CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS}`,
         )
+        // Give the re-prompt room to finish reasoning AND produce prose, since
+        // the truncation means the default backstop starved this turn. Consumed
+        // one-shot by installChannelOutputCap on the next session.prompt().
+        live.nextPromptMaxTokens = CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS
         live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
         return
       }
