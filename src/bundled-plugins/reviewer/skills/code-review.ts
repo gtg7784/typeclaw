@@ -13,11 +13,36 @@ You have been asked to review code. Apply this guidance on top of the reviewer's
 
 - **PR URL or number** — fetch the diff and the description:
   - \`gh pr diff <n>\` for the unified diff
-  - \`gh pr view <n>\` for title, body, labels, linked issues, checks
+  - \`gh pr view <n> --json title,body,baseRefName,headRefOid,files\` for title, body, linked issues, the head SHA, and the changed-file list
   - \`gh api /repos/<owner>/<repo>/pulls/<n>\` for the structured payload when you need machine-readable fields
 - **Commit SHA** — \`git show <sha>\` and \`git show <sha> --stat\` for the scope.
 - **File path / module path** — \`read\` the file directly; \`ls\` the parent directory to understand its neighbors; \`grep\` for callers of any function the file exports.
 - **Branch name** — \`git log <branch> ^main --oneline\` to enumerate commits, then \`git diff main...<branch>\` for the cumulative change.
+
+### Your cwd is NOT the PR's repo — read at the head SHA
+
+You run in the agent folder (\`/agent\`), **not** a checkout of the PR's target repository. A bare \`read /agent/src/...\` for a file that lives in the PR's repo will fail with \`ENOENT\` — the file is not on this disk. **When \`read\` returns \`ENOENT\` for a path you expected to exist, stop retrying local reads immediately**: that is the signal you are outside the target checkout, not a transient miss. Switch to one of the two acquisition modes below. Do not burn turns re-issuing \`read\` against \`/agent\` paths that will never resolve.
+
+Whichever mode you use, **every line number you cite must come from the PR's head SHA** (\`headRefOid\` from \`gh pr view\`), not the default branch — inline comments anchor to that exact revision.
+
+**Mode 1 — remote-read (default, for a handful of files).** When you need only a few adjacent files, fetch each **once** at the head SHA and number its lines in a single pipeline. Prefer \`gh api\` over \`raw.githubusercontent.com\`: \`gh api\` carries the adapter's GitHub auth, so it works on private repos too.
+
+\`\`\`sh
+gh api "/repos/<owner>/<repo>/contents/<path>?ref=<headSha>" --jq .content | base64 -d | nl -ba
+\`\`\`
+
+\`nl -ba\` prints real, 1-based line numbers so your \`location="path:line"\` anchors are exact. Fetch each file once and keep its numbered output — do not re-fetch the same file to re-derive a line number you already saw.
+
+**Mode 2 — scratch checkout (escalate when navigation gets broad).** When the review needs repo-wide \`grep\`, symbol tracing across several directories, many adjacent files, or repeated access to the same files, the remote-read dance is slower and more error-prone than a real checkout. In that case clone the PR head into a **fresh throwaway directory under \`/tmp\`** and read it natively:
+
+\`\`\`sh
+git clone --depth 1 "https://github.com/<owner>/<repo>.git" /tmp/review-<n>-src && \
+  git -C /tmp/review-<n>-src fetch --depth 1 origin <headSha> && git -C /tmp/review-<n>-src checkout <headSha>
+\`\`\`
+
+Then \`read\`, \`grep\`, \`find\`, and read-only \`git\` (\`git -C /tmp/review-<n>-src log|diff|show|blame|grep|ls-files|cat-file\`) all work against \`/tmp/review-<n>-src\` with correct line numbers and zero per-file round-trips.
+
+This \`/tmp\` scratch checkout is the **one** write the read-only contract permits — and only because it is a private acquisition cache, never the reviewed artifact. Inside it you may only **read**. You still may NOT: edit any file, install dependencies, run builds or tests, commit/stage/push/rebase/reset, or write anywhere outside this \`/tmp\` scratch dir. Do not \`rm\` it when done — leave cleanup to the session lifecycle (\`rm\` stays forbidden). When in doubt about how many files you'll touch, start with Mode 1 and escalate to Mode 2 only once the file count or grep breadth justifies the clone.
 
 ## How to build context
 
@@ -72,6 +97,8 @@ This includes payloads where the parent says the author **addressed your prior b
 
 - Return **approve** if the blockers that drove the prior \`request-changes\` are resolved (leftover nits do not block — \`approve\` with inline nits is correct).
 - Return **request-changes** if any blocker remains or a new one appeared.
+
+**Account for resolved threads in the \`<summary>\`, not as \`praise\` findings.** A re-review tempts you to emit one \`praise\` finding per prior concern the author fixed — "Thread 123 is addressed", "Thread 456 is addressed". Do **not**. \`praise\` is reserved for *non-obvious good work*, and a routine "you fixed what I asked" is neither non-obvious nor a finding the parent should post inline (it strips \`praise\` from inline comments anyway, so these become dead weight). Instead, state the resolution accounting in one sentence in your \`<summary>\` — e.g. "Both prior blockers (the unfenced table scan and the backtick-wrap span) are resolved at head \`<sha>\`; one new concern below." Reserve actual \`<finding>\` entries for what still needs action: a prior blocker that is **only partially** fixed (\`blocker\`/\`concern\`, anchored to the line that's still wrong), a **regression the fix introduced** (\`blocker\`/\`concern\`), or a genuinely non-obvious fix worth a rare \`praise\`. A clean re-review where everything was addressed is an \`approve\` whose \`<summary>\` says so and whose \`<findings>\` is empty — not a wall of \`praise\` receipts.
 - **Do NOT return \`comment\` on a re-review.** \`comment\` is for ambiguous partial reviews with no accept/reject signal; a re-review is the opposite — it is precisely an accept/reject decision. A \`comment\` verdict here leaves the PR's \`REQUEST_CHANGES\` state stuck (a plain comment does not clear it on GitHub), which is the exact failure a re-review exists to resolve. The only escape hatch is the same one that always applies: if you genuinely cannot reach the diff or the prior context, return one \`blocker\` finding stating what you need and a \`comment\` verdict — but a reachable, reviewable re-review must end in \`approve\` or \`request-changes\`.
 
 ## Line-anchor every finding
