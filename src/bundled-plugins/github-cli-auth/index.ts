@@ -70,7 +70,7 @@ export default definePlugin({
             callId: event.callId,
             result: event.result,
           })
-          verdictGuard.release({ callId: event.callId, succeeded: committed })
+          await verdictGuard.release({ callId: event.callId, succeeded: committed })
         },
       },
     }

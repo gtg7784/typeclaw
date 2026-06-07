@@ -13,11 +13,14 @@ export type EffectiveApprovalResolver = (target: {
   prNumber: number
 }) => Promise<{ ok: true; effective: EffectiveVerdict } | { ok: false }>
 
-// Resolves the PR's current head commit SHA. The landed-verdict cache keys on it
-// so a genuine re-verdict on a NEW push is allowed while a same-commit duplicate
-// is blocked. Resolved AFTER the in-flight lease is acquired, so the await does
-// not widen the reserve-before-await race. Fails soft (null) — an unresolved SHA
-// degrades the cache to verdict-only matching, never strands a genuine verdict.
+// Resolves the PR's current head commit SHA. Called twice: once in guard() (the
+// pre-submit head, resolved AFTER the in-flight lease so the await cannot widen the
+// reserve-before-await race) and once in release() (the post-submit head, to detect
+// a push that landed during the review). Fails soft (null). A null PRE-submit head
+// skips the cache write entirely — the guard falls open to GitHub rather than ever
+// stranding a genuine verdict on local memory. A null POST-submit head (or one that
+// differs from the pre-submit head) is recorded as the uncertainty sentinel so a
+// push-during-review still blocks a same-verdict duplicate for the lag window.
 export type HeadShaResolver = (target: { workspace: string; prNumber: number }) => Promise<string | null>
 
 export type ApproveBlock = { block: true; reason: string }
@@ -29,7 +32,7 @@ export type ReviewVerdictGuard = {
     prNumber: number
     verdict: ReviewVerdict
   }) => Promise<ApproveBlock | null>
-  release: (args: { callId: string; succeeded: boolean }) => void
+  release: (args: { callId: string; succeeded: boolean }) => Promise<void>
 }
 
 // Back-compat alias: the guard now covers REQUEST_CHANGES too, not just APPROVE.
@@ -71,16 +74,27 @@ const LEASE_TTL_MS = 5 * 60_000
 // list lags a write by up to ~10s, so a second engagement turn firing in that
 // window reads NONE and would land a duplicate. Observed duplicates were ~10-18s
 // apart; 60s is a comfortable lag margin without making a legitimate re-verdict
-// wait long. This window only shadows a raw NONE on the SAME verdict + SAME head —
-// a DISMISSED/CHANGES_REQUESTED/flipped-verdict/new-head all bypass it.
+// wait long. This window only shadows a raw NONE on the SAME verdict (+ same or
+// uncertain head) — a DISMISSED/CHANGES_REQUESTED/flipped-verdict all bypass it.
 const RECENT_LANDED_TTL_MS = 60_000
 
-type Reservation = { key: string; token: number; createdAt: number; headSha: string | null; verdict: ReviewVerdict }
+type Reservation = {
+  key: string
+  token: number
+  createdAt: number
+  headSha: string | null
+  verdict: ReviewVerdict
+  workspace: string
+  prNumber: number
+}
 
-// headSha is REQUIRED (never null): the cache is written only when the head was
-// resolved, so a same-head equality check is always meaningful. An unresolved
-// head skips the write entirely rather than storing a null that could never match.
-type LandedVerdict = { verdict: ReviewVerdict; headSha: string; landedAt: number }
+// headSha === null is the UNCERTAINTY sentinel: the command succeeded but the head
+// the review actually attached to is unknown (the PR head advanced between the
+// pre-submit capture and the write, or the post-submit re-resolve failed). A null
+// record matches any current head for the window — same verdict + raw NONE only —
+// so a push-during-review cannot let a same-verdict duplicate slip past on the new
+// head. A resolved string keys precise same-head matching for the normal case.
+type LandedVerdict = { verdict: ReviewVerdict; headSha: string | null; landedAt: number }
 
 // MODULE-LEVEL singletons, shared by every plugin instance in this process. The
 // github-cli-auth plugin's `plugin: async (ctx) => ...` factory may run once per
@@ -114,11 +128,14 @@ let tokenSeq = 0
 //      NONE. The lease (layer 1) covers two OVERLAPPING in-flight commands, but a
 //      second engagement turn ~10s later starts after the first's lease released,
 //      and GitHub's reviews list still lags the write (reports NONE). A short-lived
-//      `recentLandedByPr` record — same verdict + same head, written on a succeeded
-//      release, RECENT_LANDED_TTL_MS — disambiguates "NONE because lag" from "NONE
-//      because genuinely absent": only the former blocks. Because it fires after a
-//      raw NONE, a real DISMISSED/CHANGES_REQUESTED already allowed the re-verdict
-//      at layer 2, so this cannot re-strand a supersession.
+//      `recentLandedByPr` record — same verdict + (same OR uncertain head), written
+//      on a succeeded release, RECENT_LANDED_TTL_MS — disambiguates "NONE because
+//      lag" from "NONE because genuinely absent": only the former blocks. The head
+//      is re-resolved at release time; if the PR head advanced during the submit the
+//      record stores a null head (uncertainty), which matches the current head so a
+//      push-during-review cannot leak a duplicate. Because it fires after a raw
+//      NONE, a real DISMISSED/CHANGES_REQUESTED already allowed the re-verdict at
+//      layer 2, so this cannot re-strand a supersession.
 //
 // The lease is released only in release() (tool.after) or on a terminal block,
 // never after the remote read — releasing early reopens the TOCTOU the lease
@@ -150,6 +167,8 @@ export function createApproveIdempotencyGuard(deps: {
         createdAt: now(),
         headSha: null,
         verdict: args.verdict,
+        workspace: args.workspace,
+        prNumber: args.prNumber,
       }
       inFlightByPr.set(key, reservation)
       reservationByCall.set(args.callId, reservation)
@@ -185,32 +204,48 @@ export function createApproveIdempotencyGuard(deps: {
       return null
     },
 
-    release(args): void {
+    async release(args): Promise<void> {
       const reservation = reservationByCall.get(args.callId)
       if (reservation === undefined) return
-      // Record only when the head was resolved: an unresolved head cannot key a
-      // same-head lag check, so storing it would either never match or force a
-      // verdict-only block that regresses the supersession invariant.
-      if (args.succeeded && reservation.headSha !== null) {
-        recentLandedByPr.set(reservation.key, {
-          verdict: reservation.verdict,
-          headSha: reservation.headSha,
-          landedAt: now(),
-        })
+      try {
+        // The pre-submit head can go stale: if the PR head advanced between the
+        // guard() capture and the review landing, GitHub attaches the review to the
+        // NEWER head while reservation.headSha holds the older one. Re-resolve the
+        // head AFTER a successful submit and store what we can prove: the resolved
+        // head only when pre==post, else the null uncertainty sentinel (matches any
+        // current head for the lag window) so a push-during-review cannot let a
+        // same-verdict duplicate slip past on the new head. The lease stays held
+        // across this await (finally below), so the window is not reopened.
+        if (args.succeeded && reservation.headSha !== null) {
+          const postHeadSha =
+            (await deps.resolveHeadSha?.({ workspace: reservation.workspace, prNumber: reservation.prNumber })) ?? null
+          const landedHeadSha = postHeadSha !== null && postHeadSha === reservation.headSha ? postHeadSha : null
+          recentLandedByPr.set(reservation.key, {
+            verdict: reservation.verdict,
+            headSha: landedHeadSha,
+            landedAt: now(),
+          })
+        }
+      } finally {
+        releaseReservation(args.callId, reservation)
       }
-      releaseReservation(args.callId, reservation)
     },
   }
 }
 
 // True only when a recently-landed record proves the GitHub NONE is read lag: same
-// verdict, same head, within the lag window. A flipped verdict, a new head, or an
-// expired/absent record all return false so the genuine re-verdict passes.
+// verdict, within the window, AND the heads agree. Head agreement holds when the
+// stored head equals the current head, OR the stored head is the null uncertainty
+// sentinel (the landed commit could not be pinned, so it conservatively matches the
+// current head for the window). A flipped verdict or an expired/absent record
+// returns false so the genuine re-verdict passes; a different KNOWN head also
+// returns false so a real new push is never blocked.
 function recentlyLandedSame(key: string, verdict: ReviewVerdict, headSha: string | null, now: () => number): boolean {
   const landed = recentLandedByPr.get(key)
   if (landed === undefined) return false
   if (now() - landed.landedAt >= RECENT_LANDED_TTL_MS) return false
-  return verdict === landed.verdict && headSha !== null && headSha === landed.headSha
+  if (verdict !== landed.verdict) return false
+  return landed.headSha === null || landed.headSha === headSha
 }
 
 // Drop the lease only if THIS reservation still owns the key. A stale tool.after
