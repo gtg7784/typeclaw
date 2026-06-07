@@ -143,6 +143,13 @@ describe('reviewer read-only bash policy — remote (gh) mutation is denied', ()
     expect(allows('gh api repos/o/r/pulls/1/reviews --input /tmp/review.json')).toBe(false)
   })
 
+  test('denies gh api whose body param uses the ATTACHED long form (regression: --field=/--raw-field=/--input=/--data= also imply POST)', () => {
+    expect(allows('gh api repos/o/r/issues/1/comments --field=body=hi')).toBe(false)
+    expect(allows('gh api repos/o/r/issues/1/comments --raw-field=body=hi')).toBe(false)
+    expect(allows('gh api repos/o/r/pulls/1/reviews --input=/tmp/body.json')).toBe(false)
+    expect(allows('gh api repos/o/r/issues/1/comments --data=@/tmp/body.json')).toBe(false)
+  })
+
   test('denies gh api graphql outright (a mutation operation writes; cannot statically prove a query safe)', () => {
     expect(allows("gh api graphql -f query='mutation { addComment }'")).toBe(false)
     expect(allows("gh api graphql -f query='query { viewer }'")).toBe(false)

@@ -463,7 +463,20 @@ function classifyGh(tokens: string[]): void {
 // deny the `graphql` endpoint outright unless it is provably a query (a `mutation`
 // operation is a write; even a query we cannot statically prove safe is denied
 // for the reviewer because graphql can mutate through a GET-shaped call).
+// Separated forms (flag and value are two tokens, e.g. `--field body=x`).
 const GH_API_BODY_FLAGS = new Set(['-f', '--field', '-F', '--raw-field', '--input', '-d', '--data'])
+// Attached long forms (`--field=body=x`, `--input=/tmp/x`). Each must be matched
+// with its trailing `=` so `--field` proper still routes through the separated
+// set above, and so an unrelated flag that merely starts with the same letters
+// is not misread. Attached SHORT forms (`-fbody=x`, `-Fx`) are caught by the
+// `-f`/`-F` prefix check at the call site.
+const GH_API_BODY_FLAG_PREFIXES = ['--field=', '--raw-field=', '--input=', '--data=']
+
+function isGhApiBodyParam(token: string): boolean {
+  if (GH_API_BODY_FLAGS.has(token)) return true
+  if (token.startsWith('-f') || token.startsWith('-F')) return true
+  return GH_API_BODY_FLAG_PREFIXES.some((p) => token.startsWith(p))
+}
 
 function assertGhApiReadOnly(rest: string[]): void {
   let explicitMethod: string | null = null
@@ -483,7 +496,7 @@ function assertGhApiReadOnly(rest: string[]): void {
       explicitMethod = stripQuotes(t.slice('--method='.length)).toUpperCase()
       continue
     }
-    if (GH_API_BODY_FLAGS.has(t) || t.startsWith('-f') || t.startsWith('-F')) hasBodyParam = true
+    if (isGhApiBodyParam(t)) hasBodyParam = true
     if (stripQuotes(t) === 'graphql') isGraphql = true
   }
   if (isGraphql) {
