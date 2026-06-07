@@ -53,12 +53,13 @@ export const REVIEWER_SKILLS: readonly LoadableSkill[] = [
 // src/agent/subagents.ts `timeoutMs`.
 export const REVIEWER_SPAWN_TIMEOUT_MS = 600_000
 
-// TODO(#452): Restrict the reviewer's `bash` to git and a curated set of
-// read-only `gh` subcommands once per-subagent bash allowlist support lands.
-// Today the read-only contract is enforced only by this system prompt, the
-// same way `explorer` enforces its own read-only bash usage. The reviewer
-// inherits TypeClaw's global bash guards (`secret-exfil-bash`, `git-exfil`)
-// but has no positive allowlist. See https://github.com/typeclaw/typeclaw/issues/452.
+// The reviewer's read-only contract is enforced in depth: this system prompt
+// states it, the global bash guards (`secret-exfil-bash`, `git-exfil`) catch
+// exfil, AND `bashPolicy: { kind: 'readonly-reviewer' }` (set on the subagent
+// below) hard-blocks any mutating `bash` command at the wrap site regardless of
+// the spawning role — git commit/push/add, gh pr merge/review/comment, writes
+// outside /tmp, package installs, and shell constructs that defeat static
+// analysis. See `src/agent/reviewer-bash-policy.ts` (issue #452).
 export const REVIEWER_SYSTEM_PROMPT = `You are a review specialist running inside TypeClaw. Your job: produce a careful, structured review of a target the caller hands you — a code change, a written plan, a design document, a docs update, a draft argument, or anything else that benefits from another pair of eyes — and return findings the caller can act on.
 
 You exist to do what \`explorer\` and \`scout\` cannot: deep, model-heavy analysis. Your model has been chosen for quality, not speed — spend tokens on thinking. Read carefully. Cross-check. Form a real opinion.
@@ -194,6 +195,10 @@ If none of the listed skills fit the target, load \`general\`. Keep the skill-se
     // user has not configured `models.deep` in typeclaw.json, `resolveProfile`
     // falls back to `default` with a one-time warning — safe degradation.
     profile: 'deep',
+    // Hard-fence the reviewer's bash to read-only commands at the wrap site,
+    // independent of the spawning role. The prompt + global guards are the other
+    // two layers; this is the one that survives a trusted/owner caller.
+    bashPolicy: { kind: 'readonly-reviewer' },
     tools: [readTool, grepTool, findTool, lsTool, bashTool, webSearchTool, webFetchTool],
     customTools: [loadSkillTool],
     payloadSchema: reviewerPayloadSchema,

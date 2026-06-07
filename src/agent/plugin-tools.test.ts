@@ -1024,6 +1024,66 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
   })
 })
 
+describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability fence, role-independent)', () => {
+  function fakeBash(record: { command?: string }) {
+    return {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: Type.Object({ command: Type.String() }),
+      async execute(_id: string, params: { command: string }) {
+        record.command = params.command
+        return { content: [{ type: 'text' as const, text: 'ran' }], details: undefined }
+      },
+    }
+  }
+
+  const ownerTui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+
+  test('readonly-reviewer policy blocks a mutating command and the underlying bash never runs — even for a trusted owner origin', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => ownerTui,
+      permissions: createPermissionService(),
+      bashPolicy: { kind: 'readonly-reviewer' },
+    })
+    await expect(
+      wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never),
+    ).rejects.toThrow()
+    expect(record.command).toBeUndefined()
+  })
+
+  test('readonly-reviewer policy lets a read-only command through (and the role sandbox still leaves an owner command unchanged)', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => ownerTui,
+      permissions: createPermissionService(),
+      bashPolicy: { kind: 'readonly-reviewer' },
+    })
+    await wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)
+    expect(record.command).toBe('git status')
+  })
+
+  test('no bashPolicy leaves bash unrestricted (default subagents keep today behavior)', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => ownerTui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never)
+    expect(record.command).toBe('git push origin HEAD')
+  })
+})
+
 describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session scratch)', () => {
   function fakeWrite(record: { path?: string }) {
     return {

@@ -6,6 +6,7 @@ import type { Stream, Unsubscribe } from '@/stream'
 
 import { type AgentSession, createSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
+import type { SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
 import {
   beginSubagentDrainWatch,
@@ -88,6 +89,13 @@ export type SubagentShared<P = unknown> = {
   // hangs" symptom. Omit for no ceiling (legacy behavior; the spawn waits
   // as long as the provider takes).
   timeoutMs?: number
+  // Per-subagent bash capability restriction, enforced at the bash-wrap site
+  // INDEPENDENT of the caller's role (unlike the role-derived bwrap sandbox,
+  // which returns early for trusted/owner). A read-only subagent declares this
+  // to fence its `bash` to read-only commands even when spawned by a privileged
+  // caller. See `src/agent/reviewer-bash-policy.ts`. Omit for no restriction
+  // (the historical contract — prompt-only enforcement).
+  bashPolicy?: SubagentBashPolicy
 }
 
 export type Subagent<P = unknown> = SubagentShared<P> & {
@@ -155,6 +163,7 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     customTools: subagent.customTools ?? [],
     ...(subagent.profile !== undefined ? { profile: subagent.profile } : {}),
     ...(subagent.toolResultBudget !== undefined ? { toolResultBudget: subagent.toolResultBudget } : {}),
+    ...(subagent.bashPolicy !== undefined ? { bashPolicy: subagent.bashPolicy } : {}),
   })
 
 type NormalizedSubagentSession = {
