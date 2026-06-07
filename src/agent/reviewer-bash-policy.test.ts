@@ -230,6 +230,17 @@ describe('reviewer read-only bash policy — ambiguous shell fails closed', () =
   test('denies an unbalanced quote (cannot parse safely)', () => {
     expect(allows('cat "unterminated')).toBe(false)
   })
+
+  test('treats an unquoted newline as a command separator (regression: a mutating second line cannot hide behind an allowed first)', () => {
+    // bash runs each line as a separate command; without splitting on \n the
+    // whole thing parsed as one allowed `git status` segment while bash also ran
+    // `git push`.
+    expect(allows('git status\ngit push origin HEAD')).toBe(false)
+    expect(allows('git diff\nrm -rf src')).toBe(false)
+    expect(allows('git log\r\ngit push')).toBe(false)
+    // A newline between two genuinely read-only commands is still fine.
+    expect(allows('git status\ngit log')).toBe(true)
+  })
 })
 
 describe('reviewer read-only bash policy — wrapper dispatch', () => {

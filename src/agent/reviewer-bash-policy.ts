@@ -256,10 +256,13 @@ function splitIntoSegments(command: string): Segment[] {
       }
       continue
     }
-    if (ch === '|' || ch === '&' || ch === ';') {
+    if (ch === '|' || ch === '&' || ch === ';' || ch === '\n' || ch === '\r') {
       const next = command[i + 1]
-      // `|`, `||`, `&&`, `;` all start a new top-level segment. A lone `&`
-      // (background) is treated the same — we don't run backgrounded jobs.
+      // `|`, `||`, `&&`, `;`, and a NEWLINE all start a new top-level segment.
+      // bash treats an unquoted newline as a command separator exactly like `;`,
+      // so failing to split on it would let `git status\ngit push` parse as one
+      // allowed `git status` segment while bash runs `git push` separately. A
+      // lone `&` (background) is treated the same — we don't run backgrounded jobs.
       if ((ch === '|' && next === '|') || (ch === '&' && next === '&')) i++
       pushSegment()
       continue
@@ -274,7 +277,7 @@ function splitIntoSegments(command: string): Segment[] {
       expectingRedirectTarget = true
       continue
     }
-    if (ch === ' ' || ch === '\t' || ch === '\n') {
+    if (ch === ' ' || ch === '\t') {
       pushToken()
       continue
     }
