@@ -75,12 +75,14 @@ Write to \`public/\` instead of \`workspace/\` when your resolved role lacks \`f
         )
       }
 
-      const [realParent, realWorkspace, realPublic] = await Promise.all([
-        realpath(parent),
-        realpath(workspaceDir),
-        realpath(publicDir),
-      ])
-      if (realParent !== realWorkspace && realParent !== realPublic) {
+      // Resolve ONLY the canonical dir `parent` lexically matched above. `public/`
+      // is optional (created only for guest-readable output), so an unconditional
+      // `realpath('<agent>/public')` throws ENOENT on agents that never made it,
+      // which would reject every valid write to `workspace/`. The symlink-escape
+      // defense is unchanged — the parent actually written to is still canonicalized.
+      const canonicalDir = parent === workspaceDir ? workspaceDir : publicDir
+      const [realParent, realCanonical] = await Promise.all([realpath(parent), realpath(canonicalDir)])
+      if (realParent !== realCanonical) {
         throw new Error(`Report parent directory resolves outside the allowed report directories: ${parent}.`)
       }
 
