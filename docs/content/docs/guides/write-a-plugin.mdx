@@ -47,30 +47,31 @@ The rest of this page is for when you want to understand — or hand-write — t
 
 <Accordion title="What a plugin actually looks like">
 
-A plugin is a single TypeScript module with one default export: a `definePlugin(...)` call. It runs in the same process as the agent — no IPC, no subprocess — and receives a `PluginContext` (the live permission service, the message stream, the agent folder path). A minimal one-tool plugin:
+A plugin is a single TypeScript module with one default export: a `definePlugin(...)` call. It runs in the same process as the agent — no IPC, no subprocess — and its async factory receives a `PluginContext` (the live permission service, the agent folder path, a logger, `spawnSubagent`). A minimal one-tool plugin:
 
 ```ts
 import { definePlugin } from 'typeclaw/plugin'
 import { z } from 'zod'
 
 export default definePlugin({
-  name: 'notify',
   permissions: ['notify.send.notification'],
   configSchema: z.object({ webhook: z.string().url() }),
-  factory(ctx) {
+  async plugin(ctx) {
     const { webhook } = ctx.config
     return {
       tools: {
         send_notification: {
           description: 'Post a short notification to the configured webhook',
-          inputSchema: z.object({ text: z.string().describe('the message body') }),
+          parameters: z.object({ text: z.string().describe('the message body') }),
           async execute({ text }) {
             const res = await fetch(webhook, {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ text }),
             })
-            return { ok: res.ok, status: res.status }
+            return {
+              content: [{ type: 'text', text: res.ok ? `sent (${res.status})` : `failed (${res.status})` }],
+            }
           },
         },
       },
@@ -79,10 +80,10 @@ export default definePlugin({
 })
 ```
 
-- `name` — scopes the config block and the permission strings
+- The plugin's **name is not declared here** — the loader derives it from the entry. A local/path plugin (`./packages/notify`) is named from the resolved path's basename (here, `notify`); an npm plugin is named from `package.json#name`. That derived name scopes both the config block and the permission strings.
 - `permissions` — every permission this plugin declares and consumes; lets the runtime expand the `owner` wildcard and catch typos
-- `configSchema` — Zod schema for the config block, which lives at `typeclaw.json#notify`
-- `factory(ctx)` — returns the contributions; `ctx.config` is the parsed, frozen config block
+- `configSchema` — Zod schema for the config block, which lives at `typeclaw.json#<name>` (the derived name above)
+- `plugin(ctx)` — an **async** factory returning the contributions; `ctx.config` is the parsed config block (treat it as read-only — the `ctx` is frozen, the config object isn't). A tool's `parameters` is a Zod schema and its `execute` returns a `ToolResult` (`{ content, details? }`).
 
 Full contract: [plugin API reference](/docs/reference/plugin-api).
 
@@ -99,7 +100,7 @@ Custom plugins live under `packages/<plugin-name>/` — the agent folder is a bu
 }
 ```
 
-`plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
+The config key (`notify`) is the plugin's derived name — for this local plugin, the basename of `./packages/notify`. `plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
 
 </Accordion>
 
@@ -107,7 +108,7 @@ Custom plugins live under `packages/<plugin-name>/` — the agent folder is a bu
 
 Plugins can't change which other plugins load, rewrite the Dockerfile, or escape the container — the trust boundary is the container, not the plugin ([plugins and stages](/docs/concepts/plugins-and-stages)).
 
-They also can't drive the agent. A plugin _defines_ tools the agent may call; it doesn't issue tool calls itself. For scheduled work, contribute a cron job; for reactive work, subscribe to the message stream.
+They also can't drive the agent. A plugin _defines_ tools the agent may call; it doesn't issue tool calls itself. For scheduled work, contribute a cron job; for reactive work, install a hook. A plugin can't _initiate_ a tool call — but it _can_ intercept every one the agent makes: a `tool.before` hook gates the agent's own built-in tools too, including `bash` (this is how the bundled `security` plugin blocks unsafe shell commands).
 
 </Accordion>
 

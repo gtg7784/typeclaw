@@ -4,132 +4,220 @@ description: definePlugin, PluginContext, contribution types
 icon: Plug
 ---
 
-The walkthrough is at [Add a plugin](/docs/guides/write-a-plugin). The shape is at [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages). This page is the contract.
+The walkthrough is at [Add a plugin](/docs/guides/write-a-plugin). The shape is at [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages). This page is the contract. The source of truth is `src/plugin/types.ts` and `src/plugin/define.ts`.
 
 ## `definePlugin`
 
 ```ts
 import { definePlugin } from 'typeclaw/plugin'
 
-export default definePlugin<TConfig = unknown>({
-  name: string,
-  permissions: string[],
-  configSchema?: z.ZodType<TConfig>,
-  factory: (ctx: PluginContext<TConfig>) => PluginContributions,
+export default definePlugin({
+  configSchema, // optional: z.ZodType<TConfig>
+  permissions, // optional: readonly string[]
+  ownerWildcardExclusions, // optional: readonly string[]
+  commands, // optional: Record<string, PluginCommand>
+  plugin: async (ctx) => {
+    return {} // PluginExports
+  },
 })
 ```
 
-| Field          | Required | Notes                                                                                 |
-| -------------- | -------- | ------------------------------------------------------------------------------------- |
-| `name`         | yes      | unique, used to scope config block (`typeclaw.json#<name>`) and namespace permissions |
-| `permissions`  | yes      | every permission this plugin both declares and consumes; read before `factory` runs   |
-| `configSchema` | no       | Zod schema for the plugin's config block; defaults to `unknown` if omitted            |
-| `factory`      | yes      | returns the plugin's contributions; receives the live `PluginContext`                 |
+The plugin's **name is not declared here** — the loader derives it from the entry. For a local/path plugin (`./packages/foo`) the name is the resolved path's basename (minus a `.ts`/`.js`/… extension); for an npm plugin it's `package.json#name` run through `derivePluginNameFromPackage` (drops a `@scope/` and a `typeclaw-plugin-` prefix). That derived name scopes the config block (`typeclaw.json#<name>`) and namespaces permissions.
+
+| Field                     | Required | Notes                                                                                                                            |
+| ------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `configSchema`            | no       | Zod schema for the plugin's config block; parsed result is handed to `plugin` as `ctx.config`. Omit for `unknown`.               |
+| `permissions`             | no       | every permission this plugin both declares and consumes; read before `plugin` runs                                               |
+| `ownerWildcardExclusions` | no       | permission strings the owner wildcard sentinel MUST NOT auto-expand to (used by `security` to keep high-tier bypasses off owner) |
+| `commands`                | no       | declared by-value so the host-stage CLI can dispatch them without booting plugin runtime state                                   |
+| `plugin`                  | yes      | **async** factory; receives the live `PluginContext`, returns the plugin's `PluginExports`                                       |
 
 ## `PluginContext`
 
 ```ts
-type PluginContext<TConfig> = {
-  config: TConfig // parsed, frozen
-  permissions: PermissionService // .has(origin, perm) etc.
-  stream: MessageStream // .subscribe / .publish
-  spawnSubagent: (name: string, payload?: unknown, options?: SpawnOptions) => Promise<SubagentResult>
-  agentDir: string // absolute path, '/agent' in container
-  pluginDir: string // where the plugin's bundled assets live
-  containerName: string
-  logger: Logger
+type PluginContext<TConfig = never> = {
+  readonly name: string // derived plugin name
+  readonly version: string | undefined
+  readonly agentDir: string // absolute; '/agent' in container
+  readonly config: TConfig // parsed per configSchema (the ctx is frozen; the config object itself is not)
+  readonly logger: PluginLogger // .info / .warn / .error
+  readonly permissions: PermissionService // .has(origin, perm) etc.
+  readonly github: PluginGithubServices // .resolveTokenForRepo
+  spawnSubagent: (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
+}
+
+type SpawnSubagentOptions = {
+  parentSessionId?: string
+  spawnedByOrigin?: SessionOrigin
 }
 ```
 
-## `PluginContributions`
+`spawnSubagent` resolves `spawnedByRole` from `spawnedByOrigin` via the `PermissionService`, so the spawning session's role is inherited rather than forged. Hook handlers that own an origin (e.g. `session.idle`, `session.turn.end`) should pass `parentSessionId` and `spawnedByOrigin: event.origin`.
 
-Returned from `factory(ctx)`. All fields optional.
+## `PluginExports`
+
+Returned from the `plugin(ctx)` factory. All fields optional.
 
 ```ts
-type PluginContributions = {
-  tools?: Record<string, Tool>
-  skills?: PluginSkill[]
-  subagents?: Record<string, Subagent>
-  channels?: Record<string, ChannelAdapter>
-  crons?: CronJob[]
-  hooks?: {
-    'session.idle'?: (event: SessionIdleEvent) => void | Promise<void>
-    'tool.before'?: (event: ToolBeforeEvent) => ToolBeforeResult | Promise<ToolBeforeResult>
-    'tool.after'?: (event: ToolAfterEvent) => void | Promise<void>
-  }
+type PluginExports = {
+  tools?: Record<string, Tool<any>>
+  subagents?: Record<string, Subagent<any>>
+  cronJobs?: Record<string, PluginCronJob>
+  skills?: Record<string, PluginSkill>
+  skillsDirs?: string[]
+  hooks?: Hooks
+  doctorChecks?: Record<string, PluginDoctorCheck>
 }
 ```
+
+Commands are declared on `definePlugin` (by-value), not returned here.
 
 ### Tool
 
 ```ts
-type Tool<TIn = unknown, TOut = unknown> = {
+type Tool<P = unknown> = {
   description: string
-  inputSchema: z.ZodType<TIn>
-  execute: (input: TIn, ctx: ToolExecuteContext) => Promise<TOut>
+  parameters: z.ZodType<P>
+  execute: (args: P, ctx: ToolContext) => Promise<ToolResult>
+}
+
+type ToolContext = {
+  signal: AbortSignal | undefined // fires when the agent cancels the call
+  sessionId: string
+  agentDir: string
+  logger: ToolLogger
+}
+
+type ToolResult = {
+  content: ContentPart[] // { type: 'text'; text } | { type: 'image'; mimeType; data }
+  details?: unknown
 }
 ```
 
-`ToolExecuteContext` carries the live `SessionOrigin`, the agent's working directory inside the container, and a `signal` (`AbortSignal`) that fires when the agent cancels the call.
+`defineTool(tool)` is an identity helper for type inference. Built-in tools are referenced by tagged ref (`readTool`, `bashTool`, `editTool`, `writeTool`, `grepTool`, `findTool`, `lsTool`, `webSearchTool`, `webFetchTool`) — useful when wiring a subagent's `tools` list.
 
 ### Subagent
 
 ```ts
-type Subagent<TPayload = unknown> = {
-  systemPrompt: string
-  payloadSchema?: z.ZodType<TPayload>
-  inFlightKey?: (payload: TPayload) => string // for per-payload coalescing
-  handler: (payload: TPayload, ctx: SubagentContext) => Promise<SubagentResult>
+type Subagent<P = unknown> = SubagentShared<P> & {
+  tools?: BuiltinToolRef[] // built-in tools, by tagged ref
+  customTools?: Tool<any>[] // plugin-contributed tools
+  inFlightKey?: (payload: P) => string // per-payload coalescing
 }
 ```
 
-`inFlightKey` is what makes two concurrent invocations with the same payload serialize instead of race. Memory's `memory-logger` and `dreaming` both key by `agentDir`.
-
-### ChannelAdapter
-
-Plugin-contributed channels follow the same contract as built-ins. See `src/channels/adapters/` for examples.
+A subagent inherits its system prompt and payload schema from `SubagentShared`. `inFlightKey` defaults to the subagent name alone (only one instance runs at a time); override it to allow per-payload concurrency. Memory's `memory-logger` keys by `parentSessionId` so different parent sessions run in parallel while duplicate runs against the same session deduplicate. `defineSubagent(subagent)` is the identity helper.
 
 ### Cron
 
+`cronJobs` is a `Record<string, PluginCronJob>`; the runtime prefixes each key with `__plugin_<plugin-name>_` to form the global cron id (no collision with `cron.json` user jobs or across plugins). `PluginCronJob` is a discriminated union on `kind`:
+
 ```ts
-type CronJob = {
-  id: string
+type PluginPromptCronJob = {
   schedule: string
-  kind: 'prompt' | 'exec'
-  prompt?: string // when kind === 'prompt'
-  subagent?: string // when kind === 'prompt', invokes a subagent instead
-  command?: string[] // when kind === 'exec'
-  scheduledByRole: string // defaults to 'owner' for plugin-contributed jobs
+  kind: 'prompt'
+  prompt: string
+  enabled?: boolean
+  timezone?: string
+  subagent?: string // invoke a subagent instead of prompting
+  payload?: unknown
+}
+
+type PluginExecCronJob = {
+  schedule: string
+  kind: 'exec'
+  command: string[]
+  enabled?: boolean
+  timezone?: string
+}
+
+type PluginHandlerCronJob = {
+  schedule: string
+  kind: 'handler'
+  handler: (ctx: CronHandlerContext) => Promise<void>
+  enabled?: boolean
+  timezone?: string
 }
 ```
 
-Plugin-contributed cron jobs default to `scheduledByRole: 'owner'` (they're bundled or operator-installed runtime, not user channel schedules).
+`kind: 'handler'` is plugin-only — a TypeScript function reference, so it cannot appear in `cron.json` (the schema gate limits user files to `prompt` and `exec`). Use it when a job needs imperative control flow (probe → maybe prompt → write file) in the same plugin as the logic. `CronHandlerContext` mirrors a command's LLM-call surface (`prompt`, `subagent`, `exec`) plus `jobId`, `name`, `agentDir`, `logger`, `signal`, `permissions`, and a cron-shaped `origin` that stamps provenance on anything the handler spawns.
+
+### Skills
+
+```ts
+type PluginSkill = {
+  description: string
+  content: string
+  frontmatter?: Record<string, unknown>
+}
+```
+
+Contribute skills inline via `skills: Record<string, PluginSkill>`, or point at on-disk skill directories with `skillsDirs: string[]`.
 
 ### Hooks
+
+```ts
+type Hooks = {
+  'session.start'?: (event: SessionStartEvent, ctx: HookContext) => void | Promise<void>
+  'session.end'?: (event: SessionEndEvent, ctx: HookContext) => void | Promise<void>
+  'session.idle'?: (event: SessionIdleEvent, ctx: HookContext) => void | Promise<void>
+  'session.prompt'?: (event: SessionPromptEvent, ctx: HookContext) => void | Promise<void>
+  'session.turn.start'?: (event: SessionTurnStartEvent, ctx: HookContext) => void | Promise<void>
+  'session.turn.end'?: (event: SessionTurnEndEvent, ctx: HookContext) => void | Promise<void>
+  'tool.before'?: (event: ToolBeforeEvent, ctx: HookContext) => ToolBeforeResult | Promise<ToolBeforeResult>
+  'tool.after'?: (event: ToolAfterEvent, ctx: HookContext) => void | Promise<void>
+}
+
+type HookContext = { agentDir: string; pluginName: string; logger: PluginLogger }
+```
 
 `tool.before` is the gate. Return:
 
 ```ts
-type ToolBeforeResult =
-  | { ok: true } // allow
-  | { ok: false; reason: string } // block
-  | { ok: 'ack'; severity: 'low' | 'medium' | 'high'; guard: string; message: string }
-// require operator acknowledgement
+type ToolBeforeResult = void | undefined | { block: true; reason: string }
 ```
 
-The `ack` variant is what the bundled `security` plugin uses for its tier-based bypasses.
+Return nothing (or `undefined`) to allow; return `{ block: true, reason }` to block. The bundled `security` plugin returns the block variant for its tier-based policies. It fires for plugin-defined tools and TypeClaw-exposed built-in tools (read/bash/edit/write/grep/find/ls).
 
 `tool.after` is read-only; use it for logging, metrics, and side-channel cleanup.
 
-`session.idle` fires synchronously after `session.prompt()` resolves. Plugins that want delayed reactions (e.g. memory-logger's idleMs window) install their own `setTimeout`.
+`session.prompt` brackets system-prompt assembly — mutate near the **end** of `event.prompt` to preserve provider prompt-cache hits; mutations near the start invalidate the cache on every call. `session.turn.start` / `session.turn.end` bracket every `session.prompt(...)` turn (distinct from `session.start` / `session.end`, which bracket session lifetime). `session.idle` carries an `idleMs` window; plugins wanting delayed reactions install their own `setTimeout`.
+
+### Doctor checks
+
+```ts
+type PluginDoctorCheck = {
+  description: string
+  category?: string
+  run: (ctx: PluginDoctorContext) => Promise<PluginCheckResult>
+}
+```
+
+Each check is read-only by default. Declaring `fix.apply` on the returned `PluginCheckResult` opts it into `typeclaw doctor --fix`, where the host serializes plugin fixes, validates each `changedPaths` entry stays inside the agent folder, and commits the union of all fixes in a single commit.
+
+## Commands
+
+Commands are declared by-value on `definePlugin#commands` so the host-stage CLI can dispatch them without booting plugin runtime state. `surface` controls where a command may run:
+
+```ts
+type PluginCommand = ContainerCommand | HostCommand | EitherCommand
+```
+
+| `surface`     | Runs                        | Context surface                                       |
+| ------------- | --------------------------- | ----------------------------------------------------- |
+| `'container'` | inside the agent runtime    | `prompt`, `subagent`, `exec`, `origin`, `permissions` |
+| `'host'`      | on the user's machine       | streams + `agentDir` (host path), `logger`, `signal`  |
+| `'either'`    | whichever stage was invoked | intersection of the two                               |
+
+`defineCommand(cmd)` infers the context type from `surface` and types `args` from a `z.ZodObject` (v1 constraint: primitive leaves so `--help` can render `--<name>=<type>`). Container commands may set `isolated: true` to spawn a fresh Bun subprocess (~150ms cold-start) for isolation from the agent.
 
 ## Lifecycle
 
 Plugins load once at container start. They can:
 
-- Mutate behavior at runtime via tool execution and stream subscriptions
+- Expose tools, subagents, cron jobs, skills, hooks, doctor checks, and commands
 - Read live config via `ctx.config` (boot-only fields are snapshots; reloadable fields are live)
-- Spawn subagents with provenance (`spawnedByRole` is stamped from the parent origin)
+- Spawn subagents with provenance (`spawnedByRole` is resolved from the parent origin)
 
 Plugins cannot:
 
