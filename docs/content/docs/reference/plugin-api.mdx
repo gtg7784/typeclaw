@@ -22,7 +22,7 @@ export default definePlugin({
 })
 ```
 
-The plugin's **name is not declared here** — it is derived from the package's `package.json#name` (`derivePluginNameFromPackage`), and that name scopes the config block (`typeclaw.json#<name>`) and namespaces permissions.
+The plugin's **name is not declared here** — the loader derives it from the entry. For a local/path plugin (`./packages/foo`) the name is the resolved path's basename (minus a `.ts`/`.js`/… extension); for an npm plugin it's `package.json#name` run through `derivePluginNameFromPackage` (drops a `@scope/` and a `typeclaw-plugin-` prefix). That derived name scopes the config block (`typeclaw.json#<name>`) and namespaces permissions.
 
 | Field                     | Required | Notes                                                                                                                            |
 | ------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -39,7 +39,7 @@ type PluginContext<TConfig = never> = {
   readonly name: string // derived plugin name
   readonly version: string | undefined
   readonly agentDir: string // absolute; '/agent' in container
-  readonly config: TConfig // parsed per configSchema, frozen
+  readonly config: TConfig // parsed per configSchema (the ctx is frozen; the config object itself is not)
   readonly logger: PluginLogger // .info / .warn / .error
   readonly permissions: PermissionService // .has(origin, perm) etc.
   readonly github: PluginGithubServices // .resolveTokenForRepo

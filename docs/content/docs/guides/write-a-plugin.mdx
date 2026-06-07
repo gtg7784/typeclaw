@@ -80,10 +80,10 @@ export default definePlugin({
 })
 ```
 
-- The plugin's **name is not declared here** — it's derived from the package's `package.json#name`, and that name scopes both the config block and the permission strings.
+- The plugin's **name is not declared here** — the loader derives it from the entry. A local/path plugin (`./packages/notify`) is named from the resolved path's basename (here, `notify`); an npm plugin is named from `package.json#name`. That derived name scopes both the config block and the permission strings.
 - `permissions` — every permission this plugin declares and consumes; lets the runtime expand the `owner` wildcard and catch typos
-- `configSchema` — Zod schema for the config block, which lives at `typeclaw.json#<package-name>`
-- `plugin(ctx)` — an **async** factory returning the contributions; `ctx.config` is the parsed, frozen config block. A tool's `parameters` is a Zod schema and its `execute` returns a `ToolResult` (`{ content, details? }`).
+- `configSchema` — Zod schema for the config block, which lives at `typeclaw.json#<name>` (the derived name above)
+- `plugin(ctx)` — an **async** factory returning the contributions; `ctx.config` is the parsed config block (treat it as read-only — the `ctx` is frozen, the config object isn't). A tool's `parameters` is a Zod schema and its `execute` returns a `ToolResult` (`{ content, details? }`).
 
 Full contract: [plugin API reference](/docs/reference/plugin-api).
 
@@ -100,7 +100,7 @@ Custom plugins live under `packages/<plugin-name>/` — the agent folder is a bu
 }
 ```
 
-The config key (`notify`) is the plugin's derived name — its `package.json#name`, not its folder path. `plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
+The config key (`notify`) is the plugin's derived name — for this local plugin, the basename of `./packages/notify`. `plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
 
 </Accordion>
 

@@ -20,7 +20,7 @@ Pulling the boundary down to the plugin level would buy almost no extra security
 
 The `plugin(ctx)` factory is an async callback that gets a `PluginContext` carrying:
 
-- **`ctx.config`** — the parsed, frozen config block for this plugin (validated by your `configSchema`). Boot-only fields are snapshots; reloadable fields update on `typeclaw reload`.
+- **`ctx.config`** — the parsed config block for this plugin (validated by your `configSchema`). The `ctx` object is frozen, but the config object itself isn't, so treat it as read-only. Boot-only fields are snapshots; reloadable fields update on `typeclaw reload`.
 - **`ctx.permissions`** — the live permission service. Plugins query it (`ctx.permissions.has(origin, perm)`) rather than implementing their own checks.
 - **`ctx.spawnSubagent(name, payload, options)`** — for plugins that contribute subagents and want to invoke them; provenance is resolved from the spawning origin.
 - **`ctx.agentDir`** — absolute path to the agent folder (mounted at `/agent` in the container).
