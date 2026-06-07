@@ -1,6 +1,6 @@
 ---
 name: typeclaw-markdown-pdf
-description: "Turn any Markdown into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the compile command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead."
+description: "Turn any Markdown into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the render command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead."
 ---
 
 # typeclaw-markdown-pdf
@@ -8,13 +8,14 @@ description: "Turn any Markdown into a polished, professional PDF and (optionall
 You can produce professional PDFs from Markdown. This skill installs a small,
 self-contained [Typst](https://typst.app) toolchain into your `workspace/` the
 **first time** you need a PDF, then reuses it. No Pandoc, no LaTeX, no headless
-browser — just one static binary plus the [`cmarker`](https://typst.app/universe/package/cmarker/)
-package that reads your Markdown.
+browser — just an npm-installed Typst compiler plus the
+[`cmarker`](https://typst.app/universe/package/cmarker/) package that reads your
+Markdown.
 
-The flow is: **(1)** run the one-time setup (downloads `typst` + `cmarker` into
-`workspace/.tools/`), **(2)** write a styled `.typ` wrapper that reads your
-Markdown, **(3)** run `typst compile`. If a channel asked for the PDF, attach the
-result with `channel_send`.
+The flow is: **(1)** run the one-time setup (`bun add` the Typst compiler +
+vendor `cmarker` into `workspace/.tools/`), **(2)** write a styled `.typ` wrapper
+that reads your Markdown, **(3)** run the render script. If a channel asked for
+the PDF, attach the result with `channel_send`.
 
 You do **not** need to learn Typst markup. `cmarker` renders your CommonMark
 (headings, lists, tables, code, blockquotes, footnotes, links, images). The
@@ -33,52 +34,35 @@ _file_ is the deliverable.
 ## Step 0 — one-time setup (install the toolchain)
 
 Run this `bash` block once per container life. It is **idempotent** — if the
-tools are already present it does nothing and exits fast. It detects the
-container's OS/arch, downloads the pinned `typst` binary and the `cmarker`
-package into `workspace/.tools/`, and verifies both with SHA256.
+tools are already present it does nothing and exits fast. It `bun add`s the Typst
+compiler (npm pulls only this platform's prebuilt binary — Linux x64/arm64,
+glibc or musl) and vendors the SHA256-verified `cmarker` package into
+`workspace/.tools/` so `@preview/cmarker` resolves offline.
 
 ```sh
 set -eu
-TOOLS="workspace/.tools"
-TYPST_BIN="$TOOLS/typst"
-TYPST_VERSION="v0.14.2"
-CMARKER_VERSION="0.1.8"
-PKGDIR="$TOOLS/typst-packages/preview/cmarker/$CMARKER_VERSION"
+cd workspace
+mkdir -p .tools
+cd .tools
 
-if [ -x "$TYPST_BIN" ] && [ -f "$PKGDIR/lib.typ" ]; then
+CMARKER_VERSION="0.1.8"
+PKGDIR="typst-packages/preview/cmarker/$CMARKER_VERSION"
+
+if [ -f "node_modules/@myriaddreamin/typst-ts-node-compiler/package.json" ] && [ -f "$PKGDIR/lib.typ" ]; then
   echo "markdown-pdf toolchain already installed"
 else
-  mkdir -p "$TOOLS"
-  # Pick the official release asset for this OS/arch.
-  os="$(uname -s)"; arch="$(uname -m)"
-  case "$os-$arch" in
-    Linux-x86_64)  asset="typst-x86_64-unknown-linux-musl" ;;
-    Linux-aarch64) asset="typst-aarch64-unknown-linux-musl" ;;
-    Darwin-arm64)  asset="typst-aarch64-apple-darwin" ;;
-    Darwin-x86_64) asset="typst-x86_64-apple-darwin" ;;
-    *) echo "unsupported platform: $os-$arch" >&2; exit 1 ;;
-  esac
-  # SHA256 of the .tar.xz for each asset (pinned to $TYPST_VERSION).
-  case "$asset" in
-    typst-x86_64-unknown-linux-musl)  sha="a6044cbad2a954deb921167e257e120ac0a16b20339ec01121194ff9d394996d" ;;
-    typst-aarch64-unknown-linux-musl) sha="491b101aa40a3a7ea82a3f8a6232cabb4e6a7e233810082e5ac812d43fdcd47a" ;;
-    *) sha="" ;;  # darwin hashes only needed for local dev; skip verify off-Linux
-  esac
-  cd "$TOOLS"
-  curl -fsSL -o typst.tar.xz \
-    "https://github.com/typst/typst/releases/download/$TYPST_VERSION/$asset.tar.xz"
-  if [ -n "$sha" ]; then echo "$sha  typst.tar.xz" | sha256sum -c -; fi
-  tar -xJf typst.tar.xz --strip-components=1 "$asset/typst"
-  rm typst.tar.xz
-  ./typst --version
-  cd - >/dev/null
+  # The Typst compiler. `bun add` resolves the right prebuilt NAPI binary for
+  # this platform via optionalDependencies — no Rust toolchain, no manual download.
+  [ -f package.json ] || echo '{"name":"typeclaw-markdown-pdf-tools","private":true}' > package.json
+  bun add @myriaddreamin/typst-ts-node-compiler
 
+  # cmarker (Markdown -> Typst), vendored so compilation needs no network.
   mkdir -p "$PKGDIR"
-  curl -fsSL -o "$TOOLS/cmarker.tar.gz" \
+  curl -fsSL -o cmarker.tar.gz \
     "https://packages.typst.org/preview/cmarker-$CMARKER_VERSION.tar.gz"
-  echo "157cc40db2716f12c7eabb95df1f60714a4d95ebfb1c6087cf4aec224e49392a  $TOOLS/cmarker.tar.gz" | sha256sum -c -
-  tar -xzf "$TOOLS/cmarker.tar.gz" -C "$PKGDIR"
-  rm "$TOOLS/cmarker.tar.gz"
+  echo "157cc40db2716f12c7eabb95df1f60714a4d95ebfb1c6087cf4aec224e49392a  cmarker.tar.gz" | sha256sum -c -
+  tar -xzf cmarker.tar.gz -C "$PKGDIR"
+  rm cmarker.tar.gz
   echo "markdown-pdf toolchain installed"
 fi
 ```
@@ -87,10 +71,9 @@ Notes:
 
 - It writes only under `workspace/`, the directory your `bash`/`write` tools can
   write to. `workspace/.tools/` is gitignored scratch — it does not get committed.
-- It needs network the first time (to fetch the release + package). After that the
-  tools persist for the life of the container.
-- `typst` and `cmarker` are version-pinned and SHA256-verified, so you always get
-  the same, known-good toolchain.
+- It needs network the first time (to `bun add` the compiler + fetch the package).
+  After that the tools persist for the life of the container.
+- The compiler ships Typst **0.14.2**; `cmarker` is pinned + SHA256-verified.
 
 ## Step 1 — have the markdown ready
 
@@ -138,26 +121,50 @@ fonts/margins only if the user asks.
 
 Notes:
 
-- `read("report.md")` is **relative to the `.typ` file** — keep both in `workspace/`.
+- `read("report.md")` is **relative to the workspace** (the compiler's `workspace`
+  is set to `workspace/` — see Step 3). Keep the `.typ` and `.md` in `workspace/`.
 - Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
   install). For Korean/CJK body text, add `"Noto Serif CJK KR"` to the `font:` list
-  if the container has the `cjkFonts` toggle on.
+  and pass that font dir to `fontPaths` in Step 3 (the container's `cjkFonts` toggle
+  installs `fonts-noto-cjk` under `/usr/share/fonts`).
 
-## Step 3 — compile
+## Step 3 — render
 
-Point Typst at the vendored package cache so `@preview/cmarker` resolves from
-`workspace/.tools/` (the toolchain you installed in Step 0):
+`write` this tiny renderer to `workspace/.tools/render.ts`, then run it. It loads
+the npm-installed compiler, points the package cache at the vendored `cmarker`, and
+writes the PDF. Pass the wrapper and output paths as arguments.
+
+```ts
+// workspace/.tools/render.ts
+import { NodeCompiler } from '@myriaddreamin/typst-ts-node-compiler'
+import { writeFileSync } from 'node:fs'
+
+const [, , mainFile, outFile] = process.argv
+if (!mainFile || !outFile) throw new Error('usage: render.ts <main.typ> <out.pdf>')
+
+const compiler = NodeCompiler.create({
+  workspace: '.', // run from workspace/, so read("report.md") resolves
+  // Add CJK / extra font dirs here if needed:
+  // fontArgs: [{ fontPaths: ["/usr/share/fonts"] }],
+})
+const pdf = compiler.pdf({ mainFilePath: mainFile })
+writeFileSync(outFile, Buffer.from(pdf))
+console.log(`wrote ${outFile} (${pdf.length} bytes)`)
+```
+
+Run it from `workspace/`, with the package cache pointed at the vendored packages:
 
 ```sh
 cd workspace
 TYPST_PACKAGE_CACHE_PATH="$PWD/.tools/typst-packages" \
 TYPST_PACKAGE_PATH="$PWD/.tools/typst-packages" \
-  ./.tools/typst compile report.typ report.pdf
+  bun .tools/render.ts report.typ report.pdf
 ```
 
-Verify: the command exits `0` and `workspace/report.pdf` exists. On a compile
-error, Typst prints the offending line — usually raw HTML or an exotic markdown
-extension `cmarker` doesn't support; simplify that part and recompile.
+Verify: the command prints `wrote report.pdf (...)` and `workspace/report.pdf`
+exists. On a compile error the compiler throws with the offending Typst line —
+usually raw HTML or a markdown extension `cmarker` doesn't support; simplify that
+part and re-run.
 
 ## Step 4 — deliver
 
@@ -179,7 +186,7 @@ extension `cmarker` doesn't support; simplify that part and recompile.
 
 The `researcher` subagent writes its report to `workspace/research-<slug>.md` and
 returns a `<report>` block naming the file. Point the wrapper's `read(...)` at that
-file, compile, and attach. You do the PDF step — the researcher's `bash` is
+file, render, and attach. You do the PDF step — the researcher's `bash` is
 read-only and it only emits markdown by design.
 
 ## Customizing this skill
@@ -190,13 +197,27 @@ a cover page with a logo? Copy this file to `.agents/skills/<your-name>/SKILL.md
 or the wrapper there. Because the whole pipeline — install + render — lives in the
 skill, you can change either half without touching the container image.
 
+## Known limitations
+
+`cmarker` covers CommonMark well, but a few markdown features don't render as you
+might expect:
+
+- **Task-list checkboxes** (`- [ ]` / `- [x]`) render as literal `[ ]` text, not
+  checkboxes. Use a plain bullet list or a status column in a table instead.
+- **Bold/italic directly adjacent to CJK + parenthetical Latin** (e.g.
+  `**로컬 우선(local-first)**`) may not be recognized as emphasis — CommonMark's
+  flanking rules treat that boundary as non-emphasis. Put a space inside, or bold a
+  pure run of text.
+- **Raw HTML** in the markdown is mostly ignored. Express structure in markdown
+  (tables, lists) rather than HTML.
+
 ## Don'ts
 
 - **Don't** hand-write Typst markup for the body. Let `cmarker` render the
   markdown; only style via `#set` / `#show` rules in the wrapper.
 - **Don't** write the `.typ`, `.md`, `.pdf`, or `.tools/` outside `workspace/` —
   the sandbox blocks it.
-- **Don't** re-run Step 0's download if the tools already exist — the guard at the
-  top skips it. Re-downloading every time is wasteful.
+- **Don't** re-run Step 0's install if the tools already exist — the guard at the
+  top skips it. Re-installing every time is wasteful.
 - **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments.
   Link or inline instead.
