@@ -1,6 +1,6 @@
 import { GITHUB_API_BASE, githubJsonHeaders } from '@/channels/adapters/github/auth-pat'
 
-import type { EffectiveApprovalResolver, EffectiveVerdict } from './approve-idempotency'
+import type { EffectiveApprovalResolver, EffectiveVerdict, HeadShaResolver } from './approve-idempotency'
 
 // Resolves THIS bot's standing decisive review on a PR, used by the review
 // verdict guard to stop a second formal verdict after a restart (the in-process
@@ -30,9 +30,40 @@ export function createGithubEffectiveApprovalResolver(deps: {
   }
 }
 
+// Reads the PR's current head commit SHA from `GET /pulls/<n>` (`head.sha`), the
+// strongly-consistent single-object endpoint — NOT the eventually-consistent
+// reviews list the duplicate bug rode in on. Returns null on any failure so the
+// landed-verdict cache degrades to verdict-only matching rather than stranding.
+export function createGithubHeadShaResolver(deps: {
+  resolveToken: (workspace: string) => Promise<string | null>
+  fetchImpl?: typeof fetch
+}): HeadShaResolver {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  return async ({ workspace, prNumber }) => {
+    const [owner, repo] = workspace.split('/')
+    if (owner === undefined || owner === '' || repo === undefined || repo === '') return null
+    const token = await deps.resolveToken(workspace).catch(() => null)
+    if (token === null || token === '') return null
+    try {
+      const url = `${GITHUB_API_BASE}/repos/${owner}/${repo}/pulls/${prNumber}`
+      const response = await fetchImpl(url, { headers: githubJsonHeaders(token) })
+      if (!response.ok) return null
+      const raw = (await response.json().catch(() => null)) as { head?: { sha?: unknown } } | null
+      const sha = raw?.head?.sha
+      return typeof sha === 'string' && sha !== '' ? sha : null
+    } catch {
+      return null
+    }
+  }
+}
+
+// DISMISSED is surfaced distinctly (not collapsed to NONE) so the verdict guard's
+// lag shield can tell a genuine dismissal — which legitimately allows a same-verdict
+// re-review — apart from a bare NONE that may just be an unindexed just-landed write.
 function toEffective(state: string | undefined): EffectiveVerdict {
   if (state === 'APPROVED') return 'APPROVED'
   if (state === 'CHANGES_REQUESTED') return 'CHANGES_REQUESTED'
+  if (state === 'DISMISSED') return 'DISMISSED'
   return 'NONE'
 }
 
