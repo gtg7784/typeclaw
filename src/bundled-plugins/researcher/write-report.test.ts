@@ -125,6 +125,28 @@ describe('write_report tool — symlink and overwrite defenses', () => {
   })
 })
 
+describe('write_report tool — optional public/ dir', () => {
+  test('writes to workspace/ when public/ does not exist (the common agent layout)', async () => {
+    await rm(publicDir, { recursive: true, force: true })
+    const tool = createWriteReportTool()
+    const target = path.join(workspaceDir, 'research-no-public-dir.md')
+
+    await tool.execute({ path: target, content: 'report' }, makeCtx())
+
+    expect(await readFile(target, 'utf8')).toBe('report')
+  })
+
+  test('writes to public/ when workspace/ does not exist', async () => {
+    await rm(workspaceDir, { recursive: true, force: true })
+    const tool = createWriteReportTool()
+    const target = path.join(publicDir, 'research-no-workspace-dir.md')
+
+    await tool.execute({ path: target, content: 'report' }, makeCtx())
+
+    expect(await readFile(target, 'utf8')).toBe('report')
+  })
+})
+
 describe('write_report tool — one report per session', () => {
   test('rejects a second write in the same session', async () => {
     const tool = createWriteReportTool()
