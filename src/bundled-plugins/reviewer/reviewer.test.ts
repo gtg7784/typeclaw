@@ -46,6 +46,18 @@ describe('reviewer subagent — load-bearing prompt phrases', () => {
     expect(REVIEWER_SYSTEM_PROMPT).toContain('git push')
   })
 
+  test('prompt scopes read-only to side effects, not local bytes, so a skill may carve a /tmp scratch exception without contradiction', () => {
+    // A loaded skill (code-review) may permit cloning a PR head into /tmp to
+    // read it at line accuracy. The base prompt must frame the boundary as
+    // "no side effects on the reviewed artifact / remote / persistent
+    // workspace" so that carve-out is not a contradiction of the forbidden-verb
+    // list — while the list still applies everywhere else.
+    const lower = REVIEWER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('no side effects on the reviewed artifact')
+    expect(lower).toContain('throwaway scratch directory under `/tmp`')
+    expect(lower).toContain('treat the list as absolute')
+  })
+
   test('prompt names the dedicated tools by their exact runtime names', () => {
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`read`')
     expect(REVIEWER_SYSTEM_PROMPT).toContain('`grep`')
@@ -295,6 +307,51 @@ describe('reviewer skill content', () => {
     const lower = CODE_REVIEW_SKILL.content.toLowerCase()
     expect(lower).toContain('addressed your prior blocking feedback')
     expect(lower).toContain('review again')
+  })
+
+  test('code-review skill stops the reviewer retrying local /agent reads and routes to head-SHA remote-read (ENOENT rule)', () => {
+    // The reviewer's cwd is the agent folder, not the PR's repo. Without the
+    // ENOENT rule it re-issues `read /agent/...` that can never resolve, then
+    // limps to gh-api with ad-hoc base64/line-number gymnastics. The skill must
+    // name the signal (ENOENT) and the canonical head-SHA recipe.
+    const content = CODE_REVIEW_SKILL.content
+    const lower = content.toLowerCase()
+    expect(lower).toContain('enoent')
+    expect(lower).toContain('stop retrying local reads')
+    expect(lower).toContain('head sha')
+    // The recipe MUST be a single bare `gh api` at the head SHA with the raw
+    // media type — NOT a pipe. A repo-targeting `gh` piped into `base64`/`nl`
+    // is rejected by the token-leak guard (a sibling stage would inherit the
+    // minted App token), so the skill must steer away from that shape.
+    expect(content).toContain('gh api')
+    expect(content).toContain('?ref=<headSha>')
+    expect(content).toContain('application/vnd.github.raw')
+    expect(lower).toContain('single bare `gh` invocation')
+    expect(lower).toContain('do not pipe')
+  })
+
+  test('code-review skill allows a scoped /tmp scratch checkout for broad navigation but keeps it read-only', () => {
+    // Hybrid acquisition: remote-read by default, escalate to a throwaway
+    // checkout only when navigation gets broad. The exception must stay
+    // narrow — /tmp scratch only, never the reviewed artifact, no rm.
+    const content = CODE_REVIEW_SKILL.content
+    const lower = content.toLowerCase()
+    expect(lower).toContain('scratch checkout')
+    expect(content).toContain('/tmp/review-')
+    expect(lower).toContain('never the reviewed artifact')
+    expect(lower).toContain('leave cleanup to the session lifecycle')
+  })
+
+  test('code-review skill accounts for resolved threads in the summary, not as praise findings (re-review noise guard)', () => {
+    // In re-reviews the model is tempted to emit one `praise` finding per
+    // fixed thread ("Thread 123 is addressed"), diluting the rare-praise
+    // signal and producing inline comments the parent strips anyway. The skill
+    // must route resolution accounting to the <summary> and reserve findings
+    // for what still needs action.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('account for resolved threads in the')
+    expect(lower).toContain('not as `praise` findings')
+    expect(lower).toContain('one `praise` finding per prior concern the author fixed')
   })
 
   test('general skill body teaches universal review craft (load-bearing audience-fit phrasing)', () => {
