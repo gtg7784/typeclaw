@@ -257,6 +257,40 @@ describe('renderSessionOrigin', () => {
     },
   )
 
+  test.each(['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const)(
+    'attachment-capable channel origin (%s) defaults researcher reports to a PDF attachment',
+    (adapter) => {
+      const out = renderSessionOrigin({
+        kind: 'channel',
+        adapter,
+        workspace: 'W0',
+        chat: 'C0',
+        thread: null,
+      })
+      expect(out).toMatch(/Ship `researcher` reports as a PDF by default/i)
+      expect(out).toContain('research-<slug>.md')
+      expect(out).toContain('typeclaw-markdown-pdf')
+      expect(out).toMatch(/channel_send\(\{ \.\.\., attachments:/)
+      expect(out).toMatch(/do not paste the full markdown into chat/i)
+    },
+  )
+
+  // GitHub's outbound callback hard-rejects attachments
+  // (`github-bot-does-not-support-attachments`), so the PDF default must be
+  // suppressed there — nudging the model toward an attachment send that always
+  // fails would be worse than no guidance at all.
+  test('github channel origin omits the researcher-PDF default (attachments unsupported)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'pr:7',
+      thread: null,
+    })
+    expect(out).not.toMatch(/Ship `researcher` reports as a PDF by default/i)
+    expect(out).not.toContain('typeclaw-markdown-pdf')
+  })
+
   test('channel origin tells the model that plain-text narration is invisible and must go through channel_reply', () => {
     const out = renderSessionOrigin({
       kind: 'channel',

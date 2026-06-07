@@ -129,14 +129,34 @@ type PlatformInfo = {
   // the call would no-op. Keep in sync with the adapters that call
   // `router.registerReaction` (github, slack-bot, discord-bot today).
   supportsReactions: boolean
+  // Whether this adapter's OutboundCallback accepts file attachments. Gates the
+  // "ship a researcher report as a PDF by default" prompt guidance: a report is
+  // only worth converting to a downloadable file on channels that can actually
+  // receive one. GitHub's outbound callback hard-rejects attachments
+  // (`github-bot-does-not-support-attachments` in adapters/github/outbound.ts),
+  // so a PDF nudge there would train the model toward a call that always fails;
+  // the other four upload files (Slack `uploadFile`, Discord `uploadFile`,
+  // Telegram `sendDocument`, KakaoTalk `sendAttachment`). Keep in sync with the
+  // adapters' outbound callbacks.
+  supportsAttachments: boolean
 }
 
 const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
-  'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id', supportsReactions: true },
-  'discord-bot': { displayName: 'Discord', mentionMode: 'angle-id', supportsReactions: true },
-  github: { displayName: 'GitHub', mentionMode: 'at-username', supportsReactions: true },
-  'telegram-bot': { displayName: 'Telegram', mentionMode: 'at-username', supportsReactions: false },
-  kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias', supportsReactions: false },
+  'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id', supportsReactions: true, supportsAttachments: true },
+  'discord-bot': {
+    displayName: 'Discord',
+    mentionMode: 'angle-id',
+    supportsReactions: true,
+    supportsAttachments: true,
+  },
+  github: { displayName: 'GitHub', mentionMode: 'at-username', supportsReactions: true, supportsAttachments: false },
+  'telegram-bot': {
+    displayName: 'Telegram',
+    mentionMode: 'at-username',
+    supportsReactions: false,
+    supportsAttachments: true,
+  },
+  kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias', supportsReactions: false, supportsAttachments: true },
 }
 
 function getPlatformInfo(adapter: AdapterId): PlatformInfo {
@@ -461,6 +481,7 @@ function renderChannelOrigin(
     "matching the channel's `allow` rules are accepted (the tool returns",
     '`{ ok: false }` otherwise).',
     '',
+    ...renderResearchReportDeliveryGuidance(platformInfo),
     ...renderMentionGuidance(platformInfo, origin.participants ?? [], now, origin.self),
   )
 
@@ -494,6 +515,30 @@ function renderMembershipSummary(
     return `This channel has ${total} members: ${membership.humans} humans, ${membership.bots} bots.${caveat} The 10 most recent speakers are listed below.`
   }
   return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap). The 10 most recent speakers are listed below.`
+}
+
+// The `researcher` subagent always hands back a markdown report file
+// (`research-<slug>.md`) and is itself read-only — it cannot produce the PDF.
+// Whoever delivers that report to a channel is the one who decides the format,
+// and on a channel that accepts file uploads the right default for a multi-page
+// research report is a downloadable PDF, not a wall of raw markdown dumped into
+// chat. This block makes that the default ONLY where it is actionable: gated on
+// `supportsAttachments` so GitHub (whose outbound callback rejects attachments)
+// never gets a nudge toward a `channel_send` call that would fail.
+function renderResearchReportDeliveryGuidance(platformInfo: PlatformInfo): string[] {
+  if (!platformInfo.supportsAttachments) return []
+  return [
+    `**Ship \`researcher\` reports as a PDF by default.** ${platformInfo.displayName} accepts file`,
+    'attachments. When you receive a `researcher` subagent result — a',
+    '`research-<slug>.md` report file path in its `<report>` block — convert that',
+    'markdown to a PDF with the `typeclaw-markdown-pdf` skill and deliver it with',
+    '`channel_send({ ..., attachments: [{ path, filename }] })`, with a one- or',
+    'two-line summary as the message text. A downloadable file is what a human',
+    'wants for a multi-page report; do not paste the full markdown into chat. Send',
+    'the report inline as plain text only if the caller explicitly asked for it in',
+    'the message, or the report is short enough that a file would be overkill.',
+    '',
+  ]
 }
 
 function renderMentionGuidance(
