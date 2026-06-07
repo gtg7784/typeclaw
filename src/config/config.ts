@@ -338,22 +338,31 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
-// `realProc` opts the per-tool bwrap sandbox into the 'real-proc' strategy
-// (src/sandbox/build.ts): a fresh procfs scoped to a new PID namespace so
-// external-package runners (`bunx`, `bun add <pkg>`, `bun run <pkg-bin>`) get a
-// working /proc/self/{fd,maps} and stop aborting with Bun's "NotDir". Default
-// `false` keeps the universally-portable '--tmpfs /proc' profile, under which
-// sandboxed external-package execution is unsupported by design. Turning it on
-// makes `typeclaw start` grant the container CAP_SYS_ADMIN (required to mount
-// proc for the new PID namespace), which is a deliberate posture change on the
-// single-tenant outer boundary — see docs/internals/sandbox.mdx. PID isolation
-// and the /proc/N/environ leak guard are both preserved; the trade is the
-// CAP_SYS_ADMIN grant, not sandbox strength.
+// `realProc` drives the per-tool bwrap sandbox /proc strategy
+// (src/sandbox/build.ts). Default `true` uses the 'real-proc' strategy: a fresh
+// procfs scoped to a new PID namespace so external-package runners (`bunx`,
+// `bun add <pkg>`, `bun run <pkg-bin>`) get a working /proc/self/{fd,maps}.
+// This is REQUIRED for the core subagent workflow — the bundled agent-messenger
+// skills all shell out to `bunx agent-*`, and under the older '--tmpfs /proc'
+// profile every such call aborted with Bun's "NotDir" (createFakeTemporaryNode-
+// Executable reads /proc/self/{fd,maps} in the spawned child, which the empty
+// tmpfs lacks). The default makes `typeclaw start` grant the container
+// CAP_SYS_ADMIN (required to mount proc for the new PID namespace). On
+// typeclaw's single-tenant outer boundary (already seccomp=unconfined, the
+// inner bwrap user-namespace is the real per-tool boundary) this is an accepted
+// posture — see docs/internals/sandbox.mdx. PID isolation and the
+// /proc/N/environ leak guard are both preserved; real-proc is a fresh procfs in
+// a NEW pid ns, never the agent runtime's /proc.
+//
+// Set `false` to opt back into the narrower '--tmpfs /proc' profile WITHOUT the
+// CAP_SYS_ADMIN grant. That profile cannot run external packages inside the
+// sandbox: sandboxed `bunx`/`bun add`/`bun run <pkg-bin>` abort with Bun's
+// "NotDir" — the explicit, documented cost of the opt-out.
 export const sandboxSchema = z
   .object({
-    realProc: z.boolean().default(false),
+    realProc: z.boolean().default(true),
   })
-  .default({ realProc: false })
+  .default({ realProc: true })
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 
