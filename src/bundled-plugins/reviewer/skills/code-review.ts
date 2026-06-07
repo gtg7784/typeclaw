@@ -25,13 +25,15 @@ You run in the agent folder (\`/agent\`), **not** a checkout of the PR's target 
 
 Whichever mode you use, **every line number you cite must come from the PR's head SHA** (\`headRefOid\` from \`gh pr view\`), not the default branch — inline comments anchor to that exact revision.
 
-**Mode 1 — remote-read (default, for a handful of files).** When you need only a few adjacent files, fetch each **once** at the head SHA and number its lines in a single pipeline. Prefer \`gh api\` over \`raw.githubusercontent.com\`: \`gh api\` carries the adapter's GitHub auth, so it works on private repos too.
+**Mode 1 — remote-read (default, for a handful of files).** When you need only a few adjacent files, fetch each **once** at the head SHA. Prefer \`gh api\` over \`raw.githubusercontent.com\`: \`gh api\` carries the adapter's GitHub auth, so it works on private repos too.
+
+A repo-targeting \`gh\` command MUST be a **single bare \`gh\` invocation** — no pipes, \`&&\`, \`;\`, or redirects. The runtime injects the GitHub App token into the command's environment, so any sibling stage in a pipeline would inherit a live token; the guard blocks those shapes (the same rule the GitHub channel skill enforces for review posting). So do NOT pipe \`gh api ... | base64 -d | nl -ba\` — that exact shape is rejected before it runs. Instead fetch the **already-decoded** file with the raw media type in one bare call:
 
 \`\`\`sh
-gh api "/repos/<owner>/<repo>/contents/<path>?ref=<headSha>" --jq .content | base64 -d | nl -ba
+gh api "/repos/<owner>/<repo>/contents/<path>?ref=<headSha>" -H "Accept: application/vnd.github.raw"
 \`\`\`
 
-\`nl -ba\` prints real, 1-based line numbers so your \`location="path:line"\` anchors are exact. Fetch each file once and keep its numbered output — do not re-fetch the same file to re-derive a line number you already saw.
+That returns the file's raw bytes (no base64, no second stage). For the line numbers your \`location="path:line"\` anchors need, read them off the unified diff you already fetched (\`gh pr diff\` prints the new-side line numbers in its hunk headers, \`@@ -a,b +c,d @@\`), or escalate to Mode 2 where a real \`read\`/\`grep\` gives native line numbers. Fetch each file once and keep its output — do not re-fetch the same file to re-derive a line you already saw.
 
 **Mode 2 — scratch checkout (escalate when navigation gets broad).** When the review needs repo-wide \`grep\`, symbol tracing across several directories, many adjacent files, or repeated access to the same files, the remote-read dance is slower and more error-prone than a real checkout. In that case clone the PR head into a **fresh throwaway directory under \`/tmp\`** and read it natively:
 

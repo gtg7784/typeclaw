@@ -313,16 +313,21 @@ describe('reviewer skill content', () => {
     // The reviewer's cwd is the agent folder, not the PR's repo. Without the
     // ENOENT rule it re-issues `read /agent/...` that can never resolve, then
     // limps to gh-api with ad-hoc base64/line-number gymnastics. The skill must
-    // name the signal (ENOENT) and the canonical line-numbered recipe.
+    // name the signal (ENOENT) and the canonical head-SHA recipe.
     const content = CODE_REVIEW_SKILL.content
     const lower = content.toLowerCase()
     expect(lower).toContain('enoent')
     expect(lower).toContain('stop retrying local reads')
     expect(lower).toContain('head sha')
-    // Canonical one-shot, line-numbered remote read at the head SHA.
+    // The recipe MUST be a single bare `gh api` at the head SHA with the raw
+    // media type — NOT a pipe. A repo-targeting `gh` piped into `base64`/`nl`
+    // is rejected by the token-leak guard (a sibling stage would inherit the
+    // minted App token), so the skill must steer away from that shape.
     expect(content).toContain('gh api')
-    expect(content).toContain('base64 -d | nl -ba')
     expect(content).toContain('?ref=<headSha>')
+    expect(content).toContain('application/vnd.github.raw')
+    expect(lower).toContain('single bare `gh` invocation')
+    expect(lower).toContain('do not pipe')
   })
 
   test('code-review skill allows a scoped /tmp scratch checkout for broad navigation but keeps it read-only', () => {
