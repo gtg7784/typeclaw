@@ -18,35 +18,43 @@ Pulling the boundary down to the plugin level would buy almost no extra security
 
 ## What plugins receive
 
-The `factory(ctx)` callback gets a `PluginContext` carrying:
+The `plugin(ctx)` factory is an async callback that gets a `PluginContext` carrying:
 
 - **`ctx.config`** — the parsed, frozen config block for this plugin (validated by your `configSchema`). Boot-only fields are snapshots; reloadable fields update on `typeclaw reload`.
 - **`ctx.permissions`** — the live permission service. Plugins query it (`ctx.permissions.has(origin, perm)`) rather than implementing their own checks.
-- **`ctx.stream`** — the in-process message stream. Plugins subscribe to broadcasts, publish to typed targets.
-- **`ctx.spawnSubagent(name, payload, options)`** — for plugins that contribute subagents and want to invoke them.
+- **`ctx.spawnSubagent(name, payload, options)`** — for plugins that contribute subagents and want to invoke them; provenance is resolved from the spawning origin.
 - **`ctx.agentDir`** — absolute path to the agent folder (mounted at `/agent` in the container).
+- **`ctx.name` / `ctx.version` / `ctx.logger` / `ctx.github`** — the plugin's derived name, its package version, a namespaced logger, and GitHub token resolution.
 
 Everything plugins talk to flows through this object. There are no module-global imports of agent state, no singletons reaching into the runtime — the surface is the `ctx`.
 
 ## What plugins can contribute
 
-A plugin's `factory` returns an object with optional fields:
+A plugin's factory returns a `PluginExports` object with optional fields:
 
 - **`tools`** — Zod-typed functions the agent can call
-- **`skills`** — markdown procedures the agent loads on demand
+- **`skills`** / **`skillsDirs`** — markdown procedures the agent loads on demand, inline or from directories
 - **`subagents`** — focused worker sessions with their own system prompt and payload schema
-- **`channels`** — new inbound/outbound message platforms
-- **`crons`** — scheduled prompts or exec commands contributed at boot
+- **`cronJobs`** — scheduled prompts, exec commands, or in-process handlers contributed at boot
+- **`hooks`** — session- and tool-lifecycle observers (see below)
+- **`doctorChecks`** — `typeclaw doctor` checks, optionally with a `--fix` apply step
 
-Plus, declared on the `definePlugin` envelope itself (not inside `factory`):
+Plus, declared on the `definePlugin` envelope itself (not inside the factory):
 
 - **`permissions`** — every permission this plugin both checks and contributes. Lifted out of the factory because the runtime reads it before invoking the factory, to expand the owner wildcard and validate user-declared `permissions[]` against the union of all plugin permissions.
+- **`commands`** — host- or container-stage CLI subcommands, declared by-value so the host CLI can dispatch them without booting plugin runtime state.
 
 The full signatures are at [/reference/plugin-api](/docs/reference/plugin-api).
 
+## Hooks intercept the agent's own tools
+
+Reactive work runs through `hooks`, not a message-stream subscription. The session hooks (`session.start` / `end` / `idle` / `prompt` / `turn.start` / `turn.end`) observe the agent's lifecycle; the bundled `memory` plugin debounces off `session.idle` to spawn its logger.
+
+The tool hooks are the important ones for security. `tool.before` and `tool.after` fire for **both** plugin-contributed tools **and** the agent's own built-in tools — `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. A `tool.before` returning `{ block: true, reason }` aborts the call before it runs, including a `bash` shell command. This is exactly how the bundled `security` plugin enforces its policies (secret exfil, SSRF, git remote taint, prompt injection) — by inspecting the agent's own `bash` invocations at `tool.before`. So "plugins can't drive the agent" does **not** mean plugins can't intercept it: a plugin cannot _issue_ tool calls, but it can _gate_ every tool call the agent makes.
+
 ## What plugins cannot do
 
-Plugins can't drive the agent. They contribute tools the agent might call; they don't issue tool calls themselves. If you need scheduled work, contribute a cron. If you need reactive work, subscribe to the message stream. The agent's autonomy is the agent's; plugins are how you give it more capabilities, not how you put it on rails.
+Plugins can't drive the agent. They contribute tools the agent might call; they don't issue tool calls themselves. If you need scheduled work, contribute a cron. If you need reactive work, install a hook. The agent's autonomy is the agent's; plugins are how you give it more capabilities, not how you put it on rails.
 
 Plugins also can't change other plugins' contributions, mutate the Dockerfile, or open new mounts. These are container-stage facts captured at boot, owned by the host-stage launcher, and not exposed to plugin code.
 
