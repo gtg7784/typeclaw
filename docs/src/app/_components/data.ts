@@ -1,4 +1,8 @@
+import { TYPECLAW_VERSION } from '../../generated/version'
+
 export const INSTALL_COMMAND = 'bun add -g typeclaw'
+
+export const VERSION = `v${TYPECLAW_VERSION}`
 
 export interface Feature {
   title: string

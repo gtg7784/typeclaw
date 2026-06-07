@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "gen:version": "bun run scripts/gen-version.ts",
+    "predev": "bun run gen:version",
     "dev": "next dev",
+    "prebuild": "bun run gen:version",
     "build": "next build",
     "start": "next start",
     "lint": "oxlint",
