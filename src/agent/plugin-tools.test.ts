@@ -10,7 +10,7 @@ import { z } from 'zod'
 
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
-import { _resetBwrapAvailabilityCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
+import { _resetBwrapAvailabilityCacheForTests, _resetRealProcProbeCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
 
 import {
   __resetSharedLoopGuardForTests,
@@ -920,6 +920,7 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
 describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hiding)', () => {
   beforeEach(() => {
     _resetBwrapAvailabilityCacheForTests()
+    _resetRealProcProbeCacheForTests()
   })
 
   function fakeBash(record: { command?: string }) {
