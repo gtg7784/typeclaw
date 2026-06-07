@@ -3200,6 +3200,30 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
   })
 
+  for (const stop of ['error', 'aborted'] as const) {
+    test(`empty-turn guard: a '${stop}' truncation retries under the DEFAULT cap, not the raised budget`, async () => {
+      const dir = await tempDir()
+      const logs: string[] = []
+      const { router, sessions } = makeRouter(dir, { logs })
+      router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+      await router.route(inbound({ text: 'ambiguous thing' }))
+      const budgetsPerPrompt: Array<number | undefined> = []
+      sessions[0]!.onPrompt = async () => {
+        await streamOnce(sessions[0]!)
+        budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
+        // error/aborted are not budget exhaustion, so the raised reasoning
+        // budget is unjustified — the retry must stay on the default backstop.
+        sessions[0]!.setAssistantMidTurn('truncated output', stop)
+      }
+      await router.__testing!.flushDebounce(KEY)
+
+      expect(budgetsPerPrompt.every((b) => b === CHANNEL_MAX_OUTPUT_TOKENS)).toBe(true)
+      expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(true)
+      expect(logs.some((m) => m.includes(`max_tokens=${CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS}`))).toBe(false)
+    })
+  }
+
   test('empty-turn guard: a turn that thrashed the send path skips retry and posts the fallback once', async () => {
     const dir = await tempDir()
     const logs: string[] = []
