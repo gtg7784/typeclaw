@@ -375,6 +375,7 @@ export async function startAgent({
         ...(entry.pluginSubagent.toolResultBudget !== undefined
           ? { toolResultBudget: entry.pluginSubagent.toolResultBudget }
           : {}),
+        ...(entry.pluginSubagent.bashPolicy !== undefined ? { bashPolicy: entry.pluginSubagent.bashPolicy } : {}),
         ...runtimeVersionOpt,
       })
       liveSessionRegistry.register({ sessionId, session: created.session })

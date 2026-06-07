@@ -49,6 +49,7 @@ import {
 } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import type { RestartHandoffOrigin } from './restart-handoff'
+import type { SubagentBashPolicy } from './reviewer-bash-policy'
 import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
@@ -147,6 +148,11 @@ export type CreateSessionOptions = {
   // wider plugin registry's tools are NOT injected. Used by plugin subagent
   // session creation so subagents see exactly what they declared.
   pluginSubagent?: PluginSubagentSelection
+  // Per-subagent bash capability restriction. Threaded to the bash-tool wrapper
+  // and enforced before the role-derived sandbox, so a read-only subagent's
+  // bash stays read-only regardless of the spawning role. See
+  // `src/agent/reviewer-bash-policy.ts`.
+  bashPolicy?: SubagentBashPolicy
   // Enables the `restart` tool. Set when the agent is running inside a
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
@@ -411,6 +417,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           getOrigin,
           getAbort,
           ...(options.permissions ? { permissions: options.permissions } : {}),
+          ...(options.bashPolicy !== undefined ? { bashPolicy: options.bashPolicy } : {}),
         })
       : []
   const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin, getAbort)

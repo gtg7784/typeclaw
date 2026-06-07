@@ -49,6 +49,7 @@ import {
 
 import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
+import { enforceSubagentBashPolicy, type SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
 import { SUBAGENT_OUTPUT_TOOL_NAME, type SubagentOutputToolDetails } from './tools/subagent-output'
 import { webFetchTool } from './tools/webfetch'
@@ -193,6 +194,11 @@ export type WrapSystemToolOptions = {
   // runs bash unchanged — preserving today's behavior for trusted+ and for
   // sessions wired without a permission service (e.g. tests).
   permissions?: PermissionService
+  // Per-subagent bash capability policy, enforced as a hard pre-check BEFORE
+  // the role-derived sandbox (which returns early for trusted/owner). Lets a
+  // read-only subagent keep its bash read-only no matter who spawned it. See
+  // `src/agent/reviewer-bash-policy.ts`.
+  bashPolicy?: SubagentBashPolicy
 }
 
 // Zod 4 emits a top-level `"$schema": "https://json-schema.org/draft/2020-12/schema"`
@@ -460,6 +466,16 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
         throw new Error(`blocked: ${readGuardResult.reason}`)
       }
       stripGuardAcknowledgements(mutableArgs)
+
+      // Per-subagent capability fence: runs BEFORE the role-derived sandbox so
+      // a read-only subagent's bash stays read-only even for a trusted/owner
+      // caller (for whom applyBashSandbox returns early with no masks). Throws
+      // SubagentBashPolicyError on a disallowed command, surfaced to the model
+      // as a tool error.
+      if (tool.name === 'bash' && opts.bashPolicy !== undefined) {
+        const command = mutableArgs.command
+        if (typeof command === 'string') enforceSubagentBashPolicy(opts.bashPolicy, command)
+      }
 
       if (tool.name === 'bash' && opts.permissions !== undefined) {
         await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId, bashEnvOverlay)
