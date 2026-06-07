@@ -166,6 +166,98 @@ exists. On a compile error the compiler throws with the offending Typst line —
 usually raw HTML or a markdown extension `cmarker` doesn't support; simplify that
 part and re-run.
 
+## Rich elements (optional)
+
+When plain markdown isn't enough — you want a cover banner, callout boxes,
+multi-column sections, captioned figures — you don't switch to HTML (Typst
+doesn't render HTML). Instead, drop **raw Typst** into the markdown via
+`<!--raw-typst ... -->` comments. `cmarker` evaluates them as Typst (the
+`raw-typst: true` option is already the default and is set in the wrapper above).
+The rest of the document stays plain markdown.
+
+Each snippet below is self-contained — paste it into your `.md` where you want the
+element. They use Typst built-ins only (no extra packages).
+
+**Cover banner** (top of a report):
+
+```markdown
+<!--raw-typst
+#block(width: 100%, fill: rgb("#0f172a"), inset: 18pt, radius: 6pt)[
+  #text(fill: white, size: 1.6em, weight: "bold")[Quarterly Business Review]
+  #v(2pt)
+  #text(fill: rgb("#94a3b8"), size: 0.95em)[Acme Robotics · Q2 2026 · Confidential]
+]
+#v(1em)
+-->
+```
+
+**Callout boxes** (info / warning — change the two colors for other variants):
+
+```markdown
+<!--raw-typst
+#block(fill: rgb("#eff6ff"), stroke: (left: 3pt + rgb("#3b82f6")), inset: 12pt, radius: 4pt, width: 100%)[
+  #text(weight: "bold")[Note.] Revenue grew 31% YoY.
+]
+#v(0.6em)
+#block(fill: rgb("#fef2f2"), stroke: (left: 3pt + rgb("#ef4444")), inset: 12pt, radius: 4pt, width: 100%)[
+  #text(weight: "bold")[Risk.] A single supplier covers 40% of NPUs.
+]
+-->
+```
+
+**Two-column section** (use `#colbreak()` to split):
+
+```markdown
+<!--raw-typst
+#columns(2, gutter: 1.4em)[
+  #text(weight: "bold")[Strengths]
+  - Net retention 124%
+  - Margin +240bps
+  #colbreak()
+  #text(weight: "bold")[Risks]
+  - Supplier concentration
+  - Partial FX hedging
+]
+-->
+```
+
+**Figure with caption** (swap the `rect(...)` for `image("chart.png")` to embed an
+image written to `workspace/`):
+
+```markdown
+<!--raw-typst
+#figure(
+  rect(width: 60%, height: 48pt, fill: luma(245), stroke: 0.5pt + luma(180)),
+  caption: [Revenue trend, Q1–Q2 2026.],
+)
+-->
+```
+
+**Definition grid** (label column + description column):
+
+```markdown
+<!--raw-typst
+#grid(columns: (auto, 1fr), row-gutter: 6pt, column-gutter: 12pt,
+  text(weight: "bold")[NPU], [Neural processing unit — on-device inference accelerator.],
+  text(weight: "bold")[Net retention], [Revenue from existing customers vs. a year ago.],
+)
+-->
+```
+
+Keep it tasteful — a banner, a couple of callouts, and one good figure read as
+deliberate; a wall of colored boxes reads as noise.
+
+## Rendering an _existing_ web page or HTML to PDF
+
+This skill renders **markdown you author**. If instead you need to capture an
+**existing web page or a live URL** as a PDF — something Typst cannot do — use the
+already-installed `agent-browser` (Chrome): `agent-browser --allow-file-access open
+file:///agent/workspace/page.html` (or a URL), then `agent-browser pdf
+/agent/workspace/out.pdf`. Note its output is fixed US-Letter with default margins
+(no page-size flags), and launching the browser needs a trusted/owner session — so
+it's the right tool for _archiving web content_, not for authoring styled reports.
+For authored documents, stay on the Typst path above.
+
 ## Step 4 — deliver
 
 - **Channel asked for the PDF** — attach it:
