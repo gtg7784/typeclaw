@@ -6,14 +6,17 @@ export type SandboxMount =
 
 export type SandboxNetwork = 'none' | 'inherit'
 
-// 'tmpfs' (default): empty /proc + a single /proc/self/exe symlink. Works on
-// every host but gives no /proc/self/{fd,maps}, so a JS package runner's CHILD
-// (the spawned bin) crashes with ENOTDIR reading /proc/self/fd. 'none': no
-// /proc at all. 'real-proc': mount a fresh procfs scoped to a NEW pid namespace
-// so the child gets a real /proc/self/{fd,maps} WITHOUT seeing the agent
-// runtime's pids (no /proc/<agent>/environ leak). 'real-proc' requires the
-// outer container to hold CAP_SYS_ADMIN (mount(2) of proc); start.ts only grants
-// it when the operator opts in via typeclaw.json#sandbox.realProc.
+// 'real-proc' (the runtime default — see sandbox.realProc, default true): mount
+// a fresh procfs scoped to a NEW pid namespace so a JS package runner's child
+// gets a real /proc/self/{fd,maps} WITHOUT seeing the agent runtime's pids (no
+// /proc/<agent>/environ leak). Requires the outer container to hold
+// CAP_SYS_ADMIN (mount(2) of proc); start.ts grants it by default and the
+// consumer probes that it actually works before choosing this strategy.
+// 'tmpfs' (the fallback when CAP_SYS_ADMIN is a no-op, or realProc=false): empty
+// /proc + a single /proc/self/exe symlink. Works on every host but gives no
+// /proc/self/{fd,maps}, so a JS package runner's CHILD (the spawned bin) crashes
+// with ENOTDIR reading /proc/self/fd — external packages can't run in the
+// sandbox under this strategy. 'none': no /proc at all.
 export type SandboxProcStrategy = 'tmpfs' | 'none' | 'real-proc'
 
 export type SandboxEnvPolicy = {
