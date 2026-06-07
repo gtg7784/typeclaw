@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { createGithubEffectiveApprovalResolver } from './effective-approval'
+import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
 
 const WS = 'acme/widgets'
 
@@ -135,5 +135,39 @@ describe('github effective-approval resolver', () => {
       fetchImpl: fetchStub({}),
     })
     expect(await resolve({ workspace: WS, prNumber: 11 })).toEqual({ ok: false })
+  })
+})
+
+describe('github head-sha resolver', () => {
+  test('returns head.sha from the single-PR endpoint', async () => {
+    const resolve = createGithubHeadShaResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({ '/pulls/5': jsonResponse({ head: { sha: 'deadbeef' } }) }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 5 })).toBe('deadbeef')
+  })
+
+  test('returns null on a non-ok response so the cache degrades rather than strands', async () => {
+    const resolve = createGithubHeadShaResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({ '/pulls/6': new Response('boom', { status: 500 }) }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 6 })).toBeNull()
+  })
+
+  test('returns null when no token is available', async () => {
+    const resolve = createGithubHeadShaResolver({
+      resolveToken: async () => null,
+      fetchImpl: fetchStub({}),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 7 })).toBeNull()
+  })
+
+  test('returns null when head.sha is missing or malformed', async () => {
+    const resolve = createGithubHeadShaResolver({
+      resolveToken: async () => 'tok',
+      fetchImpl: fetchStub({ '/pulls/8': jsonResponse({ head: {} }) }),
+    })
+    expect(await resolve({ workspace: WS, prNumber: 8 })).toBeNull()
   })
 })

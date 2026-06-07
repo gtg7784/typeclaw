@@ -2,7 +2,7 @@ import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import { definePlugin } from '@/plugin'
 
 import { createApproveIdempotencyGuard } from './approve-idempotency'
-import { createGithubEffectiveApprovalResolver } from './effective-approval'
+import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
 import { analyzeGhCommand } from './gh-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
@@ -11,13 +11,13 @@ import { classifyGhToken } from './token-class'
 export default definePlugin({
   plugin: async (ctx) => {
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
+    const resolveToken = async (workspace: string) => {
+      const result = await resolveTokenForRepo(workspace)
+      return result.kind === 'token' ? result.token : null
+    }
     const verdictGuard = createApproveIdempotencyGuard({
-      resolveEffectiveApproval: createGithubEffectiveApprovalResolver({
-        resolveToken: async (workspace) => {
-          const result = await resolveTokenForRepo(workspace)
-          return result.kind === 'token' ? result.token : null
-        },
-      }),
+      resolveEffectiveApproval: createGithubEffectiveApprovalResolver({ resolveToken }),
+      resolveHeadSha: createGithubHeadShaResolver({ resolveToken }),
     })
     return {
       hooks: {
