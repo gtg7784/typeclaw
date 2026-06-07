@@ -34,10 +34,10 @@ _file_ is the deliverable.
 ## Step 0 — one-time setup (install the toolchain)
 
 Run this `bash` block once per container life. It is **idempotent** — if the
-tools are already present it does nothing and exits fast. It `bun add`s the Typst
-compiler (npm pulls only this platform's prebuilt binary — Linux x64/arm64,
-glibc or musl) and vendors the SHA256-verified `cmarker` package into
-`workspace/.tools/` so `@preview/cmarker` resolves offline.
+tools are already present it does nothing and exits fast. It `bun add`s the
+version-pinned Typst compiler (npm pulls only this platform's prebuilt binary —
+Linux x64/arm64, glibc or musl) and vendors the SHA256-verified `cmarker` package
+into `workspace/.tools/` so `@preview/cmarker` resolves offline.
 
 ```sh
 set -eu
@@ -45,16 +45,23 @@ cd workspace
 mkdir -p .tools
 cd .tools
 
+# Pinned to the exact versions validated for this skill. COMPILER_VERSION is the
+# npm package version of the Typst compiler; it embeds Typst 0.14.2. Bumping
+# either is a deliberate edit — keep the embedded-Typst note below in sync.
+COMPILER_VERSION="0.7.0"   # @myriaddreamin/typst-ts-node-compiler (embeds Typst 0.14.2)
 CMARKER_VERSION="0.1.8"
 PKGDIR="typst-packages/preview/cmarker/$CMARKER_VERSION"
 
 if [ -f "node_modules/@myriaddreamin/typst-ts-node-compiler/package.json" ] && [ -f "$PKGDIR/lib.typ" ]; then
   echo "markdown-pdf toolchain already installed"
 else
-  # The Typst compiler. `bun add` resolves the right prebuilt NAPI binary for
-  # this platform via optionalDependencies — no Rust toolchain, no manual download.
+  # The Typst compiler, version-pinned. `bun add` resolves the right prebuilt
+  # NAPI binary for this platform via optionalDependencies — no Rust toolchain,
+  # no manual download. The exact pin keeps the toolchain reproducible: a future
+  # npm release can't silently change the embedded Typst version or the API that
+  # Step 3 depends on.
   [ -f package.json ] || echo '{"name":"typeclaw-markdown-pdf-tools","private":true}' > package.json
-  bun add @myriaddreamin/typst-ts-node-compiler
+  bun add "@myriaddreamin/typst-ts-node-compiler@$COMPILER_VERSION"
 
   # cmarker (Markdown -> Typst), vendored so compilation needs no network.
   mkdir -p "$PKGDIR"
@@ -73,7 +80,12 @@ Notes:
   write to. `workspace/.tools/` is gitignored scratch — it does not get committed.
 - It needs network the first time (to `bun add` the compiler + fetch the package).
   After that the tools persist for the life of the container.
-- The compiler ships Typst **0.14.2**; `cmarker` is pinned + SHA256-verified.
+- **Everything is version-pinned and reproducible.** The validated toolchain is
+  `@myriaddreamin/typst-ts-node-compiler@0.7.0` (which embeds Typst **0.14.2**) and
+  `cmarker@0.1.8` (SHA256-verified). The `bun add` uses the exact `@0.7.0` pin, so
+  a future npm release can't change the embedded Typst version or the API Step 3
+  uses. To upgrade, bump both `COMPILER_VERSION` and the embedded-Typst note
+  together after re-validating.
 
 ## Step 1 — have the markdown ready
 
