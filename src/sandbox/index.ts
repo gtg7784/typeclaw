@@ -1,5 +1,11 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
-export { ensureBwrapAvailable, resolveProcSelfExe, _resetBwrapAvailabilityCacheForTests } from './availability'
+export {
+  canMountRealProc,
+  ensureBwrapAvailable,
+  resolveProcSelfExe,
+  _resetBwrapAvailabilityCacheForTests,
+  _resetRealProcProbeCacheForTests,
+} from './availability'
 export { resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
 export {
   resolveProtectedZones,
