@@ -137,11 +137,14 @@ Notes:
   is set to `workspace/` — see Step 3). Keep the `.typ` and `.md` in `workspace/`.
 - Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
   install) and carry the Latin text. `"Noto Serif CJK KR"` is appended as the
-  fallback so Korean/CJK glyphs resolve out of the box — Typst falls through to it
-  per-glyph wherever the Latin fonts have no glyph, leaving Latin runs untouched.
-  It comes from `fonts-noto-cjk` (installed under `/usr/share/fonts` by the
-  container's `cjkFonts` toggle, on by default), which Step 3's renderer loads via
-  `fontPaths`. If your CJK font lives elsewhere, add its dir to that list.
+  fallback so Korean/CJK glyphs resolve per-glyph — Typst falls through to it
+  wherever the Latin fonts have no glyph, leaving Latin runs untouched. It comes
+  from `fonts-noto-cjk`, which Step 3's renderer loads from `/usr/share/fonts` via
+  `fontPaths`. **The package is only present when the container's `cjkFonts` toggle
+  resolves to `true`.** Its default is `"auto"`, which installs the fonts only when
+  the host locale is CJK (`ja`/`ko`/`zh`) — so on a non-CJK host, CJK PDFs still
+  render as tofu until you set `docker.file.cjkFonts: true` in `typeclaw.json` and
+  rebuild. If your CJK font lives elsewhere, add its dir to the `fontPaths` list.
 
 ## Step 3 — render
 
