@@ -1,6 +1,6 @@
 ---
 name: typeclaw-config
-description: "Read or edit typeclaw.json: model, port, mounts, plugins, channels (per-adapter engagement and history; access control lives in roles — see typeclaw-permissions), portForward (auto port forwarding policy), docker.file (tmux/gh/python/ffmpeg toggles + append), git.ignore.append. Covers the GitHub channel config specifically — which repos it watches (channels.github.repos), the code-review trigger (channels.github.review.on / approve), and that its webhook auto-registers via a tunnel — load whenever the user mentions a 'github channel', 'github webhook', 'review these repos', 'add a repo to review', 'watch repo X', 'set up code review', 'stop reviewing repo Y', or asks how the agent's GitHub integration is wired. There is NO 'forward webhooks to a Slack channel' flow — GitHub events are an inbound channel the agent engages directly; do not invent destinations. Also: any question about a default value or whether a behavior is already on by default — port forwarding, channel visibility, model choice, container packages (tmux/gh/python on by default; ffmpeg off), anything ending in 'by default', 'automatically', 'out of the box', 'do I need to configure', 'is X on', 'what does X default to', '기본값', '기본적으로', '자동으로', '디폴트'. MUST load before saying you do not know what X defaults to, or proposing to add a field whose default the user is asking about — most fields already default to the behavior the user expects (portForward defaults to forwarding every container LISTEN; tmux/gh/python are pre-installed in the container; no edit needed). Also covers recommended host paths to mount for common use cases (voice memos for STT, screenshots, mail, iMessage, notes vaults, downloads) with macOS/Linux/WSL paths and TCC/Full-Disk-Access gotchas — load when user describes a use case like 'transcribe my voice memos', 'triage my mail', 'mount my notes', 'let you see my screenshots', or asks 'what should I mount?'. Read it before touching typeclaw.json — strict schema, mix of live-reloadable and restart-required fields."
+description: "Read or edit typeclaw.json — the host-stage runtime config: model, port, mounts, plugins, alias, channels, portForward, docker.file (container package toggles + append), git.ignore.append, plus provider credentials (secrets.json/.env) and the allowed-models registry. Strict schema with a mix of live-reloadable and restart-required fields — load before touching the file or you risk corrupting it or promising a behavior the runtime won't deliver. Also the authority on what a field defaults to and whether a behavior is already on out of the box (port forwarding, container packages, model choice) — load before saying you don't know what X defaults to, or before proposing to add a field whose default the user is asking about; most fields already default to the expected behavior, so the answer is usually 'no edit needed'. Owns the GitHub channel config — which repos it watches (channels.github.repos), the code-review trigger (channels.github.review.on/approve), webhook auto-registration via a tunnel — load on 'github channel', 'github webhook', 'review these repos', 'watch repo X', 'set up code review', 'stop reviewing repo Y'; GitHub events are an inbound channel the agent engages directly, there is NO 'forward webhooks to a Slack channel' flow, do not invent destinations. Covers recommended host paths to mount for common use cases (references/recommended-mounts.md). For messenger-channel engagement BEHAVIOR (when the agent replies vs. observes, triggers, stickiness, alias matching, suppressors) load typeclaw-channels; for who is admitted to a channel load typeclaw-permissions."
 ---
 
 # typeclaw-config
@@ -132,92 +132,17 @@ When the user describes a use case rather than naming a path — "transcribe my 
 
 The reference is **a lookup table, not a wishlist** — recommending a path there is not a license to add the mount silently. The user still has to ask, you still follow the standard procedure (read file, check collisions, pick name, append, write, commit, restart-required), and you still surface the TCC/FDA requirement before promising the agent can read FDA-gated data.
 
-## Channels
+## Channels and Alias
 
-`channels` configures which external messenger adapters are enabled and how the engagement layer should behave on each. **Access control lives in `roles`, not here** — to admit a chat, declare a role match-rule that covers it (see `typeclaw-permissions`). The shape is `channels: { "<adapter-id>": { engagement, history, enabled } }`. Today the adapters are `discord-bot`, `slack-bot`, `telegram-bot`, `kakaotalk`, and `github`.
+`channels` configures which external adapters (`discord-bot`, `slack-bot`, `telegram-bot`, `kakaotalk`, and `github`) are enabled and how the engagement layer behaves on each; `alias` lists plain-text names the agent answers to. Both are **live-reloadable** — edits take effect on the next `reload`, no container restart.
 
-`github` is **not a messenger** — it is a webhook-driven channel that watches repositories and reviews pull requests. It has its own fields (`repos`, `review`, …) on top of the common `engagement`/`history`/`enabled` shape, and depends on a tunnel to receive webhooks. It gets its **own section below** (**GitHub channel**); the messenger-oriented guidance in the rest of this section (engagement triggers, `roles` match-rules) still applies to it, but its configuration questions are answered there.
+This skill owns only the **schema and edit mechanics** of these two fields (see the schema table above): `channels: { "<adapter-id>": { engagement, history, enabled } }` and `alias: [...]`. The **behavioral contract** for the messenger adapters — when the agent wakes to reply vs. observes, engagement triggers (mention/reply/dm), reply stickiness, the non-configurable solo-human fallback, alias substring-match semantics, and peer-name suppressors — lives in the **`typeclaw-channels`** skill. **Load `typeclaw-channels` before answering any "why did/didn't the agent respond", "make it quieter", "answer to this nickname", or engagement/alias-behavior question.** Editing the fields here still follows the standard safe-edit workflow (read whole file, validate, write back, commit, reload-required).
 
-The channels block is **live-reloadable** — edits take effect on the next `reload`, no container restart.
+`github` is **not a messenger** — it is a webhook-driven channel that watches repositories and reviews pull requests. It has its own fields (`repos`, `review`, …) on top of the common `engagement`/`history`/`enabled` shape, and depends on a tunnel to receive webhooks. Its configuration is documented in the **GitHub channel** section below.
 
-### Adapter block
+**Access control is separate again**: whether an inbound is admitted at all lives in `roles`, not `channels`. By default an adapter with no `roles` block matching the speaker resolves to `guest` and the router drops every inbound. See the `typeclaw-permissions` skill.
 
-Each entry in `channels` is keyed by adapter id and has this shape:
-
-| Field        | Required | Type    | Notes                                                                                                                                                                                    |
-| ------------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `engagement` | no       | object  | When the agent should auto-reply vs. stay silent. Defaults to mention/reply/dm with 15-minute reply stickiness. See **Engagement** below.                                                |
-| `history`    | no       | object  | Cold-start prefetch windows for `(thread.head, thread.tail, channel.tail)`. Set any to `0` to disable that side. Defaults to `{ thread: { head: 3, tail: 10 }, channel: { tail: 10 } }`. |
-| `enabled`    | no       | boolean | Defaults to `true`. Set `false` to disable the adapter entirely without removing its config.                                                                                             |
-
-To stop the agent answering in a specific channel, narrow the `roles` block so the speaking author's role no longer carries `channel.respond` — engagement triggers gate wake-up _given_ the message is admitted; `channel.respond` gates whether the message is admitted at all.
-
-### Engagement
-
-`engagement` controls when the agent's loop wakes up to reply on an inbound message it has permission to read. Two fields:
-
-```json
-"engagement": {
-  "trigger": ["mention", "reply", "dm"],
-  "stickiness": { "perReply": { "window": 900000 } }
-}
-```
-
-- **`trigger`** — array of one or more of `"mention"`, `"reply"`, `"dm"`. Default: all three.
-  - `mention` — explicit `@bot` mentions.
-  - `reply` — message is a Discord reply pointed at the agent's own message.
-  - `dm` — any message in a DM channel.
-- **`stickiness`** — either the literal string `"off"`, or `{ perReply: { window: <ms> } }`. Default: 15-minute reply stickiness (`window: 900000`).
-  - `perReply` means: after the agent replies to a user, follow-up messages from that same user in that same channel within the window also wake the loop, even without a mention. The window is bounded server-side (`1` to `86_400_000` ms — 1 ms to 24 hours).
-  - `"off"` disables stickiness — the agent only wakes on explicit triggers.
-
-There is also a **solo-human fallback** built into the runtime that is **not configurable** through `engagement`: in any channel where the participants cache currently holds at most one distinct human author, every admitted inbound wakes the loop, regardless of `trigger` or `stickiness`. The fallback turns off the moment a second distinct human posts in that channel. This makes "private dev channel with one human and the bot" work without forcing an `@mention` on every message; clearing `trigger` to `[]` does **not** override it.
-
-**Engagement does not gate access.** Access is gated by `permissions.has(origin, 'channel.respond')` — see the `typeclaw-permissions` skill. Engagement decides whether an _admitted_ inbound wakes the loop or sits in the context buffer.
-
-### Example
-
-```json
-"channels": {
-  "discord-bot": {
-    "engagement": {
-      "trigger": ["mention", "reply", "dm"],
-      "stickiness": { "perReply": { "window": 900000 } }
-    },
-    "enabled": true
-  }
-},
-"roles": {
-  "member": { "match": ["discord:123456789012345678/987654321098765432", "discord:dm/*"] }
-}
-```
-
-This says: the `discord-bot` adapter is enabled with default engagement; one specific channel in one specific guild plus all DMs admit speakers as `member` (which carries `channel.respond` by default).
-
-### When the user asks "let me talk to you in this channel"
-
-This is a **`roles`** edit, not a `channels` edit. See the `typeclaw-permissions` skill for the full procedure. Short version:
-
-1. Get the platform ID (Discord channel ID, Slack channel ID, Telegram chat ID, KakaoTalk chat ID).
-2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
-3. **`roles` is restart-required** — `typeclaw reload` won't apply it; the user needs `typeclaw restart`.
-
-### When the user asks "stop replying in this channel"
-
-Two interpretations — ask if unclear:
-
-- **"Stop everything"** — remove the match-rule from `roles.<role>.match`. The agent loses both inbound visibility and outbound posting on that channel.
-- **"Just stop auto-replying"** — leave the match-rule, but adjust `engagement` on the adapter (set `trigger: []` and/or `stickiness: "off"`). The agent can still receive the channel and can still post if you tell it to. Caveat: this approach does NOT silence the agent in a channel that currently has only one human posting — the solo-human fallback (see Engagement) overrides `trigger: []`. In that case the only way to go silent today is to remove the match-rule.
-
-The second is usually what people mean by "be quieter".
-
-### When the user asks "what channels can you see / are you in"
-
-1. **Read `typeclaw.json`**, list each adapter under `channels`: which is enabled, the engagement triggers and stickiness window.
-2. Also read `roles.<role>.match` for every role — those are the actual admit lists.
-3. Note that the live runtime may have a different view if `typeclaw.json` was edited but `reload` hasn't run yet — say so when relevant.
-
-### GitHub channel
+## GitHub channel
 
 The `github` adapter is a **webhook-driven inbound channel**, not a messenger. GitHub posts events (PR opened, review requested, issue/PR comments, discussion comments) to a webhook URL; the runtime turns each event into a channel inbound and the agent engages on it directly — reviewing the PR, answering the comment, etc. There is **no "forward to a Slack channel" step**: the GitHub channel _is_ the destination. If a user asks you to "set up a GitHub webhook to send to a channel", they are describing a flow that does not exist — clarify that the GitHub channel reviews PRs in place, and ask which repos they want it to watch.
 
@@ -239,7 +164,9 @@ Its config block adds these fields on top of the common `engagement`/`history`/`
 
 **`review.approve`** — when `true` (default) the agent may submit a formal approving review; when `false` it downgrades an approve verdict to a plain `COMMENT` (findings still posted, no formal approval).
 
-#### Adding or removing watched repos
+Engagement, stickiness, and the solo-human fallback behave the same as for messenger adapters — see the `typeclaw-channels` skill for that behavioral model; this section covers only the github-specific config.
+
+### Adding or removing watched repos
 
 This is the most common request ("review repo X too", "stop watching repo Y"). It is a `channels.github.repos` edit — **non-secret**, but read the reload caveat carefully:
 
@@ -256,61 +183,12 @@ This is the most common request ("review repo X too", "stop watching repo Y"). I
 
 If neither exists, say so plainly: the repo is configured but events won't arrive until a tunnel (or `webhookUrl`) is in place.
 
-#### Initial setup and auth — this is a host-stage step, not yours
+### Initial setup and auth — this is a host-stage step, not yours
 
 The **first-time** GitHub channel setup (creating the `channels.github` block, supplying the GitHub auth — a PAT or App private key — and the webhook secret, and optionally provisioning the tunnel) is done by the operator on the host with `typeclaw channel add github`. You cannot run that: it is a host-stage CLI, and the credentials live in `secrets.json` / `.env`, which you must never write. So:
 
 - If there is **no `channels.github` block yet**, do not try to bootstrap it by hand. Tell the operator to run `typeclaw channel add github` from the agent folder, which collects the auth + webhook secret and wires the tunnel.
 - Once the block exists, **repo and review changes are yours** — they are plain `typeclaw.json` edits (above), no secrets involved.
-
-## Alias
-
-`alias` is an array of plain-text names the agent answers to when a channel message contains the name without using the platform's `<@id>` mention syntax. It is independent from `channels.<adapter>.engagement.trigger`: the structural triggers (`mention`, `reply`, `dm`) gate engagement on platform-rendered events; `alias` gates engagement on the message text itself.
-
-The agent folder's directory name (`basename(agentDir)`) is **always** an implicit alias — the runtime adds it automatically. `alias` adds further forms on top: Latin transliteration of a Korean nickname, casual short forms, alternative spellings, etc. **You only need to add the dir-name explicitly when you want a variation of it** (different casing, a different word entirely, or extra forms beyond the dir name).
-
-### Match semantics
-
-- **Substring** match against the inbound text. `"토토"` matches `"토토아 cron"`, `"토토씨 안녕"`, `"누가 토토을 불러"`, all of them. Korean particles aren't stripped — substring is enough because the bot name appears at the start of every particled form.
-- **Case-insensitive** via `toLocaleLowerCase()` on both sides. `"Toto"` in the alias list matches `"TOTO"`, `"toto"`, `"ToTo"`.
-- **No word-boundary detection.** A short or generic alias like `"bot"` will match every message containing `"robot"` or `"bottom"`. Pick distinctive names — the operator owns curation.
-
-### Engagement priority
-
-The alias path runs **after** explicit triggers (mention/reply/dm) and the sticky check. So a message with both an `<@id>` mention and an alias substring engages once, normally. A message with only the alias substring engages on the alias path. The alias path is **NOT suppressed by `mentionsOthers`**: addressing two bots in one message (`"토토아 라라아 둘 다 봐"`) engages both bots — each on their own alias.
-
-There's also a symmetric **peer-name suppressor**: if the message contains a peer bot's observed display name (from `participants[]`, populated as peers speak in the channel) and **does not** contain any of this agent's aliases, the solo-human fallback is suppressed and the agent observes. This is what makes `"라라아 cron 좀"` in a 1-human-multi-bot channel correctly observe instead of all bots replying. First-time addressing of a never-seen peer slips through; the suppressor catches it after the peer's first message.
-
-### Example
-
-```json
-{
-  "alias": ["toto", "토토"]
-}
-```
-
-The agent in folder `토토/` already answers to `"토토"` from the dir name. This adds the Latin transliteration so users can also write `"Hey toto, deploy?"`.
-
-### When the user asks "respond to my casual nickname for you" / "I want to call you X"
-
-1. **Read `typeclaw.json`.**
-2. **If `alias` exists**, append the new name (preserve existing entries; dedupe trivially — the runtime also dedupes).
-3. **If `alias` is absent**, create it as `["<new name>"]`.
-4. **You don't need to add the dir name** unless the new name IS a variation of the dir name itself (e.g. dir is `toto` and the user wants `Toto` casing — the implicit dir alias matches case-insensitively, so this isn't needed either).
-5. **Trim whitespace** before adding. The schema rejects empty/whitespace-only entries; the runtime trims surrounding whitespace from valid entries.
-6. **Write, commit**: "Edited `alias` — live-reloadable. Run `reload` to pick up the change without restart."
-
-### When the user asks "stop responding to <name>"
-
-1. **Read `typeclaw.json`.**
-2. **Remove the entry** from `alias`. If the entry IS the dir name, removing it from `alias` does nothing — the dir name is implicit and can't be turned off this way. The right answer there is "to stop responding to your dir name, rename the agent folder, which is a host-stage operation outside this container."
-3. **Write, commit, reload-required.**
-
-### When the user asks "what names do you respond to"
-
-1. **Read `typeclaw.json`** and report `alias`.
-2. **Always also report `basename(agentDir)`** (the implicit dir-name alias) — the user might not realize it's automatic.
-3. Mention that channel addressing also engages on `<@id>` mentions and replies regardless of alias config (those are separate triggers in `channels.<adapter>.engagement`).
 
 ## portForward
 
@@ -391,66 +269,10 @@ Off switch — the broker is constructed but never opens a WS, no LISTEN gets fo
 
 The `docker.file` block has two layers of customization:
 
-1. **Toggles** for opinionated package installs typeclaw knows how to layer correctly (`tmux`, `gh`, `python`, `ffmpeg`, `cjkFonts`, `cloudflared`, `claudeCode`, `codexCli`). Most are apt packages — boolean for on/off, version string for an apt pin (e.g. `"gh": "2.40.0"` → `gh=2.40.0`) — and benefit from BuildKit cache mounts. `cloudflared`, `claudeCode`, and `codexCli` are the exceptions: `cloudflared` downloads the pinned GitHub release, `claudeCode` runs Anthropic's `curl | bash` installer, `codexCli` `bun install`s the `@openai/codex` npm package; all three are boolean-only. Use a toggle whenever it covers what the user wants over a hand-rolled `append` entry.
+1. **Toggles** for opinionated package installs typeclaw knows how to layer correctly (`tmux`, `gh`, `python`, `ffmpeg`, `cjkFonts`, `cloudflared`, `xvfb`, `claudeCode`, `codexCli`). Most are apt packages — boolean for on/off, version string for an apt pin — and benefit from BuildKit cache mounts. Use a toggle whenever it covers what the user wants over a hand-rolled `append` entry.
 2. **`append`** is the escape hatch for everything the toggles don't cover. An array of single-line Dockerfile instructions spliced in right before `ENTRYPOINT`, prefixed with a `# Custom lines from typeclaw.json#docker.file.append.` comment.
 
-### Fields
-
-| Field         | Required | Type                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------- | -------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tmux`        | no       | boolean \| string   | Default `true`. `false` omits tmux from the apt install. String pins the Debian package version (e.g. `"3.3a-3"` → `tmux=3.3a-3`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `gh`          | no       | boolean \| string   | Default `true`. `false` omits **both** the `gh` package and the GitHub CLI keyring bootstrap layer (skipping the network roundtrip on cold builds). String pins the version.                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `python`      | no       | boolean             | Default `true`. Fans out to `python3 python3-pip python3-venv python-is-python3` (the bundle that makes `python` and `pip` resolve correctly inside the container). Boolean-only — no version pin, because Debian's `python3` is a meta-package that doesn't accept a useful pin.                                                                                                                                                                                                                                                                                                                   |
-| `ffmpeg`      | no       | boolean \| string   | Default `false`. `true` apt-installs ffmpeg (~80 MB of codecs). String pins the version.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `cjkFonts`    | no       | boolean or `"auto"` | Default `"auto"`. Installs `fonts-noto-cjk` (~89 MB) so Chromium (used by `agent-browser`) renders Korean/Japanese/Chinese glyphs correctly in screenshots, `page.pdf()`, and other raster output. `"auto"` resolves at `typeclaw start` from the host locale (`LANG`/`LC_ALL`/`Intl`): a CJK host (ja/ko/zh) installs the fonts, any other host skips them. An explicit `true`/`false` forces the decision. `false` skips the layer entirely (DOM/innerText scraping is unaffected by font absence — only raster output shows tofu boxes).                                                         |
-| `cloudflared` | no       | boolean             | Default `false`. Downloads the pinned `cloudflared` GitHub release (~38 MB) into the image so `cloudflare-quick` tunnels work. Default `false` skips the layer on agents that don't use tunnels; `typeclaw tunnel add` / `channel add github` with a Cloudflare provider flip it to `true` automatically and prompt for a restart, so the happy path needs no manual edit. If the binary is absent when a tunnel starts, the tunnel goes `permanently-failed` with a "set docker.file.cloudflared: true and run typeclaw restart" message. Boolean-only — pinning is owned by the typeclaw release. |
-| `xvfb`        | no       | boolean             | Default `true`. Installs `xvfb` (~5 MB) so the entrypoint shim can spawn a virtual X server and export `DISPLAY=:99`, giving headed Chrome (agent-browser `--headed`, headful Playwright) a real X11 display to defeat headless-mode WAF fingerprinting. `false` skips the layer; the shim self-heals (no `Xvfb` on PATH → execs the agent without `DISPLAY`). Boolean-only — xvfb tracks the upstream X server release with no useful apt pin.                                                                                                                                                     |
-| `claudeCode`  | no       | boolean             | Default `false`. `true` runs Anthropic's official `curl -fsSL https://claude.ai/install.sh \| bash` in a dedicated layer (between agent-browser and the entrypoint shim) and pre-seeds `~/.claude.json` to skip the TTY-only theme picker on first launch (without it the agent's `tmux send-keys` would be eaten by the picker). Not apt: no version-pin variant; the upstream installer manages channels via env vars. Pairs with the `typeclaw-claude-code` skill, which documents the auth + tmux-driven usage flow including how to clear the post-seed API-key/trust dialogs.                 |
-| `codexCli`    | no       | boolean             | Default `false`. `true` runs `bun install -g @openai/codex` in a dedicated layer (after `claudeCode`, before the entrypoint shim) and pre-writes `~/.codex/hooks.json` registering `SessionStart` + `Stop` hooks so the operator can detect turn boundaries the same way as Claude Code (sentinel files, `.session-id` discovery). Not apt: no version-pin variant. Codex CLI has NO theme picker so no onboarding seed is needed, but auth (`codex login` or `OPENAI_API_KEY`) and the per-project trust dialog are still required at runtime — handled by the `typeclaw-codex-cli` skill.         |
-| `append`      | no       | array of strings    | Each entry is a single Dockerfile line — schema **rejects** entries containing `\n` or `\r`. Defaults to `[]`. Splice happens just before `ENTRYPOINT`, after `ENV NODE_ENV=production`.                                                                                                                                                                                                                                                                                                                                                                                                            |
-
-Toggle version strings reject whitespace and `=` (apt-injection guard) — pass just the version, not `pkg=ver`.
-
-### The single-line constraint (`append` only)
-
-Each entry of `append` must be one Dockerfile instruction's worth of source — a `RUN`, `ENV`, `COPY`, `ARG`, etc. The schema enforces "no embedded newlines" because a multiline string in the JSON would silently break Dockerfile syntax (Dockerfile line continuations require backslashes at end-of-line, and a JSON multiline doesn't carry those). If the user wants a logically multi-step instruction, give them two entries:
-
-```json
-"docker": {
-  "file": {
-    "append": [
-      "RUN apt-get update && apt-get install -y --no-install-recommends ripgrep fd-find",
-      "ENV CUSTOM_TOOL=1"
-    ]
-  }
-}
-```
-
-A single `RUN` with `&&`-chained shell commands is fine and idiomatic — that's still a single Dockerfile line. What's rejected is a literal newline inside the JSON string.
-
-### Where things land in the build
-
-The template's last layers are roughly:
-
-```
-RUN apt-get install ... <baseline + enabled toggle packages>   ← toggles fan out into this line
-...
-ENV NODE_ENV=production
-# Custom lines from typeclaw.json#docker.file.append.   ← only emitted when append is non-empty
-<your appended lines>
-ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]
-CMD ["run"]
-```
-
-The toggle-driven apt install benefits from BuildKit `--mount=type=cache` on `/var/cache/apt` and `/var/lib/apt/lists`, so toggling `ffmpeg: true` (or pinning `gh: "2.40.0"`) only re-fetches what changed. The `gh` keyring bootstrap is in its own earlier layer that's gated on `gh` being enabled — turning `gh: false` saves the network roundtrip even on cold builds.
-
-`append` runs after every cache-friendly base layer (apt setup, the toggle-driven apt install, `agent-browser`, Chrome for Testing on amd64), so changing `append` invalidates only the final layer. Conversely, putting `apt-get install` in `append` is **slower than using a toggle** (no BuildKit cache mount) — and if the package you want is `tmux/gh/python/ffmpeg/cjkFonts`, just use the toggle.
-
-### Restart and rebuild semantics
-
-- **Restart-required.** `docker.file` is in `FIELD_EFFECTS` as restart-required. `reload` reports the change as `restartRequired` and the live container keeps running on the old image.
-- **The next `typeclaw start` rebuilds the image automatically.** No `--build` flag is needed; the CLI re-runs `docker build` whenever the Dockerfile content has changed (it rewrites the file from the current template + current `docker.file` block every start). Tell the user: "Edited `docker.file` — restart-required. The next `typeclaw start` will rewrite the Dockerfile and rebuild the image."
-- **Pre-existing host-side edits to the Dockerfile are clobbered.** If the user manually edited the Dockerfile before, the next `start` overwrites it and (if the working tree was dirty) auto-commits the cleanup. This is by design; don't try to preserve manual edits.
+For the full toggle catalog (per-toggle defaults, types, version-pin rules, what each installs and why), the `append` single-line constraint, where things land in the build, and the restart/rebuild semantics, consult `references/dockerfile.md`. The playbooks below are the entry point; open the reference when you need the specifics of a toggle or the build-layer details. **`docker.file` is restart-required** — the next `typeclaw start` rewrites the Dockerfile and rebuilds the image automatically (no `--build` flag needed).
 
 ### When the user asks "install <package> in the container" / "add a Dockerfile line"
 

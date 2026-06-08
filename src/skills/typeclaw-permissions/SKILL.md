@@ -141,7 +141,7 @@ Probable causes, in descending order of frequency:
 
 1. **No match rule covers the speaking author's coordinates.** Read `typeclaw.json` `roles`, compare every `match[]` entry to the channel ID and author ID the user is reporting. If nothing matches, the author resolves to `guest`, which has no `channel.respond`, so every inbound is dropped at the router. The fix is to append a match rule to `roles.<role>.match[]` for that channel (or DM bucket).
 2. **The match rule exists but the role has `permissions: []`** (or otherwise lacks `channel.respond`). A user-declared role replaces the built-in's permissions wholesale. Re-add `channel.respond` or use a built-in role name (`member`, `trusted`, `owner`) that carries it by default.
-3. **Engagement triggers are filtering admitted messages.** This is a different problem — the inbound was admitted by permissions but engagement (`channels.<adapter>.engagement.trigger`) decided not to wake you. See the `typeclaw-config` skill for the engagement model.
+3. **Engagement triggers are filtering admitted messages.** This is a different problem — the inbound was admitted by permissions but engagement (`channels.<adapter>.engagement.trigger`) decided not to wake you. See the `typeclaw-channels` skill for the engagement model.
 
 To distinguish cause 1/2 from cause 3: if `typeclaw logs <container> -f` (host stage) shows `[channels] ... denied by permissions (channel.respond)`, it's a permissions problem. If it shows the message being admitted but no LLM call follows, it's engagement.
 
@@ -160,7 +160,7 @@ This is a `roles` edit. The full procedure:
 Two interpretations — clarify if ambiguous:
 
 - **"Stop everything"** — remove the match rule from `roles.<role>.match[]`. The author resolves to `guest`, and the channel router silently drops every inbound. You lose all visibility into their messages. Restart-required.
-- **"Just stop auto-replying"** — keep the match rule, but narrow `channels.<adapter>.engagement.trigger` and/or `stickiness`. See `typeclaw-config`. The agent still receives the messages and can still post if you tell it to. The solo-human fallback (single human in a channel) overrides `trigger: []`, so this approach can't fully silence you in a 1:1; only removing the match rule does.
+- **"Just stop auto-replying"** — keep the match rule, but narrow `channels.<adapter>.engagement.trigger` and/or `stickiness`. See `typeclaw-channels`. The agent still receives the messages and can still post if you tell it to. The solo-human fallback (single human in a channel) overrides `trigger: []`, so this approach can't fully silence you in a 1:1; only removing the match rule does.
 
 ## When the user asks "what role am I in this session?"
 
@@ -192,7 +192,7 @@ If you see a cron job mysteriously failing every fire with `denied by permission
 
 ## What this skill does not cover
 
-- **The `channels.<adapter>` block** — engagement, history, stickiness, alias. See `typeclaw-config`. Engagement decides whether an _admitted_ inbound wakes the loop; this skill is only about admission.
+- **The `channels.<adapter>` block behavior** — engagement, history, stickiness, alias matching. See `typeclaw-channels`. Engagement decides whether an _admitted_ inbound wakes the loop; this skill is only about admission. The `channels`/`alias` schema and edit mechanics live in `typeclaw-config`.
 - **The full `typeclaw.json` schema** — model, mounts, plugins, docker, git.ignore. See `typeclaw-config`.
 - **Cron job authoring** — schedule syntax, `prompt` vs `exec`, the `reload` tool. See `typeclaw-cron`. This skill only covers the `scheduledByRole` field and its provenance semantics.
 - **Plugin authoring** — `definePlugin`, contributing permissions, custom `tool.before` hooks. See `typeclaw-plugins`. The bundled security plugin is an example of a plugin that contributes `security.bypass.*` strings and uses `permissions.has()` to gate its own guards.
