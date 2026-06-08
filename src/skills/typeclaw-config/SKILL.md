@@ -1,6 +1,6 @@
 ---
 name: typeclaw-config
-description: "Read or edit typeclaw.json: model, port, mounts, plugins, channels (per-adapter engagement and history; access control lives in roles — see typeclaw-permissions), portForward (auto port forwarding policy), docker.file (tmux/gh/python/ffmpeg toggles + append), git.ignore.append. Also: any question about a default value or whether a behavior is already on by default — port forwarding, channel visibility, model choice, container packages (tmux/gh/python on by default; ffmpeg off), anything ending in 'by default', 'automatically', 'out of the box', 'do I need to configure', 'is X on', 'what does X default to', '기본값', '기본적으로', '자동으로', '디폴트'. MUST load before saying you do not know what X defaults to, or proposing to add a field whose default the user is asking about — most fields already default to the behavior the user expects (portForward defaults to forwarding every container LISTEN; tmux/gh/python are pre-installed in the container; no edit needed). Also covers recommended host paths to mount for common use cases (voice memos for STT, screenshots, mail, iMessage, notes vaults, downloads) with macOS/Linux/WSL paths and TCC/Full-Disk-Access gotchas — load when user describes a use case like 'transcribe my voice memos', 'triage my mail', 'mount my notes', 'let you see my screenshots', or asks 'what should I mount?'. Read it before touching typeclaw.json — strict schema, mix of live-reloadable and restart-required fields."
+description: "Read or edit typeclaw.json: model, port, mounts, plugins, channels (per-adapter engagement and history; access control lives in roles — see typeclaw-permissions), portForward (auto port forwarding policy), docker.file (tmux/gh/python/ffmpeg toggles + append), git.ignore.append. Covers the GitHub channel config specifically — which repos it watches (channels.github.repos), the code-review trigger (channels.github.review.on / approve), and that its webhook auto-registers via a tunnel — load whenever the user mentions a 'github channel', 'github webhook', 'review these repos', 'add a repo to review', 'watch repo X', 'set up code review', 'stop reviewing repo Y', or asks how the agent's GitHub integration is wired. There is NO 'forward webhooks to a Slack channel' flow — GitHub events are an inbound channel the agent engages directly; do not invent destinations. Also: any question about a default value or whether a behavior is already on by default — port forwarding, channel visibility, model choice, container packages (tmux/gh/python on by default; ffmpeg off), anything ending in 'by default', 'automatically', 'out of the box', 'do I need to configure', 'is X on', 'what does X default to', '기본값', '기본적으로', '자동으로', '디폴트'. MUST load before saying you do not know what X defaults to, or proposing to add a field whose default the user is asking about — most fields already default to the behavior the user expects (portForward defaults to forwarding every container LISTEN; tmux/gh/python are pre-installed in the container; no edit needed). Also covers recommended host paths to mount for common use cases (voice memos for STT, screenshots, mail, iMessage, notes vaults, downloads) with macOS/Linux/WSL paths and TCC/Full-Disk-Access gotchas — load when user describes a use case like 'transcribe my voice memos', 'triage my mail', 'mount my notes', 'let you see my screenshots', or asks 'what should I mount?'. Read it before touching typeclaw.json — strict schema, mix of live-reloadable and restart-required fields."
 ---
 
 # typeclaw-config
@@ -18,7 +18,7 @@ The runtime reads `typeclaw.json` at container startup. Some fields are picked u
 - `mounts` — additional host directories the user has chosen to expose to you. Each entry produces a `docker run -v <hostPath>:/agent/mounts/<name>` flag at `typeclaw start` time, so the directory shows up at `mounts/<name>` inside your agent folder. **The launcher reads this; the running container does not.** Editing `mounts` only takes effect on the next `typeclaw start`. **Restart-required.**
 - `plugins` — array of plugin package names loaded at server boot. **Restart-required.**
 - `alias` — additional names the agent answers to when a channel message contains its name in plain text (no `<@id>` mention). The agent folder's directory name (`basename(agentDir)`) is always implicit; `alias` adds further forms (Latin transliteration, nicknames, Korean particles, etc.). Used by the channel engagement layer alongside the structural mention/reply/dm triggers. **Live-reloadable.**
-- `channels` — per-adapter engagement triggers and history-prefetch knobs for external messengers (Discord, Slack, Telegram, KakaoTalk). Access control lives in `roles`, not here. **Live-reloadable** — edits take effect on the next `reload` without a container restart.
+- `channels` — per-adapter engagement triggers and history-prefetch knobs for external messengers (Discord, Slack, Telegram, KakaoTalk), plus the GitHub channel (a webhook-driven adapter that watches repos and reviews PRs — see **GitHub channel** below). Access control lives in `roles`, not here. **Live-reloadable** — edits take effect on the next `reload` without a container restart.
 - `docker.file` — controls what ships in the autogenerated container image. Two layers: (1) **toggles** for opinionated package installs (`tmux`, `gh`, `python`, `cjkFonts`, `cloudflared`, `xvfb` default `true`; `ffmpeg`, `claudeCode` default `false`) — set the toggle to `false` to omit, or to a version string like `"2.40.0"` to apt-pin (`python`, `cjkFonts`, `cloudflared`, `xvfb`, and `claudeCode` are boolean-only). Most toggles install apt packages with BuildKit cache mounts; `cloudflared` and `claudeCode` are exceptions — `cloudflared` downloads the pinned GitHub release, `claudeCode` runs Anthropic's official `curl | bash` installer. (2) **`append`** — extra Dockerfile lines spliced in right before `ENTRYPOINT` for anything the toggles don't cover. The whole Dockerfile is rewritten on every `start` from the typeclaw template. Lives under the `docker` namespace alongside future Docker-related blocks (e.g. `docker.compose`). **Restart-required** (next `typeclaw start` rebuilds the image).
 - `git.ignore.append` — extra `.gitignore` patterns `typeclaw start` splices into the TypeClaw-owned `.gitignore` before the protected TypeClaw rules. The whole `.gitignore` is rewritten and auto-committed on every `start` when it changes; `append` is the supported escape hatch for local ignore patterns without editing the managed file by hand. Lives under the `git` namespace. **Restart-required** (next `typeclaw start` refreshes and commits `.gitignore`).
 - `portForward` — allow/deny policy for the auto port-forwarder (the host-stage `_hostd` daemon's portbroker). When the agent runs a server inside the container that LISTENs on a TCP port, the broker proxies it to the same port number on `127.0.0.1` of the host so the user can hit it directly. `portForward` decides which ports are allowed through. **Restart-required** — the broker captures the policy at register time on `typeclaw start`.
@@ -134,7 +134,9 @@ The reference is **a lookup table, not a wishlist** — recommending a path ther
 
 ## Channels
 
-`channels` configures which external messenger adapters are enabled and how the engagement layer should behave on each. **Access control lives in `roles`, not here** — to admit a chat, declare a role match-rule that covers it (see `typeclaw-permissions`). The shape is `channels: { "<adapter-id>": { engagement, history, enabled } }`. Today the adapters are `discord-bot`, `slack-bot`, `telegram-bot`, and `kakaotalk`.
+`channels` configures which external messenger adapters are enabled and how the engagement layer should behave on each. **Access control lives in `roles`, not here** — to admit a chat, declare a role match-rule that covers it (see `typeclaw-permissions`). The shape is `channels: { "<adapter-id>": { engagement, history, enabled } }`. Today the adapters are `discord-bot`, `slack-bot`, `telegram-bot`, `kakaotalk`, and `github`.
+
+`github` is **not a messenger** — it is a webhook-driven channel that watches repositories and reviews pull requests. It has its own fields (`repos`, `review`, …) on top of the common `engagement`/`history`/`enabled` shape, and depends on a tunnel to receive webhooks. It gets its **own section below** (**GitHub channel**); the messenger-oriented guidance in the rest of this section (engagement triggers, `roles` match-rules) still applies to it, but its configuration questions are answered there.
 
 The channels block is **live-reloadable** — edits take effect on the next `reload`, no container restart.
 
@@ -214,6 +216,52 @@ The second is usually what people mean by "be quieter".
 1. **Read `typeclaw.json`**, list each adapter under `channels`: which is enabled, the engagement triggers and stickiness window.
 2. Also read `roles.<role>.match` for every role — those are the actual admit lists.
 3. Note that the live runtime may have a different view if `typeclaw.json` was edited but `reload` hasn't run yet — say so when relevant.
+
+### GitHub channel
+
+The `github` adapter is a **webhook-driven inbound channel**, not a messenger. GitHub posts events (PR opened, review requested, issue/PR comments, discussion comments) to a webhook URL; the runtime turns each event into a channel inbound and the agent engages on it directly — reviewing the PR, answering the comment, etc. There is **no "forward to a Slack channel" step**: the GitHub channel _is_ the destination. If a user asks you to "set up a GitHub webhook to send to a channel", they are describing a flow that does not exist — clarify that the GitHub channel reviews PRs in place, and ask which repos they want it to watch.
+
+Its config block adds these fields on top of the common `engagement`/`history`/`enabled` shape:
+
+| Field            | Required | Type     | Notes                                                                                                                                                                                                                                  |
+| ---------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repos`          | no       | string[] | Repositories the adapter watches, as `owner/name` slugs. Default `[]` (watches nothing). On start the adapter registers (or updates/claims) a managed webhook on each repo; on stop it deletes the hooks it managed during that start. |
+| `review`         | no       | object   | Code-review policy: `{ on, approve }`. See below. Default `{ on: "review_requested", approve: true }`.                                                                                                                                 |
+| `webhookPort`    | no       | number   | Container port the webhook server binds to. Default `8975`. Rarely changed.                                                                                                                                                            |
+| `webhookUrl`     | no       | string   | Explicit public webhook URL. **Usually omit** — when a `tunnels[]` entry targets the github channel, the URL is resolved from the tunnel automatically (see below).                                                                    |
+| `eventAllowlist` | no       | string[] | Which webhook events are accepted. Has a sane default; leave it unless the user has a specific reason.                                                                                                                                 |
+
+**`review.on`** — which `pull_request` action triggers an automatic code review:
+
+- `"review_requested"` (default) — review only when the bot is added as a reviewer.
+- `"opened"` — review every non-draft PR as soon as it opens (a draft is reviewed once it turns ready, or the bot is requested).
+- `"off"` — disable automatic code review entirely (the channel still receives comment events).
+
+**`review.approve`** — when `true` (default) the agent may submit a formal approving review; when `false` it downgrades an approve verdict to a plain `COMMENT` (findings still posted, no formal approval).
+
+#### Adding or removing watched repos
+
+This is the most common request ("review repo X too", "stop watching repo Y"). It is a `channels.github.repos` edit — **non-secret**, but read the reload caveat carefully:
+
+1. Read `typeclaw.json`, find `channels.github.repos`, add/remove the `owner/name` slug, write the whole file back.
+2. **Webhook registration is restart-required, not reload.** The adapter registers GitHub webhooks only when it `start()`s, and `reload` does not re-run start for an already-running adapter (it only handles enable/disable and credential rotation). So although `channels` is broadly "live-reloadable", a `repos` change does **not** create the new repo's webhook on `reload` — the operator must run `typeclaw restart` (host stage) for the adapter to register the hook on the added repo and remove the hook it created for a removed one.
+3. Tell the user accurately: "Added `owner/name` to `channels.github.repos`. This needs `typeclaw restart` (not just `reload`) for the webhook to be registered on that repo." Do not claim it took effect on `reload`.
+
+> Why restart and not reload: GitHub webhooks are created/removed only in the adapter's `start()`/`stop()`. `reload` does not restart a running adapter for a `repos` change (it only handles enable/disable and credential rotation), so the new repo's webhook simply isn't created until the container restarts. `typeclaw restart` is the honest answer for "start reviewing repo X".
+
+**Webhook delivery requires a public URL.** GitHub must be able to reach the container. That URL comes from one of two places, and a repo added without it will register a hook that never receives events:
+
+- A **tunnel** entry: `tunnels: [{ name: "github-webhook", provider: "cloudflare-quick", for: { kind: "channel", name: "github" } }]`. The adapter pulls its URL from the tunnel manager automatically — leave `webhookUrl` unset. This is the normal setup. Adding/removing a tunnel is **restart-required** (`tunnels` is not live-reloadable) — see the `typeclaw-tunnels` skill.
+- An explicit `channels.github.webhookUrl` the operator manages by hand.
+
+If neither exists, say so plainly: the repo is configured but events won't arrive until a tunnel (or `webhookUrl`) is in place.
+
+#### Initial setup and auth — this is a host-stage step, not yours
+
+The **first-time** GitHub channel setup (creating the `channels.github` block, supplying the GitHub auth — a PAT or App private key — and the webhook secret, and optionally provisioning the tunnel) is done by the operator on the host with `typeclaw channel add github`. You cannot run that: it is a host-stage CLI, and the credentials live in `secrets.json` / `.env`, which you must never write. So:
+
+- If there is **no `channels.github` block yet**, do not try to bootstrap it by hand. Tell the operator to run `typeclaw channel add github` from the agent folder, which collects the auth + webhook secret and wires the tunnel.
+- Once the block exists, **repo and review changes are yours** — they are plain `typeclaw.json` edits (above), no secrets involved.
 
 ## Alias
 
