@@ -9,8 +9,7 @@ export const CRON_STATE_FILE = join('cron', 'state.json')
 type StateEntry = {
   progressFingerprint: string
   firedCount: number
-  lastAcceptedAt?: string
-  updatedAt: string
+  lastAcceptedAt: string
 }
 
 type StateFile = {
@@ -19,7 +18,10 @@ type StateFile = {
 }
 
 export type CountStore = {
-  get: (id: string) => number
+  // Fingerprint-aware: returns 0 unless the stored entry's recurrence
+  // fingerprint matches `job`. A stale fire from a previous job definition (or
+  // a resurrected entry after reload) therefore can't gate the live job.
+  get: (id: string, job: CronJob) => number
   increment: (id: string, job: CronJob, at: number) => Promise<void>
   // Re-applies boot-time reconciliation against a new job set (called on
   // `typeclaw reload`) so re-added/changed jobs don't inherit stale counts.
@@ -64,30 +66,45 @@ function targetIdentity(job: CronJob): unknown {
   return { handler: String(job.handler) }
 }
 
+function matchingCount(entry: StateEntry | undefined, job: CronJob): number {
+  if (entry === undefined) return 0
+  return entry.progressFingerprint === progressFingerprint(job) ? entry.firedCount : 0
+}
+
+function serialize(state: StateFile): string {
+  return JSON.stringify(state)
+}
+
 export async function createCountStore(
   agentDir: string,
   jobs: CronJob[],
   io: CountStoreIO = realIO,
 ): Promise<CountStore> {
   const path = join(agentDir, CRON_STATE_FILE)
-  const reconciled = reconcile(await readState(path, io), jobs)
-  const state: StateFile = reconciled
+  const onDisk = await readState(path, io)
+  const state: StateFile = reconcile(onDisk, jobs)
   // Serializes writes so concurrent increments (two jobs firing in the same
   // tick) can't clobber each other via read-modify-write races.
   let tail: Promise<void> = Promise.resolve()
 
-  await persist(path, state, io)
+  // Only touch disk when reconciliation actually pruned/reset something.
+  // Avoids a force-committed no-op rewrite of cron/state.json on every boot.
+  if (serialize(state) !== serialize(onDisk)) {
+    await persist(path, state, io)
+  }
 
   return {
-    get: (id) => state.jobs[id]?.firedCount ?? 0,
+    get: (id, job) => matchingCount(state.jobs[id], job),
     increment: (id, job, at) => {
       const run = tail.then(async () => {
-        const prev = state.jobs[id]?.firedCount ?? 0
+        // Read `prev` only from an entry whose fingerprint still matches, so a
+        // queued increment that lost a reload race starts the new recurrence at
+        // 0 instead of resurrecting the dropped entry's count.
+        const prev = matchingCount(state.jobs[id], job)
         state.jobs[id] = {
           progressFingerprint: progressFingerprint(job),
           firedCount: prev + 1,
           lastAcceptedAt: new Date(at).toISOString(),
-          updatedAt: new Date(at).toISOString(),
         }
         await persist(path, state, io)
       })
@@ -107,18 +124,42 @@ export async function createCountStore(
   }
 }
 
+function emptyState(): StateFile {
+  return { version: 1, jobs: {} }
+}
+
 async function readState(path: string, io: CountStoreIO): Promise<StateFile> {
   const raw = await io.read(path)
-  if (raw === null) return { version: 1, jobs: {} }
+  if (raw === null) return emptyState()
   try {
-    const parsed = JSON.parse(raw) as StateFile
-    if (parsed.version !== 1 || typeof parsed.jobs !== 'object' || parsed.jobs === null) {
-      return { version: 1, jobs: {} }
-    }
-    return parsed
+    return validateState(JSON.parse(raw))
   } catch {
-    return { version: 1, jobs: {} }
+    return emptyState()
   }
+}
+
+// Durable on-disk state is untrusted: a corrupt or hand-edited file must never
+// crash the scheduler or feed a bogus count into expiry. Drop the whole file
+// on a version mismatch, and skip individual entries that aren't well-formed.
+function validateState(raw: unknown): StateFile {
+  if (typeof raw !== 'object' || raw === null) return emptyState()
+  const obj = raw as { version?: unknown; jobs?: unknown }
+  if (obj.version !== 1 || typeof obj.jobs !== 'object' || obj.jobs === null) return emptyState()
+
+  const jobs: Record<string, StateEntry> = {}
+  for (const [id, value] of Object.entries(obj.jobs as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) continue
+    const e = value as Record<string, unknown>
+    if (typeof e.progressFingerprint !== 'string') continue
+    if (typeof e.firedCount !== 'number' || !Number.isInteger(e.firedCount) || e.firedCount < 0) continue
+    if (typeof e.lastAcceptedAt !== 'string') continue
+    jobs[id] = {
+      progressFingerprint: e.progressFingerprint,
+      firedCount: e.firedCount,
+      lastAcceptedAt: e.lastAcceptedAt,
+    }
+  }
+  return { version: 1, jobs }
 }
 
 // Boot/reload reconciliation. The scary footgun is a job id removed and later
