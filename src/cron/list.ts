@@ -38,15 +38,27 @@ export type AggregateCronListOptions = {
   // to its plugin + localId without re-parsing the global id.
   pluginJobs: readonly RegisteredCronJob[]
   now: number
+  // Durable fire progress for count-limited jobs. Without this, an exhausted
+  // count job would render with a future next-fire time and lie about being
+  // retired, so the listing threads the same firedCount the scheduler uses.
+  firedCount?: (job: CronJob) => number
 }
 
 export function aggregateCronList(opts: AggregateCronListOptions): CronListEntry[] {
+  const firedCount = opts.firedCount ?? (() => 0)
   const entries: CronListEntry[] = []
   for (const job of opts.userJobs) {
-    entries.push(toEntry(job, { kind: 'user' }, opts.now))
+    entries.push(toEntry(job, { kind: 'user' }, opts.now, firedCount(job)))
   }
   for (const reg of opts.pluginJobs) {
-    entries.push(toEntry(reg.job, { kind: 'plugin', pluginName: reg.pluginName, localId: reg.localId }, opts.now))
+    entries.push(
+      toEntry(
+        reg.job,
+        { kind: 'plugin', pluginName: reg.pluginName, localId: reg.localId },
+        opts.now,
+        firedCount(reg.job),
+      ),
+    )
   }
   // Sort by next-fire time ascending so the soonest-firing job is at the
   // top. Jobs with a null nextFireMs (parse errors) sort to the bottom
@@ -58,8 +70,8 @@ export function aggregateCronList(opts: AggregateCronListOptions): CronListEntry
   return entries
 }
 
-function toEntry(job: CronJob, source: CronListSource, now: number): CronListEntry {
-  const fire = computeNextFire(job, now)
+function toEntry(job: CronJob, source: CronListSource, now: number, firedCount: number): CronListEntry {
+  const fire = computeNextFire(job, now, { firedCount })
   const base = {
     id: job.id,
     source,
