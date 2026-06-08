@@ -40,10 +40,10 @@ Use the **Release** GitHub Actions workflow (`workflow_dispatch`, see `.github/w
 
 The workflow is the only supported release path. The GHCR-first-then-npm ordering is load-bearing for the version-pin invariant: a user who `npm install`s before the base image lands cannot `typeclaw start`.
 
-**Version decision.** Specified version → use as-is. Otherwise decide bump level:
+**Version decision.** Specified version → use as-is. Otherwise **default to patch** and only escalate to minor when one of the explicit minor triggers below is clearly met. When in doubt, it's a patch.
 
-- **minor** — new features, new CLI subcommands, new plugin contract surface, breaking changes
-- **patch** — bug fixes, refactors, docs, deps, minor improvements
+- **patch** (the default) — bug fixes, refactors, docs, deps, internal-only changes, performance work, test changes, and any user-facing improvement that doesn't add a new public surface or break an existing one. Most releases are patches.
+- **minor** — reserve for a genuinely new _public_ surface or a breaking change. Specifically, exactly one of: (a) a new CLI subcommand or flag, (b) a new plugin contract surface (tool/skill/subagent/channel/command hook or config field plugins can rely on), (c) a backwards-incompatible change to any of the above. A "new feature" alone is NOT enough — if it doesn't expand or break the public surface in one of those ways, it's a patch.
 - Never bump major unless asked. Never ask the user which to bump.
 
 `package.json` is the single source of truth for the version.
