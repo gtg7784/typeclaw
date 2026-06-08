@@ -43,7 +43,7 @@ To stop the agent answering in a specific channel, narrow the `roles` block so t
 }
 ```
 
-- **`trigger`** — array of one or more of `"mention"`, `"reply"`, `"dm"`. Default: all three.
+- **`trigger`** — array of any subset of `"mention"`, `"reply"`, `"dm"` (including the empty array `[]`, which disables all explicit triggers — see the quieting playbook below). Default: all three.
   - `mention` — explicit `@bot` mentions.
   - `reply` — message is a Discord reply pointed at the agent's own message.
   - `dm` — any message in a DM channel.
