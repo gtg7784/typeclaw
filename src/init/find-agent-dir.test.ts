@@ -12,8 +12,13 @@ import { findAgentDir, isInitialized } from './find-agent-dir'
 describe('find-agent-dir dependency isolation', () => {
   test('imports nothing beyond node:fs and node:path', () => {
     const source = readFileSync(join(import.meta.dir, 'find-agent-dir.ts'), 'utf8')
-    const importSpecifiers = [...source.matchAll(/^import .* from ['"]([^'"]+)['"]/gm)].map((m) => m[1])
-    expect(importSpecifiers.sort()).toEqual(['node:fs', 'node:path'])
+    // Catch every static dependency form: `import ... from 'spec'`, bare
+    // side-effect `import 'spec'`, and re-exports `export ... from 'spec'` /
+    // `export * from 'spec'` — any of these would drag in the heavy graph.
+    const specifiers = [...source.matchAll(/^(?:import|export)\s+(?:[^'"]*\sfrom\s+)?['"]([^'"]+)['"]/gm)].map(
+      (m) => m[1],
+    )
+    expect(specifiers.sort()).toEqual(['node:fs', 'node:path'])
   })
 })
 

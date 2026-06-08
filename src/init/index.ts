@@ -36,7 +36,7 @@ export { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 
 export { appendOrReplaceEnvKey, hasEnvKey, readEnvFile } from './env-file'
 
-export { CONFIG_FILE, findAgentDir, isInitialized } from './find-agent-dir'
+export { CONFIG_FILE, findAgentDir, isInitialized }
 
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'
