@@ -108,6 +108,12 @@ describe('formatList', () => {
     expect(out).toContain('cron-parser: bad expression')
   })
 
+  test('renders a retired (count/until-exhausted) job as retired, not invalid schedule', () => {
+    const out = formatList([entry({ nextFireMs: null, scheduleError: undefined, count: 3 })], NOW)
+    expect(out).toContain('retired')
+    expect(out).not.toContain('invalid schedule')
+  })
+
   test('renders timezone next to schedule when set', () => {
     const out = formatList([entry({ timezone: 'America/Los_Angeles' })], NOW)
     expect(out).toContain('America/Los_Angeles')

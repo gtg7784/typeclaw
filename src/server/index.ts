@@ -28,7 +28,7 @@ import {
 } from '@/agent/todo/continuation-wiring'
 import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
 import type { ChannelRouter } from '@/channels/router'
-import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
+import { aggregateCronList, type CronJob, type CronListEntry, loadCron } from '@/cron'
 import type { McpManager } from '@/mcp'
 import type { HookBus } from '@/plugin'
 import type { BrokerWsData, ContainerBroker } from '@/portbroker'
@@ -75,6 +75,9 @@ export type ServerOptions = {
   mcpManager?: McpManager
   agentDir?: string
   pluginRuntime?: PluginRuntime
+  // Durable cron fire-progress lookup so `cron list` marks count-exhausted jobs
+  // as retired instead of showing a stale future fire time. Omit in tests/dev.
+  getFiredCount?: (job: CronJob) => number
   containerName?: string
   runtimeVersion?: string
   tuiToken?: string
@@ -252,6 +255,7 @@ export function createServer({
   mcpManager,
   agentDir,
   pluginRuntime,
+  getFiredCount,
   containerName,
   runtimeVersion,
   tuiToken,
@@ -716,7 +720,7 @@ export function createServer({
           }
 
           if (msg.type === 'cron_list') {
-            await handleCronList(ws, msg.requestId, pluginRuntime, agentDir)
+            await handleCronList(ws, msg.requestId, pluginRuntime, agentDir, getFiredCount)
             return
           }
 
@@ -1186,6 +1190,7 @@ async function handleCronList(
   requestId: string,
   pluginRuntime: PluginRuntime | undefined,
   agentDir: string | undefined,
+  getFiredCount?: (job: CronJob) => number,
 ): Promise<void> {
   if (agentDir === undefined) {
     send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason: 'agentDir not configured' } })
@@ -1208,7 +1213,12 @@ async function handleCronList(
     const userJobs = loadResult.file?.jobs ?? []
     const pluginJobs = snapshot?.registry.cronJobs ?? []
     const nowMs = Date.now()
-    const entries = aggregateCronList({ userJobs, pluginJobs, now: nowMs })
+    const entries = aggregateCronList({
+      userJobs,
+      pluginJobs,
+      now: nowMs,
+      ...(getFiredCount !== undefined ? { firedCount: getFiredCount } : {}),
+    })
     send(ws, {
       type: 'cron_list_result',
       requestId,
@@ -1541,9 +1551,12 @@ function toPayload(entry: CronListEntry): CronListEntryPayload {
     id: entry.id,
     source,
     kind: entry.kind,
-    schedule: entry.schedule,
     enabled: entry.enabled,
     nextFireMs: entry.nextFireMs,
+    ...(entry.schedule !== undefined ? { schedule: entry.schedule } : {}),
+    ...(entry.at !== undefined ? { at: entry.at } : {}),
+    ...(entry.until !== undefined ? { until: entry.until } : {}),
+    ...(entry.count !== undefined ? { count: entry.count } : {}),
     ...(entry.timezone !== undefined ? { timezone: entry.timezone } : {}),
     ...(entry.scheduledByRole !== undefined ? { scheduledByRole: entry.scheduledByRole } : {}),
     ...(entry.scheduleError !== undefined ? { scheduleError: entry.scheduleError } : {}),

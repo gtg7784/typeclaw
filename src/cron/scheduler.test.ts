@@ -542,6 +542,144 @@ describe('Scheduler.replaceJobs', () => {
   })
 })
 
+// The scheduler is NOT the count authority — the consumer is. The scheduler
+// only reads `get` to STOP ARMING once the durable count is already exhausted.
+// This fake models a store whose count is set externally (by the consumer).
+function fixedCountStore(counts: Record<string, number> = {}): {
+  get: (id: string, job: CronJob) => number
+  reconcile: () => Promise<void>
+} {
+  return {
+    get: (id) => counts[id] ?? 0,
+    reconcile: async () => {},
+  }
+}
+
+const countedPrompt = (id: string, schedule: string, count: number): CronJob => ({
+  id,
+  schedule,
+  kind: 'prompt',
+  prompt: `run ${id}`,
+  enabled: true,
+  count,
+})
+
+describe('end boundaries', () => {
+  test('scheduler stops arming once the store reports the count is exhausted', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [countedPrompt('limited', '* * * * *', 3)],
+      onFire: recorder.onFire,
+      clock,
+      countStore: fixedCountStore({ limited: 3 }),
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(10 * 60 * 1000 + 100)
+
+    expect(recorder.firesByJob.get('limited')).toBeUndefined()
+
+    scheduler.stop()
+  })
+
+  test('scheduler keeps arming while the store reports count below the limit', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [countedPrompt('limited', '* * * * *', 3)],
+      onFire: recorder.onFire,
+      clock,
+      countStore: fixedCountStore({ limited: 1 }),
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(3 * 60 * 1000 + 100)
+
+    // count never advances in this fake (consumer would), so it keeps firing —
+    // proving the scheduler is not the gate, only an arming optimization.
+    expect((recorder.firesByJob.get('limited') ?? []).length).toBeGreaterThanOrEqual(3)
+
+    scheduler.stop()
+  })
+
+  test('until stops a recurring job after the boundary instant', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [
+        {
+          id: 'bounded',
+          schedule: '* * * * *',
+          kind: 'prompt',
+          prompt: 'run',
+          enabled: true,
+          until: '2026-01-01T00:03:00Z',
+        },
+      ],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(10 * 60 * 1000 + 100)
+
+    expect(recorder.firesByJob.get('bounded')).toHaveLength(3)
+
+    scheduler.stop()
+  })
+
+  test('an "at" job fires exactly once then retires', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [{ id: 'oneshot', at: '2026-01-01T00:05:00Z', kind: 'prompt', prompt: 'remind', enabled: true }],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(60 * 60 * 1000)
+
+    expect(recorder.firesByJob.get('oneshot')).toHaveLength(1)
+
+    scheduler.stop()
+  })
+
+  test('count + until: scheduler stops arming when the store reports count exhausted before until', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [
+        {
+          id: 'both',
+          schedule: '* * * * *',
+          kind: 'prompt',
+          prompt: 'run',
+          enabled: true,
+          until: '2026-01-01T00:10:00Z',
+          count: 2,
+        },
+      ],
+      onFire: recorder.onFire,
+      clock,
+      countStore: fixedCountStore({ both: 2 }),
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(20 * 60 * 1000)
+
+    expect(recorder.firesByJob.get('both')).toBeUndefined()
+
+    scheduler.stop()
+  })
+})
+
 describe('schedule failure surfacing', () => {
   function createCapturingLogger(): SchedulerLogger & { warns: string[]; errors: string[] } {
     const warns: string[] = []

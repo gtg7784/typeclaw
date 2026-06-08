@@ -165,7 +165,10 @@ export type CronListEntryPayload = {
   id: string
   source: CronListSourcePayload
   kind: 'prompt' | 'exec' | 'handler'
-  schedule: string
+  schedule?: string
+  at?: string
+  until?: string
+  count?: number
   timezone?: string
   enabled: boolean
   scheduledByRole?: string

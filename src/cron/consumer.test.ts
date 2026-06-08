@@ -930,3 +930,139 @@ describe('createCronConsumer model fallback', () => {
     }
   })
 })
+
+function fakeCountStore(): {
+  get: (id: string, job: CronJob) => number
+  increment: (id: string, job: CronJob, at: number) => Promise<boolean>
+  counts: Map<string, number>
+  inactive: Set<string>
+} {
+  const counts = new Map<string, number>()
+  // ids the test has marked as no longer live: increment returns false (dropped)
+  // and does not count, mirroring a job removed/replaced during the await.
+  const inactive = new Set<string>()
+  return {
+    counts,
+    inactive,
+    get: (id) => counts.get(id) ?? 0,
+    increment: async (id) => {
+      if (inactive.has(id)) return false
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+      return true
+    },
+  }
+}
+
+const countedPromptJob = (id: string, count: number): PromptJob => ({
+  id,
+  schedule: '* * * * *',
+  enabled: true,
+  kind: 'prompt',
+  prompt: `run ${id}`,
+  count,
+})
+
+describe('createCronConsumer count gate', () => {
+  test('increments the durable count for an accepted run', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const countStore = fakeCountStore()
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      countStore,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    publishCron(stream, countedPromptJob('limited', 3))
+    await new Promise((r) => setImmediate(r))
+
+    expect(countStore.counts.get('limited')).toBe(1)
+
+    consumer.stop()
+  })
+
+  test('skips and does NOT increment once the count boundary is reached', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const countStore = fakeCountStore()
+    countStore.counts.set('limited', 3)
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      countStore,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    publishCron(stream, countedPromptJob('limited', 3))
+    await new Promise((r) => setImmediate(r))
+
+    expect(countStore.counts.get('limited')).toBe(3)
+    expect(factory.callsByJob.get('limited')).toBeUndefined()
+
+    consumer.stop()
+  })
+
+  test('a coalesced (in-flight) fire does NOT consume a count', async () => {
+    const stream = createStream()
+    const countStore = fakeCountStore()
+    // Hold the first run open so the second publish coalesces against it.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const createSessionForCron = async (): Promise<CronSession> => ({
+      prompt: async () => {
+        await gate
+      },
+      session: stubAgentSession(),
+    })
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron,
+      countStore,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    publishCron(stream, countedPromptJob('limited', 5))
+    await new Promise((r) => setImmediate(r))
+    // second fire while the first is still in flight -> coalesced skip
+    publishCron(stream, countedPromptJob('limited', 5))
+    await new Promise((r) => setImmediate(r))
+
+    expect(countStore.counts.get('limited')).toBe(1)
+
+    release?.()
+    consumer.stop()
+  })
+
+  test('does NOT dispatch when increment reports the job is no longer live', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const countStore = fakeCountStore()
+    // job removed/replaced while the durable increment was awaiting
+    countStore.inactive.add('limited')
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      countStore,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    publishCron(stream, countedPromptJob('limited', 3))
+    await new Promise((r) => setImmediate(r))
+
+    expect(countStore.counts.get('limited')).toBeUndefined()
+    expect(factory.callsByJob.get('limited')).toBeUndefined()
+
+    consumer.stop()
+  })
+})

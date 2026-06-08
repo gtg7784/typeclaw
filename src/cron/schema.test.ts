@@ -185,6 +185,113 @@ describe('parseCronFile', () => {
   })
 })
 
+describe('parseCronFile timing boundaries (until / at / count)', () => {
+  const NOW = new Date('2026-06-08T00:00:00Z').getTime()
+  const FUTURE = '2026-06-12T00:00:00Z'
+  const PAST = '2020-01-01T00:00:00Z'
+
+  const job = (extra: Record<string, unknown>) => ({
+    id: 'j',
+    kind: 'prompt' as const,
+    prompt: 'x',
+    scheduledByRole: 'owner',
+    ...extra,
+  })
+
+  test('accepts a recurring job with a future "until"', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: FUTURE })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs[0]?.until).toBe(FUTURE)
+  })
+
+  test('accepts a recurring job with a positive "count"', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', count: 3 })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs[0]?.count).toBe(3)
+  })
+
+  test('accepts a one-shot "at" job', () => {
+    const result = parseCronFile({ jobs: [job({ at: FUTURE })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs[0]?.at).toBe(FUTURE)
+  })
+
+  test('rejects a job with neither schedule nor at', () => {
+    const result = parseCronFile({ jobs: [job({})] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/exactly one of "schedule".*"at"/)
+  })
+
+  test('rejects a job with both schedule and at', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', at: FUTURE })] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/exactly one of/)
+  })
+
+  test('rejects "at" in the past for an enabled job', () => {
+    const result = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/past/)
+  })
+
+  test('rejects a past "at" only when enabled — disabled past jobs validate', () => {
+    const result = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('rejects "until" in the past for an enabled job', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: PAST })] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/past/)
+  })
+
+  test('rejects "until" before the first occurrence', () => {
+    const result = parseCronFile(
+      { jobs: [job({ schedule: '0 9 1 1 *', until: '2026-06-09T00:00:00Z' })] },
+      { now: NOW },
+    )
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/no occurrence/)
+  })
+
+  test('rejects an "at" without an explicit zone (local-time ambiguity)', () => {
+    const result = parseCronFile({ jobs: [job({ at: '2026-06-12T09:00:00' })] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/explicit zone/)
+  })
+
+  test('accepts an "at" with a numeric offset', () => {
+    const result = parseCronFile({ jobs: [job({ at: '2026-06-12T09:00:00+09:00' })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('rejects "until" or "timezone" on a one-shot "at" job', () => {
+    const withUntil = parseCronFile({ jobs: [job({ at: FUTURE, until: FUTURE })] }, { now: NOW })
+    if (withUntil.ok) throw new Error('expected failure')
+    expect(withUntil.reason).toMatch(/"until" is only valid with "schedule"/)
+
+    const withTz = parseCronFile({ jobs: [job({ at: FUTURE, timezone: 'UTC' })] }, { now: NOW })
+    if (withTz.ok) throw new Error('expected failure')
+    expect(withTz.reason).toMatch(/"timezone" is only valid with "schedule"/)
+  })
+
+  test('rejects count > 1 on a one-shot "at" job', () => {
+    const result = parseCronFile({ jobs: [job({ at: FUTURE, count: 2 })] }, { now: NOW })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/only set "count": 1/)
+  })
+
+  test('rejects a non-positive or non-integer count via schema', () => {
+    expect(parseCronFile({ jobs: [job({ schedule: '0 9 * * *', count: 0 })] }, { now: NOW }).ok).toBe(false)
+    expect(parseCronFile({ jobs: [job({ schedule: '0 9 * * *', count: 1.5 })] }, { now: NOW }).ok).toBe(false)
+  })
+
+  test('accepts until + count together on one recurring job', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: FUTURE, count: 5 })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+  })
+})
+
 describe('parseCronFile with subagents registry', () => {
   const greeter: Subagent = { systemPrompt: 'X' }
   const memoryLogger: Subagent<{ id: string }> = {

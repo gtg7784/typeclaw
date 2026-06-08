@@ -14,11 +14,22 @@ export type SchedulerLogger = {
   error: (msg: string) => void
 }
 
+// The scheduler uses the count store only to stop arming once a job's durable
+// count is exhausted (an optimization) and to reconcile progress on reload.
+// The authoritative count gate lives in the consumer, which owns accepted-fire
+// accounting — the scheduler must not be the correctness boundary because it
+// can't know whether the downstream coalescer will accept or skip a fire.
+export type SchedulerCountStore = {
+  get: (id: string, job: CronJob) => number
+  reconcile: (jobs: CronJob[]) => Promise<void>
+}
+
 export type CreateSchedulerOptions = {
   jobs: CronJob[]
   onFire: (job: CronJob) => void
   clock?: SchedulerClock
   logger?: SchedulerLogger
+  countStore?: SchedulerCountStore
 }
 
 export type JobDiff = {
@@ -51,6 +62,7 @@ export function createScheduler({
   onFire,
   clock = realClock,
   logger = consoleLogger,
+  countStore,
 }: CreateSchedulerOptions): Scheduler {
   const registry = new Map<string, CronJob>()
   for (const job of jobs) registry.set(job.id, job)
@@ -69,9 +81,16 @@ export function createScheduler({
     const job = currentEnabled(id)
     if (!job) return
 
-    const result = computeNextFire(job, clock.now())
+    const firedCount = job.count !== undefined ? (countStore?.get(id, job) ?? 0) : 0
+    const result = computeNextFire(job, clock.now(), { firedCount })
     if (!result.ok) {
-      logger.warn(`[cron] ${id} not scheduled: invalid schedule "${job.schedule}"${tzSuffix(job)}: ${result.reason}`)
+      if (result.expired) {
+        logger.info(`[cron] ${id} retired: ${result.reason}`)
+      } else {
+        logger.warn(
+          `[cron] ${id} not scheduled: invalid schedule "${job.schedule ?? job.at}"${tzSuffix(job)}: ${result.reason}`,
+        )
+      }
       return
     }
 
@@ -94,8 +113,7 @@ export function createScheduler({
     try {
       onFire(job)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error(`[cron] ${job.id} onFire threw synchronously: ${message}`)
+      logger.error(`[cron] ${job.id} onFire threw synchronously: ${describe(err)}`)
     }
   }
 
@@ -153,6 +171,14 @@ export function createScheduler({
       registry.clear()
       for (const [id, job] of newRegistry) registry.set(id, job)
 
+      // Reconcile counts before arming so re-added/changed jobs don't inherit
+      // stale progress. `reconcile` settles the authoritative in-memory map
+      // synchronously; only the persist is async, so a failure there just means
+      // disk lags the (correct) in-memory state — log it, don't fail the reload.
+      countStore?.reconcile(next).catch((err) => {
+        logger.error(`[cron] failed to persist count reconciliation: ${describe(err)}`)
+      })
+
       for (const job of result.removed) cancel(job.id)
       for (const job of result.updated) {
         cancel(job.id)
@@ -167,7 +193,10 @@ export function createScheduler({
 
 function jobFingerprint(job: CronJob): string {
   return JSON.stringify({
-    schedule: job.schedule,
+    schedule: job.schedule ?? null,
+    at: job.at ?? null,
+    until: job.until ?? null,
+    count: job.count ?? null,
     enabled: job.enabled,
     timezone: job.timezone ?? null,
     kind: job.kind,
@@ -189,21 +218,67 @@ function jobPayload(job: CronJob): unknown {
   return { handler: String(job.handler) }
 }
 
-export type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }
+export type ComputeNextFireResult =
+  | { ok: true; nextFire: number }
+  // `expired` distinguishes a reached end-boundary (count/until/past `at`) from
+  // a malformed schedule: the former is silent and final, the latter warns.
+  | { ok: false; expired: true; reason: string }
+  | { ok: false; expired: false; reason: string }
 
-export function computeNextFire(job: CronJob, now: number): ComputeNextFireResult {
+export type ComputeNextFireOptions = {
+  // Accepted fires so far, sourced from the count store. Defaults to 0 so
+  // callers that don't track counts (cron list rendering, pure schedule
+  // preview) compute the raw next occurrence.
+  firedCount?: number
+}
+
+export function computeNextFire(
+  job: CronJob,
+  now: number,
+  options: ComputeNextFireOptions = {},
+): ComputeNextFireResult {
+  const firedCount = options.firedCount ?? 0
+  if (job.count !== undefined && firedCount >= job.count) {
+    return { ok: false, expired: true, reason: `count limit reached (${firedCount}/${job.count})` }
+  }
+
+  if (job.at !== undefined) {
+    const at = Date.parse(job.at)
+    if (Number.isNaN(at)) return { ok: false, expired: false, reason: `invalid "at": ${job.at}` }
+    if (at <= now) return { ok: false, expired: true, reason: `one-shot "at" already elapsed` }
+    return { ok: true, nextFire: at }
+  }
+
+  if (job.schedule === undefined) {
+    return { ok: false, expired: false, reason: `job has neither "schedule" nor "at"` }
+  }
+
+  let nextFire: number
   try {
     const expr = CronExpressionParser.parse(job.schedule, {
       currentDate: new Date(now),
       ...(job.timezone ? { tz: job.timezone } : {}),
     })
-    return { ok: true, nextFire: expr.next().getTime() }
+    nextFire = expr.next().getTime()
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    return { ok: false, reason }
+    return { ok: false, expired: false, reason }
   }
+
+  if (job.until !== undefined) {
+    const until = Date.parse(job.until)
+    if (!Number.isNaN(until) && nextFire > until) {
+      return { ok: false, expired: true, reason: `next occurrence is after "until" (${job.until})` }
+    }
+  }
+
+  return { ok: true, nextFire }
 }
 
 function tzSuffix(job: CronJob): string {
   return job.timezone ? ` (timezone "${job.timezone}")` : ''
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }

@@ -30,9 +30,11 @@ import {
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
 import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync, reloadConfig } from '@/config'
 import {
+  type CountStore,
   type CronConsumer,
   type CronJob,
   type CronFile,
+  createCountStore,
   createCronConsumer,
   createCronReloadable,
   createScheduler,
@@ -77,7 +79,12 @@ type BunServer = ReturnType<Server['start']>
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<unknown> }
 
 export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
-export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
+export type SchedulerFactory = (options: {
+  cwd: string
+  file: CronFile
+  onFire: (job: CronJob) => void
+  onCountStore?: (store: CountStore) => void
+}) => Scheduler | Promise<Scheduler>
 export type ChannelManagerFactory = typeof createChannelManager
 export type TunnelManagerFactory = (options: TunnelManagerOptions) => TunnelManager
 
@@ -419,9 +426,23 @@ export async function startAgent({
   })
   subagentConsumer.start()
 
+  // Populated by startScheduler's factory (onCountStore). The consumer
+  // subscribes before this is set, but only touches the holder at fire time
+  // (reading the count via `get` and recording it via `increment`) — and the
+  // scheduler (the sole cron publisher) is armed only AFTER the holder is
+  // populated, so no count-limited fire can observe an undefined holder. If
+  // another cron publisher is ever added, create the store before this point.
+  let cronCountStore: CountStore | undefined
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
+    countStore: {
+      get: (id, job) => cronCountStore?.get(id, job) ?? 0,
+      // Holder is always set before any fire (see above); the `false` fallback
+      // fails safe — skip dispatch rather than run an uncounted count-job — for
+      // the unreachable case where a fire somehow predates the holder.
+      increment: (id, job, at) => cronCountStore?.increment(id, job, at) ?? Promise.resolve(false),
+    },
     invokeHandler: async (job) => {
       const snap = pluginRuntime.get()
       const registered = snap.registry.cronJobs.find((j) => j.globalId === job.id)
@@ -532,6 +553,11 @@ export async function startAgent({
 
   const internalJobs = () => pluginCronJobs(pluginRuntime.get().registry)
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
+  // Subscribe the consumer BEFORE the scheduler arms any timers. The stream
+  // delivers only to live subscribers (no replay), so a fire published before
+  // the subscription exists would be lost. Subscribing to an empty stream is
+  // harmless when there are no jobs.
+  cronConsumer.start()
   const scheduler = await startScheduler({
     cwd,
     loadCron,
@@ -539,10 +565,12 @@ export async function startAgent({
     stream,
     hasInternalJobs: internalJobs().length > 0,
     getSubagents: () => pluginRuntime.get().subagents,
+    onCountStore: (store) => {
+      cronCountStore = store
+    },
   })
 
   if (scheduler) {
-    cronConsumer.start()
     reloadRegistry.register(
       createCronReloadable({ cwd, scheduler, internalJobs, getSubagents: () => pluginRuntime.get().subagents }),
     )
@@ -721,6 +749,7 @@ export async function startAgent({
     ...mcpManagerOpt,
     agentDir: cwd,
     pluginRuntime,
+    getFiredCount: (job) => cronCountStore?.get(job.id, job) ?? 0,
     claimController,
     commandRunnerFactory,
     tunnelManager,
@@ -838,6 +867,7 @@ async function startScheduler({
   stream,
   hasInternalJobs,
   getSubagents,
+  onCountStore,
 }: {
   cwd: string
   loadCron: LoadCronFn
@@ -845,6 +875,7 @@ async function startScheduler({
   stream: Stream
   hasInternalJobs: boolean
   getSubagents?: () => SubagentRegistry
+  onCountStore?: (store: CountStore) => void
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   const subagents = getSubagents?.()
@@ -864,13 +895,19 @@ async function startScheduler({
   const onFire = (job: CronJob) => {
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
-  const scheduler = createSchedulerFor({ cwd, file, onFire })
+  const scheduler = await createSchedulerFor({ cwd, file, onFire, onCountStore })
   scheduler.start()
   return scheduler
 }
 
 function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFactory {
-  return ({ file, onFire }) => createScheduler({ jobs: [...file.jobs, ...internalJobs()], onFire })
+  return async ({ cwd, file, onFire, onCountStore }) => {
+    const jobs = [...file.jobs, ...internalJobs()]
+    const countStore = await createCountStore(cwd, jobs)
+    // Share the one store instance with the consumer's authoritative count gate.
+    onCountStore?.(countStore)
+    return createScheduler({ jobs, onFire, countStore })
+  }
 }
 
 // Exported for the regression test in `merge-subagents.test.ts`. The shim
