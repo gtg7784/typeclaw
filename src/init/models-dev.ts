@@ -22,6 +22,7 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   'zai-coding': 'zai',
   xai: 'xai',
   minimax: 'minimax',
+  deepseek: 'deepseek',
 }
 
 export type ModelOption = {

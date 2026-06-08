@@ -646,6 +646,63 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // DeepSeek (api.deepseek.com) pay-as-you-go API. OpenAI-compatible (Bearer
+  // auth + /chat/completions shape), so models go through pi-ai's
+  // `openai-completions` adapter with a custom baseUrl — same trick as
+  // Fireworks, Z.AI, and MiniMax. api-key only; DeepSeek ships no OAuth flow.
+  //
+  // baseUrl is bare `https://api.deepseek.com` (no `/v1` segment) — the SDK
+  // appends `/chat/completions`. This mirrors Anthropic's no-`/v1` convention,
+  // not the OpenAI/xAI `/v1` one; `validate-api-key.ts` probes
+  // `${baseUrl}/models` accordingly.
+  //
+  // Model lineup is the V4 generation as listed on api-docs.deepseek.com/quick_start/pricing
+  // as of 2026-06-08: deepseek-v4-flash (fast, cheap default) and
+  // deepseek-v4-pro (stronger). Both default to thinking/reasoning mode (it is
+  // toggleable upstream, but reasoning: true reflects the default). 1M context,
+  // 384K max output, text-only — DeepSeek's API exposes no image input. The
+  // legacy `deepseek-chat` / `deepseek-reasoner` aliases (deprecated 2026-07-24,
+  // they redirect into v4-flash's non-thinking/thinking modes) are intentionally
+  // omitted in favor of the canonical v4 ids.
+  //
+  // Costs are USD per 1M tokens (standard tier). DeepSeek prices input on a
+  // cache-miss/cache-hit split: `input` is the cache-miss rate, `cacheRead` is
+  // the cache-hit rate. There is no published cache-write surcharge, so
+  // cacheWrite is 0.
+  deepseek: {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    auth: ['api-key'],
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'deepseek-v4-flash': {
+        id: 'deepseek-v4-flash',
+        name: 'DeepSeek V4 Flash',
+        api: 'openai-completions',
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 384000,
+      },
+      'deepseek-v4-pro': {
+        id: 'deepseek-v4-pro',
+        name: 'DeepSeek V4 Pro',
+        api: 'openai-completions',
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 384000,
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
@@ -713,6 +770,11 @@ export const KNOWN_PROVIDER_VENDORS = {
     id: 'minimax',
     name: 'MiniMax',
     providers: ['minimax'],
+  },
+  deepseek: {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    providers: ['deepseek'],
   },
 } as const satisfies Record<string, KnownProviderVendor>
 
