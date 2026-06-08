@@ -2923,7 +2923,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return { ok: false, error: `no adapter registered for "${msg.adapter}"`, code: 'no-adapter' }
     }
 
-    const authoredText = normalizeSendText(msg.text)
+    // Strip leaked `<think>` reasoning off the message itself, up front, so the
+    // stripped text flows through EVERY downstream consumer: the flood check,
+    // the duplicate guard, the quote-anchor prepend, and the adapter callback.
+    // A body that was nothing but a think block collapses to undefined and is
+    // delivered as a text-less send (attachments, if any, still go through).
+    if (msg.text !== undefined) {
+      msg = { ...msg, text: normalizeSendText(msg.text) }
+    }
+
+    const authoredText = msg.text
     if (authoredText !== undefined) {
       const flood = checkOutboundFlood(authoredText)
       if (!flood.ok) return { ok: false, error: OUTBOUND_FLOOD_ERROR, code: 'outbound-flood' }
@@ -4410,10 +4419,32 @@ export function resolveLiveSessionForCommand(
   return { kind: 'none' }
 }
 
+// Strips leaked `<think>…</think>` reasoning from outbound message text. Some
+// models (DeepSeek-R1 / Qwen-QwQ family) emit chain-of-thought inline as a
+// literal `<think>` span in `delta.content` rather than a dedicated `thinking`
+// content block, so it lands verbatim in the assistant body and — without this
+// — gets posted to the channel (production: a reasoning paragraph leaked into a
+// Slack thread). The whole block is removed, not just the tags.
+//
+// THINK_BLOCK_RE matches closed blocks (case-insensitive, attribute-tolerant,
+// multi-line). DANGLING_THINK_RE catches an UNCLOSED trailing `<think>` (model
+// ran out of budget mid-reasoning) by dropping open-tag-to-end. The final pass
+// collapses excision-left blank-line runs and trims.
+const THINK_BLOCK_RE = /<think\b[^>]*>[\s\S]*?<\/think\s*>/gi
+const DANGLING_THINK_RE = /<think\b[^>]*>[\s\S]*$/i
+
+export function stripThinkBlocks(text: string): string {
+  const withoutBlocks = text.replace(THINK_BLOCK_RE, '').replace(DANGLING_THINK_RE, '')
+  return withoutBlocks.replace(/\n{3,}/g, '\n\n').trim()
+}
+
 function normalizeSendText(text: string | undefined): string | undefined {
   if (text === undefined) return undefined
-  if (text === '') return undefined
-  return text
+  // Strip before the empty-collapse so a turn that was ONLY a think block
+  // resolves to `undefined` (suppressed) instead of posting an empty shell.
+  const stripped = stripThinkBlocks(text)
+  if (stripped === '') return undefined
+  return stripped
 }
 
 function recordSendTimestamp(live: LiveSession, sendKey: string, ts: number): number {

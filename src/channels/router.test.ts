@@ -36,6 +36,7 @@ import {
   SESSION_IDLE_MS,
   sliceHeadTail,
   StaleLiveSessionError,
+  stripThinkBlocks,
   TURN_CAP_ERROR,
   type ChannelRouter,
   type ClaimHandler,
@@ -1480,6 +1481,80 @@ describe('ChannelRouter outbound', () => {
     })
     expect(result.ok).toBe(false)
     expect(result.ok === false ? result.error : '').toContain('denied')
+  })
+
+  test('strips a leaked think block before forwarding to the adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let captured = ''
+    router.registerOutbound('discord-bot', async (msg) => {
+      captured = msg.text ?? ''
+      return { ok: true }
+    })
+    const result = await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: '<think>let me figure out the tone here</think>Done — shipped it.',
+    })
+    expect(result.ok).toBe(true)
+    expect(captured).toBe('Done — shipped it.')
+  })
+
+  test('does not forward the reasoning when the whole body was a think block', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let capturedText: string | undefined = 'UNSET'
+    router.registerOutbound('discord-bot', async (msg) => {
+      capturedText = msg.text
+      return { ok: true }
+    })
+    const result = await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: '<think>they are just laughing, no reply needed</think>',
+    })
+    expect(result.ok).toBe(true)
+    expect(capturedText === undefined || capturedText === '').toBe(true)
+  })
+})
+
+describe('stripThinkBlocks', () => {
+  test('removes a closed block and trims surrounding whitespace', () => {
+    expect(stripThinkBlocks('<think>plan the reply</think>\n\nHello there')).toBe('Hello there')
+  })
+
+  test('removes a block wrapped by real prose on both sides', () => {
+    expect(stripThinkBlocks('Sure.<think>internal</think> On it.')).toBe('Sure. On it.')
+  })
+
+  test('matches case-insensitively and tolerates attributes', () => {
+    expect(stripThinkBlocks('<Think foo="bar">x</THINK>kept')).toBe('kept')
+  })
+
+  test('drops an unclosed trailing think block (budget exhaustion)', () => {
+    expect(stripThinkBlocks('Visible answer.\n<think>ran out of room mid-thought')).toBe('Visible answer.')
+  })
+
+  test('removes multiple blocks in one message', () => {
+    expect(stripThinkBlocks('<think>a</think>one <think>b</think>two')).toBe('one two')
+  })
+
+  test('collapses blank-line runs left by excision', () => {
+    expect(stripThinkBlocks('line1\n\n<think>x</think>\n\nline2')).toBe('line1\n\nline2')
+  })
+
+  test('returns empty string when the whole body was a think block', () => {
+    expect(stripThinkBlocks('<think>nothing to say</think>')).toBe('')
+  })
+
+  test('leaves text without think tags unchanged (aside from trim)', () => {
+    expect(stripThinkBlocks('just a normal message')).toBe('just a normal message')
+  })
+
+  test('does not match a bare word "think" in prose', () => {
+    expect(stripThinkBlocks('I think this is fine')).toBe('I think this is fine')
   })
 })
 
