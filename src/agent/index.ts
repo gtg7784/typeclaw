@@ -67,6 +67,7 @@ import {
   wrapAgentToolWithBudget,
   wrapToolDefinitionWithBudget,
 } from './tool-result-budget'
+import { createChannelDisengageTool } from './tools/channel-disengage'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
@@ -621,9 +622,11 @@ export function formatRestartNoticeOriginating(restartedAt: string): string {
 }
 
 // Builds the channel tool subset: channel_send (always when a router is
-// available), plus channel_reply + channel_history + skip_response (only
-// when the session origin is a channel — those rely on origin-bound
-// addressing or per-session turn state). Extracted from
+// available), plus the origin-bound channel tools when the session origin is
+// a channel — channel_reply, channel_history, channel_react,
+// channel_fetch_attachment, look_at_channel_attachment, channel_disengage, and
+// (when sessionId is known) skip_response. Those rely on origin-bound
+// addressing or per-session turn state. Extracted from
 // createSessionWithDispose so composition can be unit-tested without
 // going through createAgentSession / auth.
 //
@@ -683,6 +686,7 @@ export function buildChannelTools(
       }),
     )
     tools.push(createChannelLookAtTool(channelRouter, channelOrigin))
+    tools.push(createChannelDisengageTool({ router: channelRouter, origin: channelOrigin }))
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }

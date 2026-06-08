@@ -1303,6 +1303,120 @@ describe('ChannelRouter sticky credits', () => {
     expect(sessions[0]!.prompts[0]).toContain('where did you send it')
     expect(sessions[0]!.prompts[0]).toContain('You are in a group chat with multiple people.')
   })
+
+  test('clearSticky drops the credit so a plain follow-up is no longer auto-engaged', async () => {
+    // given a 2-human group where the bot just replied in alice's turn,
+    // granting alice a sticky credit (mirrors the test above)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yep just sent it' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot did you send it?' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // when the credit is force-cleared before alice's plain follow-up
+    const cleared = router.clearSticky(KEY)
+    expect(cleared.cleared).toBe(1)
+
+    nowRef.value = 2000
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: 'where did you send it' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the follow-up is observed, not engaged: no new prompt reaches the session
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('clearSticky reports zero when no credit is held', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    expect(router.clearSticky(KEY)).toEqual({ keyId: 'discord-bot:g1:c1:', cleared: 0 })
+  })
+
+  test('an ack reply in the same turn as clearSticky does not re-grant sticky', async () => {
+    // given a 2-human group: the model disengages mid-turn and THEN acks with a
+    // reply in the SAME turn (the natural "ok, backing off" pattern). The reply's
+    // success path must not silently re-grant the credit disengage just cleared.
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      // disengage, then ack in the same turn — the ordering that previously
+      // re-granted alice's credit and defeated the tool
+      router.clearSticky(KEY)
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ok, backing off' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot stop replying' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // when alice posts a plain follow-up after the disengaged turn
+    nowRef.value = 2000
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: 'you there' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then it is observed, not engaged: the ack did not re-arm stickiness
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('disengage is scoped to its turn: a reply on a LATER turn re-grants normally', async () => {
+    // given the model disengaged on alice's first turn (clearing + arming the
+    // guard for that turn only)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      router.clearSticky(KEY)
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot stop' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // when alice mentions again on a NEW turn and the bot replies (no disengage)
+    nowRef.value = 2000
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'sure' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: true, text: 'bot one thing' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // then sticky is back: alice's plain follow-up engages again
+    nowRef.value = 2200
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-3', isBotMention: false, text: 'and another' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
 })
 
 describe('ChannelRouter outbound', () => {
