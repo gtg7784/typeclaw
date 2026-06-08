@@ -23,7 +23,7 @@ export const TRULY_IGNORED_PATTERNS = [
 // The reconciler MUST fail-closed and never untrack these, even if a custom
 // git.ignore.append pattern (e.g. `**`) matches them — doing so would drop
 // runtime-owned state out of git.
-export const SYSTEM_MANAGED_ROOTS = ['sessions/', 'memory/', 'channels/', 'todo/'] as const
+export const SYSTEM_MANAGED_ROOTS = ['sessions/', 'memory/', 'channels/', 'todo/', 'cron/'] as const
 
 export function buildGitignore(config: GitignoreConfig = { append: [] }): string {
   const customEntries = renderCustomGitignoreEntries(config.append)

@@ -6,6 +6,14 @@ import type { SubagentRegistry } from '@/agent/subagents'
 
 import { type CronFile, parseCronFile } from './schema'
 
+export {
+  CRON_STATE_FILE,
+  type CountStore,
+  type CountStoreIO,
+  createCountStore,
+  progressFingerprint,
+  reconcile,
+} from './count-state'
 export { createCronReloadable, type CreateCronReloadableOptions } from './reloadable'
 export {
   createCronConsumer,
