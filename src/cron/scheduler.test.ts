@@ -542,6 +542,177 @@ describe('Scheduler.replaceJobs', () => {
   })
 })
 
+function memoryCountStore(): {
+  get: (id: string) => number
+  increment: (id: string) => Promise<void>
+  reconcile: () => Promise<void>
+} {
+  const counts = new Map<string, number>()
+  return {
+    get: (id) => counts.get(id) ?? 0,
+    increment: async (id) => {
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+    },
+    reconcile: async () => {},
+  }
+}
+
+const countedPrompt = (id: string, schedule: string, count: number): CronJob => ({
+  id,
+  schedule,
+  kind: 'prompt',
+  prompt: `run ${id}`,
+  enabled: true,
+  count,
+})
+
+describe('end boundaries', () => {
+  test('count stops a recurring job after N fires', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [countedPrompt('limited', '* * * * *', 3)],
+      onFire: recorder.onFire,
+      clock,
+      countStore: memoryCountStore(),
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(10 * 60 * 1000 + 100)
+
+    expect(recorder.firesByJob.get('limited')).toHaveLength(3)
+
+    scheduler.stop()
+  })
+
+  test('count progress carried in the store is respected on (re)start', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const store = memoryCountStore()
+    await store.increment('limited')
+    await store.increment('limited')
+
+    const scheduler = createScheduler({
+      jobs: [countedPrompt('limited', '* * * * *', 3)],
+      onFire: recorder.onFire,
+      clock,
+      countStore: store,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(10 * 60 * 1000 + 100)
+
+    expect(recorder.firesByJob.get('limited')).toHaveLength(1)
+
+    scheduler.stop()
+  })
+
+  test('until stops a recurring job after the boundary instant', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [
+        {
+          id: 'bounded',
+          schedule: '* * * * *',
+          kind: 'prompt',
+          prompt: 'run',
+          enabled: true,
+          until: '2026-01-01T00:03:00Z',
+        },
+      ],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(10 * 60 * 1000 + 100)
+
+    expect(recorder.firesByJob.get('bounded')).toHaveLength(3)
+
+    scheduler.stop()
+  })
+
+  test('an "at" job fires exactly once then retires', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [{ id: 'oneshot', at: '2026-01-01T00:05:00Z', kind: 'prompt', prompt: 'remind', enabled: true }],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(60 * 60 * 1000)
+
+    expect(recorder.firesByJob.get('oneshot')).toHaveLength(1)
+
+    scheduler.stop()
+  })
+
+  test('count and until together stop at whichever hits first (count wins)', async () => {
+    const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [
+        {
+          id: 'both',
+          schedule: '* * * * *',
+          kind: 'prompt',
+          prompt: 'run',
+          enabled: true,
+          until: '2026-01-01T00:10:00Z',
+          count: 2,
+        },
+      ],
+      onFire: recorder.onFire,
+      clock,
+      countStore: memoryCountStore(),
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(20 * 60 * 1000)
+
+    expect(recorder.firesByJob.get('both')).toHaveLength(2)
+
+    scheduler.stop()
+  })
+
+  test('a failed count persist skips dispatch and does not advance the count', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    let calls = 0
+    const flakyStore = {
+      get: () => 0,
+      increment: async () => {
+        calls++
+        throw new Error('disk full')
+      },
+      reconcile: async () => {},
+    }
+    const scheduler = createScheduler({
+      jobs: [countedPrompt('limited', '* * * * *', 3)],
+      onFire: recorder.onFire,
+      clock,
+      countStore: flakyStore,
+      logger: silentLogger,
+    })
+
+    scheduler.start()
+    await clock.advance(3 * 60 * 1000 + 100)
+
+    expect(recorder.fires).toHaveLength(0)
+    expect(calls).toBeGreaterThanOrEqual(1)
+
+    scheduler.stop()
+  })
+})
+
 describe('schedule failure surfacing', () => {
   function createCapturingLogger(): SchedulerLogger & { warns: string[]; errors: string[] } {
     const warns: string[] = []

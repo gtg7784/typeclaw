@@ -14,11 +14,22 @@ export type SchedulerLogger = {
   error: (msg: string) => void
 }
 
+// Tracks accepted fires for count-limited jobs. The scheduler reads `get` to
+// decide expiry and awaits `increment` BEFORE dispatch so a crash can never
+// under-count and over-fire a reminder after restart. Optional: jobs without
+// `count` never touch it, and tests that don't exercise counts can omit it.
+export type SchedulerCountStore = {
+  get: (id: string) => number
+  increment: (id: string, job: CronJob, at: number) => Promise<void>
+  reconcile: (jobs: CronJob[]) => Promise<void>
+}
+
 export type CreateSchedulerOptions = {
   jobs: CronJob[]
   onFire: (job: CronJob) => void
   clock?: SchedulerClock
   logger?: SchedulerLogger
+  countStore?: SchedulerCountStore
 }
 
 export type JobDiff = {
@@ -51,6 +62,7 @@ export function createScheduler({
   onFire,
   clock = realClock,
   logger = consoleLogger,
+  countStore,
 }: CreateSchedulerOptions): Scheduler {
   const registry = new Map<string, CronJob>()
   for (const job of jobs) registry.set(job.id, job)
@@ -69,9 +81,16 @@ export function createScheduler({
     const job = currentEnabled(id)
     if (!job) return
 
-    const result = computeNextFire(job, clock.now())
+    const firedCount = job.count !== undefined ? (countStore?.get(id) ?? 0) : 0
+    const result = computeNextFire(job, clock.now(), { firedCount })
     if (!result.ok) {
-      logger.warn(`[cron] ${id} not scheduled: invalid schedule "${job.schedule}"${tzSuffix(job)}: ${result.reason}`)
+      if (result.expired) {
+        logger.info(`[cron] ${id} retired: ${result.reason}`)
+      } else {
+        logger.warn(
+          `[cron] ${id} not scheduled: invalid schedule "${job.schedule ?? job.at}"${tzSuffix(job)}: ${result.reason}`,
+        )
+      }
       return
     }
 
@@ -83,10 +102,28 @@ export function createScheduler({
       if (!started) return
       const live = currentEnabled(id)
       if (!live) return
-      fire(live)
-      scheduleNext(id)
+      void fireThenReschedule(live)
     }, delay)
     handles.set(id, handle)
+  }
+
+  // The fire path is async because count-limited jobs must DURABLY record the
+  // fire before dispatch. We re-arm only after that completes, so the re-armed
+  // timer sees the updated count and retires on the final fire. A failed
+  // persist skips dispatch (the count stays put and the same occurrence is
+  // retried), keeping the at-most-count guarantee across crashes.
+  async function fireThenReschedule(job: CronJob): Promise<void> {
+    if (job.count !== undefined && countStore !== undefined) {
+      try {
+        await countStore.increment(job.id, job, clock.now())
+      } catch (err) {
+        logger.error(`[cron] ${job.id}: failed to record fire, skipping dispatch: ${describe(err)}`)
+        scheduleNext(job.id)
+        return
+      }
+    }
+    fire(job)
+    scheduleNext(job.id)
   }
 
   function fire(job: CronJob): void {
@@ -94,8 +131,7 @@ export function createScheduler({
     try {
       onFire(job)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error(`[cron] ${job.id} onFire threw synchronously: ${message}`)
+      logger.error(`[cron] ${job.id} onFire threw synchronously: ${describe(err)}`)
     }
   }
 
@@ -153,6 +189,11 @@ export function createScheduler({
       registry.clear()
       for (const [id, job] of newRegistry) registry.set(id, job)
 
+      // Reconcile counts before arming so re-added/changed jobs don't inherit
+      // stale progress. `reconcile` settles the authoritative in-memory map
+      // synchronously; the returned persist promise is fire-and-forget.
+      void countStore?.reconcile(next)
+
       for (const job of result.removed) cancel(job.id)
       for (const job of result.updated) {
         cancel(job.id)
@@ -167,7 +208,10 @@ export function createScheduler({
 
 function jobFingerprint(job: CronJob): string {
   return JSON.stringify({
-    schedule: job.schedule,
+    schedule: job.schedule ?? null,
+    at: job.at ?? null,
+    until: job.until ?? null,
+    count: job.count ?? null,
     enabled: job.enabled,
     timezone: job.timezone ?? null,
     kind: job.kind,
@@ -189,21 +233,67 @@ function jobPayload(job: CronJob): unknown {
   return { handler: String(job.handler) }
 }
 
-export type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }
+export type ComputeNextFireResult =
+  | { ok: true; nextFire: number }
+  // `expired` distinguishes a reached end-boundary (count/until/past `at`) from
+  // a malformed schedule: the former is silent and final, the latter warns.
+  | { ok: false; expired: true; reason: string }
+  | { ok: false; expired: false; reason: string }
 
-export function computeNextFire(job: CronJob, now: number): ComputeNextFireResult {
+export type ComputeNextFireOptions = {
+  // Accepted fires so far, sourced from the count store. Defaults to 0 so
+  // callers that don't track counts (cron list rendering, pure schedule
+  // preview) compute the raw next occurrence.
+  firedCount?: number
+}
+
+export function computeNextFire(
+  job: CronJob,
+  now: number,
+  options: ComputeNextFireOptions = {},
+): ComputeNextFireResult {
+  const firedCount = options.firedCount ?? 0
+  if (job.count !== undefined && firedCount >= job.count) {
+    return { ok: false, expired: true, reason: `count limit reached (${firedCount}/${job.count})` }
+  }
+
+  if (job.at !== undefined) {
+    const at = Date.parse(job.at)
+    if (Number.isNaN(at)) return { ok: false, expired: false, reason: `invalid "at": ${job.at}` }
+    if (at <= now) return { ok: false, expired: true, reason: `one-shot "at" already elapsed` }
+    return { ok: true, nextFire: at }
+  }
+
+  if (job.schedule === undefined) {
+    return { ok: false, expired: false, reason: `job has neither "schedule" nor "at"` }
+  }
+
+  let nextFire: number
   try {
     const expr = CronExpressionParser.parse(job.schedule, {
       currentDate: new Date(now),
       ...(job.timezone ? { tz: job.timezone } : {}),
     })
-    return { ok: true, nextFire: expr.next().getTime() }
+    nextFire = expr.next().getTime()
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    return { ok: false, reason }
+    return { ok: false, expired: false, reason }
   }
+
+  if (job.until !== undefined) {
+    const until = Date.parse(job.until)
+    if (!Number.isNaN(until) && nextFire > until) {
+      return { ok: false, expired: true, reason: `next occurrence is after "until" (${job.until})` }
+    }
+  }
+
+  return { ok: true, nextFire }
 }
 
 function tzSuffix(job: CronJob): string {
   return job.timezone ? ` (timezone "${job.timezone}")` : ''
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
