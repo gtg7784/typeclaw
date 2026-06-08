@@ -37,8 +37,10 @@ export class StickyLedger {
     return expiresAt !== undefined && expiresAt > now
   }
 
-  clear(key: string): void {
+  clear(key: string): number {
+    const cleared = this.byKey.get(key)?.size ?? 0
     this.byKey.delete(key)
+    return cleared
   }
 }
 

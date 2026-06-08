@@ -807,6 +807,14 @@ export type ChannelRouter = {
     | { kind: 'recorded'; keyId: string }
     | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
+  // Force-clear every sticky credit for one channel key. Stickiness normally
+  // expires on TTL or is consumed on the next inbound, but in a busy group each
+  // reply re-grants a fresh credit, so the bot can stay force-engaged turn after
+  // turn even after being told to stop. This is the escape hatch the
+  // `channel_disengage` tool calls to drop back to strict mention/reply/dm
+  // engagement without waiting out the window. In-memory only,
+  // so a later reply re-grants. `cleared` counts the author credits dropped.
+  clearSticky: (key: ChannelKey) => { keyId: string; cleared: number }
   // Two-phase boot restart-resume. Call `reserveRestartHandoff(handoff)` BEFORE
   // `channelManager.start()` to install a per-key gate so an inbound that races
   // the adapters coming online coalesces onto the resume instead of competing
@@ -3727,6 +3735,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'no-live-session' }
   }
 
+  const clearSticky = (key: ChannelKey): { keyId: string; cleared: number } => {
+    const keyId = channelKeyId(key)
+    const cleared = stickyLedger.clear(keyId)
+    logger.info(`[channels] ${keyId} sticky cleared count=${cleared}`)
+    return { keyId, cleared }
+  }
+
   return {
     route,
     send,
@@ -3768,6 +3783,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
     markTurnSkipped,
+    clearSticky,
     reserveRestartHandoff,
     resumeRestartHandoff,
     stop,

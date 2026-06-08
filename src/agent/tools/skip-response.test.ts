@@ -62,6 +62,7 @@ function fakeRouter(
       opts.markCalls?.push({ parentSessionId: args.parentSessionId, reason: args.reason })
       return opts.markResult ?? { kind: 'recorded', keyId: 'discord-bot:g1:c1' }
     },
+    clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,
     resumeRestartHandoff: async () => {},
   }

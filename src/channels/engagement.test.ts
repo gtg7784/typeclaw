@@ -1360,3 +1360,43 @@ describe('grantStickyForReplyTargets', () => {
     ).toBe(false)
   })
 })
+
+describe('StickyLedger.clear', () => {
+  test('drops every credit for the key and reports how many were held', () => {
+    const ledger = new StickyLedger()
+    grantStickyForReplyTargets(ledger, KEY, ['alice', 'bob'], baseConfig, 0)
+
+    const cleared = ledger.clear(KEY)
+
+    expect(cleared).toBe(2)
+    expect(ledger.has(KEY, 'alice', 0)).toBe(false)
+    expect(ledger.has(KEY, 'bob', 0)).toBe(false)
+  })
+
+  test('returns 0 when the key holds no credits', () => {
+    const ledger = new StickyLedger()
+    expect(ledger.clear(KEY)).toBe(0)
+  })
+
+  test('leaves other keys untouched', () => {
+    const ledger = new StickyLedger()
+    const otherKey = 'discord-bot:g1:c2:'
+    grantStickyForReplyTargets(ledger, KEY, ['alice'], baseConfig, 0)
+    grantStickyForReplyTargets(ledger, otherKey, ['alice'], baseConfig, 0)
+
+    ledger.clear(KEY)
+
+    expect(ledger.has(KEY, 'alice', 0)).toBe(false)
+    expect(ledger.has(otherKey, 'alice', 0)).toBe(true)
+  })
+
+  test('a re-grant after clear restores stickiness', () => {
+    const ledger = new StickyLedger()
+    grantStickyForReplyTargets(ledger, KEY, ['alice'], baseConfig, 0)
+    ledger.clear(KEY)
+
+    grantStickyForReplyTargets(ledger, KEY, ['alice'], baseConfig, 0)
+
+    expect(ledger.has(KEY, 'alice', 0)).toBe(true)
+  })
+})

@@ -1303,6 +1303,46 @@ describe('ChannelRouter sticky credits', () => {
     expect(sessions[0]!.prompts[0]).toContain('where did you send it')
     expect(sessions[0]!.prompts[0]).toContain('You are in a group chat with multiple people.')
   })
+
+  test('clearSticky drops the credit so a plain follow-up is no longer auto-engaged', async () => {
+    // given a 2-human group where the bot just replied in alice's turn,
+    // granting alice a sticky credit (mirrors the test above)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yep just sent it' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot did you send it?' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // when the credit is force-cleared before alice's plain follow-up
+    const cleared = router.clearSticky(KEY)
+    expect(cleared.cleared).toBe(1)
+
+    nowRef.value = 2000
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: 'where did you send it' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the follow-up is observed, not engaged: no new prompt reaches the session
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('clearSticky reports zero when no credit is held', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    expect(router.clearSticky(KEY)).toEqual({ keyId: 'discord-bot:g1:c1:', cleared: 0 })
+  })
 })
 
 describe('ChannelRouter outbound', () => {
