@@ -37,12 +37,14 @@ type GhSegmentDecision =
 
 const COMPOSITION_REASON =
   'A repo-targeting `gh` command receives a minted GitHub App token in its process ' +
-  'environment, so it must run as a single bare `gh` command — no pipes, `;`, `&&`, ' +
-  '`||`, `&`, newlines, redirections, command/process substitution, subshells, heredocs, ' +
-  'or unquoted `$` expansion (any sibling process or expansion would inherit the token ' +
-  'and could exfiltrate it). jq/JSON metacharacters are fine INSIDE single quotes, e.g. ' +
-  "`gh api repos/o/r --jq '.[] | {id}'`. To feed JSON to `gh api`, write it to a temp " +
-  'file and use `gh api --input <file>`.'
+  'environment, so it must run as a single bare `gh` command — no `;`, `&&`, `||`, `&`, ' +
+  'newlines, redirections, command/process substitution, subshells, heredocs, or unquoted ' +
+  '`$` expansion (any sibling process or expansion would inherit the token and could ' +
+  'exfiltrate it). One exception is allowed: a trailing reader pipeline `gh … | <reader>` ' +
+  'where every downstream stage is a stdin-only reader (`jq`, `cat`, `wc`, `sort`, `uniq`) ' +
+  'with no file operand — e.g. `gh api repos/o/r | jq .`. jq/JSON metacharacters are also ' +
+  "fine INSIDE single quotes, e.g. `gh api repos/o/r --jq '.[] | {id}'`. To feed JSON to " +
+  '`gh api`, write it to a temp file and use `gh api --input <file>`.'
 
 // Shell-active metacharacters that, OUTSIDE single quotes, either spawn another
 // process sharing the shell env (where the minted GH_TOKEN lives) or expand
@@ -140,15 +142,211 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
   const owners = new Set(repoSlugs.map((slug) => slug.split('/')[0]))
   if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
 
-  // We would inject a token. Enforce the single-bare-`gh` shape: the token
-  // lands in the shell's env, so any sibling/upstream/downstream process or
-  // shell expansion would inherit it.
-  if (!isSingleBareGhCommand(command)) return { kind: 'block', reason: COMPOSITION_REASON }
+  const repoSlug = repoSlugs[0] as string
 
-  if (stripRepoFlag) {
-    return { kind: 'inject', repoSlug: repoSlugs[0] as string, rewrittenCommand: stripRepoFlagFromCommand(command) }
+  // We would inject a token. The token lands in the shell env, so any sibling/
+  // upstream/downstream process or shell expansion would inherit it. The single-
+  // bare-`gh` shape is the safe baseline; a trailing reader pipeline (`gh | jq`)
+  // is the one exception we allow, under strict conditions (see analyzeReaderPipeline).
+  if (isSingleBareGhCommand(command)) {
+    if (stripRepoFlag) return { kind: 'inject', repoSlug, rewrittenCommand: stripRepoFlagFromCommand(command) }
+    return { kind: 'inject', repoSlug }
   }
-  return { kind: 'inject', repoSlug: repoSlugs[0] as string }
+
+  const piped = analyzeReaderPipeline(command, stripRepoFlag)
+  if (piped !== null) return { kind: 'inject', repoSlug, rewrittenCommand: piped }
+
+  return { kind: 'block', reason: COMPOSITION_REASON }
+}
+
+// stdin-only readers whose only sink is stdout (back to the agent, who already
+// has gh's output) — they cannot open their own network/file/process sink, so a
+// `gh <repo> | <reader>` pipeline cannot exfiltrate the minted token to a third
+// party. EXCLUDED on purpose: awk (system()/getline|cmd/inet), sed (GNU `e`
+// shell-exec), tee/xargs (write/spawn), less (`!cmd`), and grep/head/tail (their
+// file-operand forms are too easy to abuse and not worth the parser risk yet).
+const READER_ALLOWLIST = new Set(['jq', 'cat', 'wc', 'sort', 'uniq'])
+
+// STRICT per-command flag allowlists. We allow ONLY flags known to be pure
+// stdin-shaping (no file/program operand). This is allow-known-good, not
+// deny-known-bad: coreutils exposes file reads AND code execution as FLAGS, not
+// just operands — `wc --files0-from=F` and `sort --files0-from=F` open a file
+// with no positional, and `sort --compress-program=PROG` execs a helper. Any
+// such flag would let a downstream "reader" open `/proc/<pid>/environ` and
+// recover the sibling token. So an unrecognized flag REJECTS the whole stage.
+// jq is excluded here (its filter is a positional, handled separately).
+const READER_BOOLEAN_FLAGS: Record<string, ReadonlySet<string>> = {
+  cat: new Set(['-n', '--number', '-b', '--number-nonblank', '-s', '--squeeze-blank', '-A', '--show-all', '-E', '-T']),
+  wc: new Set(['-l', '--lines', '-c', '--bytes', '-m', '--chars', '-w', '--words', '-L', '--max-line-length']),
+  sort: new Set(['-r', '--reverse', '-n', '--numeric-sort', '-u', '--unique', '-f', '--ignore-case', '-b', '-g', '-h']),
+  uniq: new Set(['-c', '--count', '-d', '--repeated', '-u', '--unique', '-i', '--ignore-case']),
+}
+
+// jq flags that open a filesystem path OR run a module/test harness. Forbidden
+// because a downstream jq could otherwise read `/proc/<ghpid>/environ` (the
+// sibling gh process still holds GH_TOKEN in its env) and print it back —
+// recovering the token despite `env -u`.
+const JQ_FILE_FLAGS = new Set(['-f', '--from-file', '--rawfile', '--slurpfile', '--argfile', '-L', '--run-tests'])
+
+// A reader stage is safe only if it is an allowlisted command using ONLY its
+// known stdin-shaping flags, with no file operand. Backslashes are rejected
+// outright: our tokenizer does not model shell backslash escaping, so a
+// `jq \--from-file=…` would be seen as a harmless positional here but reach bash
+// as the forbidden flag — an allowlist-bypass. Rejecting `\` closes that gap.
+function isStdinOnlyReaderStage(stage: string): boolean {
+  if (containsShellActiveMetachar(stage)) return false
+  if (stage.includes('\\')) return false
+  const tokens = splitStageTokens(stage)
+  const cmd = tokens[0]
+  if (cmd === undefined || !READER_ALLOWLIST.has(cmd)) return false
+
+  if (cmd === 'jq') return isStdinOnlyJqStage(tokens)
+
+  const allowedFlags = READER_BOOLEAN_FLAGS[cmd]
+  if (allowedFlags === undefined) return false
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i] as string
+    if (!tok.startsWith('-')) return false
+    if (!allowedFlags.has(tok)) return false
+  }
+  return true
+}
+
+function isStdinOnlyJqStage(tokens: readonly string[]): boolean {
+  let sawFilter = false
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i] as string
+    if (tok.startsWith('-')) {
+      const flagName = tok.includes('=') ? tok.slice(0, tok.indexOf('=')) : tok
+      if (JQ_FILE_FLAGS.has(flagName)) return false
+      continue
+    }
+    // The first non-flag positional is jq's filter (allowed once); a second
+    // positional is a FILE operand jq would open — reject it.
+    if (sawFilter) return false
+    sawFilter = true
+  }
+  return true
+}
+
+// Splits a single bare `gh ... | reader | reader` pipeline into its stages on
+// TOP-LEVEL `|` only (quote-aware, so a `|` inside a single-quoted jq filter is
+// not a stage boundary), rewriting each downstream reader to run under
+// `/usr/bin/env -u GH_TOKEN`. Returns the rewritten command, or null if the
+// shape is not a leading-`gh` + allowlisted-stdin-readers pipeline. Absolute
+// `/usr/bin/env` (not bare `env`) so the strip can't be defeated by a PATH-
+// shadowed `env`; a missing binary exits 127, failing closed.
+function analyzeReaderPipeline(command: string, stripRepoFlag: boolean): string | null {
+  const stages = splitTopLevelPipeStages(command)
+  if (stages === null || stages.length < 2) return null
+
+  const ghStage = (stages[0] as string).trim()
+  if (!isSingleBareGhCommand(ghStage)) return null
+
+  for (let i = 1; i < stages.length; i++) {
+    if (!isStdinOnlyReaderStage((stages[i] as string).trim())) return null
+  }
+
+  const rewrittenGh = stripRepoFlag ? stripRepoFlagFromCommand(ghStage) : ghStage
+  const rewrittenReaders = stages.slice(1).map((s) => `/usr/bin/env -u GH_TOKEN ${s.trim()}`)
+  return [rewrittenGh, ...rewrittenReaders].join(' | ')
+}
+
+// Quote-aware split on top-level `|`. Returns null if any OTHER shell-active
+// metachar appears outside single quotes (`;` `&` `<` `>` backtick `$` `(` `)`
+// `{` `}` newline) or if a `||`/`|&` is seen — those are not simple pipelines.
+function splitTopLevelPipeStages(command: string): string[] | null {
+  const stages: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      current += ch
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '$' || ch === '`') return null
+      if (ch === '"') quote = null
+      current += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      current += ch
+      continue
+    }
+    if (ch === '|') {
+      const next = command[i + 1]
+      if (next === '|' || next === '&') return null
+      stages.push(current)
+      current = ''
+      continue
+    }
+    if (SHELL_ACTIVE_METACHARS.has(ch) && ch !== '|') return null
+    current += ch
+  }
+  if (quote !== null) return null
+  stages.push(current)
+  return stages
+}
+
+function containsShellActiveMetachar(stage: string): boolean {
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < stage.length; i++) {
+    const ch = stage[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '$' || ch === '`') return true
+      if (ch === '"') quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (SHELL_ACTIVE_METACHARS.has(ch)) return true
+  }
+  return false
+}
+
+// Whitespace-splits a single stage into argv-ish tokens, stripping surrounding
+// quotes so a quoted filter like `'.[] | {id}'` becomes one token. Quote-aware
+// so whitespace inside quotes does not split.
+function splitStageTokens(stage: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let has = false
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < stage.length; i++) {
+    const ch = stage[i] as string
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      else current += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      has = true
+      continue
+    }
+    if (ch === ' ' || ch === '\t') {
+      if (has) {
+        tokens.push(current)
+        current = ''
+        has = false
+      }
+      continue
+    }
+    current += ch
+    has = true
+  }
+  if (has) tokens.push(current)
+  return tokens
 }
 
 // Removes an unquoted `-R`/`--repo` flag (and its repo-slug value) from a single

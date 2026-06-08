@@ -174,8 +174,8 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('true; gh issue list -R acme/widgets').kind).toBe('block')
   })
 
-  it('blocks when gh is piped into another command (downstream inherits token env)', () => {
-    const result = analyzeGhCommand('gh pr view -R acme/widgets | jq .')
+  it('blocks a gh pipeline into a non-allowlisted command (downstream inherits token env)', () => {
+    const result = analyzeGhCommand('gh pr view -R acme/widgets | node -e 0')
     expect(result.kind).toBe('block')
     if (result.kind === 'block') expect(result.reason).toContain('single bare')
   })
@@ -281,6 +281,122 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('gh api /repos/acme/widgets/issues -f \'body={"x":1}\'')).toEqual({
       kind: 'inject',
       repoSlug: 'acme/widgets',
+    })
+  })
+
+  // A trailing reader pipeline (gh | jq) is the highest-frequency idiom. It is
+  // allowed only when EVERY downstream stage is a stdin-only allowlisted reader,
+  // and each downstream stage is rewritten to run under `/usr/bin/env -u
+  // GH_TOKEN` so the minted token is absent from its environment. The token
+  // still rides in env for the leading `gh` stage; `env -u` strips it from the
+  // rest. File-operand and file-reading-flag forms are rejected because a reader
+  // that can open `/proc/<ghpid>/environ` would recover the sibling token.
+  describe('reader pipelines', () => {
+    it('allows gh | jq with a stdin filter and strips the token from jq', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/pulls | jq .')).toEqual({
+        kind: 'inject',
+        repoSlug: 'acme/widgets',
+        rewrittenCommand: 'gh api /repos/acme/widgets/pulls | /usr/bin/env -u GH_TOKEN jq .',
+      })
+    })
+
+    it('keeps a single-quoted jq pipe untouched and still allows a trailing shell pipe', () => {
+      expect(analyzeGhCommand("gh api /repos/acme/widgets/pulls | jq '.[] | {id, state}'")).toEqual({
+        kind: 'inject',
+        repoSlug: 'acme/widgets',
+        rewrittenCommand: "gh api /repos/acme/widgets/pulls | /usr/bin/env -u GH_TOKEN jq '.[] | {id, state}'",
+      })
+    })
+
+    it('rewrites every downstream stage in a multi-stage reader pipeline', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq . | cat')).toEqual({
+        kind: 'inject',
+        repoSlug: 'acme/widgets',
+        rewrittenCommand:
+          'gh api /repos/acme/widgets/issues | /usr/bin/env -u GH_TOKEN jq . | /usr/bin/env -u GH_TOKEN cat',
+      })
+    })
+
+    it('allows stdin-only cat, wc -l, sort, uniq downstream', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | cat').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | wc -l').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort | uniq').kind).toBe('inject')
+    })
+
+    it('blocks a downstream reader given a file operand (could read /proc sibling environ)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | cat /proc/1/environ').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort /etc/passwd').kind).toBe('block')
+      expect(analyzeGhCommand("gh api /repos/acme/widgets/issues | jq . '/proc/1/environ'").kind).toBe('block')
+    })
+
+    it('blocks jq file-reading flags (-f, --rawfile, --slurpfile, --argfile, --from-file, -L)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -f /proc/1/environ').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --rawfile x /proc/1/environ .').kind).toBe(
+        'block',
+      )
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --slurpfile x /etc/passwd .').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --argfile x /etc/passwd .').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --from-file /etc/passwd').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -L /tmp/mods .').kind).toBe('block')
+    })
+
+    it('blocks reader stages that are exfil primitives (awk, sed, tee, xargs, less)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | awk "{print}"').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sed s/a/b/').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | tee out.json').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | xargs echo').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | less').kind).toBe('block')
+    })
+
+    it('blocks grep/head/tail downstream (operand parsing too risky for now)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | grep id').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | head -n 5').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | tail -n 5').kind).toBe('block')
+    })
+
+    it('blocks a pipeline whose LEADING stage is not gh', () => {
+      expect(analyzeGhCommand('cat foo | gh api /repos/acme/widgets/issues').kind).toBe('block')
+    })
+
+    it('blocks sort/uniq output-file flags that could write the token elsewhere', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort -o /tmp/x').kind).toBe('block')
+    })
+
+    it('blocks coreutils flags that open a file or exec a helper with no positional', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | wc --files0-from=/proc/1/environ').kind).toBe(
+        'block',
+      )
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort --files0-from=/proc/1/environ').kind).toBe(
+        'block',
+      )
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort --compress-program=/bin/sh').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort -S 1 -T /tmp').kind).toBe('block')
+    })
+
+    it('blocks backslash-escaped jq file flags that bypass naive flag detection', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq \\--from-file=/proc/self/environ').kind).toBe(
+        'block',
+      )
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq \\-f/proc/self/environ').kind).toBe('block')
+    })
+
+    it('allows known stdin-shaping coreutils flags (wc -l, cat -n, sort -r, uniq -c)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | cat -n').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sort -r | uniq -c').kind).toBe('inject')
+    })
+
+    it('blocks when a later pipeline stage reintroduces a shell metachar', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq . > out').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq "$x"').kind).toBe('block')
+    })
+
+    it('strips the graphql -R hint AND rewrites a trailing reader pipeline together', () => {
+      expect(analyzeGhCommand("gh api graphql -f query='q' -R acme/widgets | jq .")).toEqual({
+        kind: 'inject',
+        repoSlug: 'acme/widgets',
+        rewrittenCommand: "gh api graphql -f query='q' | /usr/bin/env -u GH_TOKEN jq .",
+      })
     })
   })
 
