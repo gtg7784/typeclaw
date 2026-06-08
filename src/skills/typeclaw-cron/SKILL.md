@@ -1,6 +1,6 @@
 ---
 name: typeclaw-cron
-description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, list or inspect scheduled jobs, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "list cron jobs", "list scheduled jobs", "show me the cron", "what cron jobs do you have", "what's on my cron", "when does X run", or any mention of `cron.json`. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
+description: Use this skill whenever the user asks you to schedule recurring work OR a one-off future task/reminder, run something on a cron, do something every day/hour/week, do something once at a future time, set up a periodic task, list or inspect scheduled jobs, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "remind me in 3 days", "remind me tomorrow", "remind me at 9am", "remind me next Monday", "in N hours/days do X", "do X once at hh:mm", "stop after N times", "until <date>", "list cron jobs", "list scheduled jobs", "show me the cron", "what cron jobs do you have", "what's on my cron", "when does X run", or any mention of `cron.json`. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
 ---
 
 # typeclaw-cron
@@ -25,12 +25,17 @@ Tell the user this if they ask about reliability. Do not invent guarantees the r
 
 ### Shared fields (all jobs)
 
-| Field      | Required | Notes                                                                                                         |
-| ---------- | -------- | ------------------------------------------------------------------------------------------------------------- |
-| `id`       | yes      | Unique. Letters, digits, hyphens, underscores. Used in logs and to coalesce.                                  |
-| `schedule` | yes      | Standard 5-field cron expression (`min hr dom mon dow`) or 6-field with seconds. See "Schedule syntax" below. |
-| `enabled`  | no       | Defaults to `true`. Set to `false` to keep a job in the file but skip it.                                     |
-| `timezone` | no       | IANA name like `Asia/Seoul`. Defaults to UTC (the container's timezone).                                      |
+| Field      | Required     | Notes                                                                                                                                           |
+| ---------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`       | yes          | Unique. Letters, digits, hyphens, underscores. Used in logs and to coalesce.                                                                    |
+| `schedule` | one of these | Standard 5-field cron expression (`min hr dom mon dow`) or 6-field with seconds. Recurring. See "Schedule syntax" below.                        |
+| `at`       | one of these | One-shot ISO instant — fires **once** then retires. Mutually exclusive with `schedule`; set exactly one. See "One-shot reminders (`at`)" below. |
+| `until`    | no           | Recurring only. Absolute ISO instant; last allowed fire (inclusive). The job retires after this.                                                |
+| `count`    | no           | Recurring only. Stop after N accepted fires. Coexists with `until` — whichever boundary is reached first wins.                                  |
+| `enabled`  | no           | Defaults to `true`. Set to `false` to keep a job in the file but skip it.                                                                       |
+| `timezone` | no           | IANA name like `Asia/Seoul`. Recurring (`schedule`) only — NOT valid with `at`. Defaults to UTC (the container's timezone).                     |
+
+**`schedule` XOR `at`:** every job has exactly one of `schedule` (recurring) or `at` (one-shot). Setting both, or neither, is rejected. `at` jobs may not set `until`, `timezone`, or `count` > 1 (the instant already pins the single fire).
 
 ### `kind: "prompt"` — fire a prompt into a fresh session
 
@@ -68,6 +73,47 @@ The runtime spawns the command directly with `Bun.spawn` from the agent folder (
 Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those — **or**, when the work needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file) and both the cadence and the logic belong to the same plugin, write a `kind: 'handler'` plugin cron job (see below). That's the best practice for the `exec → LLM` pattern; a cron `exec` pointing at `typeclaw <plugin-cmd>` is a narrower fallback for reusable / host-surface cases.
 
 `command` is an array. Index 0 is the executable, the rest are argv. Do **not** put a single shell pipeline in `command[0]` — that won't be parsed by a shell. If you need shell features (`|`, `>`, `&&`), wrap explicitly: `["sh", "-c", "your | pipeline | here"]`.
+
+## One-shot reminders and future tasks (`at`)
+
+When the user wants something to happen **once at a future time** — "remind me in 3 days to cancel the subscription", "ping me tomorrow at 9", "in 2 hours, check if the build finished" — use `at` instead of `schedule`. The job fires exactly once at that instant, then retires (the scheduler stops arming it; it never fires again).
+
+```json
+{
+  "id": "cancel-sub",
+  "at": "2026-06-11T09:00:00+09:00",
+  "kind": "prompt",
+  "prompt": "Remind the user to cancel the subscription they mentioned on 2026-06-08. If they already handled it, say so and move on.",
+  "scheduledByRole": "owner"
+}
+```
+
+`at` works with any `kind` (`prompt` for "remind me / do this judgement task", `exec` for a one-off mechanical command). The same best-effort rules apply: if the container is down at the `at` instant, the fire is **lost, not replayed**. Say so if the user is relying on it for something important.
+
+### The `at` value MUST carry an explicit zone or offset
+
+`at` is parsed as an **absolute instant**, so it requires a trailing `Z` or a numeric offset. A bare local-time string is rejected (it would silently resolve to UTC and surprise the user).
+
+- ✅ `2026-06-11T09:00:00+09:00` (Seoul morning) or `2026-06-11T00:00:00Z`
+- ❌ `2026-06-11T09:00:00` (no zone — rejected by `parseCronFile`)
+
+**Resolving "9am" / "tomorrow" / "in 3 days" to an instant:**
+
+1. Get the user's timezone. Check `USER.md` for a recorded zone; if it's not there and the wall-clock matters, ask once.
+2. Compute the absolute instant in that zone. "Remind me in 3 days" → take now, add 3×24h (or the next 09:00 in their zone if they said a time), and emit it with the zone's offset, e.g. `+09:00`.
+3. Use `bash` (`date`) if you need to compute the offset precisely rather than guessing — e.g. `date -u -d '+3 days' +%Y-%m-%dT%H:%M:%SZ`. Don't hand-roll DST math.
+
+Do not invent `until`, `timezone`, or `count` > 1 on an `at` job — they're rejected. The single instant is the whole schedule.
+
+### Clean up after a one-shot fires (self-prune)
+
+A fired `at` job does **not** delete itself from `cron.json` — it stays on disk as an inert, already-retired entry (the runtime never writes back to `cron.json`; that's by design). On its own this is harmless: the scheduler sees the past instant and retires it without firing, so it will not run again and will not break reload.
+
+But to keep `cron.json` clean, **a one-shot `prompt` job should remove its own entry as the last step of its fire.** Because the fire runs in a full agent session with all your tools, end the reminder prompt with a self-cleanup instruction. Write your `prompt` so your future self does this:
+
+> "... After delivering the reminder, remove the cron job with id `cancel-sub` from `cron.json` and call the `reload` tool so the dead one-shot doesn't linger."
+
+Removing a job needs **no** `cronPromotion` ack — deletions pass the guard freely (only _adding_ a job or elevating its role requires `acknowledgeGuards`). If the cleanup is ever skipped (model error, crash mid-session), the worst case is a harmless leftover entry you can prune on any later edit — never a broken schedule. This self-prune only applies to `prompt` jobs; an `at` `exec` job has no LLM to clean up after itself, so its entry just lingers until a human or a later prompt removes it.
 
 ## `exec → LLM`: write a plugin cron handler (best practice)
 
@@ -322,11 +368,13 @@ For every job you add:
 
 - `id` is unique within the file
 - `id` matches `[a-zA-Z0-9_-]+` (no spaces, no slashes, no dots)
-- `schedule` parses as cron
+- Exactly one of `schedule` or `at` is set (never both, never neither)
+- If recurring: `schedule` parses as cron
+- If one-shot: `at` is a future ISO instant **with an explicit `Z` or numeric offset**, and `until`/`timezone`/`count` > 1 are absent
 - `kind` is exactly `"prompt"` or `"exec"`
 - If `prompt`: `prompt` is non-empty
 - If `exec`: `command` is a non-empty array of non-empty strings
-- If a wall-clock schedule was requested: `timezone` is set
+- If a wall-clock `schedule` was requested: `timezone` is set
 
 ### Applying changes — the `reload` tool
 
@@ -345,19 +393,23 @@ If you finished an edit and the user only sees an in-flight job from the previou
 - **Do not promise sub-second precision or guaranteed execution.** This is best-effort — see "What cron actually does" above.
 - **Do not invent fields the schema doesn't support** (no `retry`, `timeout`, `onFailure`, `concurrency`, etc.). They will be silently ignored at best, or rejected at worst.
 
-## When the user says "every X"
+## When the user says "every X" or "do X once"
 
-Pick `kind` first, then schedule, then timezone:
+0. **Recurring or one-shot?** This is the first fork.
+   - **Recurring** ("every morning", "every Monday", "hourly") → use `schedule`. Continue with step 1 below.
+   - **One-shot / future task** ("remind me in 3 days", "tomorrow at 9", "in 2 hours", "do X once at hh:mm") → use `at` with an absolute instant (explicit zone/offset). See "One-shot reminders and future tasks (`at`)" above for resolving the instant and self-prune. Then pick the kind (almost always `prompt` for a reminder) and skip straight to step 4. Don't set `schedule`, `timezone`, `until`, or `count` on it.
+
+For a **recurring** job:
 
 1. **Pick the kind.**
    - **Pure mechanics, no judgement** (git snapshots, log rotation, calling an existing script) → `kind: 'exec'` in `cron.json`. Done.
-   - **One-shot natural-language instruction, no shell pre-work, no conditional logic** → `kind: 'prompt'` in `cron.json`. Done.
+   - **One natural-language instruction, no shell pre-work, no conditional logic** → `kind: 'prompt'` in `cron.json`. Done.
    - **Imperative control flow mixing shell calls and LLM calls** (probe → maybe prompt → write file, "if there are new emails then triage", etc.) → **write a `kind: 'handler'` plugin cron job** (see "`exec → LLM`: write a plugin cron handler" above). This is the default for scheduled `exec → LLM` work.
    - **Reuse a CLI command on a custom cadence** — the same logic must ALSO be invocable from the TUI / manual shell / `compose` orchestration, or the schedule is owned by the user (`cron.json`) rather than the plugin author, or the work must run as a `surface: 'host'` command → `kind: 'exec'` in `cron.json` with `command: ["typeclaw", "<plugin-command>", ...]`. Reach for this ONLY when reusability is the actual requirement, not just because the work is scheduled. See "When to reach for the exec bridge instead" above.
-2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday".
+2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday". If the user wants the recurrence to stop ("until end of quarter", "only 5 times"), add `until` (absolute ISO instant) and/or `count` (N fires).
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.
-5. **Write it. Call `reload`. If reload succeeded, commit it.** If reload failed, fix `cron.json` based on the error and retry — do not commit a broken file.
+5. **Write it. Call `reload`. If reload succeeded, commit it.** If reload failed, fix `cron.json` based on the error and retry — do not commit a broken file. **Adding any new job (recurring or one-shot) requires `acknowledgeGuards: { cronPromotion: true }` in the write** — but never ack a job scheduled on behalf of a channel speaker asking to elevate themselves (see step 3 of "Editing `cron.json` safely").
 
 ## Listing what is currently scheduled
 
