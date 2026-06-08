@@ -85,11 +85,37 @@ describe('createCountStore', () => {
     const newJob = job('a', { prompt: 'new' })
     await store.reconcile([newJob])
 
-    // a straggler increment carrying the OLD job fingerprint must start the new
-    // recurrence at 0+1, not resurrect the old count of 2
+    // a straggler increment carrying the OLD fingerprint is dropped (it's no
+    // longer active), so neither recurrence inherits the old count of 2
     await store.increment('a', oldJob, Date.now())
     expect(store.get('a', newJob)).toBe(0)
-    expect(store.get('a', oldJob)).toBe(1)
+    expect(store.get('a', oldJob)).toBe(0)
+  })
+
+  test('a straggler increment for a removed job does not re-add a tombstone', async () => {
+    const io = memoryIO()
+    const store = await createCountStore('/agent', [job('a')], io)
+
+    // job removed via reload
+    await store.reconcile([])
+
+    // a fire that was already in flight when the reload landed
+    await store.increment('a', job('a'), Date.now())
+
+    // the removed job left no resurrected entry, so a later re-add starts fresh
+    await store.reconcile([job('a')])
+    expect(store.get('a', job('a'))).toBe(0)
+  })
+
+  test('a straggler increment for a fingerprint-changed job is dropped', async () => {
+    const io = memoryIO()
+    const oldJob = job('a', { prompt: 'old' })
+    const store = await createCountStore('/agent', [oldJob], io)
+
+    await store.reconcile([job('a', { prompt: 'new' })])
+    await store.increment('a', oldJob, Date.now())
+
+    expect(store.get('a', job('a', { prompt: 'new' }))).toBe(0)
   })
 
   test('does not write the sidecar on boot when reconciliation is a no-op', async () => {

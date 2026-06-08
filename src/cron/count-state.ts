@@ -75,6 +75,14 @@ function serialize(state: StateFile): string {
   return JSON.stringify(state)
 }
 
+function activeFingerprints(jobs: CronJob[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const job of jobs) {
+    if (job.count !== undefined) map.set(job.id, progressFingerprint(job))
+  }
+  return map
+}
+
 export async function createCountStore(
   agentDir: string,
   jobs: CronJob[],
@@ -86,6 +94,10 @@ export async function createCountStore(
   // Serializes writes so concurrent increments (two jobs firing in the same
   // tick) can't clobber each other via read-modify-write races.
   let tail: Promise<void> = Promise.resolve()
+  // Guards against a straggler fire that lost a reconcile race re-adding a
+  // tombstone for a removed job: an increment whose id/fingerprint is not in
+  // the current live set is dropped. Maps each live id to its fingerprint.
+  let active = activeFingerprints(jobs)
 
   // Only touch disk when reconciliation actually pruned/reset something.
   // Avoids a force-committed no-op rewrite of cron/state.json on every boot.
@@ -96,10 +108,8 @@ export async function createCountStore(
   return {
     get: (id, job) => matchingCount(state.jobs[id], job),
     increment: (id, job, at) => {
+      if (active.get(id) !== progressFingerprint(job)) return Promise.resolve()
       const run = tail.then(async () => {
-        // Read `prev` only from an entry whose fingerprint still matches, so a
-        // queued increment that lost a reload race starts the new recurrence at
-        // 0 instead of resurrecting the dropped entry's count.
         const prev = matchingCount(state.jobs[id], job)
         state.jobs[id] = {
           progressFingerprint: progressFingerprint(job),
@@ -114,6 +124,7 @@ export async function createCountStore(
     reconcile: (nextJobs) => {
       // In-memory map is authoritative for `get`, so it must settle before the
       // caller arms timers; only the on-disk persist trails behind the mutex.
+      active = activeFingerprints(nextJobs)
       state.jobs = reconcile(state, nextJobs).jobs
       const run = tail.then(async () => {
         await persist(path, state, io)
