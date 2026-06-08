@@ -249,7 +249,7 @@ This is the most common request ("review repo X too", "stop watching repo Y"). I
 
 > Why restart and not reload: GitHub webhooks are created/removed only in the adapter's `start()`/`stop()`. `reload` does not restart a running adapter for a `repos` change (it only handles enable/disable and credential rotation), so the new repo's webhook simply isn't created until the container restarts. `typeclaw restart` is the honest answer for "start reviewing repo X".
 
-**Webhook delivery requires a public URL.** GitHub must be able to reach the container. That URL comes from one of two places, and a repo added without it will register a hook that never receives events:
+**Webhook delivery requires a public URL.** GitHub must be able to reach the container. That URL comes from one of two places; without one the repo can be listed in config, but the adapter **skips webhook registration entirely** (it logs the skip) and no events arrive until a tunnel or `webhookUrl` is in place:
 
 - A **tunnel** entry: `tunnels: [{ name: "github-webhook", provider: "cloudflare-quick", for: { kind: "channel", name: "github" } }]`. The adapter pulls its URL from the tunnel manager automatically — leave `webhookUrl` unset. This is the normal setup. Adding/removing a tunnel is **restart-required** (`tunnels` is not live-reloadable) — see the `typeclaw-tunnels` skill.
 - An explicit `channels.github.webhookUrl` the operator manages by hand.
