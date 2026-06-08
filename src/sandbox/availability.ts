@@ -127,6 +127,113 @@ export function _resetRealProcProbeCacheForTests(): void {
   realProcProbeInFlight = undefined
 }
 
+// The 'proc-bind' strategy (build.ts) does `bwrap --unshare-all ... --ro-bind
+// /proc /proc`: it binds the container's already-real procfs with NO unshare
+// --mount-proc and NO CAP_SYS_ADMIN, so it works where 'real-proc' is rejected
+// (OrbStack). Its security rests entirely on the kernel BLOCKING cross-userns
+// reads of /proc/<agent>/environ — the FIREWORKS_API_KEY / GH_TOKEN surface —
+// because bwrap's --unshare-all puts the sandbox in a CHILD user namespace. That
+// block is a kernel fact on every mainstream host, but the consumer must never
+// assume it: a misconfigured runtime that preserves parent-userns creds, or a
+// future bwrap flag change, would turn this strategy into a secret leak. So we
+// PROBE it directly before ever selecting it — plant a real secret in a sibling
+// process's env and assert the sandbox cannot read it back.
+let procBindProbeResult: boolean | undefined
+// Same in-flight dedup + process-global caching rationale as canMountRealProc:
+// the answer is a per-container capability fact, so concurrent first callers
+// share one probe and the result sticks. Not abortable (see canMountRealProc).
+let procBindProbeInFlight: Promise<boolean> | undefined
+
+export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boolean> {
+  if (procBindProbeResult !== undefined) return Promise.resolve(procBindProbeResult)
+  if (procBindProbeInFlight !== undefined) return procBindProbeInFlight
+
+  const promise = probeProcBind(options?.bwrapPath ?? 'bwrap')
+    .then((safe) => {
+      procBindProbeResult = safe
+      return safe
+    })
+    .finally(() => {
+      procBindProbeInFlight = undefined
+    })
+  procBindProbeInFlight = promise
+  return promise
+}
+
+const PROC_BIND_PROBE_SECRET = 'TYPECLAW_PROCBIND_PROBE_SECRET'
+
+async function probeProcBind(bwrap: string): Promise<boolean> {
+  // The sentinel must model the REAL threat geometry: the agent runtime holds
+  // the secret in its env and lives in the PARENT user namespace, while the
+  // sandbox is a child userns. So spawn the sentinel as a plain sibling (parent
+  // userns, same real uid as the agent runtime) that just sleeps holding the
+  // secret, then enter the EXACT proc-bind bwrap shape and prove the sandbox
+  // cannot read it. A weaker model (sentinel inside the same userns as the probe
+  // bash) would falsely pass.
+  let sentinel: Bun.Subprocess | undefined
+  try {
+    sentinel = Bun.spawn(['sleep', '30'], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+      env: { [PROC_BIND_PROBE_SECRET]: 'leaked' },
+    })
+    const sentinelPid = sentinel.pid
+
+    // From the sandbox: environ + maps of the sentinel must be UNREADABLE and it
+    // must be unsignalable (kill -0 EPERM), while the sandbox's OWN
+    // /proc/self/{fd,maps} must be readable (the property that makes bunx work).
+    // Any leak or any missing self-proc entry fails the probe → fall back to
+    // tmpfs. `--ro-bind /proc /proc` with no /proc/self/exe symlink mirrors
+    // build.ts's proc-bind branch exactly.
+    const script = [
+      `test -r /proc/self/fd || exit 1`,
+      `test -r /proc/self/maps || exit 1`,
+      `cat /proc/${sentinelPid}/environ >/dev/null 2>&1 && exit 1`,
+      `cat /proc/${sentinelPid}/maps >/dev/null 2>&1 && exit 1`,
+      `kill -0 ${sentinelPid} 2>/dev/null && exit 1`,
+      `exit 0`,
+    ].join('; ')
+    const proc = Bun.spawn(
+      [
+        bwrap,
+        '--unshare-all',
+        '--clearenv',
+        '--ro-bind',
+        '/usr',
+        '/usr',
+        '--ro-bind-try',
+        '/bin',
+        '/bin',
+        '--ro-bind-try',
+        '/lib',
+        '/lib',
+        '--ro-bind-try',
+        '/lib64',
+        '/lib64',
+        '--ro-bind',
+        '/proc',
+        '/proc',
+        '--',
+        '/bin/sh',
+        '-c',
+        script,
+      ],
+      { stdout: 'ignore', stderr: 'ignore' },
+    )
+    await proc.exited
+    return proc.exitCode === 0
+  } catch {
+    return false
+  } finally {
+    sentinel?.kill()
+  }
+}
+
+export function _resetProcBindProbeCacheForTests(): void {
+  procBindProbeResult = undefined
+  procBindProbeInFlight = undefined
+}
+
 // The bun binary this process runs as (process.execPath). build.ts re-exposes
 // it at /proc/self/exe over the masked /proc so sandboxed package runners can
 // self-locate. This is correct ONLY in the bun-centric container: the base

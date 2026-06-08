@@ -6,18 +6,33 @@ export type SandboxMount =
 
 export type SandboxNetwork = 'none' | 'inherit'
 
-// 'real-proc' (the runtime default — see sandbox.realProc, default true): mount
-// a fresh procfs scoped to a NEW pid namespace so a JS package runner's child
-// gets a real /proc/self/{fd,maps} WITHOUT seeing the agent runtime's pids (no
-// /proc/<agent>/environ leak). Requires the outer container to hold
-// CAP_SYS_ADMIN (mount(2) of proc); start.ts grants it by default and the
-// consumer probes that it actually works before choosing this strategy.
-// 'tmpfs' (the fallback when CAP_SYS_ADMIN is a no-op, or realProc=false): empty
-// /proc + a single /proc/self/exe symlink. Works on every host but gives no
-// /proc/self/{fd,maps}, so a JS package runner's CHILD (the spawned bin) crashes
-// with ENOTDIR reading /proc/self/fd — external packages can't run in the
-// sandbox under this strategy. 'none': no /proc at all.
-export type SandboxProcStrategy = 'tmpfs' | 'none' | 'real-proc'
+// 'proc-bind' (the runtime default): --ro-bind /proc /proc binds the container's
+// ALREADY-REAL procfs straight into the sandbox — no `unshare --mount-proc`, no
+// CAP_SYS_ADMIN. A JS package runner's child gets a real /proc/self/{fd,maps,exe}
+// so `bunx`/`bun add`/`bun run <pkg-bin>` stop aborting with Bun's ENOTDIR. The
+// agent runtime's /proc/<agent>/environ (FIREWORKS_API_KEY, GH_TOKEN) is NOT
+// leaked: build.ts always emits --unshare-user, so the sandboxed bash runs as
+// mapped-root in a CHILD user namespace that is not an ancestor of the agent
+// runtime's userns. The kernel's PTRACE_MODE_READ_FSCREDS check on
+// /proc/<pid>/environ then fails (EACCES), and kill()/ptrace against those pids
+// fail EPERM (no CAP_KILL in the parent userns) — both verified empirically on
+// live OrbStack. The residual is non-secret metadata (other pids' cmdline/status
+// are visible); accepted on the single-tenant boundary, since environ/mem/ptrace
+// /signal — the API-key surface — stay blocked. Works on every host INCLUDING
+// OrbStack (which denies `unshare --mount-proc` even with CAP_SYS_ADMIN), and is
+// the default precisely because it needs no outer-container capability.
+// 'real-proc' (opt-in, sandbox.realProc=true): mount a fresh procfs scoped to a
+// NEW pid namespace via `unshare --pid --fork --mount --mount-proc`. Adds full
+// PID isolation (the agent runtime's pids are absent from the namespace, not just
+// unreadable) on top of the environ guard, but needs CAP_SYS_ADMIN (mount(2) of
+// proc) — granted by start.ts only when realProc is set — and is rejected on
+// OrbStack. Chosen only when the cap-mount probe confirms it actually works.
+// 'tmpfs' (last-resort degraded fallback): empty /proc + a single /proc/self/exe
+// symlink. Works on every host but gives no /proc/self/{fd,maps}, so a JS package
+// runner's CHILD (the spawned bin) crashes with ENOTDIR reading /proc/self/fd —
+// external packages can't run in the sandbox under this strategy. 'none': no
+// /proc at all.
+export type SandboxProcStrategy = 'tmpfs' | 'none' | 'real-proc' | 'proc-bind'
 
 export type SandboxEnvPolicy = {
   set?: Record<string, string>

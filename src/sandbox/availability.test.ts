@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test'
 
 import {
   _resetBwrapAvailabilityCacheForTests,
+  _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
+  canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
   resolveProcSelfExe,
@@ -12,6 +14,7 @@ import { SandboxUnavailableError } from './errors'
 afterEach(() => {
   _resetBwrapAvailabilityCacheForTests()
   _resetRealProcProbeCacheForTests()
+  _resetProcBindProbeCacheForTests()
 })
 
 describe('ensureBwrapAvailable', () => {
@@ -85,6 +88,38 @@ describe('canMountRealProc', () => {
     const resolved = await canMountRealProc()
     const cachedPromise = canMountRealProc()
     expect(await cachedPromise).toBe(resolved)
+  })
+})
+
+describe('canBindProcSafely', () => {
+  // Like canMountRealProc, the boolean depends on the host: true only where a
+  // --unshare-all bwrap can bind /proc AND the kernel blocks the sentinel's
+  // cross-userns environ read (a Linux container with bwrap), false on the
+  // macOS dev host where bwrap is absent. So these assert the environment-
+  // independent contract: the result is a boolean, stable and cached, with the
+  // same in-flight dedup as the other probes.
+  test('returns a boolean', async () => {
+    expect(typeof (await canBindProcSafely())).toBe('boolean')
+  })
+
+  test('caches the result (repeated calls return the same value)', async () => {
+    const first = await canBindProcSafely()
+    const second = await canBindProcSafely()
+    expect(second).toBe(first)
+  })
+
+  test('re-probes after a cache reset', async () => {
+    const before = await canBindProcSafely()
+    _resetProcBindProbeCacheForTests()
+    const after = await canBindProcSafely()
+    expect(after).toBe(before)
+  })
+
+  test('dedups concurrent first calls onto one in-flight probe (same promise identity)', () => {
+    const first = canBindProcSafely()
+    const second = canBindProcSafely()
+    expect(second).toBe(first)
+    return first
   })
 })
 

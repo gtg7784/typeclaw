@@ -37,6 +37,7 @@ import type {
 } from '@/plugin'
 import {
   buildSandboxedCommand,
+  canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
@@ -45,6 +46,7 @@ import {
   resolveProcSelfExe,
   resolveProtectedZones,
   resolveWritableZones,
+  type SandboxProcStrategy,
   subtractMasked,
 } from '@/sandbox'
 
@@ -600,27 +602,7 @@ async function applyBashSandbox(
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
-  // 'real-proc' (the default) gives a sandboxed JS package runner a working
-  // /proc/self/{fd,maps} so `bunx`/`bun add`/`bun run <pkg>` stop aborting with
-  // Bun's NotDir. Read from the boot-time `config` snapshot, NOT live
-  // getConfig(): sandbox.realProc is restart-required, and the strategy MUST
-  // track the boot-time capability. A `typeclaw reload` that flips realProc
-  // would otherwise emit `unshare --mount-proc` in a container booted WITHOUT
-  // CAP_SYS_ADMIN (or vice versa), so the mount fails instead of the boot-time
-  // strategy holding until restart. `config` never changes on reload.
-  // procSelfExe is only consumed by the 'tmpfs' (realProc=false) branch.
-  //
-  // Probe before committing to real-proc: `--cap-add=SYS_ADMIN` is granted by
-  // start.ts but is a no-op on rootless Docker / gVisor / Docker Desktop ECI /
-  // AppArmor-enforcing hosts (see canMountRealProc). Without the probe, the
-  // FIRST low-trust bash call on such a host would emit `unshare --mount-proc`,
-  // which fails with "Operation not permitted" and breaks EVERY sandboxed bash
-  // command — strictly worse than the old tmpfs default. The probe runs once
-  // (cached) and falls back to tmpfs when the mount can't happen, so low-trust
-  // bash keeps working there (external-package execution still won't, exactly
-  // as it didn't before realProc existed). procSelfExe stays set so the tmpfs
-  // fallback can still re-expose /proc/self/exe for runner self-location.
-  const realProc = config.sandbox.realProc && (await canMountRealProc())
+  const proc = await resolveProcStrategy()
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [
       { type: 'ro-bind', source: agentDir, dest: agentDir },
@@ -631,11 +613,33 @@ async function applyBashSandbox(
     protected: protectedZones,
     network: 'inherit',
     cwd: agentDir,
-    proc: realProc ? 'real-proc' : 'tmpfs',
+    proc,
     procSelfExe: resolveProcSelfExe(),
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })
   mutableArgs.command = commandString
+}
+
+// Picks the /proc strategy for a sandboxed bash call. Ordering is the security
+// crux of the fix: prefer 'proc-bind' (--ro-bind /proc, NO CAP_SYS_ADMIN) so the
+// container needs no broad outer capability, and only fall to 'real-proc'
+// (unshare --mount-proc, NEEDS CAP_SYS_ADMIN, granted by start.ts when
+// sandbox.realProc is set) when the operator explicitly opts into the stricter
+// PID-isolation posture AND the kernel actually permits the mount (OrbStack
+// rejects it). 'tmpfs' is the last-resort degraded mode where external packages
+// can't run; reached only on a host that fails BOTH probes (e.g. a kernel that
+// leaks cross-userns environ — proc-bind fails closed there rather than leak).
+//
+// Read from the boot-time `config` snapshot, NOT live getConfig(): sandbox is
+// restart-required, and the strategy MUST track the boot-time CAP_SYS_ADMIN
+// grant. A `typeclaw reload` flipping realProc would otherwise emit `unshare
+// --mount-proc` in a container booted WITHOUT the cap (or vice versa). Both
+// probes are cached process-globally, so this resolves to one spawn per
+// container lifetime regardless of how many bash calls hit it.
+async function resolveProcStrategy(): Promise<SandboxProcStrategy> {
+  if (config.sandbox.realProc && (await canMountRealProc())) return 'real-proc'
+  if (await canBindProcSafely()) return 'proc-bind'
+  return 'tmpfs'
 }
 
 // The builtin file tools that take a single filesystem `path` arg. For a
