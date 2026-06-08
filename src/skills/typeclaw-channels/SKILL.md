@@ -138,7 +138,7 @@ The agent in folder `토토/` already answers to `"토토"` from the dir name. T
 
 1. **Read `typeclaw.json`.**
 2. **Remove the entry** from `alias`. If the entry IS the dir name, removing it from `alias` does nothing — the dir name is implicit and can't be turned off this way. The right answer there is "to stop responding to your dir name, rename the agent folder, which is a host-stage operation outside this container."
-3. **Write, commit, reload-required.**
+3. **Write, commit**: "Edited `alias` — live-reloadable. Run `reload` to pick up the change without restart."
 
 ### When the user asks "what names do you respond to"
 
