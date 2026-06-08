@@ -5377,6 +5377,47 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
   })
 
+  test('does NOT misattribute a carried provider error to a fresh user turn that coalesces with the retry nudge', async () => {
+    // given: turn A errors + truncates (no send) → empty-turn retry nudge queued
+    // AND carries the provider error forward. Before the reminder-only retry
+    // drains, a NEW user message (turn B) arrives. The drain loop splices
+    // promptQueue + pendingSystemReminders together, so turn B is a fresh user
+    // batch carrying the stale nudge. Turn B then produces no reply. The prior
+    // turn's provider notice must NOT post against turn B.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'turn A' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      // when: turn A errors + truncates (queues the retry nudge + carry), then a
+      // fresh user message lands while that nudge is still pending
+      if (attempt === 1) {
+        sessions[0]!.emit({
+          type: 'message_end',
+          message: { role: 'assistant', stopReason: 'error', errorMessage: 'transient server_is_overloaded' },
+        })
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'error')
+        await router.route(inbound({ externalMessageId: 'mB', text: 'turn B' }))
+        return
+      }
+      // when: turn B (fresh user batch + coalesced nudge) ends with no reply and
+      // no further error — a clean empty turn that must not inherit A's notice
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: A's stale provider notice is never posted against turn B
+    expect(sessions[0]!.prompts.length).toBeGreaterThanOrEqual(2)
+    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
+  })
+
   test('exhausted empty-turn retries surface the generic fallback (not a duplicate provider notice) and never go silent', async () => {
     // given: every attempt errors + truncates with no send, exhausting the
     // empty-turn retry budget without ever replying. The exhausted path already

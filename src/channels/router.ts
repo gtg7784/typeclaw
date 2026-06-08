@@ -1983,6 +1983,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.currentTurnAttachments = collectTurnAttachments(observed, batch)
 
         if (batch.length > 0) {
+          // A fresh user batch starts a NEW logical turn. Drop any provider
+          // error carried forward from a prior turn's empty-turn retry: the
+          // drain loop splices promptQueue AND pendingSystemReminders together,
+          // so a user message arriving while a retry nudge is pending coalesces
+          // into this iteration. Without this clear, the carried error (stamped
+          // `turnSeq + 1`) would match this fresh turn and post the prior turn's
+          // notice misattributed to an unrelated new message. Carry-forward stays
+          // intact for genuinely reminder-only iterations (batch.length === 0),
+          // which skip this branch.
+          live.pendingProviderError = null
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
