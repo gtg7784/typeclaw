@@ -7,6 +7,7 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   fireworks: { url: 'https://api.fireworks.ai/inference/v1/models', authHeader: 'bearer' },
   zai: { url: 'https://api.z.ai/api/paas/v4/models', authHeader: 'bearer' },
   'zai-coding': { url: 'https://api.z.ai/api/coding/paas/v4/models', authHeader: 'bearer' },
+  xai: { url: 'https://api.x.ai/v1/models', authHeader: 'bearer' },
 }
 
 // When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
@@ -159,6 +160,7 @@ export const API_KEY_DASHBOARD_URL: Partial<Record<KnownProviderId, string>> = {
   fireworks: 'https://fireworks.ai/account/api-keys',
   zai: 'https://docs.z.ai/devpack/tool/claude#api-key',
   'zai-coding': 'https://docs.z.ai/devpack/tool/claude#api-key',
+  xai: 'https://console.x.ai',
 }
 
 export function providersWithApiKeyProbe(): KnownProviderId[] {

@@ -9,6 +9,7 @@ import {
 import lockfile from 'proper-lockfile'
 
 import { providerKeyDefaultEnv } from './defaults'
+import { registerXaiOAuthProvider } from './oauth-xai'
 import { resolveSecret, type Secret } from './resolve'
 import {
   type Channels,
@@ -374,6 +375,7 @@ export class SecretsBackend implements AuthStorageBackend {
 }
 
 export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
+  registerXaiOAuthProvider()
   return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
 }
 
