@@ -4093,6 +4093,22 @@ function composeTurnPrompt(
   // the `## Recent context (not addressed to you …)` header — mislabeling the
   // one line the model is supposed to answer as context it should ignore.
   if (batch.length > 0) {
+    // The `## Current message` header is a WITHIN-turn label, but it also gets
+    // persisted into the transcript — so after many turns the model sees a
+    // chain of turns each headed "addressed to you" and a weak model collapses
+    // that into "only the latest turn exists", denying it can see what the user
+    // said earlier (those turns are in its own message history). This note
+    // re-anchors the header as turn-local. Conditional "if earlier turns
+    // appear" wording so it is not a false premise on turn 1 (a fresh session
+    // has no history). No leading `>` — that is this repo's quote-anchor syntax
+    // and would read as quoted content. Worded to NOT contain the literal
+    // `## Current message` heading — a pinned test asserts its absence on
+    // reminder-only drains, so it must stay batch-gated and substring-free.
+    parts.push(
+      'Note: if earlier turns appear above, they are real conversation history you can use.',
+      "The heading below marks this turn's new message, not the only message that may exist.",
+      '',
+    )
     parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
     for (const b of batch) {
       parts.push(formatInboundPromptLines(b, adapter))
