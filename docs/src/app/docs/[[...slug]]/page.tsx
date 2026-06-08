@@ -22,9 +22,25 @@ export async function generateMetadata(props: PageProps): Promise<Metadata> {
     return {}
   }
 
+  const { title, description } = page.data
+
   return {
-    title: page.data.title,
-    description: page.data.description,
+    title,
+    description,
+    alternates: {
+      canonical: page.url,
+    },
+    openGraph: {
+      type: 'article',
+      url: page.url,
+      title,
+      description,
+    },
+    twitter: {
+      card: 'summary',
+      title,
+      description,
+    },
   }
 }
 
