@@ -108,11 +108,16 @@ export async function createCountStore(
   return {
     get: (id, job) => matchingCount(state.jobs[id], job),
     increment: (id, job, at) => {
-      if (active.get(id) !== progressFingerprint(job)) return Promise.resolve()
+      const fp = progressFingerprint(job)
       const run = tail.then(async () => {
+        // Re-check INSIDE the tail body, not just before queueing: a reconcile
+        // can land synchronously between the queue and this body running, so a
+        // sync-only guard would still let a straggler write a tombstone for a
+        // job that's since been removed. `active` reflects the latest reconcile.
+        if (active.get(id) !== fp) return
         const prev = matchingCount(state.jobs[id], job)
         state.jobs[id] = {
-          progressFingerprint: progressFingerprint(job),
+          progressFingerprint: fp,
           firedCount: prev + 1,
           lastAcceptedAt: new Date(at).toISOString(),
         }

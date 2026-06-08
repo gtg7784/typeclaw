@@ -426,8 +426,11 @@ export async function startAgent({
   })
   subagentConsumer.start()
 
-  // Populated by startScheduler's factory (onCountStore) before the consumer is
-  // start()ed, so the consumer's count gate and the scheduler share one store.
+  // Populated by startScheduler's factory (onCountStore). The consumer
+  // subscribes before this is set, but only READS the holder at fire time —
+  // and the scheduler (the sole cron publisher) is armed only AFTER the holder
+  // is populated, so no count-limited fire can observe an undefined holder. If
+  // another cron publisher is ever added, create the store before this point.
   let cronCountStore: CountStore | undefined
   const cronConsumer = createCronConsumer({
     stream,

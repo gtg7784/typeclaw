@@ -107,6 +107,21 @@ describe('createCountStore', () => {
     expect(store.get('a', job('a'))).toBe(0)
   })
 
+  test('increment queued BEFORE a synchronous reconnect-remove does not write a tombstone', async () => {
+    const io = memoryIO()
+    const store = await createCountStore('/agent', [job('a')], io)
+
+    // Interleave without awaiting: queue the increment, then let reconcile([])
+    // land synchronously before the increment's deferred body runs. A sync-only
+    // guard would have already passed; the in-tail re-check must catch it.
+    const pending = store.increment('a', job('a'), Date.now())
+    void store.reconcile([])
+    await pending
+
+    await store.reconcile([job('a')])
+    expect(store.get('a', job('a'))).toBe(0)
+  })
+
   test('a straggler increment for a fingerprint-changed job is dropped', async () => {
     const io = memoryIO()
     const oldJob = job('a', { prompt: 'old' })
