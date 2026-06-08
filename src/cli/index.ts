@@ -2,7 +2,9 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { findAgentDir } from '../init'
 import { CLI_VERSION } from '../init/cli-version'
+import { runStartupMigrations } from '../migrations'
 import { BUILTIN_COMMAND_NAMES } from './builtins'
 import { dispatchPluginCommand, type PluginCommandDispatchOutcome } from './plugin-commands-dispatch'
 
@@ -40,11 +42,34 @@ const main = defineCommand({
   },
 })
 
-await runWithPluginDispatch()
+// #673's v1->v2 secrets migration was wired only into the container-stage boot
+// path (src/run/index.ts), so host CLI commands that read secrets.json directly
+// (model/provider list -> tryReadProvidersSync -> v2-only parser) still hard-fail
+// on a never-booted v1 folder. Run it once per host invocation here — at the
+// dispatch boundary, NOT in the parse path, which would recreate the read-time
+// shim #638 deliberately removed. `run` is the container stage and owns its own.
+let hostStartupMigrationsDone = false
+
+function runHostStartupMigrationsOnce(commandName: string | undefined): void {
+  if (hostStartupMigrationsDone) return
+  hostStartupMigrationsDone = true
+  if (commandName === 'run') return
+  const agentDir = findAgentDir(process.cwd())
+  if (agentDir === null) return
+  try {
+    runStartupMigrations(agentDir)
+  } catch (err) {
+    // runStartupMigrations isolates per-migration throws; this guards only the
+    // unexpected so a migration error can never block the host command itself.
+    console.warn(`[migration] host startup migration error: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
 
 async function runWithPluginDispatch(): Promise<void> {
   const argv = process.argv.slice(2)
   const first = argv[0]
+
+  runHostStartupMigrationsOnce(first)
 
   if (first === '--help' || first === '-h') {
     // citty calls process.exit() after rendering help, so anything we print
@@ -78,3 +103,5 @@ async function runWithPluginDispatch(): Promise<void> {
 }
 
 export type { PluginCommandDispatchOutcome }
+
+await runWithPluginDispatch()
