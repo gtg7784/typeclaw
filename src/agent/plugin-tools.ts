@@ -37,6 +37,7 @@ import type {
 } from '@/plugin'
 import {
   buildSandboxedCommand,
+  canMountRealProc,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
   mapVirtualTmpPath,
@@ -599,17 +600,27 @@ async function applyBashSandbox(
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
-  // 'real-proc' gives a sandboxed JS package runner a working /proc/self/{fd,
-  // maps} so `bunx`/`bun add`/`bun run <pkg>` stop aborting with Bun's NotDir.
-  // Opt-in (default 'tmpfs') because it makes start.ts grant the container
-  // CAP_SYS_ADMIN at boot. Read from the boot-time `config` snapshot, NOT live
+  // 'real-proc' (the default) gives a sandboxed JS package runner a working
+  // /proc/self/{fd,maps} so `bunx`/`bun add`/`bun run <pkg>` stop aborting with
+  // Bun's NotDir. Read from the boot-time `config` snapshot, NOT live
   // getConfig(): sandbox.realProc is restart-required, and the strategy MUST
-  // track the boot-time capability. A `typeclaw reload` that flips realProc to
-  // true would otherwise make this emit `unshare --mount-proc` in a container
-  // booted WITHOUT CAP_SYS_ADMIN, so the mount fails instead of the old tmpfs
+  // track the boot-time capability. A `typeclaw reload` that flips realProc
+  // would otherwise emit `unshare --mount-proc` in a container booted WITHOUT
+  // CAP_SYS_ADMIN (or vice versa), so the mount fails instead of the boot-time
   // strategy holding until restart. `config` never changes on reload.
-  // procSelfExe is only consumed by the 'tmpfs' branch.
-  const realProc = config.sandbox.realProc
+  // procSelfExe is only consumed by the 'tmpfs' (realProc=false) branch.
+  //
+  // Probe before committing to real-proc: `--cap-add=SYS_ADMIN` is granted by
+  // start.ts but is a no-op on rootless Docker / gVisor / Docker Desktop ECI /
+  // AppArmor-enforcing hosts (see canMountRealProc). Without the probe, the
+  // FIRST low-trust bash call on such a host would emit `unshare --mount-proc`,
+  // which fails with "Operation not permitted" and breaks EVERY sandboxed bash
+  // command — strictly worse than the old tmpfs default. The probe runs once
+  // (cached) and falls back to tmpfs when the mount can't happen, so low-trust
+  // bash keeps working there (external-package execution still won't, exactly
+  // as it didn't before realProc existed). procSelfExe stays set so the tmpfs
+  // fallback can still re-expose /proc/self/exe for runner self-location.
+  const realProc = config.sandbox.realProc && (await canMountRealProc())
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [
       { type: 'ro-bind', source: agentDir, dest: agentDir },

@@ -610,13 +610,13 @@ describe('planStart network egress filter', () => {
 })
 
 describe('planStart sandbox.realProc cap grant', () => {
-  test('does NOT grant SYS_ADMIN by default (the secure tmpfs-proc profile stays the default)', async () => {
+  test('grants SYS_ADMIN by default (real-proc is the default so sandboxed bunx/bun-add work out of the box)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).not.toContain('--cap-add=SYS_ADMIN')
+    expect(plan.runArgs).toContain('--cap-add=SYS_ADMIN')
   })
 
   test('does NOT grant SYS_ADMIN when sandbox.realProc is explicitly false', async () => {
