@@ -129,6 +129,44 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
+  test('deepseek is a single api-key provider on the bare api.deepseek.com base url', () => {
+    const deepseek = KNOWN_PROVIDERS.deepseek
+    expect(deepseek.baseUrl).toBe('https://api.deepseek.com')
+    expect(deepseek.apiKeyEnv).toBe('DEEPSEEK_API_KEY')
+    expect(supportsApiKey(deepseek)).toBe(true)
+    expect(supportsOAuth(deepseek)).toBe(false)
+  })
+
+  test('every deepseek model uses the openai-completions api so pi-ai routes correctly', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.deepseek.models)) {
+      expect(model.api, `deepseek/${modelId} api drift`).toBe('openai-completions')
+    }
+  })
+
+  test('deepseek ships the V4 flash and pro models, text-only', () => {
+    const models = KNOWN_PROVIDERS.deepseek.models
+    expect(Object.keys(models)).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro'])
+    for (const [modelId, model] of Object.entries(models)) {
+      expect((model.input as ReadonlyArray<string>).includes('image'), `deepseek/${modelId} should be text-only`).toBe(
+        false,
+      )
+    }
+  })
+
+  test('deepseek input cost encodes the cache-miss rate and cacheRead the cache-hit rate', () => {
+    const expected: Record<string, { input: number; output: number; cacheRead: number }> = {
+      'deepseek-v4-flash': { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+      'deepseek-v4-pro': { input: 0.435, output: 0.87, cacheRead: 0.003625 },
+    }
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.deepseek.models)) {
+      const cost = model.cost as { input: number; output: number; cacheRead: number; cacheWrite: number }
+      expect(cost.input, `deepseek/${modelId} input drift`).toBe(expected[modelId]!.input)
+      expect(cost.output, `deepseek/${modelId} output drift`).toBe(expected[modelId]!.output)
+      expect(cost.cacheRead, `deepseek/${modelId} cacheRead drift`).toBe(expected[modelId]!.cacheRead)
+      expect(cost.cacheWrite, `deepseek/${modelId} has no published cache-write surcharge`).toBe(0)
+    }
+  })
+
   test('anthropic supports both api-key and oauth on the same provider id', () => {
     const anthropic = KNOWN_PROVIDERS.anthropic
     expect(anthropic.baseUrl).toBe('https://api.anthropic.com')
@@ -228,6 +266,11 @@ describe('KNOWN_PROVIDER_VENDORS', () => {
     expect(providerIdsForVendor('minimax')).toEqual(['minimax'])
     expect(vendorForProviderId('minimax')).toBe('minimax')
   })
+
+  test('DeepSeek is a single-provider vendor (no variant step)', () => {
+    expect(providerIdsForVendor('deepseek')).toEqual(['deepseek'])
+    expect(vendorForProviderId('deepseek')).toBe('deepseek')
+  })
 })
 
 describe('providerForModelRef', () => {
@@ -256,6 +299,12 @@ describe('listKnownModelRefs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('minimax/MiniMax-M3')
     expect(refs).toContain('minimax/MiniMax-M2')
+  })
+
+  test('includes deepseek model refs', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('deepseek/deepseek-v4-flash')
+    expect(refs).toContain('deepseek/deepseek-v4-pro')
   })
 
   test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8)', () => {
@@ -319,6 +368,8 @@ describe('defaultThinkingLevelForRef', () => {
     expect(defaultThinkingLevelForRef('zai/glm-4.6')).toBeUndefined()
     expect(defaultThinkingLevelForRef('zai-coding/glm-5.1')).toBeUndefined()
     expect(defaultThinkingLevelForRef('minimax/MiniMax-M3')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-flash')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-pro')).toBeUndefined()
   })
 
   test('every known model ref is classified (no provider falls through unhandled)', () => {

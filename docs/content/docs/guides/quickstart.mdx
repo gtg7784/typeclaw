@@ -16,7 +16,7 @@ You need two things installed:
 - **[Bun](https://bun.sh/)** (version 1.1 or newer) — the runtime TypeClaw is built on.
 - **[OrbStack](https://orbstack.dev/)** (recommended) or **[Docker](https://www.docker.com/)** — your agent runs inside a container. OrbStack is lighter and faster to start on macOS; Docker Desktop works just as well.
 
-You'll also need access to one AI provider — an API key from OpenAI, Anthropic, Fireworks, Z.AI, xAI, or MiniMax, or an existing ChatGPT, Claude, or Grok subscription you can log in with (via the `openai-codex`, `anthropic`, or `xai` providers). The wizard in step 2 walks you through it.
+You'll also need access to one AI provider — an API key from OpenAI, Anthropic, Fireworks, Z.AI, xAI, MiniMax, or DeepSeek, or an existing ChatGPT, Claude, or Grok subscription you can log in with (via the `openai-codex`, `anthropic`, or `xai` providers). The wizard in step 2 walks you through it.
 
 ## Five steps to your first reply
 
@@ -67,7 +67,7 @@ The provider step asks, in order: **which provider**, **which model**, then **AP
 Add a provider and pick a default model by hand:
 
 ```sh
-typeclaw provider add openai --key sk-...       # or anthropic, fireworks, zai, zai-coding, xai, minimax
+typeclaw provider add openai --key sk-...       # or anthropic, fireworks, zai, zai-coding, xai, minimax, deepseek
 typeclaw provider add openai-codex --oauth      # log in with a ChatGPT subscription
 typeclaw provider add anthropic --oauth         # log in with a Claude subscription
 typeclaw provider add xai --oauth               # log in with a Grok subscription

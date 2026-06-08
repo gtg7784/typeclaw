@@ -9,6 +9,7 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   'zai-coding': { url: 'https://api.z.ai/api/coding/paas/v4/models', authHeader: 'bearer' },
   xai: { url: 'https://api.x.ai/v1/models', authHeader: 'bearer' },
   minimax: { url: 'https://api.minimax.io/v1/models', authHeader: 'bearer' },
+  deepseek: { url: 'https://api.deepseek.com/models', authHeader: 'bearer' },
 }
 
 // When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
@@ -163,6 +164,7 @@ export const API_KEY_DASHBOARD_URL: Partial<Record<KnownProviderId, string>> = {
   'zai-coding': 'https://docs.z.ai/devpack/tool/claude#api-key',
   xai: 'https://console.x.ai',
   minimax: 'https://platform.minimax.io/user-center/basic-information/interface-key',
+  deepseek: 'https://platform.deepseek.com/api_keys',
 }
 
 // MiniMax sells the same `minimax` provider under two billing surfaces that
