@@ -12,7 +12,6 @@ import {
   supportsOAuth as providerSupportsOAuth,
   variantHint,
   variantLabel,
-  vendorForProviderId,
   type KnownModelRef,
   type KnownProviderId,
   type KnownProviderVendorId,
