@@ -993,7 +993,11 @@ async function pickModelForProvider(
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
-  const choice = await select<KnownModelRef>({
+  // select<string>, not select<KnownModelRef>: clack's Option<Value> is a
+  // distributive conditional type, so a large KnownModelRef union explodes into
+  // a per-literal option union that no longer accepts `value: ref`. The runtime
+  // value is the ref string and is re-narrowed via `candidates.find` below.
+  const choice = await select<string>({
     message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,
@@ -1068,7 +1072,8 @@ async function pickVisionModel(
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
-  const choice = await select<KnownModelRef>({
+  // select<string> for the same distributive-Option reason as pickModelForProvider.
+  const choice = await select<string>({
     message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,

@@ -230,7 +230,11 @@ async function pickModelRef(cwd: string): Promise<string> {
       }
       continue
     }
-    const choice = await select<KnownModelRef | typeof ADD_PROVIDER_SENTINEL>({
+    // select<string>, not the KnownModelRef union: clack's Option<Value> is a
+    // distributive conditional type and a large ref union breaks `value: ref`
+    // assignability. Values are ref strings (+ the sentinel) and stay correct
+    // at runtime — the sentinel check and `return choice` below are unaffected.
+    const choice = await select<string>({
       message: 'Pick a model',
       options: [
         ...refs.map((ref) => ({
