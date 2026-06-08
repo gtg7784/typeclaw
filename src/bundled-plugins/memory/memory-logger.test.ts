@@ -280,6 +280,10 @@ describe('memoryLoggerSubagent', () => {
     expect(msg).toContain('Do not invent or reuse a watermark id')
   })
 
+  test("runs on the 'fast' profile so it does not share the slow default model a researcher saturates", () => {
+    expect(memoryLoggerSubagent.profile).toBe('fast')
+  })
+
   test('declares an inFlightKey that keys on agentDir (so two concurrent sessions for the same agent serialize)', () => {
     expect(memoryLoggerSubagent.inFlightKey).toBeDefined()
     const key = memoryLoggerSubagent.inFlightKey!({
