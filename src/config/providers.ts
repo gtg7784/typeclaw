@@ -41,6 +41,17 @@ type KnownProvider = {
 // e.g. `OPENAI_API_KEY`). For `oauth` providers, `oauthProviderId` MUST match
 // a pi-ai OAuth provider id exactly, otherwise `authStorage.login()` will
 // throw "Unknown OAuth provider".
+//
+// Granularity rule (split vs merge): a provider id is the runtime API surface,
+// not the brand. Different API call => different provider id; same API call =>
+// same provider id. "Same API call" means same endpoint + same wire transport.
+// So `anthropic` is ONE id because api-key and oauth hit the same
+// /v1/messages endpoint (only the auth header differs), while `openai` /
+// `openai-codex` and `zai` / `zai-coding` are SEPARATE ids because each pair
+// targets different endpoints (and env vars). The user-facing brand grouping
+// lives in `KNOWN_PROVIDER_VENDORS` below — keep it out of this decision.
+// Renaming an id is a breaking change to secrets.json keys and typeclaw.json
+// model refs; only do it behind a migration in a dedicated major-version PR.
 export const KNOWN_PROVIDERS = {
   openai: {
     id: 'openai',
