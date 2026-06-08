@@ -30,6 +30,7 @@ import {
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
 import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync, reloadConfig } from '@/config'
 import {
+  type CountStore,
   type CronConsumer,
   type CronJob,
   type CronFile,
@@ -82,6 +83,7 @@ export type SchedulerFactory = (options: {
   cwd: string
   file: CronFile
   onFire: (job: CronJob) => void
+  onCountStore?: (store: CountStore) => void
 }) => Scheduler | Promise<Scheduler>
 export type ChannelManagerFactory = typeof createChannelManager
 export type TunnelManagerFactory = (options: TunnelManagerOptions) => TunnelManager
@@ -424,9 +426,16 @@ export async function startAgent({
   })
   subagentConsumer.start()
 
+  // Populated by startScheduler's factory (onCountStore) before the consumer is
+  // start()ed, so the consumer's count gate and the scheduler share one store.
+  let cronCountStore: CountStore | undefined
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
+    countStore: {
+      get: (id, job) => cronCountStore?.get(id, job) ?? 0,
+      increment: (id, job, at) => cronCountStore?.increment(id, job, at) ?? Promise.resolve(),
+    },
     invokeHandler: async (job) => {
       const snap = pluginRuntime.get()
       const registered = snap.registry.cronJobs.find((j) => j.globalId === job.id)
@@ -544,6 +553,9 @@ export async function startAgent({
     stream,
     hasInternalJobs: internalJobs().length > 0,
     getSubagents: () => pluginRuntime.get().subagents,
+    onCountStore: (store) => {
+      cronCountStore = store
+    },
   })
 
   if (scheduler) {
@@ -726,6 +738,7 @@ export async function startAgent({
     ...mcpManagerOpt,
     agentDir: cwd,
     pluginRuntime,
+    getFiredCount: (job) => cronCountStore?.get(job.id, job) ?? 0,
     claimController,
     commandRunnerFactory,
     tunnelManager,
@@ -843,6 +856,7 @@ async function startScheduler({
   stream,
   hasInternalJobs,
   getSubagents,
+  onCountStore,
 }: {
   cwd: string
   loadCron: LoadCronFn
@@ -850,6 +864,7 @@ async function startScheduler({
   stream: Stream
   hasInternalJobs: boolean
   getSubagents?: () => SubagentRegistry
+  onCountStore?: (store: CountStore) => void
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   const subagents = getSubagents?.()
@@ -869,15 +884,17 @@ async function startScheduler({
   const onFire = (job: CronJob) => {
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
-  const scheduler = await createSchedulerFor({ cwd, file, onFire })
+  const scheduler = await createSchedulerFor({ cwd, file, onFire, onCountStore })
   scheduler.start()
   return scheduler
 }
 
 function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFactory {
-  return async ({ cwd, file, onFire }) => {
+  return async ({ cwd, file, onFire, onCountStore }) => {
     const jobs = [...file.jobs, ...internalJobs()]
     const countStore = await createCountStore(cwd, jobs)
+    // Share the one store instance with the consumer's authoritative count gate.
+    onCountStore?.(countStore)
     return createScheduler({ jobs, onFire, countStore })
   }
 }

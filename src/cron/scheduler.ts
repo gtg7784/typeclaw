@@ -14,13 +14,13 @@ export type SchedulerLogger = {
   error: (msg: string) => void
 }
 
-// Tracks accepted fires for count-limited jobs. The scheduler reads `get` to
-// decide expiry and awaits `increment` BEFORE dispatch so a crash can never
-// under-count and over-fire a reminder after restart. Optional: jobs without
-// `count` never touch it, and tests that don't exercise counts can omit it.
+// The scheduler uses the count store only to stop arming once a job's durable
+// count is exhausted (an optimization) and to reconcile progress on reload.
+// The authoritative count gate lives in the consumer, which owns accepted-fire
+// accounting — the scheduler must not be the correctness boundary because it
+// can't know whether the downstream coalescer will accept or skip a fire.
 export type SchedulerCountStore = {
-  get: (id: string) => number
-  increment: (id: string, job: CronJob, at: number) => Promise<void>
+  get: (id: string, job: CronJob) => number
   reconcile: (jobs: CronJob[]) => Promise<void>
 }
 
@@ -81,7 +81,7 @@ export function createScheduler({
     const job = currentEnabled(id)
     if (!job) return
 
-    const firedCount = job.count !== undefined ? (countStore?.get(id) ?? 0) : 0
+    const firedCount = job.count !== undefined ? (countStore?.get(id, job) ?? 0) : 0
     const result = computeNextFire(job, clock.now(), { firedCount })
     if (!result.ok) {
       if (result.expired) {
@@ -102,28 +102,10 @@ export function createScheduler({
       if (!started) return
       const live = currentEnabled(id)
       if (!live) return
-      void fireThenReschedule(live)
+      fire(live)
+      scheduleNext(id)
     }, delay)
     handles.set(id, handle)
-  }
-
-  // The fire path is async because count-limited jobs must DURABLY record the
-  // fire before dispatch. We re-arm only after that completes, so the re-armed
-  // timer sees the updated count and retires on the final fire. A failed
-  // persist skips dispatch (the count stays put and the same occurrence is
-  // retried), keeping the at-most-count guarantee across crashes.
-  async function fireThenReschedule(job: CronJob): Promise<void> {
-    if (job.count !== undefined && countStore !== undefined) {
-      try {
-        await countStore.increment(job.id, job, clock.now())
-      } catch (err) {
-        logger.error(`[cron] ${job.id}: failed to record fire, skipping dispatch: ${describe(err)}`)
-        scheduleNext(job.id)
-        return
-      }
-    }
-    fire(job)
-    scheduleNext(job.id)
   }
 
   function fire(job: CronJob): void {
@@ -191,8 +173,11 @@ export function createScheduler({
 
       // Reconcile counts before arming so re-added/changed jobs don't inherit
       // stale progress. `reconcile` settles the authoritative in-memory map
-      // synchronously; the returned persist promise is fire-and-forget.
-      void countStore?.reconcile(next)
+      // synchronously; only the persist is async, so a failure there just means
+      // disk lags the (correct) in-memory state — log it, don't fail the reload.
+      countStore?.reconcile(next).catch((err) => {
+        logger.error(`[cron] failed to persist count reconciliation: ${describe(err)}`)
+      })
 
       for (const job of result.removed) cancel(job.id)
       for (const job of result.updated) {

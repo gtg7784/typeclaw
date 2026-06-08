@@ -56,7 +56,18 @@ export type CreateCronConsumerOptions = {
   // `ctx.exec`. Optional so unit-test fakes that never schedule handler jobs
   // stay one-liners.
   invokeHandler?: CronHandlerInvoker
+  // Authoritative count gate. The consumer — not the scheduler — owns
+  // accepted-fire accounting: it re-checks the durable count and increments
+  // only for runs that pass coalescing, so a coalesced skip never consumes a
+  // count. Optional so test fakes that don't exercise counts stay one-liners.
+  countStore?: ConsumerCountStore
+  now?: () => number
   logger?: CronConsumerLogger
+}
+
+export type ConsumerCountStore = {
+  get: (id: string, job: CronJob) => number
+  increment: (id: string, job: CronJob, at: number) => Promise<void>
 }
 
 export type CronConsumer = {
@@ -76,6 +87,8 @@ export function createCronConsumer({
   cwd,
   createSessionForCron,
   invokeHandler,
+  countStore,
+  now = Date.now,
   logger = consoleLogger,
 }: CreateCronConsumerOptions): CronConsumer {
   const inFlight = new Set<string>()
@@ -94,8 +107,20 @@ export function createCronConsumer({
           logger.warn(`[cron] ${job.id}: previous run still in progress, skipping`)
           return
         }
+        // Reserve before the count gate so two close occurrences can't both
+        // pass the `firedCount < count` check before either increment lands.
         inFlight.add(job.id)
         try {
+          if (job.count !== undefined && countStore !== undefined) {
+            if (countStore.get(job.id, job) >= job.count) {
+              logger.info(`[cron] ${job.id}: count boundary reached, skipping`)
+              return
+            }
+            // Durably record the accepted fire BEFORE dispatch. A crash here
+            // consumes the count without running (at-most-count), which is the
+            // correct tradeoff for a reminder versus over-firing on restart.
+            await countStore.increment(job.id, job, now())
+          }
           if (job.kind === 'prompt') {
             await runPrompt(job, createSessionForCron, stream, logger)
           } else if (job.kind === 'exec') {

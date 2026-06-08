@@ -542,17 +542,15 @@ describe('Scheduler.replaceJobs', () => {
   })
 })
 
-function memoryCountStore(): {
-  get: (id: string) => number
-  increment: (id: string) => Promise<void>
+// The scheduler is NOT the count authority — the consumer is. The scheduler
+// only reads `get` to STOP ARMING once the durable count is already exhausted.
+// This fake models a store whose count is set externally (by the consumer).
+function fixedCountStore(counts: Record<string, number> = {}): {
+  get: (id: string, job: CronJob) => number
   reconcile: () => Promise<void>
 } {
-  const counts = new Map<string, number>()
   return {
-    get: (id) => counts.get(id) ?? 0,
-    increment: async (id) => {
-      counts.set(id, (counts.get(id) ?? 0) + 1)
-    },
+    get: (id) => counts[id] ?? 0,
     reconcile: async () => {},
   }
 }
@@ -567,44 +565,42 @@ const countedPrompt = (id: string, schedule: string, count: number): CronJob => 
 })
 
 describe('end boundaries', () => {
-  test('count stops a recurring job after N fires', async () => {
+  test('scheduler stops arming once the store reports the count is exhausted', async () => {
     const clock = createFakeClock()
     const recorder = createFireRecorder()
     const scheduler = createScheduler({
       jobs: [countedPrompt('limited', '* * * * *', 3)],
       onFire: recorder.onFire,
       clock,
-      countStore: memoryCountStore(),
+      countStore: fixedCountStore({ limited: 3 }),
       logger: silentLogger,
     })
 
     scheduler.start()
     await clock.advance(10 * 60 * 1000 + 100)
 
-    expect(recorder.firesByJob.get('limited')).toHaveLength(3)
+    expect(recorder.firesByJob.get('limited')).toBeUndefined()
 
     scheduler.stop()
   })
 
-  test('count progress carried in the store is respected on (re)start', async () => {
+  test('scheduler keeps arming while the store reports count below the limit', async () => {
     const clock = createFakeClock()
     const recorder = createFireRecorder()
-    const store = memoryCountStore()
-    await store.increment('limited')
-    await store.increment('limited')
-
     const scheduler = createScheduler({
       jobs: [countedPrompt('limited', '* * * * *', 3)],
       onFire: recorder.onFire,
       clock,
-      countStore: store,
+      countStore: fixedCountStore({ limited: 1 }),
       logger: silentLogger,
     })
 
     scheduler.start()
-    await clock.advance(10 * 60 * 1000 + 100)
+    await clock.advance(3 * 60 * 1000 + 100)
 
-    expect(recorder.firesByJob.get('limited')).toHaveLength(1)
+    // count never advances in this fake (consumer would), so it keeps firing —
+    // proving the scheduler is not the gate, only an arming optimization.
+    expect((recorder.firesByJob.get('limited') ?? []).length).toBeGreaterThanOrEqual(3)
 
     scheduler.stop()
   })
@@ -654,7 +650,7 @@ describe('end boundaries', () => {
     scheduler.stop()
   })
 
-  test('count and until together stop at whichever hits first (count wins)', async () => {
+  test('count + until: scheduler stops arming when the store reports count exhausted before until', async () => {
     const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
     const recorder = createFireRecorder()
     const scheduler = createScheduler({
@@ -671,43 +667,14 @@ describe('end boundaries', () => {
       ],
       onFire: recorder.onFire,
       clock,
-      countStore: memoryCountStore(),
+      countStore: fixedCountStore({ both: 2 }),
       logger: silentLogger,
     })
 
     scheduler.start()
     await clock.advance(20 * 60 * 1000)
 
-    expect(recorder.firesByJob.get('both')).toHaveLength(2)
-
-    scheduler.stop()
-  })
-
-  test('a failed count persist skips dispatch and does not advance the count', async () => {
-    const clock = createFakeClock()
-    const recorder = createFireRecorder()
-    let calls = 0
-    const flakyStore = {
-      get: () => 0,
-      increment: async () => {
-        calls++
-        throw new Error('disk full')
-      },
-      reconcile: async () => {},
-    }
-    const scheduler = createScheduler({
-      jobs: [countedPrompt('limited', '* * * * *', 3)],
-      onFire: recorder.onFire,
-      clock,
-      countStore: flakyStore,
-      logger: silentLogger,
-    })
-
-    scheduler.start()
-    await clock.advance(3 * 60 * 1000 + 100)
-
-    expect(recorder.fires).toHaveLength(0)
-    expect(calls).toBeGreaterThanOrEqual(1)
+    expect(recorder.firesByJob.get('both')).toBeUndefined()
 
     scheduler.stop()
   })
