@@ -97,6 +97,21 @@ describe('KNOWN_PROVIDERS', () => {
       expect(model.api, `anthropic/${modelId} api drift`).toBe('anthropic-messages')
     }
   })
+
+  test('xai supports both api-key and oauth against the native x.ai endpoint', () => {
+    const xai = KNOWN_PROVIDERS.xai
+    expect(xai.baseUrl).toBe('https://api.x.ai/v1')
+    expect(xai.apiKeyEnv).toBe('XAI_API_KEY')
+    expect(xai.oauthProviderId).toBe('xai')
+    expect(supportsApiKey(xai)).toBe(true)
+    expect(supportsOAuth(xai)).toBe(true)
+  })
+
+  test('every xai model uses the openai-completions api (x.ai is OpenAI-compatible)', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.xai.models)) {
+      expect(model.api, `xai/${modelId} api drift`).toBe('openai-completions')
+    }
+  })
 })
 
 describe('KNOWN_PROVIDER_VENDORS', () => {
@@ -186,6 +201,13 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('anthropic/claude-sonnet-4-6')
     expect(refs).toContain('anthropic/claude-opus-4-7')
     expect(refs).toContain('anthropic/claude-opus-4-8')
+  })
+
+  test('includes the xai Grok models', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('xai/grok-4-fast')
+    expect(refs).toContain('xai/grok-4')
+    expect(refs).toContain('xai/grok-code-fast-1')
   })
 })
 

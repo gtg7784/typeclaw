@@ -463,6 +463,69 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // xAI (Grok). The native developer API at api.x.ai/v1 is OpenAI-compatible
+  // (Bearer auth + /chat/completions shape), so models go through pi-ai's
+  // `openai-completions` adapter with a custom baseUrl — same trick as
+  // Fireworks and Z.AI. This is a DUAL-AUTH provider like `anthropic`:
+  //   * api-key — XAI_API_KEY (the standard xAI env var), a plain Bearer token.
+  //   * oauth — Grok subscription login via xAI's OIDC server (auth.x.ai),
+  //     authorization-code + PKCE. pi-ai ships no built-in xAI OAuth provider,
+  //     so `oauthProviderId: 'xai'` resolves to the custom provider registered
+  //     in src/secrets/oauth-xai.ts (registered from createSecretsStoreForAgent
+  //     so both init-login and runtime-refresh see it). The dual-auth runtime
+  //     rule in src/agent/auth.ts applies: an OAuth credential on disk wins over
+  //     XAI_API_KEY in .env — remove it (`typeclaw provider remove xai`) to fall
+  //     back to the key.
+  //
+  // Costs and context windows mirror the xAI pricing/models docs as of
+  // 2026-06-08. Grok 4 Fast is the cheap default; grok-code-fast-1 is the
+  // coding-tuned model. When refreshing, rerun `scripts/generate-schema.ts`.
+  xai: {
+    id: 'xai',
+    name: 'xAI (Grok)',
+    baseUrl: 'https://api.x.ai/v1',
+    auth: ['api-key', 'oauth'],
+    apiKeyEnv: 'XAI_API_KEY',
+    oauthProviderId: 'xai',
+    models: {
+      'grok-4-fast': {
+        id: 'grok-4-fast',
+        name: 'Grok 4 Fast',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.2, output: 0.5, cacheRead: 0.05, cacheWrite: 0 },
+        contextWindow: 2000000,
+        maxTokens: 30000,
+      },
+      'grok-4': {
+        id: 'grok-4',
+        name: 'Grok 4',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 3, output: 15, cacheRead: 0.75, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+      'grok-code-fast-1': {
+        id: 'grok-code-fast-1',
+        name: 'Grok Code Fast 1',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.2, output: 1.5, cacheRead: 0.02, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS

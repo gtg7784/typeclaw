@@ -20,6 +20,7 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   // catalog. models.dev tracks the underlying model metadata under `zai`,
   // so we route lookups there. The curated entries still get surfaced.
   'zai-coding': 'zai',
+  xai: 'xai',
 }
 
 export type ModelOption = {
