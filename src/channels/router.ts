@@ -3713,6 +3713,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ok: boolean
       durationMs: number
       error?: string
+      hasRecoverableOutput?: boolean
     },
   ): { kind: 'delivered'; keyId: string } => {
     const adapter = live.keyId.split(':', 1)[0] ?? ''
@@ -3722,6 +3723,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ok: args.ok,
       durationMs: args.durationMs,
       ...(args.error !== undefined ? { error: args.error } : {}),
+      ...(args.hasRecoverableOutput === true ? { hasRecoverableOutput: true } : {}),
       channel: true,
       adapter,
     })
@@ -3754,6 +3756,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     ok: boolean
     durationMs: number
     error?: string
+    hasRecoverableOutput?: boolean
     channelKey?: { adapter: string; workspace: string; chat: string; thread: string | null }
   }): { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' } => {
     for (const live of liveSessions.values()) {

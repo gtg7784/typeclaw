@@ -37,6 +37,7 @@ export type SubagentOutputToolDetails =
       subagent: string
       durationMs: number
       error: string
+      finalMessage?: string
     }
   | { ok: false; error: string }
 
@@ -137,6 +138,7 @@ function renderSnapshot(snap: StatusSnapshot): ToolReturn {
     }
   }
   const error = snap.completion?.error ?? 'unknown error'
+  const finalMessage = snap.completion?.finalMessage
   const details: SubagentOutputToolDetails = {
     ok: true,
     status: 'failed',
@@ -144,9 +146,19 @@ function renderSnapshot(snap: StatusSnapshot): ToolReturn {
     subagent: snap.subagentName,
     durationMs: snap.completion?.durationMs ?? snap.elapsedMs,
     error,
+    ...(finalMessage !== undefined ? { finalMessage } : {}),
   }
+  const recovered =
+    finalMessage !== undefined
+      ? ` It produced output before failing; recover it below instead of redoing the work:\n\n${finalMessage}`
+      : ''
   return {
-    content: [{ type: 'text' as const, text: `${snap.subagentName} failed after ${details.durationMs}ms: ${error}` }],
+    content: [
+      {
+        type: 'text' as const,
+        text: `${snap.subagentName} failed after ${details.durationMs}ms: ${error}.${recovered}`,
+      },
+    ],
     details,
   }
 }

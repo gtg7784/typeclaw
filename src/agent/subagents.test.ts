@@ -947,6 +947,71 @@ describe('startSubagent', () => {
     expect(abortCount).toBe(1)
   })
 
+  test('a timeout preserves an already-captured final message so a near-miss result is not discarded', async () => {
+    // given: a session that emits a final report, then wedges before settling — the
+    // production shape of a researcher that produced its <report> then hit the ceiling
+    let listener: ((event: unknown) => void) | null = null
+    const session = {
+      prompt: () =>
+        new Promise<void>(() => {
+          listener?.({ type: 'message_end', message: { role: 'assistant', content: 'The finished report body.' } })
+        }),
+      dispose: () => {},
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_recover',
+    })
+    const result = await completion
+
+    // then: still a failure (the contract was not honored), but the report rides along
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('timed out')
+      expect(result.finalMessage).toBe('The finished report body.')
+    }
+  })
+
+  test('a timeout with no captured message yields ok=false and no finalMessage', async () => {
+    // given: a wedge that never emits any assistant message before the ceiling
+    const session = {
+      prompt: () => new Promise<void>(() => {}),
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_no_recover',
+    })
+    const result = await completion
+
+    // then
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.finalMessage).toBeUndefined()
+    }
+  })
+
   test('without timeoutMs a slow prompt keeps completion pending (legacy unbounded behavior preserved)', async () => {
     // given: a session whose prompt has not resolved yet, and no timeout declared
     let resolvePrompt: () => void = () => {}

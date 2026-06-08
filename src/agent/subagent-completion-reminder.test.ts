@@ -47,6 +47,30 @@ describe('renderSubagentCompletionReminder', () => {
     expect(text).toContain('unknown error')
   })
 
+  test('ok=false with hasRecoverableOutput steers the parent to recover, not redo, the work', () => {
+    const recoverable = renderSubagentCompletionReminder({
+      subagent: 'researcher',
+      taskId: 'bg_to',
+      ok: false,
+      durationMs: 600_000,
+      error: 'spawn timed out after 1800000ms',
+      hasRecoverableOutput: true,
+    })
+    expect(recoverable).toContain('produced output before failing')
+    expect(recoverable).toContain('subagent_output')
+
+    // when the flag is absent, the wording stays the plain "inspect" guidance
+    const plain = renderSubagentCompletionReminder({
+      subagent: 'researcher',
+      taskId: 'bg_to',
+      ok: false,
+      durationMs: 600_000,
+      error: 'spawn timed out after 1800000ms',
+    })
+    expect(plain).not.toContain('produced output before failing')
+    expect(plain).toContain('subagent_output to inspect')
+  })
+
   test('channel=true appends the channel_reply nudge so a channel-session reminder steers the model to surface via tool, not plain text', () => {
     const text = renderSubagentCompletionReminder({
       subagent: 'explorer',

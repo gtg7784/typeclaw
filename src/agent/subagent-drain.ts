@@ -71,12 +71,14 @@ function collectPendingReminders(drain: SubagentBackgroundDrain, delivered: Set<
     if (child.status === 'running') continue
     if (delivered.has(child.taskId)) continue
     const completion = child.completion
+    const hasRecoverableOutput = child.status !== 'completed' && completion?.finalMessage !== undefined
     const text = renderSubagentCompletionReminder({
       subagent: child.subagentName,
       taskId: child.taskId,
       ok: child.status === 'completed',
       durationMs: completion?.durationMs ?? 0,
       ...(completion?.error !== undefined ? { error: completion.error } : {}),
+      ...(hasRecoverableOutput ? { hasRecoverableOutput: true } : {}),
     })
     pending.push({ taskId: child.taskId, text })
   }

@@ -15,6 +15,7 @@ export type CompletionReminderArgs = {
   ok: boolean
   durationMs: number
   error?: string
+  hasRecoverableOutput?: boolean
   channel?: boolean
   adapter?: string
 }
@@ -55,10 +56,14 @@ export function renderSubagentCompletionReminder(args: CompletionReminderArgs): 
     )
   }
   const err = args.error ?? 'unknown error'
+  const recoveryHint =
+    args.hasRecoverableOutput === true
+      ? `It produced output before failing — call subagent_output to recover it instead of redoing the work. `
+      : `Use subagent_output to inspect. `
   return (
     `<system-reminder>\n` +
     `Subagent \`${args.subagent}\` (${args.taskId}) FAILED after ${durationStr}: ${err}. ` +
-    `Use subagent_output to inspect. If this work was tracked in your todo list, ` +
+    `${recoveryHint}If this work was tracked in your todo list, ` +
     `keep the item pending (or add a recovery item) via todo_write so it is not ` +
     `dropped.${channelTail}\n` +
     `</system-reminder>`
@@ -88,6 +93,12 @@ export type SubagentCompletedPayload = {
   ok: boolean
   durationMs: number
   error?: string
+  // A failed subagent can still carry a recoverable result (e.g. a researcher
+  // that produced its `<report>` then timed out). The boolean — not the content
+  // — rides the broadcast so the reminder can tell the parent to fetch it via
+  // subagent_output; the body stays in the registry retrieval path, off the
+  // broadcast bus, to keep large/sensitive output out of every subscriber.
+  hasRecoverableOutput?: boolean
   // Present when the parent was a channel session. Lets the router fall back
   // to the live successor session for the same channel key when the parent
   // rolled over (SESSION_FRESHNESS_TTL_MS) or was idle-evicted while the
@@ -109,6 +120,7 @@ export function parseSubagentCompletedPayload(payload: unknown): SubagentComplet
     ok?: unknown
     durationMs?: unknown
     error?: unknown
+    hasRecoverableOutput?: unknown
     channelKey?: unknown
   }
   if (p.kind !== 'subagent.completed') return null
@@ -121,6 +133,7 @@ export function parseSubagentCompletedPayload(payload: unknown): SubagentComplet
     ok: p.ok === true,
     durationMs: typeof p.durationMs === 'number' ? p.durationMs : 0,
     ...(typeof p.error === 'string' ? { error: p.error } : {}),
+    ...(p.hasRecoverableOutput === true ? { hasRecoverableOutput: true } : {}),
     ...(channelKey !== null ? { channelKey } : {}),
   }
 }
