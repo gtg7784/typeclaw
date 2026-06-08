@@ -1,5 +1,6 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
 export {
+  buildProcBindProbeScript,
   canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,

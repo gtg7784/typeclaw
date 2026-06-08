@@ -4,6 +4,7 @@ import {
   _resetBwrapAvailabilityCacheForTests,
   _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
+  buildProcBindProbeScript,
   canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
@@ -120,6 +121,37 @@ describe('canBindProcSafely', () => {
     const second = canBindProcSafely()
     expect(second).toBe(first)
     return first
+  })
+})
+
+describe('buildProcBindProbeScript (false-pass regression guard)', () => {
+  // The real probe needs a Linux container + bwrap, so its security behavior
+  // can't run in CI. These pin the generated script's SHAPE so a regression to
+  // the false-passing form (which leaked secrets, see git history) fails here.
+  const script = buildProcBindProbeScript(4242)
+
+  test('opens the protected files (the actual leak path), never grep/cat on a localized errno', () => {
+    // given-when-then: a successful open of environ/maps must trip `exit 1`
+    expect(script).toContain('(: < /proc/4242/environ) 2>/dev/null && exit 1')
+    expect(script).toContain('(: < /proc/4242/maps) 2>/dev/null && exit 1')
+    // the old false-passing / locale-fragile forms must NOT return
+    expect(script).not.toContain('grep')
+    expect(script).not.toContain('Permission denied')
+    expect(script).not.toMatch(/cat .*&& exit 1/)
+  })
+
+  test('proves the sentinel is alive so an open-failure cannot be misread as ESRCH', () => {
+    expect(script).toContain('test -r /proc/4242/status || exit 1')
+  })
+
+  test('requires the sandbox own /proc/self/{fd,maps} to be usable (the property that makes bunx work)', () => {
+    expect(script).toContain('test -r /proc/self/fd || exit 1')
+    expect(script).toContain('test -r /proc/self/maps || exit 1')
+  })
+
+  test('never asserts readability of a protected file via test -r (access() != open() across userns)', () => {
+    expect(script).not.toContain('test -r /proc/4242/environ')
+    expect(script).not.toContain('test -r /proc/4242/maps')
   })
 })
 
