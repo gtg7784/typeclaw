@@ -71,7 +71,7 @@ function validateManagedContent(file: ManagedFile, content: string): { ok: true 
     const result = parseConfigJson(content, { migrate: false })
     return result.ok ? { ok: true } : { ok: false, reason: result.reason }
   }
-  const result = parseCronJson(content)
+  const result = parseCronJson(content, { mode: 'edit' })
   return result.ok ? { ok: true } : { ok: false, reason: result.reason }
 }
 

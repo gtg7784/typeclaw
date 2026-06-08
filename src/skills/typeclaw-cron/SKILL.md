@@ -97,6 +97,8 @@ When the user wants something to happen **once at a future time** — "remind me
 - ✅ `2026-06-11T09:00:00+09:00` (Seoul morning) or `2026-06-11T00:00:00Z`
 - ❌ `2026-06-11T09:00:00` (no zone — rejected by `parseCronFile`)
 
+**The `at` instant must be in the future.** Writing an enabled `at` in the past is **rejected at write time** (the `reload`/guard validation returns `"at" is in the past`), because a past reminder would be retired immediately and never fire — a silent no-op the user would mistake for a scheduled reminder. If you get this error, recompute the instant (you probably botched the timezone offset) and write again. (An already-_fired_ one-shot left on disk is the one exception — it stays valid so it can't brick reload — but you never author one of those by hand.)
+
 **Resolving "9am" / "tomorrow" / "in 3 days" to an instant:**
 
 1. Get the user's timezone. Check `USER.md` for a recorded zone; if it's not there and the wall-clock matters, ask once.

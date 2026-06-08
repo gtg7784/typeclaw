@@ -68,6 +68,14 @@ export type CronFile = z.infer<typeof cronFileSchema>
 
 export type ParseCronResult = { ok: true; file: CronFile } | { ok: false; reason: string }
 
+// `edit` is the strict path for an agent writing/editing cron.json: a past
+// enabled `at` is rejected so a reminder scheduled in the past surfaces as an
+// error instead of silently becoming a never-firing no-op. `load` is the
+// tolerant path the scheduler uses on boot/reload: a fired or missed one-shot
+// lingers on disk with a now-past `at`, and rejecting it would brick the whole
+// file — so `load` accepts it and lets the scheduler retire it passively.
+export type ParseCronMode = 'edit' | 'load'
+
 export type ParseCronOptions = {
   // When provided, prompt jobs with a `subagent` field are validated against
   // the registry: the name must exist, and the optional `payload` must match
@@ -76,6 +84,9 @@ export type ParseCronOptions = {
   // Injected by tests so past/future boundary checks on `at`/`until` are
   // deterministic. Production omits it and validation reads the wall clock.
   now?: number
+  // Defaults to `load` (reload-safe). Callers validating an agent edit pass
+  // `edit` to reject newly-scheduled past `at` reminders.
+  mode?: ParseCronMode
 }
 
 export type ParseCronJsonOptions = ParseCronOptions
@@ -88,7 +99,11 @@ export function parseCronJson(raw: string, options: ParseCronJsonOptions = {}): 
     return { ok: false, reason: `cron.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}` }
   }
 
-  return parseCronFile(json, options.subagents !== undefined ? { subagents: options.subagents } : {})
+  return parseCronFile(json, {
+    ...(options.subagents !== undefined ? { subagents: options.subagents } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.mode !== undefined ? { mode: options.mode } : {}),
+  })
 }
 
 export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): ParseCronResult {
@@ -105,7 +120,7 @@ export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): Par
     }
     seen.add(job.id)
 
-    const timingError = validateTiming(job, options.now ?? Date.now())
+    const timingError = validateTiming(job, options.now ?? Date.now(), options.mode ?? 'load')
     if (timingError !== null) {
       return { ok: false, reason: `job ${job.id}: ${timingError}` }
     }
@@ -143,7 +158,7 @@ type TimingJob = {
   enabled: boolean
 }
 
-function validateTiming(job: TimingJob, now: number = Date.now()): string | null {
+function validateTiming(job: TimingJob, now: number = Date.now(), mode: ParseCronMode = 'load'): string | null {
   const hasSchedule = job.schedule !== undefined
   const hasAt = job.at !== undefined
   if (hasSchedule === hasAt) {
@@ -156,10 +171,9 @@ function validateTiming(job: TimingJob, now: number = Date.now()): string | null
     if (job.count !== undefined && job.count !== 1) return `one-shot "at" jobs may only set "count": 1`
     const at = parseInstant(job.at!)
     if (at === null) return `invalid "at": "${job.at}" is not an ISO datetime with an explicit zone/offset`
-    // A past `at` must NOT reject the file: a fired/missed one-shot lingers on
-    // disk as `enabled: true` with a now-past instant, and hard-rejecting here
-    // would brick all of cron.json on the next reload over one dead reminder.
-    // The scheduler retires it via computeNextFire's `expired` path instead.
+    // Reject a past reminder only on `edit`; `load` tolerates fired tombstones.
+    // See ParseCronMode for the full rationale.
+    if (mode === 'edit' && job.enabled && at <= now) return `"at" is in the past: "${job.at}"`
     return null
   }
 

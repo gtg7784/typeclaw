@@ -195,6 +195,33 @@ describe('managedConfig guard — cron.json', () => {
     expect(result?.reason).toContain('bogus')
   })
 
+  test('rejects scheduling a one-shot reminder in the past', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [{ id: 'remind', at: '2020-01-01T00:00:00Z', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('past')
+  })
+
+  test('accepts a future one-shot reminder', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [{ id: 'remind', at: '2999-01-01T00:00:00Z', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
   test('rejects duplicate job ids', async () => {
     const agentDir = await makeAgentDir()
     const content = JSON.stringify({
