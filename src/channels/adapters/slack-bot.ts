@@ -32,7 +32,7 @@ import type {
 } from '@/channels/types'
 import { chunkMarkdown } from '@/markdown'
 
-import { createSlackAuthorResolver } from './slack-bot-author-resolver'
+import { createSlackAuthorResolver, type SlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import {
   classifyInbound,
@@ -650,9 +650,10 @@ export function createSlackHistoryCallback(deps: {
   token: string
   logger: SlackBotAdapterLogger
   botUserIdRef: () => string | null
+  authorResolver?: SlackAuthorResolver
   fetchImpl?: typeof fetch
 }): HistoryCallback {
-  const { token, logger, botUserIdRef } = deps
+  const { token, logger, botUserIdRef, authorResolver } = deps
   const fetchFn = deps.fetchImpl ?? fetch
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     const limit = clampLimit(args.limit, SLACK_HISTORY_LIMIT_MAX)
@@ -687,6 +688,20 @@ export function createSlackHistoryCallback(deps: {
     const botUserId = botUserIdRef()
     const rawMessages = raw.messages ?? []
     const mapped = rawMessages.map((m) => mapSlackMessage(m, botUserId))
+    // History payloads carry no profile, so mapSlackMessage echoes the raw
+    // id into authorName; resolve it here so prompts show display names.
+    // Only msg.user authors are resolvable — bot_id-only messages have no
+    // users.info entry. The resolver caches/coalesces, so repeated authors
+    // cost one lookup each.
+    if (authorResolver !== undefined) {
+      await Promise.all(
+        mapped.map(async (message, index) => {
+          const userId = rawMessages[index]?.user
+          if (userId === undefined || userId === '') return
+          message.authorName = await authorResolver.resolve(userId)
+        }),
+      )
+    }
     // Slack's `conversations.history` returns newest-first; `replies`
     // returns oldest-first. Normalize to oldest-first so the agent always
     // reads chronological order regardless of scope.
@@ -905,7 +920,11 @@ export function createFetchAttachmentCallback(deps: {
   }
 }
 
-function createSlackReferenceFetch(deps: { token: string; fetchImpl: typeof fetch }) {
+export function createSlackReferenceFetch(deps: {
+  token: string
+  fetchImpl: typeof fetch
+  authorResolver?: SlackAuthorResolver
+}) {
   return async (channelId: string, messageTs: string) => {
     const url = new URL('https://slack.com/api/conversations.replies')
     url.searchParams.set('channel', channelId)
@@ -918,10 +937,13 @@ function createSlackReferenceFetch(deps: { token: string; fetchImpl: typeof fetc
     const messages = arrayField(body, 'messages')
     const first = recordValue(messages[0])
     if (first === null) return null
-    const authorId = stringField(first, 'user') ?? stringField(first, 'bot_id')
+    const userId = stringField(first, 'user')
+    const authorId = userId ?? stringField(first, 'bot_id')
     const text = stringField(first, 'text')
     if (authorId === null || text === null) return null
-    return { authorId, authorName: authorId, text }
+    const authorName =
+      userId !== null && deps.authorResolver !== undefined ? await deps.authorResolver.resolve(userId) : authorId
+    return { authorId, authorName, text }
   }
 }
 
@@ -981,6 +1003,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     token: options.token,
     logger,
     botUserIdRef: () => botUserId,
+    authorResolver,
   })
 
   const membershipResolver = createSlackMembershipResolver({
@@ -1108,7 +1131,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         ...(event.thread_ts !== undefined ? { threadTs: event.thread_ts } : {}),
         messageTs: event.ts,
         ...(slackAttachments !== undefined ? { attachments: slackAttachments } : {}),
-        fetchMessage: createSlackReferenceFetch({ token: options.token, fetchImpl }),
+        fetchMessage: createSlackReferenceFetch({ token: options.token, fetchImpl, authorResolver }),
       })
       const enriched = {
         ...verdict.payload,
