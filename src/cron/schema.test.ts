@@ -228,14 +228,33 @@ describe('parseCronFile timing boundaries (until / at / count)', () => {
     expect(result.reason).toMatch(/exactly one of/)
   })
 
-  test('rejects "at" in the past for an enabled job', () => {
+  test('load mode accepts a past "at" so a fired one-shot does not brick cron.json on reload', () => {
+    const enabled = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW, mode: 'load' })
+    if (!enabled.ok) throw new Error(enabled.reason)
+    expect(enabled.file.jobs[0]?.at).toBe(PAST)
+
+    const disabled = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW, mode: 'load' })
+    if (!disabled.ok) throw new Error(disabled.reason)
+  })
+
+  test('load is the default mode (a past "at" still parses)', () => {
     const result = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('edit mode rejects a newly-scheduled enabled past "at"', () => {
+    const result = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW, mode: 'edit' })
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/past/)
   })
 
-  test('rejects a past "at" only when enabled — disabled past jobs validate', () => {
-    const result = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW })
+  test('edit mode still accepts a disabled past "at" (an intentional tombstone)', () => {
+    const result = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW, mode: 'edit' })
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('edit mode accepts a future "at"', () => {
+    const result = parseCronFile({ jobs: [job({ at: FUTURE })] }, { now: NOW, mode: 'edit' })
     if (!result.ok) throw new Error(result.reason)
   })
 
