@@ -156,7 +156,10 @@ function validateTiming(job: TimingJob, now: number = Date.now()): string | null
     if (job.count !== undefined && job.count !== 1) return `one-shot "at" jobs may only set "count": 1`
     const at = parseInstant(job.at!)
     if (at === null) return `invalid "at": "${job.at}" is not an ISO datetime with an explicit zone/offset`
-    if (job.enabled && at <= now) return `"at" is in the past: "${job.at}"`
+    // A past `at` must NOT reject the file: a fired/missed one-shot lingers on
+    // disk as `enabled: true` with a now-past instant, and hard-rejecting here
+    // would brick all of cron.json on the next reload over one dead reminder.
+    // The scheduler retires it via computeNextFire's `expired` path instead.
     return null
   }
 

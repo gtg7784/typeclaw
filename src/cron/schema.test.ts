@@ -228,15 +228,13 @@ describe('parseCronFile timing boundaries (until / at / count)', () => {
     expect(result.reason).toMatch(/exactly one of/)
   })
 
-  test('rejects "at" in the past for an enabled job', () => {
-    const result = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW })
-    if (result.ok) throw new Error('expected failure')
-    expect(result.reason).toMatch(/past/)
-  })
+  test('accepts a past "at" so a fired one-shot does not brick cron.json on reload', () => {
+    const enabled = parseCronFile({ jobs: [job({ at: PAST })] }, { now: NOW })
+    if (!enabled.ok) throw new Error(enabled.reason)
+    expect(enabled.file.jobs[0]?.at).toBe(PAST)
 
-  test('rejects a past "at" only when enabled — disabled past jobs validate', () => {
-    const result = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW })
-    if (!result.ok) throw new Error(result.reason)
+    const disabled = parseCronFile({ jobs: [job({ at: PAST, enabled: false })] }, { now: NOW })
+    if (!disabled.ok) throw new Error(disabled.reason)
   })
 
   test('rejects "until" in the past for an enabled job', () => {
