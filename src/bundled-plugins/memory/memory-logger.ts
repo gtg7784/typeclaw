@@ -307,6 +307,13 @@ export function createMemoryLoggerSubagent(
   const logger = options.logger ?? consoleLogger
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
+    // Logging is "read transcript past the watermark, decide 0-N fragments,
+    // append" — mechanical extraction, no deep reasoning. Without this it fell
+    // back to `default`, sharing the slow reasoning model that a concurrent
+    // `researcher` pass saturates, which made the 50s spawn timeout fire under
+    // load. `fast` matches `memory-retrieval` (same I/O-bound shape) and itself
+    // falls back to `default` with a one-time warning when unconfigured.
+    profile: 'fast',
     tools: [readTool],
     customTools: [findEntryTool, appendTool, advanceWatermarkTool],
     payloadSchema: memoryLoggerPayloadSchema,

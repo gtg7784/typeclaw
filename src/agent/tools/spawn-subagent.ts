@@ -29,7 +29,7 @@ export type SpawnSubagentToolDetails =
       taskId: string
       sessionId: string | undefined
     }
-  | { ok: false; error: string }
+  | { ok: false; error: string; finalMessage?: string }
 
 export type CreateSpawnSubagentToolOptions = {
   registry: SubagentRegistry
@@ -167,6 +167,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         const durationMs = now() - startedAt
         liveRegistry.recordCompletion(taskId, completionToFinalShape(c, durationMs))
         if (stream && background) {
+          const hasRecoverableOutput = !c.ok && c.finalMessage !== undefined
           stream.publish({
             target: { kind: 'broadcast' },
             payload: {
@@ -177,6 +178,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
               ok: c.ok,
               durationMs,
               ...(c.ok ? {} : { error: c.error }),
+              ...(hasRecoverableOutput ? { hasRecoverableOutput: true } : {}),
               ...(channelKey !== undefined ? { channelKey } : {}),
             },
           })
@@ -205,9 +207,22 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       const result = await completion
       const durationMs = now() - startedAt
       if (!result.ok) {
-        const details: SpawnSubagentToolDetails = { ok: false, error: result.error }
+        const details: SpawnSubagentToolDetails = {
+          ok: false,
+          error: result.error,
+          ...(result.finalMessage !== undefined ? { finalMessage: result.finalMessage } : {}),
+        }
+        const recovered =
+          result.finalMessage !== undefined
+            ? ` It produced output before failing; recover it below instead of redoing the work:\n\n${result.finalMessage}`
+            : ''
         return {
-          content: [{ type: 'text' as const, text: `${subagentName} failed after ${durationMs}ms: ${result.error}` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `${subagentName} failed after ${durationMs}ms: ${result.error}.${recovered}`,
+            },
+          ],
           details,
         }
       }
@@ -312,13 +327,18 @@ function hasPermissionForSubagent(
 }
 
 function completionToFinalShape(
-  c: { ok: true; finalMessage?: string } | { ok: false; error: string },
+  c: { ok: true; finalMessage?: string } | { ok: false; error: string; finalMessage?: string },
   durationMs: number,
 ): SubagentCompletion {
   if (c.ok) {
     return { ok: true, durationMs, ...(c.finalMessage !== undefined ? { finalMessage: c.finalMessage } : {}) }
   }
-  return { ok: false, error: c.error, durationMs }
+  return {
+    ok: false,
+    error: c.error,
+    durationMs,
+    ...(c.finalMessage !== undefined ? { finalMessage: c.finalMessage } : {}),
+  }
 }
 
 type ToolReturn = {

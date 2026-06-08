@@ -360,7 +360,7 @@ export type SubagentHandle = {
 
 export type StartSubagentResult = {
   handle: Promise<SubagentHandle>
-  completion: Promise<{ ok: true; finalMessage?: string } | { ok: false; error: string }>
+  completion: Promise<{ ok: true; finalMessage?: string } | { ok: false; error: string; finalMessage?: string }>
 }
 
 export type StartSubagentOptions = InvokeSubagentOptions & {
@@ -427,7 +427,8 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
     })
 
   const timeoutMs = options.registry[name]?.timeoutMs
-  const completion = timeoutMs === undefined ? work : raceSubagentCompletion(work, name, options.taskId, timeoutMs)
+  const completion =
+    timeoutMs === undefined ? work : raceSubagentCompletion(work, name, options.taskId, timeoutMs, () => finalMessage)
 
   void completion.then(() => {
     if (timeoutMs !== undefined) void abortSession?.()
@@ -436,20 +437,33 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
   return { handle, completion }
 }
 
-type SubagentCompletion = { ok: true; finalMessage?: string } | { ok: false; error: string }
+type SubagentCompletion = { ok: true; finalMessage?: string } | { ok: false; error: string; finalMessage?: string }
 
+// `getFinalMessage` is read INSIDE the timeout callback, not at race-construction
+// time, so the timed-out result carries whatever the subagent had captured by the
+// moment the timer fired (e.g. a researcher's `<report>` block emitted just before
+// the kill). JS is single-threaded, so this read is torn-free; it preserves only
+// what an assistant `message_end` already committed — a result still mid-stream
+// when the timer fires cannot be recovered. The outcome stays `ok: false`: a
+// timeout is a lifecycle failure, and `finalMessage` here is recovery data for
+// the parent to inspect/re-persist, not proof the subagent honored its contract.
 function raceSubagentCompletion(
   work: Promise<SubagentCompletion>,
   name: string,
   taskId: string,
   timeoutMs: number,
+  getFinalMessage: () => string | undefined,
 ): Promise<SubagentCompletion> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<SubagentCompletion>((resolve) => {
-    timer = setTimeout(
-      () => resolve({ ok: false, error: new SubagentTimeoutError(name, taskId, timeoutMs).message }),
-      timeoutMs,
-    )
+    timer = setTimeout(() => {
+      const finalMessage = getFinalMessage()
+      resolve({
+        ok: false,
+        error: new SubagentTimeoutError(name, taskId, timeoutMs).message,
+        ...(finalMessage !== undefined ? { finalMessage } : {}),
+      })
+    }, timeoutMs)
   })
   return Promise.race([work, timeout]).finally(() => {
     if (timer !== null) clearTimeout(timer)
