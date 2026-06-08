@@ -129,8 +129,15 @@ function formatEntry(job: CronListEntryPayload, nowMs: number): string {
   }
 
   if (job.nextFireMs === null) {
-    const why = job.scheduleError !== undefined ? `: ${job.scheduleError}` : ''
-    lines.push(`  ${c.dim('next    ')} ${c.red('invalid schedule')}${why}`)
+    // A null next-fire means one of two very different things. A parse error
+    // carries `scheduleError` and is a problem to surface in red. No error
+    // means the job hit its count/until boundary and is simply retired — not
+    // broken — so it must not be mislabeled as an invalid schedule.
+    if (job.scheduleError !== undefined) {
+      lines.push(`  ${c.dim('next    ')} ${c.red('invalid schedule')}: ${job.scheduleError}`)
+    } else {
+      lines.push(`  ${c.dim('next    ')} ${c.dim('retired (boundary reached)')}`)
+    }
   } else {
     lines.push(`  ${c.dim('next    ')} ${formatNextFire(job.nextFireMs, nowMs)}`)
   }
