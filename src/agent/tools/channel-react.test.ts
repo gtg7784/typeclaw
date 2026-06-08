@@ -33,6 +33,7 @@ function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): C
     fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment' }),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
+    registerHistoryAttachments: () => {},
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},

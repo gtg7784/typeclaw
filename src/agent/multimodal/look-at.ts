@@ -89,8 +89,10 @@ export function createChannelLookAtTool(router: ChannelRouter, origin: ChannelLo
     name: 'look_at_channel_attachment',
     label: 'Look at channel attachment',
     description:
-      'View an image attached to the current inbound channel message. Inbound messages show ' +
-      '`[<Platform> attachment #N: <kind> <metadata>]`; pass `N` as `attachment_id`. Do not invent ids.',
+      'View an image attached to a channel message. Inbound messages show ' +
+      '`[<Platform> attachment #N: <kind> <metadata>]`; pass `N` as `attachment_id`. Do not invent ids. ' +
+      'Images on the CURRENT inbound resolve directly; for one from an EARLIER message, call channel_history ' +
+      'first to make it resolvable by the same id.',
     parameters: Type.Object({
       attachment_id: Type.Integer({
         description: 'The number N from the inbound `[<Platform> attachment #N: ...]` placeholder.',
@@ -106,10 +108,10 @@ export function createChannelLookAtTool(router: ChannelRouter, origin: ChannelLo
         const validIds = router.listInboundAttachmentIds(origin)
         const validMsg =
           validIds.length === 0
-            ? 'no attachments are present in the current turn'
-            : `valid attachment_ids in this turn: ${validIds.join(', ')}`
+            ? 'no attachments are resolvable right now'
+            : `resolvable attachment_ids: ${validIds.join(', ')}`
         return errorResult(
-          `no attachment with id=${params.attachment_id} in this turn (${validMsg}). Do not call look_at_channel_attachment for attachments that do not appear in the inbound message — they do not exist.`,
+          `no attachment with id=${params.attachment_id} (${validMsg}). For an attachment from an earlier message, call channel_history first to make it resolvable; otherwise do not invent ids that are not in the inbound message.`,
           { count: 0, prompt: params.prompt },
         )
       }

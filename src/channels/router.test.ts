@@ -23,6 +23,7 @@ import {
   EMPTY_TURN_RETRY_NUDGE,
   extractPlainTextChannelToolCallText,
   getPlainTextChannelToolCallKind,
+  HISTORY_ATTACHMENT_LIMIT,
   MAX_CHANNEL_SENDS_PER_TURN,
   MAX_EMPTY_TURN_RETRIES,
   MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
@@ -8124,6 +8125,77 @@ describe('ChannelRouter inbound attachment lookup', () => {
     // pending or in-flight turn, so a late lookup must miss.
     expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
     expect(router.listInboundAttachmentIds(KEY)).toEqual([])
+  })
+})
+
+describe('ChannelRouter history attachment registry', () => {
+  const HIST_PHOTO = { id: 1, kind: 'photo' as const, ref: 'https://example.test/hist.jpg', mimetype: 'image/jpeg' }
+
+  async function liveRouter(dir: string) {
+    const made = makeRouter(dir)
+    // A live session must exist before registerHistoryAttachments has somewhere
+    // to stash; route + drain a throwaway inbound to create one.
+    await made.router.route(inbound({ text: 'open session' }))
+    await made.router.__testing!.flushDebounce(KEY)
+    return made
+  }
+
+  test('makes a prior-turn attachment resolvable by its placeholder id after channel_history', async () => {
+    const { router } = await liveRouter(await tempDir())
+
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
+
+    router.registerHistoryAttachments(KEY, [historyMessage({ externalMessageId: 'old', attachments: [HIST_PHOTO] })])
+
+    const resolved = router.lookupInboundAttachment({ ...KEY, id: 1 })
+    expect(resolved).not.toBeNull()
+    expect(resolved!.ref).toBe(HIST_PHOTO.ref)
+    expect(router.listInboundAttachmentIds(KEY)).toEqual([1])
+  })
+
+  test('a live current-turn #1 still wins over a registered history #1', async () => {
+    const { router, sessions } = makeRouter(await tempDir())
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [],
+    }))
+
+    // Seed a history attachment #1, then start a turn whose inbound also carries
+    // its own attachment #1; the live one must shadow the historical one.
+    let resolvedMidTurn: ReturnType<typeof router.lookupInboundAttachment> = null
+    await router.route(inbound({ text: 'seed', attachments: [{ id: 1, kind: 'photo', ref: 'LIVE-REF' }] }))
+    router.registerHistoryAttachments(KEY, [historyMessage({ attachments: [HIST_PHOTO] })])
+    sessions[0]!.onPrompt = () => {
+      resolvedMidTurn = router.lookupInboundAttachment({ ...KEY, id: 1 })
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(resolvedMidTurn).not.toBeNull()
+    expect(resolvedMidTurn!.ref).toBe('LIVE-REF')
+  })
+
+  test('is a no-op when the session is not live', async () => {
+    const { router } = makeRouter(await tempDir())
+    router.registerHistoryAttachments(KEY, [historyMessage({ attachments: [HIST_PHOTO] })])
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
+  })
+
+  test('caps retained history attachments at HISTORY_ATTACHMENT_LIMIT, keeping the freshest', async () => {
+    const { router } = await liveRouter(await tempDir())
+
+    const many = Array.from({ length: HISTORY_ATTACHMENT_LIMIT + 5 }, (_, i) =>
+      historyMessage({ externalMessageId: `h${i}`, attachments: [{ id: i + 1, kind: 'file', ref: `R${i + 1}` }] }),
+    )
+    router.registerHistoryAttachments(KEY, many)
+
+    const ids = router.listInboundAttachmentIds(KEY)
+    expect(ids).toHaveLength(HISTORY_ATTACHMENT_LIMIT)
+    // The first 5 (oldest) were evicted; the freshest survive.
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
+    expect(router.lookupInboundAttachment({ ...KEY, id: HISTORY_ATTACHMENT_LIMIT + 5 })!.ref).toBe(
+      `R${HISTORY_ATTACHMENT_LIMIT + 5}`,
+    )
   })
 })
 

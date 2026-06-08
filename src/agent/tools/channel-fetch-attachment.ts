@@ -37,11 +37,12 @@ export function createChannelFetchAttachmentTool({
     name: 'channel_fetch_attachment',
     label: 'Channel Fetch Attachment',
     description:
-      'Download a file the user attached to the current inbound channel message and save it to disk. Inbound channel ' +
+      'Download a file attached to a channel message and save it to disk. Inbound channel ' +
       'messages with attachments show `[<Platform> attachment #N: <kind> <metadata>]` in the text. Pass `N` as ' +
-      '`attachment_id`; do not invent ids that are not present in the inbound message. The router validates the id ' +
-      'against the current turn and resolves the private platform ref itself. On success returns the absolute path ' +
-      'of the saved file plus its detected mimetype and size.',
+      '`attachment_id`; do not invent ids that are not present in the message. The router resolves the private ' +
+      'platform ref itself. Attachments on the CURRENT inbound message resolve directly; for one from an EARLIER ' +
+      'message, call channel_history first (it makes those attachments resolvable by the same id). On success ' +
+      'returns the absolute path of the saved file plus its detected mimetype and size.',
     parameters: Type.Object({
       attachment_id: Type.Integer({
         description:
@@ -75,10 +76,10 @@ export function createChannelFetchAttachmentTool({
         })
         const validMsg =
           validIds.length === 0
-            ? 'no attachments are present in the current turn'
-            : `valid attachment_ids in this turn: ${validIds.join(', ')}`
+            ? 'no attachments are resolvable right now'
+            : `resolvable attachment_ids: ${validIds.join(', ')}`
         return errorResult(
-          `no attachment with id=${params.attachment_id} in this turn (${validMsg}). Do not call channel_fetch_attachment for attachments that do not appear in the inbound message — they do not exist.`,
+          `no attachment with id=${params.attachment_id} (${validMsg}). For an attachment from an earlier message, call channel_history first to make it resolvable; otherwise do not invent ids that are not in the inbound message.`,
         )
       }
       if (found.ref === '') {

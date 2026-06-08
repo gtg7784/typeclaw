@@ -65,6 +65,7 @@ function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): Cha
     getReviewState: async () => ({ ok: true, selfBlocking: false, approve: true }),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
+    registerHistoryAttachments: () => {},
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},

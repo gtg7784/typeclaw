@@ -94,6 +94,8 @@ export function createChannelHistoryTool({
         }
       }
 
+      router.registerHistoryAttachments(origin, result.messages)
+
       const rendered = renderMessages(result.messages)
       const cursorLine =
         result.nextCursor !== undefined

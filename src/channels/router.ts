@@ -297,6 +297,8 @@ export class StaleLiveSessionError extends Error {
 export const RESOLVE_CHANNEL_NAMES_TIMEOUT_MS = 5_000
 export const FETCH_HISTORY_TIMEOUT_MS = 5_000
 
+export const HISTORY_ATTACHMENT_LIMIT = 50
+
 // Watchdog over the whole session.idle hook chain. The drain loop awaits
 // `fireSessionIdle` between turns; a single hung plugin handler (e.g. a
 // memory-logger awaiting a network call that never resolves) wedges the
@@ -439,6 +441,14 @@ type LiveSession = {
   // and cleared when the turn ends, is what the lookup reads so a freshly-
   // arrived attachment stays resolvable for the whole turn it belongs to.
   currentTurnAttachments: readonly InboundAttachment[]
+  // Refs from an explicit channel_history look-back. A prior-turn attachment is
+  // replayed to the model as a text placeholder but its ref is gone from every
+  // turn-scoped queue above, so look_at/fetch can't resolve it; stashing the
+  // fetched refs here makes the same `attachment_id: N` resolvable. MUST be
+  // searched LAST so a live `#1` still wins over a historical `#1` (the
+  // newest-first collision rule lookupInboundAttachment documents). Bounded,
+  // never persisted, never exposes the ref to the model.
+  historyAttachments: InboundAttachment[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
   typingTimer: ReturnType<typeof setInterval> | null
@@ -724,6 +734,10 @@ export type ChannelRouter = {
   getReviewState: (req: ReviewStateRequest) => Promise<ReviewStateResult>
   lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
   listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
+  // Stash refs from a channel_history fetch so prior-turn attachments stay
+  // resolvable by their placeholder id. Called by the channel_history tool
+  // after a successful fetch; no-op when the session is not live.
+  registerHistoryAttachments: (key: ChannelKey, messages: readonly ChannelHistoryMessage[]) => void
   // Execute a command by name against an existing live session, bypassing
   // the inbound classifier, engagement gate, debounce, and prompt queue.
   // Used by adapters that receive commands through a native surface
@@ -1407,6 +1421,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         pendingSystemReminders: [],
         contextBuffer: [],
         currentTurnAttachments: [],
+        historyAttachments: [],
         draining: false,
         debounceTimer: null,
         typingTimer: null,
@@ -2778,7 +2793,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (hit !== undefined) return hit
       }
     }
-    return null
+    return findAttachmentById(live.historyAttachments, args.id)
   }
 
   const listInboundAttachmentIds = (args: ChannelKey): readonly number[] => {
@@ -2789,7 +2804,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     for (const item of [...live.promptQueue, ...live.contextBuffer]) {
       for (const attachment of item.attachments ?? []) ids.add(attachment.id)
     }
+    for (const attachment of live.historyAttachments) ids.add(attachment.id)
     return Array.from(ids).sort((a, b) => a - b)
+  }
+
+  const registerHistoryAttachments = (key: ChannelKey, messages: readonly ChannelHistoryMessage[]): void => {
+    const live = liveSessions.get(channelKeyId(key))
+    if (live === undefined) return
+    const incoming = messages.flatMap((message) => message.attachments ?? [])
+    if (incoming.length === 0) return
+    // Cap to the freshest HISTORY_ATTACHMENT_LIMIT so a deep scrollback paging
+    // session can't grow this unboundedly; the agent fetches refs it's about to
+    // act on, so recency is the right eviction key.
+    const merged = [...live.historyAttachments, ...incoming]
+    live.historyAttachments =
+      merged.length > HISTORY_ATTACHMENT_LIMIT ? merged.slice(merged.length - HISTORY_ATTACHMENT_LIMIT) : merged
   }
 
   const send = async (msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> => {
@@ -3693,6 +3722,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getReviewState,
     lookupInboundAttachment,
     listInboundAttachmentIds,
+    registerHistoryAttachments,
     executeCommand,
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
