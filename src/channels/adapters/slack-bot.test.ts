@@ -11,6 +11,7 @@ import {
   createOutboundCallback,
   createSlackHistoryCallback,
   createSlackMembershipResolver,
+  createSlackReferenceFetch,
   createSlackTypingTracker,
   createSlashCommandHandler,
   createThreadCommandHandler,
@@ -1189,6 +1190,139 @@ describe('createSlackHistoryCallback', () => {
     // then
     expect(calls).toHaveLength(1)
     expect(result.ok).toBe(true)
+  })
+
+  test('resolves authorName to display names when an authorResolver is provided', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1.1', user: 'UALICE', text: 'hi' },
+        { ts: '2.2', user: 'UBOB', text: 'yo' },
+      ],
+    })
+    const resolved: string[] = []
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      authorResolver: {
+        resolve: async (id) => {
+          resolved.push(id)
+          return id === 'UALICE' ? 'alice.s' : 'Bob Jones'
+        },
+      },
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const byTs = Object.fromEntries(result.messages.map((m) => [m.externalMessageId, m.authorName]))
+    expect(byTs['1.1']).toBe('alice.s')
+    expect(byTs['2.2']).toBe('Bob Jones')
+    expect(resolved.sort()).toEqual(['UALICE', 'UBOB'])
+  })
+
+  test('leaves bot_id-only authors unresolved (no users.info entry exists)', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '1.1', subtype: 'bot_message', bot_id: 'B123', text: 'from a bot' }],
+    })
+    const resolved: string[] = []
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      authorResolver: {
+        resolve: async (id) => {
+          resolved.push(id)
+          return 'should-not-be-used'
+        },
+      },
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages[0]!.authorName).toBe('B123')
+    expect(resolved).toEqual([])
+  })
+
+  test('falls back to the raw id in authorName when no authorResolver is provided', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '1.1', user: 'UALICE', text: 'hi' }],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages[0]!.authorName).toBe('UALICE')
+  })
+})
+
+describe('createSlackReferenceFetch', () => {
+  function fakeFetch(response: unknown): typeof fetch {
+    return (async () =>
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+  }
+
+  test('resolves authorName to a display name when an authorResolver is provided', async () => {
+    // given
+    const fetchMessage = createSlackReferenceFetch({
+      token: 'tok',
+      fetchImpl: fakeFetch({ ok: true, messages: [{ user: 'UALICE', text: 'root text' }] }),
+      authorResolver: { resolve: async (id) => (id === 'UALICE' ? 'alice.s' : id) },
+    })
+    // when
+    const result = await fetchMessage('C1', '1700.000001')
+    // then
+    expect(result).toEqual({ authorId: 'UALICE', authorName: 'alice.s', text: 'root text' })
+  })
+
+  test('leaves bot_id authors unresolved (no users.info entry exists)', async () => {
+    // given
+    const resolved: string[] = []
+    const fetchMessage = createSlackReferenceFetch({
+      token: 'tok',
+      fetchImpl: fakeFetch({ ok: true, messages: [{ bot_id: 'B123', text: 'from a bot' }] }),
+      authorResolver: {
+        resolve: async (id) => {
+          resolved.push(id)
+          return 'should-not-be-used'
+        },
+      },
+    })
+    // when
+    const result = await fetchMessage('C1', '1700.000001')
+    // then
+    expect(result).toEqual({ authorId: 'B123', authorName: 'B123', text: 'from a bot' })
+    expect(resolved).toEqual([])
+  })
+
+  test('falls back to the raw id when no authorResolver is provided', async () => {
+    // given
+    const fetchMessage = createSlackReferenceFetch({
+      token: 'tok',
+      fetchImpl: fakeFetch({ ok: true, messages: [{ user: 'UALICE', text: 'root text' }] }),
+    })
+    // when
+    const result = await fetchMessage('C1', '1700.000001')
+    // then
+    expect(result).toEqual({ authorId: 'UALICE', authorName: 'UALICE', text: 'root text' })
   })
 })
 
