@@ -1,5 +1,5 @@
 import type { PortForward } from '@/config'
-import type { KakaoChannelBlock } from '@/secrets/schema'
+import type { KakaoChannelBlock, LineChannelBlock } from '@/secrets/schema'
 
 export type Request =
   | {
@@ -15,7 +15,11 @@ export type Request =
   | { kind: 'list' }
   | { kind: 'status'; containerName: string }
   | { kind: 'restart'; containerName: string; build?: boolean }
-  | { kind: 'secrets-patch'; containerName: string; patch: { channels: { kakaotalk: KakaoChannelBlock } } }
+  | {
+      kind: 'secrets-patch'
+      containerName: string
+      patch: { channels: { kakaotalk: KakaoChannelBlock } | { line: LineChannelBlock } }
+    }
   | { kind: 'http-info' }
   | { kind: 'version' }
   | { kind: 'shutdown' }
