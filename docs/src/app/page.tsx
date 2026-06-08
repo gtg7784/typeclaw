@@ -78,15 +78,25 @@ function ChannelTrust() {
         Talks to — and a websocket TUI
       </p>
       <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-4">
-        {CHANNELS.map(({ name, Icon }) => (
-          <div
-            key={name}
-            className="flex items-center gap-2 text-zinc-500 grayscale transition-all hover:text-zinc-800 hover:grayscale-0 dark:text-zinc-500 dark:hover:text-zinc-200"
-          >
-            <Icon className="size-5" />
-            <span className="text-sm font-medium">{name}</span>
-          </div>
-        ))}
+        {CHANNELS.map(({ name, Icon, href }) => {
+          const className =
+            'flex items-center gap-2 text-zinc-500 grayscale transition-all hover:text-zinc-800 hover:grayscale-0 dark:text-zinc-500 dark:hover:text-zinc-200'
+          const content = (
+            <>
+              <Icon className="size-5" />
+              <span className="text-sm font-medium">{name}</span>
+            </>
+          )
+          return href ? (
+            <Link key={name} href={href} className={className}>
+              {content}
+            </Link>
+          ) : (
+            <div key={name} className={className}>
+              {content}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
