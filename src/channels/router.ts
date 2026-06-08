@@ -628,6 +628,16 @@ type LiveSession = {
   // "is this a multi-human group". Read by composeTurnPrompt().
   multiHumanGroup: boolean
   membershipFetch: Promise<MembershipCount | null> | null
+  // Provider soft-error (`stopReason: 'error'`) captured during the current
+  // turn, deferred to turn-end. Upstream surfaces transient errors (e.g.
+  // `server_is_overloaded`) MID-turn and the turn often recovers, replying
+  // seconds later — posting the "⚠️ provider failed" notice on the spot strands
+  // a false failure above the eventual real reply. So the listener only RECORDS
+  // here (stamped with the firing turnSeq; raw text logged for operators); the
+  // turn-end finally posts `safeMessage` ONLY if no reply landed, else discards.
+  // First error per turn wins. Keyed by `turnSeq` so a stale record from a
+  // crashed prior turn can't leak into the next.
+  pendingProviderError: { turnSeq: number; safeMessage: string } | null
   destroyed: boolean
   unsubProviderErrors: (() => void) | null
   unsubTypingActivity: (() => void) | null
@@ -1491,49 +1501,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         loopGuardActive: false,
         multiHumanGroup: false,
         membershipFetch,
+        pendingProviderError: null,
         destroyed: false,
         unsubProviderErrors: null,
         unsubTypingActivity: null,
         unsubTodoOutcome: null,
       }
-      // Tracks the `turnSeq` a provider-error notice was last POSTED for, so the
-      // channel surfaces at most one notice per turn. The upstream SDK retries
-      // internally, and each retry emits its own `message_end` with
-      // `stopReason: 'error'` — without this gate a single failing turn posts N
-      // identical "⚠️ upstream provider failed" notices (one per retry). Logs
-      // still record every attempt; only the user-facing notice is deduped.
-      let lastProviderErrorNoticeTurn: number | undefined
+      // Raw text is logged on EVERY attempt for operators; the user-facing
+      // notice is deferred. The upstream SDK retries internally, and each retry
+      // emits its own `message_end` with `stopReason: 'error'` — but the turn
+      // frequently recovers and replies anyway. Recording the first error per
+      // turn (keyed by `turnSeq`) lets drain()'s turn-end decide: post the
+      // notice only if no reply landed, suppress it if the turn recovered. This
+      // both dedupes the retry storm AND prevents a stranded false-failure
+      // notice above a successful reply. See `pendingProviderError`.
       live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
-        // Suppress duplicate notices for the SAME turn (retry storm). Set the
-        // marker BEFORE the async send so a synchronous burst of retry events
-        // can't each slip past the check and enqueue their own notice.
-        if (lastProviderErrorNoticeTurn === live.turnSeq) return
-        lastProviderErrorNoticeTurn = live.turnSeq
-        // A provider soft-error (rate/usage limit, billing, malformed response)
-        // ends the turn with no assistant text, so the human otherwise sees
-        // silence. Surface the REDACTED `safeMessage` (never the raw provider
-        // text, which can carry response bodies / URLs / tokens) via a 'system'
-        // send — the same one-shot bypass path validateChannelTurn uses, so it
-        // lands regardless of per-turn send caps and skips the duplicate guard.
-        void send(
-          {
-            adapter: live.key.adapter,
-            workspace: live.key.workspace,
-            chat: live.key.chat,
-            thread: live.key.thread,
-            text: `⚠️ ${err.safeMessage}`,
-          },
-          { source: 'system' },
-        )
-          .then((result) => {
-            if (!result.ok) {
-              logger.warn(`[channels] ${live.keyId}: provider-error notice send failed: ${result.error}`)
-            }
-          })
-          .catch((sendErr) => {
-            logger.warn(`[channels] ${live.keyId}: provider-error notice send threw: ${describe(sendErr)}`)
-          })
+        if (live.pendingProviderError?.turnSeq === live.turnSeq) return
+        live.pendingProviderError = { turnSeq: live.turnSeq, safeMessage: err.safeMessage }
       })
       live.unsubTodoOutcome = created.session.subscribe((event: unknown) => {
         const usage = extractTurnUsage(event)
@@ -1950,6 +1935,56 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const maybePostDeferredProviderError = async (
+    live: LiveSession,
+    sentReplyThisTurn: boolean,
+    retryQueued: boolean,
+  ): Promise<void> => {
+    const pending = live.pendingProviderError
+    if (pending === null || pending.turnSeq !== live.turnSeq) {
+      live.pendingProviderError = null
+      return
+    }
+    // The turn recovered and replied — the provider blip was transient, so a
+    // failure notice would be a false alarm stranded above the real reply.
+    if (sentReplyThisTurn) {
+      live.pendingProviderError = null
+      return
+    }
+    // An empty-turn retry was queued (validateChannelTurn pushed
+    // EMPTY_TURN_RETRY_NUDGE): the same logical turn re-prompts in the next
+    // drain iteration and may yet recover. Carry the pending error forward,
+    // re-stamping to that iteration's turnSeq (drain does `turnSeq++` once per
+    // iteration, so it will be exactly `turnSeq + 1`). Posting now would strand
+    // a false-failure notice above the retry's eventual reply — the same defect
+    // one logical turn later.
+    if (retryQueued) {
+      live.pendingProviderError = { turnSeq: live.turnSeq + 1, safeMessage: pending.safeMessage }
+      return
+    }
+    live.pendingProviderError = null
+    // Genuinely empty turn with no retry left: surface the REDACTED
+    // `safeMessage` (never raw provider text, which can carry response bodies /
+    // URLs / tokens) via a 'system' send — the one-shot bypass path that lands
+    // regardless of per-turn send caps — so the human doesn't just see silence.
+    const result = await send(
+      {
+        adapter: live.key.adapter,
+        workspace: live.key.workspace,
+        chat: live.key.chat,
+        thread: live.key.thread,
+        text: `⚠️ ${pending.safeMessage}`,
+      },
+      { source: 'system' },
+    ).catch((sendErr) => {
+      logger.warn(`[channels] ${live.keyId}: provider-error notice send threw: ${describe(sendErr)}`)
+      return null
+    })
+    if (result !== null && !result.ok) {
+      logger.warn(`[channels] ${live.keyId}: provider-error notice send failed: ${result.error}`)
+    }
+  }
+
   const drain = async (live: LiveSession): Promise<void> => {
     if (live.draining || live.destroyed) return
     live.draining = true
@@ -1967,6 +2002,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.currentTurnAttachments = collectTurnAttachments(observed, batch)
 
         if (batch.length > 0) {
+          // A fresh user batch starts a NEW logical turn. Drop any provider
+          // error carried forward from a prior turn's empty-turn retry: the
+          // drain loop splices promptQueue AND pendingSystemReminders together,
+          // so a user message arriving while a retry nudge is pending coalesces
+          // into this iteration. Without this clear, the carried error (stamped
+          // `turnSeq + 1`) would match this fresh turn and post the prior turn's
+          // notice misattributed to an unrelated new message. Carry-forward stays
+          // intact for genuinely reminder-only iterations (batch.length === 0),
+          // which skip this branch.
+          live.pendingProviderError = null
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
@@ -2029,6 +2074,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
+        const emptyTurnRetriesBeforePrompt = live.emptyTurnRetries
         const engageAddPromises = live.currentTurnEngageReactions
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
@@ -2050,6 +2096,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         } finally {
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
+          const emptyTurnRetryQueued = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt
+          await maybePostDeferredProviderError(live, sentReplyThisTurn, emptyTurnRetryQueued)
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
