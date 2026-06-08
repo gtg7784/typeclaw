@@ -477,9 +477,21 @@ export const KNOWN_PROVIDERS = {
   //     XAI_API_KEY in .env — remove it (`typeclaw provider remove xai`) to fall
   //     back to the key.
   //
-  // Costs and context windows mirror the xAI pricing/models docs as of
-  // 2026-06-08. Grok 4 Fast is the cheap default; grok-code-fast-1 is the
-  // coding-tuned model. When refreshing, rerun `scripts/generate-schema.ts`.
+  // Costs and context windows mirror docs.x.ai/developers/models and the raw
+  // /v1/models price fields as of 2026-06-08 (xAI quotes prices in cents per
+  // 100M tokens; e.g. grok-4.3 prompt 12500 = $1.25/1M). grok-4.3 is the
+  // flagship default; grok-build-0.1 is the coding-tuned model. The
+  // grok-4.20-0309 snapshots are pinned weights for reproducible runs.
+  //
+  // The earlier grok-4 / grok-4-fast / grok-code-fast-1 ids were RETIRED on
+  // 2026-05-15 — they still resolve but silently redirect (and bill) at the
+  // grok-4.3 / grok-build-0.1 rates, so they are intentionally NOT listed.
+  //
+  // cacheWrite is 0: xAI publishes no cache-write price (caching is implicit,
+  // billed only at the cacheRead rate). Models 1-4 also carry a long-context
+  // tier (2x rates above a 200k-token request); pi-ai's Model shape can't
+  // express tiered pricing, so the standard rate is used and the breakpoint is
+  // noted here. When refreshing, rerun `scripts/generate-schema.ts`.
   xai: {
     id: 'xai',
     name: 'xAI (Grok)',
@@ -488,39 +500,51 @@ export const KNOWN_PROVIDERS = {
     apiKeyEnv: 'XAI_API_KEY',
     oauthProviderId: 'xai',
     models: {
-      'grok-4-fast': {
-        id: 'grok-4-fast',
-        name: 'Grok 4 Fast',
+      'grok-4.3': {
+        id: 'grok-4.3',
+        name: 'Grok 4.3',
         api: 'openai-completions',
         provider: 'xai',
         baseUrl: 'https://api.x.ai/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 0.2, output: 0.5, cacheRead: 0.05, cacheWrite: 0 },
-        contextWindow: 2000000,
-        maxTokens: 30000,
-      },
-      'grok-4': {
-        id: 'grok-4',
-        name: 'Grok 4',
-        api: 'openai-completions',
-        provider: 'xai',
-        baseUrl: 'https://api.x.ai/v1',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 3, output: 15, cacheRead: 0.75, cacheWrite: 0 },
-        contextWindow: 256000,
+        cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+        contextWindow: 1000000,
         maxTokens: 64000,
       },
-      'grok-code-fast-1': {
-        id: 'grok-code-fast-1',
-        name: 'Grok Code Fast 1',
+      'grok-4.20-0309-reasoning': {
+        id: 'grok-4.20-0309-reasoning',
+        name: 'Grok 4.20 (Reasoning)',
         api: 'openai-completions',
         provider: 'xai',
         baseUrl: 'https://api.x.ai/v1',
         reasoning: true,
-        input: ['text'],
-        cost: { input: 0.2, output: 1.5, cacheRead: 0.02, cacheWrite: 0 },
+        input: ['text', 'image'],
+        cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 64000,
+      },
+      'grok-4.20-0309-non-reasoning': {
+        id: 'grok-4.20-0309-non-reasoning',
+        name: 'Grok 4.20 (Non-Reasoning)',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: false,
+        input: ['text', 'image'],
+        cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 64000,
+      },
+      'grok-build-0.1': {
+        id: 'grok-build-0.1',
+        name: 'Grok Build 0.1',
+        api: 'openai-completions',
+        provider: 'xai',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 1.0, output: 2.0, cacheRead: 0.2, cacheWrite: 0 },
         contextWindow: 256000,
         maxTokens: 64000,
       },

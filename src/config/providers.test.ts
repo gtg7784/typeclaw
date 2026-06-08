@@ -203,11 +203,19 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('anthropic/claude-opus-4-8')
   })
 
-  test('includes the xai Grok models', () => {
+  test('includes the current xai Grok models', () => {
     const refs = listKnownModelRefs()
-    expect(refs).toContain('xai/grok-4-fast')
-    expect(refs).toContain('xai/grok-4')
-    expect(refs).toContain('xai/grok-code-fast-1')
+    expect(refs).toContain('xai/grok-4.3')
+    expect(refs).toContain('xai/grok-4.20-0309-reasoning')
+    expect(refs).toContain('xai/grok-4.20-0309-non-reasoning')
+    expect(refs).toContain('xai/grok-build-0.1')
+  })
+
+  test('does not list xai models retired on 2026-05-15', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).not.toContain('xai/grok-4-fast')
+    expect(refs).not.toContain('xai/grok-4')
+    expect(refs).not.toContain('xai/grok-code-fast-1')
   })
 })
 
