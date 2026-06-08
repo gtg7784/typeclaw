@@ -27,14 +27,16 @@ icon: Variable
 
 Set in the host stage; injected into the container via `--env-file .env`.
 
-| Variable            | Provider    | Notes                                                                                                    |
-| ------------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
-| `FIREWORKS_API_KEY` | `fireworks` |                                                                                                          |
-| `OPENAI_API_KEY`    | `openai`    |                                                                                                          |
-| `ANTHROPIC_API_KEY` | `anthropic` |                                                                                                          |
-| `MINIMAX_API_KEY`   | `minimax`   | Accepts either a pay-as-you-go API key or a Token Plan Subscription Key (`sk-cp-…`) — same slot.         |
-| `GOOGLE_API_KEY`    | `google`    |                                                                                                          |
-| (others)            |             | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
+| Variable             | Provider     | Notes                                                                                                    |
+| -------------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
+| `FIREWORKS_API_KEY`  | `fireworks`  |                                                                                                          |
+| `OPENAI_API_KEY`     | `openai`     |                                                                                                          |
+| `ANTHROPIC_API_KEY`  | `anthropic`  | OAuth credential on disk wins over this env var (dual-auth provider).                                    |
+| `ZAI_API_KEY`        | `zai`        | Z.AI pay-as-you-go.                                                                                      |
+| `ZAI_CODING_API_KEY` | `zai-coding` | Z.AI GLM Coding Plan — separate billing surface from `zai`.                                              |
+| `XAI_API_KEY`        | `xai`        | xAI (Grok). OAuth credential on disk wins over this env var (dual-auth provider).                        |
+| `MINIMAX_API_KEY`    | `minimax`    | Accepts either a pay-as-you-go API key or a Token Plan Subscription Key (`sk-cp-…`) — same slot.         |
+| (others)             |              | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
 
 Custom env-var names are supported via the `Secret`'s `env` field — `{ "key": { "env": "MY_OPENAI" } }`. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for resolution order.
 
