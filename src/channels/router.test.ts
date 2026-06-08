@@ -969,6 +969,23 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(prompt).toContain('<@alice> (alice): hey bot')
   })
 
+  test('engaged turn carries the history-interpretation note above the current-message header', async () => {
+    // Regression: the persisted `## Current message (addressed to you)` header
+    // is turn-local, but a chain of such turns made weak models believe only
+    // the latest turn existed (they denied seeing earlier user messages that
+    // were in their own transcript). The note re-anchors the header. It must
+    // sit ABOVE the header so the model reads it before the addressed line.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ text: 'hey bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('if earlier turns appear above, they are real conversation history')
+    expect(prompt.indexOf('if earlier turns appear above')).toBeLessThan(
+      prompt.indexOf('## Current message (addressed to you)'),
+    )
+  })
+
   test('empty allow rules + observed-only burst produces no prompt and no crash', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {
@@ -7775,6 +7792,9 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(reminderPrompt).toContain('## Recent context')
     expect(reminderPrompt).toContain('side chatter')
     expect(reminderPrompt).not.toContain('## Current message')
+    // The history-interpretation note is batch-gated like the header: a
+    // reminder-only drain has an empty promptQueue, so it must stay absent.
+    expect(reminderPrompt).not.toContain('if earlier turns appear above')
   })
 
   test('referenceContext renders quote lines above the current author line and truncates at render time', async () => {
