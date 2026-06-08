@@ -114,8 +114,19 @@ function formatEntry(job: CronListEntryPayload, nowMs: number): string {
   const kindBadge = c.dim(`[${job.kind}]`)
   lines.push(`${c.bold(displayId(job))} ${kindBadge} ${sourceLabel}${enabledBadge}`)
 
-  const tz = job.timezone !== undefined ? ` ${c.dim(`(${job.timezone})`)}` : ''
-  lines.push(`  ${c.dim('schedule')} ${job.schedule}${tz}`)
+  if (job.at !== undefined) {
+    lines.push(`  ${c.dim('at      ')} ${job.at}`)
+  } else {
+    const tz = job.timezone !== undefined ? ` ${c.dim(`(${job.timezone})`)}` : ''
+    lines.push(`  ${c.dim('schedule')} ${job.schedule}${tz}`)
+  }
+
+  const stops: string[] = []
+  if (job.until !== undefined) stops.push(`until ${job.until}`)
+  if (job.count !== undefined) stops.push(`count ${job.count}`)
+  if (stops.length > 0) {
+    lines.push(`  ${c.dim('stops   ')} ${stops.join(', ')}`)
+  }
 
   if (job.nextFireMs === null) {
     const why = job.scheduleError !== undefined ? `: ${job.scheduleError}` : ''

@@ -33,6 +33,7 @@ import {
   type CronConsumer,
   type CronJob,
   type CronFile,
+  createCountStore,
   createCronConsumer,
   createCronReloadable,
   createScheduler,
@@ -77,7 +78,11 @@ type BunServer = ReturnType<Server['start']>
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<unknown> }
 
 export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
-export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
+export type SchedulerFactory = (options: {
+  cwd: string
+  file: CronFile
+  onFire: (job: CronJob) => void
+}) => Scheduler | Promise<Scheduler>
 export type ChannelManagerFactory = typeof createChannelManager
 export type TunnelManagerFactory = (options: TunnelManagerOptions) => TunnelManager
 
@@ -864,13 +869,17 @@ async function startScheduler({
   const onFire = (job: CronJob) => {
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
-  const scheduler = createSchedulerFor({ cwd, file, onFire })
+  const scheduler = await createSchedulerFor({ cwd, file, onFire })
   scheduler.start()
   return scheduler
 }
 
 function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFactory {
-  return ({ file, onFire }) => createScheduler({ jobs: [...file.jobs, ...internalJobs()], onFire })
+  return async ({ cwd, file, onFire }) => {
+    const jobs = [...file.jobs, ...internalJobs()]
+    const countStore = await createCountStore(cwd, jobs)
+    return createScheduler({ jobs, onFire, countStore })
+  }
 }
 
 // Exported for the regression test in `merge-subagents.test.ts`. The shim

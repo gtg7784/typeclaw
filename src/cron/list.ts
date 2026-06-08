@@ -15,7 +15,10 @@ export type CronListEntry = {
   id: string
   source: CronListSource
   kind: 'prompt' | 'exec' | 'handler'
-  schedule: string
+  schedule: string | undefined
+  at: string | undefined
+  until: string | undefined
+  count: number | undefined
   timezone: string | undefined
   enabled: boolean
   scheduledByRole: string | undefined
@@ -61,11 +64,14 @@ function toEntry(job: CronJob, source: CronListSource, now: number): CronListEnt
     id: job.id,
     source,
     schedule: job.schedule,
+    at: job.at,
+    until: job.until,
+    count: job.count,
     timezone: job.timezone,
     enabled: job.enabled,
     scheduledByRole: job.scheduledByRole,
     nextFireMs: fire.ok ? fire.nextFire : null,
-    scheduleError: fire.ok ? undefined : fire.reason,
+    scheduleError: fire.ok || fire.expired ? undefined : fire.reason,
   } as const
   if (job.kind === 'prompt') {
     return {
