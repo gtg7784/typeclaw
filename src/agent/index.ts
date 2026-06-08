@@ -67,6 +67,7 @@ import {
   wrapAgentToolWithBudget,
   wrapToolDefinitionWithBudget,
 } from './tool-result-budget'
+import { createChannelDisengageTool } from './tools/channel-disengage'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
@@ -683,6 +684,7 @@ export function buildChannelTools(
       }),
     )
     tools.push(createChannelLookAtTool(channelRouter, channelOrigin))
+    tools.push(createChannelDisengageTool({ router: channelRouter, origin: channelOrigin }))
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }
