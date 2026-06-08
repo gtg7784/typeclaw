@@ -595,6 +595,16 @@ type LiveSession = {
   // send was attempted. Compared by `turnSeq` so a stale value can't leak across
   // turns.
   skipLockedSendTurn: number | null
+  // Stamped with the current `turnSeq` by `clearSticky` (called from the
+  // `channel_disengage` tool). Read in `send()`'s post-delivery grant block: a
+  // successful outbound normally re-grants sticky credit to the turn's authors,
+  // which would silently re-arm the engagement the model just dropped if it
+  // acks ("ok, backing off") via `channel_reply` in the same turn. When this
+  // matches the live `turnSeq`, the grant is suppressed so disengage stays
+  // binding for the rest of the turn — the same "commit to it within the turn"
+  // shape as the skip lock. `null` when no disengage has been recorded.
+  // Compared by `turnSeq` so a stale value can't leak across turns.
+  disengagedTurn: number | null
   // Captured by drain() at batch dequeue; read+cleared by send() on the
   // first tool-source send of the turn. The anchor decision (delay
   // threshold + intervening-observed check) is evaluated at SEND time
@@ -1474,6 +1484,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         nextPromptMaxTokens: undefined,
         skippedTurn: null,
         skipLockedSendTurn: null,
+        disengagedTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -2022,6 +2033,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.skipLockedSendTurn = null
+        live.disengagedTurn = null
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
@@ -3031,8 +3043,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // land after it. Discord and Telegram treat the extra tick as a
       // no-op refresh of their already-armed (auto-expiring) indicators.
       if (live.typingTimer) void fireTyping(live, 'tick')
+      // Disengage is binding for the rest of the turn: if the model dropped
+      // sticky via `channel_disengage` this turn, a same-turn ack reply must NOT
+      // silently re-grant the credit it just cleared. Skipped only for the live
+      // turn (matched by `turnSeq`); the next turn re-grants normally.
+      const disengagedThisTurn = live.disengagedTurn !== null && live.disengagedTurn === live.turnSeq
       const adapterConfig = options.configForAdapter(msg.adapter)
-      if (adapterConfig) {
+      if (adapterConfig && !disengagedThisTurn) {
         const targetIds = Array.from(
           live.currentTurnAuthorIds.size > 0 ? live.currentTurnAuthorIds : live.lastTurnAuthorIds,
         )
@@ -3738,6 +3755,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const clearSticky = (key: ChannelKey): { keyId: string; cleared: number } => {
     const keyId = channelKeyId(key)
     const cleared = stickyLedger.clear(keyId)
+    // Arm the same-turn re-grant guard so a subsequent ack reply this turn does
+    // not re-grant the credit just cleared (see `disengagedTurn`). No-op when
+    // the key has no live session — the ledger clear above still stands.
+    const live = liveSessions.get(keyId)
+    if (live && !live.destroyed) live.disengagedTurn = live.turnSeq
     logger.info(`[channels] ${keyId} sticky cleared count=${cleared}`)
     return { keyId, cleared }
   }
