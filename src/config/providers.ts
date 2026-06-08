@@ -603,6 +603,11 @@ export const KNOWN_PROVIDER_VENDORS = {
       'zai-coding': { label: 'Coding Plan', hint: 'GLM Coding Plan subscription' },
     },
   },
+  xai: {
+    id: 'xai',
+    name: 'xAI (Grok)',
+    providers: ['xai'],
+  },
 } as const satisfies Record<string, KnownProviderVendor>
 
 export type KnownProviderVendorId = keyof typeof KNOWN_PROVIDER_VENDORS

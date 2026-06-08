@@ -167,9 +167,15 @@ describe('KNOWN_PROVIDER_VENDORS', () => {
     expect(variantLabel('zai', 'zai-coding')).toBe('Coding Plan')
   })
 
-  test('Anthropic and Fireworks are single-provider vendors (no variant step)', () => {
+  test('Anthropic, Fireworks, and xAI are single-provider vendors (no variant step)', () => {
     expect(providerIdsForVendor('anthropic')).toEqual(['anthropic'])
     expect(providerIdsForVendor('fireworks')).toEqual(['fireworks'])
+    expect(providerIdsForVendor('xai')).toEqual(['xai'])
+  })
+
+  test('xAI vendor resolves to the single dual-auth xai provider', () => {
+    expect(vendorForProviderId('xai')).toBe('xai')
+    expect(KNOWN_PROVIDER_VENDORS.xai.name).toBe('xAI (Grok)')
   })
 })
 
