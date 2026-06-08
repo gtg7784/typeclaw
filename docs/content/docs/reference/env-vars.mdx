@@ -23,9 +23,11 @@ icon: Variable
 | `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true` | `1` — entrypoint shim installs the iptables egress filter                 |
 | `DISPLAY`                         | when `docker.file.xvfb` is enabled | `:99` — points at the in-container Xvfb server                            |
 
-## Provider credentials (env-wins)
+## Provider credentials
 
 Set in the host stage; injected into the container via `--env-file .env`.
+
+These env vars override a stored API-key credential in `secrets.json` (env-wins). The exception is dual-auth providers (`anthropic`, `xai`): a stored OAuth credential takes precedence over the env var, since OAuth is stateful and refreshed on disk. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for the full resolution order.
 
 | Variable             | Provider     | Notes                                                                                                    |
 | -------------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
