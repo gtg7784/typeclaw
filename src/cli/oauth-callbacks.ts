@@ -44,8 +44,9 @@ export function buildOAuthCallbacks(providerName: string): OAuthCallbackHandle {
         const preamble = [
           `Open this URL in your browser to sign in to ${providerName}.`,
           '',
-          'If your browser shows "this site can\'t be reached" after you sign in,',
-          'copy the full address from the top of the browser and paste it below.',
+          'If the page after sign-in shows a code to copy (or a "this site can\'t',
+          'be reached" / "could not establish connection" error), copy that code —',
+          'or the full address from the top of the browser — and paste it below.',
         ]
         if (instructions) preamble.push('', instructions)
         note(preamble.join('\n'), 'Browser login')
@@ -67,8 +68,8 @@ export function buildOAuthCallbacks(providerName: string): OAuthCallbackHandle {
       onManualCodeInput: async () => {
         const value = await text({
           message:
-            'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
-          placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
+            'After signing in, paste the code shown on the page (some providers offer a copy button), or the full redirect address from the top of the browser:',
+          placeholder: 'code, or http://localhost:1455/auth/callback?code=...&state=...',
           signal,
         })
         if (isCancel(value)) throw new Error('Login cancelled by user')
