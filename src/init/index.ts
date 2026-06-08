@@ -19,6 +19,7 @@ import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
+import { CONFIG_FILE, findAgentDir, isInitialized } from './find-agent-dir'
 import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { buildHatchingPrompt } from './hatching'
@@ -35,7 +36,8 @@ export { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 
 export { appendOrReplaceEnvKey, hasEnvKey, readEnvFile } from './env-file'
 
-const CONFIG_FILE = 'typeclaw.json'
+export { CONFIG_FILE, findAgentDir, isInitialized }
+
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'
 
@@ -488,39 +490,6 @@ export function isDirectoryNonEmpty(dir: string): boolean {
     return readdirSync(dir).some((entry) => !entry.startsWith('.'))
   } catch {
     return false
-  }
-}
-
-export function isInitialized(dir: string): boolean {
-  return existsSync(join(dir, CONFIG_FILE))
-}
-
-// Walks upward from `start` looking for the agent folder (the dir containing
-// typeclaw.json). Returns the found dir, or null if nothing is found before
-// the walk hits a stop boundary.
-//
-// Stop boundaries (whichever comes first, checked at every level):
-//   1. The current dir contains typeclaw.json — return it.
-//   2. The current dir contains .git — return null. A .git boundary marks a
-//      project root; refusing to cross it prevents accidentally picking up an
-//      unrelated parent project, and matches how typeclaw itself initializes
-//      one .git per agent folder.
-//   3. We've reached the filesystem root — return null.
-//
-// The `.git` check fires AFTER the typeclaw.json check at the same level so
-// that walking up from a subdir of the agent (e.g. `<agent>/workspace/`) still
-// resolves to the agent root, even though the agent root itself contains both
-// typeclaw.json and .git.
-export function findAgentDir(start: string): string | null {
-  let dir = resolve(start)
-  const root = resolve(dir, '/')
-  while (true) {
-    if (existsSync(join(dir, CONFIG_FILE))) return dir
-    if (existsSync(join(dir, '.git'))) return null
-    if (dir === root) return null
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
   }
 }
 
