@@ -639,7 +639,25 @@ async function applyBashSandbox(
 async function resolveProcStrategy(): Promise<SandboxProcStrategy> {
   if (config.sandbox.realProc && (await canMountRealProc())) return 'real-proc'
   if (await canBindProcSafely()) return 'proc-bind'
+  // Degraded last resort: no working /proc strategy. External package runners
+  // (bunx/bun add/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
+  // /proc/self/{fd,maps} are absent. Warn once so an operator on such an exotic
+  // host (no usable user namespaces at all) gets a diagnostic instead of the bare
+  // Bun error. Not gated on parsing the command — that heuristic is fragile (see
+  // PR #696); this is a strategy-level notice, fail-closed and command-agnostic.
+  warnTmpfsProcFallbackOnce()
   return 'tmpfs'
+}
+
+let tmpfsProcFallbackWarned = false
+function warnTmpfsProcFallbackOnce(): void {
+  if (tmpfsProcFallbackWarned) return
+  tmpfsProcFallbackWarned = true
+  console.warn(
+    '[sandbox] degraded /proc mode: neither real-proc nor proc-bind is available on this host, ' +
+      'so sandboxed external package runners (bunx / bun add / bun run <pkg-bin>) will fail. ' +
+      'This needs a runtime with working user namespaces.',
+  )
 }
 
 // The builtin file tools that take a single filesystem `path` arg. For a

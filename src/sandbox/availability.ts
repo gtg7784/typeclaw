@@ -172,25 +172,57 @@ async function probeProcBind(bwrap: string): Promise<boolean> {
   // bash) would falsely pass.
   let sentinel: Bun.Subprocess | undefined
   try {
-    sentinel = Bun.spawn(['sleep', '30'], {
+    // `env -i` so the sentinel carries ONLY the marker, never the parent's real
+    // FIREWORKS_API_KEY/GH_TOKEN — the probe must not itself plant a real secret,
+    // independent of Bun.spawn's env merge/replace semantics. `sleep 300` is long
+    // enough that the sentinel cannot exit mid-probe and turn a "permission
+    // denied" assertion into a "no such process" false pass (see below).
+    sentinel = Bun.spawn(['/usr/bin/env', '-i', `${PROC_BIND_PROBE_SECRET}=leaked`, '/bin/sleep', '300'], {
       stdout: 'ignore',
       stderr: 'ignore',
-      env: { [PROC_BIND_PROBE_SECRET]: 'leaked' },
     })
     const sentinelPid = sentinel.pid
 
-    // From the sandbox: environ + maps of the sentinel must be UNREADABLE and it
-    // must be unsignalable (kill -0 EPERM), while the sandbox's OWN
-    // /proc/self/{fd,maps} must be readable (the property that makes bunx work).
-    // Any leak or any missing self-proc entry fails the probe → fall back to
-    // tmpfs. `--ro-bind /proc /proc` with no /proc/self/exe symlink mirrors
-    // build.ts's proc-bind branch exactly.
+    if (sentinelPid === undefined) return false
+    // Two-sided proof that the in-sandbox block is the USERNS boundary and
+    // nothing else. From the PARENT (this process — container root, parent
+    // userns, same uid as the sentinel) the sentinel's environ MUST be readable:
+    // that establishes the sentinel is dumpable and same-uid, so the ONLY thing
+    // that can deny the read from inside the sandbox is the child-userns boundary
+    // (rules out a false "blocked" caused by an unrelated dumpable=0 / uid
+    // mismatch). If the parent itself can't read it, the sentinel setup is
+    // unsound and we cannot conclude anything — fail closed.
+    if (!(await parentCanRead(`/proc/${sentinelPid}/environ`))) return false
+
+    // In-sandbox, the assertion must prove the block holds for the RIGHT REASON.
+    // A naive `cat environ && exit 1` passes on BOTH "permission denied" (EACCES,
+    // the real userns block — SAFE) and "no such process" (ESRCH, the sentinel
+    // died — proves NOTHING); on a host that actually leaks, a sentinel that
+    // exited early would false-pass. So the script positively verifies, in order:
+    //   1. self /proc/self/{fd,maps} readable — the property that makes bunx work
+    //   2. the sentinel is ALIVE and visible — /proc/<pid>/status readable, so a
+    //      later environ failure cannot be ESRCH (a dead pid fails here)
+    //   3. environ + maps reads fail with EACCES SPECIFICALLY (stderr matches
+    //      "Permission denied"), NOT ESRCH and NOT a successful read. Combined
+    //      with the parent-readable check above, an EACCES here can only be the
+    //      cross-userns block. environ is the API-key surface; maps is the
+    //      secondary mem-layout surface.
+    // `kill -0` and `readlink ns/user` are deliberately NOT asserted: the
+    // busybox/dash `kill` builtin exits 1 with no stderr for BOTH EPERM and
+    // ESRCH, and `readlink` prints nothing on EACCES — neither can distinguish
+    // the safe case from a dead pid, so asserting them would be theater. The
+    // load-bearing guarantee is (3): the secret surface is unreadable, for the
+    // reason proven by the parent-readable bracket.
+    // Any deviation exits non-zero → canBindProcSafely() returns false → the
+    // resolver falls back to tmpfs. `--ro-bind /proc /proc` with no
+    // /proc/self/exe symlink mirrors build.ts's proc-bind branch exactly.
+    const deniedRead = (path: string): string => `cat ${path} 2>&1 >/dev/null | grep -q 'Permission denied' || exit 1`
     const script = [
       `test -r /proc/self/fd || exit 1`,
       `test -r /proc/self/maps || exit 1`,
-      `cat /proc/${sentinelPid}/environ >/dev/null 2>&1 && exit 1`,
-      `cat /proc/${sentinelPid}/maps >/dev/null 2>&1 && exit 1`,
-      `kill -0 ${sentinelPid} 2>/dev/null && exit 1`,
+      `test -r /proc/${sentinelPid}/status || exit 1`,
+      deniedRead(`/proc/${sentinelPid}/environ`),
+      deniedRead(`/proc/${sentinelPid}/maps`),
       `exit 0`,
     ].join('; ')
     const proc = Bun.spawn(
@@ -221,11 +253,25 @@ async function probeProcBind(bwrap: string): Promise<boolean> {
       { stdout: 'ignore', stderr: 'ignore' },
     )
     await proc.exited
-    return proc.exitCode === 0
+    if (proc.exitCode !== 0) return false
+    // Liveness re-check from the PARENT, where the sentinel IS readable: if it
+    // died during the probe, the in-sandbox assertions that depended on its pid
+    // resolving are void, so fail closed rather than trust them.
+    return !sentinel.killed && sentinel.exitCode === null
   } catch {
     return false
   } finally {
     sentinel?.kill()
+  }
+}
+
+async function parentCanRead(path: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(['cat', path], { stdout: 'ignore', stderr: 'ignore' })
+    await proc.exited
+    return proc.exitCode === 0
+  } catch {
+    return false
   }
 }
 
