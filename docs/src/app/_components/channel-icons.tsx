@@ -48,13 +48,14 @@ export interface ChannelDef {
   name: string
   Icon: ComponentType<IconProps>
   branded: boolean
+  href?: string
 }
 
 export const CHANNELS: ChannelDef[] = [
-  { name: 'Slack', Icon: SlackBrand, branded: true },
-  { name: 'Discord', Icon: Discord, branded: true },
-  { name: 'Telegram', Icon: Telegram, branded: true },
-  { name: 'KakaoTalk', Icon: KakaoTalk, branded: true },
-  { name: 'GitHub', Icon: GithubBrand, branded: true },
+  { name: 'Slack', Icon: SlackBrand, branded: true, href: '/docs/reference/slack-bot' },
+  { name: 'Discord', Icon: Discord, branded: true, href: '/docs/reference/discord-bot' },
+  { name: 'Telegram', Icon: Telegram, branded: true, href: '/docs/reference/telegram-bot' },
+  { name: 'KakaoTalk', Icon: KakaoTalk, branded: true, href: '/docs/reference/kakaotalk' },
+  { name: 'GitHub', Icon: GithubBrand, branded: true, href: '/docs/reference/github' },
   { name: 'TUI', Icon: TerminalBrand, branded: false },
 ]
