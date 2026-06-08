@@ -299,9 +299,12 @@ async function clackSelectSession(
 }
 
 function itemLabel(item: ViewerItem): string {
+  // clack's select already draws a radio dot (●/○) per option; a leading status
+  // dot here doubled it into a confusing "● ○". Keep rows glyph-free; the live
+  // row uses ▸ (not a dot) to stay distinct from the radio cursor.
   if (item.kind === 'logs') return `${c.dim('▤')} container logs`
-  if (item.kind === 'tui') return `${c.green('●')} ${c.bold('live TUI')}  ${sessionRowLabel(item.summary)}`
-  return `${c.dim('○')} ${sessionRowLabel(item.summary)}`
+  if (item.kind === 'tui') return `${c.green('▸')} ${c.bold('live TUI')}  ${sessionRowLabel(item.summary)}`
+  return sessionRowLabel(item.summary)
 }
 
 function itemHint(item: ViewerItem): { hint: string } {
