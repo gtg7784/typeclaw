@@ -24,6 +24,23 @@ describe('subagent orchestration — explicit research routing', () => {
   })
 })
 
+describe('delivering reports and documents', () => {
+  test('routes report/PDF/document requests to the typeclaw-markdown-pdf skill', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('## Delivering reports and documents')
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('typeclaw-markdown-pdf')
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/produce a polished file/i)
+  })
+
+  test('states the summary is a pointer, never the deliverable', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/summary[\s\S]*?never the deliverable/i)
+  })
+
+  test('forbids hand-rolling a PDF with an ad-hoc library', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/jsPDF, pdfkit/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/mojibake/i)
+  })
+})
+
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
     const now = new Date('2026-01-15T12:00:00+09:00')

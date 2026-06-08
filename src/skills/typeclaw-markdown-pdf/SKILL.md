@@ -1,6 +1,6 @@
 ---
 name: typeclaw-markdown-pdf
-description: "Turn any Markdown into a polished, professional PDF and (optionally) attach it to a channel. Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, anything a human would want to download, print, or forward. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부'. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. Covers the one-time setup, the styled wrapper, the render command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead."
+description: "The ONLY supported way to turn Markdown into a polished, professional PDF (and optionally attach it to a channel). Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, render report, export document, anything a human would want to download, print, or forward, including a researcher's report file shipped as a Slack/Discord attachment. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'render report', 'export document', 'the report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부', '리포트', '보고서'. Handles CJK/Korean/Japanese/Chinese: CJK fonts are opt-in, so before rendering it checks whether a CJK font is present and, if not, asks the user to enable `docker.file.cjkFonts` and regenerate rather than shipping a tofu PDF — it never auto-downloads a font. Also load before saying you cannot produce PDFs — you can: this skill installs a tiny Typst toolchain into workspace/ on first use, then renders. NEVER build a PDF with jsPDF, pdfkit, a canvas text dump, or a headless-browser raw-text print — those produce unrendered markdown and broken CJK; this skill is the only correct path. Covers the one-time setup, the styled wrapper, the render command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead."
 ---
 
 # typeclaw-markdown-pdf
@@ -21,6 +21,15 @@ You do **not** need to learn Typst markup. `cmarker` renders your CommonMark
 (headings, lists, tables, code, blockquotes, footnotes, links, images). The
 wrapper only sets _styling_ — fonts, margins, headings, page numbers — so the
 output looks deliberate, not like a default-template export.
+
+> **This is the only supported way to make a PDF from Markdown in TypeClaw.**
+> Do **not** reach for `jsPDF`, `pdfkit`, a `<canvas>` text dump, or a
+> headless-browser "print raw text" path. Those skip Markdown rendering (you get
+> literal `##` and `**` in the output) and ship no CJK font, so Korean/Japanese/
+> Chinese come out as mojibake. The Typst path below renders the Markdown properly;
+> for CJK it relies on the opt-in `cjkFonts` font and gates on its presence (see
+> "## Handling CJK content") rather than shipping tofu. If you catch yourself about
+> to `bun add` a PDF library, stop and use this skill instead.
 
 ## When to use this
 
@@ -141,10 +150,60 @@ Notes:
   wherever the Latin fonts have no glyph, leaving Latin runs untouched. It comes
   from `fonts-noto-cjk`, which Step 3's renderer loads from `/usr/share/fonts` via
   `fontPaths`. **The package is only present when the container's `cjkFonts` toggle
-  resolves to `true`.** Its default is `"auto"`, which installs the fonts only when
-  the host locale is CJK (`ja`/`ko`/`zh`) — so on a non-CJK host, CJK PDFs still
-  render as tofu until you set `docker.file.cjkFonts: true` in `typeclaw.json` and
-  rebuild. If your CJK font lives elsewhere, add its dir to the `fontPaths` list.
+  resolves to `true`** (default `"auto"` installs it only on a CJK host locale), so
+  on a non-CJK host CJK text renders as tofu — see "## Handling CJK content" below
+  for the pre-render check that catches this and asks the user before shipping a
+  broken PDF. If your CJK font lives elsewhere, add its dir to the `fontPaths` list.
+
+## Handling CJK content
+
+CJK fonts are **opt-in** (the `docker.file.cjkFonts` toggle). When they are off,
+Typst still renders — it just substitutes `.notdef` tofu boxes for every
+Korean/Japanese/Chinese glyph, so the render "succeeds" and you can ship a broken
+PDF without noticing. **Do not** download, vendor, or `curl` a font into the
+workspace to work around this, and **do not** silently deliver a tofu PDF. Instead,
+run this gate **before** Step 3 whenever the markdown might contain CJK:
+
+```sh
+# Run from workspace/. MD is the markdown you are about to render.
+MD="report.md"
+
+# Hangul, Kana, CJK ideographs + the common extensions. grep -P on Debian; perl
+# slurp as the fallback (BusyBox/macOS grep lack -P).
+CJK_RE='[\x{1100}-\x{11FF}\x{3130}-\x{318F}\x{AC00}-\x{D7A3}\x{3040}-\x{30FF}\x{31F0}-\x{31FF}\x{3400}-\x{4DBF}\x{4E00}-\x{9FFF}\x{F900}-\x{FAFF}\x{20000}-\x{2A6DF}\x{2A700}-\x{2B73F}\x{2B740}-\x{2B81F}\x{2B820}-\x{2CEAF}\x{2CEB0}-\x{2EBEF}\x{30000}-\x{3134F}]'
+if command -v grep >/dev/null && echo | grep -qP '' 2>/dev/null; then
+  LC_ALL=C.UTF-8 grep -qP "$CJK_RE" -- "$MD" && HAS_CJK=1 || HAS_CJK=0
+else
+  perl -CSDA -0777 -ne "exit(/$CJK_RE/ ? 0 : 1)" "$MD" && HAS_CJK=1 || HAS_CJK=0
+fi
+
+# A CJK font Typst can load. dpkg is the authoritative signal for the opt-in
+# fonts-noto-cjk package; the file scan covers a preinstalled or mounted font.
+# fontconfig/fc-list is NOT consulted — Typst reads fontPaths directly, not fc.
+has_cjk_font() {
+  dpkg-query -W -f='${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed' && return 0
+  find /usr/share/fonts /usr/local/share/fonts -type f \( -iname '*.otf' -o -iname '*.ttf' -o -iname '*.ttc' \) 2>/dev/null |
+    grep -Eiq '(Noto(Sans|Serif)CJK|Noto (Sans|Serif) CJK|SourceHan|Source Han|WenQuanYi|Nanum|Unifont|DroidSansFallback|AR PL)'
+}
+
+if [ "$HAS_CJK" = 1 ] && ! has_cjk_font; then
+  echo "CJK_FONT_MISSING"
+fi
+```
+
+If the gate prints `CJK_FONT_MISSING`, **stop — do not render or attach a PDF.**
+Tell the user, honestly, that this is a restart-required boot setting, e.g.:
+
+> This report has Korean/Japanese/Chinese text, but the container has no CJK font
+> — they're opt-in, so the PDF would come out as tofu boxes. Want me to set
+> `docker.file.cjkFonts: true` in `typeclaw.json`? It's a boot setting, so after I
+> edit it you'll need to run `typeclaw restart` from the host project directory,
+> and then I'll regenerate the PDF.
+
+Only after the user agrees: edit `typeclaw.json` to set `docker.file.cjkFonts:
+true` (use the `typeclaw-config` skill), ask them to `typeclaw restart`, and
+regenerate the PDF **after** the restarted container reports `has_cjk_font` true.
+If the markdown has no CJK, or a CJK font is present, skip straight to Step 3.
 
 ## Step 3 — render
 

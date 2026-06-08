@@ -258,7 +258,7 @@ describe('renderSessionOrigin', () => {
   )
 
   test.each(['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const)(
-    'attachment-capable channel origin (%s) defaults researcher reports to a PDF attachment',
+    'attachment-capable channel origin (%s) defaults report/PDF requests to a PDF attachment',
     (adapter) => {
       const out = renderSessionOrigin({
         kind: 'channel',
@@ -267,11 +267,15 @@ describe('renderSessionOrigin', () => {
         chat: 'C0',
         thread: null,
       })
-      expect(out).toMatch(/Ship `researcher` reports as a PDF by default/i)
+      expect(out).toMatch(/Ship reports as a PDF by default/i)
+      expect(out).toMatch(/the user asks for a report, document, brief, or "the report"/i)
       expect(out).toContain('research-<slug>.md')
       expect(out).toContain('typeclaw-markdown-pdf')
       expect(out).toMatch(/channel_send\(\{ \.\.\., attachments:/)
-      expect(out).toMatch(/do not paste the full markdown into chat/i)
+      expect(out).toMatch(/do not paste\s+the full markdown into chat/i)
+      expect(out).toMatch(/`<summary>`[\s\S]*?NOT the deliverable/i)
+      expect(out).toMatch(/ad-hoc library \(jsPDF, pdfkit/i)
+      expect(out).toMatch(/do not attach the raw `\.md`/i)
     },
   )
 
@@ -279,7 +283,7 @@ describe('renderSessionOrigin', () => {
   // (`github-bot-does-not-support-attachments`), so the PDF default must be
   // suppressed there — nudging the model toward an attachment send that always
   // fails would be worse than no guidance at all.
-  test('github channel origin omits the researcher-PDF default (attachments unsupported)', () => {
+  test('github channel origin omits the report-PDF default (attachments unsupported)', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'github',
@@ -287,7 +291,7 @@ describe('renderSessionOrigin', () => {
       chat: 'pr:7',
       thread: null,
     })
-    expect(out).not.toMatch(/Ship `researcher` reports as a PDF by default/i)
+    expect(out).not.toMatch(/Ship reports as a PDF by default/i)
     expect(out).not.toContain('typeclaw-markdown-pdf')
   })
 
