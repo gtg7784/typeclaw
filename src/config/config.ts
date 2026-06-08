@@ -338,31 +338,34 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
-// `realProc` drives the per-tool bwrap sandbox /proc strategy
-// (src/sandbox/build.ts). Default `true` uses the 'real-proc' strategy: a fresh
-// procfs scoped to a new PID namespace so external-package runners (`bunx`,
-// `bun add <pkg>`, `bun run <pkg-bin>`) get a working /proc/self/{fd,maps}.
-// This is REQUIRED for the core subagent workflow — the bundled agent-messenger
-// skills all shell out to `bunx agent-*`, and under the older '--tmpfs /proc'
-// profile every such call aborted with Bun's "NotDir" (createFakeTemporaryNode-
-// Executable reads /proc/self/{fd,maps} in the spawned child, which the empty
-// tmpfs lacks). The default makes `typeclaw start` grant the container
-// CAP_SYS_ADMIN (required to mount proc for the new PID namespace). On
-// typeclaw's single-tenant outer boundary (already seccomp=unconfined, the
-// inner bwrap user-namespace is the real per-tool boundary) this is an accepted
-// posture — see docs/internals/sandbox.mdx. PID isolation and the
-// /proc/N/environ leak guard are both preserved; real-proc is a fresh procfs in
-// a NEW pid ns, never the agent runtime's /proc.
+// `realProc` opts the per-tool bwrap sandbox (src/sandbox/build.ts) into the
+// stricter 'real-proc' /proc strategy: a fresh procfs scoped to a NEW PID
+// namespace via `unshare --pid --fork --mount --mount-proc`. It adds full PID
+// isolation (the agent runtime's pids are absent from the sandbox namespace),
+// but needs CAP_SYS_ADMIN to mount proc — so `typeclaw start` grants the
+// container `--cap-add=SYS_ADMIN` only when this is set.
 //
-// Set `false` to opt back into the narrower '--tmpfs /proc' profile WITHOUT the
-// CAP_SYS_ADMIN grant. That profile cannot run external packages inside the
-// sandbox: sandboxed `bunx`/`bun add`/`bun run <pkg-bin>` abort with Bun's
-// "NotDir" — the explicit, documented cost of the opt-out.
+// Default `false`, because external-package execution (`bunx agent-*`, `bun add
+// <pkg>`, `bun run <pkg-bin>` — the core subagent workflow) no longer needs it:
+// the default 'proc-bind' strategy `--ro-bind`s the container's already-real
+// procfs into the sandbox with NO CAP_SYS_ADMIN, giving the runner's child a
+// working /proc/self/{fd,maps} so it stops aborting with Bun's "NotDir". The
+// agent runtime's /proc/N/environ (FIREWORKS_API_KEY) stays unreadable because
+// bwrap's --unshare-user puts the sandbox in a child user namespace the kernel
+// won't let read a parent-userns process's environ — verified at runtime by a
+// probe before the strategy is selected (src/sandbox/availability.ts). Avoiding
+// the broad CAP_SYS_ADMIN grant by default is a smaller blast radius than the
+// non-secret PID metadata 'proc-bind' exposes — see docs/internals/sandbox.mdx.
+//
+// Set `true` only to add the PID-isolation posture on a host where the proc
+// mount actually works (bare-metal Linux, Docker Desktop — NOT OrbStack, which
+// rejects the mount even with the cap; there the runtime falls back to
+// 'proc-bind' regardless). The cost is the CAP_SYS_ADMIN grant on the container.
 export const sandboxSchema = z
   .object({
-    realProc: z.boolean().default(true),
+    realProc: z.boolean().default(false),
   })
-  .default({ realProc: true })
+  .default({ realProc: false })
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 

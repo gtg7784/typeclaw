@@ -610,13 +610,13 @@ describe('planStart network egress filter', () => {
 })
 
 describe('planStart sandbox.realProc cap grant', () => {
-  test('grants SYS_ADMIN by default (real-proc is the default so sandboxed bunx/bun-add work out of the box)', async () => {
+  test('does NOT grant SYS_ADMIN by default (proc-bind is the default; bunx/bun-add work without the broad cap)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).toContain('--cap-add=SYS_ADMIN')
+    expect(plan.runArgs).not.toContain('--cap-add=SYS_ADMIN')
   })
 
   test('does NOT grant SYS_ADMIN when sandbox.realProc is explicitly false', async () => {

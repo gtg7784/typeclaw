@@ -38,6 +38,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
   const bwrap = policy.bwrapPath ?? 'bwrap'
   const procStrategy = policy.proc ?? 'tmpfs'
   const realProc = procStrategy === 'real-proc'
+  const procBind = procStrategy === 'proc-bind'
 
   // 'real-proc' splits PID-namespace ownership from bwrap. `unshare --pid
   // --fork --mount --mount-proc` (util-linux, baseline) creates the new PID +
@@ -118,13 +119,22 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     '/lib64',
   )
 
-  if (realProc) {
-    // The outer `unshare --mount-proc` already mounted a fresh procfs scoped to
-    // the new PID namespace. --ro-bind /proc /proc binds THAT procfs (not the
-    // outer container's), so the child gets real /proc/self/{fd,maps} and the
-    // agent runtime's pids — and their /proc/N/environ secrets — are simply
-    // absent from this namespace. No /proc/self/exe symlink is needed: a real
-    // /proc/self/exe already resolves correctly.
+  if (realProc || procBind) {
+    // --ro-bind /proc /proc gives the child a real /proc/self/{fd,maps,exe} so a
+    // JS package runner's spawned bin stops aborting with Bun's ENOTDIR. The two
+    // strategies differ only in WHICH procfs is bound:
+    //   real-proc: the outer `unshare --mount-proc` already mounted a fresh
+    //     procfs scoped to the new PID namespace, so this binds THAT — the agent
+    //     runtime's pids are absent from the namespace entirely (full PID
+    //     isolation), at the cost of CAP_SYS_ADMIN for the mount.
+    //   proc-bind: no unshare/mount, so this binds the container's ALREADY-REAL
+    //     procfs. The agent runtime's pids ARE present, but --unshare-all put
+    //     this bash in a CHILD user namespace, so the kernel's
+    //     PTRACE_MODE_READ_FSCREDS check blocks /proc/<agent>/environ (EACCES)
+    //     and kill()/ptrace against them fail EPERM (no CAP_KILL in the parent
+    //     userns). Only non-secret metadata (cmdline/status) stays visible.
+    // No /proc/self/exe symlink is needed in either case: a real /proc/self/exe
+    // resolves correctly.
     argv.push('--ro-bind', '/proc', '/proc')
   } else if (procStrategy === 'tmpfs') {
     // --tmpfs /proc, never --proc /proc (OrbStack's kernel blocks

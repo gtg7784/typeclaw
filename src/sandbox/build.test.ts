@@ -311,6 +311,38 @@ describe('buildSandboxedCommand proc strategy', () => {
   })
 })
 
+describe("buildSandboxedCommand proc: 'proc-bind'", () => {
+  test('binds the real /proc read-only with NO unshare prefix and NO CAP_SYS_ADMIN dependency', () => {
+    const argv = argvOf('bunx cowsay hi', { proc: 'proc-bind' })
+    expect(argv[0]).toBe('bwrap')
+    expect(argv).not.toContain('unshare')
+    expect(argv).not.toContain('--mount-proc')
+    expect(argv.join(' ')).toContain('--ro-bind /proc /proc')
+    expect(argv.slice(-3)).toEqual(['bash', '-c', 'bunx cowsay hi'])
+  })
+
+  test('keeps --unshare-all (the user-namespace that blocks cross-userns /proc/<agent>/environ reads)', () => {
+    const argv = argvOf('true', { proc: 'proc-bind' })
+    expect(argv).toContain('--unshare-all')
+  })
+
+  test('does not mask /proc with a tmpfs or fake the /proc/self/exe symlink', () => {
+    const joined = argvOf('true', { proc: 'proc-bind', procSelfExe: '/usr/local/bin/bun' }).join(' ')
+    expect(joined).not.toContain('--tmpfs /proc')
+    expect(joined).not.toContain('/proc/self/exe')
+  })
+
+  test('isolates the net namespace by default via --unshare-all (no --share-net)', () => {
+    const argv = argvOf('true', { proc: 'proc-bind' })
+    expect(argv).not.toContain('--share-net')
+  })
+
+  test("rejoins the container network for network 'inherit' via --share-net", () => {
+    const argv = argvOf('true', { proc: 'proc-bind', network: 'inherit' })
+    expect(argv).toContain('--share-net')
+  })
+})
+
 describe("buildSandboxedCommand proc: 'real-proc'", () => {
   test('prefixes the command with unshare to own a new pid ns + fresh procfs, then bwrap', () => {
     const argv = argvOf('bunx cowsay hi', { proc: 'real-proc' })

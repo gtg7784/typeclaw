@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test'
 
 import {
   _resetBwrapAvailabilityCacheForTests,
+  _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
+  buildProcBindProbeScript,
+  canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
   resolveProcSelfExe,
@@ -12,6 +15,7 @@ import { SandboxUnavailableError } from './errors'
 afterEach(() => {
   _resetBwrapAvailabilityCacheForTests()
   _resetRealProcProbeCacheForTests()
+  _resetProcBindProbeCacheForTests()
 })
 
 describe('ensureBwrapAvailable', () => {
@@ -85,6 +89,80 @@ describe('canMountRealProc', () => {
     const resolved = await canMountRealProc()
     const cachedPromise = canMountRealProc()
     expect(await cachedPromise).toBe(resolved)
+  })
+})
+
+describe('canBindProcSafely', () => {
+  // Like canMountRealProc, the boolean depends on the host: true only where a
+  // --unshare-all bwrap can bind /proc AND the kernel blocks the sentinel's
+  // cross-userns environ read (a Linux container with bwrap), false on the
+  // macOS dev host where bwrap is absent. So these assert the environment-
+  // independent contract: the result is a boolean, stable and cached, with the
+  // same in-flight dedup as the other probes.
+  test('returns a boolean', async () => {
+    expect(typeof (await canBindProcSafely())).toBe('boolean')
+  })
+
+  test('caches the result (repeated calls return the same value)', async () => {
+    const first = await canBindProcSafely()
+    const second = await canBindProcSafely()
+    expect(second).toBe(first)
+  })
+
+  test('re-probes after a cache reset', async () => {
+    const before = await canBindProcSafely()
+    _resetProcBindProbeCacheForTests()
+    const after = await canBindProcSafely()
+    expect(after).toBe(before)
+  })
+
+  test('dedups concurrent first calls onto one in-flight probe (same promise identity)', () => {
+    const first = canBindProcSafely()
+    const second = canBindProcSafely()
+    expect(second).toBe(first)
+    return first
+  })
+
+  test('keys the cache by bwrapPath so a non-default binary re-probes (never inherits the default result)', async () => {
+    // given: the default-path probe has run and cached a result
+    await canBindProcSafely()
+    // when/then: a non-existent bwrap path must NOT inherit that cache — it
+    // probes its own (absent) binary and is unsafe. A singleton cache would
+    // wrongly return the default's answer here.
+    expect(await canBindProcSafely({ bwrapPath: '/nonexistent/definitely-not-bwrap' })).toBe(false)
+  })
+})
+
+describe('buildProcBindProbeScript (false-pass regression guard)', () => {
+  // The real probe needs a Linux container + bwrap, so its security behavior
+  // can't run in CI. These pin the generated script's SHAPE so a regression to
+  // the false-passing form (which leaked secrets, see git history) fails here.
+  const script = buildProcBindProbeScript(4242)
+
+  test('opens the protected files (the actual leak path), never grep/cat on a localized errno', () => {
+    // given-when-then: a successful open of environ/maps must trip the LEAK exit
+    expect(script).toContain('(: < /proc/4242/environ) 2>/dev/null && exit 10')
+    expect(script).toContain('(: < /proc/4242/maps) 2>/dev/null && exit 10')
+    // the old false-passing / locale-fragile forms must NOT return
+    expect(script).not.toContain('grep')
+    expect(script).not.toContain('Permission denied')
+    expect(script).not.toMatch(/cat .*&& exit/)
+  })
+
+  test('uses DISTINCT exit codes so a setup failure is never cached as a leak', () => {
+    // leak = 10 (cacheable unsafe); setup checks = 20 (inconclusive); safe = 0.
+    // A bare `exit 1` on setup checks would conflate them and poison the cache.
+    expect(script).toContain('test -r /proc/self/fd || exit 20')
+    expect(script).toContain('test -r /proc/self/maps || exit 20')
+    expect(script).toContain('test -r /proc/4242/status || exit 20')
+    expect(script.trim().endsWith('exit 0')).toBe(true)
+    // the leak code must NEVER be reachable from a setup-check failure
+    expect(script).not.toMatch(/test -r [^|]*\|\| exit 10/)
+  })
+
+  test('never asserts readability of a protected file via test -r (access() != open() across userns)', () => {
+    expect(script).not.toContain('test -r /proc/4242/environ')
+    expect(script).not.toContain('test -r /proc/4242/maps')
   })
 })
 

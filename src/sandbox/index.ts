@@ -1,9 +1,12 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
 export {
+  buildProcBindProbeScript,
+  canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
   resolveProcSelfExe,
   _resetBwrapAvailabilityCacheForTests,
+  _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
 } from './availability'
 export { resolveHiddenPaths, type HiddenPaths } from './hidden-paths'

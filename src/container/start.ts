@@ -514,21 +514,21 @@ export async function planStart({
     }
   }
 
-  // sandbox.realProc (default true) drives the per-tool bwrap sandbox's
+  // sandbox.realProc (default FALSE) opts into the per-tool bwrap sandbox's
   // 'real-proc' strategy (src/sandbox/build.ts), which prefixes the sandbox with
   // `unshare --pid --fork --mount --mount-proc`. Mounting a fresh procfs for the
   // new PID namespace needs real CAP_SYS_ADMIN — seccomp=unconfined alone is not
   // enough (it only unblocks the unshare/clone SYSCALLS; the kernel still
-  // rejects mount(2) of proc without the capability). So the default grants the
-  // broad "new root" capability, accepted on typeclaw's single-tenant boundary
-  // (see docs/internals/sandbox.mdx) because external-package execution (`bunx
-  // agent-*`) is a core subagent workflow. Setting realProc:false opts back out
-  // of the grant (and out of in-sandbox external packages). The container-side
-  // strategy resolution still probes whether the mount actually works
-  // (canMountRealProc) and falls back to tmpfs on runtimes where the cap is a
-  // no-op, so this grant is necessary-but-not-sufficient by design. Placed
-  // before the image tag (like --cap-add=NET_ADMIN) so docker applies it at run
-  // time.
+  // rejects mount(2) of proc without the capability). So the grant is gated on
+  // the flag and is OFF by default: external-package execution (`bunx agent-*`)
+  // no longer needs it — the default 'proc-bind' strategy gives the runner real
+  // /proc without any outer capability (see docs/internals/sandbox.mdx). Setting
+  // realProc:true adds the stricter PID-isolation posture at the cost of this
+  // broad "new root" grant. The container-side strategy resolution still probes
+  // whether the mount actually works (canMountRealProc) and falls back to
+  // proc-bind on runtimes where the cap is a no-op (e.g. OrbStack), so this grant
+  // is necessary-but-not-sufficient by design. Placed before the image tag (like
+  // --cap-add=NET_ADMIN) so docker applies it at run time.
   if (cfg.sandbox.realProc) {
     runArgs.push('--cap-add=SYS_ADMIN')
   }
