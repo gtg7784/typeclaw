@@ -3224,7 +3224,14 @@ describe('ChannelRouter channel-turn protocol', () => {
     })
   }
 
-  test('empty-turn guard: a turn that thrashed the send path skips retry and posts the fallback once', async () => {
+  test('empty-turn guard: skip-locked send thrash stays silent (no fallback) — the model chose silence', async () => {
+    // Regression for the production false alarm (thread 1780845903.114339): the
+    // model called skip_response (committing to silence), then tried channel_reply
+    // anyway. Each send was denied skip-locked; past the cap the run aborted with
+    // no recoverable prose (the reply text was a denied tool ARG). The old guard
+    // posted "I got stuck putting together a reply…" — a misleading system-failure
+    // message for what is the model's own silence decision. Honor the skip: stay
+    // silent, log skip_locked_send_thrash_suppressed for production signal.
     const dir = await tempDir()
     const logs: string[] = []
     const sent: Array<{ text: string }> = []
@@ -3236,9 +3243,6 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     await router.route(inbound({ text: 'say something' }))
     sessions[0]!.onPrompt = async () => {
-      // The model committed to silence, then thrashed the send path (denied
-      // skip-locked) and left no recoverable prose. Re-prompting would just
-      // re-thrash, so the guard skips retry and posts the fallback once.
       router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'changed my mind' })
       await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'denied attempt' })
       sessions[0]!.setAssistantMidTurn('stranded loop output', 'length')
@@ -3246,9 +3250,42 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(sessions[0]!.prompts).toHaveLength(1)
-    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(sent).toHaveLength(0)
     expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
-    expect(logs.some((m) => m.includes('empty_turn_fallback cause=send_thrash'))).toBe(true)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+    expect(logs.some((m) => m.includes('skip_locked_send_thrash_suppressed'))).toBe(true)
+  })
+
+  test('empty-turn guard: duplicate-loop thrash WITHOUT skip_response does not reach the fallback (a real send landed)', async () => {
+    // The non-skip thrash counterpart. A duplicate/turn-cap denial can only
+    // accumulate AFTER a send actually landed (the dup-guard reads lastSentText,
+    // which is only set by a delivered send; turn-cap needs the full quota first).
+    // That successful send makes validateChannelTurn exit early — so the suppression
+    // change cannot strand this path, and it never emitted the skip-only fallback.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'say something' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first' })
+      let i = 0
+      while (!sessions[0]!.agent.signal.aborted && i < 100) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first' })
+        i++
+      }
+      sessions[0]!.setAssistantMidTurn('stranded loop output', 'length')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual(['first'])
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+    expect(logs.some((m) => m.includes('skip_locked_send_thrash_suppressed'))).toBe(false)
   })
 
   test('mid-turn recovery: does NOT fire when the model successfully replied (channel send happened)', async () => {
