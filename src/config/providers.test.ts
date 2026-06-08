@@ -83,6 +83,36 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
+  test('minimax is a single api-key provider serving both paygo and Token Plan keys', () => {
+    const minimax = KNOWN_PROVIDERS.minimax
+    expect(minimax.baseUrl).toBe('https://api.minimax.io/v1')
+    expect(minimax.apiKeyEnv).toBe('MINIMAX_API_KEY')
+    expect(supportsApiKey(minimax)).toBe(true)
+    expect(supportsOAuth(minimax)).toBe(false)
+  })
+
+  test('every minimax model uses the openai-completions api so pi-ai routes correctly', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.minimax.models)) {
+      expect(model.api, `minimax/${modelId} api drift`).toBe('openai-completions')
+    }
+  })
+
+  test('minimax ships the M3 flagship plus the M2 series', () => {
+    const modelIds = Object.keys(KNOWN_PROVIDERS.minimax.models)
+    expect(modelIds).toContain('MiniMax-M3')
+    expect(modelIds).toContain('MiniMax-M2')
+    expect(modelIds).toContain('MiniMax-M2.5')
+  })
+
+  test('only MiniMax-M3 accepts image input; the M2 series is text-only', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.minimax.models)) {
+      const expectsImage = modelId === 'MiniMax-M3'
+      expect((model.input as ReadonlyArray<string>).includes('image'), `minimax/${modelId} vision drift`).toBe(
+        expectsImage,
+      )
+    }
+  })
+
   test('anthropic supports both api-key and oauth on the same provider id', () => {
     const anthropic = KNOWN_PROVIDERS.anthropic
     expect(anthropic.baseUrl).toBe('https://api.anthropic.com')
@@ -177,6 +207,11 @@ describe('KNOWN_PROVIDER_VENDORS', () => {
     expect(vendorForProviderId('xai')).toBe('xai')
     expect(KNOWN_PROVIDER_VENDORS.xai.name).toBe('xAI (Grok)')
   })
+
+  test('MiniMax is a single-provider vendor: paygo and Token Plan share one provider id', () => {
+    expect(providerIdsForVendor('minimax')).toEqual(['minimax'])
+    expect(vendorForProviderId('minimax')).toBe('minimax')
+  })
 })
 
 describe('providerForModelRef', () => {
@@ -199,6 +234,12 @@ describe('listKnownModelRefs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('zai/glm-4.6')
     expect(refs).toContain('zai-coding/glm-5.1')
+  })
+
+  test('includes minimax model refs', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('minimax/MiniMax-M3')
+    expect(refs).toContain('minimax/MiniMax-M2')
   })
 
   test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8)', () => {
@@ -261,6 +302,7 @@ describe('defaultThinkingLevelForRef', () => {
     expect(defaultThinkingLevelForRef('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')).toBeUndefined()
     expect(defaultThinkingLevelForRef('zai/glm-4.6')).toBeUndefined()
     expect(defaultThinkingLevelForRef('zai-coding/glm-5.1')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('minimax/MiniMax-M3')).toBeUndefined()
   })
 
   test('every known model ref is classified (no provider falls through unhandled)', () => {

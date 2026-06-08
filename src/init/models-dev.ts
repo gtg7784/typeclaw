@@ -21,6 +21,7 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   // so we route lookups there. The curated entries still get surfaced.
   'zai-coding': 'zai',
   xai: 'xai',
+  minimax: 'minimax',
 }
 
 export type ModelOption = {
