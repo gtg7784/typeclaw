@@ -567,9 +567,15 @@ export const KNOWN_PROVIDERS = {
   // `abab*` models are intentionally omitted — the first are duplicate weights
   // on a pricier surface, the rest don't serve the OpenAI-compatible
   // /chat/completions route this adapter speaks. Costs are USD per 1M tokens
-  // from docs/guides/pricing-paygo; M3 reflects the permanent 50%-off ≤512K
-  // input tier. cacheRead/cacheWrite are 0 because MiniMax doesn't bill a
-  // separate prompt-cache rate on this surface.
+  // from docs/guides/pricing-paygo (standard tier): M3 reflects the permanent
+  // 50%-off ≤512K-input rate (input 0.30 / output 1.20 / cacheRead 0.06; M3 has
+  // no separate cache-write rate). M2.7 caches at 0.06 read / 0.375 write; the
+  // M2.5/M2.1/M2 series at 0.03 read / 0.375 write.
+  //
+  // M3 tiered pricing is NOT modeled: this single cost record only encodes the
+  // ≤512K-input tier. The >512K tier (input 0.60 / output 2.40 / cacheRead 0.12)
+  // is a limited-availability surcharge that pi-ai's flat per-model cost shape
+  // can't represent, so long-context M3 sessions above 512K under-report cost.
   minimax: {
     id: 'minimax',
     name: 'MiniMax',
@@ -586,7 +592,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
         contextWindow: 1000000,
         maxTokens: 524288,
       },
@@ -598,7 +604,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
         input: ['text'],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
         contextWindow: 204800,
         maxTokens: 204800,
       },
@@ -610,7 +616,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
         input: ['text'],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
         maxTokens: 204800,
       },
@@ -622,7 +628,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
         input: ['text'],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
         maxTokens: 204800,
       },
@@ -634,7 +640,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
         input: ['text'],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
         maxTokens: 204800,
       },

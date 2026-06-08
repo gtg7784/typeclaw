@@ -113,6 +113,22 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
+  test('minimax cache rates match the published pay-as-you-go pricing table', () => {
+    // ≤512K standard tier from docs/guides/pricing-paygo; M3 has no cache-write rate.
+    const expectedCache: Record<string, { cacheRead: number; cacheWrite: number }> = {
+      'MiniMax-M3': { cacheRead: 0.06, cacheWrite: 0 },
+      'MiniMax-M2.7': { cacheRead: 0.06, cacheWrite: 0.375 },
+      'MiniMax-M2.5': { cacheRead: 0.03, cacheWrite: 0.375 },
+      'MiniMax-M2.1': { cacheRead: 0.03, cacheWrite: 0.375 },
+      'MiniMax-M2': { cacheRead: 0.03, cacheWrite: 0.375 },
+    }
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.minimax.models)) {
+      const cost = model.cost as { cacheRead: number; cacheWrite: number }
+      expect(cost.cacheRead, `minimax/${modelId} cacheRead drift`).toBe(expectedCache[modelId]!.cacheRead)
+      expect(cost.cacheWrite, `minimax/${modelId} cacheWrite drift`).toBe(expectedCache[modelId]!.cacheWrite)
+    }
+  })
+
   test('anthropic supports both api-key and oauth on the same provider id', () => {
     const anthropic = KNOWN_PROVIDERS.anthropic
     expect(anthropic.baseUrl).toBe('https://api.anthropic.com')
