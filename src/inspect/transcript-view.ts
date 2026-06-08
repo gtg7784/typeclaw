@@ -27,6 +27,8 @@ export type TranscriptViewOptions = {
   createTerminal?: () => Terminal
 }
 
+export const MAX_LIVE_HISTORY_ENTRIES = 250
+
 // Read-only pi-tui transcript viewer: the rich counterpart to the line
 // renderer, matching the live TUI's look (markdown assistant blocks, formatted
 // tool panels) but with NO editor and NO websocket writes. It owns its own
@@ -45,11 +47,18 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     tui.requestRender()
 
     // The status line is pinned last (no editor to pin, unlike createTui). Each
-    // appended history entry is inserted before it: strip status, add entry,
-    // re-add status.
-    const append = (component: Component): void => {
+    // event's components are inserted before it: strip status, add them, re-add
+    // status. pi-tui re-renders (and re-lays out every Markdown block in) the
+    // whole child list each frame, so an unbounded live tail makes per-frame cost
+    // grow until the viewer stalls; the window evicts the oldest entry to keep
+    // render cost bounded. Components are evicted per event so a timestamp never
+    // outlives its body. Header and pinned status are never evicted.
+    const history = new BoundedComponentWindow(MAX_LIVE_HISTORY_ENTRIES)
+    const appendEntry = (components: HistoryEntry): void => {
       tui.removeChild(status)
-      tui.addChild(component)
+      const evicted = history.push(components)
+      if (evicted !== null) for (const component of evicted) tui.removeChild(component)
+      for (const component of components) tui.addChild(component)
       tui.addChild(status)
     }
 
@@ -83,15 +92,14 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     // transcripts; render per event once live.
     let live = false
     const onEvent = (event: InspectEvent): void => {
-      append(new Text(formatEventTime(event.ts), 0, 0))
-      append(componentFor(event))
+      appendEntry([new Text(formatEventTime(event.ts), 0, 0), componentFor(event)])
       if (live) tui.requestRender()
     }
     const onPhase = (phase: StreamPhase): void => {
       if (phase.phase === 'replay-end') {
         tui.requestRender()
       } else if (phase.phase === 'live-start') {
-        append(new Text(divider(phase.sessionLive ? 'live' : 'live (broadcasts only)'), 0, 0))
+        appendEntry([new Text(divider(phase.sessionLive ? 'live' : 'live (broadcasts only)'), 0, 0)])
         live = true
         tui.requestRender()
       }
@@ -189,4 +197,22 @@ function statusLine(_phase: 'replay'): string {
 
 function divider(text: string): string {
   return colors.dim(`─── ${text} ───`)
+}
+
+export type HistoryEntry = readonly Component[]
+
+export class BoundedComponentWindow {
+  private readonly entries: HistoryEntry[] = []
+
+  constructor(private readonly maxEntries: number) {}
+
+  push(entry: HistoryEntry): HistoryEntry | null {
+    this.entries.push(entry)
+    if (this.entries.length <= this.maxEntries) return null
+    return this.entries.shift() ?? null
+  }
+
+  get size(): number {
+    return this.entries.length
+  }
 }

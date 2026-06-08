@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Markdown, type Terminal, Text } from '@mariozechner/pi-tui'
 
 import type { SessionSummary } from './session-list'
-import { createTranscriptView, componentFor } from './transcript-view'
+import { BoundedComponentWindow, createTranscriptView, componentFor } from './transcript-view'
 import type { InspectEvent } from './types'
 import { parseFilter } from './types'
 
@@ -64,6 +64,43 @@ describe('componentFor', () => {
       { cat: 'error', ts: 1, message: 'boom' },
     ]
     for (const ev of cases) expect(componentFor(ev)).toBeInstanceOf(Text)
+  })
+})
+
+describe('BoundedComponentWindow', () => {
+  test('keeps every entry until the cap is reached', () => {
+    const window = new BoundedComponentWindow(3)
+    expect(window.push([new Text('a', 0, 0)])).toBeNull()
+    expect(window.push([new Text('b', 0, 0)])).toBeNull()
+    expect(window.push([new Text('c', 0, 0)])).toBeNull()
+    expect(window.size).toBe(3)
+  })
+
+  test('evicts the oldest entry once the cap is exceeded', () => {
+    const window = new BoundedComponentWindow(2)
+    const first = [new Text('first', 0, 0)]
+    const second = [new Text('second', 0, 0)]
+    const third = [new Text('third', 0, 0)]
+
+    expect(window.push(first)).toBeNull()
+    expect(window.push(second)).toBeNull()
+    expect(window.push(third)).toBe(first)
+    expect(window.size).toBe(2)
+  })
+
+  test('evicts the whole entry so a timestamp never outlives its body', () => {
+    const window = new BoundedComponentWindow(1)
+    const timestamp = new Text('12:00:00', 0, 0)
+    const body = new Text('assistant reply', 0, 0)
+    const firstEntry = [timestamp, body]
+    const secondEntry = [new Text('12:00:01', 0, 0), new Text('next', 0, 0)]
+
+    expect(window.push(firstEntry)).toBeNull()
+    const evicted = window.push(secondEntry)
+    expect(evicted).toBe(firstEntry)
+    expect(evicted).toContain(timestamp)
+    expect(evicted).toContain(body)
+    expect(window.size).toBe(1)
   })
 })
 
