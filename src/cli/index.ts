@@ -2,11 +2,11 @@
 
 import { defineCommand, runMain } from 'citty'
 
-import { findAgentDir } from '../init'
 import { CLI_VERSION } from '../init/cli-version'
+import { findAgentDir } from '../init/find-agent-dir'
 import { runStartupMigrations } from '../migrations'
 import { BUILTIN_COMMAND_NAMES } from './builtins'
-import { dispatchPluginCommand, type PluginCommandDispatchOutcome } from './plugin-commands-dispatch'
+import type { PluginCommandDispatchOutcome } from './plugin-commands-dispatch'
 
 const main = defineCommand({
   meta: {
@@ -98,6 +98,10 @@ async function runWithPluginDispatch(): Promise<void> {
     !first.startsWith('-') &&
     !BUILTIN_COMMAND_NAMES.includes(first as (typeof BUILTIN_COMMAND_NAMES)[number])
   ) {
+    // Lazy: the dispatch chain statically pulls in @/config, @/plugin, zod, and
+    // @/container (~190ms). Only plugin (non-builtin) commands need it, so we
+    // defer the import to keep builtin commands and bare flags fast.
+    const { dispatchPluginCommand } = await import('./plugin-commands-dispatch')
     const outcome = await dispatchPluginCommand({ name: first, rawArgs: argv.slice(1), cwd: process.cwd() })
     if (outcome.kind === 'dispatched') {
       process.exit(outcome.exitCode)
