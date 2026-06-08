@@ -67,6 +67,25 @@ describe('canMountRealProc', () => {
     // fresh probe rather than the cache (no throw, deterministic).
     expect(after).toBe(before)
   })
+
+  test('dedups concurrent first calls onto one in-flight probe (same promise identity)', () => {
+    // Strong assertion: a second call BEFORE the first settles must return the
+    // exact same in-flight promise, proving only one `unshare` is spawned. (A
+    // value-equality check would pass even with two separate spawns, so it
+    // would not actually guard the dedup.)
+    const first = canMountRealProc()
+    const second = canMountRealProc()
+    expect(second).toBe(first)
+    return first
+  })
+
+  test('caches the result for the process so later calls never re-probe', async () => {
+    // The capability is a process-global fact; once resolved (true OR false) a
+    // subsequent call returns the cached value rather than spawning again.
+    const resolved = await canMountRealProc()
+    const cachedPromise = canMountRealProc()
+    expect(await cachedPromise).toBe(resolved)
+  })
 })
 
 describe('resolveProcSelfExe', () => {

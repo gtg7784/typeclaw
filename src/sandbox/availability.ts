@@ -5,6 +5,13 @@ import { SandboxUnavailableError } from './errors'
 // resolved bwrap path so a test (or a consumer pinning a non-default path)
 // re-probes instead of reading another path's cached result.
 const availabilityCache = new Map<string, boolean>()
+// In-flight dedup: bash calls run concurrently (subagents, cron, parallel
+// tool calls), so without this two calls racing before the cache is populated
+// would each spawn a probe. The promise is cleared on settle so a probe that
+// was aborted (not "unavailable", just cancelled) does not poison the next
+// caller — the next call re-probes from scratch. Mirrors the channels
+// membership-cache in-flight pattern.
+const availabilityInFlight = new Map<string, Promise<boolean>>()
 
 export async function ensureBwrapAvailable(options?: { bwrapPath?: string }): Promise<void> {
   const bwrap = options?.bwrapPath ?? 'bwrap'
@@ -12,9 +19,27 @@ export async function ensureBwrapAvailable(options?: { bwrapPath?: string }): Pr
   if (cached === true) return
   if (cached === false) throw new SandboxUnavailableError()
 
-  const available = await probe(bwrap)
-  availabilityCache.set(bwrap, available)
+  const available = await dedupedProbe(bwrap)
   if (!available) throw new SandboxUnavailableError()
+}
+
+function dedupedProbe(bwrap: string): Promise<boolean> {
+  const existing = availabilityInFlight.get(bwrap)
+  if (existing !== undefined) return existing
+
+  const promise = probe(bwrap)
+    .then((available) => {
+      // Cache unconditionally, including false: a genuinely missing bwrap is a
+      // process-global fact, so the negative must stick rather than re-probe on
+      // every bash call. (No per-caller signal here — see canMountRealProc.)
+      availabilityCache.set(bwrap, available)
+      return available
+    })
+    .finally(() => {
+      availabilityInFlight.delete(bwrap)
+    })
+  availabilityInFlight.set(bwrap, promise)
+  return promise
 }
 
 async function probe(bwrap: string): Promise<boolean> {
@@ -32,6 +57,7 @@ async function probe(bwrap: string): Promise<boolean> {
 
 export function _resetBwrapAvailabilityCacheForTests(): void {
   availabilityCache.clear()
+  availabilityInFlight.clear()
 }
 
 // The 'real-proc' sandbox strategy prefixes bwrap with `unshare --pid --fork
@@ -48,11 +74,35 @@ export function _resetBwrapAvailabilityCacheForTests(): void {
 // low-trust bash call — restoring the pre-realProc behavior on unsupported
 // hosts (external-package execution still won't work there, exactly as before).
 let realProcProbeResult: boolean | undefined
+// In-flight dedup for the real-proc probe, same rationale as bwrap above:
+// concurrent first bash calls would otherwise each spawn `unshare`. A single
+// nullable promise suffices (no key — there is one probe), cleared on settle.
+//
+// Deliberately NOT abortable. The answer ("can THIS container mount a fresh
+// procfs?") is a process-global capability fact, not a per-request operation —
+// it does not vary with any one bash call's lifecycle. Threading a caller's
+// AbortSignal here is a category error: a deduped joiner would let the first
+// caller's abort decide a shared fact for everyone waiting on it. The payload
+// (`/bin/true`) exits in milliseconds and the result is cached for the process,
+// so cancellation buys nothing. If a supported environment ever made this probe
+// slow, add an INTERNAL timeout (the result is still global), never a caller
+// signal.
+let realProcProbeInFlight: Promise<boolean> | undefined
 
-export async function canMountRealProc(): Promise<boolean> {
-  if (realProcProbeResult !== undefined) return realProcProbeResult
-  realProcProbeResult = await probeRealProc()
-  return realProcProbeResult
+export function canMountRealProc(): Promise<boolean> {
+  if (realProcProbeResult !== undefined) return Promise.resolve(realProcProbeResult)
+  if (realProcProbeInFlight !== undefined) return realProcProbeInFlight
+
+  const promise = probeRealProc()
+    .then((canMount) => {
+      realProcProbeResult = canMount
+      return canMount
+    })
+    .finally(() => {
+      realProcProbeInFlight = undefined
+    })
+  realProcProbeInFlight = promise
+  return promise
 }
 
 async function probeRealProc(): Promise<boolean> {
@@ -74,6 +124,7 @@ async function probeRealProc(): Promise<boolean> {
 
 export function _resetRealProcProbeCacheForTests(): void {
   realProcProbeResult = undefined
+  realProcProbeInFlight = undefined
 }
 
 // The bun binary this process runs as (process.execPath). build.ts re-exposes
