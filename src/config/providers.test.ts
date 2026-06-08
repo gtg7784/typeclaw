@@ -2,11 +2,17 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   defaultThinkingLevelForRef,
+  KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
+  type KnownProviderId,
   listKnownModelRefs,
+  listKnownProviderVendorIds,
   providerForModelRef,
+  providerIdsForVendor,
   supportsApiKey,
   supportsOAuth,
+  variantLabel,
+  vendorForProviderId,
 } from './providers'
 
 describe('KNOWN_PROVIDERS', () => {
@@ -90,6 +96,65 @@ describe('KNOWN_PROVIDERS', () => {
     for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.anthropic.models)) {
       expect(model.api, `anthropic/${modelId} api drift`).toBe('anthropic-messages')
     }
+  })
+})
+
+describe('KNOWN_PROVIDER_VENDORS', () => {
+  test('every vendor references only known provider ids', () => {
+    for (const vendorId of listKnownProviderVendorIds()) {
+      for (const providerId of providerIdsForVendor(vendorId)) {
+        expect(providerId in KNOWN_PROVIDERS, `${vendorId} references unknown provider ${providerId}`).toBe(true)
+      }
+    }
+  })
+
+  test('every known provider belongs to exactly one vendor (full partition)', () => {
+    const assigned = new Map<KnownProviderId, number>()
+    for (const vendorId of listKnownProviderVendorIds()) {
+      for (const providerId of providerIdsForVendor(vendorId)) {
+        assigned.set(providerId, (assigned.get(providerId) ?? 0) + 1)
+      }
+    }
+    for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
+      expect(assigned.get(providerId), `${providerId} not assigned to exactly one vendor`).toBe(1)
+    }
+  })
+
+  test('vendorForProviderId is the inverse of providerIdsForVendor', () => {
+    for (const vendorId of listKnownProviderVendorIds()) {
+      for (const providerId of providerIdsForVendor(vendorId)) {
+        expect(vendorForProviderId(providerId)).toBe(vendorId)
+      }
+    }
+  })
+
+  test('multi-provider vendors supply variant copy for each of their providers', () => {
+    for (const vendorId of listKnownProviderVendorIds()) {
+      const providers = providerIdsForVendor(vendorId)
+      if (providers.length < 2) continue
+      for (const providerId of providers) {
+        expect(variantLabel(vendorId, providerId), `${vendorId}/${providerId} missing variant label`).not.toBe(
+          KNOWN_PROVIDERS[providerId].name,
+        )
+      }
+    }
+  })
+
+  test('OpenAI vendor splits API key (openai) from ChatGPT OAuth (openai-codex)', () => {
+    expect(providerIdsForVendor('openai')).toEqual(['openai', 'openai-codex'])
+    expect(variantLabel('openai', 'openai')).toBe('API key')
+    expect(variantLabel('openai', 'openai-codex')).toBe('OAuth (ChatGPT Plus/Pro)')
+  })
+
+  test('Z.AI vendor splits paygo (zai) from Coding Plan (zai-coding)', () => {
+    expect(providerIdsForVendor('zai')).toEqual(['zai', 'zai-coding'])
+    expect(variantLabel('zai', 'zai')).toBe('Pay-as-you-go')
+    expect(variantLabel('zai', 'zai-coding')).toBe('Coding Plan')
+  })
+
+  test('Anthropic and Fireworks are single-provider vendors (no variant step)', () => {
+    expect(providerIdsForVendor('anthropic')).toEqual(['anthropic'])
+    expect(providerIdsForVendor('fireworks')).toEqual(['fireworks'])
   })
 })
 

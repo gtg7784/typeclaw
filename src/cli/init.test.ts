@@ -1,6 +1,12 @@
 import { describe, expect, mock, test } from 'bun:test'
 
-import { KNOWN_PROVIDERS, supportsApiKey, supportsOAuth, type KnownProviderId } from '@/config/providers'
+import {
+  KNOWN_PROVIDERS,
+  supportsApiKey,
+  supportsOAuth,
+  type KnownProviderId,
+  type KnownProviderVendorId,
+} from '@/config/providers'
 import type { ModelOption } from '@/init/models-dev'
 
 import {
@@ -78,12 +84,14 @@ describe('collectWizardInputs back-aware flow', () => {
       loadCatalog: async () => ({ options: [fireworksModel, openaiModel, codexModel], source: 'curated' }),
       readExistingApiKey: async () => null,
       hasExistingOAuthCredentials: async () => false,
-      pickProvider: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: fireworksModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
       askApiKey: async () => ({ kind: 'value', value: 'sk_test' }),
       validateApiKey: async () => ({ kind: 'ok' as const }),
-      pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'skip' }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'openai' as KnownProviderId, auto: true }),
       pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickChannel: async () => ({ kind: 'value', value: 'none' }),
       hasExistingChannelSecrets: async () => false,
@@ -101,9 +109,9 @@ describe('collectWizardInputs back-aware flow', () => {
         record('load-catalog')
         return { options: [fireworksModel], source: 'curated' }
       },
-      pickProvider: async () => {
-        record('pick-provider')
-        return { kind: 'value', value: 'fireworks' as KnownProviderId }
+      pickVendor: async () => {
+        record('pick-vendor')
+        return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
       },
       pickModel: async () => {
         record('pick-model')
@@ -131,9 +139,9 @@ describe('collectWizardInputs back-aware flow', () => {
 
     expect(steps).toEqual([
       'load-catalog',
-      'pick-provider',
-      'pick-model',
+      'pick-vendor',
       'pick-auth-method',
+      'pick-model',
       'enter-api-key',
       'pick-channel',
       'channel-flow',
@@ -143,32 +151,32 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.channelSecrets).toEqual({})
   })
 
-  test('back from pick-provider re-asks the same prompt; cancelling twice aborts', async () => {
-    let providerCalls = 0
+  test('back from pick-vendor re-asks the same prompt; cancelling twice aborts', async () => {
+    let vendorCalls = 0
     const prompts = makePrompts({
-      pickProvider: async () => {
-        providerCalls += 1
+      pickVendor: async () => {
+        vendorCalls += 1
         return { kind: 'back' }
       },
     })
 
     await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
-    expect(providerCalls).toBe(2)
+    expect(vendorCalls).toBe(2)
   })
 
-  test('back from pick-provider then pick succeeds (single cancel is still a no-op)', async () => {
-    let providerCalls = 0
+  test('back from pick-vendor then pick succeeds (single cancel is still a no-op)', async () => {
+    let vendorCalls = 0
     const prompts = makePrompts({
-      pickProvider: async () => {
-        providerCalls += 1
-        if (providerCalls === 1) return { kind: 'back' }
-        return { kind: 'value', value: 'fireworks' as KnownProviderId }
+      pickVendor: async () => {
+        vendorCalls += 1
+        if (vendorCalls === 1) return { kind: 'back' }
+        return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
       },
     })
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(providerCalls).toBe(2)
+    expect(vendorCalls).toBe(2)
     expect(result.model).toBe(fireworksModel)
   })
 
@@ -179,6 +187,7 @@ describe('collectWizardInputs back-aware flow', () => {
     let apiKeyCalls = 0
     const prompts = makePrompts({
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key', auto: true }),
+      pickModel: async () => ({ kind: 'value', value: fireworksModel, auto: true }),
       askApiKey: async () => {
         apiKeyCalls += 1
         return { kind: 'back' }
@@ -193,13 +202,13 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(apiKeyCalls).toBe(2)
   })
 
-  test('back from pick-model returns to pick-provider, then advances', async () => {
+  test('back from pick-model returns to pick-vendor, then advances', async () => {
     const calls: string[] = []
     let modelBacked = false
     const prompts = makePrompts({
-      pickProvider: async () => {
-        calls.push('pick-provider')
-        return { kind: 'value', value: 'fireworks' as KnownProviderId }
+      pickVendor: async () => {
+        calls.push('pick-vendor')
+        return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
       },
       pickModel: async () => {
         calls.push('pick-model')
@@ -213,7 +222,7 @@ describe('collectWizardInputs back-aware flow', () => {
 
     await collectWizardInputs('/agent', prompts)
 
-    expect(calls).toEqual(['pick-provider', 'pick-model', 'pick-provider', 'pick-model'])
+    expect(calls).toEqual(['pick-vendor', 'pick-model', 'pick-vendor', 'pick-model'])
   })
 
   test('back from pick-channel returns to enter-api-key when api-key was chosen', async () => {
@@ -247,7 +256,8 @@ describe('collectWizardInputs back-aware flow', () => {
     const calls: string[] = []
     let channelBacked = false
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -265,7 +275,7 @@ describe('collectWizardInputs back-aware flow', () => {
 
     await collectWizardInputs('/agent', prompts)
 
-    expect(calls).toEqual(['pick-auth-method', 'pick-channel', 'pick-auth-method', 'pick-channel'])
+    expect(calls).toEqual(['pick-auth-method', 'pick-channel', 'pick-channel'])
   })
 
   test('auto-resume: existing api-key skips pick-auth-method and enter-api-key silently', async () => {
@@ -301,34 +311,40 @@ describe('collectWizardInputs back-aware flow', () => {
 
   test('changing provider clears the previously picked model so it is re-asked fresh', async () => {
     let providerCallCount = 0
-    let authBacked = false
+    let apiKeyBacked = false
+    let modelCalls = 0
     const modelInitials: (string | undefined)[] = []
     const prompts = makePrompts({
-      pickProvider: async () => {
+      pickVendor: async () => {
         providerCallCount += 1
-        return { kind: 'value', value: (providerCallCount === 1 ? 'fireworks' : 'openai') as KnownProviderId }
+        return { kind: 'value', value: (providerCallCount === 1 ? 'fireworks' : 'openai') as KnownProviderVendorId }
+      },
+      pickProviderVariant: async (vendorId) => {
+        return { kind: 'value', value: (vendorId === 'fireworks' ? 'fireworks' : 'openai') as KnownProviderId }
       },
       pickModel: async (_options, providerId, initial) => {
+        modelCalls += 1
         modelInitials.push(initial)
+        if (providerId === 'fireworks' && modelCalls === 2) return { kind: 'back' }
         return {
           kind: 'value',
           value: providerId === 'fireworks' ? fireworksModel : openaiModel,
         }
       },
-      pickAuthMethod: async () => {
-        if (!authBacked) {
-          authBacked = true
+      pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
+      askApiKey: async () => {
+        if (!apiKeyBacked) {
+          apiKeyBacked = true
           return { kind: 'back' }
         }
-        return { kind: 'value', value: 'api-key' }
+        return { kind: 'value', value: 'sk_test' }
       },
     })
 
     await collectWizardInputs('/agent', prompts)
 
-    expect(providerCallCount).toBe(1)
-    expect(modelInitials.length).toBeGreaterThanOrEqual(2)
-    expect(modelInitials[1]).toBe(fireworksModel.ref)
+    expect(providerCallCount).toBe(2)
+    expect(modelInitials).toEqual([undefined, fireworksModel.ref, undefined])
   })
 
   test('picking a different provider on retry discards the prior model selection', async () => {
@@ -336,9 +352,12 @@ describe('collectWizardInputs back-aware flow', () => {
     let modelBackedOnce = false
     const modelInitials: (string | undefined)[] = []
     const prompts = makePrompts({
-      pickProvider: async () => {
+      pickVendor: async () => {
         providerCallCount += 1
-        return { kind: 'value', value: (providerCallCount === 1 ? 'fireworks' : 'openai') as KnownProviderId }
+        return { kind: 'value', value: (providerCallCount === 1 ? 'fireworks' : 'openai') as KnownProviderVendorId }
+      },
+      pickProviderVariant: async (vendorId) => {
+        return { kind: 'value', value: (vendorId === 'fireworks' ? 'fireworks' : 'openai') as KnownProviderId }
       },
       pickModel: async (_options, providerId, initial) => {
         modelInitials.push(initial)
@@ -350,12 +369,13 @@ describe('collectWizardInputs back-aware flow', () => {
         }
         return { kind: 'value', value: openaiModel }
       },
-      pickAuthMethod: async () => {
+      pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
+      askApiKey: async () => {
         if (!modelBackedOnce) {
           modelBackedOnce = true
           return { kind: 'back' }
         }
-        return { kind: 'value', value: 'api-key' }
+        return { kind: 'value', value: 'sk_test' }
       },
     })
 
@@ -373,9 +393,9 @@ describe('collectWizardInputs back-aware flow', () => {
         catalogLoads += 1
         return { options: [fireworksModel], source: 'curated' }
       },
-      pickProvider: async () => {
+      pickVendor: async () => {
         providerCallCount += 1
-        return { kind: 'value', value: 'fireworks' as KnownProviderId }
+        return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
       },
       pickModel: async () => {
         if (providerCallCount === 1) return { kind: 'back' }
@@ -393,17 +413,21 @@ describe('collectWizardInputs back-aware flow', () => {
     const calls: string[] = []
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => {
         calls.push('enter-api-key')
         return { kind: 'value', value: 'zai_key' }
       },
-      pickVisionProvider: async (options) => {
-        calls.push('pick-vision-provider')
+      pickVisionVendor: async (options) => {
+        calls.push('pick-vision-vendor')
         // Vision picker MUST be fed only vision-capable models.
         expect(options.every((o) => o.supportsVision)).toBe(true)
         expect(options.some((o) => o.ref === zaiTextOnlyModel.ref)).toBe(false)
+        return { kind: 'value', value: 'openai' as KnownProviderVendorId }
+      },
+      pickVisionProviderVariant: async () => {
         return { kind: 'value', value: 'openai' as KnownProviderId }
       },
       pickVisionModel: async () => {
@@ -425,7 +449,7 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(calls).toEqual([
       'pick-auth-method',
       'enter-api-key',
-      'pick-vision-provider',
+      'pick-vision-vendor',
       'pick-vision-model',
       'pick-auth-method',
       'enter-api-key',
@@ -438,10 +462,10 @@ describe('collectWizardInputs back-aware flow', () => {
   test('vision-capable default model: vision picker is skipped entirely', async () => {
     const calls: string[] = []
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderVendorId }),
       pickModel: async () => ({ kind: 'value', value: fireworksModel }),
-      pickVisionProvider: async () => {
-        calls.push('pick-vision-provider')
+      pickVisionVendor: async () => {
+        calls.push('pick-vision-vendor')
         return { kind: 'value', value: 'skip' }
       },
       pickVisionModel: async () => {
@@ -459,9 +483,10 @@ describe('collectWizardInputs back-aware flow', () => {
   test('vision skip returns no vision profile', async () => {
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
-      pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'skip' }),
     })
 
     const result = await collectWizardInputs('/agent', prompts)
@@ -474,13 +499,15 @@ describe('collectWizardInputs back-aware flow', () => {
     const visionOpenAI: ModelOption = { ...openaiModel, ref: 'openai/gpt-5.4', modelId: 'gpt-5.4' }
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, visionOpenAI], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => {
         calls.push('enter-api-key')
         return { kind: 'value', value: 'zai_key' }
       },
-      pickVisionProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickVisionModel: async () => ({ kind: 'value', value: { ...zaiTextOnlyModel, supportsVision: true } }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -499,10 +526,12 @@ describe('collectWizardInputs back-aware flow', () => {
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
       readExistingApiKey: async (_cwd, providerId) => (providerId === 'openai' ? 'sk_existing_openai' : null),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
-      pickVisionProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
       pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -516,19 +545,20 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result!.vision?.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing_openai' })
   })
 
-  test('back from pick-vision-provider returns to the auth-finalizing step', async () => {
+  test('back from pick-vision-vendor returns to pick-model', async () => {
     const calls: string[] = []
     let backed = false
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => {
         calls.push('enter-api-key')
         return { kind: 'value', value: 'zai_key' }
       },
-      pickVisionProvider: async () => {
-        calls.push('pick-vision-provider')
+      pickVisionVendor: async () => {
+        calls.push('pick-vision-vendor')
         if (!backed) {
           backed = true
           return { kind: 'back' }
@@ -539,7 +569,7 @@ describe('collectWizardInputs back-aware flow', () => {
 
     await collectWizardInputs('/agent', prompts)
 
-    expect(calls).toEqual(['enter-api-key', 'pick-vision-provider', 'enter-api-key', 'pick-vision-provider'])
+    expect(calls).toEqual(['enter-api-key', 'pick-vision-vendor', 'enter-api-key', 'pick-vision-vendor'])
   })
 
   test('back from channel-flow returns to pick-channel', async () => {
@@ -682,7 +712,8 @@ describe('collectWizardInputs back-aware flow', () => {
     const calls: string[] = []
     const loginCalls: Array<{ cwd: string; model: string; providerName: string }> = []
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -713,7 +744,8 @@ describe('collectWizardInputs back-aware flow', () => {
     let loginAttempt = 0
     let authMethodCalls = 0
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => {
         authMethodCalls += 1
@@ -752,7 +784,8 @@ describe('collectWizardInputs back-aware flow', () => {
   test('oauth path: login failure → user picks api-key fallback routes to enter-api-key', async () => {
     const calls: string[] = []
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: openaiModel }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -790,7 +823,8 @@ describe('collectWizardInputs back-aware flow', () => {
 
   test('oauth path: login failure → user picks abort throws WizardAbortedError', async () => {
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async () => ({ ok: false, reason: 'cancelled' }),
@@ -803,7 +837,8 @@ describe('collectWizardInputs back-aware flow', () => {
   test('oauth path: oauth-only provider gets apiKeyAvailable=false in recovery prompt', async () => {
     let apiKeyAvailableSeen: boolean | undefined
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async () => ({ ok: false, reason: 'whatever' }),
@@ -820,7 +855,8 @@ describe('collectWizardInputs back-aware flow', () => {
   test('oauth path: runner that throws is coerced to a failure recovery prompt (init never crashes)', async () => {
     const calls: string[] = []
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
@@ -845,10 +881,12 @@ describe('collectWizardInputs back-aware flow', () => {
     const loginCalls: Array<{ cwd: string; model: string; providerName: string }> = []
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, codexModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
-      pickVisionProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickVisionModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async (provider) => {
         calls.push(`pick-auth-method:${provider.id}`)
@@ -886,7 +924,8 @@ describe('collectWizardInputs back-aware flow', () => {
     let askApiKeyCalls = 0
     let askApiKeyBackCount = 0
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: openaiModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async () => ({ ok: false, reason: 'failed' }),
@@ -916,8 +955,9 @@ describe('collectWizardInputs back-aware flow', () => {
     // can warn the user instead of exiting silently.
     let channelBacks = 0
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
-      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel, auto: true }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
       runOAuthLogin: async () => ({ ok: true }),
       pickChannel: async () => {
@@ -938,7 +978,8 @@ describe('collectWizardInputs back-aware flow', () => {
 
   test('oauth path: WizardAbortedError.oauthCredentialsSaved is false when OAuth never succeeded', async () => {
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async () => ({ ok: false, reason: 'nope' }),
@@ -964,7 +1005,8 @@ describe('collectWizardInputs back-aware flow', () => {
     let seenBothAuthModes: boolean | undefined
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: anthropicModel }),
       pickAuthMethod: async (provider) => {
         seenProviderId = provider.id
@@ -985,7 +1027,8 @@ describe('collectWizardInputs back-aware flow', () => {
     const loginCalls: Array<{ cwd: string; model: string; providerId: string }> = []
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: anthropicModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async (provider, cwd, model) => {
@@ -996,7 +1039,7 @@ describe('collectWizardInputs back-aware flow', () => {
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(loginCalls).toEqual([{ cwd: '/agent', model: 'anthropic/claude-sonnet-4-6', providerId: 'anthropic' }])
+    expect(loginCalls).toEqual([{ cwd: '/agent', model: 'anthropic/claude-haiku-4-5', providerId: 'anthropic' }])
     expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
   })
 
@@ -1007,7 +1050,8 @@ describe('collectWizardInputs back-aware flow', () => {
     let apiKeyAvailableSeen: boolean | undefined
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: anthropicModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
       runOAuthLogin: async () => ({ ok: false, reason: 'browser closed' }),
@@ -1027,7 +1071,8 @@ describe('collectWizardInputs back-aware flow', () => {
   test('auto-resume: existing OAuth credentials skip the browser login', async () => {
     const runOAuth = mock(async () => ({ ok: true as const }))
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       hasExistingOAuthCredentials: async (_cwd, providerId) => providerId === 'openai-codex',
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
@@ -1044,10 +1089,12 @@ describe('collectWizardInputs back-aware flow', () => {
     const runOAuth = mock(async () => ({ ok: true as const }))
     const prompts = makePrompts({
       loadCatalog: async () => ({ options: [zaiTextOnlyModel, codexModel], source: 'curated' }),
-      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'zai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'zai' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
       askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
-      pickVisionProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickVisionModel: async () => ({ kind: 'value', value: codexModel }),
       hasExistingOAuthCredentials: async (_cwd, providerId) => providerId === 'openai-codex',
       pickAuthMethod: async (provider) => ({
@@ -1067,7 +1114,8 @@ describe('collectWizardInputs back-aware flow', () => {
     const runOAuth = mock(async () => ({ ok: true as const }))
     const hasOAuth = mock(async () => true)
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'openai' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: codexModel }),
       hasExistingOAuthCredentials: hasOAuth,
       pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
@@ -1115,7 +1163,8 @@ describe('collectWizardInputs back-aware flow', () => {
       readExistingApiKey: readExisting,
       hasExistingOAuthCredentials: hasOAuth,
       hasExistingChannelSecrets: hasChannel,
-      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickVendor: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId, auto: true }),
       pickModel: async () => ({ kind: 'value', value: anthropicModel }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
       askApiKey: async () => ({ kind: 'value', value: 'sk_fresh' }),

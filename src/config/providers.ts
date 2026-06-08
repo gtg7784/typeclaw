@@ -119,13 +119,12 @@ export const KNOWN_PROVIDERS = {
   // these ids work end-to-end as long as the Codex backend itself accepts
   // them, which it does for ChatGPT Plus/Pro accounts as of 2026-05-10.
   //
-  // Position-load-bearing: must stay adjacent to `openai`. The init wizard's
-  // provider picker, `provider --help`'s `id | id | ...` listing, and the
-  // generated JSON schema's model-ref enum all derive their ordering from
-  // Object.keys() iteration on this literal. Alphabetizing the registry
-  // would scatter `openai-codex` after `fireworks` and re-introduce the
-  // "OpenAI ... Anthropic ... OpenAI" picker order this comment exists to
-  // prevent.
+  // Position-load-bearing: must stay adjacent to `openai`. `provider --help`'s
+  // `id | id | ...` listing and the generated JSON schema's model-ref enum
+  // derive their ordering from Object.keys() iteration on this literal, so
+  // alphabetizing the registry would scatter `openai-codex` after `fireworks`.
+  // (The init wizard's picker no longer depends on this order — it groups by
+  // `KNOWN_PROVIDER_VENDORS` below.)
   'openai-codex': {
     id: 'openai-codex',
     name: 'OpenAI Codex (ChatGPT Plus/Pro)',
@@ -456,6 +455,95 @@ export const KNOWN_PROVIDERS = {
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
+
+// UX-only grouping of provider ids under one vendor for the init/`provider
+// add` pickers. Deliberately does NOT touch the runtime contract:
+// `KnownProviderId`, `KnownModelRef`, secrets.json keys, auth resolution, and
+// the generated schema all stay keyed on the flat ids in `KNOWN_PROVIDERS`.
+// The follow-up "variant" prompt resolves a concrete provider id, then
+// `pickAuthMethod` runs as before; it is auto-resolved for single-provider
+// vendors (Fireworks, Anthropic). `variants` copy lets the prompt read as an
+// auth choice for OpenAI but a plan choice for Z.AI (both api-key, different
+// billing surfaces).
+type KnownProviderVendor = {
+  id: string
+  name: string
+  providers: ReadonlyArray<KnownProviderId>
+  variants?: Partial<Record<KnownProviderId, { label: string; hint?: string }>>
+}
+
+// Ordered by product priority for the picker — independent of the
+// `KNOWN_PROVIDERS` declaration order (which stays load-bearing for the schema
+// enum and `provider --help` listing). Every provider id below MUST appear in
+// exactly one vendor; `providers.test.ts` enforces the partition.
+export const KNOWN_PROVIDER_VENDORS = {
+  openai: {
+    id: 'openai',
+    name: 'OpenAI',
+    providers: ['openai', 'openai-codex'],
+    variants: {
+      openai: { label: 'API key', hint: 'OpenAI API platform' },
+      'openai-codex': { label: 'OAuth (ChatGPT Plus/Pro)', hint: 'ChatGPT subscription' },
+    },
+  },
+  anthropic: {
+    id: 'anthropic',
+    name: 'Anthropic',
+    providers: ['anthropic'],
+  },
+  fireworks: {
+    id: 'fireworks',
+    name: 'Fireworks',
+    providers: ['fireworks'],
+  },
+  zai: {
+    id: 'zai',
+    name: 'Z.AI',
+    providers: ['zai', 'zai-coding'],
+    variants: {
+      zai: { label: 'Pay-as-you-go', hint: 'standard API billing' },
+      'zai-coding': { label: 'Coding Plan', hint: 'GLM Coding Plan subscription' },
+    },
+  },
+} as const satisfies Record<string, KnownProviderVendor>
+
+export type KnownProviderVendorId = keyof typeof KNOWN_PROVIDER_VENDORS
+
+export function listKnownProviderVendorIds(): KnownProviderVendorId[] {
+  return Object.keys(KNOWN_PROVIDER_VENDORS) as KnownProviderVendorId[]
+}
+
+export function providerIdsForVendor(vendorId: KnownProviderVendorId): ReadonlyArray<KnownProviderId> {
+  return KNOWN_PROVIDER_VENDORS[vendorId].providers
+}
+
+export function vendorForProviderId(providerId: KnownProviderId): KnownProviderVendorId {
+  for (const vendorId of listKnownProviderVendorIds()) {
+    if ((KNOWN_PROVIDER_VENDORS[vendorId].providers as ReadonlyArray<KnownProviderId>).includes(providerId)) {
+      return vendorId
+    }
+  }
+  throw new Error(`Provider ${providerId} is not assigned to any vendor in KNOWN_PROVIDER_VENDORS`)
+}
+
+function variantCopy(
+  vendorId: KnownProviderVendorId,
+  providerId: KnownProviderId,
+): { label: string; hint?: string } | undefined {
+  const vendor: KnownProviderVendor = KNOWN_PROVIDER_VENDORS[vendorId]
+  return vendor.variants?.[providerId]
+}
+
+// Falls back to the provider's own name when a vendor supplies no variant copy
+// (single-provider vendors never render this prompt, so the fallback only
+// guards against an incomplete `variants` map on a multi-provider vendor).
+export function variantLabel(vendorId: KnownProviderVendorId, providerId: KnownProviderId): string {
+  return variantCopy(vendorId, providerId)?.label ?? KNOWN_PROVIDERS[providerId].name
+}
+
+export function variantHint(vendorId: KnownProviderVendorId, providerId: KnownProviderId): string | undefined {
+  return variantCopy(vendorId, providerId)?.hint
+}
 
 export type KnownModelRef = {
   [P in KnownProviderId]: `${P}/${Extract<keyof (typeof KNOWN_PROVIDERS)[P]['models'], string>}`

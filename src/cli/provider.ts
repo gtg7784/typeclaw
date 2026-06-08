@@ -2,10 +2,16 @@ import { cancel, intro, isCancel, log, password, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import {
+  KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
+  listKnownProviderVendorIds,
+  providerIdsForVendor,
   supportsApiKey as providerSupportsApiKey,
   supportsOAuth as providerSupportsOAuth,
+  variantHint,
+  variantLabel,
   type KnownProviderId,
+  type KnownProviderVendorId,
 } from '@/config/providers'
 import {
   addProvider,
@@ -270,15 +276,40 @@ function validateKnownProvider(input: string): KnownProviderId {
 
 async function resolveProviderForAdd(input: string | undefined): Promise<KnownProviderId> {
   if (input !== undefined) return validateKnownProvider(input)
-  const ids = Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]
-  const choice = await select<KnownProviderId>({
+  const vendorId = await pickVendorToAdd()
+  return await pickVariantToAdd(vendorId)
+}
+
+async function pickVendorToAdd(): Promise<KnownProviderVendorId> {
+  const vendorIds = listKnownProviderVendorIds()
+  const choice = await select<KnownProviderVendorId>({
     message: 'Pick a provider to add',
-    options: ids.map((id) => ({
+    options: vendorIds.map((id) => ({
       value: id,
-      label: KNOWN_PROVIDERS[id].name,
-      hint: authHint(id),
+      label: KNOWN_PROVIDER_VENDORS[id].name,
+      hint: vendorAuthHint(id),
     })),
-    initialValue: ids[0],
+    initialValue: vendorIds[0],
+  })
+  if (isCancel(choice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return choice
+}
+
+async function pickVariantToAdd(vendorId: KnownProviderVendorId): Promise<KnownProviderId> {
+  const variants = providerIdsForVendor(vendorId)
+  if (variants.length === 1) return variants[0]!
+  const choice = await select<KnownProviderId>({
+    message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
+    options: variants.map((id) => {
+      const hint = variantHint(vendorId, id)
+      return hint !== undefined
+        ? { value: id, label: variantLabel(vendorId, id), hint }
+        : { value: id, label: variantLabel(vendorId, id) }
+    }),
+    initialValue: variants[0],
   })
   if (isCancel(choice)) {
     cancel('Aborted.')
@@ -378,10 +409,10 @@ async function runOAuthLogin(cwd: string, providerId: KnownProviderId): Promise<
   }
 }
 
-function authHint(id: KnownProviderId): string {
-  const provider = KNOWN_PROVIDERS[id]
-  const apiKey = providerSupportsApiKey(provider)
-  const oauth = providerSupportsOAuth(provider)
+function vendorAuthHint(vendorId: KnownProviderVendorId): string {
+  const providers = providerIdsForVendor(vendorId)
+  const apiKey = providers.some((id) => providerSupportsApiKey(KNOWN_PROVIDERS[id]))
+  const oauth = providers.some((id) => providerSupportsOAuth(KNOWN_PROVIDERS[id]))
   if (apiKey && oauth) return 'API key or OAuth'
   if (oauth) return 'OAuth only'
   return 'API key'
