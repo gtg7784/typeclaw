@@ -2389,8 +2389,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const hasBotParticipated = (live: LiveSession): boolean => {
     if (live.successfulChannelSends > 0) return true
+    // Only OUR own prefetched history counts as participation — matching any
+    // bot here let a PEER bot's buffered message flip botInThread=true,
+    // neutralizing the replyToOtherMessageId suppressor and engaging us in a
+    // thread aimed at another bot. Self id is unavailable during the startup
+    // identity race; then this falls back to successfulChannelSends, which is
+    // safe (conservative: we just don't claim participation we can't prove).
+    const selfId = resolveSelfIdentity(live.key)?.id
+    if (selfId === undefined) return false
     for (const item of live.contextBuffer) {
-      if (item.authorIsBot) return true
+      if (item.authorId === selfId) return true
     }
     return false
   }

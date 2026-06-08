@@ -6004,6 +6004,89 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(prompt).toContain('hey bot')
   })
 
+  test('a peer bot in prefetched history does NOT make botInThread true (stays quiet on a human-rooted reply-to-other)', async () => {
+    // Incident: dobby woke on a fresh thread cold-start whose prefetched
+    // history held a PEER bot's message. `hasBotParticipated` counted that
+    // peer bot as "we participated", flipping botInThread=true, which
+    // neutralized the replyToOtherMessageId suppressor and let dobby engage
+    // a thread aimed at another bot. botInThread must mean OUR participation,
+    // not "some bot spoke here".
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({
+          externalMessageId: 'peer-hist',
+          text: 'peer bot analysis',
+          authorId: 'peer1',
+          authorName: 'PeerBot',
+          isBot: true,
+        }),
+      ],
+    }))
+
+    // when: a human posts a thread reply whose parent (thread root) is another
+    // human — Slack's parent_user_id always points at the root, so this is the
+    // shape the suppressor exists to catch. No mention/alias/dm.
+    await router.route(
+      inbound({
+        thread: 't-A',
+        externalMessageId: 'human-followup',
+        text: 'follow-up between others',
+        authorId: 'human-asker',
+        authorName: 'human-asker',
+        isBotMention: false,
+        replyToBotMessageId: null,
+        replyToOtherMessageId: 't-A',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    // then: observed, not engaged (no prompt produced)
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('our OWN message in prefetched history DOES make botInThread true (PR #58 cold-start participation survives)', async () => {
+    // The flip side of the fix: a cold-start that prefetches DOBBY's own past
+    // reply (authorId === self identity) must still count as participation, so
+    // a human follow-up in a thread we already answered engages rather than
+    // being dropped by the replyToOtherMessageId suppressor.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerSelfIdentity('discord-bot', () => ({ id: 'BOT_SELF_ID' }))
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({
+          externalMessageId: 'own-hist',
+          text: 'our earlier reply',
+          authorId: 'BOT_SELF_ID',
+          authorName: 'Dobby',
+          isBot: true,
+        }),
+      ],
+    }))
+
+    await router.route(
+      inbound({
+        thread: 't-A',
+        externalMessageId: 'human-followup',
+        text: 'thanks, one more thing',
+        authorId: 'human-asker',
+        authorName: 'human-asker',
+        isBotMention: false,
+        replyToBotMessageId: null,
+        replyToOtherMessageId: 't-A',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    // then: engaged (a prompt is produced) — our prior participation is honored
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
   test('prefetches channel scrollback (tail-only) when session is not in a thread', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
