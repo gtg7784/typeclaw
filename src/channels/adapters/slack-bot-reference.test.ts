@@ -23,7 +23,10 @@ function fakeFetch(messages: ReadonlyMap<string, { authorId: string; authorName:
 }
 
 describe('enrichSlackReferenceContext', () => {
-  test('keeps raw text and adds thread-root reply context', async () => {
+  test('does not derive reply context from thread membership', async () => {
+    // Slack thread_ts is the thread root on EVERY in-thread message, so it is
+    // not a per-message reply signal. A plain in-thread reply must not fetch
+    // or attach the root as quote context.
     const { fetch, calls } = fakeFetch(
       new Map([['C1:1700.000001', { authorId: 'UBOB', authorName: 'Bob', text: 'root text' }]]),
     )
@@ -31,19 +34,12 @@ describe('enrichSlackReferenceContext', () => {
     const result = await enrichSlackReferenceContext({
       text: 'actual reply',
       channelId: 'C1',
-      threadTs: '1700.000001',
       messageTs: '1700.000002',
       fetchMessage: fetch,
     })
 
-    expect(result).toEqual({
-      text: 'actual reply',
-      referenceContext: {
-        kind: 'reply',
-        sources: [{ adapter: 'slack-bot', authorId: 'UBOB', authorName: 'Bob', text: 'root text' }],
-      },
-    })
-    expect(calls).toEqual([{ channelId: 'C1', messageTs: '1700.000001' }])
+    expect(result).toEqual({ text: 'actual reply' })
+    expect(calls).toEqual([])
   })
 
   test('keeps share-only raw text empty and adds quote context from share attachments', async () => {

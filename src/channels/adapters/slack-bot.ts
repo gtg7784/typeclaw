@@ -1128,7 +1128,6 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       const referenceResult = await enrichSlackReferenceContext({
         text: verdict.payload.text,
         channelId: event.channel,
-        ...(event.thread_ts !== undefined ? { threadTs: event.thread_ts } : {}),
         messageTs: event.ts,
         ...(slackAttachments !== undefined ? { attachments: slackAttachments } : {}),
         fetchMessage: createSlackReferenceFetch({ token: options.token, fetchImpl, authorResolver }),

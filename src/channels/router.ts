@@ -3978,19 +3978,16 @@ function composeTurnPrompt(
     }
     parts.push('')
   }
-  // Only emit the `## Current message(s)` header when there is at least one
-  // queued inbound to live under it. A reminder-only wakeup (subagent
-  // completion firing while the prompt queue is empty) used to print the
-  // header with zero lines underneath; persona-rich models read the empty
-  // header as "there must be a current message addressed to me" and
-  // hallucinated content to reply to. The header is now batch-gated; the
-  // reminder block above and any observed context still render normally.
+  // Emit the `## Current message(s)` header whenever the batch is non-empty.
+  // It is batch-gated (a reminder-only wakeup with an empty promptQueue must
+  // not print a header with zero lines under it — persona-rich models read
+  // the dangling header as a message they're failing to see and hallucinate a
+  // reply). It must NOT also be gated on observed context: a turn carrying
+  // only the current message then rendered the batch line bare, or flush under
+  // the `## Recent context (not addressed to you …)` header — mislabeling the
+  // one line the model is supposed to answer as context it should ignore.
   if (batch.length > 0) {
-    if (observed.length > 0) {
-      parts.push(
-        batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)',
-      )
-    }
+    parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
     for (const b of batch) {
       parts.push(formatInboundPromptLines(b, adapter))
     }

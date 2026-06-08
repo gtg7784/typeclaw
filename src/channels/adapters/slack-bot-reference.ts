@@ -16,7 +16,6 @@ export type SlackMessagePointer = {
 export async function enrichSlackReferenceContext(args: {
   text: string
   channelId: string
-  threadTs?: string
   messageTs: string
   attachments?: readonly unknown[]
   fetchMessage: SlackReferenceFetch
@@ -25,17 +24,17 @@ export async function enrichSlackReferenceContext(args: {
   const sources: QuoteAnchorSource[] = []
   let kind: InboundReferenceContext['kind'] = 'link'
 
-  if (args.threadTs !== undefined && args.threadTs !== args.messageTs) {
-    const parent = await fetchSafely(args.fetchMessage, { channelId: args.channelId, messageTs: args.threadTs })
-    if (parent !== null) {
-      sources.push(toSource(parent))
-      kind = 'reply'
-    }
-  }
-
+  // Slack `thread_ts` is thread MEMBERSHIP, not a "reply-to this message"
+  // signal: every message in a thread carries the same root ts, so deriving
+  // reply context from it attached the thread root as a quote anchor on every
+  // in-thread message — repeated once per buffered message in a turn, and
+  // re-attached on every turn for the life of the thread. Only explicit
+  // message shares and archive links below carry a genuine referenced-message
+  // signal. If Slack ever exposes a distinct referenced-message id, add a new
+  // path for it rather than reusing `thread_ts`.
   for (const source of extractSlackShareSources(args.attachments ?? [])) {
     sources.push(source)
-    if (kind !== 'reply') kind = 'quote'
+    kind = 'quote'
   }
 
   const links = extractSlackMessageLinks(args.text).slice(0, args.linkLimit ?? 3)
