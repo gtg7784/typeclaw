@@ -287,6 +287,36 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('pin the evidence')
   })
 
+  test('code-review skill checks intent drift, not just local architecture fit (drift guard)', () => {
+    // A diff can compile, pass its own tests, and still pull the system away
+    // from the design intent the surrounding code was built on. Without naming
+    // intent drift, the reviewer only catches layering/duplication and misses
+    // the "purely a refactor that quietly changed behavior" class.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('intent drift')
+    expect(lower).toContain('diverges from the design intent')
+  })
+
+  test('code-review skill hunts regressions in callers the diff never shows (drift guard)', () => {
+    // The regression's other half lives in an existing caller of a changed
+    // contract — not in the diff, not in this PR's test count. Without this the
+    // reviewer clears a contract change as "looks fine in the diff" and the
+    // broken caller ships silently.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('regression risk and blast radius')
+    expect(lower).toContain('who depended on the old behavior')
+  })
+
+  test('code-review skill traces side effects that reach outside the changed lines (drift guard)', () => {
+    // The dangerous side effect (mutated shared state, un-invalidated cache,
+    // leaked resource on a new error path) has no line in the diff to anchor
+    // to — it emerges from interaction. Without this the reviewer only sees
+    // what changed, never what the change disturbs.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('side effects and ripple')
+    expect(lower).toContain('cleanup path')
+  })
+
   test('code-review skill flags change hygiene — stray temporary commits (drift guard)', () => {
     // Escaped scaffolding (wip/fixup commits, debug logging) the language-neutral base prompt misses.
     const lower = CODE_REVIEW_SKILL.content.toLowerCase()
