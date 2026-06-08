@@ -62,7 +62,7 @@ export type EngagementInput = {
   // once. Empty list means alias-based engagement is off — useful for
   // tests and for agents that explicitly want strict-mention behavior.
   // Match semantics: case-insensitive substring of inbound text. This is
-  // the operator contract documented in typeclaw-config; if a name is too
+  // the operator contract documented in typeclaw-channels; if a name is too
   // generic ("bot", "ai") it WILL produce false matches and the operator
   // owns curation.
   selfAliases: readonly string[]

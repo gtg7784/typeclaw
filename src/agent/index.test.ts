@@ -1228,7 +1228,7 @@ describe('buildSubagentOrchestrationTools', () => {
 })
 
 describe('getBundledSkillsDir', () => {
-  test.each([['typeclaw-cron'], ['typeclaw-config'], ['typeclaw-markdown-pdf']])(
+  test.each([['typeclaw-cron'], ['typeclaw-config'], ['typeclaw-channels'], ['typeclaw-markdown-pdf']])(
     'points at a directory containing %s/SKILL.md',
     (skill) => {
       const dir = getBundledSkillsDir()
@@ -1236,7 +1236,7 @@ describe('getBundledSkillsDir', () => {
     },
   )
 
-  test.each([['typeclaw-cron'], ['typeclaw-config'], ['typeclaw-markdown-pdf']])(
+  test.each([['typeclaw-cron'], ['typeclaw-config'], ['typeclaw-channels'], ['typeclaw-markdown-pdf']])(
     '%s SKILL.md has YAML frontmatter with name and description',
     async (skill) => {
       const path = join(getBundledSkillsDir(), skill, 'SKILL.md')
