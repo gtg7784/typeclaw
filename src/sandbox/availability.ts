@@ -273,8 +273,18 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
-    // Probe ran to completion → its verdict is a definitive, cacheable fact.
-    if (proc.exitCode !== 0) return { safe: false, cacheable: true }
+    // Interpret the verdict by the SPECIFIC exit code the script chose, never by
+    // "non-zero" — a non-zero exit also covers script setup failures (a bwrap that
+    // started but couldn't read /proc/self/fd), bwrap startup failures (missing
+    // lib, transient mount EBUSY → bwrap's own exit), and an external SIGKILL.
+    // Caching any of those transient failures as a definitive safe=false would
+    // PERMANENTLY disable proc-bind — the same cache-poisoning class as the
+    // timeout bug. So only the script's two designated codes are cacheable:
+    // PROC_BIND_SAFE (clean run, every open blocked) and PROC_BIND_LEAK (an open
+    // SUCCEEDED — a real leak). Setup failures use PROC_BIND_SETUP_FAILED, and any
+    // other code (bwrap startup, signals, 127) is treated as inconclusive.
+    if (proc.exitCode === PROC_BIND_LEAK) return { safe: false, cacheable: true }
+    if (proc.exitCode !== PROC_BIND_SAFE) return INCONCLUSIVE
     // Final liveness: the in-sandbox blocked-open assertions are only meaningful
     // if the sentinel was alive throughout. Re-read its MARKER from the PARENT —
     // success proves the pid still resolves to OUR live sentinel, so the in-sandbox
@@ -301,6 +311,16 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
 // generous ceiling, not a tuning knob.
 const PROC_BIND_PROBE_TIMEOUT_MS = 5_000
 
+// Designated probe-script exit codes. ONLY these two are a cacheable verdict;
+// every other code (a setup failure, bwrap startup failure, a signal, 127, …) is
+// inconclusive and must NOT be cached — see the exit-code interpretation in
+// probeProcBind. Chosen well clear of the shell's own conventional codes (1, 2,
+// 126, 127, 128+n) so a setup/bwrap/signal failure can never be mistaken for the
+// safe or leak verdict.
+const PROC_BIND_SAFE = 0
+const PROC_BIND_LEAK = 10
+const PROC_BIND_SETUP_FAILED = 20
+
 // The in-sandbox assertion, built as a pure function so a unit test can pin its
 // shape (the integration behavior needs a Linux container + bwrap, unrunnable in
 // CI). It must prove the secret block holds for the RIGHT REASON, not by
@@ -313,13 +333,18 @@ const PROC_BIND_PROBE_TIMEOUT_MS = 5_000
 //      here, so a later open-failure cannot be ESRCH.
 //   3. environ + maps OPENS fail. `(: < path)` is the no-op builtin with a read
 //      redirect: the SHELL opens the file (the same open(2) path Bun/an attacker
-//      uses), so a cross-userns EACCES makes the redirect fail and the `&& exit 1`
-//      is skipped, while a successful open (a leak) runs `exit 1`. This replaces
-//      an earlier `cat … | grep 'Permission denied'`, which depended on a
-//      localized errno STRING (a non-C locale would mistranslate it → grep miss →
-//      silent fallback to tmpfs → the bunx crash returns) and on PATH resolving
-//      `cat`/`grep` under --clearenv. The redirect uses no external command and
-//      no error text, so it is locale- and PATH-independent.
+//      uses), so a cross-userns EACCES makes the redirect fail and the leak-exit
+//      is skipped, while a successful open (a leak) runs `exit PROC_BIND_LEAK`.
+//      This replaces an earlier `cat … | grep 'Permission denied'`, which
+//      depended on a localized errno STRING (a non-C locale would mistranslate it
+//      → grep miss → silent fallback to tmpfs → the bunx crash returns) and on
+//      PATH resolving `cat`/`grep` under --clearenv. The redirect uses no external
+//      command and no error text, so it is locale- and PATH-independent.
+// The exit codes are DISTINCT by outcome so the caller can cache only definitive
+// verdicts: setup checks exit PROC_BIND_SETUP_FAILED (inconclusive — a bwrap that
+// started but lacks /proc/self/fd, etc.), a detected leak exits PROC_BIND_LEAK
+// (definitive unsafe), a clean run exits PROC_BIND_SAFE. A bare `exit 1` would
+// conflate setup failures with leaks and poison the cache.
 // NOTE: `test -r` is deliberately NOT used for the protected files. It asks
 // access(2) (permission bits + uid), which on a same-uid /proc/<pid>/environ
 // returns "readable" even when the ptrace-gated open(2) is actually blocked —
@@ -328,14 +353,14 @@ const PROC_BIND_PROBE_TIMEOUT_MS = 5_000
 // /dev` (matching build.ts's proc-bind branch). Without it the redirect fails and
 // the verdict is unreliable — the bwrap probe MUST keep `--dev /dev`.
 export function buildProcBindProbeScript(sentinelPid: number): string {
-  const blockedOpen = (path: string): string => `(: < ${path}) 2>/dev/null && exit 1`
+  const blockedOpen = (path: string): string => `(: < ${path}) 2>/dev/null && exit ${PROC_BIND_LEAK}`
   return [
-    `test -r /proc/self/fd || exit 1`,
-    `test -r /proc/self/maps || exit 1`,
-    `test -r /proc/${sentinelPid}/status || exit 1`,
+    `test -r /proc/self/fd || exit ${PROC_BIND_SETUP_FAILED}`,
+    `test -r /proc/self/maps || exit ${PROC_BIND_SETUP_FAILED}`,
+    `test -r /proc/${sentinelPid}/status || exit ${PROC_BIND_SETUP_FAILED}`,
     blockedOpen(`/proc/${sentinelPid}/environ`),
     blockedOpen(`/proc/${sentinelPid}/maps`),
-    `exit 0`,
+    `exit ${PROC_BIND_SAFE}`,
   ].join('; ')
 }
 

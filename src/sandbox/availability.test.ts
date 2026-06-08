@@ -140,22 +140,24 @@ describe('buildProcBindProbeScript (false-pass regression guard)', () => {
   const script = buildProcBindProbeScript(4242)
 
   test('opens the protected files (the actual leak path), never grep/cat on a localized errno', () => {
-    // given-when-then: a successful open of environ/maps must trip `exit 1`
-    expect(script).toContain('(: < /proc/4242/environ) 2>/dev/null && exit 1')
-    expect(script).toContain('(: < /proc/4242/maps) 2>/dev/null && exit 1')
+    // given-when-then: a successful open of environ/maps must trip the LEAK exit
+    expect(script).toContain('(: < /proc/4242/environ) 2>/dev/null && exit 10')
+    expect(script).toContain('(: < /proc/4242/maps) 2>/dev/null && exit 10')
     // the old false-passing / locale-fragile forms must NOT return
     expect(script).not.toContain('grep')
     expect(script).not.toContain('Permission denied')
-    expect(script).not.toMatch(/cat .*&& exit 1/)
+    expect(script).not.toMatch(/cat .*&& exit/)
   })
 
-  test('proves the sentinel is alive so an open-failure cannot be misread as ESRCH', () => {
-    expect(script).toContain('test -r /proc/4242/status || exit 1')
-  })
-
-  test('requires the sandbox own /proc/self/{fd,maps} to be usable (the property that makes bunx work)', () => {
-    expect(script).toContain('test -r /proc/self/fd || exit 1')
-    expect(script).toContain('test -r /proc/self/maps || exit 1')
+  test('uses DISTINCT exit codes so a setup failure is never cached as a leak', () => {
+    // leak = 10 (cacheable unsafe); setup checks = 20 (inconclusive); safe = 0.
+    // A bare `exit 1` on setup checks would conflate them and poison the cache.
+    expect(script).toContain('test -r /proc/self/fd || exit 20')
+    expect(script).toContain('test -r /proc/self/maps || exit 20')
+    expect(script).toContain('test -r /proc/4242/status || exit 20')
+    expect(script.trim().endsWith('exit 0')).toBe(true)
+    // the leak code must NEVER be reachable from a setup-check failure
+    expect(script).not.toMatch(/test -r [^|]*\|\| exit 10/)
   })
 
   test('never asserts readability of a protected file via test -r (access() != open() across userns)', () => {
