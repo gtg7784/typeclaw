@@ -55,6 +55,28 @@ const githubChannelSchema = z.object({
   webhookSecret: secretFieldSchema,
 })
 
+const lineDeviceSchema = z.enum(['DESKTOPWIN', 'DESKTOPMAC', 'ANDROID', 'ANDROIDSECONDARY', 'IOS', 'IOSIPAD'])
+
+// LINE persists a long-lived auth token (+ optional certificate that lets a
+// later re-login skip the e-mail/PIN step on the same device). There is no
+// encrypted-password / renewal-cron path the way KakaoTalk has — LINE tokens
+// don't expire on a fixed short schedule, so the renewal fields are absent by
+// design.
+export const lineAccountRecordSchema = z.object({
+  account_id: z.string(),
+  auth_token: z.string(),
+  certificate: z.string().optional(),
+  device: lineDeviceSchema,
+  display_name: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const lineChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), lineAccountRecordSchema),
+})
+
 // Encrypted password envelope produced by src/secrets/encryption.ts. Optional
 // in the schema because legacy v2 accounts (pre-renewal feature) don't have
 // one; the renewal cron treats a missing envelope as "reauth required" and
@@ -109,6 +131,7 @@ export const channelsSchema = z
     'discord-bot': discordBotChannelSchema.optional(),
     github: githubChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
+    line: lineChannelBlockSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
   })
   .catchall(z.unknown())
@@ -130,6 +153,8 @@ export type Channels = z.infer<typeof channelsSchema>
 export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
 export type GithubAppAuthBlock = z.infer<typeof githubAppAuthSchema>
 export type GithubSecretsBlock = z.infer<typeof githubChannelSchema>
+export type LineAccountRecord = z.infer<typeof lineAccountRecordSchema>
+export type LineChannelBlock = z.infer<typeof lineChannelBlockSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
 export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
 export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>

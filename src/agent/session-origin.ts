@@ -156,6 +156,7 @@ const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
     supportsReactions: false,
     supportsAttachments: true,
   },
+  line: { displayName: 'LINE', mentionMode: 'alias', supportsReactions: false, supportsAttachments: false },
   kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias', supportsReactions: false, supportsAttachments: true },
 }
 

@@ -7,6 +7,7 @@ const ADAPTER_TO_PLATFORM: Record<AdapterId, Platform> = {
   'discord-bot': 'discord',
   github: 'github',
   'telegram-bot': 'telegram',
+  line: 'line',
   kakaotalk: 'kakao',
 }
 
@@ -63,10 +64,16 @@ function matchesChannel(rule: Extract<MatchRule, { kind: 'channel' }>, origin: M
 // the origin's workspace is `@dm` (Slack) or `dm` (Discord). KakaoTalk uses
 // the workspace prefix itself.
 function matchesBucket(
-  bucket: 'dm' | 'group' | 'open',
+  bucket: 'dm' | 'group' | 'open' | 'square',
   origin: Extract<MatchableOrigin, { kind: 'channel' }>,
 ): boolean {
   const platform = ADAPTER_TO_PLATFORM[origin.adapter]
+  if (platform === 'line') {
+    if (bucket === 'dm') return origin.workspace === '@line-dm'
+    if (bucket === 'group') return origin.workspace === '@line-group'
+    if (bucket === 'square') return origin.workspace === '@line-square'
+    return false
+  }
   if (platform === 'kakao') {
     if (bucket === 'dm') return origin.workspace === '@kakao-dm'
     if (bucket === 'group') return origin.workspace === '@kakao-group'

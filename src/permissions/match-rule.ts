@@ -16,7 +16,7 @@
 // error messages with typo suggestions; a single big regex would only ever
 // say "didn't match".
 
-export const PLATFORMS = ['slack', 'discord', 'telegram', 'kakao', 'github'] as const
+export const PLATFORMS = ['slack', 'discord', 'telegram', 'line', 'kakao', 'github'] as const
 export type Platform = (typeof PLATFORMS)[number]
 
 const SUBAGENT_NAME = /^[a-z][a-z0-9-]*$/
@@ -35,9 +35,10 @@ export type MatchRule =
       workspace?: string
       chat?: string
       // Buckets for DM-style scopes. `slack:dm/*`, `discord:dm/*`,
-      // `kakao:dm/*`, `kakao:group/*`, `kakao:open/*` produce `bucket` only
-      // (no workspace, no chat).
-      bucket?: 'dm' | 'group' | 'open'
+      // `kakao:dm/*`, `kakao:group/*`, `kakao:open/*`, `line:dm/*`,
+      // `line:group/*`, `line:square/*` produce `bucket` only (no workspace,
+      // no chat).
+      bucket?: 'dm' | 'group' | 'open' | 'square'
       author?: string
     }
 
@@ -50,7 +51,7 @@ export type ParseMatchRuleResult = { ok: true; value: MatchRule } | { ok: false;
 // this to `author:` only, the JSON schema would reject typos with a generic
 // "did not match pattern" error and the user would lose the actionable hint.
 export const MATCH_RULE_REGEX_SOURCE =
-  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|kakao|github):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
+  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|line|kakao|github):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
 
 export function parseMatchRule(input: string): ParseMatchRuleResult {
   if (input !== input.trim() || input.length === 0) {
@@ -164,15 +165,16 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
       }
     }
 
-    if (head === 'dm' || head === 'group' || head === 'open') {
-      if (platform !== 'kakao' && (head === 'group' || head === 'open')) {
-        return { ok: false, error: `bucket '${head}' is only valid for kakao` }
+    if (head === 'dm' || head === 'group' || head === 'open' || head === 'square') {
+      const bucketError = invalidBucketForPlatform(head, platform)
+      if (bucketError !== null) {
+        return { ok: false, error: bucketError }
       }
       if (tail === '') {
         return { ok: false, error: `bucket '${platform}:${head}/' requires '*' or a chat id` }
       }
       if (tail === '*') {
-        return { ok: true, value: buildChannelRule(platform, { bucket: head as 'dm' | 'group' | 'open', author }) }
+        return { ok: true, value: buildChannelRule(platform, { bucket: head, author }) }
       }
       // `slack:dm/<id>` — keep the bucket plus the specific chat. We omit a
       // separate workspace field; DM IDs are globally unique within a
@@ -180,7 +182,7 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
       return {
         ok: true,
         value: buildChannelRule(platform, {
-          bucket: head as 'dm' | 'group' | 'open',
+          bucket: head,
           chat: tail,
           author,
         }),
@@ -199,10 +201,24 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
   }
 
   // No slash: `slack:T0123` or `kakao:dm` (bare bucket — error).
-  if (rest === 'dm' || rest === 'group' || rest === 'open') {
+  if (rest === 'dm' || rest === 'group' || rest === 'open' || rest === 'square') {
     return { ok: false, error: `bucket '${platform}:${rest}' requires a chat id or '*'` }
   }
   return { ok: true, value: buildChannelRule(platform, { workspace: rest, author }) }
+}
+
+// `dm` is universal. `group`/`open` are KakaoTalk buckets; `group`/`square`
+// are LINE buckets. Reject a bucket on a platform whose workspace shapes don't
+// produce it, so a typo'd rule fails loudly instead of silently never matching.
+function invalidBucketForPlatform(bucket: 'dm' | 'group' | 'open' | 'square', platform: Platform): string | null {
+  if (bucket === 'dm') return null
+  if (bucket === 'open') {
+    return platform === 'kakao' ? null : `bucket 'open' is only valid for kakao`
+  }
+  if (bucket === 'square') {
+    return platform === 'line' ? null : `bucket 'square' is only valid for line`
+  }
+  return platform === 'kakao' || platform === 'line' ? null : `bucket 'group' is only valid for kakao or line`
 }
 
 function parseGithubChannelScope(rest: string, author: string | undefined): ParseMatchRuleResult {
@@ -230,7 +246,7 @@ function buildChannelRule(
   parts: {
     workspace?: string
     chat?: string
-    bucket?: 'dm' | 'group' | 'open'
+    bucket?: 'dm' | 'group' | 'open' | 'square'
     author?: string
   },
 ): MatchRule {

@@ -26,6 +26,12 @@ const discordChat: MatchableOrigin = {
   workspace: '9999',
   chat: '123456',
 }
+const lineSquare: MatchableOrigin = {
+  kind: 'channel',
+  adapter: 'line',
+  workspace: '@line-square',
+  chat: 'S_X',
+}
 const kakaoGroup: MatchableOrigin = {
   kind: 'channel',
   adapter: 'kakaotalk',
@@ -44,6 +50,7 @@ const SLACK_CHAT: MatchRule = { kind: 'channel', platform: 'slack', workspace: '
 const SLACK_WS_AUTHOR: MatchRule = { kind: 'channel', platform: 'slack', workspace: 'T0123', author: 'U_ME' }
 const SLACK_DM_BUCKET: MatchRule = { kind: 'channel', platform: 'slack', bucket: 'dm' }
 const DISCORD_GUILD: MatchRule = { kind: 'channel', platform: 'discord', workspace: '9999' }
+const LINE_SQUARE_BUCKET: MatchRule = { kind: 'channel', platform: 'line', bucket: 'square' }
 const KAKAO_GROUP_BUCKET: MatchRule = { kind: 'channel', platform: 'kakao', bucket: 'group' }
 
 describe('matchesOrigin — keyword scopes', () => {
@@ -108,6 +115,11 @@ describe('matchesOrigin — channel coordinates', () => {
   test('discord workspace match', () => {
     expect(matchesOrigin(DISCORD_GUILD, discordChat)).toBe(true)
     expect(matchesOrigin(DISCORD_GUILD, { ...discordChat, workspace: '8888' })).toBe(false)
+  })
+
+  test('line square bucket matches the @line-square workspace prefix', () => {
+    expect(matchesOrigin(LINE_SQUARE_BUCKET, lineSquare)).toBe(true)
+    expect(matchesOrigin(LINE_SQUARE_BUCKET, { ...lineSquare, workspace: '@line-group' })).toBe(false)
   })
 
   test('kakao group bucket matches the @kakao-group workspace prefix', () => {

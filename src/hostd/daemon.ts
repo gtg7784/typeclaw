@@ -7,7 +7,7 @@ import type { Socket, UnixSocketListener } from 'bun'
 import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
-import { kakaoChannelBlockSchema } from '@/secrets/schema'
+import { kakaoChannelBlockSchema, lineChannelBlockSchema } from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
 
 import { isDaemonReachable } from './client'
@@ -410,19 +410,27 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   const handleSecretsPatch = async (req: {
     containerName: string
-    patch: { channels: { kakaotalk: unknown } }
+    patch: { channels: { kakaotalk: unknown } | { line: unknown } }
   }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
       const cwd = cwds.get(req.containerName)
       if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
-      const parsed = kakaoChannelBlockSchema.safeParse(req.patch?.channels?.kakaotalk)
-      if (!parsed.success) {
-        return { ok: false, reason: parsed.error.issues.map((issue) => issue.message).join('; ') }
+      const channelsPatch = req.patch?.channels
+      // Exactly one personal-account channel block per patch. KakaoTalk and
+      // LINE both write their structured account block through this RPC; the
+      // key present in the patch selects which block to validate and merge.
+      const patch =
+        'line' in channelsPatch
+          ? { key: 'line' as const, parsed: lineChannelBlockSchema.safeParse(channelsPatch.line) }
+          : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
+      if (!patch.parsed.success) {
+        return { ok: false, reason: patch.parsed.error.issues.map((issue) => issue.message).join('; ') }
       }
+      const data = patch.parsed.data
       const backend = new SecretsBackend(join(cwd, 'secrets.json'))
       await backend.updateChannelsAsync(async (channels) => ({
         result: undefined,
-        next: { ...channels, kakaotalk: parsed.data },
+        next: { ...channels, [patch.key]: data },
       }))
       const result: SecretsPatchResult = { containerName: req.containerName, patched: true }
       return { ok: true, result }
