@@ -951,6 +951,22 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(prompt.indexOf('unrelated')).toBeLessThan(prompt.indexOf('hey bot'))
   })
 
+  test('labels the current message even when there is no recent context', async () => {
+    // Regression: the `## Current message` header used to be gated on
+    // observed.length > 0, so a turn carrying only the current message (no
+    // recent context) rendered the batch line bare. The group-chat nudge tells
+    // the model to identify "THIS latest message", so the latest message must
+    // be labeled regardless of whether recent context exists.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ text: 'hey bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).not.toContain('Recent context')
+    expect(prompt).toContain('## Current message (addressed to you)')
+    expect(prompt).toContain('<@alice> (alice): hey bot')
+  })
+
   test('empty allow rules + observed-only burst produces no prompt and no crash', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {
