@@ -1249,6 +1249,38 @@ describe('getBundledSkillsDir', () => {
       expect(frontmatter).toMatch(/^description:\s*\S/m)
     },
   )
+
+  test('typeclaw-markdown-pdf keeps CJK fonts opt-in: gates on font presence, never auto-downloads', async () => {
+    const path = join(getBundledSkillsDir(), 'typeclaw-markdown-pdf', 'SKILL.md')
+    const raw = await readFile(path, 'utf8')
+
+    expect(raw).toContain('## Handling CJK content')
+    expect(raw).toContain('fonts-noto-cjk')
+    expect(raw).toMatch(/CJK fonts are \*\*opt-in\*\*/)
+    expect(raw).toMatch(/docker\.file\.cjkFonts/)
+    expect(raw).toMatch(/typeclaw restart/)
+    // Auto-downloading a font would defeat the opt-in and hide the teachable failure.
+    expect(raw).not.toContain('NotoSerifKR-Regular.otf')
+    expect(raw).not.toContain('workspace/.tools/fonts')
+  })
+
+  test('typeclaw-markdown-pdf detection covers Hangul, Kana, and CJK ideograph ranges', async () => {
+    const path = join(getBundledSkillsDir(), 'typeclaw-markdown-pdf', 'SKILL.md')
+    const raw = await readFile(path, 'utf8')
+
+    expect(raw).toContain('\\x{AC00}-\\x{D7A3}')
+    expect(raw).toContain('\\x{3040}-\\x{30FF}')
+    expect(raw).toContain('\\x{4E00}-\\x{9FFF}')
+  })
+
+  test('typeclaw-markdown-pdf forbids ad-hoc PDF libraries', async () => {
+    const path = join(getBundledSkillsDir(), 'typeclaw-markdown-pdf', 'SKILL.md')
+    const raw = await readFile(path, 'utf8')
+
+    expect(raw).toMatch(/only supported way to make a PDF from Markdown/i)
+    expect(raw).toMatch(/jsPDF/)
+    expect(raw).toMatch(/pdfkit/)
+  })
 })
 
 describe('formatRestartNotice (sibling sessions: do not acknowledge unless asked)', () => {
