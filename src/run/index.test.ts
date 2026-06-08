@@ -272,6 +272,36 @@ describe('startAgent', () => {
     expect(running.cronConsumer).not.toBeNull()
   })
 
+  test('a fire emitted while the scheduler is being armed is not lost (consumer subscribes first)', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-boot-'))
+    try {
+      const sentinel = join(agentDir, 'fired.txt')
+      const job: CronJob = {
+        id: 'boot-fire',
+        schedule: '* * * * *',
+        kind: 'exec',
+        command: ['sh', '-c', `echo fired > ${sentinel}`],
+        enabled: true,
+        scheduledByRole: 'owner',
+      }
+      const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [job] } }) as LoadCronResult
+      // Fire synchronously at arm time. If the consumer hadn't subscribed yet,
+      // this fire would be dropped (the stream has no replay) and the sentinel
+      // would never be written.
+      const createSchedulerFor: SchedulerFactory = ({ onFire }) => {
+        onFire(job)
+        return stubScheduler()
+      }
+
+      running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron, createSchedulerFor })
+
+      await Bun.sleep(80)
+      expect(await Bun.file(sentinel).exists()).toBe(true)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('cronConsumer is started when bundled memory plugin contributes a default dreaming cron job (no cron.json)', async () => {
     running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
 

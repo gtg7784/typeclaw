@@ -546,6 +546,11 @@ export async function startAgent({
 
   const internalJobs = () => pluginCronJobs(pluginRuntime.get().registry)
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
+  // Subscribe the consumer BEFORE the scheduler arms any timers. The stream
+  // delivers only to live subscribers (no replay), so a fire published before
+  // the subscription exists would be lost. Subscribing to an empty stream is
+  // harmless when there are no jobs.
+  cronConsumer.start()
   const scheduler = await startScheduler({
     cwd,
     loadCron,
@@ -559,7 +564,6 @@ export async function startAgent({
   })
 
   if (scheduler) {
-    cronConsumer.start()
     reloadRegistry.register(
       createCronReloadable({ cwd, scheduler, internalJobs, getSubagents: () => pluginRuntime.get().subagents }),
     )
