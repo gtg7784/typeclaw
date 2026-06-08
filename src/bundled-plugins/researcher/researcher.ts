@@ -25,17 +25,20 @@ import { createWriteReportTool } from './write-report'
 // `./skills/`; no runtime change required.
 export const RESEARCHER_SKILLS: readonly LoadableSkill[] = [GENERAL_RESEARCH_SKILL]
 
-// Mirrors the reviewer ceiling. A researcher whose `session.prompt` stalls
-// mid-turn would otherwise leave `completion` pending forever — the
-// `subagent.completed` broadcast never fires and the parent is never woken to
-// read the report. The ceiling makes `awaitWithSubagentTimeout` settle with
-// SubagentTimeoutError, surfacing a FAILED completion reminder so the request
-// fails loudly instead of vanishing. Sized for a thorough `deep`-model pass
-// (multi-source gathering, a few delegated workers, writing a report file),
-// well above a typical sub-minute lookup. This is liveness for the parent, not
-// hard cancellation: pi's `session.prompt` takes no AbortSignal, so the LLM
-// stream may run until the OS reaps it. See src/agent/subagents.ts `timeoutMs`.
-export const RESEARCHER_SPAWN_TIMEOUT_MS = 600_000
+// A researcher whose `session.prompt` stalls mid-turn would otherwise leave
+// `completion` pending forever and never wake the parent. This ceiling makes
+// the spawn settle with SubagentTimeoutError, surfacing a completion reminder
+// so the request resolves loudly instead of vanishing.
+//
+// 30m, not the prior 10m: a real pass spent ~2.5m composing its scout fan-out,
+// ~4–7m on 4 parallel scouts, then was killed ~2s into the final `write_report`
+// — discarding a finished report. The `deep` profile trades speed for quality,
+// so nested scout warmup + multi-source gathering + synthesis routinely exceed
+// 10m. This is liveness, not hard cancellation: `session.prompt` takes no
+// AbortSignal, so the stream may run until the OS reaps it. A report produced
+// before the ceiling is no longer lost — see startSubagent's finalMessage
+// preservation in src/agent/subagents.ts.
+export const RESEARCHER_SPAWN_TIMEOUT_MS = 1_800_000
 
 // TODO(#452): Restrict the researcher's `bash` to a curated read-only allowlist
 // once per-subagent bash allowlist support lands. Today the read-only contract
