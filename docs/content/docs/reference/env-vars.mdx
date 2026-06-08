@@ -23,18 +23,22 @@ icon: Variable
 | `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true` | `1` — entrypoint shim installs the iptables egress filter                 |
 | `DISPLAY`                         | when `docker.file.xvfb` is enabled | `:99` — points at the in-container Xvfb server                            |
 
-## Provider credentials (env-wins)
+## Provider credentials
 
 Set in the host stage; injected into the container via `--env-file .env`.
 
-| Variable            | Provider    | Notes                                                                                                    |
-| ------------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
-| `FIREWORKS_API_KEY` | `fireworks` |                                                                                                          |
-| `OPENAI_API_KEY`    | `openai`    |                                                                                                          |
-| `ANTHROPIC_API_KEY` | `anthropic` |                                                                                                          |
-| `MINIMAX_API_KEY`   | `minimax`   | Accepts either a pay-as-you-go API key or a Token Plan Subscription Key (`sk-cp-…`) — same slot.         |
-| `GOOGLE_API_KEY`    | `google`    |                                                                                                          |
-| (others)            |             | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
+These env vars override a stored API-key credential in `secrets.json` (env-wins). The exception is dual-auth providers (`anthropic`, `xai`): a stored OAuth credential takes precedence over the env var, since OAuth is stateful and refreshed on disk. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for the full resolution order.
+
+| Variable             | Provider     | Notes                                                                                                    |
+| -------------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
+| `FIREWORKS_API_KEY`  | `fireworks`  |                                                                                                          |
+| `OPENAI_API_KEY`     | `openai`     |                                                                                                          |
+| `ANTHROPIC_API_KEY`  | `anthropic`  | OAuth credential on disk wins over this env var (dual-auth provider).                                    |
+| `ZAI_API_KEY`        | `zai`        | Z.AI pay-as-you-go.                                                                                      |
+| `ZAI_CODING_API_KEY` | `zai-coding` | Z.AI GLM Coding Plan — separate billing surface from `zai`.                                              |
+| `XAI_API_KEY`        | `xai`        | xAI (Grok). OAuth credential on disk wins over this env var (dual-auth provider).                        |
+| `MINIMAX_API_KEY`    | `minimax`    | Accepts either a pay-as-you-go API key or a Token Plan Subscription Key (`sk-cp-…`) — same slot.         |
+| (others)             |              | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
 
 Custom env-var names are supported via the `Secret`'s `env` field — `{ "key": { "env": "MY_OPENAI" } }`. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for resolution order.
 
