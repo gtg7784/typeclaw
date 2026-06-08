@@ -57,6 +57,7 @@ function fakeRouter(handlers: {
     getReviewState: handlers.getReviewState ?? (async () => ({ ok: true, selfBlocking: false, approve: true })),
     lookupInboundAttachment: () => null,
     listInboundAttachmentIds: () => [],
+    registerHistoryAttachments: () => {},
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},

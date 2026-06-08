@@ -297,6 +297,8 @@ export class StaleLiveSessionError extends Error {
 export const RESOLVE_CHANNEL_NAMES_TIMEOUT_MS = 5_000
 export const FETCH_HISTORY_TIMEOUT_MS = 5_000
 
+export const HISTORY_ATTACHMENT_LIMIT = 50
+
 // Watchdog over the whole session.idle hook chain. The drain loop awaits
 // `fireSessionIdle` between turns; a single hung plugin handler (e.g. a
 // memory-logger awaiting a network call that never resolves) wedges the
@@ -418,6 +420,8 @@ type ObservedInbound = {
   source: 'prefetch' | 'observed'
 }
 
+type TimedAttachment = { ts: number; attachment: InboundAttachment }
+
 type LiveSession = {
   key: ChannelKey
   keyId: string
@@ -439,6 +443,17 @@ type LiveSession = {
   // and cleared when the turn ends, is what the lookup reads so a freshly-
   // arrived attachment stays resolvable for the whole turn it belongs to.
   currentTurnAttachments: readonly InboundAttachment[]
+  // Refs from an explicit channel_history look-back. A prior-turn attachment is
+  // replayed to the model as a text placeholder but its ref is gone from every
+  // turn-scoped queue above, so look_at/fetch can't resolve it; stashing the
+  // fetched refs here makes the same `attachment_id: N` resolvable. MUST be
+  // searched LAST so a live `#1` still wins over a historical `#1` (the
+  // newest-first collision rule lookupInboundAttachment documents). Bounded,
+  // never persisted, never exposes the ref to the model. historyTimedAttachments
+  // is the ts-tagged source of truth (ordered oldest→newest, deduped by id);
+  // historyAttachments is its flat projection consumed by the lookup helpers.
+  historyTimedAttachments: readonly TimedAttachment[]
+  historyAttachments: InboundAttachment[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
   typingTimer: ReturnType<typeof setInterval> | null
@@ -724,6 +739,10 @@ export type ChannelRouter = {
   getReviewState: (req: ReviewStateRequest) => Promise<ReviewStateResult>
   lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
   listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
+  // Stash refs from a channel_history fetch so prior-turn attachments stay
+  // resolvable by their placeholder id. Called by the channel_history tool
+  // after a successful fetch; no-op when the session is not live.
+  registerHistoryAttachments: (key: ChannelKey, messages: readonly ChannelHistoryMessage[]) => void
   // Execute a command by name against an existing live session, bypassing
   // the inbound classifier, engagement gate, debounce, and prompt queue.
   // Used by adapters that receive commands through a native surface
@@ -1407,6 +1426,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         pendingSystemReminders: [],
         contextBuffer: [],
         currentTurnAttachments: [],
+        historyTimedAttachments: [],
+        historyAttachments: [],
         draining: false,
         debounceTimer: null,
         typingTimer: null,
@@ -2778,7 +2799,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (hit !== undefined) return hit
       }
     }
-    return null
+    return findAttachmentById(live.historyAttachments, args.id)
   }
 
   const listInboundAttachmentIds = (args: ChannelKey): readonly number[] => {
@@ -2789,7 +2810,34 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     for (const item of [...live.promptQueue, ...live.contextBuffer]) {
       for (const attachment of item.attachments ?? []) ids.add(attachment.id)
     }
+    for (const attachment of live.historyAttachments) ids.add(attachment.id)
     return Array.from(ids).sort((a, b) => a - b)
+  }
+
+  const registerHistoryAttachments = (key: ChannelKey, messages: readonly ChannelHistoryMessage[]): void => {
+    const live = liveSessions.get(channelKeyId(key))
+    if (live === undefined) return
+    const incoming: TimedAttachment[] = messages.flatMap((message) =>
+      (message.attachments ?? []).map((attachment) => ({ ts: message.ts, attachment })),
+    )
+    if (incoming.length === 0) return
+    // Order by message freshness, NOT append order: channel_history pages
+    // OLDER messages via nextCursor, so a later call can deliver an OLDER ref.
+    // findAttachmentById searches end-first, so the list MUST end with the
+    // freshest ref or an older paged `#1` would shadow a newer one. Dedupe by
+    // id keeping the freshest ts (a re-fetch of the same message is a no-op,
+    // not a duplicate), sort ascending by ts, then keep the freshest LIMIT so
+    // eviction drops the OLDEST refs, never newer ones.
+    const byId = new Map<number, TimedAttachment>()
+    for (const entry of [...live.historyTimedAttachments, ...incoming]) {
+      const existing = byId.get(entry.attachment.id)
+      if (existing === undefined || entry.ts >= existing.ts) byId.set(entry.attachment.id, entry)
+    }
+    const sorted = Array.from(byId.values()).sort((a, b) => a.ts - b.ts)
+    const kept =
+      sorted.length > HISTORY_ATTACHMENT_LIMIT ? sorted.slice(sorted.length - HISTORY_ATTACHMENT_LIMIT) : sorted
+    live.historyTimedAttachments = kept
+    live.historyAttachments = kept.map((entry) => entry.attachment)
   }
 
   const send = async (msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> => {
@@ -3715,6 +3763,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getReviewState,
     lookupInboundAttachment,
     listInboundAttachmentIds,
+    registerHistoryAttachments,
     executeCommand,
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,

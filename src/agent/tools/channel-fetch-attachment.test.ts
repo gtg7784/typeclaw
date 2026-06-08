@@ -55,6 +55,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     getReviewState: async () => ({ ok: true, selfBlocking: false, approve: true }),
     lookupInboundAttachment: (args) => attachments.find((attachment) => attachment.id === args.id) ?? null,
     listInboundAttachmentIds: () => attachments.map((attachment) => attachment.id),
+    registerHistoryAttachments: () => {},
     executeCommand: async () => ({ kind: 'no-live-session' }),
     getSelfAliases: () => [],
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
@@ -138,7 +139,7 @@ describe('channel_fetch_attachment', () => {
     expect(result.details).toEqual({
       ok: false,
       error:
-        'no attachment with id=1 in this turn (valid attachment_ids in this turn: 2). Do not call channel_fetch_attachment for attachments that do not appear in the inbound message — they do not exist.',
+        'no attachment with id=1 (resolvable attachment_ids: 2). For an attachment from an earlier message, call channel_history first to make it resolvable; otherwise do not invent ids that are not in the inbound message.',
     })
   })
 

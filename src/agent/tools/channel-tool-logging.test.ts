@@ -74,6 +74,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     getReviewState: async () => ({ ok: true, selfBlocking: false, approve: true }),
     lookupInboundAttachment: (args) => overrides.attachments?.find((attachment) => attachment.id === args.id) ?? null,
     listInboundAttachmentIds: () => (overrides.attachments ?? []).map((attachment) => attachment.id),
+    registerHistoryAttachments: () => {},
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},
