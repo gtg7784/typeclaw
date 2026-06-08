@@ -240,7 +240,7 @@ export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchF
     callbacks.onAuth({
       url: `${AUTHORIZE_URL}?${authParams.toString()}`,
       instructions:
-        'Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.',
+        'Complete login in your browser. Grok shows a code to copy on the "could not establish connection" page — paste that code here. If the browser is on another machine, paste the code (or the final redirect URL) here.',
     })
 
     if (server && callbacks.onManualCodeInput) {
