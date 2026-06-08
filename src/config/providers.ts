@@ -550,6 +550,102 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // MiniMax (minimax.io) pay-as-you-go API. OpenAI-compatible (Bearer auth +
+  // /chat/completions shape), so models go through pi-ai's `openai-completions`
+  // adapter with a custom baseUrl — same trick as Fireworks and Z.AI.
+  //
+  // Endpoint choice: the international endpoint (api.minimax.io) is the global
+  // surface; the China endpoint (api.minimaxi.com) is a regional alternative on
+  // the same protocol. We pin the international one here — operators who need the
+  // China gateway can front it with an OpenAI-compatible proxy.
+  //
+  // Model lineup mirrors the OpenAI-compatible model enum on
+  // platform.minimax.io as of 2026-06-08: MiniMax-M3 (flagship, 1M context,
+  // image input, controllable reasoning) plus the M2 reasoning series
+  // (204,800 context, reasoning always on, text-only). The `-highspeed`
+  // billing-tier variants and the native-only `M2-her` / `MiniMax-Text-01` /
+  // `abab*` models are intentionally omitted — the first are duplicate weights
+  // on a pricier surface, the rest don't serve the OpenAI-compatible
+  // /chat/completions route this adapter speaks. Costs are USD per 1M tokens
+  // from docs/guides/pricing-paygo (standard tier): M3 reflects the permanent
+  // 50%-off ≤512K-input rate (input 0.30 / output 1.20 / cacheRead 0.06; M3 has
+  // no separate cache-write rate). M2.7 caches at 0.06 read / 0.375 write; the
+  // M2.5/M2.1/M2 series at 0.03 read / 0.375 write.
+  //
+  // M3 tiered pricing is NOT modeled: this single cost record only encodes the
+  // ≤512K-input tier. The >512K tier (input 0.60 / output 2.40 / cacheRead 0.12)
+  // is a limited-availability surcharge that pi-ai's flat per-model cost shape
+  // can't represent, so long-context M3 sessions above 512K under-report cost.
+  minimax: {
+    id: 'minimax',
+    name: 'MiniMax',
+    baseUrl: 'https://api.minimax.io/v1',
+    auth: ['api-key'],
+    apiKeyEnv: 'MINIMAX_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'MiniMax-M3': {
+        id: 'MiniMax-M3',
+        name: 'MiniMax M3',
+        api: 'openai-completions',
+        provider: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 524288,
+      },
+      'MiniMax-M2.7': {
+        id: 'MiniMax-M2.7',
+        name: 'MiniMax M2.7',
+        api: 'openai-completions',
+        provider: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
+        contextWindow: 204800,
+        maxTokens: 204800,
+      },
+      'MiniMax-M2.5': {
+        id: 'MiniMax-M2.5',
+        name: 'MiniMax M2.5',
+        api: 'openai-completions',
+        provider: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
+        contextWindow: 204800,
+        maxTokens: 204800,
+      },
+      'MiniMax-M2.1': {
+        id: 'MiniMax-M2.1',
+        name: 'MiniMax M2.1',
+        api: 'openai-completions',
+        provider: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
+        contextWindow: 204800,
+        maxTokens: 204800,
+      },
+      'MiniMax-M2': {
+        id: 'MiniMax-M2',
+        name: 'MiniMax M2',
+        api: 'openai-completions',
+        provider: 'minimax',
+        baseUrl: 'https://api.minimax.io/v1',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
+        contextWindow: 204800,
+        maxTokens: 204800,
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
@@ -607,6 +703,16 @@ export const KNOWN_PROVIDER_VENDORS = {
     id: 'xai',
     name: 'xAI (Grok)',
     providers: ['xai'],
+  },
+  // Single-provider vendor: pay-as-you-go and Token Plan are the SAME provider
+  // id (same /v1 endpoint, same Bearer transport — only the key prefix differs),
+  // so per the granularity rule above MiniMax is one id like Anthropic, not a
+  // zai-style split. The picker shows one row and skips the variant prompt; the
+  // pay-as-you-go-vs-Token-Plan dashboard hint is handled in the key-entry step.
+  minimax: {
+    id: 'minimax',
+    name: 'MiniMax',
+    providers: ['minimax'],
   },
 } as const satisfies Record<string, KnownProviderVendor>
 

@@ -17,9 +17,16 @@ Adding a provider is one command. Pick the one you have an account with:
 typeclaw provider add anthropic --key sk-ant-...
 typeclaw provider add openai-codex --oauth    # log in with a ChatGPT subscription
 typeclaw provider add fireworks --key fw_...
+typeclaw provider add minimax --key ...        # pay-as-you-go API key or Token Plan key (sk-cp-…)
 ```
 
-The supported providers are `openai`, `openai-codex`, `anthropic`, `fireworks`, `zai`, and `zai-coding`. The key (or browser login) is stored in `secrets.json`, git-ignored like the rest of your credentials.
+The supported providers are `openai`, `openai-codex`, `anthropic`, `fireworks`, `zai`, `zai-coding`, and `minimax`. The key (or browser login) is stored in `secrets.json`, git-ignored like the rest of your credentials.
+
+<Callout type="info" title="MiniMax: pay-as-you-go or Token Plan">
+  MiniMax sells one `minimax` provider under two billing surfaces — pay-as-you-go API keys and Token Plan Subscription
+  Keys (`sk-cp-…`). Both are saved to the same `MINIMAX_API_KEY` slot and work against the same endpoint; `typeclaw
+  init` asks which one you have only so it can link you to the right dashboard.
+</Callout>
 
 <Callout type="info" title="Use a subscription you already pay for">
   `openai-codex` and `anthropic` support `--oauth` — log in through the browser with an existing ChatGPT or Claude

@@ -8,6 +8,7 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   zai: { url: 'https://api.z.ai/api/paas/v4/models', authHeader: 'bearer' },
   'zai-coding': { url: 'https://api.z.ai/api/coding/paas/v4/models', authHeader: 'bearer' },
   xai: { url: 'https://api.x.ai/v1/models', authHeader: 'bearer' },
+  minimax: { url: 'https://api.minimax.io/v1/models', authHeader: 'bearer' },
 }
 
 // When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
@@ -161,7 +162,17 @@ export const API_KEY_DASHBOARD_URL: Partial<Record<KnownProviderId, string>> = {
   zai: 'https://docs.z.ai/devpack/tool/claude#api-key',
   'zai-coding': 'https://docs.z.ai/devpack/tool/claude#api-key',
   xai: 'https://console.x.ai',
+  minimax: 'https://platform.minimax.io/user-center/basic-information/interface-key',
 }
+
+// MiniMax sells the same `minimax` provider under two billing surfaces that
+// each hand out a key on a DIFFERENT dashboard page: pay-as-you-go API keys
+// (the API_KEY_DASHBOARD_URL above) and Token Plan "Subscription Keys"
+// (sk-cp-…, this URL). Both keys are Bearer tokens for the same api.minimax.io
+// endpoint and store in the same MINIMAX_API_KEY slot — the runtime doesn't
+// care which. The init wizard surfaces the choice only to deep-link the
+// correct dashboard, so a Token Plan subscriber isn't sent to the paygo page.
+export const MINIMAX_TOKEN_PLAN_DASHBOARD_URL = 'https://platform.minimax.io/user-center/payment/token-plan'
 
 export function providersWithApiKeyProbe(): KnownProviderId[] {
   return Object.keys(PROVIDER_PROBE) as KnownProviderId[]

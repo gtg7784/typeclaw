@@ -38,7 +38,12 @@ import {
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
-import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/validate-api-key'
+import {
+  API_KEY_DASHBOARD_URL,
+  MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
+  validateApiKey,
+  type KeyValidationResult,
+} from '@/init/validate-api-key'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
@@ -988,7 +993,11 @@ async function pickModelForProvider(
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
-  const choice = await select<KnownModelRef>({
+  // select<string>, not select<KnownModelRef>: clack's Option<Value> is a
+  // distributive conditional type, so a large KnownModelRef union explodes into
+  // a per-literal option union that no longer accepts `value: ref`. The runtime
+  // value is the ref string and is re-narrowed via `candidates.find` below.
+  const choice = await select<string>({
     message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,
@@ -1063,7 +1072,8 @@ async function pickVisionModel(
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
-  const choice = await select<KnownModelRef>({
+  // select<string> for the same distributive-Option reason as pickModelForProvider.
+  const choice = await select<string>({
     message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,
@@ -1125,19 +1135,50 @@ async function runApiKeyValidation(
 
 async function askApiKey(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<StepResult<string>> {
   const providerId = provider.id as KnownProviderId
-  const dashboardUrl = API_KEY_DASHBOARD_URL[providerId]
+  const keySurface = await pickMinimaxKeySurface(providerId)
+  if (keySurface.kind === 'back') return back()
+  const label = keySurface.kind === 'chosen' ? keySurface.label : `${provider.name} API`
+  const dashboardUrl = keySurface.kind === 'chosen' ? keySurface.dashboardUrl : API_KEY_DASHBOARD_URL[providerId]
   if (dashboardUrl) {
     note(
       [`Don't have a key yet?`, `Get one at ${dashboardUrl}`, `Then come back and paste it below.`].join('\n'),
-      `Get a ${provider.name} API key`,
+      `Get a ${label} key`,
     )
   }
   const apiKey = await password({
-    message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
+    message: `Put your ${label} key (will be saved to secrets.json)`,
     validate: (v) => (v && v.length > 0 ? undefined : 'API key is required'),
   })
   if (isCancel(apiKey)) return back()
   return value(apiKey)
+}
+
+type MinimaxKeySurface =
+  | { kind: 'back' }
+  | { kind: 'default' }
+  | { kind: 'chosen'; label: string; dashboardUrl: string }
+
+// MiniMax issues keys on two billing surfaces (pay-as-you-go vs Token Plan
+// subscription) that store in the same provider slot but live on different
+// dashboard pages. For the `minimax` provider, let the user say which one they
+// have so the deep-link points at the right page; every other provider skips
+// straight to the paste prompt. The picked surface only changes the label and
+// dashboard URL — the pasted key is stored identically either way.
+async function pickMinimaxKeySurface(providerId: KnownProviderId): Promise<MinimaxKeySurface> {
+  if (providerId !== 'minimax') return { kind: 'default' }
+  const choice = await select<'paygo' | 'token-plan'>({
+    message: 'Which MiniMax key do you have?',
+    options: [
+      { value: 'paygo', label: 'Pay-as-you-go API key', hint: 'billed per token' },
+      { value: 'token-plan', label: 'Token Plan API key', hint: 'subscription / Credits (sk-cp-…)' },
+    ],
+    initialValue: 'paygo',
+  })
+  if (isCancel(choice)) return { kind: 'back' }
+  if (choice === 'token-plan') {
+    return { kind: 'chosen', label: 'MiniMax Token Plan', dashboardUrl: MINIMAX_TOKEN_PLAN_DASHBOARD_URL }
+  }
+  return { kind: 'chosen', label: 'MiniMax pay-as-you-go API', dashboardUrl: API_KEY_DASHBOARD_URL.minimax! }
 }
 
 async function askOAuthFailureRecovery(

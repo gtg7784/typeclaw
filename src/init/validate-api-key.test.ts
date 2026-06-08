@@ -3,7 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import { supportsApiKey } from '@/config/providers'
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 
-import { API_KEY_DASHBOARD_URL, providersWithApiKeyProbe, validateApiKey, type FetchFn } from './validate-api-key'
+import {
+  API_KEY_DASHBOARD_URL,
+  MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
+  providersWithApiKeyProbe,
+  validateApiKey,
+  type FetchFn,
+} from './validate-api-key'
 
 function fakeFetch(responder: (url: string, init: RequestInit) => Response | Promise<Response>): FetchFn {
   return async (url, init) => responder(url, init)
@@ -20,6 +26,32 @@ describe('validateApiKey', () => {
         expect(url).toBe('https://api.openai.com/v1/models')
         expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-test')
         expect(init.redirect).toBe('manual')
+        return new Response(okBody, { status: 200 })
+      }),
+    )
+    expect(result).toEqual({ kind: 'ok' })
+  })
+
+  test('probes the minimax /v1/models endpoint with a Bearer header', async () => {
+    const result = await validateApiKey(
+      'minimax',
+      'mm-test',
+      fakeFetch((url, init) => {
+        expect(url).toBe('https://api.minimax.io/v1/models')
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer mm-test')
+        return new Response(okBody, { status: 200 })
+      }),
+    )
+    expect(result).toEqual({ kind: 'ok' })
+  })
+
+  test('accepts a minimax Token Plan subscription key (sk-cp-) through the same probe', async () => {
+    const result = await validateApiKey(
+      'minimax',
+      'sk-cp-subscription',
+      fakeFetch((url, init) => {
+        expect(url).toBe('https://api.minimax.io/v1/models')
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-cp-subscription')
         return new Response(okBody, { status: 200 })
       }),
     )
@@ -270,5 +302,10 @@ describe('drift guard', () => {
       if (!supportsApiKey(KNOWN_PROVIDERS[id])) continue
       expect(API_KEY_DASHBOARD_URL[id], `provider "${id}" supports api-key but has no dashboard URL`).toBeDefined()
     }
+  })
+
+  test('minimax exposes a distinct Token Plan dashboard URL separate from the paygo one', () => {
+    expect(MINIMAX_TOKEN_PLAN_DASHBOARD_URL).not.toBe(API_KEY_DASHBOARD_URL.minimax)
+    expect(MINIMAX_TOKEN_PLAN_DASHBOARD_URL).toContain('token-plan')
   })
 })
