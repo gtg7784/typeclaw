@@ -341,6 +341,31 @@ describe('analyzeGhCommand', () => {
       expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -L /tmp/mods .').kind).toBe('block')
     })
 
+    // Regression for PR #710 review: exact-token deny-listing missed jq's
+    // attached/clustered short-option forms, reopening the file-read path.
+    it('blocks attached and clustered jq short-option file/module flags', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -f/proc/self/environ').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -L/proc').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -rf/proc/self/environ').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -Lpath .').kind).toBe('block')
+    })
+
+    it('blocks unknown jq flags and jq filters that load modules', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --run-tests').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --args .').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -Z .').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq \'import "m"; .\'').kind).toBe('block')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq \'include "m"; .\'').kind).toBe('block')
+    })
+
+    it('allows jq safe boolean and value flags (clustered short, --arg, --indent)', () => {
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -r .').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -rc .').kind).toBe('inject')
+      expect(analyzeGhCommand("gh api /repos/acme/widgets/issues | jq --arg x 1 '.a'").kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq --indent 2 .').kind).toBe('inject')
+      expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | jq -S --tab .').kind).toBe('inject')
+    })
+
     it('blocks reader stages that are exfil primitives (awk, sed, tee, xargs, less)', () => {
       expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | awk "{print}"').kind).toBe('block')
       expect(analyzeGhCommand('gh api /repos/acme/widgets/issues | sed s/a/b/').kind).toBe('block')

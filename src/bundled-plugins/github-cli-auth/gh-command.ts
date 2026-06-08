@@ -182,11 +182,47 @@ const READER_BOOLEAN_FLAGS: Record<string, ReadonlySet<string>> = {
   uniq: new Set(['-c', '--count', '-d', '--repeated', '-u', '--unique', '-i', '--ignore-case']),
 }
 
-// jq flags that open a filesystem path OR run a module/test harness. Forbidden
-// because a downstream jq could otherwise read `/proc/<ghpid>/environ` (the
-// sibling gh process still holds GH_TOKEN in its env) and print it back —
-// recovering the token despite `env -u`.
-const JQ_FILE_FLAGS = new Set(['-f', '--from-file', '--rawfile', '--slurpfile', '--argfile', '-L', '--run-tests'])
+// jq is validated allow-known-good, exactly like the coreutils readers: only
+// known stdin-shaping flags pass; anything else rejects the stage. Exact-token
+// deny-listing was unsound — `-f/proc/self/environ`, `-L/proc`, and clustered
+// `-rf/proc/...` short forms slipped past a `Set.has(token)` check and reopened
+// the file-read path. jq accepts NO `--flag=value` form (value flags take the
+// value as a SEPARATE token), so long flags are matched as whole tokens.
+
+// Safe boolean LONG flags: output/parse shaping only, no value, no file/module.
+const JQ_SAFE_BOOLEAN_LONG = new Set([
+  '--raw-output',
+  '--raw-output0',
+  '--compact-output',
+  '--slurp',
+  '--null-input',
+  '--exit-status',
+  '--ascii-output',
+  '--sort-keys',
+  '--raw-input',
+  '--join-output',
+  '--color-output',
+  '--monochrome-output',
+  '--binary',
+  '--tab',
+  '--unbuffered',
+  '--stream',
+  '--stream-errors',
+  '--seq',
+])
+
+// Safe LONG flags that consume a fixed number of FOLLOWING tokens, none a file:
+// --arg/--argjson take 2 (name, value), --indent takes 1 (a number).
+const JQ_SAFE_VALUE_LONG: Record<string, number> = {
+  '--arg': 2,
+  '--argjson': 2,
+  '--indent': 1,
+}
+
+// Safe boolean SHORT flags (single chars). A clustered short token like `-rc`
+// is allowed iff EVERY char is in this set. `f` (filter-from-file) and `L`
+// (module path) are the fatal ones — and any unknown char also rejects.
+const JQ_SAFE_BOOLEAN_SHORT = new Set(['r', 'c', 's', 'n', 'e', 'a', 'S', 'R', 'j', 'C', 'M', 'b'])
 
 // A reader stage is safe only if it is an allowlisted command using ONLY its
 // known stdin-shaping flags, with no file operand. Backslashes are rejected
@@ -212,21 +248,41 @@ function isStdinOnlyReaderStage(stage: string): boolean {
   return true
 }
 
+// jq must run pure-stdin: only known stdin-shaping flags, and EXACTLY one
+// positional (the filter). A second positional is an input FILE jq would open
+// (`jq . /proc/self/environ` reads that file), so it is rejected. The filter is
+// additionally screened for `import`/`include`, which load modules from jq's
+// default search path even without `-L` — another file-read vector.
 function isStdinOnlyJqStage(tokens: readonly string[]): boolean {
   let sawFilter = false
   for (let i = 1; i < tokens.length; i++) {
     const tok = tokens[i] as string
-    if (tok.startsWith('-')) {
-      const flagName = tok.includes('=') ? tok.slice(0, tok.indexOf('=')) : tok
-      if (JQ_FILE_FLAGS.has(flagName)) return false
+    if (tok === '--') return false
+    if (tok.startsWith('--')) {
+      if (JQ_SAFE_BOOLEAN_LONG.has(tok)) continue
+      const consume = JQ_SAFE_VALUE_LONG[tok]
+      if (consume === undefined) return false
+      i += consume
       continue
     }
-    // The first non-flag positional is jq's filter (allowed once); a second
-    // positional is a FILE operand jq would open — reject it.
+    if (tok.startsWith('-') && tok.length > 1) {
+      for (const ch of tok.slice(1)) {
+        if (!JQ_SAFE_BOOLEAN_SHORT.has(ch)) return false
+      }
+      continue
+    }
     if (sawFilter) return false
     sawFilter = true
+    if (jqFilterLoadsModules(tok)) return false
   }
   return true
+}
+
+// jq `import`/`include` directives pull a module file from the search path, a
+// file-read vector that `-L` rejection alone does not cover (the default path
+// still applies). Match them as leading directives in the untrusted filter.
+function jqFilterLoadsModules(filter: string): boolean {
+  return /(^|[;\s])(import|include)\s/.test(filter)
 }
 
 // Splits a single bare `gh ... | reader | reader` pipeline into its stages on
