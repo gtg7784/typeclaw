@@ -420,6 +420,8 @@ type ObservedInbound = {
   source: 'prefetch' | 'observed'
 }
 
+type TimedAttachment = { ts: number; attachment: InboundAttachment }
+
 type LiveSession = {
   key: ChannelKey
   keyId: string
@@ -447,7 +449,10 @@ type LiveSession = {
   // fetched refs here makes the same `attachment_id: N` resolvable. MUST be
   // searched LAST so a live `#1` still wins over a historical `#1` (the
   // newest-first collision rule lookupInboundAttachment documents). Bounded,
-  // never persisted, never exposes the ref to the model.
+  // never persisted, never exposes the ref to the model. historyTimedAttachments
+  // is the ts-tagged source of truth (ordered oldest→newest, deduped by id);
+  // historyAttachments is its flat projection consumed by the lookup helpers.
+  historyTimedAttachments: readonly TimedAttachment[]
   historyAttachments: InboundAttachment[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
@@ -1421,6 +1426,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         pendingSystemReminders: [],
         contextBuffer: [],
         currentTurnAttachments: [],
+        historyTimedAttachments: [],
         historyAttachments: [],
         draining: false,
         debounceTimer: null,
@@ -2811,14 +2817,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const registerHistoryAttachments = (key: ChannelKey, messages: readonly ChannelHistoryMessage[]): void => {
     const live = liveSessions.get(channelKeyId(key))
     if (live === undefined) return
-    const incoming = messages.flatMap((message) => message.attachments ?? [])
+    const incoming: TimedAttachment[] = messages.flatMap((message) =>
+      (message.attachments ?? []).map((attachment) => ({ ts: message.ts, attachment })),
+    )
     if (incoming.length === 0) return
-    // Cap to the freshest HISTORY_ATTACHMENT_LIMIT so a deep scrollback paging
-    // session can't grow this unboundedly; the agent fetches refs it's about to
-    // act on, so recency is the right eviction key.
-    const merged = [...live.historyAttachments, ...incoming]
-    live.historyAttachments =
-      merged.length > HISTORY_ATTACHMENT_LIMIT ? merged.slice(merged.length - HISTORY_ATTACHMENT_LIMIT) : merged
+    // Order by message freshness, NOT append order: channel_history pages
+    // OLDER messages via nextCursor, so a later call can deliver an OLDER ref.
+    // findAttachmentById searches end-first, so the list MUST end with the
+    // freshest ref or an older paged `#1` would shadow a newer one. Dedupe by
+    // id keeping the freshest ts (a re-fetch of the same message is a no-op,
+    // not a duplicate), sort ascending by ts, then keep the freshest LIMIT so
+    // eviction drops the OLDEST refs, never newer ones.
+    const byId = new Map<number, TimedAttachment>()
+    for (const entry of [...live.historyTimedAttachments, ...incoming]) {
+      const existing = byId.get(entry.attachment.id)
+      if (existing === undefined || entry.ts >= existing.ts) byId.set(entry.attachment.id, entry)
+    }
+    const sorted = Array.from(byId.values()).sort((a, b) => a.ts - b.ts)
+    const kept =
+      sorted.length > HISTORY_ATTACHMENT_LIMIT ? sorted.slice(sorted.length - HISTORY_ATTACHMENT_LIMIT) : sorted
+    live.historyTimedAttachments = kept
+    live.historyAttachments = kept.map((entry) => entry.attachment)
   }
 
   const send = async (msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> => {

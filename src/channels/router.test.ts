@@ -8197,6 +8197,43 @@ describe('ChannelRouter history attachment registry', () => {
       `R${HISTORY_ATTACHMENT_LIMIT + 5}`,
     )
   })
+
+  test('a newer page wins over a later older-cursor page that collides on the same id', async () => {
+    const { router } = await liveRouter(await tempDir())
+
+    // The agent fetches the recent page first (newer ts), then pages back with
+    // a cursor and gets an OLDER message reusing id #1. Despite arriving later,
+    // the older ref must not shadow the newer one.
+    router.registerHistoryAttachments(KEY, [
+      historyMessage({ externalMessageId: 'recent', ts: 2000, attachments: [{ id: 1, kind: 'file', ref: 'NEW-REF' }] }),
+    ])
+    router.registerHistoryAttachments(KEY, [
+      historyMessage({ externalMessageId: 'older', ts: 1000, attachments: [{ id: 1, kind: 'file', ref: 'OLD-REF' }] }),
+    ])
+
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })!.ref).toBe('NEW-REF')
+  })
+
+  test('a later older-cursor page is evicted first when the cap is exceeded', async () => {
+    const { router } = await liveRouter(await tempDir())
+
+    // Fill the cap with the freshest page, then page back: the older refs must
+    // be the ones dropped, never the newer ones already retained.
+    const recent = Array.from({ length: HISTORY_ATTACHMENT_LIMIT }, (_, i) =>
+      historyMessage({
+        externalMessageId: `r${i}`,
+        ts: 9000 + i,
+        attachments: [{ id: i + 1, kind: 'file', ref: `NEW${i + 1}` }],
+      }),
+    )
+    router.registerHistoryAttachments(KEY, recent)
+    router.registerHistoryAttachments(KEY, [
+      historyMessage({ externalMessageId: 'older', ts: 10, attachments: [{ id: 999, kind: 'file', ref: 'OLD' }] }),
+    ])
+
+    expect(router.lookupInboundAttachment({ ...KEY, id: 999 })).toBeNull()
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })!.ref).toBe('NEW1')
+  })
 })
 
 describe('review-thread resolver registry', () => {
