@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const ADAPTER_IDS = ['discord-bot', 'github', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
+export const ADAPTER_IDS = ['discord-bot', 'github', 'line', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
@@ -254,6 +254,11 @@ export const channelsSchema = z
   .object({
     'discord-bot': adapterSchema.optional(),
     github: githubChannelSchema.optional(),
+    // LINE is a personal-account channel like KakaoTalk: plain-text only,
+    // alias-only engagement (no native @-mention), credentials in
+    // secrets.json#channels.line (not env). Unlike KakaoTalk it has no
+    // token-renewal cron — it persists a long-lived auth token + certificate.
+    line: adapterSchema.optional(),
     kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),

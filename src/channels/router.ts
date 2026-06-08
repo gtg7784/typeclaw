@@ -4156,6 +4156,7 @@ function formatAuthorReference(adapter: AdapterId, authorId: string, authorName:
     case 'github':
       return displayName.startsWith('@') ? displayName : `@${displayName}`
     case 'telegram-bot':
+    case 'line':
     case 'kakaotalk':
       return displayName
   }

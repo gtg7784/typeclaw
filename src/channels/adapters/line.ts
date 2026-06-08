@@ -1,0 +1,350 @@
+import {
+  LineClient as RealLineClient,
+  LineListener as RealLineListener,
+  type LineAccountCredentials,
+  type LineChat,
+  type LineConfig,
+  type LineListenerEventMap,
+  type LineMessage,
+  type LineProfile,
+  type LinePushMessageEvent,
+  type LineSendResult,
+} from 'agent-messenger/line'
+
+import type { ChannelRouter } from '@/channels/router'
+import type { ChannelAdapterConfig } from '@/channels/schema'
+import type {
+  ChannelHistoryMessage,
+  FetchHistoryArgs,
+  FetchHistoryResult,
+  HistoryCallback,
+  OutboundCallback,
+  OutboundMessage,
+  ResolvedChannelNames,
+  SendResult,
+} from '@/channels/types'
+
+import { createLineChannelResolver } from './line-channel-resolver'
+import { classifyInbound } from './line-classify'
+import { toLinePlainText } from './line-format'
+
+// Structural duck-type of the upstream LineClient class. Declaring this as an
+// interface (rather than reusing the nominal class type) lets test fakes
+// satisfy the public surface without inheriting the class's private fields.
+// The cast on the const below bridges the runtime class onto this interface.
+export interface LineClient {
+  login(credentials?: LineAccountCredentials): Promise<this>
+  getProfile(): Promise<LineProfile>
+  getChats(options?: { limit?: number }): Promise<LineChat[]>
+  getMessages(chatId: string, options?: { count?: number }): Promise<LineMessage[]>
+  sendMessage(chatId: string, text: string): Promise<LineSendResult>
+  close(): void
+}
+
+export interface LineListener {
+  start(): Promise<void>
+  stop(): void
+  on<K extends keyof LineListenerEventMap>(event: K, listener: (...args: LineListenerEventMap[K]) => void): this
+  off<K extends keyof LineListenerEventMap>(event: K, listener: (...args: LineListenerEventMap[K]) => void): this
+}
+
+export type LineCredentialStore = {
+  load(): Promise<LineConfig>
+  getAccount(id?: string): Promise<LineAccountCredentials | null>
+}
+
+const LineClient = RealLineClient as unknown as new () => LineClient
+const LineListener = RealLineListener as unknown as new (client: LineClient) => LineListener
+
+export type LineAdapterLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+}
+
+const consoleLogger: LineAdapterLogger = {
+  info: (m) => console.log(m),
+  warn: (m) => console.warn(m),
+  error: (m) => console.error(m),
+}
+
+export type LineAdapterOptions = {
+  router: ChannelRouter
+  configRef: () => ChannelAdapterConfig
+  logger?: LineAdapterLogger
+  selfAliasesRef?: () => readonly string[]
+  credentialsStore?: LineCredentialStore
+  client?: LineClient
+  listenerFactory?: (client: LineClient) => LineListener
+}
+
+export type LineAdapter = {
+  start: () => Promise<void>
+  stop: () => Promise<void>
+  isConnected: () => boolean
+}
+
+export const LINE_HISTORY_LIMIT_MAX = 200
+
+export function createOutboundCallback(deps: {
+  client: Pick<LineClient, 'sendMessage'>
+  logger: LineAdapterLogger
+  formatChannelTag: (workspace: string, chat: string) => Promise<string>
+}): OutboundCallback {
+  const { client, logger, formatChannelTag } = deps
+  return async (msg: OutboundMessage): Promise<SendResult> => {
+    if (msg.adapter !== 'line') {
+      return { ok: false, error: `unknown adapter: ${msg.adapter}` }
+    }
+    // LINE's SDK exposes text sends only — there is no attachment upload
+    // primitive, so an outbound carrying attachments is rejected loudly
+    // rather than silently dropping the files.
+    if (msg.attachments !== undefined && msg.attachments.length > 0) {
+      return { ok: false, error: 'line adapter does not support outbound attachments' }
+    }
+    const text = toLinePlainText(msg.text ?? '')
+    if (text === '') {
+      return { ok: false, error: 'message has no text' }
+    }
+    const tag = await formatChannelTag(msg.workspace, msg.chat)
+    logger.info(`[line] outbound ${tag} text_len=${text.length}`)
+    try {
+      const result = await client.sendMessage(msg.chat, text)
+      if (!result.success) {
+        logger.error(`[line] sendMessage non-success ${tag}`)
+        return { ok: false, error: 'line send failed' }
+      }
+      logger.info(`[line] sent message_id=${result.message_id} ${tag}`)
+    } catch (err) {
+      const message = describe(err)
+      logger.error(`[line] sendMessage failed: ${message}`)
+      return { ok: false, error: message }
+    }
+    return { ok: true }
+  }
+}
+
+export function createLineHistoryCallback(deps: {
+  client: Pick<LineClient, 'getMessages'>
+  logger: LineAdapterLogger
+  selfUserIdRef: () => string | null
+}): HistoryCallback {
+  const { client, logger, selfUserIdRef } = deps
+  return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
+    const limit = clampLimit(args.limit, LINE_HISTORY_LIMIT_MAX)
+    try {
+      const messages = await client.getMessages(args.chat, { count: limit })
+      const selfId = selfUserIdRef()
+      const mapped: ChannelHistoryMessage[] = messages.map((m) => {
+        const parsed = Date.parse(m.sent_at)
+        return {
+          externalMessageId: m.message_id,
+          authorId: m.author_id,
+          authorName: m.author_name ?? m.author_id,
+          text: m.text ?? '',
+          ts: Number.isNaN(parsed) ? 0 : parsed,
+          isBot: selfId !== null && m.author_id === selfId,
+          replyToBotMessageId: null,
+        }
+      })
+      return { ok: true, messages: mapped }
+    } catch (err) {
+      const message = describe(err)
+      logger.warn(`[line] history fetch failed: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
+function clampLimit(requested: number, max: number): number {
+  if (!Number.isFinite(requested) || requested <= 0) return max
+  return Math.min(Math.floor(requested), max)
+}
+
+export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
+  const logger = options.logger ?? consoleLogger
+  const client = options.client ?? new LineClient()
+  let listener: LineListener | null = null
+  let selfUserId: string | null = null
+  let connected = false
+  let started = false
+  let inflightInbounds = 0
+  let stopWaiters: Array<() => void> = []
+
+  const channelResolver = createLineChannelResolver({ client, logger })
+
+  const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
+    const names = await channelResolver
+      .resolve({ adapter: 'line', workspace, chat, thread: null })
+      .catch(() => ({}) as ResolvedChannelNames)
+    return `bucket=${workspace} chat=${formatLabel(names.chatName, chat)}`
+  }
+
+  const historyCallback = createLineHistoryCallback({
+    client,
+    logger,
+    selfUserIdRef: () => selfUserId,
+  })
+
+  const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
+
+  const processInbound = async (event: LinePushMessageEvent): Promise<void> => {
+    inflightInbounds++
+    try {
+      if (channelResolver.lookupChat(event.chat_id) === null) {
+        await channelResolver.refresh()
+        if (channelResolver.lookupChat(event.chat_id) === null) {
+          // The push event itself proves the chat exists even when GETCHATS
+          // hasn't surfaced it yet. Register a provisional @line-group entry
+          // (the strictest multi-party bucket) so the message is not silently
+          // dropped as unknown_chat; the next refresh upgrades it.
+          channelResolver.ingestProvisional(event.chat_id)
+          logger.warn(
+            `[line] provisional chat=${event.chat_id} message_id=${event.message_id} bucket=@line-group reason=not_in_getchats`,
+          )
+        }
+      }
+
+      const bucket = channelResolver.lookupChat(event.chat_id)?.workspace ?? '@line-group'
+      const inboundTag = await formatChannelTag(bucket, event.chat_id)
+      logger.info(
+        `[line] inbound message_id=${event.message_id} author=${event.author_id} ${inboundTag} text_len=${(event.text ?? '').length}`,
+      )
+
+      const verdict = classifyInbound(event, options.configRef(), {
+        selfUserId,
+        lookupChat: (id) => channelResolver.lookupChat(id),
+        ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
+      })
+      if (verdict.kind === 'drop') {
+        logger.info(`[line] dropped message_id=${event.message_id} reason=${verdict.reason}`)
+        return
+      }
+
+      logger.info(
+        `[line] routed message_id=${event.message_id} ${inboundTag} mention=${verdict.payload.isBotMention} dm=${verdict.payload.isDm}`,
+      )
+      await options.router.route(verdict.payload)
+    } catch (err) {
+      logger.error(`[line] handleInbound failed: ${describe(err)}`)
+    } finally {
+      inflightInbounds--
+      if (inflightInbounds === 0 && stopWaiters.length > 0) {
+        const waiters = stopWaiters
+        stopWaiters = []
+        for (const w of waiters) w()
+      }
+    }
+  }
+
+  return {
+    async start(): Promise<void> {
+      if (started) return
+      started = true
+      try {
+        const credentialStore = options.credentialsStore ?? null
+        if (credentialStore !== null) {
+          const account = await credentialStore.getAccount()
+          if (account === null) {
+            throw new Error('no LINE account in secrets.json#channels.line (run typeclaw init to authenticate)')
+          }
+          await client.login(account)
+        } else {
+          await client.login()
+        }
+      } catch (err) {
+        started = false
+        logger.error(`[line] login failed: ${describe(err)}`)
+        throw err
+      }
+
+      try {
+        const profile = await client.getProfile()
+        selfUserId = profile.mid
+        logger.info(`[line] authenticated as ${profile.display_name || profile.mid} (${profile.mid})`)
+      } catch (err) {
+        started = false
+        logger.error(`[line] getProfile failed: ${describe(err)}`)
+        throw err
+      }
+
+      try {
+        await channelResolver.refresh()
+      } catch (err) {
+        logger.warn(`[line] initial chat list fetch failed: ${describe(err)}`)
+      }
+
+      listener = options.listenerFactory ? options.listenerFactory(client) : new LineListener(client)
+      listener.on('connected', (info) => {
+        connected = true
+        logger.info(`[line] connected (account_id=${info.account_id})`)
+      })
+      listener.on('disconnected', () => {
+        connected = false
+        logger.warn('[line] disconnected; SDK will reconnect with backoff')
+      })
+      listener.on('error', (err) => {
+        logger.error(`[line] listener error: ${describe(err)}`)
+      })
+      listener.on('message', (event) => {
+        void processInbound(event)
+      })
+
+      try {
+        await listener.start()
+      } catch (err) {
+        try {
+          listener.stop()
+        } catch {
+          // best-effort cleanup; the start failure is what we surface
+        }
+        listener = null
+        started = false
+        logger.error(`[line] listener start failed: ${describe(err)}`)
+        throw err
+      }
+
+      // Registration happens AFTER listener.start() resolves so a start
+      // failure cannot leave the router pointing at callbacks for a
+      // half-initialized adapter. stop() unregisters in inverse order.
+      options.router.registerOutbound('line', outboundCallback)
+      options.router.registerChannelNameResolver('line', channelResolver.resolve)
+      options.router.registerHistory('line', historyCallback)
+    },
+
+    async stop(): Promise<void> {
+      if (!started) return
+      started = false
+      options.router.unregisterOutbound('line', outboundCallback)
+      options.router.unregisterChannelNameResolver('line', channelResolver.resolve)
+      options.router.unregisterHistory('line', historyCallback)
+      if (inflightInbounds > 0) {
+        await new Promise<void>((resolve) => {
+          stopWaiters.push(resolve)
+        })
+      }
+      listener?.stop()
+      listener = null
+      try {
+        client.close()
+      } catch {
+        // close() throwing on a half-initialized client is benign.
+      }
+      selfUserId = null
+      connected = false
+    },
+
+    isConnected(): boolean {
+      return connected && selfUserId !== null
+    },
+  }
+}
+
+function formatLabel(name: string | undefined, id: string): string {
+  if (name === undefined || name === '' || name === id) return id
+  return `${name}(${id})`
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}

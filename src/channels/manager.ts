@@ -4,12 +4,14 @@ import { join } from 'node:path'
 import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+import { SecretsLineCredentialStore } from '@/secrets/line-store'
 import { SecretsBackend } from '@/secrets/storage'
 import type { Stream } from '@/stream'
 
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createGithubAdapter, type GithubAdapter } from './adapters/github'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
+import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import type { GithubTokenBridge } from './github-token-bridge'
@@ -66,6 +68,7 @@ export type ChannelManagerOptions = {
   createDiscordAdapter?: typeof createDiscordBotAdapter
   createGithubAdapter?: typeof createGithubAdapter
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
+  createLineAdapter?: typeof createLineAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
   // Wake-up gate: forwarded to the router, which calls
@@ -111,7 +114,13 @@ export type ChannelManager = {
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
 }
 
-type AnyAdapter = DiscordBotAdapter | GithubAdapter | KakaotalkAdapter | SlackBotAdapter | TelegramBotAdapter
+type AnyAdapter =
+  | DiscordBotAdapter
+  | GithubAdapter
+  | LineAdapter
+  | KakaotalkAdapter
+  | SlackBotAdapter
+  | TelegramBotAdapter
 
 // Credential signature is the comparison key for credential-rotation
 // detection on reload. Discord and Telegram each use a single bot token;
@@ -143,6 +152,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
+  const createLine = options.createLineAdapter ?? createLineAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
 
@@ -160,6 +170,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
+    if (name === 'line') return buildLineSignature(options.agentDir)
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
     if (name === 'github') return buildGithubSignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
@@ -196,6 +207,15 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         appToken,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
+      })
+    }
+    if (name === 'line') {
+      return createLine({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsStore: createContainerLineCredentialStore(options.agentDir, env),
       })
     }
     if (name === 'kakaotalk') {
@@ -335,7 +355,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
             await runSerially(name, () => stopAdapter(name))
             stopped.push(name)
           } else if (signature !== current.credentialSignature) {
-            const reason = name === 'kakaotalk' ? 'credential rotation' : 'token rotation'
+            const reason = name === 'kakaotalk' || name === 'line' ? 'credential rotation' : 'token rotation'
             restartRequired.push(`${name} (${reason})`)
           }
         }
@@ -346,10 +366,10 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 }
 
-// Token-based adapters only. KakaoTalk's credentials live in
-// secrets.json#channels.kakaotalk, not in env, so it goes through
-// buildKakaotalkSignature instead.
-const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'github'>, readonly string[]> = {
+// Token-based adapters only. KakaoTalk's and LINE's credentials live in
+// secrets.json#channels.<adapter>, not in env, so they go through
+// buildKakaotalkSignature / buildLineSignature instead.
+const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'line' | 'github'>, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
@@ -387,6 +407,36 @@ function buildKakaotalkSignature(agentDir: string): { signature: string; missing
   }
 }
 
+function createContainerLineCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsLineCredentialStore {
+  const hostdUrl = env.TYPECLAW_HOSTD_URL
+  const restartToken = env.TYPECLAW_HOSTD_TOKEN
+  const containerName = env.TYPECLAW_CONTAINER_NAME
+  if (!hostdUrl || !restartToken || !containerName) {
+    throw new Error('LINE credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
+  }
+  return new SecretsLineCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostdUrl,
+    restartToken,
+    containerName,
+  })
+}
+
+function buildLineSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.line
+    if (!isLineCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.line'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.line@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`secrets.json#channels.line (${describe(err)})`] }
+  }
+}
+
 function buildGithubSignature(agentDir: string): { signature: string; missing: string[] } {
   const block = readGithubSecrets(agentDir)
   if (block === null) return { signature: '', missing: ['secrets.json#channels.github'] }
@@ -414,6 +464,15 @@ function isGithubSecretsBlock(value: unknown): value is GithubSecretsBlock {
 }
 
 function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
+}
+
+function isLineCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('accounts' in value)) return false
   const accounts = value.accounts
