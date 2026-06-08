@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { createServer, type Server } from 'node:http'
 
 import { getOAuthProvider, unregisterOAuthProvider } from '@mariozechner/pi-ai/oauth'
 
 import {
+  errorHtml,
+  loginXai,
   refreshXaiToken,
   registerXaiOAuthProvider,
   xaiOAuthProvider,
@@ -94,5 +97,65 @@ describe('refreshXaiToken', () => {
         fakeFetch(() => new Response('{"error":"invalid_grant"}', { status: 400 })),
       ),
     ).rejects.toThrow(/status=400/)
+  })
+})
+
+describe('errorHtml', () => {
+  test('escapes a provider-supplied OAuth error so a crafted callback cannot inject markup', () => {
+    const html = errorHtml('Error: <script>alert(1)</script>')
+    expect(html).not.toContain('<script>')
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+  })
+})
+
+describe('loginXai callback-server fallback', () => {
+  const CALLBACK_PORT = 56121
+  let blocker: Server | undefined
+
+  afterEach(async () => {
+    if (blocker) {
+      await new Promise<void>((resolve) => blocker!.close(() => resolve()))
+      blocker = undefined
+    }
+  })
+
+  test('falls back to manual paste when the loopback port cannot be bound', async () => {
+    // given: the fixed callback port is already occupied, so startCallbackServer fails to bind
+    blocker = createServer()
+    await new Promise<void>((resolve, reject) => {
+      blocker!.once('error', reject)
+      blocker!.listen(CALLBACK_PORT, '127.0.0.1', () => resolve())
+    })
+
+    let authUrlShown: string | undefined
+    let manualPromptShown = false
+
+    // when: the user pastes the redirect URL via onManualCodeInput
+    const creds = await loginXai(
+      {
+        onAuth: (info) => {
+          authUrlShown = info.url
+        },
+        onManualCodeInput: async () => {
+          manualPromptShown = true
+          return 'manual-code'
+        },
+        onPrompt: async () => {
+          throw new Error('onPrompt should not be reached when onManualCodeInput yields a code')
+        },
+      },
+      fakeFetch((url, init) => {
+        expect(url).toBe('https://auth.x.ai/oauth2/token')
+        expect(new URLSearchParams(init.body as string).get('code')).toBe('manual-code')
+        return new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 3600 }), {
+          status: 200,
+        })
+      }),
+    )
+
+    // then: the auth URL was still shown and the pasted code drove the token exchange
+    expect(authUrlShown).toContain('https://auth.x.ai/oauth2/authorize')
+    expect(manualPromptShown).toBe(true)
+    expect(creds.access).toBe('a')
   })
 })

@@ -87,12 +87,28 @@ function successHtml(): string {
   return '<!doctype html><html><body style="font-family:sans-serif;padding:2rem"><h2>xAI authentication complete.</h2><p>You can close this window and return to the terminal.</p></body></html>'
 }
 
-function errorHtml(message: string): string {
-  return `<!doctype html><html><body style="font-family:sans-serif;padding:2rem"><h2>xAI authentication failed.</h2><p>${message}</p></body></html>`
+// The OAuth `error` query param is provider-supplied and reflected into the
+// callback page, so escape it to keep a crafted callback URL
+// (`?error=<script>…`) from injecting markup into the local page.
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
 }
 
-function startCallbackServer(expectedState: string): Promise<CallbackServer> {
-  return new Promise((resolve, reject) => {
+export function errorHtml(message: string): string {
+  return `<!doctype html><html><body style="font-family:sans-serif;padding:2rem"><h2>xAI authentication failed.</h2><p>${escapeHtml(message)}</p></body></html>`
+}
+
+// Resolves to `null` when the fixed loopback port can't be bound (EADDRINUSE,
+// sandbox bind restriction). The caller then falls back to manual-paste mode
+// rather than failing the whole login — the browser callback is a convenience,
+// not a hard requirement, since the user can always paste the redirect URL.
+function startCallbackServer(expectedState: string): Promise<CallbackServer | null> {
+  return new Promise((resolve) => {
     let settle: ((value: { code: string; state: string | null } | null) => void) | undefined
     const waitForCodePromise = new Promise<{ code: string; state: string | null } | null>((resolveWait) => {
       let settled = false
@@ -138,7 +154,10 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
       }
     })
 
-    server.on('error', (err) => reject(err))
+    server.on('error', () => {
+      server.close()
+      resolve(null)
+    })
     server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
       resolve({
         server,
@@ -224,7 +243,9 @@ export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchF
         'Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.',
     })
 
-    if (callbacks.onManualCodeInput) {
+    if (server && callbacks.onManualCodeInput) {
+      // Race the local callback server against a manual paste: whichever lands
+      // a code first wins (cross-device/SSH logins can't reach the loopback).
       let manualInput: string | undefined
       let manualError: Error | undefined
       const manualPromise = callbacks
@@ -243,22 +264,21 @@ export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchF
       if (result?.code) {
         code = result.code
       } else if (manualInput) {
-        const parsed = parseAuthorizationInput(manualInput)
-        if (parsed.state && parsed.state !== verifier) throw new Error('OAuth state mismatch')
-        code = parsed.code
+        code = parseManualCode(manualInput, verifier)
       }
       if (!code) {
         await manualPromise
         if (manualError) throw manualError
         if (manualInput) {
-          const parsed = parseAuthorizationInput(manualInput)
-          if (parsed.state && parsed.state !== verifier) throw new Error('OAuth state mismatch')
-          code = parsed.code
+          code = parseManualCode(manualInput, verifier)
         }
       }
-    } else {
+    } else if (server) {
       const result = await server.waitForCode()
       if (result?.code) code = result.code
+    } else if (callbacks.onManualCodeInput) {
+      // No callback server bound — manual paste is the only path to a code.
+      code = parseManualCode(await callbacks.onManualCodeInput(), verifier)
     }
 
     if (!code) {
@@ -266,9 +286,7 @@ export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchF
         message: 'Paste the authorization code or full redirect URL:',
         placeholder: REDIRECT_URI,
       })
-      const parsed = parseAuthorizationInput(input)
-      if (parsed.state && parsed.state !== verifier) throw new Error('OAuth state mismatch')
-      code = parsed.code
+      code = parseManualCode(input, verifier)
     }
 
     if (!code) throw new Error('Missing authorization code')
@@ -276,8 +294,14 @@ export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchF
     callbacks.onProgress?.('Exchanging authorization code for tokens...')
     return await exchangeAuthorizationCode(code, verifier, fetchImpl)
   } finally {
-    server.server.close()
+    server?.server.close()
   }
+}
+
+function parseManualCode(input: string, verifier: string): string | undefined {
+  const parsed = parseAuthorizationInput(input)
+  if (parsed.state && parsed.state !== verifier) throw new Error('OAuth state mismatch')
+  return parsed.code
 }
 
 export async function refreshXaiToken(refreshToken: string, fetchImpl: FetchFn = fetch): Promise<OAuthCredentials> {
