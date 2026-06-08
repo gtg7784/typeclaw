@@ -4,11 +4,17 @@ import { cancel, confirm, intro, isCancel, log, note, password, select, spinner,
 import { defineCommand } from 'citty'
 
 import {
+  KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
+  listKnownProviderVendorIds,
+  providerIdsForVendor,
   supportsApiKey as providerSupportsApiKey,
   supportsOAuth as providerSupportsOAuth,
+  variantHint,
+  variantLabel,
   type KnownModelRef,
   type KnownProviderId,
+  type KnownProviderVendorId,
 } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability } from '@/container'
 import {
@@ -290,11 +296,13 @@ export const init = defineCommand({
 
 interface WizardState {
   catalog?: { options: ModelOption[]; source: 'models.dev' | 'curated'; warning?: string }
+  vendorId?: KnownProviderVendorId
   providerId?: KnownProviderId
   model?: ModelOption
   reuseExisting?: boolean
   authMethod?: 'api-key' | 'oauth'
   llmAuth?: LLMAuth
+  visionVendorId?: KnownProviderVendorId
   visionProviderId?: KnownProviderId
   visionModel?: ModelOption
   visionReuseExisting?: boolean
@@ -336,14 +344,16 @@ interface CollectedInputs {
 }
 
 type StepId =
-  | 'pick-provider'
-  | 'pick-model'
+  | 'pick-vendor'
+  | 'pick-provider-variant'
   | 'reuse-existing-key'
   | 'pick-auth-method'
+  | 'pick-model'
   | 'enter-api-key'
-  | 'pick-vision-provider'
-  | 'pick-vision-model'
+  | 'pick-vision-vendor'
+  | 'pick-vision-provider-variant'
   | 'pick-vision-auth-method'
+  | 'pick-vision-model'
   | 'enter-vision-api-key'
   | 'pick-channel'
   | 'reuse-existing-channel'
@@ -353,7 +363,15 @@ export interface WizardPrompts {
   loadCatalog: () => Promise<NonNullable<WizardState['catalog']>>
   readExistingApiKey: (cwd: string, providerId: KnownProviderId) => Promise<string | null>
   hasExistingOAuthCredentials: (cwd: string, providerId: KnownProviderId) => Promise<boolean>
-  pickProvider: (options: ModelOption[], initial: KnownProviderId | undefined) => Promise<StepResult<KnownProviderId>>
+  pickVendor: (
+    options: ModelOption[],
+    initial: KnownProviderVendorId | undefined,
+  ) => Promise<StepResult<KnownProviderVendorId>>
+  pickProviderVariant: (
+    vendorId: KnownProviderVendorId,
+    options: ModelOption[],
+    initial: KnownProviderId | undefined,
+  ) => Promise<StepResult<KnownProviderId>>
   pickModel: (
     options: ModelOption[],
     providerId: KnownProviderId,
@@ -365,10 +383,15 @@ export interface WizardPrompts {
   ) => Promise<StepResult<'api-key' | 'oauth'>>
   askApiKey: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => Promise<StepResult<string>>
   validateApiKey: (providerId: KnownProviderId, key: string) => Promise<KeyValidationResult>
-  pickVisionProvider: (
+  pickVisionVendor: (
+    options: ModelOption[],
+    initial: KnownProviderVendorId | undefined,
+  ) => Promise<StepResult<KnownProviderVendorId | 'skip'>>
+  pickVisionProviderVariant: (
+    vendorId: KnownProviderVendorId,
     options: ModelOption[],
     initial: KnownProviderId | undefined,
-  ) => Promise<StepResult<KnownProviderId | 'skip'>>
+  ) => Promise<StepResult<KnownProviderId>>
   pickVisionModel: (
     options: ModelOption[],
     providerId: KnownProviderId,
@@ -399,12 +422,14 @@ export const defaultWizardPrompts: WizardPrompts = {
   loadCatalog,
   readExistingApiKey: readExistingProviderApiKey,
   hasExistingOAuthCredentials,
-  pickProvider,
+  pickVendor,
+  pickProviderVariant,
   pickModel: pickModelForProvider,
   pickAuthMethod,
   askApiKey,
   validateApiKey,
-  pickVisionProvider,
+  pickVisionVendor,
+  pickVisionProviderVariant,
   pickVisionModel,
   pickChannel,
   hasExistingChannelSecrets,
@@ -428,7 +453,7 @@ export async function collectWizardInputs(
   const reset = options.reset === true
   const catalog = await prompts.loadCatalog()
   const state: WizardState = { catalog }
-  let step: StepId = 'pick-provider'
+  let step: StepId = 'pick-vendor'
   let pendingBackOrigin: StepId | null = null
   let oauthCredentialsSaved = false
 
@@ -463,9 +488,30 @@ export async function collectWizardInputs(
 
   while (true) {
     switch (step) {
-      case 'pick-provider': {
-        const result = onResult(step, await prompts.pickProvider(catalog.options, state.providerId))
+      case 'pick-vendor': {
+        const result = onResult(step, await prompts.pickVendor(catalog.options, state.vendorId))
         if (result.kind === 'back') {
+          break
+        }
+        if (state.vendorId !== result.value) {
+          state.providerId = undefined
+          state.model = undefined
+          state.reuseExisting = undefined
+          state.authMethod = undefined
+          state.llmAuth = undefined
+        }
+        state.vendorId = result.value
+        step = 'pick-provider-variant'
+        break
+      }
+
+      case 'pick-provider-variant': {
+        const result = onResult(
+          step,
+          await prompts.pickProviderVariant(state.vendorId!, catalog.options, state.providerId),
+        )
+        if (result.kind === 'back') {
+          step = 'pick-vendor'
           break
         }
         if (state.providerId !== result.value) {
@@ -475,17 +521,6 @@ export async function collectWizardInputs(
           state.llmAuth = undefined
         }
         state.providerId = result.value
-        step = 'pick-model'
-        break
-      }
-
-      case 'pick-model': {
-        const result = onResult(step, await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref))
-        if (result.kind === 'back') {
-          step = 'pick-provider'
-          break
-        }
-        state.model = result.value
         step = 'reuse-existing-key'
         break
       }
@@ -503,7 +538,7 @@ export async function collectWizardInputs(
           log.info(`Reusing existing ${provider.name} API key from secrets.json.`)
           state.llmAuth = { kind: 'api-key', apiKey: existingApiKey }
           state.reuseExisting = true
-          step = stepAfterDefaultAuth(state)
+          step = 'pick-model'
           break
         }
         state.reuseExisting = false
@@ -517,12 +552,12 @@ export async function collectWizardInputs(
         const result = onResult(step, await prompts.pickAuthMethod(provider, state.authMethod))
         if (result.kind === 'back') {
           // Skip past `reuse-existing-key` — it is a silent auto-resume
-          // step with no user prompt, so unwind directly to pick-model
-          // (the prior user-visible step). This only fires when
-          // pickAuthMethod was an interactive choice (dual-auth providers);
-          // single-method providers return autoValue and never reach the
-          // back branch.
-          step = 'pick-model'
+          // step with no user prompt, so unwind directly to the prior
+          // user-visible step (the variant picker when it was interactive,
+          // else the vendor picker). This only fires when pickAuthMethod was
+          // an interactive choice (dual-auth providers); single-method
+          // providers return autoValue and never reach the back branch.
+          step = stepBeforeAuthMethod(state)
           break
         }
         state.authMethod = result.value
@@ -530,21 +565,24 @@ export async function collectWizardInputs(
           // Auto-resume: skip the browser flow when OAuth credentials are
           // already on disk from a prior partial run. The fresh-tokens path
           // and the resume path both leave `state.llmAuth = oauth-completed`,
-          // so downstream steps (vision, channel, scaffold) can't tell the
-          // difference. `--reset` short-circuits this by making
+          // so downstream steps (model, vision, channel, scaffold) can't tell
+          // the difference. `--reset` short-circuits this by making
           // `hasExistingOAuth` return false.
           if (await hasExistingOAuth(state.providerId!)) {
             log.info(`Reusing existing ${provider.name} OAuth credentials from secrets.json.`)
             state.llmAuth = { kind: 'oauth-completed' }
-            step = stepAfterDefaultAuth(state)
+            step = 'pick-model'
             break
           }
           // Run the browser login eagerly so the user sees the OAuth URL the
           // moment they pick "OAuth (browser login)" — not at the end of the
-          // wizard. On failure we ask the user how to recover (retry / fall
-          // back to API key / abort) instead of dumping them back into the
-          // auth method picker with no guidance.
-          const login = await runOAuthLoginSafely(prompts, provider, cwd, state.model!.ref)
+          // wizard. The model isn't picked yet at this point, so we hand the
+          // login the provider's first model ref purely to resolve its
+          // `oauthProviderId` (login ignores the model otherwise). On failure
+          // we ask the user how to recover (retry / fall back to API key /
+          // abort) instead of dumping them back into the auth method picker
+          // with no guidance.
+          const login = await runOAuthLoginSafely(prompts, provider, cwd, oauthDiscoveryRef(state.providerId!))
           if (!login.ok) {
             const recovery = await prompts.askOAuthFailureRecovery(
               provider,
@@ -560,15 +598,29 @@ export async function collectWizardInputs(
             if (recovery === 'abort') abort()
             state.authMethod = recovery === 'api-key' ? 'api-key' : undefined
             state.llmAuth = undefined
-            step = recovery === 'api-key' ? 'enter-api-key' : 'pick-auth-method'
+            step = recovery === 'api-key' ? 'pick-model' : 'pick-auth-method'
             break
           }
           oauthCredentialsSaved = true
           state.llmAuth = { kind: 'oauth-completed' }
-          step = stepAfterDefaultAuth(state)
+          step = 'pick-model'
         } else {
-          step = 'enter-api-key'
+          step = 'pick-model'
         }
+        break
+      }
+
+      case 'pick-model': {
+        const result = onResult(step, await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref))
+        if (result.kind === 'back') {
+          step = stepBeforeModel(state)
+          break
+        }
+        state.model = result.value
+        // OAuth and reused api-key already minted `state.llmAuth`; only a
+        // freshly-chosen api-key still needs the key prompt.
+        step =
+          state.authMethod === 'api-key' && state.reuseExisting !== true ? 'enter-api-key' : stepAfterDefaultAuth(state)
         break
       }
 
@@ -577,7 +629,7 @@ export async function collectWizardInputs(
         const provider = KNOWN_PROVIDERS[providerId]
         const result = onResult(step, await prompts.askApiKey(provider))
         if (result.kind === 'back') {
-          step = 'pick-auth-method'
+          step = 'pick-model'
           break
         }
         const verdict = await runApiKeyValidation(prompts, providerId, result.value)
@@ -590,20 +642,43 @@ export async function collectWizardInputs(
         break
       }
 
-      case 'pick-vision-provider': {
+      case 'pick-vision-vendor': {
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
-        const result = onResult(step, await prompts.pickVisionProvider(visionOptions, state.visionProviderId))
+        const result = onResult(step, await prompts.pickVisionVendor(visionOptions, state.visionVendorId))
         if (result.kind === 'back') {
           step = stepBeforeVision(state)
           break
         }
         if (result.value === 'skip') {
+          state.visionVendorId = undefined
           state.visionProviderId = undefined
           state.visionModel = undefined
           state.visionLlmAuth = undefined
           state.visionReuseExisting = undefined
           state.visionAuthMethod = undefined
           step = 'pick-channel'
+          break
+        }
+        if (state.visionVendorId !== result.value) {
+          state.visionProviderId = undefined
+          state.visionModel = undefined
+          state.visionReuseExisting = undefined
+          state.visionAuthMethod = undefined
+          state.visionLlmAuth = undefined
+        }
+        state.visionVendorId = result.value
+        step = 'pick-vision-provider-variant'
+        break
+      }
+
+      case 'pick-vision-provider-variant': {
+        const visionOptions = catalog.options.filter((o) => o.supportsVision)
+        const result = onResult(
+          step,
+          await prompts.pickVisionProviderVariant(state.visionVendorId!, visionOptions, state.visionProviderId),
+        )
+        if (result.kind === 'back') {
+          step = 'pick-vision-vendor'
           break
         }
         if (state.visionProviderId !== result.value) {
@@ -624,7 +699,7 @@ export async function collectWizardInputs(
           await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref),
         )
         if (result.kind === 'back') {
-          step = 'pick-vision-provider'
+          step = 'pick-vision-provider-variant'
           break
         }
         state.visionModel = result.value
@@ -806,14 +881,33 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
   }
 }
 
+// Model is the last default-track step before the vision/channel branch, so
+// vendor/variant/auth all sit upstream of it. Reached after `pick-model`
+// (api-key path also passes through `enter-api-key` first).
 function stepAfterDefaultAuth(state: WizardState): StepId {
-  return state.model?.supportsVision === false ? 'pick-vision-provider' : 'pick-channel'
+  return state.model?.supportsVision === false ? 'pick-vision-vendor' : 'pick-channel'
 }
 
-function stepBeforeVision(state: WizardState): StepId {
-  if (state.reuseExisting === true) return 'reuse-existing-key'
-  if (state.authMethod === 'api-key') return 'enter-api-key'
-  return 'pick-auth-method'
+// Back-target when leaving `pick-auth-method`: the variant picker when it was
+// interactive (multi-provider vendor), else the vendor picker. The
+// `reuse-existing-key` step in between is a silent auto-resume with no prompt.
+function stepBeforeAuthMethod(state: WizardState): StepId {
+  return providerIdsForVendor(state.vendorId!).length > 1 ? 'pick-provider-variant' : 'pick-vendor'
+}
+
+// Back-target when leaving `pick-model`: the auth picker when it was
+// interactive (dual-auth provider), else fall back past the silent
+// auto-resume/auth steps to the prior user-visible picker.
+function stepBeforeModel(state: WizardState): StepId {
+  const provider = KNOWN_PROVIDERS[state.providerId!]
+  if (providerSupportsApiKey(provider) && providerSupportsOAuth(provider)) return 'pick-auth-method'
+  return stepBeforeAuthMethod(state)
+}
+
+// Back-target when leaving the vision track to the default track. With model
+// now the final default-track step, that is always `pick-model`.
+function stepBeforeVision(_state: WizardState): StepId {
+  return 'pick-model'
 }
 
 function stepBeforePickChannel(state: WizardState): StepId {
@@ -824,8 +918,16 @@ function stepBeforePickChannel(state: WizardState): StepId {
     if (state.visionAuthMethod === 'oauth') return 'pick-vision-auth-method'
     return 'pick-vision-model'
   }
-  if (state.model?.supportsVision === false) return 'pick-vision-provider'
+  if (state.model?.supportsVision === false) return 'pick-vision-vendor'
   return stepBeforeVision(state)
+}
+
+function oauthDiscoveryRef(providerId: KnownProviderId): KnownModelRef {
+  // OAuth login only reads the provider's `oauthProviderId` from the ref, so
+  // any registered model for the provider works as the discovery handle.
+  const modelId = Object.keys(KNOWN_PROVIDERS[providerId].models)[0]
+  if (modelId === undefined) throw new Error(`Provider ${providerId} has no registered models for OAuth discovery`)
+  return `${providerId}/${modelId}` as KnownModelRef
 }
 
 async function loadCatalog(): Promise<NonNullable<WizardState['catalog']>> {
@@ -840,15 +942,41 @@ async function loadCatalog(): Promise<NonNullable<WizardState['catalog']>> {
   return warning !== undefined ? { options, source, warning } : { options, source }
 }
 
-async function pickProvider(
+async function pickVendor(
+  options: ModelOption[],
+  initial: KnownProviderVendorId | undefined,
+): Promise<StepResult<KnownProviderVendorId>> {
+  const vendors = uniqueVendors(options)
+  const choice = await select({
+    message: 'Pick an LLM provider',
+    options: vendors.map((id) => ({
+      value: id,
+      label: KNOWN_PROVIDER_VENDORS[id].name,
+      hint: vendorHint(id, options),
+    })),
+    initialValue: initial ?? vendors[0],
+  })
+  if (isCancel(choice)) return back()
+  return value(choice)
+}
+
+async function pickProviderVariant(
+  vendorId: KnownProviderVendorId,
   options: ModelOption[],
   initial: KnownProviderId | undefined,
 ): Promise<StepResult<KnownProviderId>> {
-  const providers = uniqueProviders(options)
-  const choice = await select({
-    message: 'Pick an LLM provider',
-    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name, hint: providerAuthHint(id) })),
-    initialValue: initial ?? providers[0],
+  const variants = providersForVendorInCatalog(vendorId, options)
+  if (variants.length === 0) throw new Error(`Internal error: vendor ${vendorId} has no providers in the catalog`)
+  if (variants.length === 1) return autoValue(variants[0]!)
+  const choice = await select<KnownProviderId>({
+    message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
+    options: variants.map((id) => {
+      const hint = variantHint(vendorId, id)
+      return hint !== undefined
+        ? { value: id, label: variantLabel(vendorId, id), hint }
+        : { value: id, label: variantLabel(vendorId, id) }
+    }),
+    initialValue: initial ?? variants[0],
   })
   if (isCancel(choice)) return back()
   return value(choice)
@@ -896,29 +1024,37 @@ async function pickAuthMethod(
   return autoValue(supportsOAuth ? 'oauth' : 'api-key')
 }
 
-async function pickVisionProvider(
+async function pickVisionVendor(
   options: ModelOption[],
-  initial: KnownProviderId | undefined,
-): Promise<StepResult<KnownProviderId | 'skip'>> {
-  const providers = uniqueProviders(options)
-  if (providers.length === 0) {
+  initial: KnownProviderVendorId | undefined,
+): Promise<StepResult<KnownProviderVendorId | 'skip'>> {
+  const vendors = uniqueVendors(options)
+  if (vendors.length === 0) {
     log.warn('No vision-capable models available; skipping vision profile.')
     return autoValue('skip')
   }
-  const choice = await select<KnownProviderId | 'skip'>({
+  const choice = await select<KnownProviderVendorId | 'skip'>({
     message: 'Your model is text-only. Pick a provider for the `vision` profile (used for image input)',
     options: [
-      ...providers.map((id) => ({
-        value: id as KnownProviderId | 'skip',
-        label: KNOWN_PROVIDERS[id].name,
-        hint: providerAuthHint(id),
+      ...vendors.map((id) => ({
+        value: id as KnownProviderVendorId | 'skip',
+        label: KNOWN_PROVIDER_VENDORS[id].name,
+        hint: vendorHint(id, options),
       })),
       { value: 'skip', label: 'Skip — no vision support', hint: 'add later with `typeclaw model set vision <ref>`' },
     ],
-    initialValue: initial ?? providers[0],
+    initialValue: initial ?? vendors[0],
   })
   if (isCancel(choice)) return back()
   return value(choice)
+}
+
+async function pickVisionProviderVariant(
+  vendorId: KnownProviderVendorId,
+  options: ModelOption[],
+  initial: KnownProviderId | undefined,
+): Promise<StepResult<KnownProviderId>> {
+  return pickProviderVariant(vendorId, options, initial)
 }
 
 async function pickVisionModel(
@@ -1486,15 +1622,23 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   }
 }
 
-function uniqueProviders(options: ModelOption[]): KnownProviderId[] {
-  const seen = new Set<KnownProviderId>()
-  const out: KnownProviderId[] = []
-  for (const o of options) {
-    if (seen.has(o.providerId)) continue
-    seen.add(o.providerId)
-    out.push(o.providerId)
-  }
-  return out
+function providersInCatalog(options: ModelOption[]): Set<KnownProviderId> {
+  return new Set(options.map((o) => o.providerId))
+}
+
+// Vendors with at least one provider present in the catalog, ordered by the
+// product priority encoded in `KNOWN_PROVIDER_VENDORS` declaration order (not
+// catalog iteration order).
+function uniqueVendors(options: ModelOption[]): KnownProviderVendorId[] {
+  const present = providersInCatalog(options)
+  return listKnownProviderVendorIds().filter((vendorId) =>
+    providerIdsForVendor(vendorId).some((providerId) => present.has(providerId)),
+  )
+}
+
+function providersForVendorInCatalog(vendorId: KnownProviderVendorId, options: ModelOption[]): KnownProviderId[] {
+  const present = providersInCatalog(options)
+  return providerIdsForVendor(vendorId).filter((providerId) => present.has(providerId))
 }
 
 // Per-provider recommended model refs. Surfaces a "(Recommended)" suffix in
@@ -1528,10 +1672,10 @@ function formatModelHint(o: ModelOption): string {
   return parts.join(' · ')
 }
 
-function providerAuthHint(id: KnownProviderId): string {
-  const provider = KNOWN_PROVIDERS[id]
-  const apiKey = providerSupportsApiKey(provider)
-  const oauth = providerSupportsOAuth(provider)
+function vendorHint(vendorId: KnownProviderVendorId, options: ModelOption[]): string {
+  const providers = providersForVendorInCatalog(vendorId, options)
+  const apiKey = providers.some((id) => providerSupportsApiKey(KNOWN_PROVIDERS[id]))
+  const oauth = providers.some((id) => providerSupportsOAuth(KNOWN_PROVIDERS[id]))
   if (apiKey && oauth) return 'API key or OAuth'
   if (oauth) return 'OAuth login'
   return 'API key'
