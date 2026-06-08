@@ -933,15 +933,22 @@ describe('createCronConsumer model fallback', () => {
 
 function fakeCountStore(): {
   get: (id: string, job: CronJob) => number
-  increment: (id: string, job: CronJob, at: number) => Promise<void>
+  increment: (id: string, job: CronJob, at: number) => Promise<boolean>
   counts: Map<string, number>
+  inactive: Set<string>
 } {
   const counts = new Map<string, number>()
+  // ids the test has marked as no longer live: increment returns false (dropped)
+  // and does not count, mirroring a job removed/replaced during the await.
+  const inactive = new Set<string>()
   return {
     counts,
+    inactive,
     get: (id) => counts.get(id) ?? 0,
     increment: async (id) => {
+      if (inactive.has(id)) return false
       counts.set(id, (counts.get(id) ?? 0) + 1)
+      return true
     },
   }
 }
@@ -1032,6 +1039,30 @@ describe('createCronConsumer count gate', () => {
     expect(countStore.counts.get('limited')).toBe(1)
 
     release?.()
+    consumer.stop()
+  })
+
+  test('does NOT dispatch when increment reports the job is no longer live', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const countStore = fakeCountStore()
+    // job removed/replaced while the durable increment was awaiting
+    countStore.inactive.add('limited')
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      countStore,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    publishCron(stream, countedPromptJob('limited', 3))
+    await new Promise((r) => setImmediate(r))
+
+    expect(countStore.counts.get('limited')).toBeUndefined()
+    expect(factory.callsByJob.get('limited')).toBeUndefined()
+
     consumer.stop()
   })
 })

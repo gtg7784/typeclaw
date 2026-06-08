@@ -67,7 +67,9 @@ export type CreateCronConsumerOptions = {
 
 export type ConsumerCountStore = {
   get: (id: string, job: CronJob) => number
-  increment: (id: string, job: CronJob, at: number) => Promise<void>
+  // Resolves true if the fire was accepted/counted, false if the job is no
+  // longer live (so the consumer skips dispatching stale config).
+  increment: (id: string, job: CronJob, at: number) => Promise<boolean>
 }
 
 export type CronConsumer = {
@@ -119,7 +121,13 @@ export function createCronConsumer({
             // Durably record the accepted fire BEFORE dispatch. A crash here
             // consumes the count without running (at-most-count), which is the
             // correct tradeoff for a reminder versus over-firing on restart.
-            await countStore.increment(job.id, job, now())
+            // A false result means a reload removed/replaced the job while the
+            // write was queued — skip dispatch so we never run stale config.
+            const accepted = await countStore.increment(job.id, job, now())
+            if (!accepted) {
+              logger.info(`[cron] ${job.id}: job no longer live, skipping dispatch`)
+              return
+            }
           }
           if (job.kind === 'prompt') {
             await runPrompt(job, createSessionForCron, stream, logger)

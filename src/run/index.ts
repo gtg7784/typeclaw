@@ -437,7 +437,10 @@ export async function startAgent({
     cwd,
     countStore: {
       get: (id, job) => cronCountStore?.get(id, job) ?? 0,
-      increment: (id, job, at) => cronCountStore?.increment(id, job, at) ?? Promise.resolve(),
+      // Holder is always set before any fire (see above); the `false` fallback
+      // fails safe — skip dispatch rather than run an uncounted count-job — for
+      // the unreachable case where a fire somehow predates the holder.
+      increment: (id, job, at) => cronCountStore?.increment(id, job, at) ?? Promise.resolve(false),
     },
     invokeHandler: async (job) => {
       const snap = pluginRuntime.get()

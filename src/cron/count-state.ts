@@ -22,7 +22,12 @@ export type CountStore = {
   // fingerprint matches `job`. A stale fire from a previous job definition (or
   // a resurrected entry after reload) therefore can't gate the live job.
   get: (id: string, job: CronJob) => number
-  increment: (id: string, job: CronJob, at: number) => Promise<void>
+  // Resolves `true` when the fire was accepted and counted, `false` when the
+  // job is no longer in the live set (removed/replaced while this was queued).
+  // Callers use the result to skip dispatching a stale job, not just to avoid
+  // miscounting it. The verdict is computed inside the write mutex, so it
+  // reflects any reconcile that landed before the write ran.
+  increment: (id: string, job: CronJob, at: number) => Promise<boolean>
   // Re-applies boot-time reconciliation against a new job set (called on
   // `typeclaw reload`) so re-added/changed jobs don't inherit stale counts.
   reconcile: (jobs: CronJob[]) => Promise<void>
@@ -114,7 +119,7 @@ export async function createCountStore(
         // can land synchronously between the queue and this body running, so a
         // sync-only guard would still let a straggler write a tombstone for a
         // job that's since been removed. `active` reflects the latest reconcile.
-        if (active.get(id) !== fp) return
+        if (active.get(id) !== fp) return false
         const prev = matchingCount(state.jobs[id], job)
         state.jobs[id] = {
           progressFingerprint: fp,
@@ -122,8 +127,12 @@ export async function createCountStore(
           lastAcceptedAt: new Date(at).toISOString(),
         }
         await persist(path, state, io)
+        return true
       })
-      tail = run.catch(() => {})
+      tail = run.then(
+        () => {},
+        () => {},
+      )
       return run
     },
     reconcile: (nextJobs) => {
