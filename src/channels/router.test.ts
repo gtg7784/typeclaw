@@ -5303,6 +5303,114 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(totalNotices).toBe(2)
   })
 
+  test('suppresses the soft-error notice when the turn recovers and replies (no stranded false failure)', async () => {
+    // given: a turn that hits a transient provider error MID-stream (e.g.
+    // server_is_overloaded) but then recovers and produces a real reply — the
+    // exact huxley#1755 incident, where the "⚠️ provider failed" notice was
+    // stranded above a correct review posted ~83s later.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    // when: error fires, then the turn recovers with assistant prose
+    await router.route(inbound({ text: 'review this PR' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage:
+            'Codex error: {"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded."}}',
+        },
+      })
+      sessions[0]!.setAssistantText('Review complete. Clean refactor, no issues.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the real reply lands and NO failure notice is posted
+    expect(sent.some((t) => /Review complete/.test(t))).toBe(true)
+    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
+  })
+
+  test('carries the soft-error across an empty-turn retry: no notice when the RETRY recovers and replies', async () => {
+    // given: the first prompt hits a provider error AND ends truncated with no
+    // send, so validateChannelTurn queues an EMPTY_TURN_RETRY_NUDGE (a fresh
+    // drain iteration with a new turnSeq). The retry then replies. The pending
+    // error must follow the logical turn — posting it at the first iteration's
+    // end would strand a false failure above the retry's reply.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      // when: first attempt errors + truncates (no send) → retry queued
+      if (attempt === 1) {
+        sessions[0]!.emit({
+          type: 'message_end',
+          message: { role: 'assistant', stopReason: 'error', errorMessage: 'transient server_is_overloaded' },
+        })
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'error')
+        return
+      }
+      // when: retry recovers and replies
+      expect(text).toContain(EMPTY_TURN_RETRY_NUDGE)
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here is your answer' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: only the real reply; the carried-forward error is suppressed
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent.some((t) => /here is your answer/.test(t))).toBe(true)
+    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
+  })
+
+  test('exhausted empty-turn retries surface the generic fallback (not a duplicate provider notice) and never go silent', async () => {
+    // given: every attempt errors + truncates with no send, exhausting the
+    // empty-turn retry budget without ever replying. The exhausted path already
+    // posts EMPTY_TURN_FALLBACK_TEXT — a user-facing "I got stuck" notice that
+    // counts as a reply — so the provider notice is correctly suppressed as
+    // redundant. The human still sees exactly one notice (never dead air); the
+    // raw provider cause lives in the operator logs.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'transient server_is_overloaded' },
+      })
+      sessions[0]!.setAssistantMidTurn('never-ending loop output', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: retries ran, the generic fallback surfaced exactly once, no
+    // duplicate provider notice, and the raw cause was logged for operators
+    expect(sessions[0]!.prompts.length).toBeGreaterThan(1)
+    expect(sent.filter((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toHaveLength(1)
+    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
+    expect(logs.some((m) => /LLM call failed: .*server_is_overloaded/.test(m))).toBe(true)
+  })
+
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {
     // given
     const dir = await tempDir()
