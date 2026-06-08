@@ -5,6 +5,7 @@ const ADAPTER_DISPLAY: Record<string, string> = {
   'discord-bot': 'Discord',
   github: 'GitHub',
   'telegram-bot': 'Telegram',
+  line: 'LINE',
   kakaotalk: 'KakaoTalk',
 }
 

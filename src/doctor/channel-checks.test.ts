@@ -68,6 +68,7 @@ describe('buildChannelChecks', () => {
       'channel.slack-bot.credentials',
       'channel.discord-bot.credentials',
       'channel.telegram-bot.credentials',
+      'channel.line.credentials',
       'channel.kakaotalk.credentials',
       'channel.github.credentials',
       'channel.github.webhook-delivery',
@@ -189,6 +190,43 @@ describe('buildChannelChecks', () => {
       writeChannelsSecrets(cwd, { 'discord-bot': { token: { env: 'MY_DISCORD_TOKEN' } } })
       const result = await runCheck('channel.discord-bot.credentials', ctxFor(cwd))
       expect(result.status).toBe('warning')
+    })
+  })
+
+  describe('line', () => {
+    test('skips when not configured', async () => {
+      const cwd = makeTmpAgentDir({})
+      const result = await runCheck('channel.line.credentials', ctxFor(cwd))
+      expect(result.status).toBe('skipped')
+    })
+
+    test('warns when configured but secrets.json has no accounts', async () => {
+      const cwd = makeTmpAgentDir({ line: {} })
+      const result = await runCheck('channel.line.credentials', ctxFor(cwd))
+      expect(result.status).toBe('warning')
+      expect(result.message).toMatch(/no accounts/)
+      expect(result.fix?.description).toContain('channel add line')
+    })
+
+    test('passes when at least one account exists', async () => {
+      const cwd = makeTmpAgentDir({ line: {} })
+      writeChannelsSecrets(cwd, {
+        line: {
+          currentAccount: 'a',
+          accounts: {
+            a: {
+              account_id: 'a',
+              auth_token: 't',
+              device: 'DESKTOPMAC',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+            },
+          },
+        },
+      })
+      const result = await runCheck('channel.line.credentials', ctxFor(cwd))
+      expect(result.status).toBe('ok')
+      expect(result.message).toContain('1 account')
     })
   })
 

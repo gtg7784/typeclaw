@@ -28,6 +28,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     slackBotCredentials(),
     discordBotCredentials(),
     telegramBotCredentials(),
+    lineCredentials(),
     kakaotalkCredentials(),
     githubCredentials(),
     githubWebhookDelivery(),
@@ -61,6 +62,33 @@ function telegramBotCredentials(): DoctorCheck {
     description: 'telegram-bot adapter has TELEGRAM_BOT_TOKEN',
     applies: (ctx) => ctx.hasAgentFolder,
     run: (ctx) => runTokenAdapterCheck(ctx, 'telegram-bot', ['TELEGRAM_BOT_TOKEN']),
+  }
+}
+
+function lineCredentials(): DoctorCheck {
+  return {
+    name: 'channel.line.credentials',
+    category: 'channels',
+    description: 'line adapter has at least one account in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'line')) {
+        return { status: 'skipped', message: 'line not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.line
+      const accountCount = block?.accounts ? Object.keys(block.accounts).length : 0
+      if (accountCount === 0) {
+        return {
+          status: 'warning',
+          message: 'line has no accounts in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add line` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: `line has ${accountCount} account(s)` }
+    },
   }
 }
 
