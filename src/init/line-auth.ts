@@ -72,6 +72,16 @@ export async function runLineBootstrap(input: LineLoginInput): Promise<LineBoots
       return { ok: false, reason }
     }
 
+    // The SDK persists the account by calling setAccount() on the credential
+    // manager as a side effect of login. We can't assume it did: read the
+    // record back and require an auth_token before declaring success, so a
+    // login that authenticated but failed to persist surfaces as an error
+    // instead of a green "added" with an empty secrets.json#channels.line.
+    const persisted = await store.getAccount(result.account_id)
+    if (persisted === null || persisted.auth_token === '') {
+      return { ok: false, reason: 'LINE login authenticated but did not persist credentials' }
+    }
+
     await store.setCurrentAccount(result.account_id)
     return { ok: true }
   } catch (err) {

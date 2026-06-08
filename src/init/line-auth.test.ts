@@ -41,6 +41,14 @@ function fakeClient(agentDir: string, result: LineLoginResult): LineLoginClient 
   }
 }
 
+// Models an SDK that authenticates but never calls setAccount() — nothing
+// lands in secrets.json. runLineBootstrap must treat this as a failure rather
+// than a green "added".
+function nonPersistingClient(result: LineLoginResult): LineLoginClient {
+  const login = async (): Promise<LineLoginResult> => result
+  return { loginWithQR: login, loginWithEmail: login }
+}
+
 describe('runLineBootstrap', () => {
   test('persists the account and sets it current on a successful QR login', async () => {
     await withDir(async (dir) => {
@@ -82,6 +90,18 @@ describe('runLineBootstrap', () => {
         client: fakeClient(dir, { authenticated: false, error: 'pin rejected' }),
       })
       expect(status).toEqual({ ok: false, reason: 'pin rejected' })
+    })
+  })
+
+  test('fails when login authenticates but no credentials were persisted', async () => {
+    await withDir(async (dir) => {
+      const status = await runLineBootstrap({
+        method: 'qr',
+        agentDir: dir,
+        callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+        client: nonPersistingClient({ authenticated: true, account_id: 'mid-1' }),
+      })
+      expect(status).toEqual({ ok: false, reason: 'LINE login authenticated but did not persist credentials' })
     })
   })
 })
