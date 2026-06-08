@@ -122,6 +122,15 @@ describe('canBindProcSafely', () => {
     expect(second).toBe(first)
     return first
   })
+
+  test('keys the cache by bwrapPath so a non-default binary re-probes (never inherits the default result)', async () => {
+    // given: the default-path probe has run and cached a result
+    await canBindProcSafely()
+    // when/then: a non-existent bwrap path must NOT inherit that cache — it
+    // probes its own (absent) binary and is unsafe. A singleton cache would
+    // wrongly return the default's answer here.
+    expect(await canBindProcSafely({ bwrapPath: '/nonexistent/definitely-not-bwrap' })).toBe(false)
+  })
 })
 
 describe('buildProcBindProbeScript (false-pass regression guard)', () => {

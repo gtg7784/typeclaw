@@ -138,25 +138,32 @@ export function _resetRealProcProbeCacheForTests(): void {
 // future bwrap flag change, would turn this strategy into a secret leak. So we
 // PROBE it directly before ever selecting it — plant a real secret in a sibling
 // process's env and assert the sandbox cannot read it back.
-let procBindProbeResult: boolean | undefined
-// Same in-flight dedup + process-global caching rationale as canMountRealProc:
-// the answer is a per-container capability fact, so concurrent first callers
-// share one probe and the result sticks. Not abortable (see canMountRealProc).
-let procBindProbeInFlight: Promise<boolean> | undefined
+// Keyed by resolved bwrapPath, like ensureBwrapAvailable: the safety answer is a
+// fact about a SPECIFIC bwrap binary, so a caller pinning a non-default path
+// (tests, or a future deployment) must re-probe rather than inherit the default
+// binary's result. In-flight dedup for the same reason as canMountRealProc:
+// concurrent first callers for one path share a single probe. Both cached
+// process-globally (the answer is a per-container capability fact). Not abortable
+// (see canMountRealProc).
+const procBindProbeCache = new Map<string, boolean>()
+const procBindProbeInFlight = new Map<string, Promise<boolean>>()
 
 export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boolean> {
-  if (procBindProbeResult !== undefined) return Promise.resolve(procBindProbeResult)
-  if (procBindProbeInFlight !== undefined) return procBindProbeInFlight
+  const bwrap = options?.bwrapPath ?? 'bwrap'
+  const cached = procBindProbeCache.get(bwrap)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const existing = procBindProbeInFlight.get(bwrap)
+  if (existing !== undefined) return existing
 
-  const promise = probeProcBind(options?.bwrapPath ?? 'bwrap')
+  const promise = probeProcBind(bwrap)
     .then((safe) => {
-      procBindProbeResult = safe
+      procBindProbeCache.set(bwrap, safe)
       return safe
     })
     .finally(() => {
-      procBindProbeInFlight = undefined
+      procBindProbeInFlight.delete(bwrap)
     })
-  procBindProbeInFlight = promise
+  procBindProbeInFlight.set(bwrap, promise)
   return promise
 }
 
@@ -174,10 +181,11 @@ async function probeProcBind(bwrap: string): Promise<boolean> {
   try {
     // `env -i` so the sentinel carries ONLY the marker, never the parent's real
     // FIREWORKS_API_KEY/GH_TOKEN — the probe must not itself plant a real secret,
-    // independent of Bun.spawn's env merge/replace semantics. `sleep 300` is long
-    // enough that the sentinel cannot exit mid-probe and turn a "permission
-    // denied" assertion into a "no such process" false pass (see below).
-    sentinel = Bun.spawn(['/usr/bin/env', '-i', `${PROC_BIND_PROBE_SECRET}=leaked`, '/bin/sleep', '300'], {
+    // independent of Bun.spawn's env merge/replace semantics. `sleep 30` outlives
+    // the sub-second probe by a wide margin (so it cannot exit mid-probe and let
+    // a post-exit ESRCH masquerade as the EACCES block), yet is short enough to
+    // self-reap within seconds if cleanup ever fails to fire .kill().
+    sentinel = Bun.spawn(['/usr/bin/env', '-i', `${PROC_BIND_PROBE_SECRET}=leaked`, '/bin/sleep', '30'], {
       stdout: 'ignore',
       stderr: 'ignore',
     })
@@ -221,7 +229,21 @@ async function probeProcBind(bwrap: string): Promise<boolean> {
       ],
       { stdout: 'ignore', stderr: 'ignore' },
     )
-    await proc.exited
+    // Resolve the probe against three outcomes:
+    //   - the bwrap probe exits → use its verdict
+    //   - the sentinel exits FIRST → the in-sandbox open-failures could now be
+    //     ESRCH (pid gone), so the verdict is void → fail closed
+    //   - a hung bwrap (a wedged runtime) → time out and fail closed, so a stuck
+    //     probe never stalls the first low-trust bash call indefinitely
+    const outcome = await Promise.race([
+      proc.exited.then(() => 'probe' as const),
+      sentinel.exited.then(() => 'sentinel-died' as const),
+      Bun.sleep(PROC_BIND_PROBE_TIMEOUT_MS).then(() => 'timeout' as const),
+    ])
+    if (outcome !== 'probe') {
+      proc.kill()
+      return false
+    }
     if (proc.exitCode !== 0) return false
     // Final liveness: the in-sandbox blocked-open assertions are only meaningful
     // if the sentinel was alive throughout. Re-read its environ from the PARENT
@@ -237,6 +259,11 @@ async function probeProcBind(bwrap: string): Promise<boolean> {
     sentinel?.kill()
   }
 }
+
+// Cap on the in-sandbox bwrap probe so a wedged runtime cannot stall the first
+// low-trust bash call. The probe normally completes in a few ms; this is a
+// generous ceiling, not a tuning knob.
+const PROC_BIND_PROBE_TIMEOUT_MS = 5_000
 
 // The in-sandbox assertion, built as a pure function so a unit test can pin its
 // shape (the integration behavior needs a Linux container + bwrap, unrunnable in
@@ -274,18 +301,24 @@ export function buildProcBindProbeScript(sentinelPid: number): string {
 }
 
 async function parentCanRead(path: string): Promise<boolean> {
+  // Direct read, not a `cat` subprocess: an actual open(2)+read is the real leak
+  // path (matching the in-sandbox `(: < path)` check), and it avoids both a spawn
+  // and a PATH dependence in this non-clearenv parent context. `.bytes()` forces
+  // the read so a security-gated procfs file that stats fine but blocks read is
+  // correctly reported as unreadable. A zero-length successful read still returns
+  // true (the file opened) — fine, since the parent SHOULD be able to open the
+  // sentinel's environ.
   try {
-    const proc = Bun.spawn(['cat', path], { stdout: 'ignore', stderr: 'ignore' })
-    await proc.exited
-    return proc.exitCode === 0
+    await Bun.file(path).bytes()
+    return true
   } catch {
     return false
   }
 }
 
 export function _resetProcBindProbeCacheForTests(): void {
-  procBindProbeResult = undefined
-  procBindProbeInFlight = undefined
+  procBindProbeCache.clear()
+  procBindProbeInFlight.clear()
 }
 
 // The bun binary this process runs as (process.execPath). build.ts re-exposes

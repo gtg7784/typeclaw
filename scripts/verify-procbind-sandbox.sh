@@ -6,11 +6,12 @@
 #
 # The point of proc-bind is that it needs NEITHER `unshare --mount-proc` NOR
 # CAP_SYS_ADMIN — so this runs WITHOUT --cap-add (unlike verify-realproc-sandbox).
-# It proves three properties of `bwrap --unshare-all … --ro-bind /proc /proc`:
+# It proves two properties of `bwrap --unshare-all … --ro-bind /proc /proc`:
 #   1. An external package runner (bunx) runs to completion (no Bun "NotDir").
 #   2. A secret in a sibling process's environment is UNREADABLE from the sandbox
 #      (the --unshare-all child userns blocks cross-userns /proc/<pid>/environ).
-#   3. That sibling is unsignalable from the sandbox (kill -0 EPERM).
+# The signal boundary (kill/ptrace fail EPERM across the userns) is a corollary
+# of the same userns isolation property (2) proves, so it is not re-tested here.
 #
 # Usage: scripts/verify-procbind-sandbox.sh [image]
 #   image defaults to ghcr.io/typeclaw/typeclaw-base:<version-from-package.json>

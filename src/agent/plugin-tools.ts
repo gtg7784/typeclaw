@@ -620,15 +620,17 @@ async function applyBashSandbox(
   mutableArgs.command = commandString
 }
 
-// Picks the /proc strategy for a sandboxed bash call. Ordering is the security
-// crux of the fix: prefer 'proc-bind' (--ro-bind /proc, NO CAP_SYS_ADMIN) so the
-// container needs no broad outer capability, and only fall to 'real-proc'
-// (unshare --mount-proc, NEEDS CAP_SYS_ADMIN, granted by start.ts when
-// sandbox.realProc is set) when the operator explicitly opts into the stricter
-// PID-isolation posture AND the kernel actually permits the mount (OrbStack
-// rejects it). 'tmpfs' is the last-resort degraded mode where external packages
-// can't run; reached only on a host that fails BOTH probes (e.g. a kernel that
-// leaks cross-userns environ — proc-bind fails closed there rather than leak).
+// Picks the /proc strategy for a sandboxed bash call. The branch order is:
+// 'real-proc' ONLY when the operator explicitly opted in (sandbox.realProc) AND
+// the kernel permits the mount (canMountRealProc) — it adds PID isolation but
+// needs CAP_SYS_ADMIN (unshare --mount-proc), so it is a deliberate, narrow
+// opt-in; else 'proc-bind' (--ro-bind /proc, NO CAP_SYS_ADMIN) when its userns
+// leak-block is verified safe (canBindProcSafely); else 'tmpfs'. Because
+// sandbox.realProc DEFAULTS FALSE, the first branch is normally skipped and
+// proc-bind is the de-facto default — which is the point: the common path needs
+// no broad outer capability. 'tmpfs' is the last-resort degraded mode where
+// external packages can't run; reached only when BOTH probes fail (e.g. a kernel
+// that would leak cross-userns environ — proc-bind fails closed there).
 //
 // Read from the boot-time `config` snapshot, NOT live getConfig(): sandbox is
 // restart-required, and the strategy MUST track the boot-time CAP_SYS_ADMIN
