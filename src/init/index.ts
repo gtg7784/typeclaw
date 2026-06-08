@@ -139,6 +139,9 @@ export type HatchRunner = (options: {
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 
+export type LineAuthResult = { ok: true } | { ok: false; reason: string }
+export type LineAuthRunner = (options: { cwd: string }) => Promise<LineAuthResult>
+
 // Discriminated by `kind` so the type system enforces "you can't pass an
 // API key to an OAuth provider, and you can't pass an OAuth runner to an
 // API-key provider". Optional model defaults to DEFAULT_MODEL_REF, which is
@@ -834,7 +837,7 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk' | 'github',
+  channel: 'discord' | 'slack' | 'telegram' | 'line' | 'kakaotalk' | 'github',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -854,6 +857,21 @@ export async function hasExistingChannelSecrets(
       // surfaced as a hard error inside `runAddChannel` to prevent silent
       // overwrites.
       return false
+    case 'line': {
+      // A usable LINE block needs a current account whose record carries an
+      // auth_token. Unlike KakaoTalk there are no renewal fields (email +
+      // encrypted password) to require — LINE has no unattended renewal cron.
+      const block = channels.line
+      if (!isObjectRecord(block)) return false
+      const current = (block as { currentAccount?: unknown }).currentAccount
+      if (typeof current !== 'string' || current.length === 0) return false
+      const accounts = (block as { accounts?: unknown }).accounts
+      if (!isObjectRecord(accounts)) return false
+      const account = accounts[current]
+      if (!isObjectRecord(account)) return false
+      const authToken = (account as { auth_token?: unknown }).auth_token
+      return typeof authToken === 'string' && authToken.length > 0
+    }
     case 'kakaotalk': {
       const block = channels.kakaotalk
       if (!isObjectRecord(block)) return false
@@ -924,7 +942,7 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 // scaffold-test cases above demonstrates how easy it is to lose a single
 // behavior under a mode flag.
 
-export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'kakaotalk' | 'github'
+export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'line' | 'kakaotalk' | 'github'
 
 // Public adapter names match the typeclaw.json `channels.*` keys exactly.
 // The CLI takes these as the optional positional arg, the picker shows
@@ -934,15 +952,18 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'slack-bot',
   'discord-bot',
   'telegram-bot',
+  'line',
   'kakaotalk',
   'github',
 ]
 
-export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets' | 'github-webhooks'
+export type AddChannelStep = 'line-auth' | 'kakaotalk-auth' | 'config' | 'secrets' | 'github-webhooks'
 
 export type AddChannelStepEvent =
   | { step: 'config'; phase: 'start' }
   | { step: 'config'; phase: 'done' }
+  | { step: 'line-auth'; phase: 'start' }
+  | { step: 'line-auth'; phase: 'done'; result: LineAuthResult }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'secrets'; phase: 'start' }
@@ -960,6 +981,7 @@ export type AddChannelOptions = {
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
   | {
       channel: 'github'
@@ -986,6 +1008,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   // drops messages — the same trap `runInit` already guards against. Aborting
   // before any file write means the user's next `typeclaw channel add
   // kakaotalk` retry has no half-applied state to clean up.
+  if (options.channel === 'line') {
+    emit({ step: 'line-auth', phase: 'start' })
+    const result = await options.runLineAuth({ cwd: options.cwd })
+    emit({ step: 'line-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`LINE authentication failed: ${result.reason}`)
+  }
+
   if (options.channel === 'kakaotalk') {
     emit({ step: 'kakaotalk-auth', phase: 'start' })
     const result = await options.runKakaotalkAuth({ cwd: options.cwd })
@@ -1065,6 +1094,10 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       return { botToken: options.slackBotToken, appToken: options.slackAppToken }
     case 'telegram-bot':
       return { token: options.telegramBotToken }
+    case 'line':
+      // LINE auth writes its structured account block directly to
+      // secrets.json#channels.line before config mutation.
+      return {}
     case 'kakaotalk':
       // KakaoTalk auth writes its structured multi-account block directly to
       // secrets.json#channels.kakaotalk before config mutation.

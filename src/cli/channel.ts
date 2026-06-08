@@ -22,8 +22,10 @@ import {
   type GithubCredentialPatch,
   type GithubTunnelProvider,
   type KakaotalkAuthResult,
+  type LineAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
+import { runLineBootstrap } from '@/init/line-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
@@ -33,6 +35,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
+  line: 'LINE',
   kakaotalk: 'KakaoTalk',
   github: 'GitHub',
 }
@@ -127,6 +130,15 @@ const setSub = defineCommand({
       process.exit(1)
     }
 
+    if (args.adapter === 'line') {
+      console.error(
+        errorLine(
+          'LINE uses an interactive auth flow (QR or email + PIN). Use `typeclaw channel reauth line` to rotate its credentials.',
+        ),
+      )
+      process.exit(1)
+    }
+
     const adapter =
       args.adapter === undefined
         ? await pickSettableAdapter(configured)
@@ -138,7 +150,7 @@ const setSub = defineCommand({
   },
 })
 
-const REAUTHABLE_ADAPTERS = ['kakaotalk'] as const
+const REAUTHABLE_ADAPTERS = ['line', 'kakaotalk'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
 const reauthSub = defineCommand({
@@ -234,10 +246,27 @@ function isReauthableAdapter(value: string): value is ReauthableAdapter {
 
 async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void> {
   switch (adapter) {
+    case 'line':
+      await runLineReauth(cwd)
+      return
     case 'kakaotalk':
       await runKakaotalkReauth(cwd)
       return
   }
+}
+
+async function runLineReauth(cwd: string): Promise<void> {
+  const login = await promptLineLogin()
+  const s = spinner()
+  s.start('Logging in to LINE...')
+  const result = await runLineBootstrap({ ...login, agentDir: cwd })
+  if (!result.ok) {
+    s.stop(`LINE login failed: ${result.reason}`)
+    process.exit(1)
+  }
+  s.stop('LINE credentials refreshed in secrets.json.')
+
+  await maybePromptReauthRefresh(cwd, 'line')
 }
 
 async function runKakaotalkReauth(cwd: string): Promise<void> {
@@ -566,6 +595,7 @@ type CollectedCredentials =
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
   | {
       channel: 'github'
@@ -587,6 +617,13 @@ async function collectCredentials(channel: ChannelKind, cwd: string): Promise<Co
     }
     case 'telegram-bot':
       return { channel, telegramBotToken: await promptTelegramToken() }
+    case 'line': {
+      const login = await promptLineLogin()
+      return {
+        channel,
+        runLineAuth: ({ cwd: agentDir }) => runLineBootstrap({ ...login, agentDir }),
+      }
+    }
     case 'kakaotalk': {
       const creds = await promptKakaotalkCredentials()
       return {
@@ -1023,6 +1060,71 @@ async function promptKakaotalkCredentials(
   return { email, password: pwd }
 }
 
+type LinePromptResult =
+  | { method: 'qr'; callbacks: { onQRUrl: (url: string) => void; onPincode: (pin: string) => void } }
+  | {
+      method: 'email'
+      email: string
+      password: string
+      callbacks: { onPincode: (pin: string) => void }
+    }
+
+async function promptLineLogin(): Promise<LinePromptResult> {
+  note(
+    [
+      'LINE authentication uses a personal account registered as a sub-device.',
+      'Messages will be sent and received under this account — use a',
+      'non-primary account if possible.',
+      '',
+      'QR login is recommended: it works even when the account has no',
+      'email/password set (social-login accounts).',
+    ].join('\n'),
+    'About to log in to LINE',
+  )
+  const method = await select<'qr' | 'email'>({
+    message: 'How do you want to log in to LINE?',
+    options: [
+      { value: 'qr', label: 'QR code — scan with the LINE app on your phone (recommended)' },
+      { value: 'email', label: 'Email + password — for accounts with email login enabled' },
+    ],
+    initialValue: 'qr',
+  })
+  if (isCancel(method)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const onPincode = (pin: string): void => log.info(`Enter this PIN in the LINE app to confirm: ${pin}`)
+
+  if (method === 'qr') {
+    return {
+      method: 'qr',
+      callbacks: {
+        onQRUrl: (url) => note(url, 'Open this URL on your phone (or scan the QR it renders)'),
+        onPincode,
+      },
+    }
+  }
+
+  const email = await text({
+    message: 'LINE email',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Email is required'),
+  })
+  if (isCancel(email)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const pwd = await password({
+    message: 'LINE password',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Password is required'),
+  })
+  if (isCancel(pwd)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return { method: 'email', email, password: pwd, callbacks: { onPincode } }
+}
+
 function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEvent) => void {
   const spinners: Partial<Record<AddChannelStepEvent['step'], ReturnType<typeof spinner>>> = {}
 
@@ -1039,6 +1141,9 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
     if (!s) return
 
     switch (event.step) {
+      case 'line-auth':
+        s.stop(reportLineAuth(event.result))
+        break
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
@@ -1056,6 +1161,7 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
 }
 
 const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
+  'line-auth': 'Logging in to LINE...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
@@ -1065,6 +1171,11 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
   if (result.ok) return 'KakaoTalk credentials saved to secrets.json.'
   return `KakaoTalk login failed: ${result.reason}`
+}
+
+function reportLineAuth(result: LineAuthResult): string {
+  if (result.ok) return 'LINE credentials saved to secrets.json.'
+  return `LINE login failed: ${result.reason}`
 }
 
 async function maybePromptRestart(cwd: string, channel: ChannelKind): Promise<void> {
