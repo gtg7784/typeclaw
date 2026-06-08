@@ -47,13 +47,22 @@ const main = defineCommand({
 // (model/provider list -> tryReadProvidersSync -> v2-only parser) still hard-fail
 // on a never-booted v1 folder. Run it once per host invocation here — at the
 // dispatch boundary, NOT in the parse path, which would recreate the read-time
-// shim #638 deliberately removed. `run` is the container stage and owns its own.
+// shim #638 deliberately removed.
 let hostStartupMigrationsDone = false
+
+// `run` is the container stage and owns its own migration. Bare flag
+// invocations (`--help`, `-h`, `--version`, `-v`, no command) are
+// informational, exit before reading secrets, and must NOT rewrite secrets.json
+// or emit migration warnings — so only a real subcommand triggers the migration.
+function shouldRunHostStartupMigrations(commandName: string | undefined): boolean {
+  if (commandName === undefined || commandName === 'run') return false
+  return !commandName.startsWith('-')
+}
 
 function runHostStartupMigrationsOnce(commandName: string | undefined): void {
   if (hostStartupMigrationsDone) return
   hostStartupMigrationsDone = true
-  if (commandName === 'run') return
+  if (!shouldRunHostStartupMigrations(commandName)) return
   const agentDir = findAgentDir(process.cwd())
   if (agentDir === null) return
   try {

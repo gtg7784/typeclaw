@@ -63,9 +63,9 @@ describe('typeclaw model list migrates a pre-0.20.0 v1 secrets.json on first hos
     await rm(cwd, { recursive: true, force: true })
   })
 
-  async function runModelList(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  async function runCli(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const proc = Bun.spawn({
-      cmd: ['bun', CLI_ENTRY, 'model', 'list'],
+      cmd: ['bun', CLI_ENTRY, ...args],
       cwd,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -76,8 +76,10 @@ describe('typeclaw model list migrates a pre-0.20.0 v1 secrets.json on first hos
     return { exitCode, stdout, stderr }
   }
 
-  test('exits 0 and rewrites secrets.json to the v2 envelope on disk', async () => {
-    await writeFile(
+  const runModelList = () => runCli(['model', 'list'])
+
+  const writeV1Secrets = () =>
+    writeFile(
       join(cwd, 'secrets.json'),
       JSON.stringify({
         version: 1,
@@ -85,6 +87,9 @@ describe('typeclaw model list migrates a pre-0.20.0 v1 secrets.json on first hos
         channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'dtok' } },
       }),
     )
+
+  test('exits 0 and rewrites secrets.json to the v2 envelope on disk', async () => {
+    await writeV1Secrets()
 
     const { exitCode, stdout } = await runModelList()
 
@@ -105,5 +110,16 @@ describe('typeclaw model list migrates a pre-0.20.0 v1 secrets.json on first hos
     expect(exitCode).toBe(0)
     const after = JSON.parse(await readFile(join(cwd, 'secrets.json'), 'utf8'))
     expect(after).toEqual(v2)
+  })
+
+  test('does not migrate or warn on informational --help invocations', async () => {
+    await writeV1Secrets()
+
+    const { exitCode, stderr } = await runCli(['--help'])
+
+    expect(exitCode).toBe(0)
+    expect(stderr).not.toMatch(/migration/i)
+    const untouched = JSON.parse(await readFile(join(cwd, 'secrets.json'), 'utf8'))
+    expect(untouched.version).toBe(1)
   })
 })
