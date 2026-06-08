@@ -3043,13 +3043,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const candidate = recoverableAssistantText(live.session)
     if (candidate === null) {
       // No recoverable assistant prose: the turn ended with no usable reply.
-      // Two distinct shapes, handled differently (Option B):
+      // Three distinct shapes, handled differently:
       //
-      //   1. The model THRASHED the send path this turn — it tried to send but
-      //      every attempt was denied (skip-locked, or policy-denied/duplicate/
-      //      cap, tracked on skipLockedSendTurn / policyDeniedToolSendsThisTurn).
-      //      Re-prompting would just re-thrash, so skip retry and post the
-      //      user-facing fallback once.
+      //   1a. SKIP-LOCKED thrash — the model called `skip_response` (committed to
+      //       silence) then tried to send; every attempt was denied skip-locked
+      //       (skipLockedSendTurn === turnSeq). Honor the silence decision: stay
+      //       silent, no fallback. Handled first, below.
+      //
+      //   1b. The model THRASHED the send path WITHOUT a skip commitment — denials
+      //       tracked on policyDeniedToolSendsThisTurn (duplicate/cap). In practice
+      //       these only accumulate after a real send landed, so the early return
+      //       above usually fires first; if one ever reaches here, re-prompting
+      //       would just re-thrash, so skip retry and post the fallback once.
       //
       //   2. The PURE reasoning-loop — no send was ever attempted; the model
       //      burned its budget thinking and produced nothing (the canonical
@@ -3061,8 +3066,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // The legitimate empty-state case (a TUI-only check before any user
       // prompt, no inbound this turn) is excluded: no batch means no real turn
       // to retry or apologize for — keep the historical silent bail there.
-      const attemptedSendThisTurn =
-        live.skipLockedSendTurn === live.turnSeq || live.policyDeniedToolSendsThisTurn.size > 0
+      const skipLockedThisTurn = live.skipLockedSendTurn === live.turnSeq
+      const attemptedSendThisTurn = skipLockedThisTurn || live.policyDeniedToolSendsThisTurn.size > 0
+
+      // Skip-locked thrash honors the skip with SILENCE, not the fallback. The
+      // model called `skip_response` (committed to silence) then tried to send;
+      // the send was denied skip-locked and a retry loop aborts the run, leaving
+      // an `aborted` leaf whose reply text was a denied tool ARG — never
+      // recoverable prose. EMPTY_TURN_FALLBACK_TEXT would be a false alarm here:
+      // it reads as a system failure when the real state is the model's own
+      // silence decision contradicted by a late reply. The pure turn-cap/duplicate
+      // thrash below (no `skip_response`) never committed to silence, so it still
+      // gets the fallback. Distinct log line keeps production signal.
+      if (skipLockedThisTurn) {
+        logger.warn(
+          `[channels] ${live.keyId} skip_locked_send_thrash_suppressed ` +
+            `denied_targets=${live.policyDeniedToolSendsThisTurn.size}`,
+        )
+        return
+      }
 
       // Only a TRUNCATED assistant leaf (length/error/aborted) from a real
       // conversational turn is a degeneration worth retrying. A cold/empty turn
