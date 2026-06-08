@@ -33,6 +33,14 @@ Every inbound that survives the `channel.respond` permission gate is tagged with
 5. **Solo-human fallback**: if the channel currently holds at most one distinct **human** participant and the author isn't a bot, engage. Reverts to strict the moment a second human posts. This makes a one-human dev channel work without an `@mention` on every line.
 6. **Default**: `observe`.
 
+## Clearing stickiness (`channel_disengage`)
+
+Sticky credit normally drains on its own — consumed on the next inbound, expired on TTL (default 15 min), or lost on a container restart. There is no other natural exit, and because every reply **re-grants** a fresh credit (`grantStickyForReplyTargets`), a bot in a busy multi-bot room can stay engaged turn after turn even after a participant tells it to stop.
+
+`channel_disengage` is the runtime escape hatch. It calls `ChannelRouter.clearSticky(key)`, which drops every credit for the channel key via `StickyLedger.clear` and returns the bot to strict rules #1/#3 engagement (mention / reply / dm / alias) for that conversation. It sends no message, is scoped to the one channel key, and is in-memory only — a later reply re-grants normally, so it is a "drop in, then resume" action, not a permanent mute.
+
+The same-turn re-grant is the subtle part. The agent's natural pattern is to **ack and disengage** ("ok, backing off"), but that ack is itself a `channel_reply` whose success path would re-grant the credit `clearSticky` just dropped. To keep disengage binding, `clearSticky` stamps `live.disengagedTurn = turnSeq`, and `send()` **skips** `grantStickyForReplyTargets` while `disengagedTurn === turnSeq`. The suppression is scoped to that one turn (matched by `turnSeq`, reset at turn start), so the next turn re-grants as usual. This mirrors the `skip_response` send-lock shape: a turn-local flag that makes "I'm stepping back" survive a same-turn reply.
+
 ## Suppressors
 
 The suppressors exist to keep the bot out of conversations clearly aimed elsewhere, _before_ the permissive solo-human fallback can fire. Each is populated by the adapter classifiers and flips the fallback off for one message without changing channel state. Explicit triggers (1–3 above) are unaffected — they engage even when the message also tags a third party.

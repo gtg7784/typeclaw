@@ -1,7 +1,8 @@
 // Shared logger surface for the channel_* agent tools.
 //
-// Until now, channel_send / channel_reply / channel_history /
-// channel_fetch_attachment swallowed every failure into the model-visible
+// Until now, the channel tools (channel_send / channel_reply /
+// channel_history / channel_fetch_attachment / channel_disengage / ...)
+// swallowed every failure into the model-visible
 // tool result and emitted nothing to the container's stdout/stderr. That
 // made operator-side debugging blind: a Slack send that 403'd, a
 // `thread-scope-requires-thread-session` denial, or a Discord attachment

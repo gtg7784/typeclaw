@@ -355,6 +355,22 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/Do not include secrets/i)
   })
 
+  test('channel origin teaches channel_disengage as the future-turn engagement drop with ack-first ordering', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    expect(out).toContain('channel_disengage()')
+    expect(out).toMatch(/stop being pulled\s+back into FUTURE turns/i)
+    expect(out).toMatch(/asks you to be quiet \/\s+stop replying/i)
+    // ack-first ordering is the load-bearing instruction that keeps the tool
+    // from being defeated by a same-turn re-grant
+    expect(out).toMatch(/send that `channel_reply` FIRST, THEN call `channel_disengage`/i)
+  })
+
   test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
