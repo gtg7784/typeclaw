@@ -11,9 +11,15 @@ export type StreamLiveOptions = {
   onSubscribed?: (live: boolean) => void
   onError?: (message: string) => void
   connectTimeoutMs?: number
+  heartbeatIntervalMs?: number
+  pongTimeoutMs?: number
+  bufferedAmountCeiling?: number
 }
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000
+const DEFAULT_PONG_TIMEOUT_MS = 30_000
+const DEFAULT_BUFFERED_AMOUNT_CEILING = 1_048_576
 
 export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<InspectEvent> {
   const WS = opts.WebSocketImpl ?? WebSocket
@@ -25,6 +31,17 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
 
   const accumulators = new Map<string, string>()
   const thinkingAccumulators = new Map<string, string>()
+
+  let heartbeat: ReturnType<typeof setInterval> | null = null
+  let awaitingPongSince: number | null = null
+  let supportsPing = false
+
+  const stopHeartbeat = (): void => {
+    if (heartbeat !== null) {
+      clearInterval(heartbeat)
+      heartbeat = null
+    }
+  }
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -43,13 +60,19 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
       return
     }
     if (msg.type === 'subscribed') {
+      supportsPing = msg.supportsPing === true
       opts.onSubscribed?.(msg.sessionLive)
+      return
+    }
+    if (msg.type === 'pong') {
+      awaitingPongSince = null
       return
     }
     if (msg.type === 'error') {
       opts.onError?.(msg.message)
       pendingError = msg.message
       closed = true
+      stopHeartbeat()
       try {
         ws.close()
       } catch {
@@ -84,6 +107,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
   })
   ws.addEventListener('close', () => {
     closed = true
+    stopHeartbeat()
     wake()
   })
 
@@ -99,6 +123,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
         'abort',
         () => {
           closed = true
+          stopHeartbeat()
           try {
             ws.close()
           } catch {
@@ -134,25 +159,115 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
   }
   ws.send(JSON.stringify(subscribe))
 
-  while (true) {
-    if (buffer.length > 0) {
-      const next = buffer.shift()!
-      yield next
-      continue
+  startHeartbeat({
+    ws,
+    intervalMs: opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+    pongTimeoutMs: opts.pongTimeoutMs ?? DEFAULT_PONG_TIMEOUT_MS,
+    bufferedAmountCeiling: opts.bufferedAmountCeiling ?? DEFAULT_BUFFERED_AMOUNT_CEILING,
+    supportsPing: () => supportsPing,
+    isAwaitingPongSince: () => awaitingPongSince,
+    setAwaitingPongSince: (at) => {
+      awaitingPongSince = at
+    },
+    setTimer: (timer) => {
+      heartbeat = timer
+    },
+    onDead: () => {
+      closed = true
+      stopHeartbeat()
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
+      }
+      wake()
+    },
+  })
+
+  try {
+    while (true) {
+      if (buffer.length > 0) {
+        const next = buffer.shift()!
+        yield next
+        continue
+      }
+      if (closed) {
+        if (pendingError !== null) throw new Error(pendingError)
+        return
+      }
+      const { event, done } = await new Promise<{ event: InspectEvent | null; done: boolean }>((resolve) => {
+        resolveNext = resolve
+      })
+      if (event !== null) yield event
+      if (done) {
+        if (pendingError !== null) throw new Error(pendingError)
+        return
+      }
     }
-    if (closed) {
-      if (pendingError !== null) throw new Error(pendingError)
-      return
-    }
-    const { event, done } = await new Promise<{ event: InspectEvent | null; done: boolean }>((resolve) => {
-      resolveNext = resolve
-    })
-    if (event !== null) yield event
-    if (done) {
-      if (pendingError !== null) throw new Error(pendingError)
-      return
+  } finally {
+    // Also fired when the consumer abandons the generator (break from a
+    // `for await` calls .return()): close the socket so it can't outlive the
+    // viewer, not just the heartbeat timer.
+    stopHeartbeat()
+    closed = true
+    try {
+      ws.close()
+    } catch {
+      /* ignore */
     }
   }
+}
+
+type HeartbeatOptions = {
+  ws: WebSocket
+  intervalMs: number
+  pongTimeoutMs: number
+  bufferedAmountCeiling: number
+  // Read live: the `subscribed` reply that sets it arrives after the timer is
+  // armed, so a snapshot taken at startHeartbeat time would always be false.
+  supportsPing: () => boolean
+  isAwaitingPongSince: () => number | null
+  setAwaitingPongSince: (at: number | null) => void
+  setTimer: (timer: ReturnType<typeof setInterval>) => void
+  onDead: () => void
+}
+
+// Steady-state liveness watchdog. The connect gate only bounds the OPENING
+// phase; once subscribed, a wedged socket (send queue not draining, no
+// 'close'/'error') would park the read loop forever. The interval fires on the
+// event-loop timer queue independent of the dead socket, so it always runs.
+// Two death signals, both treated as a clean close (return, never throw) so the
+// viewer recovers to the picker:
+//   1. bufferedAmount past a ceiling — our writes are not draining. Always on:
+//      it needs no server cooperation, so it works against any server version.
+//   2. a ping with no pong within the deadline — round-trip liveness lost,
+//      which also covers idle tails (a quiet-but-healthy tail still pongs). Only
+//      armed when the server advertised supportsPing; a pre-heartbeat server
+//      answers an unknown ping with error+close, so probing it would kill the
+//      tail. Such a server degrades to bufferedAmount-only detection.
+function startHeartbeat(opts: HeartbeatOptions): void {
+  let pingId = 0
+  const tick = (): void => {
+    if (opts.ws.bufferedAmount >= opts.bufferedAmountCeiling) {
+      opts.onDead()
+      return
+    }
+    if (!opts.supportsPing()) return
+    const awaiting = opts.isAwaitingPongSince()
+    if (awaiting !== null) {
+      if (Date.now() - awaiting >= opts.pongTimeoutMs) opts.onDead()
+      return
+    }
+    pingId += 1
+    const ping: InspectClientMessage = { type: 'ping', id: pingId }
+    try {
+      opts.ws.send(JSON.stringify(ping))
+      opts.setAwaitingPongSince(Date.now())
+    } catch {
+      opts.onDead()
+    }
+  }
+  opts.setTimer(setInterval(tick, opts.intervalMs))
 }
 
 function frameToEvent(
