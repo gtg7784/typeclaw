@@ -445,7 +445,7 @@ function renderChannelOrigin(
     '  **An explicit quiet command is a direct order to call this tool.** When',
     '  someone tells you to stop — e.g. "disengage", "be quiet", "stop replying",',
     '  "stop", "back off", "stay out of this", "shush", or "조용" / "조용히 해" /',
-    '  "그만" / "빠져" / "static" / "tais-toi" / "cállate" / "ruhig" / "黙って" /',
+    '  "그만" / "빠져" / "тихо" / "tais-toi" / "cállate" / "ruhig" / "黙って" /',
     '  "安静" in any language — you MUST call `channel_disengage` that same turn.',
     '  Posting a `channel_reply` like "ok, I\'ll be quiet" is NOT enough on its',
     '  own: a reply alone re-grants the very stickiness they asked you to drop,',
