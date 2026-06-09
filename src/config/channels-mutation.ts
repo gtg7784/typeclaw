@@ -42,7 +42,7 @@ export function isChannelKind(value: string): value is ChannelKind {
 export function listChannels(cwd: string): ChannelListEntry[] {
   const config = readConfigRecordOrEmpty(cwd)
   const configuredChannels = isObjectRecord(config.channels) ? config.channels : {}
-  const secrets = readChannelSecretsOrEmpty(cwd)
+  const secrets = channelSecretsOrEmpty(readChannelSecrets(cwd))
 
   return CHANNEL_KINDS.map((kind) => {
     const channelConfig = configuredChannels[kind]
@@ -63,7 +63,22 @@ export function removeChannel(cwd: string, kind: ChannelKind): RemoveChannelResu
   if (!config.ok) return config
 
   const channels = isObjectRecord(config.value.channels) ? { ...config.value.channels } : {}
-  const secrets = readChannelSecretsOrEmpty(cwd)
+
+  // Bail BEFORE touching typeclaw.json when secrets.json exists but cannot be
+  // read. Otherwise the config write below would strip `channels.<kind>` while
+  // the credential block stays on disk yet unreachable — `removeChannelSync`
+  // would throw on the same parse error, and the next invocation would no
+  // longer see the channel in config OR (the swallowed) secrets, stranding the
+  // credentials with no CLI path to clean them. Failing first keeps the retry
+  // able to target both once the file is fixed.
+  const secretsRead = readChannelSecrets(cwd)
+  if (secretsRead.kind === 'unreadable') {
+    return {
+      ok: false,
+      reason: `${SECRETS_FILE} is unreadable (${secretsRead.reason}). Fix it by hand, then retry \`typeclaw channel remove ${kind}\`.`,
+    }
+  }
+  const secrets = channelSecretsOrEmpty(secretsRead)
 
   const inConfig = kind in channels
   const inSecrets = kind in secrets
@@ -197,13 +212,23 @@ function readConfigRecordOrEmpty(cwd: string): Record<string, unknown> {
   return result.ok ? result.value : {}
 }
 
-function readChannelSecretsOrEmpty(cwd: string): Record<string, unknown> {
+type ChannelSecretsRead =
+  | { kind: 'ok'; channels: Record<string, unknown> }
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; reason: string }
+
+function readChannelSecrets(cwd: string): ChannelSecretsRead {
   try {
     const channels = new SecretsBackend(join(cwd, SECRETS_FILE)).tryReadChannelsSync()
-    return channels === null ? {} : (channels as Record<string, unknown>)
-  } catch {
-    return {}
+    if (channels === null) return { kind: 'missing' }
+    return { kind: 'ok', channels: channels as Record<string, unknown> }
+  } catch (error) {
+    return { kind: 'unreadable', reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+function channelSecretsOrEmpty(read: ChannelSecretsRead): Record<string, unknown> {
+  return read.kind === 'ok' ? read.channels : {}
 }
 
 function writeConfig(

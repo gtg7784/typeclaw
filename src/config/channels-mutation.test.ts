@@ -198,5 +198,19 @@ describe('channels mutation', () => {
       if (!result.ok) return
       expect(result).toMatchObject({ configRemoved: true, secretsRemoved: false })
     })
+
+    test('refuses without touching typeclaw.json when secrets.json is unreadable', async () => {
+      await writeConfig({ channels: { 'discord-bot': {} } })
+      await writeFile(join(cwd, 'secrets.json'), '{ this is not valid json')
+
+      const result = removeChannel(cwd, 'discord-bot')
+
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('unreadable')
+      // The channel must survive in config so a retry can still clean both
+      // sides once the user fixes secrets.json.
+      expect(await readConfig()).toEqual({ channels: { 'discord-bot': {} } })
+    })
   })
 })
