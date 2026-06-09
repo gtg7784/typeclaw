@@ -57,8 +57,14 @@ async function loadLocal(entry: string, agentDir: string): Promise<ResolvedPlugi
 }
 
 async function loadNpm(entry: string, agentDir: string): Promise<ResolvedPlugin> {
-  const pkgJsonPath = findPackageJson(entry, agentDir)
-  let pkgName = entry
+  // The version suffix (`name@1.2.3`, `@scope/name@1.2.3`) is consumed by the
+  // host reconcile step when materializing the entry into package.json. By load
+  // time the package is installed at `node_modules/<name>/` under its bare name,
+  // so passing the raw `name@version` here would miss the dir and fail the
+  // bare-import fallback too.
+  const { name: packageName } = splitPluginEntrySpec(entry)
+  const pkgJsonPath = findPackageJson(packageName, agentDir)
+  let pkgName = packageName
   let version: string | undefined
   let entryPath: string | null = null
   if (pkgJsonPath !== null) {
@@ -93,7 +99,7 @@ async function loadNpm(entry: string, agentDir: string): Promise<ResolvedPlugin>
     importTarget = pathToFileURL(entryPath).href
   } else {
     try {
-      importTarget = Bun.resolveSync(entry, agentDir)
+      importTarget = Bun.resolveSync(packageName, agentDir)
     } catch (err) {
       throw new PluginNotFoundError(entry, `cannot resolve plugin "${entry}": ${describeError(err)}`, { cause: err })
     }
@@ -102,6 +108,24 @@ async function loadNpm(entry: string, agentDir: string): Promise<ResolvedPlugin>
   const defined = expectDefined(mod, entry)
   const name = derivePluginNameFromPackage(pkgName)
   return { name, version, source: entry, defined }
+}
+
+export type PluginEntrySpec = { name: string; versionSpec: string | undefined }
+
+// Splits an npm-style entry into package name and optional version spec. The
+// version delimiter is the LAST `@` that isn't the leading scope marker, so
+// `@scope/pkg@1.2.3` → { name: '@scope/pkg', versionSpec: '1.2.3' } while
+// `@scope/pkg` → { name: '@scope/pkg', versionSpec: undefined }.
+export function splitPluginEntrySpec(entry: string): PluginEntrySpec {
+  const scoped = entry.startsWith('@')
+  const searchFrom = scoped ? entry.indexOf('/') + 1 : 0
+  const at = entry.indexOf('@', searchFrom)
+  if (at <= 0) return { name: entry, versionSpec: undefined }
+  const versionSpec = entry.slice(at + 1)
+  return {
+    name: entry.slice(0, at),
+    versionSpec: versionSpec.length > 0 ? versionSpec : undefined,
+  }
 }
 
 export function derivePluginNameFromPackage(packageName: string): string {

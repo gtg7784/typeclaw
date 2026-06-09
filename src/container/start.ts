@@ -21,6 +21,7 @@ import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
+import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
@@ -247,7 +248,29 @@ export async function start({
     // subsequent installs (PR #243 dogfooding wasted three rebuilds + a
     // manual version bump before this gate existed). Registry-spec users
     // skip the force path because their install is already cache-correct.
-    const forceDepsReinstall = forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))
+
+    // Materialize typeclaw.json#plugins into package.json BEFORE ensureDeps so
+    // the drift detector below sees the newly-written deps as missing and
+    // installs them in the same pass. This makes the plugin list a single
+    // source of truth: the user edits typeclaw.json and never touches
+    // package.json. The agent cannot abuse this to install arbitrary host code —
+    // the security plugin's `pluginAddition` guard gates writes to the plugins
+    // field at owner/trusted trust, so by the time this host-side step runs the
+    // field is trustworthy by construction.
+    const pluginReconcile = await reconcilePluginDeps({
+      cwd,
+      plugins: (await loadTypeclawConfig(cwd)).plugins,
+    }).catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }) as const)
+    if ('error' in pluginReconcile) {
+      return { ok: false, reason: `plugin dependency reconcile failed: ${pluginReconcile.error}` }
+    }
+
+    // Force install when reconcile rewrote package.json. ensureDeps' drift
+    // detector only checks for MISSING dependency names, so a managed plugin's
+    // version bump (dir already present) or a removal (stale dir left behind)
+    // would otherwise leave bun.lock/node_modules out of sync with the
+    // reconciled package.json.
+    const forceDepsReinstall = (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) || pluginReconcile.changed
     const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
