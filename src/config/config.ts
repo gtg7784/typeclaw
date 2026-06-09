@@ -1,6 +1,6 @@
 import { accessSync, constants as fsConstants, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, posix, resolve } from 'node:path'
 
 import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
@@ -405,21 +405,39 @@ export const relativeAgentPathSchema = z
 // config need and risks masking the runtime's view of them. `/etc/...` is allowed
 // (a legitimate use case) because the entrypoint's no-clobber guard already stops
 // it from overwriting an existing system file. `to` reuses relativeAgentPathSchema.
+//
+// `..` is rejected OUTRIGHT, before the /agent and kernel-root bans run. Those
+// bans previously inspected the RAW string, which both consumers later normalize
+// against $HOME — so a `~/../agent/workspace/.foo` (→ /agent/...) or
+// `~/../proc/x` (→ /proc/...) slipped past a startsWith('/agent') /
+// startsWith('/proc') check on the un-normalized text. A traversal segment is the
+// ONLY way the post-$HOME effective path can re-enter a banned root, so banning
+// `..` makes the raw-string bans equivalent to checking the effective path —
+// stage-independent, no need to expand $HOME at parse time. The bans then run on
+// the POSIX-normalized form so an absolute `from` like `/var/../proc` is caught
+// even though it has no leading `/proc` literal.
 const FORBIDDEN_SYMLINK_FROM_ROOTS = ['/proc', '/sys', '/dev', '/run'] as const
+function normalizedSymlinkFrom(value: string): string {
+  // The `~/` prefix is not a real path component; normalize only the remainder
+  // so a `~/a/b` stays `~/a/b` while `/var/../proc` collapses to `/proc`.
+  if (value.startsWith('~/')) return `~/${posix.normalize(value.slice(2))}`
+  return posix.normalize(value)
+}
 export const symlinkFromSchema = z
   .string()
   .min(1)
   .refine((value) => !value.includes('\0'), 'must not contain a null byte')
   .refine((value) => value.startsWith('~/') || isAbsolute(value), 'must be an absolute path or start with ~/')
-  .refine((value) => value !== '/', 'must not be the filesystem root')
-  .refine(
-    (value) => !value.startsWith('/agent/') && value !== '/agent',
-    'must not point into /agent (the symlink would loop back into the agent folder)',
-  )
-  .refine(
-    (value) => !FORBIDDEN_SYMLINK_FROM_ROOTS.some((root) => value === root || value.startsWith(`${root}/`)),
-    'must not point at a kernel/virtual path (/proc, /sys, /dev, /run)',
-  )
+  .refine((value) => !value.split(/[/\\]+/).includes('..'), "must not contain a '..' segment")
+  .refine((value) => normalizedSymlinkFrom(value) !== '/', 'must not be the filesystem root')
+  .refine((value) => {
+    const normalized = normalizedSymlinkFrom(value)
+    return !normalized.startsWith('/agent/') && normalized !== '/agent'
+  }, 'must not point into /agent (the symlink would loop back into the agent folder)')
+  .refine((value) => {
+    const normalized = normalizedSymlinkFrom(value)
+    return !FORBIDDEN_SYMLINK_FROM_ROOTS.some((root) => normalized === root || normalized.startsWith(`${root}/`))
+  }, 'must not point at a kernel/virtual path (/proc, /sys, /dev, /run)')
 
 export const symlinkSchema = z.object({
   from: symlinkFromSchema,

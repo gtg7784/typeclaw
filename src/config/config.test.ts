@@ -266,6 +266,43 @@ describe('sandboxSchema', () => {
       }),
     ).toThrow(/\.\./)
   })
+
+  // Regression: `from` is later expanded against $HOME by both consumers, so a
+  // traversal segment could re-enter a banned root after expansion. The raw-string
+  // bans missed it before — `..` must be rejected outright.
+  test('rejects a symlink from with a .. segment (would re-enter a banned root after $HOME expansion)', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from: '~/../x', to: '.foo' }] } }),
+    ).toThrow(/\.\./)
+  })
+
+  test.each([
+    '~/../agent/workspace/.foo',
+    '~/../proc/x',
+    '~/../sys/x',
+    '/var/../proc/x',
+    '/foo/../agent/workspace/.foo',
+  ])('rejects a symlink from that traverses back into a banned root via .. (%p)', (from) => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from, to: '.foo' }] } }),
+    ).toThrow()
+  })
+
+  test('still accepts a legitimate ~/ and absolute from without traversal', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      sandbox: {
+        symlinks: [
+          { from: '~/.foo', to: '.foo' },
+          { from: '/etc/foo', to: 'workspace/foo' },
+        ],
+      },
+    })
+    expect(parsed.sandbox.symlinks).toEqual([
+      { from: '~/.foo', to: '.foo' },
+      { from: '/etc/foo', to: 'workspace/foo' },
+    ])
+  })
 })
 
 describe('getSandboxWritablePathSpecs', () => {
