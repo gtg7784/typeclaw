@@ -553,6 +553,29 @@ function isGraphqlEndpoint(args: readonly string[]): boolean {
   return findApiEndpoint(args) === 'graphql'
 }
 
+// True when any `gh api` invocation targets the authenticated-user endpoint
+// (`/user`, `user`, or a `/user/...` descendant). This is a token-CLASS mismatch,
+// not an auth failure: an App installation token is not a user identity, so GitHub
+// rejects `/user` regardless of how valid the token is. The caller blocks-and-
+// guides for App/none classes only (a PAT IS a user identity and works), so this
+// stays a pure shape detector. Narrow by design: `/users/{username}`, `/meta`,
+// `/rate_limit` are not user-identity endpoints and must not match.
+export function usesGhApiAuthenticatedUserEndpoint(command: string): boolean {
+  const tokens = tokenize(command)
+  const ghStarts = findGhInvocations(tokens)
+  for (let i = 0; i < ghStarts.length; i++) {
+    const start = ghStarts[i] as number
+    const end = ghStarts[i + 1] ?? tokens.length
+    const args = tokens.slice(start + 1, end)
+    if (args[0] !== 'api') continue
+    const endpoint = findApiEndpoint(args)
+    if (endpoint === null) continue
+    const normalized = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint
+    if (normalized === 'user' || normalized.startsWith('user/')) return true
+  }
+  return false
+}
+
 function findGhInvocations(tokens: readonly string[]): number[] {
   const starts: number[] = []
   for (let i = 0; i < tokens.length; i++) {

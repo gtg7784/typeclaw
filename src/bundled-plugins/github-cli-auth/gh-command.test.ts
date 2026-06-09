@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { analyzeGhCommand } from './gh-command'
+import { analyzeGhCommand, usesGhApiAuthenticatedUserEndpoint } from './gh-command'
 
 describe('analyzeGhCommand', () => {
   it('passes through commands that do not invoke gh', () => {
@@ -515,5 +515,32 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('gh search repos cli')).toEqual({ kind: 'pass-through' })
     expect(analyzeGhCommand('gh gist list')).toEqual({ kind: 'pass-through' })
     expect(analyzeGhCommand('gh codespace list')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('keeps classifying the authenticated-user endpoint as pass-through (block lives in the caller)', () => {
+    expect(analyzeGhCommand('gh api /user')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand("gh api /user --jq '.login'")).toEqual({ kind: 'pass-through' })
+  })
+})
+
+describe('usesGhApiAuthenticatedUserEndpoint', () => {
+  it('detects the authenticated-user endpoint and its descendants', () => {
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /user')).toBe(true)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api user')).toBe(true)
+    expect(usesGhApiAuthenticatedUserEndpoint("gh api /user --jq '.login'")).toBe(true)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /user/emails')).toBe(true)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api user/orgs')).toBe(true)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api -H "Accept: application/json" /user')).toBe(true)
+  })
+
+  it('does not match third-party, meta, or repo endpoints', () => {
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /users/octocat')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /users/octocat/repos')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /meta')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /rate_limit')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api graphql -f query=x')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh api /repos/acme/widgets/issues')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('gh pr view -R acme/widgets')).toBe(false)
+    expect(usesGhApiAuthenticatedUserEndpoint('echo gh api /user')).toBe(false)
   })
 })

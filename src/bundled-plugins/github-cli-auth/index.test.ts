@@ -53,6 +53,8 @@ const unavailableResolver = async (): Promise<GithubTokenResolveResult> => ({
   reason: 'adapter down',
 })
 
+const hookCtx = { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger }
+
 describe('github-cli-auth plugin', () => {
   test('App auth: sets the env overlay with the minted token, leaving the command untouched', async () => {
     process.env.GH_TOKEN = 'ghs_seeded'
@@ -207,6 +209,63 @@ describe('github-cli-auth plugin', () => {
     expect(event.args.command).toBe('gh api repos/victim/private/issues -R acme/widgets')
   })
 
+  test('App auth: blocks gh api /user with a guiding reason and does not call the resolver', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    })
+
+    const result = await hook(bashEvent("gh api /user --jq '.login'"), hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    expect((result as { reason: string }).reason).toContain('/user')
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('multi-owner App (no seeded token): blocks gh api /user', async () => {
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent('gh api /user'), hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+  })
+
+  test('classic PAT: gh api /user passes through (user identity works)', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('gh api /user')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api /user')
+  })
+
+  test('fine-grained PAT: gh api /user passes through (user identity works)', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('gh api /user')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api /user')
+  })
+
+  test('App auth: gh api /users/octocat (third-party) is not blocked', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('gh api /users/octocat')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api /users/octocat')
+  })
+
   test('non-gh bash command passes through without touching the resolver', async () => {
     process.env.GH_TOKEN = 'ghs_seeded'
     let resolverCalled = false
@@ -235,8 +294,6 @@ describe('github-cli-auth plugin', () => {
     expect(result).toBeUndefined()
   })
 })
-
-const hookCtx = { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger }
 
 describe('github-cli-auth plugin — git path', () => {
   const askpassDir = mkdtempSync(join(tmpdir(), 'typeclaw-askpass-it-'))

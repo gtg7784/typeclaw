@@ -3,7 +3,7 @@ import { definePlugin } from '@/plugin'
 
 import { createApproveIdempotencyGuard } from './approve-idempotency'
 import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
-import { analyzeGhCommand } from './gh-command'
+import { analyzeGhCommand, usesGhApiAuthenticatedUserEndpoint } from './gh-command'
 import { ensureGitAskPassHelper } from './git-askpass'
 import { analyzeGitCommand, defaultGitResolvers } from './git-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
@@ -14,6 +14,17 @@ export default definePlugin({
   plugin: async (ctx) => {
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
     const hasAppTokenResolver = ctx.github.hasAppTokenResolver
+    // `/user` resolves the caller's USER identity. An App installation token is not
+    // a user, so GitHub rejects it on a token-class basis (403, or no-token error in
+    // the sandbox) no matter how valid the token is. We block-and-guide so the agent
+    // does not misread this as "I have no auth" — it does, for repo-scoped calls.
+    const appUserEndpointReason =
+      '`gh api /user` (and `/user/...`) resolves the calling USER. This agent authenticates ' +
+      'as a GitHub App with a per-repo installation token, which is not a user identity — so ' +
+      '`/user` cannot work here, and this failure is NOT a sign that auth is missing (repo-' +
+      'scoped calls still work). It is not a valid auth/login check. For repo data use ' +
+      '`gh <cmd> -R owner/repo` or `gh api /repos/owner/repo/...`; for the actor, read the ' +
+      'PR/issue/comment context you were given instead of `gh api /user`.'
     const resolveToken = async (workspace: string) => {
       const result = await resolveTokenForRepo(workspace)
       return result.kind === 'token' ? result.token : null
@@ -45,6 +56,19 @@ export default definePlugin({
       if (review.dump !== null) return review.dump
 
       const decision = analyzeGhCommand(command)
+
+      // `/user` classifies as pass-through (no repo to mint for), so this block
+      // must run BEFORE the pass-through return. shouldMintAppToken is the App-auth
+      // signal — true for an App-class token OR a live minter (multi-owner / no-repos
+      // App configs never seed GH_TOKEN yet can mint). PATs carry a user identity, so
+      // `/user` works for them and shouldMintAppToken returns false: not blocked.
+      if (
+        shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver()) &&
+        usesGhApiAuthenticatedUserEndpoint(command)
+      ) {
+        return { block: true, reason: appUserEndpointReason }
+      }
+
       if (decision.kind === 'pass-through') return 'fall-through'
 
       // The `-R` strip is a pure syntax fix (`gh api` rejects `-R`), independent
