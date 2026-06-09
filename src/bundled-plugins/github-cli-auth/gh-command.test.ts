@@ -67,11 +67,25 @@ describe('analyzeGhCommand', () => {
     if (result.kind === 'block') expect(result.reason).toContain('ignores `-R`')
   })
 
-  it('allows gh api when -R matches the literal path repo', () => {
+  it('strips a redundant -R that matches the literal path repo (gh api rejects -R)', () => {
     expect(analyzeGhCommand('gh api /repos/acme/widgets/pulls/1 -R acme/widgets')).toEqual({
       kind: 'inject',
       repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api /repos/acme/widgets/pulls/1',
     })
+  })
+
+  it('strips every redundant -R/--repo flag form from a literal-path gh api call', () => {
+    const cases: Array<[string, string]> = [
+      ['gh api repos/acme/widgets/issues -R acme/widgets', 'gh api repos/acme/widgets/issues'],
+      ['gh api repos/acme/widgets/issues --repo acme/widgets', 'gh api repos/acme/widgets/issues'],
+      ['gh api repos/acme/widgets/issues -R=acme/widgets', 'gh api repos/acme/widgets/issues'],
+      ['gh api repos/acme/widgets/issues --repo=acme/widgets', 'gh api repos/acme/widgets/issues'],
+      ['gh api -R acme/widgets repos/acme/widgets/issues', 'gh api repos/acme/widgets/issues'],
+    ]
+    for (const [input, expected] of cases) {
+      expect(analyzeGhCommand(input)).toEqual({ kind: 'inject', repoSlug: 'acme/widgets', rewrittenCommand: expected })
+    }
   })
 
   it('still detects the path repo (and conflict) when -R precedes a /repos endpoint', () => {
@@ -136,6 +150,29 @@ describe('analyzeGhCommand', () => {
       repoSlug: 'acme/widgets',
       rewrittenCommand: 'gh api graphql -f query=\'mutation { x(input:"-R evil/repo") }\'',
     })
+  })
+
+  it('does not strip a -R inside a double-quoted value with escaped quotes (escape-aware)', () => {
+    const input = 'gh api repos/acme/widgets/issues -f body="{\\"text\\":\\"-R evil/repo\\"}" -R acme/widgets'
+    expect(analyzeGhCommand(input)).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api repos/acme/widgets/issues -f body="{\\"text\\":\\"-R evil/repo\\"}"',
+    })
+  })
+
+  it('the strip rewrite never touches a -R/--repo whose value is not an owner/repo slug', () => {
+    // The graphql repo hint is taken from a valid slug; an attached `=` form
+    // whose value is NOT owner/repo must be left verbatim by the rewrite (the
+    // detection path already rejected it, so the rewrite must agree).
+    const noStrip = [
+      'gh api graphql -R=notaslug -f query=x',
+      'gh api graphql --repo=owner/repo/extra -f query=x',
+      'gh api graphql -R= -f query=x',
+    ]
+    for (const input of noStrip) {
+      expect(analyzeGhCommand(input)).toEqual({ kind: 'pass-through' })
+    }
   })
 
   it('passes through gh api graphql with no -R (nothing to mint for)', () => {
