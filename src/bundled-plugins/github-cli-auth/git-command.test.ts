@@ -286,6 +286,16 @@ describe('analyzeGitCommand — token-exfil hardening', () => {
       'block',
     )
   })
+  test('git --config-env (separate arg) blocks', async () => {
+    expect((await analyze('git --config-env core.askPass=EVIL clone https://github.com/acme/widgets.git')).kind).toBe(
+      'block',
+    )
+  })
+  test('git --config-env=<name>=<envvar> (inline form) blocks', async () => {
+    expect((await analyze('git --config-env=core.askPass=EVIL clone https://github.com/acme/widgets.git')).kind).toBe(
+      'block',
+    )
+  })
   test('--git-dir / --work-tree blocks (git operates on a different repo)', async () => {
     expect((await analyze('git --git-dir=/tmp/o/.git push origin main', ghRemote)).kind).toBe('block')
     expect((await analyze('git --work-tree=/tmp/o push origin main', ghRemote)).kind).toBe('block')

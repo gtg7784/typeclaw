@@ -152,7 +152,10 @@ export async function analyzeGitCommand(
 // command means we cannot vouch for where the token goes — block.
 function hasDangerousGitConfig(args: readonly string[]): boolean {
   for (const arg of args) {
-    if (arg === '-c' || arg === '--config-env') return true
+    // git accepts both `--config-env <name>=<envvar>` and the inline
+    // `--config-env=<name>=<envvar>`; both must be caught. (`-c` has no inline
+    // `-c=…` form — git always takes the next token.)
+    if (arg === '-c' || arg === '--config-env' || arg.startsWith('--config-env=')) return true
     if (arg === '--git-dir' || arg.startsWith('--git-dir=')) return true
     if (arg === '--work-tree' || arg.startsWith('--work-tree=')) return true
     if (arg === '--namespace' || arg.startsWith('--namespace=')) return true
@@ -239,9 +242,24 @@ function looksLikeUrl(token: string): boolean {
   return false
 }
 
-// Flags that consume the FOLLOWING token, so a remote/URL positional is not
-// mistaken for a flag's value.
-const GIT_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '-o', '--origin', '-b', '--branch', '-u'])
+// Flags that consume the FOLLOWING token, so a positional after them (the
+// subcommand or a remote/URL) is not mistaken for the flag's value. Includes the
+// dangerous-config flags in their separate-arg form (`--config-env <v>`) so the
+// real subcommand is still located and hasDangerousGitConfig can fire.
+const GIT_VALUE_FLAGS = new Set([
+  '-C',
+  '-c',
+  '--config-env',
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--exec-path',
+  '-o',
+  '--origin',
+  '-b',
+  '--branch',
+  '-u',
+])
 
 function extractExplicitUrl(subcommand: string, args: readonly string[]): string | null {
   // `git push --repo <url>` / `--repo=<url>`
