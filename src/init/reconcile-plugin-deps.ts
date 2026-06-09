@@ -49,9 +49,9 @@ export async function reconcilePluginDeps(options: ReconcilePluginDepsOptions): 
     return { changed: false, files: [] }
   }
 
-  const desired = await resolveDesiredManaged(plugins, resolveLatest)
   const dependencies = { ...pkg.dependencies }
   const previousManaged = readManagedPlugins(pkg)
+  const desired = await resolveDesiredManaged(plugins, previousManaged, resolveLatest)
 
   let changed = false
 
@@ -86,11 +86,16 @@ type PackageJsonShape = {
 } & Record<string, unknown>
 
 // Classifies config.plugins entries and resolves the version each managed dep
-// should pin to. Local paths and bundled-style entries are not npm packages, so
-// they are skipped. A bare name resolves its current latest version once and
-// pins it, mirroring `npm/bun add <name>` writing a concrete version.
+// should pin to. Local paths are skipped (not npm packages). A bare name (no
+// `@version`) is pinned ONCE: it reuses the version already pinned in the
+// managed set on subsequent starts, and only resolves `latest` for a genuinely
+// new, unmanaged plugin. Without this reuse, an unchanged `typeclaw.json` would
+// re-resolve `latest` on every start and silently rewrite package.json when the
+// registry moves — bypassing the pluginAddition security gate, which only fires
+// on a guarded config write.
 async function resolveDesiredManaged(
   plugins: readonly string[],
+  previousManaged: Record<string, string>,
   resolveLatest: ResolveLatestVersion,
 ): Promise<Record<string, string>> {
   const desired: Record<string, string> = {}
@@ -98,7 +103,11 @@ async function resolveDesiredManaged(
     if (isLocalEntry(entry)) continue
     const { name, versionSpec } = splitPluginEntrySpec(entry)
     if (name.length === 0) continue
-    desired[name] = versionSpec ?? (await resolveLatest(name))
+    if (versionSpec !== undefined) {
+      desired[name] = versionSpec
+    } else {
+      desired[name] = previousManaged[name] ?? (await resolveLatest(name))
+    }
   }
   return sortKeys(desired)
 }

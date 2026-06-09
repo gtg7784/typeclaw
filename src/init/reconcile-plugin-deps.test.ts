@@ -55,6 +55,27 @@ describe('reconcilePluginDeps', () => {
     }
   })
 
+  test('reuses the existing pin for a bare name instead of re-resolving latest', async () => {
+    const dir = await makeAgentDir({
+      name: 'agent',
+      dependencies: { 'typeclaw-plugin-foo': '1.0.0' },
+      typeclaw: { managedPlugins: { 'typeclaw-plugin-foo': '1.0.0' } },
+    })
+    try {
+      // resolveLatest must NOT be called: an unchanged bare entry stays pinned.
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['typeclaw-plugin-foo'],
+        resolveLatest: neverResolve,
+      })
+      expect(result.changed).toBe(false)
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['typeclaw-plugin-foo']).toBe('1.0.0')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('prunes a managed dep when the plugin is removed from config', async () => {
     const dir = await makeAgentDir({
       name: 'agent',
