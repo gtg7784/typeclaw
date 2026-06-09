@@ -1,5 +1,6 @@
 import {
   LineClient as RealLineClient,
+  type LineCredentialManager,
   LineListener as RealLineListener,
   type LineAccountCredentials,
   type LineChat,
@@ -53,7 +54,7 @@ export type LineCredentialStore = {
   getAccount(id?: string): Promise<LineAccountCredentials | null>
 }
 
-const LineClient = RealLineClient as unknown as new () => LineClient
+const LineClient = RealLineClient as unknown as new (credManager?: LineCredentialManager) => LineClient
 const LineListener = RealLineListener as unknown as new (client: LineClient) => LineListener
 
 export type LineAdapterLogger = {
@@ -75,6 +76,7 @@ export type LineAdapterOptions = {
   selfAliasesRef?: () => readonly string[]
   credentialsStore?: LineCredentialStore
   client?: LineClient
+  clientFactory?: (credManager?: LineCredentialManager) => LineClient
   listenerFactory?: (client: LineClient) => LineListener
 }
 
@@ -163,7 +165,15 @@ function clampLimit(requested: number, max: number): number {
 
 export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
   const logger = options.logger ?? consoleLogger
-  const client = options.client ?? new LineClient()
+  // LineListener.connect() re-calls client.login() with NO arguments on every
+  // (re)connect, which resolves credentials via the client's credential manager
+  // rather than the explicit account start() passes. Wire the secrets.json store
+  // in as that manager (same structural cast as src/init/line-auth.ts) so the
+  // reconnect path doesn't fall through to the SDK's default file-based manager
+  // and loop forever on "No account found".
+  const credManager = options.credentialsStore as unknown as LineCredentialManager | undefined
+  const buildClient = options.clientFactory ?? ((cm?: LineCredentialManager) => new LineClient(cm))
+  const client = options.client ?? buildClient(credManager)
   let listener: LineListener | null = null
   let selfUserId: string | null = null
   let connected = false

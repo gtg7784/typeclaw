@@ -201,6 +201,52 @@ describe('createLineAdapter lifecycle', () => {
     expect(router.registered.outbound).toBe(false)
   })
 
+  test('wires the credentials store as the client credential manager so listener re-login resolves it', async () => {
+    // given a store-backed client whose no-arg login() (the LineListener reconnect
+    // path) resolves credentials only through its injected credential manager
+    const store = {
+      load: async () => ({ current_account: 'U_self', accounts: {} }),
+      getAccount: async () => ({
+        account_id: 'U_self',
+        auth_token: 't',
+        device: 'DESKTOPMAC' as const,
+        created_at: '',
+        updated_at: '',
+      }),
+    }
+    let factoryCredManager: unknown
+    const buildStoreBackedClient = (credManager?: unknown): LineClient => {
+      factoryCredManager = credManager
+      return fakeClient({
+        login: async function (this: LineClient, credentials) {
+          if (credentials === undefined) {
+            const account = await (credManager as typeof store | undefined)?.getAccount()
+            if (!account) throw new Error('No account found. Call loginWithQR() or loginWithEmail() first.')
+          }
+          return this
+        },
+      })
+    }
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      clientFactory: buildStoreBackedClient as never,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+    })
+
+    // when the adapter starts (no explicit client injected)
+    await adapter.start()
+
+    // then the factory received the credentials store as the credential manager,
+    // so an argument-less re-login resolves the account instead of throwing
+    expect(factoryCredManager).toBe(store)
+    const reLoginClient = buildStoreBackedClient(factoryCredManager)
+    await expect(reLoginClient.login()).resolves.toBeDefined()
+  })
+
   test('start throws when no account is stored', async () => {
     const adapter = createLineAdapter({
       router: makeRouterStub(() => {}),
