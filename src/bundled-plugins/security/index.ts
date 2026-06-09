@@ -12,6 +12,7 @@ import {
   recordGitRemoteTaintIfAny,
 } from './policies/git-exfil'
 import { GUARD_OUTBOUND_SECRET_SEVERITY, checkOutboundSecretGuard } from './policies/outbound-secret-scan'
+import { GUARD_PLUGIN_ADDITION_SEVERITY, checkPluginAdditionGuard } from './policies/plugin-addition'
 import { checkPrivateSurfaceReadGuard } from './policies/private-surface-read'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { clearSessionTaints } from './policies/remote-taint-state'
@@ -68,6 +69,8 @@ const BYPASS_ROLE_HINT = {
     'owner and trusted have it by default (medium tier); member and guest do not. The privilege-escalation defense for trusted now depends on operator review of `typeclaw.json` backup commits — `roles` is restart-required, so the operator has wall-clock time to revert before the new role table takes effect. Operators who do not review can re-tighten by replacing `roles.trusted.permissions[]` with an explicit list that omits `security.bypass.medium`.',
   [SECURITY_PERMISSIONS.bypassCronPromotion]:
     'owner and trusted have it by default (medium tier); member and guest do not. Same shape as rolePromotion but deferred: a new cron job (or a changed scheduledByRole) fires at schedule-time as the stamped role. The operator-review window between write and execution is the trusted-tier defense.',
+  [SECURITY_PERMISSIONS.bypassPluginAddition]:
+    'owner and trusted have it by default (medium tier); member and guest do not. Same shape as cronPromotion but for host-side install: a new (or version-bumped) plugins[] entry is materialized into package.json and installed by the next host `typeclaw start`, running npm lifecycle scripts as the operator. The operator-review window between the typeclaw.json write and the next start is the trusted-tier defense.',
 } as const satisfies Record<PerGuardSecurityPermission, string>
 
 function withPermissionHint(
@@ -120,6 +123,18 @@ export default definePlugin({
               GUARD_CRON_PROMOTION_SEVERITY,
             )
         if (cronPromotionResult) return cronPromotionResult
+
+        const pluginAdditionResult = canBypass(
+          GUARD_PLUGIN_ADDITION_SEVERITY,
+          SECURITY_PERMISSIONS.bypassPluginAddition,
+        )
+          ? undefined
+          : withPermissionHint(
+              await checkPluginAdditionGuard({ tool: event.tool, args: event.args, agentDir: ctx.agentDir }),
+              SECURITY_PERMISSIONS.bypassPluginAddition,
+              GUARD_PLUGIN_ADDITION_SEVERITY,
+            )
+        if (pluginAdditionResult) return pluginAdditionResult
 
         // Taint-recording runs FIRST, independently of the gitExfil guard.
         // The gitRemoteTainted defense depends on it. We pass through
