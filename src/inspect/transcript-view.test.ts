@@ -6,9 +6,14 @@ import { join } from 'node:path'
 import { Markdown, type Terminal, Text } from '@mariozechner/pi-tui'
 
 import type { SessionSummary } from './session-list'
-import { BoundedComponentWindow, createTranscriptView, componentFor } from './transcript-view'
+import { BoundedComponentWindow, createTranscriptView, componentFor, type HistoryEntry } from './transcript-view'
 import type { InspectEvent } from './types'
 import { parseFilter } from './types'
+
+function eventEntry(cat: InspectEvent['cat'], stamped: boolean, ts = 1): HistoryEntry {
+  const time = new Text(stamped ? '12:00:00' : '', 0, 0)
+  return { kind: 'event', cat, ts, time, stamped, components: [time, new Text(`${cat} body`, 0, 0)] }
+}
 
 class FakeTerminal implements Terminal {
   rows = 30
@@ -72,18 +77,18 @@ describe('componentFor', () => {
 
 describe('BoundedComponentWindow', () => {
   test('keeps every entry until the cap is reached', () => {
-    const window = new BoundedComponentWindow(3)
-    expect(window.push([new Text('a', 0, 0)])).toBeNull()
-    expect(window.push([new Text('b', 0, 0)])).toBeNull()
-    expect(window.push([new Text('c', 0, 0)])).toBeNull()
+    const window = new BoundedComponentWindow<HistoryEntry>(3)
+    expect(window.push(eventEntry('user', true))).toBeNull()
+    expect(window.push(eventEntry('thinking', true))).toBeNull()
+    expect(window.push(eventEntry('tool', true))).toBeNull()
     expect(window.size).toBe(3)
   })
 
   test('evicts the oldest entry once the cap is exceeded', () => {
-    const window = new BoundedComponentWindow(2)
-    const first = [new Text('first', 0, 0)]
-    const second = [new Text('second', 0, 0)]
-    const third = [new Text('third', 0, 0)]
+    const window = new BoundedComponentWindow<HistoryEntry>(2)
+    const first = eventEntry('user', true)
+    const second = eventEntry('thinking', true)
+    const third = eventEntry('tool', true)
 
     expect(window.push(first)).toBeNull()
     expect(window.push(second)).toBeNull()
@@ -92,18 +97,27 @@ describe('BoundedComponentWindow', () => {
   })
 
   test('evicts the whole entry so a timestamp never outlives its body', () => {
-    const window = new BoundedComponentWindow(1)
-    const timestamp = new Text('12:00:00', 0, 0)
-    const body = new Text('assistant reply', 0, 0)
-    const firstEntry = [timestamp, body]
-    const secondEntry = [new Text('12:00:01', 0, 0), new Text('next', 0, 0)]
+    const window = new BoundedComponentWindow<HistoryEntry>(1)
+    const firstEntry = eventEntry('assistant', true)
+    const secondEntry = eventEntry('user', true)
 
     expect(window.push(firstEntry)).toBeNull()
     const evicted = window.push(secondEntry)
     expect(evicted).toBe(firstEntry)
-    expect(evicted).toContain(timestamp)
-    expect(evicted).toContain(body)
     expect(window.size).toBe(1)
+  })
+
+  test('first() returns the oldest still-visible entry', () => {
+    const window = new BoundedComponentWindow<HistoryEntry>(2)
+    expect(window.first()).toBeUndefined()
+    const a = eventEntry('user', true)
+    const b = eventEntry('thinking', true)
+    const c = eventEntry('tool', true)
+    window.push(a)
+    window.push(b)
+    expect(window.first()).toBe(a)
+    window.push(c)
+    expect(window.first()).toBe(b)
   })
 })
 
@@ -243,5 +257,66 @@ describe('createTranscriptView run()', () => {
     expect(frame).toContain('first thought')
     expect(frame).toContain('second thought')
     expect(frame.split(stamp).length - 1).toBe(1)
+  })
+
+  test('evicting the stamped head of a same-category run re-stamps the new first visible row', async () => {
+    // given: a session with no replay events, then a live run of same-category
+    // thinking events long enough to evict the originally-stamped head
+    const file = join(dir, 'evict.jsonl')
+    await writeFile(
+      file,
+      JSON.stringify({
+        type: 'custom',
+        customType: 'typeclaw.session-meta',
+        data: { origin: { kind: 'tui' } },
+        timestamp: 1,
+      }) + '\n',
+    )
+    const summary: SessionSummary = {
+      sessionId: 'e',
+      sessionFile: file,
+      basename: 'evict.jsonl',
+      mtimeMs: 1,
+      origin: { kind: 'tui' },
+      firstPrompt: null,
+    }
+
+    const base = Date.parse('2026-06-10T09:00:00.000Z')
+    const count = 5
+    async function* live(o: { onSubscribed?: (live: boolean) => void }): AsyncGenerator<InspectEvent> {
+      o.onSubscribed?.(true)
+      for (let i = 0; i < count; i++) {
+        yield { cat: 'thinking', ts: base + i * 1000, text: `thought ${i}` }
+      }
+    }
+
+    const terminal = new FakeTerminal()
+    const view = createTranscriptView({
+      summary,
+      filter: FILTER.filter,
+      sinceMs: undefined,
+      createTerminal: () => terminal,
+      liveSource: (o) => live(o),
+      maxHistoryEntries: 2,
+    })
+
+    // when: the viewer tails the live run (which overflows the 2-entry window)
+    const runPromise = view.run()
+    await flush()
+    terminal.feed('\x1b')
+    await runPromise
+
+    // then: the final frame still carries a timestamp for the run even though the
+    // first thinking event (and its stamp) was evicted — the new first visible
+    // row was promoted. The meta divider's '--:--:--' must not be the only stamp.
+    const p = (n: number): string => String(n).padStart(2, '0')
+    const hhmmss = (ms: number): string => {
+      const d = new Date(ms)
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    }
+    const frame = terminal.writes.join('')
+    const survivor = base + (count - 2) * 1000
+    expect(frame).toContain(`thought ${count - 1}`)
+    expect(frame).toContain(hhmmss(survivor))
   })
 })

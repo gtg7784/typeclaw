@@ -26,6 +26,7 @@ export type TranscriptViewOptions = {
   sinceMs: number | undefined
   liveSource?: LiveSourceFactory
   createTerminal?: () => Terminal
+  maxHistoryEntries?: number
 }
 
 export const MAX_LIVE_HISTORY_ENTRIES = 250
@@ -54,12 +55,15 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     // grow until the viewer stalls; the window evicts the oldest entry to keep
     // render cost bounded. Components are evicted per event so a timestamp never
     // outlives its body. Header and pinned status are never evicted.
-    const history = new BoundedComponentWindow(MAX_LIVE_HISTORY_ENTRIES)
-    const appendEntry = (components: HistoryEntry): void => {
+    const history = new BoundedComponentWindow<HistoryEntry>(opts.maxHistoryEntries ?? MAX_LIVE_HISTORY_ENTRIES)
+    const appendEntry = (entry: HistoryEntry): void => {
       tui.removeChild(status)
-      const evicted = history.push(components)
-      if (evicted !== null) for (const component of evicted) tui.removeChild(component)
-      for (const component of components) tui.addChild(component)
+      const evicted = history.push(entry)
+      if (evicted !== null) {
+        for (const component of evicted.components) tui.removeChild(component)
+        promoteVisibleRunHead(history, evicted)
+      }
+      for (const component of entry.components) tui.addChild(component)
       tui.addChild(status)
     }
 
@@ -95,15 +99,20 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     const timeGate = new TimeGate()
     const onEvent = (event: InspectEvent): void => {
       const body = componentFor(event)
-      const entry = timeGate.shouldShow(event.cat) ? [new Text(formatEventTime(event.ts), 0, 0), body] : [body]
-      appendEntry(entry)
+      const stamped = timeGate.shouldShow(event.cat)
+      const time = new Text(stamped ? formatEventTime(event.ts) : '', 0, 0)
+      appendEntry({ kind: 'event', cat: event.cat, ts: event.ts, time, stamped, components: [time, body] })
       if (live) tui.requestRender()
     }
     const onPhase = (phase: StreamPhase): void => {
       if (phase.phase === 'replay-end') {
         tui.requestRender()
       } else if (phase.phase === 'live-start') {
-        appendEntry([new Text(divider(phase.sessionLive ? 'live' : 'live (broadcasts only)'), 0, 0)])
+        timeGate.reset()
+        appendEntry({
+          kind: 'divider',
+          components: [new Text(divider(phase.sessionLive ? 'live' : 'live (broadcasts only)'), 0, 0)],
+        })
         live = true
         tui.requestRender()
       }
@@ -203,17 +212,45 @@ function divider(text: string): string {
   return colors.dim(`─── ${text} ───`)
 }
 
-export type HistoryEntry = readonly Component[]
+// After the stamped head of a same-category run is evicted, the new first
+// visible row of that run would have a blank timestamp. Fill its already-present
+// (blank) Text so the visible window never shows a run with no timestamp at all.
+// Mutates text in place — no child add/remove/reorder.
+function promoteVisibleRunHead(history: BoundedComponentWindow<HistoryEntry>, evicted: HistoryEntry): void {
+  if (evicted.kind !== 'event' || !evicted.stamped) return
+  const first = history.first()
+  if (first === undefined || first.kind !== 'event' || first.stamped || first.cat !== evicted.cat) return
+  first.time.setText(formatEventTime(first.ts))
+  first.stamped = true
+}
 
-export class BoundedComponentWindow {
-  private readonly entries: HistoryEntry[] = []
+// An event row carries its category + ts + the (possibly blank) timestamp Text
+// so the window can re-stamp the visible run head after eviction. Non-event rows
+// (the live divider) have no category and never participate in re-stamping.
+export type HistoryEntry =
+  | {
+      kind: 'event'
+      cat: InspectEvent['cat']
+      ts: number
+      time: Text
+      stamped: boolean
+      components: readonly Component[]
+    }
+  | { kind: 'divider'; components: readonly Component[] }
+
+export class BoundedComponentWindow<T> {
+  private readonly entries: T[] = []
 
   constructor(private readonly maxEntries: number) {}
 
-  push(entry: HistoryEntry): HistoryEntry | null {
+  push(entry: T): T | null {
     this.entries.push(entry)
     if (this.entries.length <= this.maxEntries) return null
     return this.entries.shift() ?? null
+  }
+
+  first(): T | undefined {
+    return this.entries[0]
   }
 
   get size(): number {
