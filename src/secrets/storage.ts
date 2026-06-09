@@ -243,6 +243,33 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  // Removes `channels.<kind>` from the envelope. Returns `true` when the
+  // adapter slot was present and removed, `false` when nothing changed
+  // (idempotent on the CLI side — `channel remove discord-bot` twice should
+  // not error on the second call). Mirrors `removeProviderCredentialSync`:
+  // rewrites the file only when something changed so canonical-shape reads
+  // pay zero cost.
+  removeChannelSync(kind: string): boolean {
+    if (!existsSync(this.secretsPath)) return false
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      if (!(kind in envelope.channels)) return false
+      const { [kind]: _removed, ...rest } = envelope.channels
+      const next: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        channels: rest,
+      }
+      this.writeEnvelopeAtomic(next)
+      return true
+    } finally {
+      release?.()
+    }
+  }
+
   writeChannelsSync(next: Channels): void {
     this.ensureParentDir()
     this.ensureFileExists()

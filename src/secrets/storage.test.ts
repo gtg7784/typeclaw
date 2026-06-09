@@ -339,4 +339,34 @@ describe('SecretsBackend idempotency (Oracle bridge rule)', () => {
     const obj = JSON.parse(raw) as { providers: Record<string, unknown> }
     expect(obj.providers['fireworks']).toBeUndefined()
   })
+
+  describe('removeChannelSync', () => {
+    async function seedChannels(channels: Record<string, unknown>): Promise<void> {
+      await writeFile(
+        secretsPath,
+        `${JSON.stringify({ $schema: './node_modules/typeclaw/secrets.schema.json', version: 2, providers: {}, channels }, null, 2)}\n`,
+      )
+    }
+
+    test('removes a present channel and leaves siblings intact', async () => {
+      await seedChannels({ 'discord-bot': { token: { value: 't' } }, 'telegram-bot': { token: { value: 'u' } } })
+      const backend = new SecretsBackend(secretsPath)
+
+      expect(backend.removeChannelSync('discord-bot')).toBe(true)
+      expect(backend.readChannelsSync()).toEqual({ 'telegram-bot': { token: { value: 'u' } } })
+    })
+
+    test('returns false when the channel is absent and does not rewrite', async () => {
+      await seedChannels({ 'discord-bot': { token: { value: 't' } } })
+      const backend = new SecretsBackend(secretsPath)
+
+      expect(backend.removeChannelSync('slack-bot')).toBe(false)
+      expect(backend.readChannelsSync()).toEqual({ 'discord-bot': { token: { value: 't' } } })
+    })
+
+    test('returns false when secrets.json does not exist', () => {
+      const backend = new SecretsBackend(join(dir, 'missing.json'))
+      expect(backend.removeChannelSync('discord-bot')).toBe(false)
+    })
+  })
 })
