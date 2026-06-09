@@ -361,11 +361,36 @@ export type NetworkConfig = z.infer<typeof networkSchema>
 // mount actually works (bare-metal Linux, Docker Desktop — NOT OrbStack, which
 // rejects the mount even with the cap; there the runtime falls back to
 // 'proc-bind' regardless). The cost is the CAP_SYS_ADMIN grant on the container.
+
+// `sandbox.writablePaths` re-exposes operator-chosen subtrees of the agent
+// folder as WRITABLE inside the per-tool bwrap sandbox, on top of the built-in
+// free-write zones (workspace, public, mounts, .git). It exists for tools that
+// insist on writing a fixed config dir a low-trust role would otherwise hit
+// EROFS on (e.g. a CLI that rewrites `<agentDir>/.foo-cli/config.json`).
+//
+// Each entry is AGENT-ROOT-RELATIVE — it resolves under /agent and may not
+// escape it. Absolute container paths are rejected at parse time: a blanket RW
+// bind outside /agent would punch a hole through the agent trust boundary that
+// the rest of the sandbox model assumes can't happen. `..` segments and
+// null bytes are rejected for the same reason. Targets that don't exist, aren't
+// directories, are symlinks, or land on a security-sensitive path
+// (.git, .env, secrets.json, sessions, memory, .typeclaw, node_modules, the
+// agent root itself) are dropped at resolve time, NOT parse time — existence is
+// a runtime property and the drop keeps a stale config from aborting the
+// sandbox. See resolveWritableZones in src/sandbox/writable-zones.ts.
+export const relativeAgentPathSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !isAbsolute(value), 'must be relative to the agent root, not an absolute path')
+  .refine((value) => !value.includes('\0'), 'must not contain a null byte')
+  .refine((value) => !value.split(/[/\\]+/).includes('..'), "must not contain a '..' segment")
+
 export const sandboxSchema = z
   .object({
     realProc: z.boolean().default(false),
+    writablePaths: z.array(relativeAgentPathSchema).default([]),
   })
-  .default({ realProc: false })
+  .default({ realProc: false, writablePaths: [] })
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 

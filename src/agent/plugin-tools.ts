@@ -590,7 +590,11 @@ async function applyBashSandbox(
   // (their masks are empty) and keep full unsandboxed access. subtractMasked
   // drops any writable zone masked for this role so an RW bind never re-exposes a
   // hidden path (e.g. a guest's masked workspace/).
-  const writable = subtractMasked(await resolveWritableZones(agentDir), { dirs, files })
+  // config.sandbox.writablePaths is read from the BOOT-TIME snapshot, not
+  // getConfig(): sandbox is restart-required, so the writable surface must stay
+  // coherent with the boot-time bwrap/capability decisions (same contract as
+  // resolveProcStrategy's read of config.sandbox.realProc below).
+  const writable = subtractMasked(await resolveWritableZones(agentDir, config.sandbox.writablePaths), { dirs, files })
   // subtractMasked again on the protected set: a protected RO bind renders after
   // the masks (last-op-wins), so an unfiltered protected path nested under a
   // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)

@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path, { isAbsolute, join, resolve } from 'node:path'
 
 export type WritableZones = {
@@ -35,6 +35,25 @@ export type ProtectedZones = {
 // exactly that escalation.
 const WRITABLE_DIRS = ['workspace', 'public', 'mounts', '.git'] as const
 
+// SECURITY: configured writable paths (`sandbox.writablePaths`) may NOT resolve
+// onto these. `.git` carries the hook/config escalation surface; `.env` and
+// `secrets.json` are the credential files; `sessions`/`memory` are the agent's
+// private surface (masked from low-trust roles by hidden-paths); `.typeclaw`
+// holds system-managed home persistence; `node_modules` is executable
+// dependency code. Granting blanket RW to any of these via config would defeat
+// the very guards the narrow built-in set exists to preserve. The agent root
+// itself is also rejected (a writablePaths of '' or '.') — an RW bind of the
+// whole tree erases the read-only confinement wholesale.
+const FORBIDDEN_WRITABLE_ROOTS = [
+  '.git',
+  '.env',
+  'secrets.json',
+  'sessions',
+  'memory',
+  '.typeclaw',
+  'node_modules',
+] as const
+
 const PROTECTED_GIT_DIRS = ['.git/hooks'] as const
 const PROTECTED_GIT_FILES = ['.git/config'] as const
 
@@ -54,16 +73,80 @@ const WRITABLE_ROOT_FILES = [
 // so a `workspace -> /etc` symlink at a zone root would grant write access to an
 // outside path. (Symlinks INSIDE a real zone are already safe — the kernel
 // resolves them to the read-only parent mount.)
-export async function resolveWritableZones(agentDir: string): Promise<WritableZones> {
-  const dirs = await collectExisting(
+//
+// `configuredWritablePaths` are operator-chosen agent-relative dirs from
+// `sandbox.writablePaths`. They join the built-in dirs through the SAME
+// existence + symlink filter, plus the extra guardrails in
+// `resolveConfiguredWritableDirs`: each must resolve inside agentDir and must
+// not land on a forbidden root. A path that fails any check is dropped, never
+// throws — a stale config should degrade the one bad entry, not abort sandboxing.
+export async function resolveWritableZones(
+  agentDir: string,
+  configuredWritablePaths: readonly string[] = [],
+): Promise<WritableZones> {
+  const builtinDirs = await collectExisting(
     WRITABLE_DIRS.map((d) => join(agentDir, d)),
     'dir',
   )
+  const configuredDirs = await resolveConfiguredWritableDirs(agentDir, configuredWritablePaths)
   const files = await collectExisting(
     WRITABLE_ROOT_FILES.map((f) => join(agentDir, f)),
     'file',
   )
-  return { dirs, files }
+  return { dirs: dedupe([...builtinDirs, ...configuredDirs]), files }
+}
+
+// SECURITY: validation is on the REAL path, not the lexical one. A lexical-only
+// check (resolve + isInside) is bypassable by a symlinked INTERMEDIATE component:
+// with `/agent/alias -> /tmp/outside` (or `-> /agent/sessions`) and a config of
+// `alias/sub`, the lexical path `/agent/alias/sub` passes isInside and the
+// forbidden-root check, while the bwrap `--bind` follows the ancestor symlink to
+// write outside /agent (or onto a forbidden root). The zone-root lstat alone
+// can't see it — lstat of the final component follows ancestor symlinks. So we
+// realpath BOTH the candidate and agentDir (+ the forbidden roots) and validate
+// the resolved targets. A path whose real form escapes agentDir or lands on a
+// real forbidden root is dropped. realpath also rejects the final component
+// being a symlink (its real target is re-checked), subsuming the prior lstat.
+async function resolveConfiguredWritableDirs(agentDir: string, configured: readonly string[]): Promise<string[]> {
+  const realAgentDir = await realpathOrUndefined(agentDir)
+  if (realAgentDir === undefined) return []
+  const realForbidden = await resolveRealForbiddenRoots(agentDir)
+
+  const accepted: string[] = []
+  for (const rel of configured) {
+    const absolute = resolve(agentDir, rel)
+    // Cheap lexical pre-filter: reject obvious escapes before touching the disk.
+    if (absolute === agentDir || !isInside(agentDir, absolute)) continue
+    const real = await realpathOrUndefined(absolute)
+    if (real === undefined) continue
+    if (!(await isRealEntry(real, 'dir'))) continue
+    if (real === realAgentDir || !isInside(realAgentDir, real)) continue
+    if (realForbidden.some((root) => real === root || isInside(root, real))) continue
+    // Bind the lexical (caller-facing) path; bwrap resolves it to `real` itself.
+    accepted.push(absolute)
+  }
+  return accepted
+}
+
+async function resolveRealForbiddenRoots(agentDir: string): Promise<string[]> {
+  const resolved: string[] = []
+  for (const root of FORBIDDEN_WRITABLE_ROOTS) {
+    const real = await realpathOrUndefined(join(agentDir, root))
+    if (real !== undefined) resolved.push(real)
+  }
+  return resolved
+}
+
+async function realpathOrUndefined(target: string): Promise<string | undefined> {
+  try {
+    return await realpath(target)
+  } catch {
+    return undefined
+  }
+}
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)]
 }
 
 // Read-only re-protections rendered on top of the writable .git bind. Unlike
