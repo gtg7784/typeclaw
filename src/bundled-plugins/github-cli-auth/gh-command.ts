@@ -553,27 +553,65 @@ function isGraphqlEndpoint(args: readonly string[]): boolean {
   return findApiEndpoint(args) === 'graphql'
 }
 
-// True when any `gh api` invocation targets the authenticated-user endpoint
-// (`/user`, `user`, or a `/user/...` descendant). This is a token-CLASS mismatch,
-// not an auth failure: an App installation token is not a user identity, so GitHub
-// rejects `/user` regardless of how valid the token is. The caller blocks-and-
-// guides for App/none classes only (a PAT IS a user identity and works), so this
-// stays a pure shape detector. Narrow by design: `/users/{username}`, `/meta`,
-// `/rate_limit` are not user-identity endpoints and must not match.
-export function usesGhApiAuthenticatedUserEndpoint(command: string): boolean {
+export type GhAuthEnv = {
+  GH_TOKEN?: string | undefined
+  GITHUB_TOKEN?: string | undefined
+}
+
+const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+// The effective token `gh` would use for EACH `gh api` invocation that targets the
+// authenticated-user endpoint (`/user`, `user`, or a `/user/...` descendant). The
+// caller classifies each: an App installation token is not a user identity, so
+// GitHub rejects `/user` for it (token-CLASS mismatch, not an auth failure) — but a
+// PAT IS a user identity and works, so the guard must respect a command-local
+// `GH_TOKEN=…`/`GITHUB_TOKEN=…` override on that invocation, not just process env.
+// Precedence mirrors gh: local GH_TOKEN > process GH_TOKEN > local GITHUB_TOKEN >
+// process GITHUB_TOKEN. Narrow endpoint scope: `/users/{username}`, `/meta`,
+// `/rate_limit` are not user-identity endpoints and never match.
+export function effectiveGhTokensForAuthenticatedUserEndpoint(
+  command: string,
+  env: GhAuthEnv,
+): Array<string | undefined> {
   const tokens = tokenize(command)
   const ghStarts = findGhInvocations(tokens)
+  const result: Array<string | undefined> = []
   for (let i = 0; i < ghStarts.length; i++) {
     const start = ghStarts[i] as number
     const end = ghStarts[i + 1] ?? tokens.length
-    const args = tokens.slice(start + 1, end)
-    if (args[0] !== 'api') continue
-    const endpoint = findApiEndpoint(args)
-    if (endpoint === null) continue
-    const normalized = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint
-    if (normalized === 'user' || normalized.startsWith('user/')) return true
+    if (!isAuthenticatedUserEndpointArgs(tokens.slice(start + 1, end))) continue
+    result.push(effectiveGhTokenForInvocation(tokens, start, env))
   }
-  return false
+  return result
+}
+
+export function usesGhApiAuthenticatedUserEndpoint(command: string): boolean {
+  return effectiveGhTokensForAuthenticatedUserEndpoint(command, {}).length > 0
+}
+
+function isAuthenticatedUserEndpointArgs(args: readonly string[]): boolean {
+  if (args[0] !== 'api') return false
+  const endpoint = findApiEndpoint(args)
+  if (endpoint === null) return false
+  const normalized = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint
+  return normalized === 'user' || normalized.startsWith('user/')
+}
+
+// Walks the contiguous `VAR=val` assignments immediately before `gh` (the same
+// shape findGhInvocations skips) and applies gh's token precedence over env.
+function effectiveGhTokenForInvocation(tokens: readonly string[], ghStart: number, env: GhAuthEnv): string | undefined {
+  const local: GhAuthEnv = {}
+  for (let i = ghStart - 1; i >= 0 && ENV_ASSIGNMENT_RE.test(tokens[i] as string); i--) {
+    const token = tokens[i] as string
+    const name = token.slice(0, token.indexOf('='))
+    const value = token.slice(token.indexOf('=') + 1)
+    // Iterating right-to-left, so only record the first (leftmost wins on dup).
+    if (name === 'GH_TOKEN' && local.GH_TOKEN === undefined) local.GH_TOKEN = value
+    if (name === 'GITHUB_TOKEN' && local.GITHUB_TOKEN === undefined) local.GITHUB_TOKEN = value
+  }
+  const ghToken = local.GH_TOKEN ?? env.GH_TOKEN
+  if (ghToken !== undefined && ghToken !== '') return ghToken
+  return local.GITHUB_TOKEN ?? env.GITHUB_TOKEN
 }
 
 function findGhInvocations(tokens: readonly string[]): number[] {

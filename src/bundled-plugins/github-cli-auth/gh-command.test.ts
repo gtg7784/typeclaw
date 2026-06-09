@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 
-import { analyzeGhCommand, usesGhApiAuthenticatedUserEndpoint } from './gh-command'
+import {
+  analyzeGhCommand,
+  effectiveGhTokensForAuthenticatedUserEndpoint,
+  usesGhApiAuthenticatedUserEndpoint,
+} from './gh-command'
 
 describe('analyzeGhCommand', () => {
   it('passes through commands that do not invoke gh', () => {
@@ -542,5 +546,51 @@ describe('usesGhApiAuthenticatedUserEndpoint', () => {
     expect(usesGhApiAuthenticatedUserEndpoint('gh api /repos/acme/widgets/issues')).toBe(false)
     expect(usesGhApiAuthenticatedUserEndpoint('gh pr view -R acme/widgets')).toBe(false)
     expect(usesGhApiAuthenticatedUserEndpoint('echo gh api /user')).toBe(false)
+  })
+})
+
+describe('effectiveGhTokensForAuthenticatedUserEndpoint', () => {
+  it('returns no tokens when no invocation targets /user', () => {
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('gh api /repos/acme/widgets', {})).toEqual([])
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('gh api /users/octocat', { GH_TOKEN: 'ghs_x' })).toEqual([])
+  })
+
+  it('falls back to process env when there is no command-local override', () => {
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('gh api /user', { GH_TOKEN: 'ghs_x' })).toEqual(['ghs_x'])
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('gh api /user', {})).toEqual([undefined])
+  })
+
+  it('prefers a command-local override over process env', () => {
+    expect(
+      effectiveGhTokensForAuthenticatedUserEndpoint('GH_TOKEN=ghp_local gh api /user', { GH_TOKEN: 'ghs_proc' }),
+    ).toEqual(['ghp_local'])
+  })
+
+  it('strips quotes and keeps a value containing =', () => {
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint("GH_TOKEN='ghp_local' gh api /user", {})).toEqual([
+      'ghp_local',
+    ])
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint("GH_TOKEN='ghp_a=b' gh api /user", {})).toEqual(['ghp_a=b'])
+  })
+
+  it('applies gh precedence: GH_TOKEN beats GITHUB_TOKEN at the same level', () => {
+    // process GH_TOKEN wins over a command-local GITHUB_TOKEN
+    expect(
+      effectiveGhTokensForAuthenticatedUserEndpoint('GITHUB_TOKEN=ghp_local gh api /user', { GH_TOKEN: 'ghs_proc' }),
+    ).toEqual(['ghs_proc'])
+    // command-local GH_TOKEN wins over command-local GITHUB_TOKEN
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('GH_TOKEN=ghp_a GITHUB_TOKEN=ghp_b gh api /user', {})).toEqual(
+      ['ghp_a'],
+    )
+    // GITHUB_TOKEN used only when no GH_TOKEN anywhere
+    expect(effectiveGhTokensForAuthenticatedUserEndpoint('GITHUB_TOKEN=ghp_local gh api /user', {})).toEqual([
+      'ghp_local',
+    ])
+  })
+
+  it('resolves each /user invocation independently in a compound command', () => {
+    expect(
+      effectiveGhTokensForAuthenticatedUserEndpoint('GH_TOKEN=ghp_a gh api /user && GH_TOKEN=ghs_b gh api /user', {}),
+    ).toEqual(['ghp_a', 'ghs_b'])
   })
 })

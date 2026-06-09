@@ -3,7 +3,7 @@ import { definePlugin } from '@/plugin'
 
 import { createApproveIdempotencyGuard } from './approve-idempotency'
 import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
-import { analyzeGhCommand, usesGhApiAuthenticatedUserEndpoint } from './gh-command'
+import { analyzeGhCommand, effectiveGhTokensForAuthenticatedUserEndpoint } from './gh-command'
 import { ensureGitAskPassHelper } from './git-askpass'
 import { analyzeGitCommand, defaultGitResolvers } from './git-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
@@ -58,14 +58,16 @@ export default definePlugin({
       const decision = analyzeGhCommand(command)
 
       // `/user` classifies as pass-through (no repo to mint for), so this block
-      // must run BEFORE the pass-through return. shouldMintAppToken is the App-auth
-      // signal — true for an App-class token OR a live minter (multi-owner / no-repos
-      // App configs never seed GH_TOKEN yet can mint). PATs carry a user identity, so
-      // `/user` works for them and shouldMintAppToken returns false: not blocked.
-      if (
-        shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver()) &&
-        usesGhApiAuthenticatedUserEndpoint(command)
-      ) {
+      // must run BEFORE the pass-through return. Resolve the EFFECTIVE token per
+      // `/user` invocation (a command-local `GH_TOKEN=…`/`GITHUB_TOKEN=…` overrides
+      // process env, matching gh) and block only when that token is App / none-with-
+      // minter — a command-local PAT override carries a user identity, so `/user`
+      // works for it and must not be blocked.
+      const userEndpointTokens = effectiveGhTokensForAuthenticatedUserEndpoint(command, {
+        GH_TOKEN: process.env.GH_TOKEN,
+        GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      })
+      if (userEndpointTokens.some((token) => shouldMintAppToken(token, hasAppTokenResolver()))) {
         return { block: true, reason: appUserEndpointReason }
       }
 

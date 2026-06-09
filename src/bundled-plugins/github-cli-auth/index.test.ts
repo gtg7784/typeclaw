@@ -14,10 +14,13 @@ import githubCliAuthPlugin from './index'
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
 const originalToken = process.env.GH_TOKEN
+const originalGithubToken = process.env.GITHUB_TOKEN
 
 afterEach(() => {
   if (originalToken === undefined) delete process.env.GH_TOKEN
   else process.env.GH_TOKEN = originalToken
+  if (originalGithubToken === undefined) delete process.env.GITHUB_TOKEN
+  else process.env.GITHUB_TOKEN = originalGithubToken
 })
 
 function pluginContext(
@@ -264,6 +267,73 @@ describe('github-cli-auth plugin', () => {
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh api /users/octocat')
+  })
+
+  test('App process token + command-local classic PAT: gh api /user is NOT blocked', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('GH_TOKEN=ghp_classic gh api /user')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('GH_TOKEN=ghp_classic gh api /user')
+  })
+
+  test('App process token + command-local fine-grained PAT: gh api /user is NOT blocked', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('GH_TOKEN=github_pat_xyz gh api /user')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+  })
+
+  test('App process token + quoted command-local PAT: gh api /user is NOT blocked', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent("GH_TOKEN='ghp_classic' gh api /user"), hookCtx)
+
+    expect(result).toBeUndefined()
+  })
+
+  test('command-local App token: gh api /user IS blocked', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent('GH_TOKEN=ghs_child gh api /user'), hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+  })
+
+  test('command-local GITHUB_TOKEN PAT (no GH_TOKEN): gh api /user is NOT blocked', async () => {
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent('GITHUB_TOKEN=ghp_classic gh api /user'), hookCtx)
+
+    expect(result).toBeUndefined()
+  })
+
+  test('process GH_TOKEN (App) beats command-local GITHUB_TOKEN PAT: gh api /user IS blocked', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent('GITHUB_TOKEN=ghp_classic gh api /user'), hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+  })
+
+  test('process GITHUB_TOKEN PAT (no GH_TOKEN): gh api /user is NOT blocked', async () => {
+    delete process.env.GH_TOKEN
+    process.env.GITHUB_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    const result = await hook(bashEvent('gh api /user'), hookCtx)
+
+    expect(result).toBeUndefined()
   })
 
   test('non-gh bash command passes through without touching the resolver', async () => {
