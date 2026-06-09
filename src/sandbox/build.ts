@@ -1,3 +1,5 @@
+import { posix } from 'node:path'
+
 import { SandboxPolicyError } from './errors'
 import {
   DEFAULT_SANDBOX_ENV,
@@ -7,6 +9,8 @@ import {
   type SandboxPolicy,
 } from './policy'
 import { formatCommand } from './quote'
+
+const { dirname } = posix
 
 export type SandboxedCommand = {
   argv: string[]
@@ -166,6 +170,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
   appendMasks(argv, policy)
   appendWritable(argv, policy)
   appendProtected(argv, policy)
+  appendSymlinks(argv, policy)
 
   if (policy.cwd !== undefined) {
     argv.push('--chdir', policy.cwd)
@@ -199,6 +204,18 @@ function appendProtected(argv: string[], policy: SandboxPolicy): void {
   }
   for (const file of policy.protected?.files ?? []) {
     argv.push('--ro-bind', file, file)
+  }
+}
+
+// Rendered after every bind (incl. the /tmp session bind in policy.mounts) so
+// last-op-wins keeps the symlink: a `/tmp/.foo` dest emitted before the /tmp
+// bind would be erased by it. `--dir` ensures the symlink's parent exists inside
+// the jail (the sandbox HOME dir may not be present after --clearenv tmpfs
+// scaffolding); `--symlink TARGET DEST` then creates `dest -> target`.
+function appendSymlinks(argv: string[], policy: SandboxPolicy): void {
+  for (const link of policy.symlinks ?? []) {
+    argv.push('--dir', dirname(link.dest))
+    argv.push('--symlink', link.target, link.dest)
   }
 }
 
