@@ -42,8 +42,10 @@ import {
   DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
+  isPackageInstallCommand,
   mapVirtualTmpPath,
   resolveHiddenPaths,
+  resolvePackageInstallZones,
   resolveProcSelfExe,
   resolveProtectedZones,
   resolveSandboxSymlinks,
@@ -611,6 +613,19 @@ async function applyBashSandbox(
   const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
     ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
     : { dirs: [], files: [] }
+  // A recognized standalone `bun add`/`bun install` needs DIRECTORY write at the
+  // root (node_modules/ + temp lockfile), which the narrow carve-out model can't
+  // grant. Widen to an RW root for that command class only, then re-hide secrets
+  // (masks) and re-RO the executable surfaces (resolvePackageInstallZones) on top
+  // — subtractMasked drops any protected path a mask already hides so the RW root
+  // never re-exposes it. The default jail's `writable`/`protected` are skipped
+  // here: writableRoot supersedes them for this command, and the same masks +
+  // package-install protected set cover the confidentiality and escalation
+  // boundaries.
+  const packageInstall = isPackageInstallCommand(command)
+    ? subtractMaskedProtected(await resolvePackageInstallZones(agentDir), { dirs, files })
+    : undefined
+
   // Only emit an in-jail symlink for a target that actually survived as a
   // writable dir: a symlink to a target that was dropped (missing, masked for
   // this role, or filtered by the writable-zone guardrails) would dangle onto an
@@ -632,9 +647,9 @@ async function applyBashSandbox(
       { type: 'ro-bind', source: agentDir, dest: agentDir },
       { type: 'bind', source: sessionTmp, dest: '/tmp' },
     ],
-    masks: { dirs, files },
-    writable,
-    protected: protectedZones,
+    ...(packageInstall !== undefined
+      ? { writableRoot: { dir: packageInstall.root }, masks: { dirs, files }, protected: packageInstall.protected }
+      : { masks: { dirs, files }, writable, protected: protectedZones }),
     symlinks,
     network: 'inherit',
     cwd: agentDir,
@@ -643,6 +658,14 @@ async function applyBashSandbox(
     ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })
   mutableArgs.command = commandString
+}
+
+function subtractMaskedProtected(
+  zones: { root: string; protected: { dirs: string[]; files: string[] } },
+  masked: { dirs: string[]; files: string[] },
+): { root: string; protected: { dirs: string[]; files: string[] } } {
+  const filtered = subtractMasked(zones.protected, masked)
+  return { root: zones.root, protected: filtered }
 }
 
 // Picks the /proc strategy for a sandboxed bash call. The branch order is:

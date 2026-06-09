@@ -94,6 +94,24 @@ export type SandboxSymlinkOp = {
   dest: string
 }
 
+// A single RW bind of the project root, used ONLY by the package-install path
+// (recognized standalone `bun add`/`bun install` commands). `bun add` writes
+// node_modules/ AND a temp lockfile (`bun.lock.NNN.tmp`, atomically renamed)
+// directly under the root, so a file-level RW bind of `bun.lock` alone is
+// insufficient — Bun needs DIRECTORY write to create its temp file. The default
+// ro-root + narrow carve-out model can't express that, so this widens the root
+// to RW for that command class only.
+//
+// CRITICAL ordering: unlike `writable` (rendered AFTER masks), `writableRoot`
+// renders BEFORE masks so the broad RW root does not re-expose secrets. With
+// last-op-wins the chain is: ro-bind root → writableRoot (RW root) → masks
+// (re-hide .env/secrets.json/private dirs) → protected (re-RO node_modules/typeclaw,
+// packages, .agents/skills, .git/hooks, .git/config). Everything stays hidden or
+// EROFS except the dirs a dependency install legitimately needs to write.
+export type SandboxWritableRootPolicy = {
+  dir: string
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
@@ -106,6 +124,7 @@ export type SandboxPolicy = {
   // the builder stays pure.
   procSelfExe?: string
   mounts?: SandboxMount[]
+  writableRoot?: SandboxWritableRootPolicy
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy
   protected?: SandboxProtectedPolicy
