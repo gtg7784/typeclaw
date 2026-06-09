@@ -1,9 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { RunInspectResult } from './index'
-import { runViewerLoop, type TailController } from './loop'
+import { runViewerLoop, type SelectOutcome, type TailController } from './loop'
 
 type FakeItem = { key: string; kind: 'session' | 'tui' | 'logs' }
+
+const pick = (item: FakeItem): SelectOutcome<FakeItem> => ({ kind: 'picked', item })
+const cancelled: SelectOutcome<FakeItem> = { kind: 'cancelled' }
+const refresh = (highlightKey?: string): SelectOutcome<FakeItem> =>
+  highlightKey !== undefined ? { kind: 'refresh', highlightKey } : { kind: 'refresh' }
 
 function fakeScope(onDispose?: () => void): TailController {
   const ctrl = new AbortController()
@@ -42,7 +47,7 @@ describe('runViewerLoop', () => {
       preselectKey: 'logs',
       selectItem: async () => {
         pickerCalls++
-        return null
+        return cancelled
       },
       openItem: async (item) => {
         opened.push(item.key)
@@ -69,7 +74,8 @@ describe('runViewerLoop', () => {
       keyOf: (i) => i.key,
       selectItem: async (items) => {
         pickerCalls++
-        return items[pickerCalls - 1] ?? null
+        const item = items[pickerCalls - 1]
+        return item !== undefined ? pick(item) : cancelled
       },
       openItem: async (item) => {
         opened.push(item.key)
@@ -101,7 +107,8 @@ describe('runViewerLoop', () => {
       keyOf: (i) => i.key,
       selectItem: async (items) => {
         pickerCalls++
-        return items[pickerCalls - 1] ?? null
+        const item = items[pickerCalls - 1]
+        return item !== undefined ? pick(item) : cancelled
       },
       openItem: async () => (pickerCalls === 1 ? wrapWritable(back) : wrap(done)),
       createTailScope: () => fakeScope(),
@@ -128,7 +135,8 @@ describe('runViewerLoop', () => {
       keyOf: (i) => i.key,
       selectItem: async (items) => {
         pickerCalls++
-        return items[pickerCalls - 1] ?? null
+        const item = items[pickerCalls - 1]
+        return item !== undefined ? pick(item) : cancelled
       },
       // First open (logs) returns back WITHOUT endedWritableSession; second ends.
       openItem: async () => (pickerCalls === 1 ? wrap(back) : wrap(done)),
@@ -146,7 +154,7 @@ describe('runViewerLoop', () => {
       listItems: async () => [{ key: 'live', kind: 'tui' }],
       keyOf: (i) => i.key,
       preselectKey: 'live',
-      selectItem: async () => null,
+      selectItem: async () => cancelled,
       openItem: async (item, ctx) => {
         // A real tui opener never touches ctx.createTailScope; assert the loop
         // does not force one on the branch.
@@ -167,7 +175,7 @@ describe('runViewerLoop', () => {
     const result = await runViewerLoop<FakeItem>({
       listItems: async () => [{ key: 'a', kind: 'session' }],
       keyOf: (i) => i.key,
-      selectItem: async () => null,
+      selectItem: async () => cancelled,
       openItem: async () => wrap(done),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
@@ -182,7 +190,7 @@ describe('runViewerLoop', () => {
     const result = await runViewerLoop<FakeItem>({
       listItems: async () => [],
       keyOf: (i) => i.key,
-      selectItem: async () => null,
+      selectItem: async () => cancelled,
       openItem: async () => wrap(done),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'no sessions' }),
@@ -196,12 +204,83 @@ describe('runViewerLoop', () => {
       listItems: async () => [{ key: 'a', kind: 'session' }],
       keyOf: (i) => i.key,
       preselectKey: 'a',
-      selectItem: async () => null,
+      selectItem: async () => cancelled,
       openItem: async () => wrap({ ok: false, exitCode: 2, reason: 'boom' }),
       createTailScope: () => fakeScope(),
       onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
     })
 
     expect(result).toEqual({ ok: false, exitCode: 2, reason: 'boom' })
+  })
+
+  test('refresh re-lists and re-renders the picker without opening anything', async () => {
+    let listCalls = 0
+    let openCalls = 0
+    const result = await runViewerLoop<FakeItem>({
+      listItems: async () => {
+        listCalls++
+        return [{ key: 'a', kind: 'session' }]
+      },
+      keyOf: (i) => i.key,
+      selectItem: async (items) => (listCalls === 1 ? refresh('a') : pick(items[0]!)),
+      openItem: async () => {
+        openCalls++
+        return wrap(done)
+      },
+      createTailScope: () => fakeScope(),
+      onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
+    })
+
+    expect(result).toEqual(done)
+    expect(listCalls).toBe(2)
+    expect(openCalls).toBe(1)
+  })
+
+  test('refresh persists the highlighted key as the next picker initialKey', async () => {
+    const hints: (string | undefined)[] = []
+    let pickerCalls = 0
+    await runViewerLoop<FakeItem>({
+      listItems: async () => [
+        { key: 'a', kind: 'session' },
+        { key: 'b', kind: 'session' },
+      ],
+      keyOf: (i) => i.key,
+      selectItem: async (_items, opts) => {
+        pickerCalls++
+        hints.push(opts.initialKey)
+        return pickerCalls === 1 ? refresh('b') : cancelled
+      },
+      openItem: async () => wrap(done),
+      createTailScope: () => fakeScope(),
+      onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
+    })
+
+    expect(hints).toEqual([undefined, 'b'])
+  })
+
+  test('refresh without a highlightKey keeps the prior highlight', async () => {
+    const hints: (string | undefined)[] = []
+    let pickerCalls = 0
+    await runViewerLoop<FakeItem>({
+      listItems: async () => [
+        { key: 'a', kind: 'session' },
+        { key: 'b', kind: 'session' },
+      ],
+      keyOf: (i) => i.key,
+      selectItem: async (items, opts) => {
+        pickerCalls++
+        hints.push(opts.initialKey)
+        // 1st: open 'b' (sets highlight). 2nd (after esc-back): keyless refresh.
+        // 3rd: must still be highlighting 'b'.
+        if (pickerCalls === 1) return pick(items[1]!)
+        if (pickerCalls === 2) return refresh()
+        return cancelled
+      },
+      openItem: async () => wrap(back),
+      createTailScope: () => fakeScope(),
+      onEmpty: () => ({ ok: false, exitCode: 1, reason: 'empty' }),
+    })
+
+    expect(hints).toEqual([undefined, 'b', 'b'])
   })
 })

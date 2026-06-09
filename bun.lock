@@ -5,6 +5,7 @@
     "": {
       "name": "typeclaw",
       "dependencies": {
+        "@clack/core": "^1.2.0",
         "@clack/prompts": "^1.2.0",
         "@mariozechner/pi-coding-agent": "^0.67.3",
         "@mariozechner/pi-tui": "^0.67.3",

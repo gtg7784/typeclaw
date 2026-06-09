@@ -10,7 +10,15 @@ export type OpenItemContext = {
   createTailScope: () => TailController
 }
 
-export type SelectItem<TItem> = (items: TItem[], opts: { initialKey?: string }) => Promise<TItem | null>
+// `refresh` (the `r` key) re-lists and re-renders the picker without opening
+// anything; `highlightKey` is the row highlighted when `r` was pressed, so the
+// selection survives the refresh.
+export type SelectOutcome<TItem> =
+  | { kind: 'picked'; item: TItem }
+  | { kind: 'cancelled' }
+  | { kind: 'refresh'; highlightKey?: string }
+
+export type SelectItem<TItem> = (items: TItem[], opts: { initialKey?: string }) => Promise<SelectOutcome<TItem>>
 
 export type OpenItemResult = {
   result: RunInspectResult
@@ -46,8 +54,12 @@ export type RunViewerLoopOptions<TItem> = {
 // inside `openItem` AFTER the picker resolves and disposed before the picker
 // re-opens, so clack always owns a clean cooked-mode stdin.
 export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): Promise<RunInspectResult> {
+  // `preselectKey` auto-opens a row once (the `inspect <id>` arg). `highlightKey`
+  // only seeds the picker's initial highlight (esc-return + `r` refresh) and
+  // never bypasses the picker — keeping the two apart is what lets refresh
+  // re-render the list instead of re-opening the last viewer.
   let preselectKey = opts.preselectKey
-  let lastPickedKey: string | undefined
+  let highlightKey: string | undefined
   // Writable is only safe on the very first list. Returning to the picker means
   // a viewer was just opened and left — any writable session it might represent
   // is gone (detach ends the live session), so subsequent refreshes are
@@ -58,16 +70,21 @@ export async function runViewerLoop<TItem>(opts: RunViewerLoopOptions<TItem>): P
     const items = await opts.listItems({ allowWritable })
     if (items.length === 0) return opts.onEmpty()
 
-    let chosen: TItem | null
+    let chosen: TItem
     if (preselectKey !== undefined) {
-      chosen = items.find((i) => opts.keyOf(i) === preselectKey) ?? null
+      const match = items.find((i) => opts.keyOf(i) === preselectKey) ?? null
       preselectKey = undefined
-      if (chosen === null) return opts.onEmpty()
+      if (match === null) return opts.onEmpty()
+      chosen = match
     } else {
-      const hint = lastPickedKey
-      chosen = await opts.selectItem(items, hint !== undefined ? { initialKey: hint } : {})
-      if (chosen === null) return { ok: false, exitCode: 130, reason: 'cancelled' }
-      lastPickedKey = opts.keyOf(chosen)
+      const outcome = await opts.selectItem(items, highlightKey !== undefined ? { initialKey: highlightKey } : {})
+      if (outcome.kind === 'cancelled') return { ok: false, exitCode: 130, reason: 'cancelled' }
+      if (outcome.kind === 'refresh') {
+        if (outcome.highlightKey !== undefined) highlightKey = outcome.highlightKey
+        continue
+      }
+      chosen = outcome.item
+      highlightKey = opts.keyOf(chosen)
     }
 
     const opened = await opts.openItem(chosen, { createTailScope: opts.createTailScope })
