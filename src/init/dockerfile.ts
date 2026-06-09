@@ -385,6 +385,68 @@ link_persistent_home_files() {
   ln -sfn "$persist_root/${CLAUDE_CREDENTIALS_RELATIVE_PATH}" "$claude_config_dir/${CLAUDE_CREDENTIALS_FILE_NAME}"
 }
 
+# link_configured_symlinks creates the operator's \`sandbox.symlinks\` at the real
+# container $HOME for the UNSANDBOXED (trusted/owner) bash path; low-trust bash
+# gets an equivalent in-jail symlink from the per-tool bwrap builder instead
+# (src/sandbox/build.ts). TYPECLAW_SANDBOX_SYMLINKS is base64-encoded JSON of
+# [{from,to}] (set by start.ts only when non-empty). The whole job is done in
+# \`bun -e\` rather than POSIX shell because \`from\`/\`to\` are arbitrary operator
+# strings: a real JSON parser + Node fs API sidesteps every word-splitting,
+# glob, and metachar hazard that shell string-handling of untrusted paths
+# carries. Contract enforced here (belt to the config-parse validation in
+# config.ts): \`from\` is expanded against $HOME for a leading \`~/\`, \`to\` resolves
+# under /agent and may not escape it, and an existing NON-symlink at \`from\` is
+# refused (never clobbered) — a dangling/symlink \`from\` is replaced idempotently
+# with \`ln -sfn\` semantics (force + no-deref). Failures are logged and skipped
+# per-entry so one bad symlink never blocks container boot.
+#
+# TYPECLAW_AGENT_DIR defaults to /agent (the bind-mount path) and is overridable
+# only by the shim's behavioral tests, which point it at a tmpdir — same escape
+# hatch as TYPECLAW_PERSIST_HOME_ROOT in link_persistent_home_files. Production
+# never sets it.
+link_configured_symlinks() {
+  [ -n "\${TYPECLAW_SANDBOX_SYMLINKS:-}" ] || return 0
+  TYPECLAW_SANDBOX_SYMLINKS="$TYPECLAW_SANDBOX_SYMLINKS" HOME="$HOME" \\
+    TYPECLAW_AGENT_DIR="\${TYPECLAW_AGENT_DIR:-/agent}" bun -e '
+    import { lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+    import { dirname, join, normalize, resolve } from "node:path";
+    const home = process.env.HOME || "/root";
+    const agentDir = process.env.TYPECLAW_AGENT_DIR || "/agent";
+    let specs;
+    try {
+      specs = JSON.parse(Buffer.from(process.env.TYPECLAW_SANDBOX_SYMLINKS, "base64").toString("utf8"));
+    } catch (e) {
+      console.error("typeclaw-entrypoint: could not parse TYPECLAW_SANDBOX_SYMLINKS:", String(e));
+      process.exit(0);
+    }
+    for (const spec of Array.isArray(specs) ? specs : []) {
+      const from = String(spec?.from ?? "");
+      const to = String(spec?.to ?? "");
+      if (from === "" || to === "") continue;
+      const fromAbs = from.startsWith("~/") ? join(home, from.slice(2)) : normalize(from);
+      const target = resolve(agentDir, to);
+      if (target !== agentDir && !target.startsWith(agentDir + "/")) {
+        console.error("typeclaw-entrypoint: skip symlink, target escapes /agent:", to);
+        continue;
+      }
+      try {
+        mkdirSync(target, { recursive: true });
+        mkdirSync(dirname(fromAbs), { recursive: true });
+        let existing;
+        try { existing = lstatSync(fromAbs); } catch { existing = undefined; }
+        if (existing && !existing.isSymbolicLink()) {
+          console.error("typeclaw-entrypoint: refusing to clobber existing non-symlink at", fromAbs);
+          continue;
+        }
+        if (existing) rmSync(fromAbs);
+        symlinkSync(target, fromAbs);
+      } catch (e) {
+        console.error("typeclaw-entrypoint: failed to create symlink", fromAbs, "->", target, ":", String(e));
+      }
+    }
+  ' || true
+}
+
 start_xvfb() {
   if ! command -v Xvfb >/dev/null 2>&1; then
     return 0
@@ -419,6 +481,7 @@ start_xvfb() {
 
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
   link_persistent_home_files
+  link_configured_symlinks
   start_xvfb
   exec bun run typeclaw "$@"
 fi
@@ -465,6 +528,7 @@ ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
 link_persistent_home_files
+link_configured_symlinks
 start_xvfb
 exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
 `

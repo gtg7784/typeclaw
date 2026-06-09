@@ -79,7 +79,7 @@ type ScaffoldedConfig = {
   docker?: { file?: DockerfileBlock }
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
-  sandbox?: { realProc?: boolean }
+  sandbox?: { realProc?: boolean; writablePaths?: string[]; symlinks?: Array<{ from: string; to: string }> }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -651,6 +651,30 @@ describe('planStart sandbox.realProc cap grant', () => {
     expect(capIdx).toBeGreaterThan(-1)
     expect(imageIdx).toBeGreaterThan(-1)
     expect(capIdx).toBeLessThan(imageIdx)
+  })
+})
+
+describe('planStart sandbox.symlinks env', () => {
+  test('omits TYPECLAW_SANDBOX_SYMLINKS when no symlinks are configured', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.startsWith('TYPECLAW_SANDBOX_SYMLINKS='))).toHaveLength(0)
+  })
+
+  test('emits base64-encoded JSON of the symlinks for the entrypoint shim', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const symlinks = [{ from: '~/.metabase-cli', to: 'workspace/.metabase-cli' }]
+    await writeTypeclawConfig(root, { sandbox: { symlinks } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const envArg = plan.runArgs.find((a) => a.startsWith('TYPECLAW_SANDBOX_SYMLINKS='))
+    expect(envArg).toBeDefined()
+    const encoded = envArg!.slice('TYPECLAW_SANDBOX_SYMLINKS='.length)
+    expect(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'))).toEqual(symlinks)
   })
 })
 
