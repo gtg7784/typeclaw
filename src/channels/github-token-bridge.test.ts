@@ -62,4 +62,15 @@ describe('createGithubTokenBridge', () => {
 
     expect(result).toEqual({ kind: 'token', token: 'ghs_second' })
   })
+
+  it('hasAppTokenResolver tracks resolver registration', () => {
+    const bridge = createGithubTokenBridge()
+    expect(bridge.hasAppTokenResolver()).toBe(false)
+
+    const unregister = bridge.registerResolver(async () => 'ghs_x')
+    expect(bridge.hasAppTokenResolver()).toBe(true)
+
+    unregister()
+    expect(bridge.hasAppTokenResolver()).toBe(false)
+  })
 })

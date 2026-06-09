@@ -13,6 +13,7 @@ export type CreatePluginContextOptions<TConfig> = {
   logger: PluginLogger
   permissions: PermissionService
   resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
+  hasGithubAppTokenResolver?: () => boolean
   spawnSubagent: SpawnSubagentFn
   isBooted: () => boolean
 }
@@ -30,7 +31,10 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
     config: opts.config,
     logger: opts.logger,
     permissions: opts.permissions,
-    github: { resolveTokenForRepo: opts.resolveGithubTokenForRepo ?? githubTokenUnavailable },
+    github: {
+      resolveTokenForRepo: opts.resolveGithubTokenForRepo ?? githubTokenUnavailable,
+      hasAppTokenResolver: opts.hasGithubAppTokenResolver ?? (() => false),
+    },
     spawnSubagent: async (name: string, payload?: unknown, options?: SpawnSubagentOptions) => {
       if (!opts.isBooted()) {
         throw new Error(

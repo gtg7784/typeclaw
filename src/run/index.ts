@@ -167,6 +167,7 @@ export async function startAgent({
     configsByName: pluginConfigsByName,
     bundled: BUNDLED_PLUGINS,
     resolveGithubTokenForRepo: githubTokenBridge.resolveTokenForRepo,
+    hasGithubAppTokenResolver: githubTokenBridge.hasAppTokenResolver,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
 
