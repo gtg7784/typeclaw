@@ -37,15 +37,16 @@ import type {
 } from '@/plugin'
 import {
   buildSandboxedCommand,
-  canBindProcSafely,
   canMountRealProc,
   DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
+  getProcBindSafetyVerdict,
   isPackageInstallCommand,
   mapVirtualTmpPath,
   resolveHiddenPaths,
   resolvePackageInstallZones,
+  resolveProcBindSafetyWithRetry,
   resolveProcSelfExe,
   resolveProtectedZones,
   resolveSandboxSymlinks,
@@ -673,12 +674,12 @@ function subtractMaskedProtected(
 // the kernel permits the mount (canMountRealProc) — it adds PID isolation but
 // needs CAP_SYS_ADMIN (unshare --mount-proc), so it is a deliberate, narrow
 // opt-in; else 'proc-bind' (--ro-bind /proc, NO CAP_SYS_ADMIN) when its userns
-// leak-block is verified safe (canBindProcSafely); else 'tmpfs'. Because
-// sandbox.realProc DEFAULTS FALSE, the first branch is normally skipped and
-// proc-bind is the de-facto default — which is the point: the common path needs
-// no broad outer capability. 'tmpfs' is the last-resort degraded mode where
-// external packages can't run; reached only when BOTH probes fail (e.g. a kernel
-// that would leak cross-userns environ — proc-bind fails closed there).
+// leak-block is verified safe; else 'tmpfs'. Because sandbox.realProc DEFAULTS
+// FALSE, the first branch is normally skipped and proc-bind is the de-facto
+// default — which is the point: the common path needs no broad outer capability.
+// 'tmpfs' is the last-resort degraded mode where external packages can't run;
+// reached only when proc-bind is DEFINITIVELY unavailable (a real cross-userns
+// environ leak → fail closed) or its safety stays unverifiable after retries.
 //
 // Read from the boot-time `config` snapshot, NOT live getConfig(): sandbox is
 // restart-required, and the strategy MUST track the boot-time CAP_SYS_ADMIN
@@ -688,7 +689,16 @@ function subtractMaskedProtected(
 // container lifetime regardless of how many bash calls hit it.
 async function resolveProcStrategy(): Promise<SandboxProcStrategy> {
   if (config.sandbox.realProc && (await canMountRealProc())) return 'real-proc'
-  if (await canBindProcSafely()) return 'proc-bind'
+  // Retry an 'inconclusive' proc-bind probe (transient under load) before
+  // degrading — a single such hiccup must not break external-package runs on a
+  // capable host. 'unsafe' still fails closed with no retry.
+  if (
+    await resolveProcBindSafetyWithRetry(
+      () => getProcBindSafetyVerdict(),
+      (ms) => Bun.sleep(ms),
+    )
+  )
+    return 'proc-bind'
   // Degraded last resort: no working /proc strategy. External package runners
   // (bunx/bun add/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
   // /proc/self/{fd,maps} are absent. Warn once so an operator on such an exotic

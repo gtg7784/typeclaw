@@ -8,6 +8,9 @@ import {
   canBindProcSafely,
   canMountRealProc,
   ensureBwrapAvailable,
+  getProcBindSafetyVerdict,
+  type ProcBindSafetyVerdict,
+  resolveProcBindSafetyWithRetry,
   resolveProcSelfExe,
 } from './availability'
 import { SandboxUnavailableError } from './errors'
@@ -116,11 +119,14 @@ describe('canBindProcSafely', () => {
     expect(after).toBe(before)
   })
 
-  test('dedups concurrent first calls onto one in-flight probe (same promise identity)', () => {
-    const first = canBindProcSafely()
-    const second = canBindProcSafely()
+  test('concurrent calls share one underlying probe and agree (boolean wrapper has no own identity)', async () => {
+    // canBindProcSafely now derives from the deduped getProcBindSafetyVerdict, so
+    // its OWN promise identity differs per call (the strict identity assertion
+    // lives on the verdict fn below). The guarantee that survives is the one that
+    // matters: concurrent callers resolve to the same value off a single probe.
+    _resetProcBindProbeCacheForTests()
+    const [first, second] = await Promise.all([canBindProcSafely(), canBindProcSafely()])
     expect(second).toBe(first)
-    return first
   })
 
   test('keys the cache by bwrapPath so a non-default binary re-probes (never inherits the default result)', async () => {
@@ -130,6 +136,57 @@ describe('canBindProcSafely', () => {
     // probes its own (absent) binary and is unsafe. A singleton cache would
     // wrongly return the default's answer here.
     expect(await canBindProcSafely({ bwrapPath: '/nonexistent/definitely-not-bwrap' })).toBe(false)
+  })
+})
+
+describe('getProcBindSafetyVerdict', () => {
+  // The verdict's value depends on the host (Linux container + bwrap → 'safe';
+  // macOS dev host where bwrap is absent → not 'safe'). These assert the
+  // environment-independent contract: it is always one of the three states, it
+  // is the source of truth that canBindProcSafely() narrows, and a definitively
+  // absent binary yields a definitive (cacheable) verdict, never 'inconclusive'.
+  test('returns one of the three verdict states', async () => {
+    const verdict = await getProcBindSafetyVerdict()
+    expect(['safe', 'unsafe', 'inconclusive']).toContain(verdict)
+  })
+
+  test('canBindProcSafely is true IFF the verdict is exactly "safe"', async () => {
+    // given: a fresh probe so the two calls observe the same cached fact
+    _resetProcBindProbeCacheForTests()
+    const verdict = await getProcBindSafetyVerdict()
+    const bool = await canBindProcSafely()
+    // then: the boolean wrapper collapses both 'unsafe' AND 'inconclusive' to
+    // false — only 'safe' makes proc-bind selectable.
+    expect(bool).toBe(verdict === 'safe')
+  })
+
+  test('an absent binary yields a non-"safe" verdict so proc-bind is never selected', async () => {
+    // A missing bwrap cannot prove the userns leak-block, so the verdict must
+    // never be 'safe'. (It surfaces as 'inconclusive' — the spawn throws ENOENT,
+    // which the probe treats as "couldn't verify"; the retry loop then exhausts
+    // its budget and fails closed to tmpfs. Either way proc-bind is unreachable.)
+    const verdict = await getProcBindSafetyVerdict({ bwrapPath: '/nonexistent/definitely-not-bwrap' })
+    expect(verdict).not.toBe('safe')
+  })
+
+  test('dedups concurrent first calls onto one in-flight probe (same promise identity)', () => {
+    const first = getProcBindSafetyVerdict()
+    const second = getProcBindSafetyVerdict()
+    expect(second).toBe(first)
+    return first
+  })
+
+  test('caches the result for the process so later calls never re-probe', async () => {
+    const resolved = await getProcBindSafetyVerdict()
+    const cached = getProcBindSafetyVerdict()
+    expect(await cached).toBe(resolved)
+  })
+
+  test('re-probes after a cache reset (deterministic, same host → same verdict)', async () => {
+    const before = await getProcBindSafetyVerdict()
+    _resetProcBindProbeCacheForTests()
+    const after = await getProcBindSafetyVerdict()
+    expect(after).toBe(before)
   })
 })
 
@@ -174,5 +231,82 @@ describe('resolveProcSelfExe', () => {
   test('returns the running bun binary (process.execPath)', () => {
     expect(resolveProcSelfExe()).toBe(process.execPath)
     expect(resolveProcSelfExe()).toMatch(/bun/i)
+  })
+})
+
+describe('resolveProcBindSafetyWithRetry', () => {
+  // A scripted probe + recording sleep let these assert the retry POLICY (the
+  // core of the inconclusive-retry fix) directly: how many times it probes, whether it sleeps,
+  // and the final boolean — with no process spawning and no host dependence.
+  function scriptedProbe(verdicts: ProcBindSafetyVerdict[]): () => Promise<ProcBindSafetyVerdict> {
+    let i = 0
+    return () => Promise.resolve(verdicts[Math.min(i++, verdicts.length - 1)] ?? 'inconclusive')
+  }
+  function recordingSleep(): { sleep: (ms: number) => Promise<void>; calls: number[] } {
+    const calls: number[] = []
+    return { sleep: (ms) => (calls.push(ms), Promise.resolve()), calls }
+  }
+
+  test('"safe" on the first probe returns true and never sleeps', async () => {
+    const { sleep, calls } = recordingSleep()
+    let probes = 0
+    const result = await resolveProcBindSafetyWithRetry(() => (probes++, Promise.resolve('safe')), sleep, [250, 1_000])
+    expect(result).toBe(true)
+    expect(probes).toBe(1)
+    expect(calls).toEqual([])
+  })
+
+  test('"unsafe" fails closed immediately with NO retry (a real leak is final)', async () => {
+    const { sleep, calls } = recordingSleep()
+    let probes = 0
+    const result = await resolveProcBindSafetyWithRetry(
+      () => (probes++, Promise.resolve('unsafe')),
+      sleep,
+      [250, 1_000],
+    )
+    expect(result).toBe(false)
+    expect(probes).toBe(1)
+    expect(calls).toEqual([])
+  })
+
+  test('a transient "inconclusive" that then resolves "safe" is retried and succeeds', async () => {
+    // given: the probe is inconclusive once (load spike), then verifies safe
+    const { sleep, calls } = recordingSleep()
+    const result = await resolveProcBindSafetyWithRetry(scriptedProbe(['inconclusive', 'safe']), sleep, [250, 1_000])
+    // then: it backed off once before the successful re-probe
+    expect(result).toBe(true)
+    expect(calls).toEqual([250])
+  })
+
+  test('exhausting the backoff budget on persistent "inconclusive" fails CLOSED', async () => {
+    // given: every probe is inconclusive (sustained contention)
+    const { sleep, calls } = recordingSleep()
+    let probes = 0
+    const result = await resolveProcBindSafetyWithRetry(
+      () => (probes++, Promise.resolve('inconclusive')),
+      sleep,
+      [250, 1_000],
+    )
+    // then: initial + 2 retries = 3 probes, 2 sleeps, then fail closed (never true)
+    expect(result).toBe(false)
+    expect(probes).toBe(3)
+    expect(calls).toEqual([250, 1_000])
+  })
+
+  test('"unsafe" after an "inconclusive" still fails closed and stops retrying', async () => {
+    const { sleep, calls } = recordingSleep()
+    const result = await resolveProcBindSafetyWithRetry(scriptedProbe(['inconclusive', 'unsafe']), sleep, [250, 1_000])
+    expect(result).toBe(false)
+    // only the one backoff before the definitive 'unsafe'; no further sleeps
+    expect(calls).toEqual([250])
+  })
+
+  test('an empty backoff budget probes exactly once then fails closed (no retry, no sleep)', async () => {
+    const { sleep, calls } = recordingSleep()
+    let probes = 0
+    const result = await resolveProcBindSafetyWithRetry(() => (probes++, Promise.resolve('inconclusive')), sleep, [])
+    expect(result).toBe(false)
+    expect(probes).toBe(1)
+    expect(calls).toEqual([])
   })
 })
