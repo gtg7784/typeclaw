@@ -32,4 +32,9 @@ describe('BUNDLED_PLUGINS', () => {
       'operator',
     ])
   })
+
+  test('security precedes github-cli-auth so gh/git token minting never runs on a blocked command', () => {
+    const names = BUNDLED_PLUGINS.map((p) => p.name)
+    expect(names.indexOf('security')).toBeLessThan(names.indexOf('github-cli-auth'))
+  })
 })
