@@ -227,6 +227,39 @@ describe('slack-bot createTypingCallback', () => {
     expect(clears).toHaveLength(0)
     expect(infos).toHaveLength(0)
   })
+
+  test('flat DM tick then stop ends cleared even when the tick tag resolves last', async () => {
+    // Reproduces the router's call order after a reply: a re-arm 'tick' fires
+    // (fire-and-forget) then the turn-end 'stop' fires. The bug let a slow
+    // formatChannelTag on the tick defer its FIFO enqueue past the stop's
+    // clear, stranding "is typing...". The real FIFO is wired in to assert the
+    // observable Slack status, not an internal call order.
+    // given
+    const statuses: string[] = []
+    const tracker = createSlackTypingTracker({
+      client: { setAssistantStatus: async (_chat, _thread, status) => void statuses.push(status) },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    const tagGates: Array<() => void> = []
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      formatChannelTag: () => new Promise<string>((resolve) => tagGates.push(() => resolve('tag'))),
+    })
+    const dm = { adapter: 'slack-bot' as const, workspace: '@dm', chat: 'D0DM', thread: null }
+    const anchor = '1700000000.000100'
+
+    // when: tick enters first, stop second (router order)
+    const tickDone = cb({ ...dm, typingThread: anchor, phase: 'tick' })
+    const stopDone = cb({ ...dm, typingThread: anchor, phase: 'stop' })
+    // resolve tags in REVERSE: stop's tag first, tick's tag last
+    tagGates[1]?.()
+    tagGates[0]?.()
+    await Promise.all([tickDone, stopDone])
+
+    // then: regardless of tag timing, the last status on the wire is the clear
+    expect(statuses.at(-1)).toBe('')
+  })
 })
 
 describe('createSlackTypingTracker', () => {
