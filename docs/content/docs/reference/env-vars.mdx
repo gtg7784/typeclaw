@@ -14,14 +14,15 @@ icon: Variable
 
 ## Container stage (set by `typeclaw start`)
 
-| Variable                          | Set on `docker run`                | Effect                                                                    |
-| --------------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
-| `TYPECLAW_CONTAINER_NAME`         | always                             | The container's name; container code uses it to identify itself to hostd  |
-| `TYPECLAW_HOSTD_URL`              | when hostd HTTP control is enabled | `http://host.docker.internal:<port>` — used by the agent's `restart` tool |
-| `TYPECLAW_HOSTD_TOKEN`            | per-container, generated at start  | Bearer token for the HTTP control surface; per-container restart RPC      |
-| `TYPECLAW_HOSTD_BROKER_TOKEN`     | per-container, generated at start  | Auth token for the portbroker WebSocket connection                        |
-| `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true` | `1` — entrypoint shim installs the iptables egress filter                 |
-| `DISPLAY`                         | when `docker.file.xvfb` is enabled | `:99` — points at the in-container Xvfb server                            |
+| Variable                          | Set on `docker run`                  | Effect                                                                                                                                                                                |
+| --------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TYPECLAW_CONTAINER_NAME`         | always                               | The container's name; container code uses it to identify itself to hostd                                                                                                              |
+| `TYPECLAW_HOSTD_URL`              | when hostd HTTP control is enabled   | `http://host.docker.internal:<port>` — used by the agent's `restart` tool                                                                                                             |
+| `TYPECLAW_HOSTD_TOKEN`            | per-container, generated at start    | Bearer token for the HTTP control surface; per-container restart RPC                                                                                                                  |
+| `TYPECLAW_HOSTD_BROKER_TOKEN`     | per-container, generated at start    | Auth token for the portbroker WebSocket connection                                                                                                                                    |
+| `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true`   | `1` — entrypoint shim installs the iptables egress filter                                                                                                                             |
+| `TYPECLAW_SANDBOX_SYMLINKS`       | when `sandbox.symlinks` is non-empty | base64-encoded JSON of the `sandbox.symlinks` array; the entrypoint shim decodes it and creates each `from -> /agent/<to>` symlink at the real container `$HOME` for unsandboxed bash |
+| `DISPLAY`                         | when `docker.file.xvfb` is enabled   | `:99` — points at the in-container Xvfb server                                                                                                                                        |
 
 ## Provider credentials
 
