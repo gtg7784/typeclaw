@@ -1,0 +1,103 @@
+---
+name: typeclaw-github-contributing
+description: Use this skill BEFORE you open a new issue or pull request on GitHub with `gh issue create` / `gh pr create` (or before composing the `--body`/`--title` for one, or editing an issue/PR body after the fact). Triggers include any `gh issue create`, `gh pr create`, `gh api … /issues`, `gh api … /pulls`, any time you are about to file a bug report, feature request, or PR against a repo — yours or someone else's — and any phrasing like "open an issue", "file a bug", "raise a PR", "submit a pull request". Read it first, because every repo has its own contribution rules — an issue/PR template, a CONTRIBUTING.md, a title convention — and a maintainer's first impression of your contribution is whether you bothered to follow them. Ignoring a template that the repo author wrote on purpose reads as careless; following it reads as someone who belongs. This is platform etiquette, independent of how the work reached you (it applies whether the request came through the github channel or you decided to file on your own).
+---
+
+# typeclaw-github-contributing
+
+When you open an issue or a PR on GitHub, you are writing into **someone else's repository** — even when it's nominally "yours," it usually has collaborators, a history, and conventions that predate this turn. The repo's maintainers encoded what they want from a contribution in a few well-known files. Honoring them is not bureaucracy; it's the difference between a contribution that gets triaged and merged and one that gets a "please use the template" and sits.
+
+This skill is the **etiquette of contributing to a GitHub repo**. It is not about replying to inbound GitHub events or running PR reviews — that's `typeclaw-channel-github`. It is not about committing to your own agent folder — that's `typeclaw-git`. It is specifically about _what you put on GitHub the moment you open a new issue or PR._
+
+## The rule
+
+**Before you open an issue or PR, find the repo's contribution conventions and follow them. If a template exists, fill it — don't bypass it. If a CONTRIBUTING file exists, read it and honor it. Match the title style the repo already uses.**
+
+The principle underneath all five rules below: **the repo already told you how it wants contributions; your job is to look before you write, not to impose your defaults.**
+
+## Do this first — read the repo before you write
+
+A contribution composed from your defaults and one composed from the repo's conventions look completely different to a maintainer. The five-second check that separates them:
+
+```sh
+# Issue & PR templates (any of these may exist; presence varies by repo)
+gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE 2>/dev/null
+gh api repos/OWNER/REPO/contents/.github/PULL_REQUEST_TEMPLATE.md 2>/dev/null
+# (templates also live at repo root or under docs/ — .github/ is just the common spot)
+
+# Contribution guide
+gh api repos/OWNER/REPO/contents/CONTRIBUTING.md 2>/dev/null
+
+# What do existing titles look like?
+gh pr list --repo OWNER/REPO --state all --limit 20 --json title --jq '.[].title'
+gh issue list --repo OWNER/REPO --state all --limit 20 --json title --jq '.[].title'
+
+# Is this a duplicate?
+gh issue list --repo OWNER/REPO --search "<keywords from what you're about to file>" --state all
+```
+
+You don't need every one of these every time — but you do need to _look_ before you compose. The cost is a few API calls; the cost of skipping it is a contribution that signals you didn't read the room.
+
+## The five rules
+
+### 1. Fill the issue/PR template if one exists
+
+If `gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE/*` or `.github/PULL_REQUEST_TEMPLATE.md` returns content, the maintainers want every issue/PR to follow that shape. Fetch it, read its sections, and produce a `--body` that fills each one with real content.
+
+- For PRs, the template often has a checklist ("- [ ] tests added", "- [ ] docs updated"). Fill the prose sections; for checkboxes, check only what is genuinely true and leave the rest unchecked — don't tick a box you can't back up.
+- Multiple issue templates (bug report, feature request, etc.) mean you must pick the one that matches what you're filing. A bug filed against the feature-request template is noise.
+- A repo with no template gives you latitude — but a clear, scannable body (what / why / how, repro steps for bugs) is still the courteous default.
+
+### 2. Don't bypass the template to file faster
+
+This is rule 1's hard edge and the failure this skill most exists to prevent. When a template has required sections or a checklist, **fill or honor them — do not delete them to save effort.** Stripping the template, leaving placeholder text (`<!-- describe your change -->`) un-replaced, or dumping a one-liner where the template asked for repro steps all read as "I didn't bother." If a section genuinely doesn't apply, say so explicitly ("N/A — no user-facing change") rather than silently removing it; the maintainer can tell the difference between _considered and skipped_ and _ignored_.
+
+### 3. Follow CONTRIBUTING.md
+
+If the repo has a `CONTRIBUTING.md` (root or `.github/`), read it before you open anything. It encodes rules the templates can't — branch naming, whether PRs go against `main` or `develop`, whether a linked issue is required first, commit sign-off (DCO), the expected PR description format, "open an issue before a large PR," and so on. These are the maintainers' actual process; violating them is the most common reason a well-intentioned PR gets bounced. Honor what it says even when it differs from your habits.
+
+### 4. Match the repo's title conventions
+
+A repo's existing issue/PR titles tell you the house style. Pull the last ~20 (commands above) and infer the pattern, then match it:
+
+- **Conventional-commit prefixes** (`feat:`, `fix:`, `docs(scope):`) — if the PR list is full of them, your PR title uses one too.
+- **Ticket/issue references** (`[PROJ-123]`, `(#456)`) — if titles routinely carry them and you have a ref, include it.
+- **Sentence case vs. lowercase, imperative mood** — small things, but matching them signals you read the log.
+
+If there's no discernible pattern, a clear imperative summary (`Fix race in port allocation`) is the safe default. The point is never to invent your own scheme on top of an established one.
+
+### 5. Search for duplicates before opening
+
+Before filing an issue, search existing issues (open _and_ closed — a closed one may carry the resolution or the maintainer's "won't fix" rationale). If a matching thread exists:
+
+- **Open and relevant** → add your context as a comment on that thread instead of opening a duplicate. Duplicates fragment the discussion and annoy triagers.
+- **Closed as resolved** → check whether the fix is in the version you're on before re-filing; if it's a regression, reference the old issue in your new one.
+
+The same applies to PRs: a quick `gh pr list --search` avoids opening a PR for something already in flight.
+
+## Workflow
+
+1. **Identify the target repo** (`OWNER/REPO`) and whether you're filing an issue or a PR.
+2. **Read the room** — run the checks in "Do this first": templates, CONTRIBUTING, existing titles, duplicate search.
+3. **Compose to the conventions** — fill the template, honor CONTRIBUTING, match the title style. Write the body to a file when it's long or contains backticks/markdown that shell-quoting would mangle, then pass it with `--body-file`.
+4. **Open it** with `gh`:
+   ```sh
+   gh issue create --repo OWNER/REPO --title "<conventional title>" --body-file /tmp/issue-body.md
+   gh pr create   --repo OWNER/REPO --title "<conventional title>" --body-file /tmp/pr-body.md --base <branch>
+   ```
+5. **Verify it landed** as intended (`gh issue view` / `gh pr view`) — confirm the template rendered and nothing got truncated.
+
+## Things you must not do
+
+- **Do not open an issue/PR without checking for a template.** A repo that ships a template wants it used; skipping the check is how you end up filing against conventions you never looked at.
+- **Do not strip, gut, or placeholder-leave a template** to file faster. Fill it, or explicitly mark sections N/A. An empty template body is worse than a thoughtful free-form one.
+- **Do not ignore CONTRIBUTING.md** because its rules differ from your defaults. Its rules win in its repo.
+- **Do not invent a title scheme** when the repo already has one. Match what's there.
+- **Do not file a duplicate** without searching first. Comment on the existing thread instead.
+- **Do not tick checklist boxes you can't back up.** A checked "tests added" with no tests is a false claim the reviewer will catch.
+
+## What this skill does not cover
+
+- **Replying to inbound GitHub events, and running PR reviews** — `typeclaw-channel-github`. That skill owns triage of github-channel inbounds, formal reviews via the reviews API, and resolving review threads. This skill owns only the act of _opening_ a new issue/PR.
+- **Committing to your own agent folder** — `typeclaw-git`. Local commit hygiene and decision-context messages live there; this skill is about GitHub artifacts, not your local history.
+- **The `gh` CLI's full surface** — auth, sub-commands, flags. Defer to `gh <command> --help`. Under the github channel adapter, `GH_TOKEN` is pre-injected; see `typeclaw-channel-github` for the single-bare-invocation constraint that applies to repo-targeting `gh` calls (no pipes, `;`, `&&`, heredocs, or command substitution).
