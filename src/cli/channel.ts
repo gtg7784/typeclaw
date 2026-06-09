@@ -1078,17 +1078,18 @@ type LinePromptResult =
       callbacks: { onPincode: (pin: string) => void }
     }
 
-// The LINE QR login blocks while the SDK long-polls for a scan. During that
-// wait the add-flow spinner ('Logging in to LINE...') would otherwise keep
-// animating on top of the multi-line QR, garbling it. The controller lets the
-// QR callback stop the live spinner, print the QR, then restart it with a
-// "waiting for scan" message so output stays legible.
-export type LineQrSpinnerControl = {
-  stop: () => void
-  waiting: () => void
+// LINE's interactive logins block while the SDK waits on the phone: QR
+// long-polls for a scan, email/password waits for the user to enter a PIN. The
+// add-flow spinner ('Logging in to LINE...') keeps animating during that wait
+// and would otherwise repaint over the multi-line QR or the PIN, garbling both.
+// This control lets the QR/PIN callbacks pause the live spinner, print legibly,
+// then resume it with a "waiting for you" message so output stays readable.
+export type LineAuthSpinnerControl = {
+  pause: () => void
+  resume: (message: string) => void
 }
 
-async function promptLineLogin(spinnerControl?: LineQrSpinnerControl): Promise<LinePromptResult> {
+async function promptLineLogin(spinnerControl?: LineAuthSpinnerControl): Promise<LinePromptResult> {
   note(
     [
       'LINE authentication uses a personal account registered as a sub-device.',
@@ -1113,7 +1114,11 @@ async function promptLineLogin(spinnerControl?: LineQrSpinnerControl): Promise<L
     process.exit(0)
   }
 
-  const onPincode = (pin: string): void => log.info(`Enter this PIN in the LINE app to confirm: ${pin}`)
+  const onPincode = (pin: string): void => {
+    spinnerControl?.pause()
+    printLinePincode(pin)
+    spinnerControl?.resume('Waiting for you to confirm the PIN in the LINE app...')
+  }
 
   if (method === 'qr') {
     return {
@@ -1144,8 +1149,8 @@ async function promptLineLogin(spinnerControl?: LineQrSpinnerControl): Promise<L
   return { method: 'email', email, password: pwd, callbacks: { onPincode } }
 }
 
-async function presentLineQr(url: string, spinnerControl?: LineQrSpinnerControl): Promise<void> {
-  spinnerControl?.stop()
+async function presentLineQr(url: string, spinnerControl?: LineAuthSpinnerControl): Promise<void> {
+  spinnerControl?.pause()
   const presentation = await displayQR(url, {
     title: 'LINE login',
     scanInstruction: 'Scan with the LINE app on your phone',
@@ -1170,7 +1175,7 @@ async function presentLineQr(url: string, spinnerControl?: LineQrSpinnerControl)
     printLineQrUrl(url)
   }
 
-  spinnerControl?.waiting()
+  spinnerControl?.resume('Waiting for you to scan the QR code with the LINE app...')
 }
 
 // Last-resort fallback when no QR could be rendered. The raw URL stays OUT of
@@ -1182,17 +1187,27 @@ export function printLineQrUrl(url: string, output: NodeJS.WritableStream = proc
   output.write(`${url}\n\n`)
 }
 
+// PIN stays OUT of the note() gutter (same `│`-splitting reason as
+// printLineQrUrl) and must stand out: the SDK blocks on phone confirmation and
+// throws if its window lapses, so a PIN scrolled past unnoticed leaves nothing
+// in secrets.json — the root cause of the runtime "No account found" error. The
+// "waiting" line is emitted by the resumed spinner, not here.
+export function printLinePincode(pin: string, output: NodeJS.WritableStream = process.stdout): void {
+  note('Open the LINE app on your phone and enter this PIN to authorize this device:', 'Confirm LINE login')
+  output.write(`\n  PIN: ${pin}\n\n`)
+}
+
 type Spinner = ReturnType<typeof spinner>
 
 // `current` is the live `line-auth` spinner, shared between `reportProgress`
-// (which owns its lifecycle) and the QR callback (which must pause it to print
-// a legible QR). It is null whenever no LINE login spinner is active.
+// (which owns its lifecycle) and the QR/PIN callbacks (which must pause it to
+// print legibly). It is null whenever no LINE login spinner is active.
 export type LineAuthSpinnerHolder = { current: Spinner | null }
 
-function holderSpinnerControl(holder: LineAuthSpinnerHolder): LineQrSpinnerControl {
+export function holderSpinnerControl(holder: LineAuthSpinnerHolder): LineAuthSpinnerControl {
   return {
-    stop: () => holder.current?.stop('QR code ready.'),
-    waiting: () => holder.current?.start('Waiting for you to scan the QR code with the LINE app...'),
+    pause: () => holder.current?.stop(),
+    resume: (message) => holder.current?.start(message),
   }
 }
 
