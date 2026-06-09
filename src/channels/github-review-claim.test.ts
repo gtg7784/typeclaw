@@ -118,7 +118,9 @@ describe('classifyReviewClaim — multilingual verdicts', () => {
   // supported language must NOT block a real reply.
   const demoted: readonly string[] = [
     'No apruebo esto todav\u00EDa.', // es: not approved yet
-    'Ainda n\u00E3o aprovei isto.', // pt
+    'Ainda n\u00E3o aprovei isto.', // pt: not approved yet
+    'N\u00E3o aprovado.', // pt: standalone "não" + aprovado (regression: was block-approve)
+    'N\u00E3o aprovado ainda.', // pt
     "Je ne vais pas approuver pour l'instant.", // fr: I won't approve for now
     'Non ho ancora approvato.', // it
     'Ich werde das noch nicht genehmigen.', // de: won't approve yet

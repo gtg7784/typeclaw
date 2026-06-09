@@ -162,8 +162,11 @@ const DEMOTE_TO_IGNORE: readonly RegExp[] = [
   // marker with an approve/change/resolve/close verb stem in that language so a
   // declined or deferred verdict ("no apruebo", "je vais approuver",
   // "まだ承認していません") never blocks a real reply.
-  // es/pt: no/todavía/aún/voy a/no voy a + aprob/aprov/resol/cambios
-  /\bno\b[^.!?]*\b(aprob|aprov|resol|cambios)/,
+  // es/pt: no / não / todavía / aún / voy a / vou + aprob/aprov/resol/cambios.
+  // Portuguese standalone "não" must be its own alternative — Spanish "\bno\b"
+  // does not cover it, so "Não aprovado." (not approved) would otherwise hit
+  // the new aprovado approval blocker.
+  /\b(?:no|n[ãa]o)\b[^.!?]*\b(aprob|aprov|resol|cambios|altera)/,
   /\b(todav[íi]a no|a[úu]n no|ainda n[ãa]o)\b[^.!?]*\b(aprob|aprov|resol)/,
   /\b(voy a|vou)\b[^.!?]*\b(aprob|aprov|revisar|resolver)/,
   // fr: ne…pas / pas encore / je vais + approuv/résol/modif
