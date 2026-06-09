@@ -1100,7 +1100,7 @@ async function promptLineLogin(): Promise<LinePromptResult> {
     return {
       method: 'qr',
       callbacks: {
-        onQRUrl: (url) => note(url, 'Open this URL on your phone (or scan the QR it renders)'),
+        onQRUrl: printLineQrUrl,
         onPincode,
       },
     }
@@ -1123,6 +1123,15 @@ async function promptLineLogin(): Promise<LinePromptResult> {
     process.exit(0)
   }
   return { method: 'email', email, password: pwd, callbacks: { onPincode } }
+}
+
+// URL stays OUT of note(): clack wraps long lines with a `│` gutter that
+// corrupts copy-pasted URLs, and this login URL always wraps (it carries
+// `?secret=...&e2eeVersion=...`). Same fix as src/cli/oauth-callbacks.ts.
+export function printLineQrUrl(url: string, output: NodeJS.WritableStream = process.stdout): void {
+  note('Open this URL on your phone (or scan the QR it renders):', 'Log in to LINE')
+  output.write(`${url}\n`)
+  output.write('\n')
 }
 
 function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEvent) => void {
