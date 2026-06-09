@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { z } from 'zod'
 
 import { defineTool } from './define'
-import type { LoadPluginEntryFn } from './loader'
+import { type LoadPluginEntryFn, PluginNotFoundError } from './loader'
 import { loadPlugins, summarizeLoaded, pluginCronJobs } from './manager'
 
 describe('loadPlugins — atomic rollback', () => {
@@ -97,7 +97,7 @@ describe('loadPlugins — unresolvable entry is non-fatal', () => {
     })
     const loadEntry: LoadPluginEntryFn = async (entry) => {
       if (entry === 'typeclaw-plugin-missing') {
-        throw new Error(`Cannot find package '${entry}'`)
+        throw new PluginNotFoundError(entry, `cannot resolve plugin "${entry}": Cannot find package '${entry}'`)
       }
       return {
         name: entry,
@@ -124,6 +124,19 @@ describe('loadPlugins — unresolvable entry is non-fatal', () => {
 
     expect(result.loadedPlugins.map((p) => p.name)).toEqual(['good-one', 'good-two'])
     expect(warnings.some((w) => w.includes('typeclaw-plugin-missing') && w.includes('Cannot find package'))).toBe(true)
+  })
+
+  test('does NOT swallow a non-resolution failure (invalid plugin stays fatal)', async () => {
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'broken') {
+        throw new Error(`plugin ${entry}: default export is not a definePlugin(...) result`)
+      }
+      return { name: entry, version: undefined, source: entry, defined: { plugin: async () => ({}) } }
+    }
+
+    await expect(
+      loadPlugins({ entries: ['good', 'broken'], agentDir: '/tmp', configsByName: {}, loadEntry }),
+    ).rejects.toThrow(/default export is not a definePlugin/)
   })
 })
 

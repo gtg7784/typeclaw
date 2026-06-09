@@ -11,7 +11,7 @@ import {
 
 import { createPluginContext, createPluginLogger, type SpawnSubagentFn } from './context'
 import { createHookBus, type HookBus } from './hooks'
-import { loadPluginEntry, type LoadPluginEntryFn, type ResolvedPlugin } from './loader'
+import { loadPluginEntry, type LoadPluginEntryFn, PluginNotFoundError, type ResolvedPlugin } from './loader'
 import { discardRegistrationsBy, emptyRegistry, type PluginRegistry, registerContributions } from './registry'
 import type { PluginExports } from './types'
 
@@ -52,14 +52,17 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
   }
 
   // Non-fatal: a single unresolvable entry (uninstalled package, typo) must
-  // not abort boot for every other plugin -- warn and skip it.
+  // not abort boot for every other plugin -- warn and skip it. Only genuine
+  // resolution failures (PluginNotFoundError) are swallowed; path-escape,
+  // import-time throws, and invalid definitions stay fatal so a broken or
+  // malicious plugin still hard-fails boot.
   const resolvedEntries = await Promise.all(
     opts.entries.map(async (entry) => {
       try {
         return { entry, resolved: await loadEntry(entry, opts.agentDir) }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        console.warn(`[plugin] failed to load "${entry}", ignoring: ${message}`)
+        if (!(err instanceof PluginNotFoundError)) throw err
+        console.warn(`[plugin] failed to load "${entry}", ignoring: ${err.message}`)
         return null
       }
     }),
