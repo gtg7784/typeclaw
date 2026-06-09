@@ -38,6 +38,7 @@ import {
   StaleLiveSessionError,
   stripThinkBlocks,
   TURN_CAP_ERROR,
+  WILLINGNESS_NUDGE,
   type ChannelRouter,
   type ClaimHandler,
   type RestartCommandContext,
@@ -8479,15 +8480,17 @@ describe('ChannelRouter post-tool follow-up suppression', () => {
     toolName: string,
     result: { ok: boolean; continue?: boolean },
     isError: boolean,
+    replyText?: string,
   ): AfterToolCallContext {
     const toolResult = {
       content: [{ type: 'text' as const, text: 'ignored' }],
       details: result,
     }
+    const args = replyText !== undefined ? { text: replyText } : {}
     return {
       assistantMessage: assistantMessage('') as AfterToolCallContext['assistantMessage'],
-      toolCall: { type: 'toolCall', id: 'tc1', name: toolName, arguments: {} } as AfterToolCallContext['toolCall'],
-      args: {},
+      toolCall: { type: 'toolCall', id: 'tc1', name: toolName, arguments: args } as AfterToolCallContext['toolCall'],
+      args,
       result: toolResult as AfterToolCallContext['result'],
       isError,
       context: { systemPrompt: '', messages: [], tools: [] },
@@ -8541,6 +8544,108 @@ describe('ChannelRouter post-tool follow-up suppression', () => {
     const agent = await liveAgentAfterRoute(await tempDir())
     await agent.afterToolCall!(afterToolContext('channel_send', { ok: true }, false))
     expect(agent.signal.aborted).toBe(false)
+  })
+
+  test('stashes the reply text on a terminal channel_reply so the willingness nudge can read it', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('channel_reply', { ok: true }, false, '바로 계속 확인하겠습니다'))
+    expect(agent.signal.aborted).toBe(true)
+  })
+
+  test('does NOT stash when continue:true (the turn stays alive, no nudge needed)', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(
+      afterToolContext('channel_reply', { ok: true, continue: true }, false, '바로 계속 확인하겠습니다'),
+    )
+    expect(agent.signal.aborted).toBe(false)
+  })
+})
+
+describe('ChannelRouter continuation willingness nudge', () => {
+  function afterReplyContext(replyText: string): AfterToolCallContext {
+    return {
+      assistantMessage: assistantMessage('') as AfterToolCallContext['assistantMessage'],
+      toolCall: {
+        type: 'toolCall',
+        id: 'tc1',
+        name: 'channel_reply',
+        arguments: { text: replyText },
+      } as AfterToolCallContext['toolCall'],
+      args: { text: replyText },
+      result: {
+        content: [{ type: 'text' as const, text: 'ignored' }],
+        details: { ok: true },
+      } as AfterToolCallContext['result'],
+      isError: false,
+      context: { systemPrompt: '', messages: [], tools: [] },
+    }
+  }
+
+  // Simulate a terminal channel_reply turn: the model fires channel_reply (the
+  // terminal hook stashes the record + aborts), the send lands, and the leaf is
+  // the resulting aborted assistant message.
+  async function replyTurn(session: FakeSession, router: ChannelRouter, replyText: string): Promise<void> {
+    await session.agent.afterToolCall!(afterReplyContext(replyText))
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: replyText })
+    session.setAssistantMidTurn(replyText, 'aborted')
+  }
+
+  test('queues a nudge when a terminal reply promises to continue without continue:true', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '다시 확인해봐' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      // given: first turn replies with a continuation promise (no continue:true)
+      if (attempt === 1) {
+        await replyTurn(sessions[0]!, router, '바로 계속 확인하겠습니다')
+        return
+      }
+      // then: the nudge arrives as a reminder-only re-prompt; now do the work
+      expect(text).toContain(WILLINGNESS_NUDGE)
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+  })
+
+  test('does NOT queue a nudge for a final reply with no continuation intent', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: '리뷰해줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await replyTurn(sessions[0]!, router, '리뷰 완료했습니다. 문제 없습니다.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
+  test('nudges at most once per logical turn even if the second reply also promises to continue', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: '확인해봐' }))
+    sessions[0]!.onPrompt = async () => {
+      // Every turn promises to continue without continue:true. Bound = 1, so
+      // only the first reply turn may queue a nudge; the nudge turn's own reply
+      // must NOT queue a second one.
+      await replyTurn(sessions[0]!, router, '바로 계속 확인하겠습니다')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
   })
 })
 
