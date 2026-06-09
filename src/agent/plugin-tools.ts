@@ -23,7 +23,7 @@ import {
   checkNonWorkspaceWriteGuard,
   checkSkillAuthoringGuard,
 } from '@/bundled-plugins/guard/policy'
-import { config } from '@/config/config'
+import { config, getSandboxWritablePathSpecs } from '@/config/config'
 import type { PermissionService } from '@/permissions/permissions'
 import type {
   BuiltinToolRef,
@@ -39,12 +39,14 @@ import {
   buildSandboxedCommand,
   canBindProcSafely,
   canMountRealProc,
+  DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
   mapVirtualTmpPath,
   resolveHiddenPaths,
   resolveProcSelfExe,
   resolveProtectedZones,
+  resolveSandboxSymlinks,
   resolveWritableZones,
   type SandboxProcStrategy,
   subtractMasked,
@@ -590,11 +592,17 @@ async function applyBashSandbox(
   // (their masks are empty) and keep full unsandboxed access. subtractMasked
   // drops any writable zone masked for this role so an RW bind never re-exposes a
   // hidden path (e.g. a guest's masked workspace/).
-  // config.sandbox.writablePaths is read from the BOOT-TIME snapshot, not
-  // getConfig(): sandbox is restart-required, so the writable surface must stay
-  // coherent with the boot-time bwrap/capability decisions (same contract as
-  // resolveProcStrategy's read of config.sandbox.realProc below).
-  const writable = subtractMasked(await resolveWritableZones(agentDir, config.sandbox.writablePaths), { dirs, files })
+  // config.sandbox.* is read from the BOOT-TIME snapshot, not getConfig():
+  // sandbox is restart-required, so the writable surface AND the in-jail symlinks
+  // must stay coherent with the boot-time bwrap/capability decisions and with the
+  // entrypoint shim's symlink creation (same contract as resolveProcStrategy's
+  // read of config.sandbox.realProc below). getSandboxWritablePathSpecs folds
+  // every sandbox.symlinks[].to into the writable set so the symlink target is
+  // writable without the operator also listing it under writablePaths.
+  const writable = subtractMasked(await resolveWritableZones(agentDir, getSandboxWritablePathSpecs(config)), {
+    dirs,
+    files,
+  })
   // subtractMasked again on the protected set: a protected RO bind renders after
   // the masks (last-op-wins), so an unfiltered protected path nested under a
   // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)
@@ -603,6 +611,18 @@ async function applyBashSandbox(
   const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
     ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
     : { dirs: [], files: [] }
+  // Only emit an in-jail symlink for a target that actually survived as a
+  // writable dir: a symlink to a target that was dropped (missing, masked for
+  // this role, or filtered by the writable-zone guardrails) would dangle onto an
+  // EROFS/hidden path. Resolve `from` against the SANDBOX HOME (/tmp), where the
+  // per-session tmp dir is bound — NOT the container's real /root, which the jail
+  // never sees. The entrypoint shim handles the real-/root symlink for the
+  // unsandboxed (trusted/owner) path.
+  const writableDirSet = new Set(writable.dirs)
+  const sandboxHome = DEFAULT_SANDBOX_ENV.HOME ?? '/tmp'
+  const symlinks = resolveSandboxSymlinks(agentDir, config.sandbox.symlinks, sandboxHome).filter((op) =>
+    writableDirSet.has(op.target),
+  )
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
@@ -615,6 +635,7 @@ async function applyBashSandbox(
     masks: { dirs, files },
     writable,
     protected: protectedZones,
+    symlinks,
     network: 'inherit',
     cwd: agentDir,
     proc,
