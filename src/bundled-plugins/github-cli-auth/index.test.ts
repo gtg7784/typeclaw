@@ -20,7 +20,10 @@ afterEach(() => {
   else process.env.GH_TOKEN = originalToken
 })
 
-function pluginContext(resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>): PluginContext<undefined> {
+function pluginContext(
+  resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>,
+  hasAppTokenResolver = true,
+): PluginContext<undefined> {
   return {
     name: 'github-cli-auth',
     version: undefined,
@@ -28,13 +31,13 @@ function pluginContext(resolve: (repoSlug: string) => Promise<GithubTokenResolve
     config: undefined,
     logger: noopLogger,
     permissions: noopPermissionService,
-    github: { resolveTokenForRepo: resolve },
+    github: { resolveTokenForRepo: resolve, hasAppTokenResolver: () => hasAppTokenResolver },
     spawnSubagent: async () => {},
   }
 }
 
-async function hookFor(resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>) {
-  const exports = await githubCliAuthPlugin.plugin(pluginContext(resolve))
+async function hookFor(resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>, hasAppTokenResolver = true) {
+  const exports = await githubCliAuthPlugin.plugin(pluginContext(resolve, hasAppTokenResolver))
   const hook = exports.hooks?.['tool.before']
   if (!hook) throw new Error('plugin did not register tool.before')
   return hook
@@ -88,6 +91,35 @@ describe('github-cli-auth plugin', () => {
     })
 
     expect(result).toEqual({ block: true, reason: 'adapter down' })
+  })
+
+  test('multi-owner App auth (GH_TOKEN unseeded, minter live): still injects the minted token', async () => {
+    // given: a multi-owner / no-repos App config never seeds GH_TOKEN, but the
+    // per-repo minter is registered. App auth must be detected via the minter.
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'), true)
+    const event = bashEvent('gh pr view -R acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
+  })
+
+  test('no App auth (GH_TOKEN unseeded, no minter): passes through without minting', async () => {
+    delete process.env.GH_TOKEN
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    }, false)
+    const event = bashEvent('gh pr view -R acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(resolverCalled).toBe(false)
   })
 
   test('classic PAT: passes through unchanged (cross-owner)', async () => {
@@ -184,6 +216,38 @@ describe('github-cli-auth plugin — git path', () => {
     await hook(bashEvent('git clone https://github.com/acme/widgets.git'), hookCtx)
 
     expect(seen).toEqual(['acme/widgets'])
+  })
+
+  test('multi-owner App auth (GH_TOKEN unseeded, minter live): injects GIT_ASKPASS for git push', async () => {
+    // given: the reported #733 failure — a push under a multi-owner App where
+    // GH_TOKEN is never seeded, so the old `classifyGhToken(GH_TOKEN) === app`
+    // gate dropped the credential and git died with "could not read Username".
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'), true)
+    const event = bashEvent('git push https://github.com/acme/widgets.git main')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    const overlay = event.args[TYPECLAW_INTERNAL_BASH_ENV] as Record<string, string>
+    expect(overlay.TYPECLAW_GIT_TOKEN).toBe('ghs_minted')
+    expect(overlay.GIT_ASKPASS).toBeDefined()
+  })
+
+  test('no App auth (GH_TOKEN unseeded, no minter): git push passes through without minting', async () => {
+    delete process.env.GH_TOKEN
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    }, false)
+    const event = bashEvent('git push https://github.com/acme/widgets.git main')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(resolverCalled).toBe(false)
   })
 
   test('App auth: blocks when the bridge is unavailable', async () => {
