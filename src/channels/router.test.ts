@@ -3424,29 +3424,29 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
   })
 
-  for (const stop of ['error', 'aborted'] as const) {
-    test(`empty-turn guard: a '${stop}' truncation retries under the DEFAULT cap, not the raised budget`, async () => {
-      const dir = await tempDir()
-      const logs: string[] = []
-      const { router, sessions } = makeRouter(dir, { logs })
-      router.registerOutbound('discord-bot', async () => ({ ok: true }))
+  test("empty-turn guard: an 'aborted' truncation retries under the DEFAULT cap, not the raised budget", async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
 
-      await router.route(inbound({ text: 'ambiguous thing' }))
-      const budgetsPerPrompt: Array<number | undefined> = []
-      sessions[0]!.onPrompt = async () => {
-        await streamOnce(sessions[0]!)
-        budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
-        // error/aborted are not budget exhaustion, so the raised reasoning
-        // budget is unjustified — the retry must stay on the default backstop.
-        sessions[0]!.setAssistantMidTurn('truncated output', stop)
-      }
-      await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ text: 'ambiguous thing' }))
+    const budgetsPerPrompt: Array<number | undefined> = []
+    sessions[0]!.onPrompt = async () => {
+      await streamOnce(sessions[0]!)
+      budgetsPerPrompt.push(sessions[0]!.lastStreamMaxTokens)
+      // `aborted` is the terminal-reply abort, not budget exhaustion, so the
+      // raised reasoning budget is unjustified — the retry must stay on the
+      // default backstop. (`error` no longer reaches the retry path at all: it
+      // diverts to the provider-error notice, covered by its own tests.)
+      sessions[0]!.setAssistantMidTurn('truncated output', 'aborted')
+    }
+    await router.__testing!.flushDebounce(KEY)
 
-      expect(budgetsPerPrompt.every((b) => b === CHANNEL_MAX_OUTPUT_TOKENS)).toBe(true)
-      expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(true)
-      expect(logs.some((m) => m.includes(`max_tokens=${CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS}`))).toBe(false)
-    })
-  }
+    expect(budgetsPerPrompt.every((b) => b === CHANNEL_MAX_OUTPUT_TOKENS)).toBe(true)
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(true)
+    expect(logs.some((m) => m.includes(`max_tokens=${CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS}`))).toBe(false)
+  })
 
   test('empty-turn guard: skip-locked send thrash stays silent (no fallback) — the model chose silence', async () => {
     // Regression for the production false alarm (thread 1780845903.114339): the
@@ -5562,13 +5562,16 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     let attempt = 0
     sessions[0]!.onPrompt = async (text) => {
       attempt++
-      // when: first attempt errors + truncates (no send) → retry queued
+      // when: a transient error fires mid-stream but the turn ends `length`-
+      // truncated with no send → retry queued (the carry-forward case). A
+      // `length` leaf retries; an `error` leaf would divert straight to the
+      // provider notice, which is a different path tested separately.
       if (attempt === 1) {
         sessions[0]!.emit({
           type: 'message_end',
           message: { role: 'assistant', stopReason: 'error', errorMessage: 'transient server_is_overloaded' },
         })
-        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'error')
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
         return
       }
       // when: retry recovers and replies
@@ -5603,14 +5606,17 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     let attempt = 0
     sessions[0]!.onPrompt = async () => {
       attempt++
-      // when: turn A errors + truncates (queues the retry nudge + carry), then a
-      // fresh user message lands while that nudge is still pending
+      // when: turn A hits a transient error mid-stream and ends `length`-
+      // truncated (queues the retry nudge + carry), then a fresh user message
+      // lands while that nudge is still pending. The leaf is `length`, not
+      // `error`: an `error` leaf diverts straight to the provider notice, so it
+      // would never queue a carry-forward retry to misattribute in the first place.
       if (attempt === 1) {
         sessions[0]!.emit({
           type: 'message_end',
           message: { role: 'assistant', stopReason: 'error', errorMessage: 'transient server_is_overloaded' },
         })
-        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'error')
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
         await router.route(inbound({ externalMessageId: 'mB', text: 'turn B' }))
         return
       }
@@ -5625,13 +5631,13 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
   })
 
-  test('exhausted empty-turn retries surface the generic fallback (not a duplicate provider notice) and never go silent', async () => {
-    // given: every attempt errors + truncates with no send, exhausting the
-    // empty-turn retry budget without ever replying. The exhausted path already
-    // posts EMPTY_TURN_FALLBACK_TEXT — a user-facing "I got stuck" notice that
-    // counts as a reply — so the provider notice is correctly suppressed as
-    // redundant. The human still sees exactly one notice (never dead air); the
-    // raw provider cause lives in the operator logs.
+  test('an `error`-leaf turn surfaces the provider notice immediately — no empty-turn retries, no misleading "I got stuck" fallback', async () => {
+    // given: the turn ends with a `stopReason: 'error'` leaf (an upstream
+    // provider failure, e.g. a 401 or an overloaded server). This is NOT a
+    // reasoning loop, so it must NOT be re-prompted with EMPTY_TURN_RETRY_NUDGE
+    // and must NOT post EMPTY_TURN_FALLBACK_TEXT ("I got stuck…"), which would
+    // mask the real failure. The deferred provider-error path owns this turn and
+    // posts the REDACTED safeMessage instead. The raw cause stays in operator logs.
     const dir = await tempDir()
     const logs: string[] = []
     const sent: string[] = []
@@ -5651,12 +5657,49 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     }
     await router.__testing!.flushDebounce(KEY)
 
-    // then: retries ran, the generic fallback surfaced exactly once, no
-    // duplicate provider notice, and the raw cause was logged for operators
-    expect(sessions[0]!.prompts.length).toBeGreaterThan(1)
-    expect(sent.filter((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toHaveLength(1)
-    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(false)
+    // then: exactly one prompt (no retries), the provider notice surfaced, the
+    // misleading fallback never posted, and the raw cause was logged for operators.
+    // `server_is_overloaded` is not a known safe class, so it collapses to the
+    // generic redacted notice (never the raw text).
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent.some((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+    expect(sent.some((t) => /upstream LLM provider failed/i.test(t))).toBe(true)
+    expect(sent.some((t) => /server_is_overloaded/.test(t))).toBe(false)
+    expect(logs.some((m) => /empty_turn_retry/.test(m))).toBe(false)
+    expect(logs.some((m) => /provider_error_turn/.test(m))).toBe(true)
     expect(logs.some((m) => /LLM call failed: .*server_is_overloaded/.test(m))).toBe(true)
+  })
+
+  test('a 401 provider error surfaces the auth notice (not the misleading "I got stuck" fallback)', async () => {
+    // given: the production failure — every turn ends with a
+    // `stopReason: 'error'` / `401 Unauthorized` leaf because the provider API
+    // key is bad/expired. The old code retried then posted EMPTY_TURN_FALLBACK_TEXT
+    // ("I got stuck…"), completely masking the auth failure. Now the auth-class
+    // safe message surfaces and the raw 401 stays in operator logs.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hey bot, you there?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: '401 Unauthorized' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: one prompt, the auth notice surfaced, no retries, no "I got stuck"
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent.some((t) => /unauthorized/i.test(t) && /API key/i.test(t))).toBe(true)
+    expect(sent.some((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+    expect(logs.some((m) => /empty_turn_retry/.test(m))).toBe(false)
   })
 
   test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {

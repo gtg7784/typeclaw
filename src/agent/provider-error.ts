@@ -32,6 +32,16 @@ const GENERIC_SAFE_NOTICE = 'The upstream LLM provider failed. Operators can che
 // text, so adding a new class is opt-in and never widens what we expose.
 const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
   {
+    // Auth failure: the provider rejected our credentials (bad/expired/missing
+    // API key). Matched first because a 401 body can also mention "account",
+    // which would otherwise fall into the billing class below. The safe text
+    // names the operator action (check the API key) without echoing the raw
+    // error, whose body can carry a Bearer token.
+    match:
+      /\b(401|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|authentication failed|invalid bearer)\b/i,
+    safe: 'The upstream LLM provider rejected the request as unauthorized. Operators should check the provider API key configuration and `typeclaw logs`.',
+  },
+  {
     match: /\b(usage limit|rate limit|rate.?limited|too many requests|429)\b/i,
     safe: 'The upstream LLM provider is rate-limited (usage limit reached). Try again shortly.',
   },

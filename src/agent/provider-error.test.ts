@@ -63,6 +63,25 @@ describe('detectProviderError', () => {
 })
 
 describe('detectProviderError safeMessage redaction', () => {
+  test('maps a 401/unauthorized error to the auth-safe sentence without leaking a bearer token', () => {
+    const raw = '401 Unauthorized: invalid api key (Authorization: Bearer sk-live-LEAK)'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toMatch(/unauthorized/i)
+    expect(result?.safeMessage).toMatch(/API key/i)
+    expect(result?.safeMessage).not.toContain('sk-live-LEAK')
+    expect(result?.safeMessage).not.toContain('Bearer')
+  })
+
+  test('the bare "401 Unauthorized" shape (the production incident) maps to the auth class, not the generic notice', () => {
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: '401 Unauthorized' })
+
+    expect(result?.safeMessage).toMatch(/unauthorized/i)
+    expect(result?.safeMessage).not.toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+  })
+
   test('maps rate/usage-limit errors to a canonical channel-safe sentence', () => {
     const raw = 'You have hit your ChatGPT usage limit (team plan). Try again in ~40 min.'
     const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })

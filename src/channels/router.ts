@@ -3269,6 +3269,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // The legitimate empty-state case (a TUI-only check before any user
       // prompt, no inbound this turn) is excluded: no batch means no real turn
       // to retry or apologize for — keep the historical silent bail there.
+      const leafStopReason = assistantLeafStopReason(live.session)
+
+      // A `stopReason: 'error'` leaf is an upstream provider failure (401, billing,
+      // malformed response, etc.), NOT a reasoning-loop or budget exhaustion. It is
+      // already captured by subscribeProviderErrors into `pendingProviderError`
+      // (fired synchronously on `message_end` before `prompt()` resolves), and
+      // `maybePostDeferredProviderError` in drain()'s finally posts the REDACTED
+      // `safeMessage`. Retrying with EMPTY_TURN_RETRY_NUDGE would waste the budget
+      // nudging the model about output length when the real fault is the provider;
+      // posting EMPTY_TURN_FALLBACK_TEXT would mask the actual failure behind a
+      // misleading "I got stuck" notice. Return early so the provider-error path
+      // owns this turn's surface.
+      if (leafStopReason === 'error') {
+        logger.warn(`[channels] ${live.keyId} provider_error_turn deferring to provider-error notice`)
+        return
+      }
+
       const skipLockedThisTurn = live.skipLockedSendTurn === live.turnSeq
       const attemptedSendThisTurn = skipLockedThisTurn || live.policyDeniedToolSendsThisTurn.size > 0
 
@@ -3289,11 +3306,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return
       }
 
-      // Only a TRUNCATED assistant leaf (length/error/aborted) from a real
-      // conversational turn is a degeneration worth retrying. A cold/empty turn
-      // (no inbound author, or no assistant message at all) keeps the historical
-      // silent bail — re-prompting it would manufacture replies to nothing.
-      if (live.currentTurnAuthorId === null || !assistantLeafTruncated(live.session)) {
+      // Only a TRUNCATED assistant leaf — `length` (budget exhaustion) or
+      // `aborted` (terminal-reply abort) — from a real conversational turn is a
+      // degeneration worth retrying. `error` was already diverted above to the
+      // provider-error path. A cold/empty turn (no inbound author, or no
+      // assistant message at all) keeps the historical silent bail —
+      // re-prompting it would manufacture replies to nothing.
+      if (live.currentTurnAuthorId === null || leafStopReason === undefined) {
         logger.info(`[channels] ${live.keyId}: no recoverable assistant text in branch`)
         return
       }
@@ -3301,11 +3320,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.emptyTurnRetries++
         // Raise the re-prompt's budget ONLY for a `length` truncation: that is
         // the budget-exhaustion case (reasoning ate the whole pool before any
-        // prose), so the retry needs room to finish thinking AND reply. `error`
-        // and `aborted` are not budget exhaustion — an upstream failure or the
-        // terminal-reply abort — so they retry under the default backstop.
-        // Consumed one-shot by installChannelOutputCap on the next prompt().
-        if (assistantLeafStopReason(live.session) === 'length') {
+        // prose), so the retry needs room to finish thinking AND reply. `aborted`
+        // is the terminal-reply abort, not budget exhaustion, so it retries under
+        // the default backstop. Consumed one-shot by installChannelOutputCap on
+        // the next prompt().
+        if (leafStopReason === 'length') {
           live.nextPromptMaxTokens = CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS
         }
         logger.warn(
@@ -4680,25 +4699,20 @@ function recoverableAssistantText(
   return null
 }
 
-// The truncation stop reason when the leaf is an assistant message that was CUT
-// OFF mid-output — `length` (hit the token cap, the canonical kimi reasoning-
-// loop), `error`, or `aborted` — else undefined. This is the precise signature
-// of "the model was producing but got truncated", as distinct from a turn that
-// produced no assistant message at all (leaf undefined / a non-assistant
-// entry), which is a benign empty/cold turn. Callers that only need the boolean
-// use `assistantLeafTruncated`; the retry guard reads the reason itself because
-// the raised reasoning budget is justified ONLY for `length` (budget
-// exhaustion), not for `error`/`aborted`.
+// The non-terminal stop reason when the leaf is an assistant message that did
+// NOT cleanly finish — `length` (hit the token cap, the canonical kimi
+// reasoning-loop), `error` (an upstream provider failure), or `aborted` (the
+// terminal-reply abort) — else undefined. `undefined` is the signature of a
+// benign empty/cold turn (leaf undefined / a non-assistant entry). The
+// validateChannelTurn recovery path branches on the specific reason: `error`
+// diverts to the provider-error notice, `length` gets a raised retry budget,
+// `aborted` retries under the default backstop.
 function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'aborted' | undefined {
   const leaf = session.sessionManager.getLeafEntry()
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return undefined
   const stop = leaf.message.stopReason
   if (stop === 'length' || stop === 'error' || stop === 'aborted') return stop
   return undefined
-}
-
-function assistantLeafTruncated(session: AgentSession): boolean {
-  return assistantLeafStopReason(session) !== undefined
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
