@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { renderEvent } from './render'
+import { renderEvent, TimeGate } from './render'
 import type { InspectEvent } from './types'
 
 const PLAIN = { color: false }
@@ -220,6 +220,43 @@ describe('renderEvent (plain, no color)', () => {
       decision: 'observe',
     }
     expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  inbound    [observe] kakaotalk:kk/g1 k_user_123: hi')
+  })
+})
+
+describe('renderEvent showTime=false (suppressed timestamp keeps column alignment)', () => {
+  test('blanks the time column while leaving tag and body aligned with a shown line', () => {
+    const ev: InspectEvent = { cat: 'user', ts: dateMs('15:08:42'), text: 'hi' }
+    const shown = renderEvent(ev, { color: false })
+    const hidden = renderEvent(ev, { color: false, showTime: false })
+    expect(hidden).toBe(shown.replace(/^\d{2}:\d{2}:\d{2}/, '        '))
+    expect(hidden.startsWith('        ')).toBe(true)
+  })
+})
+
+describe('TimeGate', () => {
+  test('shows the first event then suppresses consecutive same-category events', () => {
+    const gate = new TimeGate()
+    expect(gate.shouldShow('thinking')).toBe(true)
+    expect(gate.shouldShow('thinking')).toBe(false)
+    expect(gate.shouldShow('thinking')).toBe(false)
+  })
+
+  test('shows again whenever the category changes', () => {
+    const gate = new TimeGate()
+    expect(gate.shouldShow('user')).toBe(true)
+    expect(gate.shouldShow('thinking')).toBe(true)
+    expect(gate.shouldShow('thinking')).toBe(false)
+    expect(gate.shouldShow('tool')).toBe(true)
+    expect(gate.shouldShow('tool')).toBe(false)
+    expect(gate.shouldShow('assistant')).toBe(true)
+  })
+
+  test('reset() forces the next same-category event to show its timestamp again', () => {
+    const gate = new TimeGate()
+    expect(gate.shouldShow('tool')).toBe(true)
+    expect(gate.shouldShow('tool')).toBe(false)
+    gate.reset()
+    expect(gate.shouldShow('tool')).toBe(true)
   })
 })
 
