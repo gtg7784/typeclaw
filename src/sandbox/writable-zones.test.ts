@@ -3,7 +3,12 @@ import { lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { resolveProtectedZones, resolveWritableZones, subtractMasked } from './writable-zones'
+import {
+  resolvePackageInstallZones,
+  resolveProtectedZones,
+  resolveWritableZones,
+  subtractMasked,
+} from './writable-zones'
 
 let agentDir: string
 
@@ -298,6 +303,67 @@ describe('resolveProtectedZones', () => {
 
     expect(filtered.dirs).not.toContain(join(agentDir, 'workspace/hooks'))
     expect(filtered.dirs).toContain(join(agentDir, '.git/hooks'))
+  })
+})
+
+describe('resolvePackageInstallZones', () => {
+  test('returns the agent root as the RW root and pre-creates node_modules', async () => {
+    const zones = await resolvePackageInstallZones(agentDir)
+
+    expect(zones.root).toBe(agentDir)
+    expect((await stat(join(agentDir, 'node_modules'))).isDirectory()).toBe(true)
+  })
+
+  test('protects executable surfaces that exist (packages, .agents/skills, node_modules/typeclaw)', async () => {
+    await mkdir(join(agentDir, 'packages'))
+    await mkdir(join(agentDir, '.agents', 'skills'), { recursive: true })
+    await mkdir(join(agentDir, 'node_modules', 'typeclaw'), { recursive: true })
+
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(prot.dirs).toContain(join(agentDir, 'packages'))
+    expect(prot.dirs).toContain(join(agentDir, '.agents/skills'))
+    expect(prot.dirs).toContain(join(agentDir, 'node_modules/typeclaw'))
+  })
+
+  test('drops executable surfaces that are absent (bwrap aborts an RO-bind of a missing source)', async () => {
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(prot.dirs).not.toContain(join(agentDir, 'packages'))
+    expect(prot.dirs).not.toContain(join(agentDir, 'node_modules/typeclaw'))
+  })
+
+  test('protects .git/hooks and .git/config when .git exists', async () => {
+    await mkdir(join(agentDir, '.git'))
+
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(prot.dirs).toContain(join(agentDir, '.git/hooks'))
+    expect(prot.files).toContain(join(agentDir, '.git/config'))
+  })
+
+  test('rejects a symlinked agent root (RW root would follow it outside the jail)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+    const linked = join(outside, 'link')
+    try {
+      await symlink(outside, linked)
+
+      await expect(resolvePackageInstallZones(linked)).rejects.toThrow(/symlink/i)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects a symlinked node_modules / package.json / bun.lock', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+    try {
+      await mkdir(join(outside, 'real-nm'))
+      await symlink(join(outside, 'real-nm'), join(agentDir, 'node_modules'))
+
+      await expect(resolvePackageInstallZones(agentDir)).rejects.toThrow(/symlink/i)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
   })
 })
 

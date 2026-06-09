@@ -167,6 +167,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     appendMount(argv, mount)
   }
 
+  appendWritableRoot(argv, policy)
   appendMasks(argv, policy)
   appendWritable(argv, policy)
   appendProtected(argv, policy)
@@ -178,6 +179,15 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
 
   argv.push('bash', '-c', command)
   return argv
+}
+
+// Renders BEFORE appendMasks so the broad RW root is overridden by the secret
+// masks and protected re-binds that follow (last-op-wins). See
+// SandboxWritableRootPolicy for the full ordering contract.
+function appendWritableRoot(argv: string[], policy: SandboxPolicy): void {
+  if (policy.writableRoot !== undefined) {
+    argv.push('--bind', policy.writableRoot.dir, policy.writableRoot.dir)
+  }
 }
 
 function appendMasks(argv: string[], policy: SandboxPolicy): void {

@@ -235,6 +235,43 @@ describe('buildSandboxedCommand writable overlays', () => {
   })
 })
 
+describe('buildSandboxedCommand writableRoot (package-install mode)', () => {
+  test('RW-binds the project root with --bind <root> <root>', () => {
+    const joined = argvOf('bun add foo', { writableRoot: { dir: '/agent' } }).join(' ')
+    expect(joined).toContain('--bind /agent /agent')
+  })
+
+  test('renders the RW root BEFORE masks so secret masks override it (no re-expose)', () => {
+    const argv = argvOf('bun add foo', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      writableRoot: { dir: '/agent' },
+      masks: { dirs: ['/agent/memory'], files: ['/agent/.env'] },
+    })
+    const rwRoot = argv.indexOf('--bind')
+    const memoryMask = argv.indexOf('/agent/memory')
+    const envMask = argv.indexOf('/agent/.env')
+    expect(rwRoot).toBeGreaterThanOrEqual(0)
+    expect(rwRoot).toBeLessThan(memoryMask)
+    expect(rwRoot).toBeLessThan(envMask)
+  })
+
+  test('renders the RW root BEFORE protected re-binds so executable surfaces stay RO', () => {
+    const argv = argvOf('bun add foo', {
+      writableRoot: { dir: '/agent' },
+      protected: { dirs: ['/agent/packages', '/agent/node_modules/typeclaw'], files: ['/agent/.git/config'] },
+    })
+    const rwRoot = argv.indexOf('--bind')
+    const packages = argv.indexOf('/agent/packages')
+    const runtime = argv.indexOf('/agent/node_modules/typeclaw')
+    expect(rwRoot).toBeLessThan(packages)
+    expect(rwRoot).toBeLessThan(runtime)
+  })
+
+  test('emits no RW root bind when the policy omits writableRoot', () => {
+    expect(argvOf('true', { mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }] })).not.toContain('--bind')
+  })
+})
+
 describe('buildSandboxedCommand protected re-binds', () => {
   test('re-binds protected dirs and files read-only with --ro-bind <p> <p>', () => {
     const joined = argvOf('true', {

@@ -149,6 +149,63 @@ function dedupe(values: string[]): string[] {
   return [...new Set(values)]
 }
 
+export type PackageInstallZones = {
+  root: string
+  protected: ProtectedZones
+}
+
+// Executable / runtime-sensitive children RO-bound on top of the package-install
+// RW root so a hostile dependency (bun runs lifecycle scripts during `bun add`)
+// cannot write code the UNSANDBOXED runtime later executes. `packages` and
+// `.agents/skills` mirror the write/edit guard's executable-surface exclusions;
+// `node_modules/typeclaw` is the symlinked runtime itself (writing it would
+// rewrite the live binary); `.git/hooks` + `.git/config` are the same hook /
+// core.hooksPath escalation closed by resolveProtectedZones. Absent entries are
+// dropped — bwrap aborts an RO-bind of a missing source, and a child that does
+// not exist cannot be the symlinked runtime or a planted skill.
+const PACKAGE_INSTALL_PROTECTED_DIRS = ['packages', '.agents/skills', 'node_modules/typeclaw'] as const
+
+// Resolves the jail layout for a recognized standalone dependency install
+// (`bun add` / `bun install`). The RW root lets bun create node_modules/ and its
+// temp lockfile (`bun.lock.NNN.tmp`, renamed) — a file-level bind of `bun.lock`
+// alone cannot, since the temp file needs DIRECTORY write. Pre-creates an empty
+// node_modules/ so the dir exists before the RW root bind (bwrap needs a real
+// tree; the parent RW bind makes it writable). SECURITY: rejects a symlink at
+// agentDir or any of the install-touched paths (node_modules, package.json,
+// bun.lock) — an RW root following a symlinked component would write outside the
+// jail. `.git` and the secret/private masks are NOT in the writable set here;
+// they are re-hidden by the mask + protected phases that render after the RW
+// root (see SandboxWritableRootPolicy).
+export async function resolvePackageInstallZones(agentDir: string): Promise<PackageInstallZones> {
+  await assertNotSymlink(agentDir)
+  await mkdir(join(agentDir, 'node_modules'), { recursive: true })
+  for (const rel of ['node_modules', 'package.json', 'bun.lock'] as const) {
+    const target = join(agentDir, rel)
+    if (await exists(target)) await assertNotSymlink(target)
+  }
+
+  const dirs: string[] = []
+  for (const rel of PACKAGE_INSTALL_PROTECTED_DIRS) {
+    const target = join(agentDir, rel)
+    if (await isRealEntry(target, 'dir')) dirs.push(target)
+  }
+  const gitProtected = await resolveProtectedZones(agentDir).catch(() => ({ dirs: [], files: [] }))
+
+  return {
+    root: agentDir,
+    protected: { dirs: dedupe([...dirs, ...gitProtected.dirs]), files: gitProtected.files },
+  }
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await lstat(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Read-only re-protections rendered on top of the writable .git bind. Unlike
 // the writable resolvers, this MUST NOT drop absent entries: .git is writable,
 // so a path absent at jail-build time would otherwise be CREATED by sandboxed
