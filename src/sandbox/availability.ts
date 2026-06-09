@@ -138,6 +138,27 @@ export function _resetRealProcProbeCacheForTests(): void {
 // future bwrap flag change, would turn this strategy into a secret leak. So we
 // PROBE it directly before ever selecting it — plant a real secret in a sibling
 // process's env and assert the sandbox cannot read it back.
+// The probe has THREE outcomes, not two — collapsing them to a boolean is what
+// caused the silent-degrade bug this verdict type fixes. 'safe'/'unsafe' are definitive capability
+// facts (the userns block held / a leak was observed); 'inconclusive' is a
+// transient local failure (probe timeout under CPU/IO contention, sentinel dying
+// mid-probe, a bwrap startup hiccup) that proves NOTHING about the host. A caller
+// deciding the /proc strategy must tell these apart: an inconclusive probe must
+// trigger a RETRY, never a fall-through to tmpfs that breaks the whole bash call
+// on a host that is actually capable. 'unsafe' must still fail closed with no
+// retry. canBindProcSafely() keeps the old boolean shape for callers that only
+// need "is proc-bind selectable right now"; getProcBindSafetyVerdict() exposes
+// the third state for the retry-owning strategy resolver.
+export type ProcBindSafetyVerdict = 'safe' | 'unsafe' | 'inconclusive'
+
+// Only DEFINITIVE verdicts are process-global facts worth caching. Caching
+// 'inconclusive' (i.e. its boolean `false`) would PERMANENTLY disable proc-bind
+// for the process — a single slow first bash call would silently break every
+// later bunx until container restart (the exact "works after restart" symptom
+// this whole machinery exists to kill). So the cache type structurally excludes
+// it.
+type CacheableProcBindSafetyVerdict = Exclude<ProcBindSafetyVerdict, 'inconclusive'>
+
 // Keyed by resolved bwrapPath, like ensureBwrapAvailable: the safety answer is a
 // fact about a SPECIFIC bwrap binary, so a caller pinning a non-default path
 // (tests, or a future deployment) must re-probe rather than inherit the default
@@ -145,19 +166,21 @@ export function _resetRealProcProbeCacheForTests(): void {
 // concurrent first callers for one path share a single probe. Both cached
 // process-globally (the answer is a per-container capability fact). Not abortable
 // (see canMountRealProc).
-const procBindProbeCache = new Map<string, boolean>()
-const procBindProbeInFlight = new Map<string, Promise<boolean>>()
+const procBindProbeCache = new Map<string, CacheableProcBindSafetyVerdict>()
+const procBindProbeInFlight = new Map<string, Promise<ProcBindSafetyVerdict>>()
 
-// `safe` is the answer; `cacheable` is false for INCONCLUSIVE outcomes (a probe
-// timeout under load, or the sentinel dying mid-probe). Those are transient
-// failure modes, not capability facts, so caching their `safe=false` would
-// PERMANENTLY disable proc-bind for the process — a single slow first bash call
-// would silently break every later bunx until container restart (the exact
-// "works after restart" symptom this whole fix exists to kill). Only a probe that
-// ran to a verdict (definitively safe OR definitively leaking) is cached.
-type ProcBindProbe = { safe: boolean; cacheable: boolean }
+// `verdict` is the answer; only definitive verdicts are `cacheable`. INCONCLUSIVE
+// outcomes (a probe timeout under load, or the sentinel dying mid-probe) are
+// transient failure modes, not capability facts — see the cache rationale above.
+type ProcBindProbe =
+  | { verdict: CacheableProcBindSafetyVerdict; cacheable: true }
+  | { verdict: 'inconclusive'; cacheable: false }
 
-export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boolean> {
+// The three-state probe, deduped + cached like canBindProcSafely. The strategy
+// resolver (resolveProcStrategy in plugin-tools.ts) consumes this so it can RETRY
+// an 'inconclusive' result before degrading the bash call to tmpfs, while still
+// failing closed on 'unsafe'.
+export function getProcBindSafetyVerdict(options?: { bwrapPath?: string }): Promise<ProcBindSafetyVerdict> {
   const bwrap = options?.bwrapPath ?? 'bwrap'
   const cached = procBindProbeCache.get(bwrap)
   if (cached !== undefined) return Promise.resolve(cached)
@@ -165,9 +188,9 @@ export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boo
   if (existing !== undefined) return existing
 
   const promise = probeProcBind(bwrap)
-    .then(({ safe, cacheable }) => {
-      if (cacheable) procBindProbeCache.set(bwrap, safe)
-      return safe
+    .then(({ verdict, cacheable }) => {
+      if (cacheable) procBindProbeCache.set(bwrap, verdict)
+      return verdict
     })
     .finally(() => {
       procBindProbeInFlight.delete(bwrap)
@@ -176,9 +199,53 @@ export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boo
   return promise
 }
 
+// Boolean convenience wrapper: 'safe' is the ONLY verdict that makes proc-bind
+// selectable. 'unsafe' AND 'inconclusive' both map to false — callers that only
+// take a boolean (and do not own a retry budget) must fail closed on either.
+// Derives from the deduped verdict probe, so concurrent callers still share one
+// spawn even though this wrapper's own promise identity differs per call.
+export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boolean> {
+  return getProcBindSafetyVerdict(options).then((verdict) => verdict === 'safe')
+}
+
+// Default backoff between proc-bind safety re-probes, in ms. Array length = retry
+// count (2 retries after the initial attempt = 3 probes total). The probe is
+// normally sub-ms; it only returns 'inconclusive' under transient CPU/IO
+// contention (e.g. a boot-time storm of concurrent LLM calls saturating the box
+// and tripping the probe's own timeout), so a short staggered wait lets the spike
+// pass before re-proving.
+export const PROC_BIND_RETRY_BACKOFF_MS = [250, 1_000] as const
+
+// proc-bind selection must distinguish "definitely unavailable" from "couldn't
+// verify right now". A DEFINITIVE verdict is final: 'safe'→true; a real userns
+// leak ('unsafe')→false with NO retry. Only an 'inconclusive' verdict (transient
+// probe failure that proves nothing about the host) is retried, because degrading
+// the bash call to tmpfs over a transient hiccup is what silently broke
+// external-package runs on capable hosts. 'inconclusive' is never cached
+// (see the cache type), so each retry re-probes from scratch. After the backoff
+// budget is exhausted we fail CLOSED — an unverified leak-block is never treated
+// as safe. Pure and dependency-injected (probe + sleep) so the retry policy is
+// unit-testable without spawning processes; production passes
+// getProcBindSafetyVerdict and Bun.sleep.
+export async function resolveProcBindSafetyWithRetry(
+  probe: () => Promise<ProcBindSafetyVerdict>,
+  sleep: (ms: number) => Promise<void>,
+  backoffMs: readonly number[] = PROC_BIND_RETRY_BACKOFF_MS,
+): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    const verdict = await probe()
+    if (verdict === 'safe') return true
+    if (verdict === 'unsafe') return false
+
+    const backoff = backoffMs[attempt]
+    if (backoff === undefined) return false
+    await sleep(backoff)
+  }
+}
+
 const PROC_BIND_PROBE_SECRET = 'TYPECLAW_PROCBIND_PROBE_SECRET'
 
-const INCONCLUSIVE: ProcBindProbe = { safe: false, cacheable: false }
+const INCONCLUSIVE: ProcBindProbe = { verdict: 'inconclusive', cacheable: false }
 
 async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
   // The sentinel must model the REAL threat geometry: the agent runtime holds
@@ -277,13 +344,13 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
     // "non-zero" — a non-zero exit also covers script setup failures (a bwrap that
     // started but couldn't read /proc/self/fd), bwrap startup failures (missing
     // lib, transient mount EBUSY → bwrap's own exit), and an external SIGKILL.
-    // Caching any of those transient failures as a definitive safe=false would
+    // Caching any of those transient failures as a definitive 'unsafe' would
     // PERMANENTLY disable proc-bind — the same cache-poisoning class as the
     // timeout bug. So only the script's two designated codes are cacheable:
     // PROC_BIND_SAFE (clean run, every open blocked) and PROC_BIND_LEAK (an open
     // SUCCEEDED — a real leak). Setup failures use PROC_BIND_SETUP_FAILED, and any
     // other code (bwrap startup, signals, 127) is treated as inconclusive.
-    if (proc.exitCode === PROC_BIND_LEAK) return { safe: false, cacheable: true }
+    if (proc.exitCode === PROC_BIND_LEAK) return { verdict: 'unsafe', cacheable: true }
     if (proc.exitCode !== PROC_BIND_SAFE) return INCONCLUSIVE
     // Final liveness: the in-sandbox blocked-open assertions are only meaningful
     // if the sentinel was alive throughout. Re-read its MARKER from the PARENT —
@@ -293,12 +360,13 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
     // kernel liveness, so this marker re-read is the stronger postcondition. A
     // failure here means the sentinel vanished mid-probe → inconclusive.
     if (!(await parentReadsSentinelMarker(sentinelPid))) return INCONCLUSIVE
-    return { safe: true, cacheable: true }
+    return { verdict: 'safe', cacheable: true }
   } catch {
     return INCONCLUSIVE
   } finally {
     try {
       sentinel?.kill()
+      await sentinel?.exited.catch(() => {})
     } catch {
       // killing an already-exited sentinel can throw on some runtimes; cleanup
       // must never propagate out of the probe.
