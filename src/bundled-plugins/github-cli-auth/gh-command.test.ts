@@ -75,6 +75,14 @@ describe('analyzeGhCommand', () => {
     })
   })
 
+  it('blocks when a SECOND -R mismatches the path even though the first one matches', () => {
+    // The strip removes every -R, so a redundant first flag must not mask a
+    // mismatching second one (mint-for-X-hit-Y via a trailing -R victim/private).
+    const result = analyzeGhCommand('gh api repos/acme/widgets/issues -R acme/widgets -R victim/private')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('ignores `-R`')
+  })
+
   it('strips every redundant -R/--repo flag form from a literal-path gh api call', () => {
     const cases: Array<[string, string]> = [
       ['gh api repos/acme/widgets/issues -R acme/widgets', 'gh api repos/acme/widgets/issues'],
