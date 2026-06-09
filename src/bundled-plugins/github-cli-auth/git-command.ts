@@ -69,6 +69,19 @@ const COMPOSITION_REASON =
   'inherit the token). The one accepted prefix is `cd <simple-path> && git …`, ' +
   'which is rewritten to `git -C <path> …`.'
 
+const DANGEROUS_CONFIG_REASON =
+  'A repo-targeting `git` command that would receive a minted GitHub App token ' +
+  'cannot carry a leading environment assignment or `-c`/`--config-env`/' +
+  '`--git-dir`/`--work-tree`/`--namespace`/`--exec-path`: those can redirect ' +
+  "git's authentication or destination away from the resolved repo (e.g. " +
+  '`-c url.https://evil/.insteadOf=…` or `-c core.askPass=…`), which would leak ' +
+  'the token. Remove them and re-run, or run without the minted token.'
+
+const FETCH_ALL_REASON =
+  '`git fetch --all` / `git pull --all` contacts every configured remote, which ' +
+  'cannot be enumerated safely here — a minted token scoped to one remote could ' +
+  'be sent to another. Fetch a specific remote instead.'
+
 // OUTSIDE single quotes these spawn a sibling process (which would inherit the
 // askpass token) or expand shell state. `$`/backtick stay active inside double
 // quotes too, so they are screened separately. Mirrors gh-command.ts.
@@ -79,6 +92,7 @@ export async function analyzeGitCommand(
   options: { cwd: string; resolvers: GitResolvers },
 ): Promise<GitCommandDecision> {
   const stripped = stripSafeCdPrefix(command)
+  if (stripped.unsafe) return { kind: 'pass-through' }
   const segment = extractSingleGitInvocation(stripped.rest)
   if (segment === null) return { kind: 'pass-through' }
 
@@ -86,10 +100,30 @@ export async function analyzeGitCommand(
   const subcommand = findSubcommand(args)
   if (subcommand === undefined || !REMOTE_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
 
-  const dashCDir = extractDashCDir(args)
-  const effectiveCwd = resolveCwd(options.cwd, dashCDir ?? stripped.cdDir)
+  // We are about to put a live token in this process's env. Reject any command
+  // that could redirect git's auth/destination away from the resolved repo:
+  // user `-c` (url.*.insteadOf, core.askPass, credential.*, http.*), a leading
+  // env assignment (`GIT_ASKPASS=… git …`), or a different git-dir/work-tree.
+  if (segment.hasLeadingEnvAssignment || hasDangerousGitConfig(args)) {
+    return { kind: 'block', reason: DANGEROUS_CONFIG_REASON }
+  }
+  // `fetch/pull --all` contacts every configured remote; we cannot enumerate
+  // them here, so we could mint for one and leak the token to another. Block.
+  if ((subcommand === 'fetch' || subcommand === 'pull') && args.includes('--all')) {
+    return { kind: 'block', reason: FETCH_ALL_REASON }
+  }
 
-  const slugs = await resolveRepoSlugs(subcommand, args, effectiveCwd, options.resolvers)
+  const dashCDir = extractDashCDir(args)
+  const effectiveCwd = resolveCwd(resolveCwd(options.cwd, stripped.cdDir), dashCDir)
+
+  // A resolver that throws is treated as "couldn't resolve" → pass-through, so a
+  // git/subprocess failure never crashes the hook or guesses a repo.
+  let slugs: string[]
+  try {
+    slugs = await resolveRepoSlugs(subcommand, args, effectiveCwd, options.resolvers)
+  } catch {
+    return { kind: 'pass-through' }
+  }
   if (slugs.length === 0) return { kind: 'pass-through' }
 
   const owners = new Set(slugs.map((s) => s.split('/')[0]))
@@ -99,13 +133,32 @@ export async function analyzeGitCommand(
 
   // Injecting the askpass token into env means any sibling process inherits it,
   // so a token-bearing command must be a single bare `git`. A `cd … && git …`
-  // is allowed only by rewriting away the `&&` into `git -C …`.
+  // is allowed only by rewriting away the `&&` into `git -C …` — but not when the
+  // git part already has its own `-C` (the rewrite would stack two and change cwd).
   if (stripped.cdDir !== null) {
-    if (containsShellActiveMetachar(stripped.rest)) return { kind: 'block', reason: COMPOSITION_REASON }
+    if (containsShellActiveMetachar(stripped.rest) || dashCDir !== null) {
+      return { kind: 'block', reason: COMPOSITION_REASON }
+    }
     return { kind: 'inject', repoSlug, rewrittenCommand: rewriteCdToDashC(effectiveCwd, stripped.rest) }
   }
   if (containsShellActiveMetachar(command)) return { kind: 'block', reason: COMPOSITION_REASON }
   return { kind: 'inject', repoSlug }
+}
+
+// Global flags that can redirect git's auth or destination. `-c`/`--config-env`
+// inject arbitrary config (url.insteadOf, core.askPass, credential.*, http.*);
+// `--git-dir`/`--work-tree`/`--namespace`/`--exec-path` point git at a different
+// repo or helper than the one we resolved. Any of these on a token-bearing
+// command means we cannot vouch for where the token goes — block.
+function hasDangerousGitConfig(args: readonly string[]): boolean {
+  for (const arg of args) {
+    if (arg === '-c' || arg === '--config-env') return true
+    if (arg === '--git-dir' || arg.startsWith('--git-dir=')) return true
+    if (arg === '--work-tree' || arg.startsWith('--work-tree=')) return true
+    if (arg === '--namespace' || arg.startsWith('--namespace=')) return true
+    if (arg === '--exec-path' || arg.startsWith('--exec-path=')) return true
+  }
+  return false
 }
 
 async function resolveRepoSlugs(
@@ -130,7 +183,12 @@ async function resolveRepoSlugs(
   // --multiple origin upstream` touches both, and feeding only one to the
   // multi-owner guard would let a second-owner remote slip past and still mint.
   const remoteNames = extractRemoteNames(args)
-  const remotes = remoteNames.length > 0 ? remoteNames : [await resolveDefaultPushRemote(cwd, resolvers)]
+  // The branch.pushRemote/pushDefault/origin chain is a PUSH default; applying it
+  // to a bare `fetch`/`pull`/`ls-remote` could mint for the wrong (push) remote,
+  // so only push falls back. Other subcommands with no explicit remote pass through.
+  const remotes =
+    remoteNames.length > 0 ? remoteNames : subcommand === 'push' ? [await resolveDefaultPushRemote(cwd, resolvers)] : []
+  if (remotes.length === 0) return []
 
   const slugs: string[] = []
   for (const remote of remotes) {
@@ -156,8 +214,8 @@ async function resolveDefaultPushRemote(cwd: string, resolvers: GitResolvers): P
 }
 
 const HTTPS_GITHUB_RE = /^https:\/\/github\.com\/([^/\s:@]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i
-const SCP_GITHUB_RE = /^git@github\.com:([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i
-const SSH_GITHUB_RE = /^ssh:\/\/git@github\.com\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i
+const SCP_GITHUB_RE = /^git@github\.com:([^/\s:?#]+)\/([^/\s?#]+?)(?:\.git)?$/i
+const SSH_GITHUB_RE = /^ssh:\/\/git@github\.com(?::\d+)?\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i
 
 // Parses a github.com remote URL into an `owner/name` slug. Returns null for
 // non-github.com hosts, credential-bearing https URLs (https://tok@github.com/…
@@ -261,11 +319,13 @@ function extractDashCDir(args: readonly string[]): string | null {
   return null
 }
 
-type GitInvocation = { args: string[] }
+type GitInvocation = { args: string[]; hasLeadingEnvAssignment: boolean }
 
 // Null unless there is exactly one `git` at command position. Composition is NOT
 // rejected here — it is screened later against the original command so the block
-// reason stays accurate.
+// reason stays accurate. hasLeadingEnvAssignment flags `FOO=bar git …`: such an
+// assignment lands in git's env (where a `GIT_ASKPASS=…` override would receive
+// the token), so the caller blocks it for token-bearing commands.
 function extractSingleGitInvocation(command: string): GitInvocation | null {
   const tokens = tokenize(command)
   const gitStarts: number[] = []
@@ -275,7 +335,9 @@ function extractSingleGitInvocation(command: string): GitInvocation | null {
   }
   if (gitStarts.length !== 1) return null
   const start = gitStarts[0] as number
-  return { args: tokens.slice(start + 1).filter((t) => t !== '\n' && t !== ';' && t !== '|' && t !== '&') }
+  const hasLeadingEnvAssignment = start > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[start - 1] ?? '')
+  const args = tokens.slice(start + 1).filter((t) => t !== '\n' && t !== ';' && t !== '|' && t !== '&')
+  return { args, hasLeadingEnvAssignment }
 }
 
 function isCommandBoundaryBefore(tokens: readonly string[], index: number): boolean {
@@ -315,22 +377,26 @@ function containsShellActiveMetachar(command: string): boolean {
   return false
 }
 
-type StrippedCd = { cdDir: string | null; rest: string }
+// unsafe=true when the command LOOKS like a `cd … && git …` but the cd target is
+// not a plain path we can faithfully turn into `git -C` (shell `~`/`-` expansion,
+// metachars). The caller then passes through rather than rewrite wrong cwd.
+type StrippedCd = { cdDir: string | null; rest: string; unsafe: boolean }
 
 // Accepts ONLY `cd <simple-path> && git …`. <simple-path> must be a single
-// token (optionally quoted) free of metachars AND of a literal single quote
-// (rewriteCdToDashC single-quotes it). Any other shape returns cdDir=null, and
-// the caller then requires a single bare `git`.
+// token (optionally quoted) free of metachars and of a literal single quote
+// (rewriteCdToDashC single-quotes it), and not a shell-expanded `~`/`-`. A plain
+// command (no `cd` prefix) returns cdDir=null, unsafe=false.
 function stripSafeCdPrefix(command: string): StrippedCd {
   const m = command.match(/^\s*cd\s+("[^"]*"|'[^']*'|[^\s'"]+)\s+&&\s+(git\b[\s\S]*)$/)
-  if (m === null) return { cdDir: null, rest: command }
+  if (m === null) return { cdDir: null, rest: command, unsafe: false }
   const rawDir = m[1] as string
   const rest = m[2] as string
   const dir = stripQuotes(rawDir)
-  if (dir.includes('$') || dir.includes('`') || dir.includes("'") || /[;|&<>()]/.test(dir)) {
-    return { cdDir: null, rest: command }
+  const shellExpands = dir === '-' || dir === '~' || dir.startsWith('~/')
+  if (dir.includes('$') || dir.includes('`') || dir.includes("'") || /[;|&<>()]/.test(dir) || shellExpands) {
+    return { cdDir: null, rest: command, unsafe: true }
   }
-  return { cdDir: dir, rest }
+  return { cdDir: dir, rest, unsafe: false }
 }
 
 function rewriteCdToDashC(dir: string, gitCommand: string): string {
