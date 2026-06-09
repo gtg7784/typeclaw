@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { derivePluginNameFromPackage, loadPluginEntry, splitPluginEntrySpec } from './loader'
+import { derivePluginNameFromPackage, loadPluginEntry, PluginNotFoundError, splitPluginEntrySpec } from './loader'
 
 describe('splitPluginEntrySpec', () => {
   test('splits a versioned unscoped entry', () => {
@@ -81,21 +81,46 @@ export default definePlugin({
     }
   })
 
-  test('throws when local path does not exist', async () => {
+  test('throws PluginNotFoundError when local path does not exist', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
     try {
+      await expect(loadPluginEntry('./plugins/missing.ts', dir)).rejects.toBeInstanceOf(PluginNotFoundError)
       await expect(loadPluginEntry('./plugins/missing.ts', dir)).rejects.toThrow(/does not exist/)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
   })
 
-  test('throws when default export is not a definePlugin result', async () => {
+  test('throws a fatal (non-not-found) error when path escapes the agent directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
+    try {
+      const promise = loadPluginEntry('../escape.ts', dir)
+      await expect(promise).rejects.toThrow(/escapes agent directory/)
+      await expect(loadPluginEntry('../escape.ts', dir)).rejects.not.toBeInstanceOf(PluginNotFoundError)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('throws a fatal (non-not-found) error when default export is not a definePlugin result', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
     try {
       await mkdir(join(dir, 'plugins'))
       await writeFile(join(dir, 'plugins', 'bad.ts'), `export default { plugin: 'not a function' }`)
       await expect(loadPluginEntry('./plugins/bad.ts', dir)).rejects.toThrow(/default export is not/)
+      await expect(loadPluginEntry('./plugins/bad.ts', dir)).rejects.not.toBeInstanceOf(PluginNotFoundError)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an existing local plugin that throws at import time stays fatal (not classified as not-found)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
+    try {
+      await mkdir(join(dir, 'plugins'))
+      await writeFile(join(dir, 'plugins', 'explodes.ts'), `throw new Error('boom at import time')`)
+      await expect(loadPluginEntry('./plugins/explodes.ts', dir)).rejects.toThrow(/boom at import time/)
+      await expect(loadPluginEntry('./plugins/explodes.ts', dir)).rejects.not.toBeInstanceOf(PluginNotFoundError)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -157,6 +182,17 @@ export default definePlugin({
       expect(resolved.name).toBe('standup-log')
       expect(resolved.version).toBe('0.1.2')
       expect(resolved.source).toBe('typeclaw-plugin-standup-log@0.1.2')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('throws PluginNotFoundError for an uninstalled package', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-npm-'))
+    try {
+      await expect(loadPluginEntry('typeclaw-plugin-not-installed-xyz', dir)).rejects.toBeInstanceOf(
+        PluginNotFoundError,
+      )
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

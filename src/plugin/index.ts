@@ -73,7 +73,7 @@ export {
 } from './manager'
 export type { PermissionService } from '@/permissions'
 export type { LoadPluginEntryFn, PluginEntrySpec, ResolvedPlugin } from './loader'
-export { loadPluginEntry, derivePluginNameFromPackage, splitPluginEntrySpec } from './loader'
+export { derivePluginNameFromPackage, loadPluginEntry, PluginNotFoundError, splitPluginEntrySpec } from './loader'
 export { materializeSkills, type MaterializedSkills, type SkillEntry } from './skills'
 export {
   createLoadSkillTool,

@@ -13,6 +13,20 @@ export type ResolvedPlugin = {
 
 export type LoadPluginEntryFn = (entry: string, agentDir: string) => Promise<ResolvedPlugin>
 
+// Thrown only when a plugin entry cannot be resolved at all (uninstalled
+// package, missing local file, unresolvable export subpath). The manager
+// treats this as non-fatal and skips the entry. Every other failure --
+// path-escape, import-time evaluation throws, invalid definition -- stays a
+// plain Error so it remains a hard boot error.
+export class PluginNotFoundError extends Error {
+  readonly entry: string
+  constructor(entry: string, message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'PluginNotFoundError'
+    this.entry = entry
+  }
+}
+
 export async function loadPluginEntry(entry: string, agentDir: string): Promise<ResolvedPlugin> {
   if (isLocalPath(entry)) {
     return loadLocal(entry, agentDir)
@@ -33,7 +47,7 @@ async function loadLocal(entry: string, agentDir: string): Promise<ResolvedPlugi
     throw new Error(`plugin path escapes agent directory: ${entry} (resolved to ${resolved})`)
   }
   if (!existsSync(resolved)) {
-    throw new Error(`plugin path does not exist: ${entry} (resolved to ${resolved})`)
+    throw new PluginNotFoundError(entry, `plugin path does not exist: ${entry} (resolved to ${resolved})`)
   }
   const url = pathToFileURL(resolved).href
   const mod = (await import(url)) as { default?: unknown }
@@ -74,10 +88,22 @@ async function loadNpm(entry: string, agentDir: string): Promise<ResolvedPlugin>
       // Fall through to bare-import resolution.
     }
   }
-  // Falls back to bare-import resolution when entryPath cannot be located on
-  // disk. Modern packages with `exports` map (and no `main`/`module`) take
-  // this path so Bun's resolver can read `exports`.
-  const importTarget = entryPath !== null ? pathToFileURL(entryPath).href : entry
+  // Resolve before importing so an unresolvable entry (uninstalled package,
+  // missing export subpath) is classified as PluginNotFoundError WITHOUT
+  // running the module. Once resolution succeeds, any import-time throw is a
+  // genuine plugin bug and propagates fatally -- never swallowed as not-found.
+  // The entryPath branch covers packages whose `main`/`module` was already
+  // located on disk; the else branch lets Bun's resolver read `exports` maps.
+  let importTarget: string
+  if (entryPath !== null) {
+    importTarget = pathToFileURL(entryPath).href
+  } else {
+    try {
+      importTarget = Bun.resolveSync(packageName, agentDir)
+    } catch (err) {
+      throw new PluginNotFoundError(entry, `cannot resolve plugin "${entry}": ${describeError(err)}`, { cause: err })
+    }
+  }
   const mod = (await import(importTarget)) as { default?: unknown }
   const defined = expectDefined(mod, entry)
   const name = derivePluginNameFromPackage(pkgName)
@@ -107,6 +133,10 @@ export function derivePluginNameFromPackage(packageName: string): string {
   const SCOPED_PREFIX_RE = /^@[^/]+\//
   const stripped = packageName.replace(SCOPED_PREFIX_RE, '')
   return stripped.startsWith(PREFIX) ? stripped.slice(PREFIX.length) : stripped
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 function findPackageJson(entry: string, agentDir: string): string | null {
