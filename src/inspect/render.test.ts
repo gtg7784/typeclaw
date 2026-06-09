@@ -250,6 +250,14 @@ describe('TimeGate', () => {
     expect(gate.shouldShow('tool')).toBe(false)
     expect(gate.shouldShow('assistant')).toBe(true)
   })
+
+  test('reset() forces the next same-category event to show its timestamp again', () => {
+    const gate = new TimeGate()
+    expect(gate.shouldShow('tool')).toBe(true)
+    expect(gate.shouldShow('tool')).toBe(false)
+    gate.reset()
+    expect(gate.shouldShow('tool')).toBe(true)
+  })
 })
 
 describe('renderEvent (with color)', () => {

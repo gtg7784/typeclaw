@@ -310,6 +310,7 @@ async function streamSession(opts: {
       printFooter()
       emitHint()
     } else if (p.phase === 'live-start') {
+      timeGate.reset()
       opts.stdout(
         divider(opts.color, p.sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
       )

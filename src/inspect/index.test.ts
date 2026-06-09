@@ -82,6 +82,7 @@ const ID_PICK1 = '019dda40-3333-7000-9000-000000003333'
 const ID_PICK2 = '019dda40-4444-7000-9000-000000004444'
 const ID_AMB_1 = '019dda40-5555-7000-9000-000000000001'
 const ID_AMB_2 = '019dda40-5555-7000-9000-000000000002'
+const ID_RESETBND = '019dda40-6666-7000-9000-000000006666'
 const AMB_PREFIX = '019dda40-5555'
 
 describe('runInspect — direct session id (replay-then-exit)', () => {
@@ -283,6 +284,43 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     expect(body.map(hasTime)).toEqual([true, true, false, true, false])
     expect(sink.out.find((l) => l.includes('─── live ───'))).toBeDefined()
     expect(sink.out.at(-1)!).toContain('end of transcript')
+  })
+
+  test('the live divider resets the gate so the first live row is stamped even when it shares the last replayed category', async () => {
+    // given: a replay ending in a tool event, then a same-category live tool event
+    const toolMsg = JSON.stringify({
+      type: 'message',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'c0', name: 'read', arguments: { path: 'x' } }],
+        timestamp: 1_000_005,
+      },
+    })
+    await seedSession(`a_${ID_RESETBND}.jsonl`, [metaLine({ kind: 'tui' }), toolMsg], 1000)
+    const sink = captureSink()
+    async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'tool', ts: Date.now(), phase: 'start', toolCallId: 'c1', name: 'grep' }
+    }
+
+    // when: the stream replays then tails the live tool event
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: ID_RESETBND,
+      color: false,
+      selectSession: neverPick,
+      liveSource: (o) => {
+        o.onSubscribed?.(true)
+        return fakeLive()
+      },
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+
+    // then: the live tool row (after the divider) carries a timestamp, not a blank
+    const liveIdx = sink.out.findIndex((l) => l.includes('─── live ───'))
+    const liveToolLine = sink.out.slice(liveIdx + 1).find((l) => l.includes('grep'))
+    expect(liveToolLine).toBeDefined()
+    expect(/^\d{2}:\d{2}:\d{2}/.test(liveToolLine!)).toBe(true)
   })
 
   test('reports "session not in registry" divider when liveSource onSubscribed says sessionLive=false', async () => {

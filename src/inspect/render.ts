@@ -33,6 +33,13 @@ export class TimeGate {
     this.prevCat = cat
     return show
   }
+
+  // Clear the running category so the next event always shows its timestamp.
+  // Called at a visible section boundary (the live divider) so the first live
+  // row is stamped even when it shares the last replayed event's category.
+  reset(): void {
+    this.prevCat = null
+  }
 }
 
 const DEFAULT_MAX_TEXT = 200
