@@ -50,7 +50,10 @@ svg{width:280px;height:280px}</style></head>
 }
 
 export async function renderTerminalQR(url: string): Promise<string> {
-  return QRCode.toString(url, { type: 'terminal', small: true })
+  // 'L' error correction yields the fewest modules, so the QR stays small
+  // enough to scan from a terminal over SSH where screen real estate is the
+  // binding constraint. A short-lived auth URL doesn't need higher ECC.
+  return QRCode.toString(url, { type: 'terminal', small: true, errorCorrectionLevel: 'L' })
 }
 
 // Writes the QR HTML to a temp file and tries to open it in the default

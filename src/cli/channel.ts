@@ -1164,7 +1164,7 @@ async function presentLineQr(url: string, spinnerControl?: LineQrSpinnerControl)
   } else if (presentation.htmlPath !== null) {
     lines.push(`Open this file in a browser and scan it with the LINE app: ${presentation.htmlPath}`)
   }
-  note(lines.join('\n'), 'Scan to log in to LINE')
+  if (lines.length > 0) note(lines.join('\n'), 'Scan to log in to LINE')
 
   if (presentation.terminal === null && !presentation.opened && presentation.htmlPath === null) {
     printLineQrUrl(url)

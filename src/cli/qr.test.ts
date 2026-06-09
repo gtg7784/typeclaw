@@ -37,6 +37,15 @@ describe('renderTerminalQR', () => {
     const rendered = await renderTerminalQR(URL)
     expect(rendered.length).toBeGreaterThan(0)
   })
+
+  test('stays compact enough to scan from an SSH terminal', async () => {
+    // A long LINE auth URL must still fit a conventional 24-row terminal so it
+    // is scannable over SSH without resizing. The 'L' ECC tuning is what keeps
+    // it under that ceiling; a regression to higher ECC would overflow.
+    const longUrl = `https://line.me/R/au/q/${'a'.repeat(64)}`
+    const rendered = await renderTerminalQR(longUrl)
+    expect(rendered.split('\n').length).toBeLessThanOrEqual(24)
+  })
 })
 
 describe('displayQR', () => {
