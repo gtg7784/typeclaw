@@ -3,7 +3,44 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { derivePluginNameFromPackage, loadPluginEntry } from './loader'
+import { derivePluginNameFromPackage, loadPluginEntry, splitPluginEntrySpec } from './loader'
+
+describe('splitPluginEntrySpec', () => {
+  test('splits a versioned unscoped entry', () => {
+    expect(splitPluginEntrySpec('typeclaw-plugin-foo@1.2.3')).toEqual({
+      name: 'typeclaw-plugin-foo',
+      versionSpec: '1.2.3',
+    })
+  })
+
+  test('leaves a bare unscoped entry without a version', () => {
+    expect(splitPluginEntrySpec('typeclaw-plugin-foo')).toEqual({
+      name: 'typeclaw-plugin-foo',
+      versionSpec: undefined,
+    })
+  })
+
+  test('splits a versioned scoped entry on the last @', () => {
+    expect(splitPluginEntrySpec('@acme/typeclaw-plugin-foo@2.0.0')).toEqual({
+      name: '@acme/typeclaw-plugin-foo',
+      versionSpec: '2.0.0',
+    })
+  })
+
+  test('does not treat the leading scope @ as a version delimiter', () => {
+    expect(splitPluginEntrySpec('@acme/typeclaw-plugin-foo')).toEqual({
+      name: '@acme/typeclaw-plugin-foo',
+      versionSpec: undefined,
+    })
+  })
+
+  test('preserves dist-tag version specs', () => {
+    expect(splitPluginEntrySpec('typeclaw-plugin-foo@latest')).toEqual({
+      name: 'typeclaw-plugin-foo',
+      versionSpec: 'latest',
+    })
+  })
+})
 
 describe('derivePluginNameFromPackage', () => {
   test('strips typeclaw-plugin- prefix', () => {
@@ -90,6 +127,36 @@ export default definePlugin({
       const resolved = await loadPluginEntry('typeclaw-plugin-standup-log', dir)
       expect(resolved.name).toBe('standup-log')
       expect(resolved.version).toBe('0.1.2')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('resolves a versioned entry from node_modules under its bare name', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-npm-'))
+    try {
+      const pkgDir = join(dir, 'node_modules', 'typeclaw-plugin-standup-log')
+      await mkdir(pkgDir, { recursive: true })
+      await writeFile(
+        join(pkgDir, 'package.json'),
+        JSON.stringify({
+          name: 'typeclaw-plugin-standup-log',
+          version: '0.1.2',
+          type: 'module',
+          main: 'index.js',
+        }),
+      )
+      await writeFile(
+        join(pkgDir, 'index.js'),
+        `import { definePlugin } from '${process.cwd()}/src/plugin/index.ts'
+export default definePlugin({
+  plugin: async () => ({}),
+})`,
+      )
+      const resolved = await loadPluginEntry('typeclaw-plugin-standup-log@0.1.2', dir)
+      expect(resolved.name).toBe('standup-log')
+      expect(resolved.version).toBe('0.1.2')
+      expect(resolved.source).toBe('typeclaw-plugin-standup-log@0.1.2')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

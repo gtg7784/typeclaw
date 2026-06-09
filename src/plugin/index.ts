@@ -72,8 +72,8 @@ export {
   type LoadPluginsResult,
 } from './manager'
 export type { PermissionService } from '@/permissions'
-export type { LoadPluginEntryFn, ResolvedPlugin } from './loader'
-export { loadPluginEntry, derivePluginNameFromPackage } from './loader'
+export type { LoadPluginEntryFn, PluginEntrySpec, ResolvedPlugin } from './loader'
+export { loadPluginEntry, derivePluginNameFromPackage, splitPluginEntrySpec } from './loader'
 export { materializeSkills, type MaterializedSkills, type SkillEntry } from './skills'
 export {
   createLoadSkillTool,
