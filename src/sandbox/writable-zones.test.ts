@@ -102,6 +102,104 @@ describe('resolveWritableZones', () => {
 
     expect(dirs).not.toContain(join(agentDir, '.git'))
   })
+
+  describe('configured writablePaths', () => {
+    test('adds a configured agent-relative dir that exists', async () => {
+      await mkdir(join(agentDir, '.metabase-cli'))
+
+      const { dirs } = await resolveWritableZones(agentDir, ['.metabase-cli'])
+
+      expect(dirs).toContain(join(agentDir, '.metabase-cli'))
+    })
+
+    test('supports a nested configured dir', async () => {
+      await mkdir(join(agentDir, 'workspace', 'cache'), { recursive: true })
+
+      const { dirs } = await resolveWritableZones(agentDir, ['workspace/cache'])
+
+      expect(dirs).toContain(join(agentDir, 'workspace/cache'))
+    })
+
+    test('drops a configured dir that does not exist', async () => {
+      const { dirs } = await resolveWritableZones(agentDir, ['.metabase-cli'])
+
+      expect(dirs).not.toContain(join(agentDir, '.metabase-cli'))
+    })
+
+    test('drops a configured path that is a file, not a dir', async () => {
+      await writeFile(join(agentDir, '.metabase-cli'), 'not a dir')
+
+      const { dirs } = await resolveWritableZones(agentDir, ['.metabase-cli'])
+
+      expect(dirs).not.toContain(join(agentDir, '.metabase-cli'))
+    })
+
+    test('drops a configured dir whose root is a symlink (RW bind would follow it out)', async () => {
+      const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+      try {
+        await symlink(outside, join(agentDir, '.metabase-cli'))
+
+        const { dirs } = await resolveWritableZones(agentDir, ['.metabase-cli'])
+
+        expect(dirs).not.toContain(join(agentDir, '.metabase-cli'))
+      } finally {
+        await rm(outside, { recursive: true, force: true })
+      }
+    })
+
+    test('drops a configured path that escapes the agent dir via ..', async () => {
+      const { dirs } = await resolveWritableZones(agentDir, ['../escape'])
+
+      expect(dirs.every((d) => d.startsWith(agentDir))).toBe(true)
+      expect(dirs).not.toContain(join(agentDir, '../escape'))
+    })
+
+    test.each(['.git', '.env', 'secrets.json', 'sessions', 'memory', '.typeclaw', 'node_modules'])(
+      'drops the security-sensitive root %p even when it exists',
+      async (root) => {
+        await mkdir(join(agentDir, root), { recursive: true })
+
+        const { dirs } = await resolveWritableZones(agentDir, [root])
+
+        // .git is a built-in writable zone, so it is present via WRITABLE_DIRS —
+        // but the configured path must not be what re-adds it. The other roots
+        // must be absent entirely.
+        if (root !== '.git') expect(dirs).not.toContain(join(agentDir, root))
+      },
+    )
+
+    test('drops a configured path nested under a forbidden root', async () => {
+      await mkdir(join(agentDir, 'sessions', 'sub'), { recursive: true })
+
+      const { dirs } = await resolveWritableZones(agentDir, ['sessions/sub'])
+
+      expect(dirs).not.toContain(join(agentDir, 'sessions/sub'))
+    })
+
+    test.each(['.', ''])('drops a configured path that resolves to the agent root (%p)', async (root) => {
+      const { dirs } = await resolveWritableZones(agentDir, [root])
+
+      expect(dirs).not.toContain(agentDir)
+    })
+
+    test('does not duplicate a configured path that overlaps a built-in zone', async () => {
+      await mkdir(join(agentDir, 'workspace'))
+
+      const { dirs } = await resolveWritableZones(agentDir, ['workspace'])
+
+      expect(dirs.filter((d) => d === join(agentDir, 'workspace'))).toHaveLength(1)
+    })
+
+    test('keeps built-in zones alongside configured ones', async () => {
+      await mkdir(join(agentDir, 'workspace'))
+      await mkdir(join(agentDir, '.metabase-cli'))
+
+      const { dirs } = await resolveWritableZones(agentDir, ['.metabase-cli'])
+
+      expect(dirs).toContain(join(agentDir, 'workspace'))
+      expect(dirs).toContain(join(agentDir, '.metabase-cli'))
+    })
+  })
 })
 
 describe('resolveProtectedZones', () => {

@@ -181,6 +181,37 @@ describe('configSchema', () => {
   })
 })
 
+describe('sandboxSchema', () => {
+  test('defaults realProc to false and writablePaths to [] when omitted', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.sandbox).toEqual({ realProc: false, writablePaths: [] })
+  })
+
+  test('accepts agent-relative writablePaths', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      sandbox: { writablePaths: ['.metabase-cli', 'workspace/cache'] },
+    })
+    expect(parsed.sandbox.writablePaths).toEqual(['.metabase-cli', 'workspace/cache'])
+  })
+
+  test('rejects an absolute writablePath', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { writablePaths: ['/root/.metabase-cli'] } }),
+    ).toThrow(/relative/i)
+  })
+
+  test('rejects a writablePath containing a .. segment', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { writablePaths: ['../escape'] } }),
+    ).toThrow(/\.\./)
+  })
+
+  test('rejects an empty writablePath string', () => {
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { writablePaths: [''] } })).toThrow()
+  })
+})
+
 describe('mcpServerSchema', () => {
   test('accepts a stdio server config', () => {
     const parsed = mcpServerSchema.parse({
