@@ -248,6 +248,7 @@ export async function start({
     // subsequent installs (PR #243 dogfooding wasted three rebuilds + a
     // manual version bump before this gate existed). Registry-spec users
     // skip the force path because their install is already cache-correct.
+
     // Materialize typeclaw.json#plugins into package.json BEFORE ensureDeps so
     // the drift detector below sees the newly-written deps as missing and
     // installs them in the same pass. This makes the plugin list a single
@@ -264,7 +265,12 @@ export async function start({
       return { ok: false, reason: `plugin dependency reconcile failed: ${pluginReconcile.error}` }
     }
 
-    const forceDepsReinstall = forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))
+    // Force install when reconcile rewrote package.json. ensureDeps' drift
+    // detector only checks for MISSING dependency names, so a managed plugin's
+    // version bump (dir already present) or a removal (stale dir left behind)
+    // would otherwise leave bun.lock/node_modules out of sync with the
+    // reconciled package.json.
+    const forceDepsReinstall = (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) || pluginReconcile.changed
     const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }

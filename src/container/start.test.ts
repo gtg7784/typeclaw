@@ -1709,6 +1709,96 @@ describe('start (composition)', () => {
     expect(ensureCalls).toEqual([{ force: true }])
   })
 
+  test('managed plugin version bump in typeclaw.json -> ensureDeps forced even without --build', async () => {
+    // given: package.json already has the plugin installed at an older pinned
+    // version, and typeclaw.json bumps it. The drift detector would NOT catch
+    // this (the dependency name is still present), so reconcile must force.
+    await writeDockerfile(root)
+    const pkg = {
+      name: basename(root),
+      private: true,
+      type: 'module',
+      workspaces: ['packages/*'],
+      dependencies: { typeclaw: '^0.3.4', 'typeclaw-plugin-foo': '1.0.0' },
+      typeclaw: { managedPlugins: { 'typeclaw-plugin-foo': '1.0.0' } },
+    }
+    await writeFile(join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+    await mkdir(join(root, 'packages'), { recursive: true })
+    await writeFile(join(root, 'packages', '.gitkeep'), '')
+    const config = {
+      models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+      plugins: ['typeclaw-plugin-foo@2.0.0'],
+    }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: start runs WITHOUT --build
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    // then: reconcile rewrote package.json, so ensureDeps was forced
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+    const written = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(written.dependencies['typeclaw-plugin-foo']).toBe('2.0.0')
+  })
+
+  test('managed plugin removal from typeclaw.json -> ensureDeps forced even without --build', async () => {
+    // given: a managed plugin is installed but no longer listed in typeclaw.json
+    await writeDockerfile(root)
+    const pkg = {
+      name: basename(root),
+      private: true,
+      type: 'module',
+      workspaces: ['packages/*'],
+      dependencies: { typeclaw: '^0.3.4', 'typeclaw-plugin-foo': '1.0.0' },
+      typeclaw: { managedPlugins: { 'typeclaw-plugin-foo': '1.0.0' } },
+    }
+    await writeFile(join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+    await mkdir(join(root, 'packages'), { recursive: true })
+    await writeFile(join(root, 'packages', '.gitkeep'), '')
+    const config = {
+      models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+      plugins: [],
+    }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    // then: the prune rewrote package.json, so ensureDeps was forced
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+    const written = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(written.dependencies['typeclaw-plugin-foo']).toBeUndefined()
+  })
+
   test('forceBuild + registry typeclaw dep -> ensureDeps called with force=false', async () => {
     // given: agent is on a published registry version (the normal user case);
     // the force-reinstall would be expensive AND meaningless because bun's
