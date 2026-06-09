@@ -14,6 +14,7 @@ import { colors, markdownTheme } from '@/tui/theme'
 
 import { streamSessionEvents, type LiveSourceFactory, type StreamPhase } from './index'
 import { originLabel, shortSessionId } from './label'
+import { TimeGate } from './render'
 import type { SessionSummary } from './session-list'
 import type { InspectEvent, InspectFilter } from './types'
 
@@ -91,8 +92,11 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     // during replay (one render at replay-end) to avoid redraw storms on long
     // transcripts; render per event once live.
     let live = false
+    const timeGate = new TimeGate()
     const onEvent = (event: InspectEvent): void => {
-      appendEntry([new Text(formatEventTime(event.ts), 0, 0), componentFor(event)])
+      const body = componentFor(event)
+      const entry = timeGate.shouldShow(event.cat) ? [new Text(formatEventTime(event.ts), 0, 0), body] : [body]
+      appendEntry(entry)
       if (live) tui.requestRender()
     }
     const onPhase = (phase: StreamPhase): void => {

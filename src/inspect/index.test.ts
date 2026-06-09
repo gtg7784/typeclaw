@@ -269,9 +269,18 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
       ...sink.push,
     })
     expect(result.ok).toBe(true)
-    const stripTime = (l: string) => l.replace(/\d{2}:\d{2}:\d{2}/, 'HH:MM:SS')
-    const tags = sink.out.slice(1, -1).map((l) => stripTime(l).split('  ')[1]?.trim())
+    const tagOf = (l: string) => {
+      const m = /^(?:\d{2}:\d{2}:\d{2}|\s{8})  (.{9})/.exec(l)
+      return m === null ? undefined : m[1]!.trim()
+    }
+    const hasTime = (l: string) => /^\d{2}:\d{2}:\d{2}/.test(l)
+    const body = sink.out.slice(1, -1)
+    const tags = body.map(tagOf)
     expect(tags).toEqual(['meta', 'user', undefined, 'tool ▸', 'tool ◂'])
+    // meta, user and the first tool of the run carry a timestamp; the second
+    // consecutive tool line is blanked (same-category grouping). The divider is
+    // the undefined-tag line and is not timestamped.
+    expect(body.map(hasTime)).toEqual([true, true, false, true, false])
     expect(sink.out.find((l) => l.includes('─── live ───'))).toBeDefined()
     expect(sink.out.at(-1)!).toContain('end of transcript')
   })

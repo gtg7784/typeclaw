@@ -6,13 +6,33 @@ import type { InspectEvent } from './types'
 export type RenderOptions = {
   color: boolean
   maxTextLength?: number
+  // When false, the timestamp column is blanked (kept the same width so the tag
+  // column stays aligned). The line view passes this from a TimeGate so a run of
+  // same-category events shows the timestamp only on its first line.
+  showTime?: boolean
 }
 
+const TIME_WIDTH = '--:--:--'.length
+
 export function renderEvent(event: InspectEvent, opts: RenderOptions): string {
-  const time = renderTime(event.ts, opts)
+  const time = opts.showTime === false ? ' '.repeat(TIME_WIDTH) : renderTime(event.ts, opts)
   const tag = renderTag(event, opts)
   const body = renderBody(event, opts)
   return `${time}  ${tag}  ${body}`
+}
+
+// Decides whether an event's timestamp should be shown, given the running render
+// position: a timestamp prints only when the event's category differs from the
+// previous one, so a run of same-category events (e.g. back-to-back thinking
+// blocks or a tool start/end pair) carries a single timestamp at its start.
+export class TimeGate {
+  private prevCat: InspectEvent['cat'] | null = null
+
+  shouldShow(cat: InspectEvent['cat']): boolean {
+    const show = cat !== this.prevCat
+    this.prevCat = cat
+    return show
+  }
 }
 
 const DEFAULT_MAX_TEXT = 200

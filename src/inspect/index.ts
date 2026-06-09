@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 
 import { originLabel, shortSessionId } from './label'
-import { renderEvent } from './render'
+import { renderEvent, TimeGate } from './render'
 import { replayJsonl } from './replay'
 import type { SessionSummary } from './session-list'
 import { isSessionIdShape, listSessions, resolveSession } from './session-list'
@@ -283,9 +283,10 @@ async function streamSession(opts: {
 }): Promise<{ escToPicker: boolean }> {
   if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
 
+  const timeGate = new TimeGate()
   const onEvent = (event: InspectEvent): void => {
     if (opts.json) opts.stdout(JSON.stringify({ sessionId: opts.summary.sessionId, ...event }))
-    else opts.stdout(renderEvent(event, { color: opts.color }))
+    else opts.stdout(renderEvent(event, { color: opts.color, showTime: timeGate.shouldShow(event.cat) }))
   }
 
   const emitHint = (): void => {

@@ -15,6 +15,7 @@ class FakeTerminal implements Terminal {
   columns = 80
   kittyProtocolActive = false
   stopped = false
+  readonly writes: string[] = []
   private inputHandler: ((data: string) => void) | null = null
 
   start(onInput: (data: string) => void): void {
@@ -24,7 +25,9 @@ class FakeTerminal implements Terminal {
     this.stopped = true
   }
   async drainInput(): Promise<void> {}
-  write(): void {}
+  write(data: string): void {
+    this.writes.push(data)
+  }
   moveBy(): void {}
   hideCursor(): void {}
   showCursor(): void {}
@@ -189,5 +192,56 @@ describe('createTranscriptView run()', () => {
     terminal.feed('\x03')
 
     await expect(runPromise).resolves.toEqual({ reason: 'exit' })
+  })
+
+  test('a run of same-category events renders the timestamp on the first block only, not the second', async () => {
+    // given: an assistant turn with two consecutive thinking blocks (one shared ts)
+    const ts = Date.parse('2026-06-10T08:00:00.000Z')
+    const file = join(dir, 'group.jsonl')
+    await writeFile(
+      file,
+      JSON.stringify({
+        type: 'message',
+        timestamp: new Date(ts).toISOString(),
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'first thought' },
+            { type: 'thinking', thinking: 'second thought' },
+          ],
+          timestamp: ts,
+        },
+      }) + '\n',
+    )
+    const groupSummary: SessionSummary = {
+      sessionId: 'g',
+      sessionFile: file,
+      basename: 'group.jsonl',
+      mtimeMs: 1,
+      origin: { kind: 'tui' },
+      firstPrompt: null,
+    }
+    const terminal = new FakeTerminal()
+    const view = createTranscriptView({
+      summary: groupSummary,
+      filter: FILTER.filter,
+      sinceMs: undefined,
+      createTerminal: () => terminal,
+    })
+
+    // when: the viewer replays and we dismiss it
+    const runPromise = view.run()
+    await flush()
+    terminal.feed('\x1b')
+    await runPromise
+
+    // then: the final frame shows both thoughts but the HH:MM:SS stamp exactly once
+    const p = (n: number): string => String(n).padStart(2, '0')
+    const d = new Date(ts)
+    const stamp = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    const frame = terminal.writes.join('')
+    expect(frame).toContain('first thought')
+    expect(frame).toContain('second thought')
+    expect(frame.split(stamp).length - 1).toBe(1)
   })
 })
