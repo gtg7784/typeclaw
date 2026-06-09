@@ -25,9 +25,9 @@ describe('subagent orchestration — explicit research routing', () => {
 })
 
 describe('delivering reports and documents', () => {
-  test('routes report/PDF/document requests to the typeclaw-markdown-pdf skill', () => {
+  test('routes report/PDF/document requests to the typeclaw-render-pdf skill', () => {
     expect(DEFAULT_SYSTEM_PROMPT).toContain('## Delivering reports and documents')
-    expect(DEFAULT_SYSTEM_PROMPT).toContain('typeclaw-markdown-pdf')
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('typeclaw-render-pdf')
     expect(DEFAULT_SYSTEM_PROMPT).toMatch(/produce a polished file/i)
   })
 

@@ -286,7 +286,7 @@ describe('renderSessionOrigin', () => {
       expect(out).toMatch(/Ship reports as a PDF by default/i)
       expect(out).toMatch(/the user asks for a report, document, brief, or "the report"/i)
       expect(out).toContain('research-<slug>.md')
-      expect(out).toContain('typeclaw-markdown-pdf')
+      expect(out).toContain('typeclaw-render-pdf')
       expect(out).toMatch(/channel_send\(\{ \.\.\., attachments:/)
       expect(out).toMatch(/do not paste\s+the full markdown into chat/i)
       expect(out).toMatch(/`<summary>`[\s\S]*?NOT the deliverable/i)
@@ -308,7 +308,7 @@ describe('renderSessionOrigin', () => {
       thread: null,
     })
     expect(out).not.toMatch(/Ship reports as a PDF by default/i)
-    expect(out).not.toContain('typeclaw-markdown-pdf')
+    expect(out).not.toContain('typeclaw-render-pdf')
   })
 
   test('channel origin tells the model that plain-text narration is invisible and must go through channel_reply', () => {
