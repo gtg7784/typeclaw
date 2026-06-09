@@ -1265,6 +1265,10 @@ function handleInspectMessage(
     ws.close()
     return
   }
+  if (msg.type === 'ping') {
+    sendInspect(ws, { type: 'pong', id: msg.id })
+    return
+  }
   if (msg.type !== 'subscribe' || typeof msg.sessionId !== 'string' || msg.sessionId === '') {
     sendInspect(ws, { type: 'error', message: 'invalid inspect subscription' })
     ws.close()

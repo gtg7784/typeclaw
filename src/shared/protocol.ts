@@ -44,16 +44,22 @@ export type TunnelLogsServerMessage =
   | { type: 'error'; message: string }
   | { type: 'end' }
 
-export type InspectClientMessage = {
-  type: 'subscribe'
-  sessionId: string
-  // sinceMs is a wall-clock cutoff for backfilling broadcasts from the
-  // in-process Stream ring buffer. The client uses Date.now() - duration;
-  // omit to skip broadcast backfill. AgentSession events are NEVER
-  // backfilled (the session's pi-coding-agent subscribe API delivers
-  // future events only).
-  sinceMs?: number
-}
+export type InspectClientMessage =
+  | {
+      type: 'subscribe'
+      sessionId: string
+      // sinceMs is a wall-clock cutoff for backfilling broadcasts from the
+      // in-process Stream ring buffer. The client uses Date.now() - duration;
+      // omit to skip broadcast backfill. AgentSession events are NEVER
+      // backfilled (the session's pi-coding-agent subscribe API delivers
+      // future events only).
+      sinceMs?: number
+    }
+  // Steady-state liveness probe echoed back as a pong. A live tail is
+  // legitimately quiet for long stretches, so absence of inbound frames cannot
+  // distinguish "idle" from "dead"; a missed pong can. Guards a wedged
+  // WebSocket that stays ESTABLISHED yet never fires 'close'/'error'.
+  | { type: 'ping'; id: number }
 
 export type InspectFramePayload =
   | { kind: 'text_delta'; sessionId: string; delta: string }
@@ -126,6 +132,7 @@ export type InspectServerMessage =
   | { type: 'subscribed'; sessionId: string; sessionLive: boolean }
   | { type: 'frame'; ts: number; payload: InspectFramePayload }
   | { type: 'error'; message: string }
+  | { type: 'pong'; id: number }
 
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }

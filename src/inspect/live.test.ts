@@ -465,6 +465,73 @@ describe('streamLive — live session events', () => {
     await expect(drained).rejects.toThrow('websocket connect timed out')
   })
 
+  test('a wedged socket (bufferedAmount past ceiling) ends the generator cleanly', async () => {
+    // Regression: the live tail froze when its WebSocket wedged — ESTABLISHED at
+    // the TCP layer with a stuck send queue, never firing 'close'/'error'. The
+    // read loop parked forever (event loop idle) and the transcript viewer could
+    // never recover to the picker. The heartbeat watchdog detects the non-draining
+    // send queue via bufferedAmount and ends the generator as a clean close.
+    const fake = makeControllableWebSocket({ bufferedAmount: 2_000_000 })
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      WebSocketImpl: fake.ctor,
+      heartbeatIntervalMs: 5,
+      bufferedAmountCeiling: 1_048_576,
+    })
+
+    const events: InspectEvent[] = []
+    for await (const ev of gen) events.push(ev)
+    expect(events).toEqual([])
+    expect(fake.closed).toBe(true)
+  })
+
+  test('a ping with no pong within the deadline ends the generator cleanly', async () => {
+    // The pong-timeout branch covers a dead-but-quiet socket where bufferedAmount
+    // never climbs (no app writes pending) yet the peer is gone. A healthy idle
+    // tail keeps the connection because the server still pongs (next test).
+    const fake = makeControllableWebSocket({ pong: false })
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      WebSocketImpl: fake.ctor,
+      heartbeatIntervalMs: 5,
+      pongTimeoutMs: 15,
+    })
+
+    const events: InspectEvent[] = []
+    for await (const ev of gen) events.push(ev)
+    expect(events).toEqual([])
+    expect(fake.closed).toBe(true)
+    expect(fake.pingsReceived).toBeGreaterThan(0)
+  })
+
+  test('a healthy idle tail that pongs stays open until aborted', async () => {
+    const fake = makeControllableWebSocket({ pong: true })
+    const ctrl = new AbortController()
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      WebSocketImpl: fake.ctor,
+      heartbeatIntervalMs: 5,
+      pongTimeoutMs: 15,
+    })
+
+    const events: InspectEvent[] = []
+    const drained = (async () => {
+      for await (const ev of gen) events.push(ev)
+    })()
+    // Outlive several heartbeat cycles to prove the pongs keep the tail alive,
+    // then abort — the only thing that should end a healthy idle tail.
+    await new Promise((r) => setTimeout(r, 60))
+    expect(fake.closed).toBe(false)
+    expect(fake.pingsReceived).toBeGreaterThan(1)
+    ctrl.abort()
+    await drained
+    expect(events).toEqual([])
+  })
+
   test('unknown server message types are ignored without crashing', async () => {
     // Forward-compat: a future server may add new top-level message `type`
     // values. The client must not crash when it sees one — especially since
@@ -589,4 +656,74 @@ function makeNeverOpeningWebSocket(): typeof WebSocket {
     }
   }
   return FakeWS as unknown as typeof WebSocket
+}
+
+// Fake WebSocket that opens immediately, then drives the heartbeat branches: a
+// fixed `bufferedAmount` (to exercise the wedge ceiling) and optional pong
+// echoing (round-trip liveness). The returned handle exposes live state — read
+// via getters so assertions see updates after the generator runs, not a stale
+// snapshot.
+function makeControllableWebSocket(cfg: { bufferedAmount?: number; pong?: boolean }): {
+  ctor: typeof WebSocket
+  readonly closed: boolean
+  readonly pingsReceived: number
+} {
+  const state = { closed: false, pingsReceived: 0 }
+  class FakeWS {
+    readonly url: string
+    readyState = 0
+    bufferedAmount = cfg.bufferedAmount ?? 0
+    private readonly listeners = new Map<string, Set<(e: unknown) => void>>()
+
+    constructor(url: string) {
+      this.url = url
+      queueMicrotask(() => {
+        this.readyState = 1
+        this.dispatch('open', {})
+      })
+    }
+
+    addEventListener(type: string, fn: (e: unknown) => void, _opts?: unknown): void {
+      let set = this.listeners.get(type)
+      if (set === undefined) {
+        set = new Set()
+        this.listeners.set(type, set)
+      }
+      set.add(fn)
+    }
+
+    removeEventListener(type: string, fn: (e: unknown) => void): void {
+      this.listeners.get(type)?.delete(fn)
+    }
+
+    send(data: string): void {
+      const msg = JSON.parse(data) as { type: string; id?: number }
+      if (msg.type !== 'ping') return
+      state.pingsReceived += 1
+      if (cfg.pong === true) {
+        queueMicrotask(() => this.dispatch('message', { data: JSON.stringify({ type: 'pong', id: msg.id }) }))
+      }
+    }
+
+    close(): void {
+      state.closed = true
+      this.readyState = 3
+      queueMicrotask(() => this.dispatch('close', {}))
+    }
+
+    private dispatch(type: string, event: unknown): void {
+      const set = this.listeners.get(type)
+      if (set === undefined) return
+      for (const fn of set) fn(event)
+    }
+  }
+  return {
+    ctor: FakeWS as unknown as typeof WebSocket,
+    get closed() {
+      return state.closed
+    },
+    get pingsReceived() {
+      return state.pingsReceived
+    },
+  }
 }
