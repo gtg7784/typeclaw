@@ -209,12 +209,16 @@ export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boo
 }
 
 // Default backoff between proc-bind safety re-probes, in ms. Array length = retry
-// count (2 retries after the initial attempt = 3 probes total). The probe is
+// count (4 retries after the initial attempt = 5 probes total). The probe is
 // normally sub-ms; it only returns 'inconclusive' under transient CPU/IO
 // contention (e.g. a boot-time storm of concurrent LLM calls saturating the box
-// and tripping the probe's own timeout), so a short staggered wait lets the spike
-// pass before re-proving.
-export const PROC_BIND_RETRY_BACKOFF_MS = [250, 1_000] as const
+// and tripping the probe's own timeout), so a staggered wait lets the spike pass
+// before re-proving. Widened from [250,1000] after a deployed container degraded
+// to tmpfs (breaking `bun install`) when a boot-time load spike outlasted the old
+// two-retry budget; the longer tail rides out a sustained spike before failing
+// closed. 'unsafe' still short-circuits with no retry, so this never weakens the
+// leak-block guarantee — it only buys more chances to PROVE it.
+export const PROC_BIND_RETRY_BACKOFF_MS = [250, 1_000, 2_000, 4_000] as const
 
 // proc-bind selection must distinguish "definitely unavailable" from "couldn't
 // verify right now". A DEFINITIVE verdict is final: 'safe'→true; a real userns
@@ -375,9 +379,13 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
 }
 
 // Cap on the in-sandbox bwrap probe so a wedged runtime cannot stall the first
-// low-trust bash call. The probe normally completes in a few ms; this is a
-// generous ceiling, not a tuning knob.
-const PROC_BIND_PROBE_TIMEOUT_MS = 5_000
+// low-trust bash call. The probe normally completes in a few ms. Raised from 5s
+// because a deployed container fell to the tmpfs degraded mode (which breaks
+// `bun install` with Bun's opaque NotDir) when this timeout fired under a
+// boot-time storm of concurrent LLM/tool calls — a transient 'inconclusive' that
+// proves nothing about the host. A wider ceiling lets the real probe finish on a
+// briefly-saturated box; a genuinely wedged runtime still trips it and degrades.
+const PROC_BIND_PROBE_TIMEOUT_MS = 12_000
 
 // Designated probe-script exit codes. ONLY these two are a cacheable verdict;
 // every other code (a setup failure, bwrap startup failure, a signal, 127, …) is
