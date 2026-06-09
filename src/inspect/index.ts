@@ -23,6 +23,7 @@ export type {
   RunInspectLoopOptions,
   RunViewerLoopOptions,
   SelectItem,
+  SelectOutcome,
   TailController,
 } from './loop'
 export type { ViewerItem } from './item'

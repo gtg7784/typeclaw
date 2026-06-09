@@ -12,6 +12,7 @@ import {
   runViewerLoop,
   streamLive,
   type LiveSourceFactory,
+  type SelectOutcome,
   type SessionSummary,
   type ViewerItem,
 } from '@/inspect'
@@ -250,14 +251,17 @@ function useColor(): boolean {
   return Boolean(process.stdout.isTTY)
 }
 
-async function clackSelectItem(items: ViewerItem[], initialKey: string | undefined): Promise<ViewerItem | null> {
-  const { select } = await import('@clack/prompts')
+async function clackSelectItem(
+  items: ViewerItem[],
+  initialKey: string | undefined,
+): Promise<SelectOutcome<ViewerItem>> {
+  const { refreshableSelect } = await import('./inspect-select')
   prepareStdinForClack()
   const keyOf = (item: ViewerItem): string => (item.kind === 'logs' ? 'logs' : item.summary.sessionId)
   const preferred =
     initialKey !== undefined && items.some((i) => keyOf(i) === initialKey) ? initialKey : keyOf(items[0]!)
-  const picked = await select<string>({
-    message: `Pick what to view (showing ${items.length})`,
+  const outcome = await refreshableSelect<string>({
+    message: `Pick what to view (showing ${items.length}) ${c.dim('· r to refresh')}`,
     options: items.map((item) => ({
       value: keyOf(item),
       label: itemLabel(item),
@@ -265,11 +269,15 @@ async function clackSelectItem(items: ViewerItem[], initialKey: string | undefin
     })),
     initialValue: preferred,
   })
-  if (isCancel(picked)) {
+  if (outcome.kind === 'cancelled') {
     cancel('Cancelled.')
-    return null
+    return { kind: 'cancelled' }
   }
-  return items.find((i) => keyOf(i) === picked) ?? null
+  if (outcome.kind === 'refresh') {
+    return { kind: 'refresh', highlightKey: outcome.highlightValue }
+  }
+  const chosen = items.find((i) => keyOf(i) === outcome.value)
+  return chosen !== undefined ? { kind: 'picked', item: chosen } : { kind: 'cancelled' }
 }
 
 async function clackSelectSession(
