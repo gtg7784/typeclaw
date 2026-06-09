@@ -416,8 +416,7 @@ function stripRepoFlagFromCommand(command: string): string {
   while (i < command.length) {
     const ch = command[i] as string
     if (ch === '"' || ch === "'") {
-      const close = command.indexOf(ch, i + 1)
-      const endQuote = close === -1 ? command.length : close
+      const endQuote = findClosingQuote(command, i)
       out += command.slice(i, endQuote + 1)
       i = endQuote + 1
       continue
@@ -436,6 +435,24 @@ function stripRepoFlagFromCommand(command: string): string {
   return out
 }
 
+// Index of the quote that closes the one at `open`. Double quotes honor `\"` as
+// a literal (bash processes backslash escapes inside "..."), so a `-R o/r` buried
+// in a `-f body="{\"x\":\"-R o/r\"}"` value is not mistaken for an unquoted flag.
+// Single quotes take everything literally — no escapes — so the next `'` closes.
+// Unterminated quote returns the last index (strip nothing past it).
+function findClosingQuote(command: string, open: number): number {
+  const quote = command[open]
+  for (let i = open + 1; i < command.length; i++) {
+    const ch = command[i]
+    if (quote === '"' && ch === '\\') {
+      i += 1
+      continue
+    }
+    if (ch === quote) return i
+  }
+  return command.length - 1
+}
+
 // If `command` has an unquoted `-R`/`--repo` repo-flag token starting at `start`
 // (at a word boundary), returns the index just past the flag and its value;
 // otherwise null. Handles `-R o/r`, `--repo o/r`, `-R=o/r`, `--repo=o/r`.
@@ -447,10 +464,16 @@ function matchRepoFlagAt(command: string, start: number): number | null {
     if (!command.startsWith(flag, start)) continue
     let i = start + flag.length
     const sep = command[i]
+    // Both value forms validate the slug before stripping: the flag is only a
+    // repo flag if its value parses as owner/repo. Without this, the `=` form
+    // could strip a non-slug value the detection path would have rejected,
+    // diverging detection from rewrite.
     if (sep === '=') {
-      i += 1
-      while (i < command.length && command[i] !== ' ' && command[i] !== '\t') i += 1
-      return i
+      const valueStart = i + 1
+      let j = valueStart
+      while (j < command.length && command[j] !== ' ' && command[j] !== '\t') j += 1
+      if (!isRepoSlug(command.slice(valueStart, j))) return null
+      return j
     }
     if (sep === ' ' || sep === '\t') {
       let j = i
@@ -493,9 +516,20 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   const flagRepo = extractRepoFlag(args)
 
   if (pathRepos.length > 0) {
-    if (flagRepo !== null && !pathRepos.includes(flagRepo)) {
+    // Check EVERY repo flag, not just the first: the strip removes all of them,
+    // so a single non-redundant flag anywhere is a mint-for-X-hit-Y attempt and
+    // must block even when an earlier flag matches the path and would otherwise
+    // mask it.
+    const flagRepos = extractAllRepoFlags(args)
+    if (flagRepos.some((slug) => !pathRepos.includes(slug))) {
       return { kind: 'block', reason: API_REPO_CONFLICT_REASON }
     }
+    // Every `-R` here is redundant: it matches the repo already named in the
+    // literal path, which is authoritative. `gh api` rejects `-R` outright, so
+    // strip the flag rather than let `gh` fail with "unknown shorthand flag".
+    // Distinct from graphql (no path, -R IS the hint) — here the path mints the
+    // token and the flag is pure noise we remove for syntax.
+    if (flagRepos.length > 0) return { kind: 'inject', repoSlugs: pathRepos, stripRepoFlag: true }
     return { kind: 'inject', repoSlugs: pathRepos }
   }
 
@@ -563,6 +597,29 @@ function extractRepoFlag(args: readonly string[]): string | null {
     }
   }
   return null
+}
+
+// Every valid `-R`/`--repo` slug in `args`, not just the first. The strip removes
+// ALL unquoted repo flags, so the conflict check must see ALL of them: a command
+// like `... -R path/repo -R victim/private` is a mint-for-X-hit-Y attempt where
+// the redundant first flag would otherwise mask the malicious second one.
+function extractAllRepoFlags(args: readonly string[]): string[] {
+  const slugs: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === undefined) continue
+    if (arg === '-R' || arg === '--repo') {
+      const value = args[i + 1]
+      if (value !== undefined && isRepoSlug(value)) slugs.push(value)
+    } else if (arg.startsWith('--repo=')) {
+      const value = arg.slice('--repo='.length)
+      if (isRepoSlug(value)) slugs.push(value)
+    } else if (arg.startsWith('-R=')) {
+      const value = arg.slice('-R='.length)
+      if (isRepoSlug(value)) slugs.push(value)
+    }
+  }
+  return slugs
 }
 
 // `gh api` flags that consume the FOLLOWING token as their value. The endpoint

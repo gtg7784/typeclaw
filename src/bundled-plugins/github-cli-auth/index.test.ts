@@ -118,6 +118,63 @@ describe('github-cli-auth plugin', () => {
     expect(resolverCalled).toBe(false)
   })
 
+  test('App auth: strips a redundant -R on a literal-path gh api call AND injects the minted token', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('gh api repos/acme/widgets/issues -R acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api repos/acme/widgets/issues')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
+  })
+
+  test('classic PAT: strips a redundant -R on gh api without minting a token', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    })
+    const event = bashEvent('gh api repos/acme/widgets/issues -R acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api repos/acme/widgets/issues')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('fine-grained PAT: strips a redundant -R on gh api without minting a token', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    })
+    const event = bashEvent('gh api repos/acme/widgets/issues --repo=acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh api repos/acme/widgets/issues')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('App auth: blocks a gh api whose -R repo conflicts with the literal path (no strip)', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('gh api repos/victim/private/issues -R acme/widgets')
+
+    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+
+    expect(result).toMatchObject({ block: true })
+    expect(event.args.command).toBe('gh api repos/victim/private/issues -R acme/widgets')
+  })
+
   test('non-gh bash command passes through without touching the resolver', async () => {
     process.env.GH_TOKEN = 'ghs_seeded'
     let resolverCalled = false

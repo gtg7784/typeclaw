@@ -46,6 +46,15 @@ export default definePlugin({
       const decision = analyzeGhCommand(command)
       if (decision.kind === 'pass-through') return 'fall-through'
 
+      // The `-R` strip is a pure syntax fix (`gh api` rejects `-R`), independent
+      // of token minting, so apply it for EVERY token class — including the PAT
+      // paths below that return without injecting. Only `inject` decisions carry
+      // `rewrittenCommand`, and only after the single-bare/safe-pipeline gate in
+      // analyzeGhCommand, so this never rewrites a blocked or unsafe shape.
+      if (decision.kind === 'inject' && decision.rewrittenCommand !== undefined) {
+        event.args.command = decision.rewrittenCommand
+      }
+
       const tokenClass = classifyGhToken(process.env.GH_TOKEN)
       // Classic PATs reach every owner; nothing to inject or enforce.
       if (tokenClass === 'cross-owner') return
@@ -63,9 +72,6 @@ export default definePlugin({
       // --setenv by the bash wrapper) so the token never enters the command
       // string, where it could leak through logs or later hooks.
       event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
-      // graphql consumed `-R/--repo` as a mint hint; `gh api` rejects it, so
-      // run the command with the flag stripped (token still rides in env).
-      if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
       return
     }
 
