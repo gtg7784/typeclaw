@@ -91,33 +91,97 @@ export async function analyzeGitCommand(
   command: string,
   options: { cwd: string; resolvers: GitResolvers },
 ): Promise<GitCommandDecision> {
+  // The single permitted `cd <simple-path> && git …` shortcut is rewritten to a
+  // bare `git -C …` before any chain parsing, so a chain never has to reason
+  // about a `cd` segment changing cwd for the gits that follow it. Multi-git
+  // chains must use explicit `git -C` per segment instead.
   const stripped = stripSafeCdPrefix(command)
   if (stripped.unsafe) return { kind: 'pass-through' }
+  if (stripped.cdDir !== null) return analyzeSingleCdGit(stripped, options)
+
+  // Split the command into `&&`-joined git segments. null = not a pure
+  // git-only `&&` chain (a non-git segment, a forbidden shell operator, a
+  // leading env assignment, or no git at all).
+  const chain = extractGitInvocationChain(command)
+  if (chain === null) {
+    // Distinguish "no git here at all" (pass-through) from "git is present but
+    // the composition is unsafe" (block). A bare `ls`/`echo` is not our concern;
+    // a `git push … | tee` or `git … && curl evil` must be blocked, never run
+    // tokenless (which is what silently passing through used to do — the bug).
+    return containsGitInvocation(command) ? { kind: 'block', reason: COMPOSITION_REASON } : { kind: 'pass-through' }
+  }
+
+  const remoteSegments = chain.filter((s) => {
+    const sub = findSubcommand(s.args)
+    return sub !== undefined && REMOTE_SUBCOMMANDS.has(sub)
+  })
+  // No segment talks to a remote (e.g. `git status && git log`): nothing to
+  // authenticate, so pass through and let git run with no token.
+  if (remoteSegments.length === 0) return { kind: 'pass-through' }
+
+  // Every segment — even non-remote ones like `git status` that ride along in
+  // the chain — must pass the redirect screen: a token lives in the shared env
+  // the whole chain inherits, so a `-c`/env-assignment on ANY git could steer
+  // auth or destination.
+  for (const seg of chain) {
+    if (seg.hasLeadingEnvAssignment || hasDangerousGitConfig(seg.args)) {
+      return { kind: 'block', reason: DANGEROUS_CONFIG_REASON }
+    }
+    const sub = findSubcommand(seg.args)
+    if ((sub === 'fetch' || sub === 'pull') && seg.args.includes('--all')) {
+      return { kind: 'block', reason: FETCH_ALL_REASON }
+    }
+  }
+
+  const owners = new Set<string>()
+  let representativeSlug: string | null = null
+  for (const seg of remoteSegments) {
+    const sub = findSubcommand(seg.args) as string
+    const effectiveCwd = resolveCwd(options.cwd, extractDashCDir(seg.args))
+    // A resolver that throws is treated as "couldn't resolve" → pass-through, so
+    // a git/subprocess failure never crashes the hook or guesses a repo.
+    let slugs: string[]
+    try {
+      slugs = await resolveRepoSlugs(sub, seg.args, effectiveCwd, options.resolvers)
+    } catch {
+      return { kind: 'pass-through' }
+    }
+    for (const slug of slugs) {
+      owners.add(slug.split('/')[0] as string)
+      representativeSlug ??= slug
+    }
+  }
+
+  // A GitHub remote subcommand whose target owner we could not resolve: we must
+  // not mint a possibly-wrong-owner token, and silently passing through would
+  // reproduce the credential-less failure. Block with an actionable reason.
+  if (representativeSlug === null) return { kind: 'pass-through' }
+  if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
+
+  return { kind: 'inject', repoSlug: representativeSlug }
+}
+
+// The single-git `cd <path> && git …` shortcut. Kept separate (and single-git
+// only) so the cwd rewrite stays simple: the token-bearing command becomes one
+// bare `git -C <path> …`, with no sibling inheriting the env. A `cd` in a
+// multi-git chain is rejected (callers use explicit `git -C` per segment).
+async function analyzeSingleCdGit(
+  stripped: StrippedCd,
+  options: { cwd: string; resolvers: GitResolvers },
+): Promise<GitCommandDecision> {
   const segment = extractSingleGitInvocation(stripped.rest)
   if (segment === null) return { kind: 'pass-through' }
-
   const args = segment.args
   const subcommand = findSubcommand(args)
   if (subcommand === undefined || !REMOTE_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
-
-  // We are about to put a live token in this process's env. Reject any command
-  // that could redirect git's auth/destination away from the resolved repo:
-  // user `-c` (url.*.insteadOf, core.askPass, credential.*, http.*), a leading
-  // env assignment (`GIT_ASKPASS=… git …`), or a different git-dir/work-tree.
   if (segment.hasLeadingEnvAssignment || hasDangerousGitConfig(args)) {
     return { kind: 'block', reason: DANGEROUS_CONFIG_REASON }
   }
-  // `fetch/pull --all` contacts every configured remote; we cannot enumerate
-  // them here, so we could mint for one and leak the token to another. Block.
   if ((subcommand === 'fetch' || subcommand === 'pull') && args.includes('--all')) {
     return { kind: 'block', reason: FETCH_ALL_REASON }
   }
-
   const dashCDir = extractDashCDir(args)
   const effectiveCwd = resolveCwd(resolveCwd(options.cwd, stripped.cdDir), dashCDir)
-
-  // A resolver that throws is treated as "couldn't resolve" → pass-through, so a
-  // git/subprocess failure never crashes the hook or guesses a repo.
   let slugs: string[]
   try {
     slugs = await resolveRepoSlugs(subcommand, args, effectiveCwd, options.resolvers)
@@ -125,24 +189,15 @@ export async function analyzeGitCommand(
     return { kind: 'pass-through' }
   }
   if (slugs.length === 0) return { kind: 'pass-through' }
-
   const owners = new Set(slugs.map((s) => s.split('/')[0]))
   if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
-
   const repoSlug = slugs[0] as string
-
-  // Injecting the askpass token into env means any sibling process inherits it,
-  // so a token-bearing command must be a single bare `git`. A `cd … && git …`
-  // is allowed only by rewriting away the `&&` into `git -C …` — but not when the
-  // git part already has its own `-C` (the rewrite would stack two and change cwd).
-  if (stripped.cdDir !== null) {
-    if (containsShellActiveMetachar(stripped.rest) || dashCDir !== null) {
-      return { kind: 'block', reason: COMPOSITION_REASON }
-    }
-    return { kind: 'inject', repoSlug, rewrittenCommand: rewriteCdToDashC(effectiveCwd, stripped.rest) }
+  // The rewrite cannot stack two `-C` (the git part must not already carry one)
+  // and the rest must be a single bare git (no further composition).
+  if (containsShellActiveMetachar(stripped.rest) || dashCDir !== null) {
+    return { kind: 'block', reason: COMPOSITION_REASON }
   }
-  if (containsShellActiveMetachar(command)) return { kind: 'block', reason: COMPOSITION_REASON }
-  return { kind: 'inject', repoSlug }
+  return { kind: 'inject', repoSlug, rewrittenCommand: rewriteCdToDashC(effectiveCwd, stripped.rest) }
 }
 
 // Global flags that can redirect git's auth or destination. `-c`/`--config-env`
@@ -356,6 +411,97 @@ function extractSingleGitInvocation(command: string): GitInvocation | null {
   const hasLeadingEnvAssignment = start > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[start - 1] ?? '')
   const args = tokens.slice(start + 1).filter((t) => t !== '\n' && t !== ';' && t !== '|' && t !== '&')
   return { args, hasLeadingEnvAssignment }
+}
+
+// True if `git` appears at any command boundary. Used to decide block-vs-pass:
+// a command with no git at all is none of our business (pass-through), but one
+// that DOES contain git yet is not a clean git-only `&&` chain must be blocked,
+// not run tokenless.
+function containsGitInvocation(command: string): boolean {
+  const tokens = tokenize(command)
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === 'git' && (i === 0 || isCommandBoundaryBefore(tokens, i))) return true
+  }
+  return false
+}
+
+// Splits a command into `&&`-joined segments and accepts it ONLY when EVERY
+// segment is a single bare `git` invocation. Returns null (caller blocks or
+// passes through) when any segment is non-git, the chain uses any operator other
+// than `&&` (`;`, `|`, `||`, `&`, newline) at top level, or a segment carries a
+// shell-active metachar (`$`, backtick, redirection, subshell) that could spawn
+// or feed a NON-git process — which would inherit the shared token env. The
+// all-git invariant is load-bearing: the token rides in a plain inherited env
+// var, so a single non-git sibling could read it directly.
+function extractGitInvocationChain(command: string): GitInvocation[] | null {
+  // Quote-aware screen on the ORIGINAL command: every shell-active metachar
+  // except the `&&` chain operator must be absent. This rejects `;`, `|`, `||`,
+  // single `&`, redirection, subshells, and `$`/backtick (active outside single
+  // quotes) — anything that could spawn or feed a non-git process that would
+  // inherit the shared token env. Screening the original (not dequoted tokens)
+  // keeps a safely single-quoted `$` from being a false positive.
+  if (containsUnsafeMetacharOutsideAndAnd(command)) return null
+
+  const tokens = tokenize(command)
+  if (tokens.length === 0) return null
+
+  const segments: string[][] = [[]]
+  for (const token of tokens) {
+    if (token === '&&') {
+      segments.push([])
+      continue
+    }
+    // The metachar screen above already rejected every other operator; this is
+    // belt-and-suspenders in case the tokenizer ever emits one we missed.
+    if (token === ';' || token === '|' || token === '||' || token === '&' || token === '\n') return null
+    ;(segments[segments.length - 1] as string[]).push(token)
+  }
+
+  const invocations: GitInvocation[] = []
+  for (const seg of segments) {
+    if (seg.length === 0) return null
+    let start = 0
+    while (start < seg.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[start] ?? '')) start += 1
+    const hasLeadingEnvAssignment = start > 0
+    if (seg[start] !== 'git') return null
+    invocations.push({ args: seg.slice(start + 1), hasLeadingEnvAssignment })
+  }
+  return invocations
+}
+
+// Quote-aware: true if any shell-active metachar appears outside quotes EXCEPT
+// the `&&` operator (a lone `&` IS unsafe — backgrounding). `$`/backtick are
+// active inside double quotes too, so they trip even there; single-quoted
+// content is inert. Companion to containsShellActiveMetachar, which forbids ALL
+// of them (no `&&` exception) for the single-git path.
+function containsUnsafeMetacharOutsideAndAnd(command: string): boolean {
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '$' || ch === '`') return true
+      if (ch === '"') quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '&') {
+      // `&&` is the one allowed composer; a single `&` is backgrounding.
+      if (command[i + 1] === '&') {
+        i += 1
+        continue
+      }
+      return true
+    }
+    if (SHELL_ACTIVE_METACHARS.has(ch)) return true
+  }
+  return false
 }
 
 function isCommandBoundaryBefore(tokens: readonly string[], index: number): boolean {

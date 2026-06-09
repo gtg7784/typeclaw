@@ -325,6 +325,24 @@ describe('github-cli-auth plugin — git path', () => {
     expect(result).toMatchObject({ block: true })
   })
 
+  test('App auth: injects GIT_ASKPASS for an all-git same-owner chain (clone && fetch)', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+    const event = bashEvent('git clone https://github.com/acme/widgets.git /tmp/x && git -C /tmp/x fetch origin main')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    const overlay = event.args[TYPECLAW_INTERNAL_BASH_ENV] as Record<string, string>
+    expect(overlay.TYPECLAW_GIT_TOKEN).toBe('ghs_minted')
+    expect(overlay.GIT_ASKPASS).toBeDefined()
+    // The whole chain runs unchanged; the token rides only in the env overlay.
+    expect(event.args.command).toBe(
+      'git clone https://github.com/acme/widgets.git /tmp/x && git -C /tmp/x fetch origin main',
+    )
+    expect(JSON.stringify(event.args.command)).not.toContain('ghs_minted')
+  })
+
   test('classic PAT: does not mint for git', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
