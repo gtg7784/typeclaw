@@ -8,11 +8,12 @@ import { ensureGitAskPassHelper } from './git-askpass'
 import { analyzeGitCommand, defaultGitResolvers } from './git-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
-import { classifyGhToken } from './token-class'
+import { classifyGhToken, shouldMintAppToken } from './token-class'
 
 export default definePlugin({
   plugin: async (ctx) => {
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
+    const hasAppTokenResolver = ctx.github.hasAppTokenResolver
     const resolveToken = async (workspace: string) => {
       const result = await resolveTokenForRepo(workspace)
       return result.kind === 'token' ? result.token : null
@@ -66,6 +67,10 @@ export default definePlugin({
       // `gh` fails honestly if the named repo is under a different owner.
       if (tokenClass === 'fine-grained-pat') return
 
+      // No App auth (no App-class GH_TOKEN and no live minter): leave whatever
+      // is seeded so `gh` fails honestly rather than us guessing a token.
+      if (!shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver())) return
+
       const result = await resolveTokenForRepo(decision.repoSlug)
       if (result.kind === 'unavailable') return { block: true, reason: result.reason }
       // Inject via the internal env overlay (delivered to the spawn / bwrap
@@ -82,8 +87,10 @@ export default definePlugin({
     }): Promise<HookResult> => {
       const { event, command, agentDir } = params
       // Only App auth re-mints per repo. Classic/fine-grained PATs and absent
-      // tokens are left untouched, exactly as the gh path treats them.
-      if (classifyGhToken(process.env.GH_TOKEN) !== 'app') return
+      // tokens are left untouched, exactly as the gh path treats them. App auth
+      // is detected by the live minter too, not just an App-class GH_TOKEN:
+      // multi-owner / no-repos App configs never seed GH_TOKEN yet can mint.
+      if (!shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver())) return
 
       const decision = await analyzeGitCommand(command, { cwd: agentDir, resolvers: defaultGitResolvers })
       if (decision.kind === 'pass-through') return

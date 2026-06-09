@@ -22,6 +22,7 @@ export type LoadPluginsOptions = {
   loadEntry?: LoadPluginEntryFn
   roles?: RolesConfig
   resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
+  hasGithubAppTokenResolver?: () => boolean
   // Bundled plugins resolved by the runtime (not from typeclaw.json). Loaded
   // before user-declared `entries` so a config block named after a bundled
   // plugin (e.g. "memory") is consumed by the bundled plugin, and so plugin-
@@ -104,6 +105,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       logger,
       permissions,
       resolveGithubTokenForRepo: opts.resolveGithubTokenForRepo,
+      hasGithubAppTokenResolver: opts.hasGithubAppTokenResolver,
       spawnSubagent: (name, payload, options) => spawnSubagentImpl(name, payload, options),
       isBooted: () => booted,
     })

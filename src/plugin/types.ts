@@ -280,6 +280,7 @@ export type PluginContext<TConfig = never> = {
 
 export type PluginGithubServices = {
   resolveTokenForRepo: ResolveGithubTokenForRepo
+  hasAppTokenResolver: () => boolean
 }
 
 export type PluginExports = {

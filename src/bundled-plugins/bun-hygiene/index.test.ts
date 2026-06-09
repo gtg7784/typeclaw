@@ -67,7 +67,10 @@ function pluginContext(): PluginContext<undefined> {
     config: undefined,
     logger: noopLogger,
     permissions: noopPermissionService,
-    github: { resolveTokenForRepo: async () => ({ kind: 'unavailable', reason: 'test' }) },
+    github: {
+      resolveTokenForRepo: async () => ({ kind: 'unavailable', reason: 'test' }),
+      hasAppTokenResolver: () => false,
+    },
     spawnSubagent: async () => {},
   }
 }
