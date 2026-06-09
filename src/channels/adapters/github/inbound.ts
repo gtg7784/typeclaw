@@ -396,17 +396,24 @@ export function classifyGithubInbound(
     const root = parentId ?? id
     const parent =
       parentId !== null && options?.reviewCommentParent?.parentId === parentId ? options.reviewCommentParent : null
+    const commenter = readUser(comment.user)
+    const directedAtBot =
+      parentId === null &&
+      isSelfPr(readUser(pr.user), selfLogin, options?.authType ?? 'pat') &&
+      commenter !== null &&
+      !isSelfAuthor(commenter, null, selfLogin)
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: String(root) },
       comment.body,
       id,
-      readUser(comment.user),
+      commenter,
       mention,
       comment.created_at,
       { kind: 'pr-review-comment', owner: repository.owner, repo: repository.name, commentId: id },
       false,
       {
         suppressSticky: true,
+        ...(directedAtBot ? { forceBotMention: true } : {}),
         replyToBotMessageId: parent?.isSelf === true ? String(parent.parentId) : null,
         replyToOtherMessageId: parent?.isSelf === false ? String(parent.parentId) : null,
       },
@@ -533,6 +540,11 @@ export function classifyGithubInbound(
       : reviewer !== null
         ? synthesizeReviewStateText(reviewer.login, number, readString(pr, 'title'), readString(review, 'state'))
         : ''
+    const directedAtBot =
+      isSelfPr(readUser(pr.user), selfLogin, options?.authType ?? 'pat') &&
+      reviewer !== null &&
+      !isSelfAuthor(reviewer, null, selfLogin) &&
+      isActionableReviewState(readString(review, 'state'))
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
       text,
@@ -542,7 +554,7 @@ export function classifyGithubInbound(
       review.submitted_at,
       null,
       !hasBody,
-      { suppressSticky: true },
+      { suppressSticky: true, ...(directedAtBot ? { forceBotMention: true } : {}) },
     )
   }
 
@@ -591,6 +603,12 @@ type BuildInboundOptions = {
   suppressSticky?: boolean
   replyToBotMessageId?: string | null
   replyToOtherMessageId?: string | null
+  // Forces isBotMention=true with no @-handle in the body. A review (or
+  // top-level review comment) on a PR the agent ITSELF authored is directed at
+  // the bot — the inverse of review_requested — so it engages even though the
+  // reviewer never types `@bot`. Paired with suppressSticky so reviews on OTHER
+  // people's PRs still observe-only (preserving the PR #672 fix).
+  forceBotMention?: boolean
 }
 
 // A GitHub App can never be a `requested_reviewer` — that field only holds
@@ -799,7 +817,7 @@ function buildInbound(
   // Synthesized awareness lines carry an `@author` prefix describing who acted;
   // that handle is the author, never a third-party mention of the bot, so the
   // body-text mention heuristic must not fire on it.
-  const isBotMention = !synthesizedAwareness && textMentionsBot(text, mention)
+  const isBotMention = options?.forceBotMention === true || (!synthesizedAwareness && textMentionsBot(text, mention))
   const replyToBotMessageId = options?.replyToBotMessageId ?? null
   const replyToOtherMessageId = options?.replyToOtherMessageId ?? key.replyToOtherMessageId
   return {
@@ -852,6 +870,15 @@ function synthesizeReviewStateText(
         ? 'requested changes on'
         : 'submitted a review on'
   return `@${reviewer} ${verb} PR #${number}${label}.`
+}
+
+// A review on the agent's own PR engages it only when there is something to act
+// on. APPROVED clears the PR and needs no reply, so engaging would just produce
+// "thanks" churn; it stays awareness-only. COMMENTED and CHANGES_REQUESTED (and
+// any non-approval state) carry feedback the agent should address. State case
+// varies by payload source (webhook vs REST), so normalize before matching.
+function isActionableReviewState(state: string | null): boolean {
+  return state?.toLowerCase() !== 'approved'
 }
 
 async function resolveTeamMembership(
@@ -979,6 +1006,17 @@ function isSelfAuthor(author: GithubUser, selfId: string | null, selfLogin: stri
   if (selfId !== null && String(author.id) === selfId) return true
   if (selfLogin !== null && author.login === selfLogin) return true
   return false
+}
+
+// Whether the PR's OPENER is this agent. Distinct from isSelfAuthor (which
+// guards self-loops on the event ACTOR by id/login): here we have only the
+// `pull_request.user` from a review payload, no id to compare, and under App
+// auth the bot opens PRs as the decoy account (login = slug, e.g. `typeey`),
+// not the actor login `typeey[bot]`. So this matches selfLogin AND the decoy
+// slug — mirroring resolveBotMentionLogins.
+function isSelfPr(prUser: GithubUser | null, selfLogin: string | null, authType: 'pat' | 'app'): boolean {
+  if (prUser === null || selfLogin === null) return false
+  return resolveBotMentionLogins(selfLogin, authType).includes(prUser.login)
 }
 
 type GithubUser = { login: string; id: number; type?: string }
