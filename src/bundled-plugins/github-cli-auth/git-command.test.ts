@@ -192,3 +192,68 @@ describe('analyzeGitCommand — config value flag is not mistaken for subcommand
     })
   })
 })
+
+describe('analyzeGitCommand — push uses pushurl, not fetch url', () => {
+  // A remote whose fetch url and push url point at different repos/owners.
+  const splitRemote = resolvers({
+    resolveRemoteUrl: async (_cwd, _remote, forPush) =>
+      forPush ? 'https://github.com/acme/widgets.git' : 'https://github.com/other/fetchonly.git',
+  })
+
+  test('push resolves the push url (forPush=true)', async () => {
+    expect(await analyze('git push origin main', splitRemote)).toEqual({ kind: 'inject', repoSlug: 'acme/widgets' })
+  })
+
+  test('fetch resolves the fetch url (forPush=false)', async () => {
+    expect(await analyze('git fetch origin', splitRemote)).toEqual({ kind: 'inject', repoSlug: 'other/fetchonly' })
+  })
+
+  test('forPush flag is passed to the resolver per subcommand', async () => {
+    const seen: Array<{ remote: string; forPush: boolean }> = []
+    const r = resolvers({
+      resolveRemoteUrl: async (_cwd, remote, forPush) => {
+        seen.push({ remote, forPush })
+        return 'https://github.com/acme/widgets.git'
+      },
+    })
+    await analyze('git push origin main', r)
+    await analyze('git fetch origin', r)
+    expect(seen).toEqual([
+      { remote: 'origin', forPush: true },
+      { remote: 'origin', forPush: false },
+    ])
+  })
+})
+
+describe('analyzeGitCommand — multi-remote resolution', () => {
+  test('fetch --multiple across two owners blocks', async () => {
+    const r = resolvers({
+      resolveRemoteUrl: async (_cwd, remote) =>
+        remote === 'origin' ? 'https://github.com/acme/widgets.git' : 'https://github.com/other/widgets.git',
+    })
+    expect((await analyze('git fetch --multiple origin upstream', r)).kind).toBe('block')
+  })
+
+  test('fetch --multiple across one owner injects', async () => {
+    const r = resolvers({
+      resolveRemoteUrl: async (_cwd, remote) =>
+        remote === 'origin' ? 'https://github.com/acme/widgets.git' : 'https://github.com/acme/tools.git',
+    })
+    expect(await analyze('git fetch --multiple origin upstream', r)).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  test('push origin main treats main as a refspec, not a second remote', async () => {
+    const seen: string[] = []
+    const r = resolvers({
+      resolveRemoteUrl: async (_cwd, remote) => {
+        seen.push(remote)
+        return 'https://github.com/acme/widgets.git'
+      },
+    })
+    await analyze('git push origin main', r)
+    expect(seen).toEqual(['origin'])
+  })
+})

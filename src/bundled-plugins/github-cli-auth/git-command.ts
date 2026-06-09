@@ -15,7 +15,10 @@ export type GitCommandDecision =
 
 // Returns null when the remote/config is absent or git fails — the analyzer
 // then passes through so git fails honestly rather than us guessing a repo.
-export type GitRemoteResolver = (cwd: string, remote: string) => Promise<string | null>
+// forPush selects the PUSH url (`git remote get-url --push`), which differs from
+// the fetch url when a remote sets `pushurl`; minting against the fetch url for a
+// push would scope the token to the wrong repo/owner.
+export type GitRemoteResolver = (cwd: string, remote: string, forPush: boolean) => Promise<string | null>
 export type GitConfigResolver = (cwd: string, key: string) => Promise<string | null>
 export type GitBranchResolver = (cwd: string) => Promise<string | null>
 
@@ -45,7 +48,8 @@ async function runGit(cwd: string, args: string[]): Promise<string | null> {
 }
 
 export const defaultGitResolvers: GitResolvers = {
-  resolveRemoteUrl: (cwd, remote) => runGit(cwd, ['remote', 'get-url', remote]),
+  resolveRemoteUrl: (cwd, remote, forPush) =>
+    runGit(cwd, forPush ? ['remote', 'get-url', '--push', remote] : ['remote', 'get-url', remote]),
   resolveConfig: (cwd, key) => runGit(cwd, ['config', '--get', key]),
   resolveCurrentBranch: (cwd) => runGit(cwd, ['symbolic-ref', '--short', 'HEAD']),
 }
@@ -119,16 +123,24 @@ async function resolveRepoSlugs(
   // clone needs an explicit URL; it has no configured-remote fallback.
   if (subcommand === 'clone') return []
 
-  const remoteName = extractRemoteName(args) ?? (await resolveDefaultPushRemote(cwd, resolvers))
-  if (remoteName === null) return []
-  if (looksLikeUrl(remoteName)) {
-    const slug = parseGithubRepoFromGitUrl(remoteName)
-    return slug === null ? [] : [slug]
+  // Only `push` consults the push url; fetch/pull/ls-remote use the fetch url.
+  const forPush = subcommand === 'push'
+
+  // EVERY named remote must be resolved, not just the first: `git fetch
+  // --multiple origin upstream` touches both, and feeding only one to the
+  // multi-owner guard would let a second-owner remote slip past and still mint.
+  const remoteNames = extractRemoteNames(args)
+  const remotes = remoteNames.length > 0 ? remoteNames : [await resolveDefaultPushRemote(cwd, resolvers)]
+
+  const slugs: string[] = []
+  for (const remote of remotes) {
+    if (remote === null) continue
+    const url = looksLikeUrl(remote) ? remote : await resolvers.resolveRemoteUrl(cwd, remote, forPush)
+    if (url === null) continue
+    const slug = parseGithubRepoFromGitUrl(url)
+    if (slug !== null) slugs.push(slug)
   }
-  const url = await resolvers.resolveRemoteUrl(cwd, remoteName)
-  if (url === null) return []
-  const slug = parseGithubRepoFromGitUrl(url)
-  return slug === null ? [] : [slug]
+  return slugs
 }
 
 // Mirrors git's own push-remote resolution order for a bare `git push`.
@@ -206,13 +218,18 @@ function findSubcommand(args: readonly string[]): string | undefined {
   return undefined
 }
 
-function extractRemoteName(args: readonly string[]): string | null {
+// The remote name(s) a command targets. Normally just the first positional —
+// later positionals are refspecs (`git push origin main` -> remote `origin`,
+// refspec `main`). With `--multiple` (fetch), EVERY positional is a remote, so
+// all are returned to feed the multi-owner guard. URL positionals are excluded
+// here; resolveRepoSlugs handles a bare-URL target directly.
+function extractRemoteNames(args: readonly string[]): string[] {
   const sub = findSubcommand(args)
-  if (sub === undefined) return null
-  const positionals = positionalsAfterSubcommand(sub, args)
-  const first = positionals[0]
-  if (first === undefined || looksLikeUrl(first)) return null
-  return first
+  if (sub === undefined) return []
+  const positionals = positionalsAfterSubcommand(sub, args).filter((p) => !looksLikeUrl(p))
+  if (positionals.length === 0) return []
+  if (args.includes('--multiple')) return positionals
+  return [positionals[0] as string]
 }
 
 function positionalsAfterSubcommand(subcommand: string, args: readonly string[]): string[] {
