@@ -625,6 +625,107 @@ describe('classifyGithubInbound', () => {
   })
 })
 
+describe('classifyGithubInbound — review traffic on the bot-authored PR engages', () => {
+  // Regression: a peer reviewer (human or bot) reviewing the bot's OWN PR is
+  // directed at the bot — the inverse of review_requested — but review traffic
+  // is explicit-only (suppressSticky) and never @mentions the bot, so it was
+  // silently observed and the bot could not address the review. Self-PR review
+  // traffic must force the engagement trigger while staying sticky-free, so
+  // reviews on OTHER people's PRs remain observe-only (the PR #672 fix).
+  function reviewOnSelfPr(reviewer: Record<string, unknown>, state = 'COMMENTED', body = ''): Record<string, unknown> {
+    return {
+      action: 'submitted',
+      repository: repo(),
+      pull_request: {
+        number: 7,
+        id: 700,
+        title: 'Add the thing',
+        user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+      },
+      review: { id: 5002, body, state, submitted_at: '2026-01-01T00:00:00Z', user: reviewer },
+    }
+  }
+
+  it('engages a peer-bot review on the bot-authored PR', () => {
+    const msg = classifyGithubInbound(
+      'pull_request_review',
+      reviewOnSelfPr({ login: 'peer-bot', id: 20, type: 'Bot' }),
+      'typeclaw-bot',
+    )
+    expect(msg?.isBotMention).toBe(true)
+    expect(msg?.suppressSticky).toBe(true)
+    expect(msg?.authorName).toBe('peer-bot')
+  })
+
+  it('engages a human review on the bot-authored PR', () => {
+    const msg = classifyGithubInbound('pull_request_review', reviewOnSelfPr(user()), 'typeclaw-bot')
+    expect(msg?.isBotMention).toBe(true)
+  })
+
+  it('keeps a review on someone else PR observe-only (no forced mention)', () => {
+    const payload = reviewOnSelfPr({ login: 'peer-bot', id: 20, type: 'Bot' })
+    ;(payload.pull_request as Record<string, unknown>).user = user()
+    const msg = classifyGithubInbound('pull_request_review', payload, 'typeclaw-bot')
+    expect(msg?.isBotMention).toBe(false)
+  })
+
+  it('does not force-engage an APPROVED review on the bot PR (no thanks churn)', () => {
+    const msg = classifyGithubInbound(
+      'pull_request_review',
+      reviewOnSelfPr({ login: 'peer-bot', id: 20, type: 'Bot' }, 'APPROVED'),
+      'typeclaw-bot',
+    )
+    expect(msg?.isBotMention).toBe(false)
+  })
+
+  it('engages a CHANGES_REQUESTED review on the bot PR', () => {
+    const msg = classifyGithubInbound(
+      'pull_request_review',
+      reviewOnSelfPr({ login: 'peer-bot', id: 20, type: 'Bot' }, 'CHANGES_REQUESTED'),
+      'typeclaw-bot',
+    )
+    expect(msg?.isBotMention).toBe(true)
+  })
+
+  it('recognizes the bot PR via the App decoy slug', () => {
+    const payload = reviewOnSelfPr({ login: 'peer-bot', id: 20, type: 'Bot' })
+    ;(payload.pull_request as Record<string, unknown>).user = { login: 'typeclaw', id: 42, type: 'User' }
+    const msg = classifyGithubInbound('pull_request_review', payload, 'typeclaw[bot]', { authType: 'app' })
+    expect(msg?.isBotMention).toBe(true)
+  })
+
+  it('engages a top-level review comment on the bot-authored PR', () => {
+    const payload = reviewCommentPayload({ inReplyToId: null })
+    ;(payload.pull_request as Record<string, unknown>) = {
+      number: 7,
+      user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+    }
+    const msg = classifyGithubInbound('pull_request_review_comment', payload, 'typeclaw-bot')
+    expect(msg?.isBotMention).toBe(true)
+    expect(msg?.suppressSticky).toBe(true)
+  })
+
+  it('keeps a top-level review comment on someone else PR observe-only', () => {
+    const payload = reviewCommentPayload({ inReplyToId: null })
+    ;(payload.pull_request as Record<string, unknown>) = { number: 7, user: user() }
+    const msg = classifyGithubInbound('pull_request_review_comment', payload, 'typeclaw-bot')
+    expect(msg?.isBotMention).toBe(false)
+  })
+
+  it('leaves a reply to another reviewer on the bot PR observe-only (reply-target wins)', () => {
+    const payload = reviewCommentPayload({ inReplyToId: 101 })
+    ;(payload.pull_request as Record<string, unknown>) = {
+      number: 7,
+      user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+    }
+    const msg = classifyGithubInbound('pull_request_review_comment', payload, 'typeclaw-bot', {
+      reviewCommentParent: { isSelf: false, parentId: 101 },
+    })
+    expect(msg?.isBotMention).toBe(false)
+    expect(msg?.replyToOtherMessageId).toBe('101')
+  })
+})
+
 describe('classifyGithubInbound — empty-body handling', () => {
   it('drops a pull_request_review_comment with an empty body', () => {
     const payload = reviewCommentPayload()
