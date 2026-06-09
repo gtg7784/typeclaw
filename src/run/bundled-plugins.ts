@@ -1,6 +1,7 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
 import backupPlugin from '@/bundled-plugins/backup'
 import bunHygienePlugin from '@/bundled-plugins/bun-hygiene'
+import docRenderPlugin from '@/bundled-plugins/doc-render'
 import explorerPlugin from '@/bundled-plugins/explorer'
 import githubCliAuthPlugin from '@/bundled-plugins/github-cli-auth'
 import guardPlugin from '@/bundled-plugins/guard'
@@ -58,6 +59,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
+  { name: 'doc-render', version: undefined, source: '<bundled>', defined: docRenderPlugin },
   { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
   { name: 'scout', version: undefined, source: '<bundled>', defined: scoutPlugin },
   { name: 'reviewer', version: undefined, source: '<bundled>', defined: reviewerPlugin },
