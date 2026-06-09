@@ -189,6 +189,22 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/Do not post an "On it" ack comment/i)
   })
 
+  test('github channel origin tells the bot a formal review verdict is the comment and must not be re-posted', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'pr:7',
+      thread: null,
+    })
+    // guards the real failure: an APPROVE review body and an identical plain
+    // comment posted seconds apart — the same verdict landing twice
+    expect(out).toMatch(/review verdict already IS the comment/i)
+    expect(out).toContain('APPROVE')
+    expect(out).toMatch(/never post it twice|visible duplicate/i)
+    expect(out).toMatch(/skip_response/)
+  })
+
   test('non-github channel origin keeps the "On it." text ack', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
