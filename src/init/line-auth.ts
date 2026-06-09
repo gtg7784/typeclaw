@@ -7,7 +7,7 @@ import { SecretsLineCredentialStore } from '@/secrets/line-store'
 export type LineBootstrapStatus = { ok: true } | { ok: false; reason: string }
 
 export type LineLoginCallbacks = {
-  onQRUrl?: (url: string) => void
+  onQRUrl?: (url: string) => void | Promise<void>
   onPincode: (pin: string) => void
 }
 
@@ -33,7 +33,10 @@ export type LineLoginInput =
 // Structural subset of the upstream LineClient the bootstrap drives. Declared
 // here so tests can inject a fake without standing up the real LOCO client.
 export type LineLoginClient = {
-  loginWithQR(options: { onQRUrl: (url: string) => void; onPincode: (pin: string) => void }): Promise<LineLoginResult>
+  loginWithQR(options: {
+    onQRUrl: (url: string) => void | Promise<void>
+    onPincode: (pin: string) => void
+  }): Promise<LineLoginResult>
   loginWithEmail(options: {
     email: string
     password: string
@@ -58,7 +61,9 @@ export async function runLineBootstrap(input: LineLoginInput): Promise<LineBoots
     const result =
       input.method === 'qr'
         ? await client.loginWithQR({
-            onQRUrl: (url) => input.callbacks.onQRUrl?.(url),
+            onQRUrl: async (url) => {
+              await input.callbacks.onQRUrl?.(url)
+            },
             onPincode: input.callbacks.onPincode,
           })
         : await client.loginWithEmail({

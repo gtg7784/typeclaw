@@ -29,6 +29,7 @@ import { runLineBootstrap } from '@/init/line-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
+import { displayQR } from './qr'
 import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
 
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
@@ -66,14 +67,15 @@ const addSub = defineCommand({
 
     intro(`Adding channel: ${CHANNEL_LABELS[channel]}`)
 
-    const credentials = await collectCredentials(channel, cwd)
+    const lineSpinnerHolder: LineAuthSpinnerHolder = { current: null }
+    const credentials = await collectCredentials(channel, cwd, lineSpinnerHolder)
 
     const events: AddChannelStepEvent[] = []
     try {
       await runAddChannel({
         cwd,
         ...credentials,
-        onProgress: reportProgress(events),
+        onProgress: reportProgress(events, lineSpinnerHolder),
       })
       if (credentials.channel === 'github' && credentials.tunnelProvider === 'none') {
         log.warn(
@@ -256,10 +258,13 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
 }
 
 async function runLineReauth(cwd: string): Promise<void> {
-  const login = await promptLineLogin()
+  const holder: LineAuthSpinnerHolder = { current: null }
+  const login = await promptLineLogin(holderSpinnerControl(holder))
   const s = spinner()
   s.start('Logging in to LINE...')
+  holder.current = s
   const result = await runLineBootstrap({ ...login, agentDir: cwd })
+  holder.current = null
   if (!result.ok) {
     s.stop(`LINE login failed: ${result.reason}`)
     process.exit(1)
@@ -607,7 +612,11 @@ type CollectedCredentials =
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
     }
 
-async function collectCredentials(channel: ChannelKind, cwd: string): Promise<CollectedCredentials> {
+async function collectCredentials(
+  channel: ChannelKind,
+  cwd: string,
+  lineSpinnerHolder?: LineAuthSpinnerHolder,
+): Promise<CollectedCredentials> {
   switch (channel) {
     case 'discord-bot':
       return { channel, discordBotToken: await promptDiscordToken() }
@@ -618,7 +627,7 @@ async function collectCredentials(channel: ChannelKind, cwd: string): Promise<Co
     case 'telegram-bot':
       return { channel, telegramBotToken: await promptTelegramToken() }
     case 'line': {
-      const login = await promptLineLogin()
+      const login = await promptLineLogin(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)
       return {
         channel,
         runLineAuth: ({ cwd: agentDir }) => runLineBootstrap({ ...login, agentDir }),
@@ -1061,7 +1070,7 @@ async function promptKakaotalkCredentials(
 }
 
 type LinePromptResult =
-  | { method: 'qr'; callbacks: { onQRUrl: (url: string) => void; onPincode: (pin: string) => void } }
+  | { method: 'qr'; callbacks: { onQRUrl: (url: string) => Promise<void>; onPincode: (pin: string) => void } }
   | {
       method: 'email'
       email: string
@@ -1069,7 +1078,17 @@ type LinePromptResult =
       callbacks: { onPincode: (pin: string) => void }
     }
 
-async function promptLineLogin(): Promise<LinePromptResult> {
+// The LINE QR login blocks while the SDK long-polls for a scan. During that
+// wait the add-flow spinner ('Logging in to LINE...') would otherwise keep
+// animating on top of the multi-line QR, garbling it. The controller lets the
+// QR callback stop the live spinner, print the QR, then restart it with a
+// "waiting for scan" message so output stays legible.
+export type LineQrSpinnerControl = {
+  stop: () => void
+  waiting: () => void
+}
+
+async function promptLineLogin(spinnerControl?: LineQrSpinnerControl): Promise<LinePromptResult> {
   note(
     [
       'LINE authentication uses a personal account registered as a sub-device.',
@@ -1100,7 +1119,7 @@ async function promptLineLogin(): Promise<LinePromptResult> {
     return {
       method: 'qr',
       callbacks: {
-        onQRUrl: printLineQrUrl,
+        onQRUrl: (url) => presentLineQr(url, spinnerControl),
         onPincode,
       },
     }
@@ -1125,17 +1144,63 @@ async function promptLineLogin(): Promise<LinePromptResult> {
   return { method: 'email', email, password: pwd, callbacks: { onPincode } }
 }
 
-// URL stays OUT of note(): clack wraps long lines with a `│` gutter that
-// corrupts copy-pasted URLs, and this login URL always wraps (it carries
-// `?secret=...&e2eeVersion=...`). Same fix as src/cli/oauth-callbacks.ts.
-export function printLineQrUrl(url: string, output: NodeJS.WritableStream = process.stdout): void {
-  note('Open this URL on your phone (or scan the QR it renders):', 'Log in to LINE')
-  output.write(`${url}\n`)
-  output.write('\n')
+async function presentLineQr(url: string, spinnerControl?: LineQrSpinnerControl): Promise<void> {
+  spinnerControl?.stop()
+  const presentation = await displayQR(url, {
+    title: 'LINE login',
+    scanInstruction: 'Scan with the LINE app on your phone',
+  })
+
+  const lines: string[] = []
+  if (presentation.terminal !== null) {
+    lines.push(presentation.terminal)
+    lines.push('Scan the QR code above with the LINE app on your phone.')
+    lines.push('If it is too small to scan, enlarge the terminal (or zoom out) and re-run.')
+    if (presentation.opened) {
+      lines.push('A browser window with a larger QR code was also opened.')
+    }
+  } else if (presentation.opened) {
+    lines.push('A browser window with the QR code was opened. Scan it with the LINE app on your phone.')
+  } else if (presentation.htmlPath !== null) {
+    lines.push(`Open this file in a browser and scan it with the LINE app: ${presentation.htmlPath}`)
+  }
+  if (lines.length > 0) note(lines.join('\n'), 'Scan to log in to LINE')
+
+  if (presentation.terminal === null && !presentation.opened && presentation.htmlPath === null) {
+    printLineQrUrl(url)
+  }
+
+  spinnerControl?.waiting()
 }
 
-function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEvent) => void {
-  const spinners: Partial<Record<AddChannelStepEvent['step'], ReturnType<typeof spinner>>> = {}
+// Last-resort fallback when no QR could be rendered. The raw URL stays OUT of
+// note(): clack wraps long lines with a `│` gutter that corrupts the login URL
+// (it carries `?secret=...&e2eeVersion=...`). Same constraint as
+// src/cli/oauth-callbacks.ts.
+export function printLineQrUrl(url: string, output: NodeJS.WritableStream = process.stdout): void {
+  note('Open this URL on a device that can render it as a QR code:', 'Log in to LINE')
+  output.write(`${url}\n\n`)
+}
+
+type Spinner = ReturnType<typeof spinner>
+
+// `current` is the live `line-auth` spinner, shared between `reportProgress`
+// (which owns its lifecycle) and the QR callback (which must pause it to print
+// a legible QR). It is null whenever no LINE login spinner is active.
+export type LineAuthSpinnerHolder = { current: Spinner | null }
+
+function holderSpinnerControl(holder: LineAuthSpinnerHolder): LineQrSpinnerControl {
+  return {
+    stop: () => holder.current?.stop('QR code ready.'),
+    waiting: () => holder.current?.start('Waiting for you to scan the QR code with the LINE app...'),
+  }
+}
+
+function reportProgress(
+  events: AddChannelStepEvent[],
+  lineSpinnerHolder?: LineAuthSpinnerHolder,
+): (event: AddChannelStepEvent) => void {
+  const spinners: Partial<Record<AddChannelStepEvent['step'], Spinner>> = {}
 
   return (event) => {
     events.push(event)
@@ -1143,6 +1208,7 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
       const s = spinner()
       s.start(START_MESSAGES[event.step])
       spinners[event.step] = s
+      if (event.step === 'line-auth' && lineSpinnerHolder) lineSpinnerHolder.current = s
       return
     }
 
@@ -1151,6 +1217,7 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
 
     switch (event.step) {
       case 'line-auth':
+        if (lineSpinnerHolder) lineSpinnerHolder.current = null
         s.stop(reportLineAuth(event.result))
         break
       case 'kakaotalk-auth':
