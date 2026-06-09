@@ -83,7 +83,240 @@ const KO_PHRASES: readonly string[] = [
   '곧 알려',
 ]
 
-const ALL_PHRASES: readonly string[] = [...EN_PHRASES, ...KO_PHRASES]
+// The remaining languages mirror the precision-first selection above: every
+// entry pairs a FIRST-PERSON future/volitional anchor with a work verb
+// (check/look/continue/proceed/verify) or is an immediate-work idiom ("on it
+// now"). The same false-negative bias holds — bare verbs, bare acknowledgments
+// ("ok", "sí", "好"), second-person imperatives ("you continue"), and
+// descriptive past forms ("I checked") are deliberately excluded because a
+// substring match on those would mis-fire. Latin/Cyrillic/Arabic/Indic entries
+// are inflected first-person-future forms (or multi-word) so they cannot
+// collide with a bare common word; CJK entries are full 4+ character
+// intent phrases, never a lone noun.
+
+// Spanish: "voy a" / "déjame" + work verb; "enseguida" (right away) idioms.
+const ES_PHRASES: readonly string[] = [
+  'voy a revisar',
+  'voy a comprobar',
+  'voy a verificar',
+  'voy a mirar',
+  'voy a continuar',
+  'voy a seguir',
+  'déjame revisar',
+  'déjame comprobar',
+  'déjame verificar',
+  'déjame mirar',
+  'lo reviso enseguida',
+  'lo verifico enseguida',
+  'enseguida lo reviso',
+  'enseguida reviso',
+  'un momento',
+  'dame un momento',
+  'dame un segundo',
+]
+
+// French: "je vais" + work verb; "laisse-moi" idioms.
+const FR_PHRASES: readonly string[] = [
+  'je vais vérifier',
+  'je vais regarder',
+  'je vais continuer',
+  'je vais poursuivre',
+  'je vais voir',
+  'je vais contrôler',
+  'laisse-moi vérifier',
+  'laisse-moi regarder',
+  'je vérifie tout de suite',
+  'je regarde tout de suite',
+  'un instant',
+  'donne-moi un instant',
+  'donne-moi une seconde',
+]
+
+// Italian: "vado a" / "fammi" + work verb; "controllo subito" idioms.
+const IT_PHRASES: readonly string[] = [
+  'vado a controllare',
+  'vado a verificare',
+  'vado a guardare',
+  'fammi controllare',
+  'fammi verificare',
+  'fammi guardare',
+  'controllo subito',
+  'verifico subito',
+  'continuo subito',
+  'un momento',
+  'dammi un momento',
+  'dammi un secondo',
+]
+
+// Portuguese: "vou" + work verb; "deixa eu" idioms.
+const PT_PHRASES: readonly string[] = [
+  'vou verificar',
+  'vou checar',
+  'vou conferir',
+  'vou olhar',
+  'vou continuar',
+  'vou prosseguir',
+  'deixa eu verificar',
+  'deixa eu conferir',
+  'deixa eu olhar',
+  'verifico já',
+  'já verifico',
+  'um momento',
+  'me dê um momento',
+  'me dá um segundo',
+]
+
+// German: "ich werde" / "lass mich" + work verb; "ich schaue gleich" idioms.
+const DE_PHRASES: readonly string[] = [
+  'ich werde prüfen',
+  'ich werde überprüfen',
+  'ich werde nachsehen',
+  'ich werde weitermachen',
+  'ich werde fortfahren',
+  'lass mich prüfen',
+  'lass mich nachsehen',
+  'ich schaue gleich',
+  'ich prüfe gleich',
+  'gleich prüfen',
+  'gleich überprüfen',
+  'gleich nachsehen',
+  'einen moment',
+  'einen augenblick',
+  'gib mir eine sekunde',
+]
+
+// Russian: first-person-future verbs (проверю/посмотрю/продолжу) — the -ю/-у
+// inflection is unambiguously "I will", so it is a safe self-anchor.
+const RU_PHRASES: readonly string[] = [
+  'сейчас проверю',
+  'я проверю',
+  'я посмотрю',
+  'я продолжу',
+  'продолжу проверку',
+  'сейчас посмотрю',
+  'дайте мне минуту',
+  'одну секунду',
+  'минутку',
+]
+
+// Chinese: 我会/我来/我再 + work verb. Full multi-character intent phrases only;
+// no bare nouns. 继续 alone is excluded (could be "you continue").
+const ZH_PHRASES: readonly string[] = [
+  '我来确认',
+  '我来检查',
+  '我来看看',
+  '我会确认',
+  '我会检查',
+  '我会继续',
+  '我再确认',
+  '我再检查',
+  '我继续确认',
+  '我马上确认',
+  '我马上检查',
+  '我马上看',
+  '稍等一下',
+  '我看一下',
+]
+
+// Japanese: -てみます / -します first-person volitional on check/look/continue.
+// Bare nouns (確認) are excluded; the verb ending carries the self-direction.
+const JA_PHRASES: readonly string[] = [
+  '確認します',
+  '確認してみます',
+  '確認いたします',
+  '調べてみます',
+  '調べます',
+  '見てみます',
+  '続けます',
+  '引き続き確認します',
+  'すぐ確認します',
+  '少々お待ちください',
+  'ちょっと待ってください',
+]
+
+// Arabic: future particle سـ prefixed first-person verb (سأتحقق = "I will
+// verify"). The سأ prefix is unambiguously first-person-future.
+const AR_PHRASES: readonly string[] = [
+  'سأتحقق',
+  'سأتأكد',
+  'سأراجع',
+  'سأطلع',
+  'سأكمل',
+  'سأواصل',
+  'دعني أتحقق',
+  'دعني أراجع',
+  'لحظة من فضلك',
+]
+
+// Hindi: first-person-future "मैं … करूँगा/देखूँगा" forms (multi-word so they
+// cannot collide with a bare common word).
+const HI_PHRASES: readonly string[] = [
+  'जाँच करूँगा',
+  'जांच करूंगा',
+  'देख लूँगा',
+  'देख लूंगा',
+  'जारी रखूँगा',
+  'जारी रखूंगा',
+  'एक मिनट रुकिए',
+]
+
+// Turkish: first-person-future "-eceğim/-acağım" on check/look/continue verbs.
+const TR_PHRASES: readonly string[] = [
+  'kontrol edeceğim',
+  'kontrol ediyorum',
+  'bakacağım',
+  'inceleyeceğim',
+  'devam edeceğim',
+  'hemen kontrol ediyorum',
+  'hemen bakıyorum',
+  'bir saniye',
+  'bir dakika',
+]
+
+// Vietnamese: "tôi sẽ" / "để tôi" (I will / let me) + work verb.
+const VI_PHRASES: readonly string[] = [
+  'tôi sẽ kiểm tra',
+  'tôi sẽ xem',
+  'tôi sẽ tiếp tục',
+  'để tôi kiểm tra',
+  'để tôi xem',
+  'tôi kiểm tra ngay',
+  'tôi xem ngay',
+  'chờ một chút',
+  'đợi một chút',
+]
+
+// Indonesian: "saya akan" / "biar saya" (I will / let me) + work verb.
+const ID_PHRASES: readonly string[] = [
+  'saya akan periksa',
+  'saya akan cek',
+  'saya akan lihat',
+  'saya akan lanjutkan',
+  'biar saya periksa',
+  'biar saya cek',
+  'saya cek dulu',
+  'saya periksa dulu',
+  'tunggu sebentar',
+  'sebentar ya',
+]
+
+const ALL_PHRASES: readonly string[] = [
+  ...EN_PHRASES,
+  ...KO_PHRASES,
+  ...ES_PHRASES,
+  ...FR_PHRASES,
+  ...IT_PHRASES,
+  ...PT_PHRASES,
+  ...DE_PHRASES,
+  ...RU_PHRASES,
+  ...ZH_PHRASES,
+  ...JA_PHRASES,
+  ...AR_PHRASES,
+  ...HI_PHRASES,
+  ...TR_PHRASES,
+  ...VI_PHRASES,
+  ...ID_PHRASES,
+]
 
 // Reply texts shorter than this are almost always a complete final answer
 // ("네", "ok", "done") where a partial match would be noise. The shortest

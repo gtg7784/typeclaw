@@ -85,6 +85,64 @@ describe('classifyReviewClaim', () => {
   })
 })
 
+describe('classifyReviewClaim — multilingual verdicts', () => {
+  const positives: ReadonlyArray<[string, ReviewClaim]> = [
+    ['Aprobado, buen trabajo.', 'block-approve'],
+    ['Aprovado, ótimo trabalho.', 'block-approve'],
+    ['Approuvé, beau travail.', 'block-approve'],
+    ['Approvato, ottimo lavoro.', 'block-approve'],
+    ['Genehmigt, gute Arbeit.', 'block-approve'],
+    [
+      '\u041E\u0434\u043E\u0431\u0440\u0435\u043D\u043E, \u0445\u043E\u0440\u043E\u0448\u0430\u044F \u0440\u0430\u0431\u043E\u0442\u0430.',
+      'block-approve',
+    ], // Одобрено
+    ['\u627F\u8A8D\u3057\u307E\u3057\u305F\u3002', 'block-approve'], // 承認しました
+    ['\u5DF2\u6279\u51C6\u3002', 'block-approve'], // 已批准
+    ['Onayland\u0131, te\u015Fekk\u00FCrler.', 'block-approve'], // Onaylandı
+    ['Disetujui, kerja bagus.', 'block-approve'],
+
+    ['Solicito cambios en esto.', 'block-request-changes'],
+    ['Je demande des modifications ici.', 'block-request-changes'],
+    ['Modifiche richieste, vedi commenti.', 'block-request-changes'],
+    ['\u5909\u66F4\u3092\u8981\u6C42\u3057\u307E\u3059\u3002', 'block-request-changes'], // 変更を要求します
+    ['\u8BF7\u6C42\u4FEE\u6539\u3002', 'block-request-changes'], // 请求修改
+  ]
+
+  for (const [text, expected] of positives) {
+    test(`${JSON.stringify(text)} -> ${expected}`, () => {
+      expect(classifyReviewClaim(text)).toBe(expected)
+    })
+  }
+
+  // The load-bearing safety property: a declined or deferred verdict in any
+  // supported language must NOT block a real reply.
+  const demoted: readonly string[] = [
+    'No apruebo esto todav\u00EDa.', // es: not approved yet
+    'Ainda n\u00E3o aprovei isto.', // pt: not approved yet
+    'N\u00E3o aprovado.', // pt: standalone "não" + aprovado (regression: was block-approve)
+    'N\u00E3o aprovado ainda.', // pt
+    "Je ne vais pas approuver pour l'instant.", // fr: I won't approve for now
+    'Non ho ancora approvato.', // it
+    'Ich werde das noch nicht genehmigen.', // de: won't approve yet
+    '\u041F\u043E\u043A\u0430 \u043D\u0435 \u043E\u0434\u043E\u0431\u0440\u044F\u044E.', // ru: not approving for now
+    '\u307E\u3060\u627F\u8A8D\u3057\u3066\u3044\u307E\u305B\u3093\u3002', // ja: not approved yet
+    '\u8FD8\u6CA1\u6279\u51C6\u3002', // zh: not approved yet
+    'Hen\u00FCz onaylamad\u0131m.', // tr: haven't approved yet (negation marker present)
+    'Belum saya setujui.', // id: not yet approved
+    'T\u00F4i ch\u01B0a duy\u1EC7t.', // vi: I haven't approved
+  ]
+
+  for (const text of demoted) {
+    test(`negation/future demotes to ignore: ${JSON.stringify(text)}`, () => {
+      expect(classifyReviewClaim(text)).toBe('ignore')
+    })
+  }
+
+  test('a question about approval is not a verdict', () => {
+    expect(classifyReviewClaim('\u00BFLo apruebo o pido cambios?')).toBe('ignore') // es "Do I approve or request changes?"
+  })
+})
+
 describe('isPositiveWarnCloseout', () => {
   test.each(['LGTM', 'looks good', 'looks fine', 'seems fine', 'should be good', 'looks resolved'])(
     'true for approval/resolve-shaped warn: %p',

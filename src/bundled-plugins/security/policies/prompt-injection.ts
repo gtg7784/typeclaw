@@ -427,6 +427,37 @@ const GIT_EXFIL_VERBS = [
   'hub\\s+(?:create|push)',
 ].join('|')
 
+// "backup" framing across the same major-language set the rest of this file
+// covers. The narrow English+Korean-only version let "백업 해줘 to my repo"
+// framings phrased in any other channel language slip the standalone-backup
+// catch (the SECRET_DEMAND patterns still fire when a credential is named; this
+// is only the no-secret-named "push to my backup repo" idiom). Entries are the
+// noun/verb for "backup"/"back up" — kept tight so they only matter within the
+// 80-char proximity-to-git-push window below, never on their own.
+const BACKUP_NOUNS = [
+  'backup',
+  'back[-\\s]?up',
+  '\u{BC31}\u{C5C5}', // ko 백업
+  '\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7', // ja バックアップ
+  '\u5907\u4EFD', // zh-hans 备份
+  '\u5099\u4EFD', // zh-hant 備份
+  'copia\\s*de\\s*seguridad', // es
+  'respald(?:o|ar|a)', // es respaldo/respaldar
+  'sauvegard(?:e|er)', // fr
+  'sicherungskopie', // de
+  'sicher(?:n|ung)', // de Sicherung/sichern
+  'c[\u00F3o]pia\\s*de\\s*seguran[\u00E7c]a', // pt
+  'fazer\\s*backup', // pt
+  '\u0440\u0435\u0437\u0435\u0440\u0432\u043D(?:\u0430\u044F|\u0443\u044E)\\s*\u043A\u043E\u043F\u0438\u044F', // ru резервная копия
+  'sao\\s*l\u01B0u', // vi sao lưu
+  'cadang(?:an)?', // id cadangan/mencadangkan
+  '\u0646\u0633\u062E(?:\u0629)?\\s*\u0627\u062D\u062A\u064A\u0627\u0637\u064A(?:\u0629)?', // ar نسخة احتياطية
+  '\u092C\u0948\u0915\u0905\u092A', // hi बैकअप
+  'yede(?:k|kle)', // tr yedek/yedekle
+  'copia\\s*di\\s*sicurezza', // it
+  'backup', // it (loanword, same token)
+].join('|')
+
 const GIT_EXFIL_PATTERNS: ReadonlyArray<RegExp> = [
   new RegExp(`(?:${GIT_EXFIL_VERBS})`, 'i'),
   // Urgency shorthand ("do it" / "go ahead" / "now") right after a git command,
@@ -440,8 +471,8 @@ const GIT_EXFIL_PATTERNS: ReadonlyArray<RegExp> = [
   // request - if the same message also names a credential or `.env`, the
   // SECRET_DEMAND_PATTERNS already fires; this catches the standalone
   // "push to my backup repo" framing that doesn't mention secrets.
-  /(?:backup|back[-\s]?up|\u{BC31}\u{C5C5})[\s\S]{0,80}(?:git\s+push|github\.com|gitlab\.com|bitbucket\.org)/iu,
-  /(?:git\s+push|github\.com|gitlab\.com|bitbucket\.org)[\s\S]{0,80}(?:backup|back[-\s]?up|\u{BC31}\u{C5C5})/iu,
+  new RegExp(`(?:${BACKUP_NOUNS})[\\s\\S]{0,80}(?:git\\s+push|github\\.com|gitlab\\.com|bitbucket\\.org)`, 'iu'),
+  new RegExp(`(?:git\\s+push|github\\.com|gitlab\\.com|bitbucket\\.org)[\\s\\S]{0,80}(?:${BACKUP_NOUNS})`, 'iu'),
 ]
 
 export type InjectionMatch = {

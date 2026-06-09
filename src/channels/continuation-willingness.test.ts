@@ -29,6 +29,40 @@ describe('detectContinuationWillingness — positive (self-directed future inten
   }
 })
 
+describe('detectContinuationWillingness — positive (multilingual self-directed future intent)', () => {
+  const willing: readonly string[] = [
+    'Lo reviso enseguida, un momento.',
+    'Voy a verificar el resto.',
+    'Je vais vérifier les autres fichiers.',
+    'Laisse-moi regarder ça.',
+    'Vado a controllare subito.',
+    'Vou conferir o restante.',
+    'Ich werde das gleich prüfen.',
+    'Lass mich nachsehen.',
+    'Сейчас проверю остальное.',
+    'Я посмотрю и продолжу.',
+    '我来确认一下其余的。',
+    '我马上检查日志。',
+    '確認してみます、少々お待ちください。',
+    '引き続き確認します。',
+    'سأتحقق من الباقي.',
+    'دعني أراجع ذلك.',
+    'मैं अभी जाँच करूँगा।',
+    'Hemen kontrol ediyorum.',
+    'Devam edeceğim, bir saniye.',
+    'Để tôi kiểm tra phần còn lại.',
+    'Tôi sẽ xem ngay.',
+    'Biar saya cek dulu.',
+    'Saya akan periksa sisanya.',
+  ]
+
+  for (const text of willing) {
+    test(`detects: ${JSON.stringify(text)}`, () => {
+      expect(detectContinuationWillingness(text)).toBe(true)
+    })
+  }
+})
+
 describe('detectContinuationWillingness — negative (final / descriptive / other-directed)', () => {
   const notWilling: readonly string[] = [
     'Done. The diff looks good, no issues.',
@@ -44,6 +78,33 @@ describe('detectContinuationWillingness — negative (final / descriptive / othe
     '리뷰 완료했습니다. 승인합니다.',
     '',
     '...',
+  ]
+
+  for (const text of notWilling) {
+    test(`ignores: ${JSON.stringify(text)}`, () => {
+      expect(detectContinuationWillingness(text)).toBe(false)
+    })
+  }
+})
+
+describe('detectContinuationWillingness — negative (multilingual final / descriptive / other-directed)', () => {
+  const notWilling: readonly string[] = [
+    'Sí, todo bien. Puedes continuar.',
+    'Ya lo revisé, está correcto.',
+    "Oui, c'est bon. Tu peux continuer.",
+    "J'ai vérifié, aucun problème.",
+    'Va bene, ho controllato tutto.',
+    'Está tudo certo, pode continuar.',
+    'Alles gut, ich habe es geprüft.',
+    'Да, всё хорошо, можешь продолжать.',
+    '好的，我检查过了，没问题。',
+    '你可以继续了。',
+    'はい、確認しました。問題ありません。',
+    'تم، تحققت من كل شيء.',
+    'ठीक है, मैंने जाँच लिया।',
+    'Tamam, kontrol ettim, sorun yok.',
+    'Vâng, tôi đã kiểm tra rồi.',
+    'Oke, sudah saya periksa, tidak ada masalah.',
   ]
 
   for (const text of notWilling) {
