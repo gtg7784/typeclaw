@@ -11,6 +11,7 @@ import {
   configSchema,
   extractPluginConfigs,
   expandMountPath,
+  getSandboxWritablePathSpecs,
   loadConfigSync,
   loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
@@ -182,9 +183,9 @@ describe('configSchema', () => {
 })
 
 describe('sandboxSchema', () => {
-  test('defaults realProc to false and writablePaths to [] when omitted', () => {
+  test('defaults realProc to false and writablePaths/symlinks to [] when omitted', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.sandbox).toEqual({ realProc: false, writablePaths: [] })
+    expect(parsed.sandbox).toEqual({ realProc: false, writablePaths: [], symlinks: [] })
   })
 
   test('accepts agent-relative writablePaths', () => {
@@ -209,6 +210,116 @@ describe('sandboxSchema', () => {
 
   test('rejects an empty writablePath string', () => {
     expect(() => configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { writablePaths: [''] } })).toThrow()
+  })
+
+  test('accepts symlinks with absolute and ~/ from paths', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      sandbox: {
+        symlinks: [
+          { from: '~/.metabase-cli', to: 'workspace/.metabase-cli' },
+          { from: '/root/.foo', to: '.foo' },
+        ],
+      },
+    })
+    expect(parsed.sandbox.symlinks).toEqual([
+      { from: '~/.metabase-cli', to: 'workspace/.metabase-cli' },
+      { from: '/root/.foo', to: '.foo' },
+    ])
+  })
+
+  test('rejects a symlink from that is neither absolute nor ~/', () => {
+    expect(() =>
+      configSchema.parse({
+        models: { default: VALID_MODEL },
+        sandbox: { symlinks: [{ from: 'relative/.foo', to: '.foo' }] },
+      }),
+    ).toThrow(/absolute|~\//i)
+  })
+
+  test('rejects a symlink from pointing into /agent', () => {
+    expect(() =>
+      configSchema.parse({
+        models: { default: VALID_MODEL },
+        sandbox: { symlinks: [{ from: '/agent/workspace/.foo', to: '.foo' }] },
+      }),
+    ).toThrow(/agent/i)
+  })
+
+  test.each(['/proc/x', '/sys/x', '/dev/x', '/run/x'])('rejects a symlink from under the kernel path %p', (from) => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from, to: '.foo' }] } }),
+    ).toThrow(/kernel|virtual/i)
+  })
+
+  test('rejects a symlink from that is the filesystem root', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from: '/', to: '.foo' }] } }),
+    ).toThrow(/root/i)
+  })
+
+  test('rejects a symlink to that escapes via ..', () => {
+    expect(() =>
+      configSchema.parse({
+        models: { default: VALID_MODEL },
+        sandbox: { symlinks: [{ from: '~/.foo', to: '../escape' }] },
+      }),
+    ).toThrow(/\.\./)
+  })
+
+  // Regression: `from` is later expanded against $HOME by both consumers, so a
+  // traversal segment could re-enter a banned root after expansion. The raw-string
+  // bans missed it before — `..` must be rejected outright.
+  test('rejects a symlink from with a .. segment (would re-enter a banned root after $HOME expansion)', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from: '~/../x', to: '.foo' }] } }),
+    ).toThrow(/\.\./)
+  })
+
+  test.each([
+    '~/../agent/workspace/.foo',
+    '~/../proc/x',
+    '~/../sys/x',
+    '/var/../proc/x',
+    '/foo/../agent/workspace/.foo',
+  ])('rejects a symlink from that traverses back into a banned root via .. (%p)', (from) => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, sandbox: { symlinks: [{ from, to: '.foo' }] } }),
+    ).toThrow()
+  })
+
+  test('still accepts a legitimate ~/ and absolute from without traversal', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      sandbox: {
+        symlinks: [
+          { from: '~/.foo', to: '.foo' },
+          { from: '/etc/foo', to: 'workspace/foo' },
+        ],
+      },
+    })
+    expect(parsed.sandbox.symlinks).toEqual([
+      { from: '~/.foo', to: '.foo' },
+      { from: '/etc/foo', to: 'workspace/foo' },
+    ])
+  })
+})
+
+describe('getSandboxWritablePathSpecs', () => {
+  test('folds symlinks[].to into the writable specs after writablePaths', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      sandbox: {
+        writablePaths: ['workspace/cache'],
+        symlinks: [{ from: '~/.metabase-cli', to: '.metabase-cli' }],
+      },
+    })
+    expect(getSandboxWritablePathSpecs(parsed)).toEqual(['workspace/cache', '.metabase-cli'])
+  })
+
+  test('returns [] when both are empty', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(getSandboxWritablePathSpecs(parsed)).toEqual([])
   })
 })
 

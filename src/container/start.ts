@@ -533,6 +533,18 @@ export async function planStart({
     runArgs.push('--cap-add=SYS_ADMIN')
   }
 
+  // sandbox.symlinks: the entrypoint shim creates `from -> /agent/<to>` at the
+  // real container HOME for the UNSANDBOXED (trusted/owner) bash path. The
+  // low-trust path is handled separately by the per-tool bwrap --symlink op
+  // (src/sandbox/build.ts). Passed as base64-encoded JSON because `from`/`to`
+  // are arbitrary operator strings — base64 sidesteps every shell-metachar and
+  // env-quoting hazard; the shim decodes + JSON-parses it with bun. Omitted when
+  // empty so the common case adds no env clutter and the shim's loop never runs.
+  if (cfg.sandbox.symlinks.length > 0) {
+    const encoded = Buffer.from(JSON.stringify(cfg.sandbox.symlinks), 'utf8').toString('base64')
+    runArgs.push('-e', `TYPECLAW_SANDBOX_SYMLINKS=${encoded}`)
+  }
+
   if (hostdControl) {
     runArgs.push('--add-host', HOST_GATEWAY_ALIAS)
   }

@@ -265,6 +265,45 @@ describe('buildSandboxedCommand protected re-binds', () => {
   })
 })
 
+describe('buildSandboxedCommand symlinks', () => {
+  test('emits --dir <parent> then --symlink <target> <dest> for each op', () => {
+    const joined = argvOf('true', {
+      symlinks: [{ target: '/agent/workspace/.metabase-cli', dest: '/tmp/.metabase-cli' }],
+    }).join(' ')
+    expect(joined).toContain('--dir /tmp')
+    expect(joined).toContain('--symlink /agent/workspace/.metabase-cli /tmp/.metabase-cli')
+  })
+
+  test('renders the symlink AFTER the /tmp bind so last-op-wins keeps it', () => {
+    const argv = argvOf('true', {
+      mounts: [
+        { type: 'ro-bind', source: '/agent', dest: '/agent' },
+        { type: 'bind', source: '/session/tmp', dest: '/tmp' },
+      ],
+      symlinks: [{ target: '/agent/workspace/.metabase-cli', dest: '/tmp/.metabase-cli' }],
+    })
+    const tmpBind = argv.lastIndexOf('/tmp')
+    const symlinkDest = argv.lastIndexOf('/tmp/.metabase-cli')
+    expect(tmpBind).toBeGreaterThanOrEqual(0)
+    expect(symlinkDest).toBeGreaterThan(tmpBind)
+  })
+
+  test('emits nothing when the policy omits symlinks', () => {
+    const argv = argvOf('true', {})
+    expect(argv).not.toContain('--symlink')
+  })
+
+  test('emits one --symlink per op', () => {
+    const argv = argvOf('true', {
+      symlinks: [
+        { target: '/agent/.a', dest: '/tmp/.a' },
+        { target: '/agent/.b', dest: '/root/.b' },
+      ],
+    })
+    expect(argv.filter((t) => t === '--symlink')).toHaveLength(2)
+  })
+})
+
 describe('buildSandboxedCommand proc strategy', () => {
   test("omits the /proc tmpfs for proc: 'none'", () => {
     const argv = argvOf('true', { proc: 'none' })

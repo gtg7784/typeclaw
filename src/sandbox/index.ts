@@ -17,6 +17,7 @@ export {
   type ProtectedZones,
   type WritableZones,
 } from './writable-zones'
+export { resolveSandboxSymlinks, type SandboxSymlinkSpec } from './symlinks'
 export { ensureSessionTmpDir, isUnderTmp, mapVirtualTmpPath, SESSION_TMP_ROOT, sessionTmpDir } from './session-tmp'
 export { formatCommand, shellQuote } from './quote'
 export { SandboxPolicyError, SandboxUnavailableError } from './errors'
@@ -30,5 +31,6 @@ export {
   type SandboxProcessPolicy,
   type SandboxProcStrategy,
   type SandboxProtectedPolicy,
+  type SandboxSymlinkOp,
   type SandboxWritablePolicy,
 } from './policy'

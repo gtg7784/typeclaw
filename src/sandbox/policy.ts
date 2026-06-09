@@ -83,6 +83,17 @@ export type SandboxProtectedPolicy = {
   files?: string[]
 }
 
+// Symlinks recreated INSIDE the jail so a CLI that reads a fixed path (e.g.
+// `$HOME/.metabase-cli`) resolves to a writable target under /agent. `dest` is
+// the symlink location resolved against the SANDBOX HOME (/tmp), `target` is the
+// absolute /agent path it points at. Rendered last (after the /tmp bind and all
+// writable binds) so last-op-wins keeps the symlink — a `/tmp/...` dest emitted
+// before the /tmp bind would be erased by it.
+export type SandboxSymlinkOp = {
+  target: string
+  dest: string
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
@@ -98,6 +109,7 @@ export type SandboxPolicy = {
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy
   protected?: SandboxProtectedPolicy
+  symlinks?: SandboxSymlinkOp[]
   network?: SandboxNetwork
   env?: SandboxEnvPolicy
   commandFilter?: SandboxCommandFilter

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { lstatSync, mkdtempSync, readlinkSync, rmSync, statSync } from 'node:fs'
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync } from 'node:fs'
 import { mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1236,7 +1236,9 @@ describe('network egress entrypoint shim', () => {
   test('off-switch path (network.blockInternal=false) installs no iptables rules and execs the agent directly (after link_persistent_home_files seeds the credential symlink and start_xvfb sets DISPLAY)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
-    expect(shim).toMatch(/!= "1" \];? then\s+link_persistent_home_files\s+start_xvfb\s+exec bun run typeclaw "\$@"/)
+    expect(shim).toMatch(
+      /!= "1" \];? then\s+link_persistent_home_files\s+link_configured_symlinks\s+start_xvfb\s+exec bun run typeclaw "\$@"/,
+    )
   })
 
   test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
@@ -1467,6 +1469,16 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('persist_root="${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"')
     expect(shim).toContain('mkdir -p "$persist_root/.codex" "$HOME/.codex"')
     expect(shim).toContain('ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"')
+  })
+
+  test('defines link_configured_symlinks gated on TYPECLAW_SANDBOX_SYMLINKS and called on both network paths', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('link_configured_symlinks() {')
+    expect(shim).toContain('[ -n "${TYPECLAW_SANDBOX_SYMLINKS:-}" ] || return 0')
+    // invoked once on the off-path (indented inside the `if`) and once on the
+    // on-path (column 0); a call is the bare name on its own line, while the
+    // definition line ends with `() {`
+    expect(shim.match(/^[ \t]*link_configured_symlinks$/gm)?.length).toBe(2)
   })
 
   test('also symlinks Claude Code .credentials.json into /agent/.typeclaw/home/ so OAuth credentials survive container restarts', () => {
@@ -1717,6 +1729,95 @@ exec "$@"
     const claudeLinkPath = join(fakeHome, '.claude', '.credentials.json')
     expect(lstatSync(claudeLinkPath).isSymbolicLink()).toBe(true)
     expect(readlinkSync(claudeLinkPath)).toBe(join(persistRoot, '.claude', '.credentials.json'))
+  })
+
+  test('off-path: link_configured_symlinks creates from -> /agent/<to> with a ~/ from expanded against $HOME, and makes the target dir', async () => {
+    const realBun = Bun.which('bun')
+    if (!realBun) throw new Error('bun not on host PATH')
+
+    const persistRoot = join(workdir, 'persist-sym')
+    const fakeHome = join(workdir, 'home-sym')
+    const fakeAgent = join(workdir, 'agent-sym')
+    await mkdir(fakeHome, { recursive: true })
+    await mkdir(fakeAgent, { recursive: true })
+
+    const bin = join(workdir, 'bin-sym')
+    await mkdir(bin, { recursive: true })
+    await symlinkHostBinaries(bin, ['mkdir', 'ln'])
+    // Fake `bun`: pass `-e <script>` through to the real bun (link_configured_symlinks
+    // needs a real JSON parser + fs), but turn the final `bun run typeclaw` exec
+    // into a no-op so the shim ends cleanly without launching the agent.
+    await writeShellScript(join(bin, 'bun'), `#!/bin/sh\nif [ "$1" = "-e" ]; then exec ${realBun} "$@"; fi\nexit 0\n`)
+    await writeShellScript(
+      join(bin, 'setpriv'),
+      `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done\nexec "$@"\n`,
+    )
+
+    const shimPath = join(workdir, 'shim-sym.sh')
+    await writeShellScript(shimPath, buildEntrypointShim())
+
+    const symlinks = [{ from: '~/.metabase-cli', to: 'workspace/.metabase-cli' }]
+    const proc = Bun.spawn(['/bin/sh', shimPath, 'run'], {
+      env: {
+        PATH: bin,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: persistRoot,
+        TYPECLAW_AGENT_DIR: fakeAgent,
+        TYPECLAW_SANDBOX_SYMLINKS: Buffer.from(JSON.stringify(symlinks), 'utf8').toString('base64'),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(await proc.exited).toBe(0)
+
+    const linkPath = join(fakeHome, '.metabase-cli')
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(linkPath)).toBe(join(fakeAgent, 'workspace', '.metabase-cli'))
+    expect(statSync(join(fakeAgent, 'workspace', '.metabase-cli')).isDirectory()).toBe(true)
+  })
+
+  test('off-path: link_configured_symlinks refuses to clobber an existing non-symlink at from', async () => {
+    const realBun = Bun.which('bun')
+    if (!realBun) throw new Error('bun not on host PATH')
+
+    const persistRoot = join(workdir, 'persist-noclobber')
+    const fakeHome = join(workdir, 'home-noclobber')
+    const fakeAgent = join(workdir, 'agent-noclobber')
+    await mkdir(fakeHome, { recursive: true })
+    await mkdir(fakeAgent, { recursive: true })
+    // a real file already sits at the symlink location
+    const existing = join(fakeHome, '.metabase-cli')
+    await writeFile(existing, 'real config, do not clobber')
+
+    const bin = join(workdir, 'bin-noclobber')
+    await mkdir(bin, { recursive: true })
+    await symlinkHostBinaries(bin, ['mkdir', 'ln'])
+    await writeShellScript(join(bin, 'bun'), `#!/bin/sh\nif [ "$1" = "-e" ]; then exec ${realBun} "$@"; fi\nexit 0\n`)
+    await writeShellScript(
+      join(bin, 'setpriv'),
+      `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done\nexec "$@"\n`,
+    )
+
+    const shimPath = join(workdir, 'shim-noclobber.sh')
+    await writeShellScript(shimPath, buildEntrypointShim())
+
+    const symlinks = [{ from: '~/.metabase-cli', to: 'workspace/.metabase-cli' }]
+    const proc = Bun.spawn(['/bin/sh', shimPath, 'run'], {
+      env: {
+        PATH: bin,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: persistRoot,
+        TYPECLAW_AGENT_DIR: fakeAgent,
+        TYPECLAW_SANDBOX_SYMLINKS: Buffer.from(JSON.stringify(symlinks), 'utf8').toString('base64'),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(await proc.exited).toBe(0)
+
+    // the real file is untouched (still a regular file with its content)
+    expect(lstatSync(existing).isSymbolicLink()).toBe(false)
+    expect(readFileSync(existing, 'utf8')).toBe('real config, do not clobber')
   })
 
   test('off-path: when Xvfb is not on PATH (docker.file.xvfb=false equivalent), the shim execs the agent directly without spawning anything or exporting DISPLAY', async () => {
