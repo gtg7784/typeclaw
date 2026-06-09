@@ -385,12 +385,56 @@ export const relativeAgentPathSchema = z
   .refine((value) => !value.includes('\0'), 'must not contain a null byte')
   .refine((value) => !value.split(/[/\\]+/).includes('..'), "must not contain a '..' segment")
 
+// `sandbox.symlinks` is the one-entry abstraction for the common case of a CLI
+// that reads its config from a fixed path the sandbox can't write: it (1) creates
+// the symlink `from -> /agent/<to>` and (2) makes `<to>` a writable zone (same
+// machinery as `writablePaths` — every `to` is folded into the writable set).
+//
+// `from` is the symlink LOCATION and is fully configurable: an absolute container
+// path (e.g. `/root/.metabase-cli`) or a `~/`-prefixed path expanded against the
+// stage's HOME. Two stages create it: the entrypoint shim creates it at the real
+// container HOME (/root) for trusted/owner roles whose bash runs UNSANDBOXED, and
+// the per-tool bwrap sandbox emits a `--symlink` at the sandbox HOME (/tmp) for
+// low-trust roles — because `$HOME` differs between the two stages, a `~/` from
+// resolves to a different absolute path in each, which is exactly what each
+// consumer needs. The entrypoint refuses to clobber an existing non-symlink.
+//
+// `from` SECURITY: it must not contain a null byte, must not be the root `/`, and
+// must not point INTO /agent (a self-referential loop). Kernel/virtual paths
+// (/proc, /sys, /dev, /run) are rejected — symlinking over them is never a real
+// config need and risks masking the runtime's view of them. `/etc/...` is allowed
+// (a legitimate use case) because the entrypoint's no-clobber guard already stops
+// it from overwriting an existing system file. `to` reuses relativeAgentPathSchema.
+const FORBIDDEN_SYMLINK_FROM_ROOTS = ['/proc', '/sys', '/dev', '/run'] as const
+export const symlinkFromSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !value.includes('\0'), 'must not contain a null byte')
+  .refine((value) => value.startsWith('~/') || isAbsolute(value), 'must be an absolute path or start with ~/')
+  .refine((value) => value !== '/', 'must not be the filesystem root')
+  .refine(
+    (value) => !value.startsWith('/agent/') && value !== '/agent',
+    'must not point into /agent (the symlink would loop back into the agent folder)',
+  )
+  .refine(
+    (value) => !FORBIDDEN_SYMLINK_FROM_ROOTS.some((root) => value === root || value.startsWith(`${root}/`)),
+    'must not point at a kernel/virtual path (/proc, /sys, /dev, /run)',
+  )
+
+export const symlinkSchema = z.object({
+  from: symlinkFromSchema,
+  to: relativeAgentPathSchema,
+})
+
+export type SandboxSymlink = z.infer<typeof symlinkSchema>
+
 export const sandboxSchema = z
   .object({
     realProc: z.boolean().default(false),
     writablePaths: z.array(relativeAgentPathSchema).default([]),
+    symlinks: z.array(symlinkSchema).default([]),
   })
-  .default({ realProc: false, writablePaths: [] })
+  .default({ realProc: false, writablePaths: [], symlinks: [] })
 
 export type SandboxConfig = z.infer<typeof sandboxSchema>
 
@@ -615,6 +659,15 @@ export function expandMountPath(input: string, cwd: string): string {
     return join(homedir(), input.slice(1))
   }
   return isAbsolute(input) ? input : resolve(cwd, input)
+}
+
+// The full set of agent-relative dirs the sandbox should make writable: the
+// explicit `sandbox.writablePaths` plus every `sandbox.symlinks[].to` (so an
+// operator declaring a symlink doesn't also have to list its target). Order is
+// stable (writablePaths first) and duplicates are harmless — resolveWritableZones
+// dedupes after resolving each to an absolute path.
+export function getSandboxWritablePathSpecs(cfg: Pick<Config, 'sandbox'>): string[] {
+  return [...cfg.sandbox.writablePaths, ...cfg.sandbox.symlinks.map((link) => link.to)]
 }
 
 // Loaded eagerly from process.cwd()/typeclaw.json at module-import time so
