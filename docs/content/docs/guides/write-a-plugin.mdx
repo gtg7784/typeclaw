@@ -102,6 +102,16 @@ Custom plugins live under `packages/<plugin-name>/` — the agent folder is a bu
 
 The config key (`notify`) is the plugin's derived name — for this local plugin, the basename of `./packages/notify`. `plugins[]` is **restart-required** — plugins load once at container boot, so adding one needs a restart (which the agent does for you), not a `reload`.
 
+**npm plugins** are registered by package name instead of path, optionally pinned with an npm-style version suffix:
+
+```json
+{
+  "plugins": ["typeclaw-plugin-standup@1.2.3", "@acme/typeclaw-plugin-helicone"]
+}
+```
+
+`typeclaw.json` is the single source of truth — you don't edit `package.json`. On the next `typeclaw start`, the npm entries are materialized into `package.json#dependencies` and installed; removing an entry prunes it. A bare name (no `@version`) resolves to the current latest and is pinned, the same way `bun add <name>` writes a concrete version. Provenance is tracked under `package.json#typeclaw.managedPlugins`, so the sync only ever touches plugins it added — never your own dependencies. The agent itself can only add or version-bump a plugin entry when running at `owner`/`trusted` trust; lower-trust channel input is blocked by the bundled `security` plugin's `pluginAddition` guard, since installing a package runs host-side code.
+
 </Accordion>
 
 <Accordion title="What plugins can't do">
