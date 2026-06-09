@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { isPackageInstallCommand } from './package-install'
+import { commandNeedsRealProc, isPackageInstallCommand } from './package-install'
 
 describe('isPackageInstallCommand', () => {
   test('recognizes standalone bun add / install / i', () => {
@@ -42,5 +42,46 @@ describe('isPackageInstallCommand', () => {
     expect(isPackageInstallCommand('(bun add foo)')).toBe(false)
     expect(isPackageInstallCommand('bun add foo\nrm -rf x')).toBe(false)
     expect(isPackageInstallCommand('\\bun add foo')).toBe(false)
+  })
+})
+
+describe('commandNeedsRealProc', () => {
+  test('flags package installs (add / install / i)', () => {
+    expect(commandNeedsRealProc('bun add @googleworkspace/cli')).toBe(true)
+    expect(commandNeedsRealProc('bun install')).toBe(true)
+    expect(commandNeedsRealProc('bun i lodash')).toBe(true)
+  })
+
+  test('flags the package runners bunx, bun x, bun create', () => {
+    expect(commandNeedsRealProc('bunx cowsay hi')).toBe(true)
+    expect(commandNeedsRealProc('bunx')).toBe(true)
+    expect(commandNeedsRealProc('bun x cowsay')).toBe(true)
+    expect(commandNeedsRealProc('bun create vite my-app')).toBe(true)
+  })
+
+  test('flags bun run (it can exec a package bin that reads /proc/self/fd)', () => {
+    expect(commandNeedsRealProc('bun run build')).toBe(true)
+    expect(commandNeedsRealProc('bun run scripts/render.ts a b')).toBe(true)
+  })
+
+  // DIAGNOSTIC, not a privilege gate: unlike isPackageInstallCommand it must still
+  // fire through shell metacharacters, since the bun invocation still runs and
+  // still needs a real /proc.
+  test('fires even with chaining / metacharacters (the bun invocation still runs)', () => {
+    expect(commandNeedsRealProc('bunx foo && echo done')).toBe(true)
+    expect(commandNeedsRealProc('bun add foo; echo ok')).toBe(true)
+    expect(commandNeedsRealProc('  bun   install  ')).toBe(true)
+  })
+
+  test('does not flag bun subcommands that do not exercise the package /proc path', () => {
+    expect(commandNeedsRealProc('bun test')).toBe(false)
+    expect(commandNeedsRealProc('bun --version')).toBe(false)
+    expect(commandNeedsRealProc('bun')).toBe(false)
+  })
+
+  test('does not flag non-bun commands', () => {
+    expect(commandNeedsRealProc('git status')).toBe(false)
+    expect(commandNeedsRealProc('npm install')).toBe(false)
+    expect(commandNeedsRealProc('echo bunx not-really')).toBe(false)
   })
 })

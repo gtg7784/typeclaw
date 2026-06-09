@@ -38,6 +38,7 @@ import type {
 import {
   buildSandboxedCommand,
   canMountRealProc,
+  commandNeedsRealProc,
   DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
   ensureSessionTmpDir,
@@ -51,6 +52,7 @@ import {
   resolveProtectedZones,
   resolveSandboxSymlinks,
   resolveWritableZones,
+  SandboxDegradedProcError,
   type SandboxProcStrategy,
   subtractMasked,
 } from '@/sandbox'
@@ -643,6 +645,15 @@ async function applyBashSandbox(
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
   const proc = await resolveProcStrategy()
+  // Fail fast with an actionable error when /proc degraded to tmpfs AND the
+  // command needs a real /proc: under tmpfs Bun would otherwise abort deep in its
+  // pipeline with the opaque "NotDir", which the model retries forever. The
+  // SandboxDegradedProcError message tells it this is an environment limit, not
+  // the command's fault. Guarded on the command so non-bun bash still runs in the
+  // degraded mode (it does not touch /proc/self/{fd,maps}).
+  if (proc === 'tmpfs' && commandNeedsRealProc(command)) {
+    throw new SandboxDegradedProcError()
+  }
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [
       { type: 'ro-bind', source: agentDir, dest: agentDir },

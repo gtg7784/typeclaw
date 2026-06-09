@@ -24,10 +24,10 @@ export {
   type WritableZones,
 } from './writable-zones'
 export { resolveSandboxSymlinks, type SandboxSymlinkSpec } from './symlinks'
-export { isPackageInstallCommand } from './package-install'
+export { commandNeedsRealProc, isPackageInstallCommand } from './package-install'
 export { ensureSessionTmpDir, isUnderTmp, mapVirtualTmpPath, SESSION_TMP_ROOT, sessionTmpDir } from './session-tmp'
 export { formatCommand, shellQuote } from './quote'
-export { SandboxPolicyError, SandboxUnavailableError } from './errors'
+export { SandboxDegradedProcError, SandboxPolicyError, SandboxUnavailableError } from './errors'
 export {
   DEFAULT_SANDBOX_ENV,
   type SandboxCommandFilter,
