@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path, { isAbsolute, join, resolve } from 'node:path'
 
 export type WritableZones = {
@@ -96,22 +96,53 @@ export async function resolveWritableZones(
   return { dirs: dedupe([...builtinDirs, ...configuredDirs]), files }
 }
 
+// SECURITY: validation is on the REAL path, not the lexical one. A lexical-only
+// check (resolve + isInside) is bypassable by a symlinked INTERMEDIATE component:
+// with `/agent/alias -> /tmp/outside` (or `-> /agent/sessions`) and a config of
+// `alias/sub`, the lexical path `/agent/alias/sub` passes isInside and the
+// forbidden-root check, while the bwrap `--bind` follows the ancestor symlink to
+// write outside /agent (or onto a forbidden root). The zone-root lstat alone
+// can't see it — lstat of the final component follows ancestor symlinks. So we
+// realpath BOTH the candidate and agentDir (+ the forbidden roots) and validate
+// the resolved targets. A path whose real form escapes agentDir or lands on a
+// real forbidden root is dropped. realpath also rejects the final component
+// being a symlink (its real target is re-checked), subsuming the prior lstat.
 async function resolveConfiguredWritableDirs(agentDir: string, configured: readonly string[]): Promise<string[]> {
-  const candidates: string[] = []
+  const realAgentDir = await realpathOrUndefined(agentDir)
+  if (realAgentDir === undefined) return []
+  const realForbidden = await resolveRealForbiddenRoots(agentDir)
+
+  const accepted: string[] = []
   for (const rel of configured) {
     const absolute = resolve(agentDir, rel)
-    if (!isAllowedConfiguredTarget(agentDir, absolute)) continue
-    candidates.push(absolute)
+    // Cheap lexical pre-filter: reject obvious escapes before touching the disk.
+    if (absolute === agentDir || !isInside(agentDir, absolute)) continue
+    const real = await realpathOrUndefined(absolute)
+    if (real === undefined) continue
+    if (!(await isRealEntry(real, 'dir'))) continue
+    if (real === realAgentDir || !isInside(realAgentDir, real)) continue
+    if (realForbidden.some((root) => real === root || isInside(root, real))) continue
+    // Bind the lexical (caller-facing) path; bwrap resolves it to `real` itself.
+    accepted.push(absolute)
   }
-  return collectExisting(candidates, 'dir')
+  return accepted
 }
 
-function isAllowedConfiguredTarget(agentDir: string, absolute: string): boolean {
-  if (absolute === agentDir || !isInside(agentDir, absolute)) return false
-  return !FORBIDDEN_WRITABLE_ROOTS.some((root) => {
-    const forbidden = join(agentDir, root)
-    return absolute === forbidden || isInside(forbidden, absolute)
-  })
+async function resolveRealForbiddenRoots(agentDir: string): Promise<string[]> {
+  const resolved: string[] = []
+  for (const root of FORBIDDEN_WRITABLE_ROOTS) {
+    const real = await realpathOrUndefined(join(agentDir, root))
+    if (real !== undefined) resolved.push(real)
+  }
+  return resolved
+}
+
+async function realpathOrUndefined(target: string): Promise<string | undefined> {
+  try {
+    return await realpath(target)
+  } catch {
+    return undefined
+  }
 }
 
 function dedupe(values: string[]): string[] {

@@ -147,6 +147,35 @@ describe('resolveWritableZones', () => {
       }
     })
 
+    test('drops a configured path whose INTERMEDIATE component symlinks OUTSIDE the agent dir', async () => {
+      const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+      try {
+        // given /agent/alias -> /tmp/outside, a config of `alias/sub` is lexically
+        // /agent/alias/sub (passes isInside) but its real path is /tmp/outside/sub
+        await mkdir(join(outside, 'sub'), { recursive: true })
+        await symlink(outside, join(agentDir, 'alias'))
+
+        const { dirs } = await resolveWritableZones(agentDir, ['alias/sub'])
+
+        expect(dirs).not.toContain(join(agentDir, 'alias/sub'))
+        expect(dirs.some((d) => d.includes('outside'))).toBe(false)
+      } finally {
+        await rm(outside, { recursive: true, force: true })
+      }
+    })
+
+    test('drops a configured path whose INTERMEDIATE component symlinks onto a forbidden root', async () => {
+      // given /agent/alias -> /agent/sessions, a config of `alias/sub` is lexically
+      // /agent/alias/sub but its real path is /agent/sessions/sub (forbidden)
+      await mkdir(join(agentDir, 'sessions', 'sub'), { recursive: true })
+      await symlink(join(agentDir, 'sessions'), join(agentDir, 'alias'))
+
+      const { dirs } = await resolveWritableZones(agentDir, ['alias/sub'])
+
+      expect(dirs).not.toContain(join(agentDir, 'alias/sub'))
+      expect(dirs).not.toContain(join(agentDir, 'sessions/sub'))
+    })
+
     test('drops a configured path that escapes the agent dir via ..', async () => {
       const { dirs } = await resolveWritableZones(agentDir, ['../escape'])
 
