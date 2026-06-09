@@ -4,6 +4,12 @@ import { cancel, confirm, intro, isCancel, log, note, password, select, spinner,
 import { defineCommand } from 'citty'
 
 import { config } from '@/config'
+import {
+  listChannels,
+  removeChannel,
+  type ChannelListEntry,
+  type GithubConfigCleanup,
+} from '@/config/channels-mutation'
 import { start, status, stop } from '@/container'
 import {
   CHANNEL_KINDS,
@@ -30,7 +36,7 @@ import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import { displayQR } from './qr'
-import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
+import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup, successLine } from './ui'
 
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
@@ -185,6 +191,95 @@ const reauthSub = defineCommand({
   },
 })
 
+const listSub = defineCommand({
+  meta: {
+    name: 'list',
+    description: 'list channel adapters configured for this agent',
+  },
+  args: {
+    json: {
+      type: 'boolean',
+      description: 'emit channels as JSON',
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.'))
+      process.exit(1)
+    }
+    const channels = listChannels(cwd)
+    if (args.json) {
+      process.stdout.write(`${JSON.stringify({ channels }, null, 2)}\n`)
+      return
+    }
+    process.stdout.write(`${formatChannelList(channels)}\n`)
+  },
+})
+
+const removeSub = defineCommand({
+  meta: {
+    name: 'remove',
+    description: 'remove a channel adapter from typeclaw.json and secrets.json',
+  },
+  args: {
+    adapter: {
+      type: 'positional',
+      description: `which adapter to remove (${CHANNEL_KINDS.join(' | ')}); omit to pick interactively`,
+      required: false,
+    },
+    yes: {
+      type: 'boolean',
+      description: 'skip the confirmation prompt',
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.'))
+      process.exit(1)
+    }
+
+    const present = presentChannels(listChannels(cwd))
+    if (present.length === 0) {
+      console.error(errorLine('No channels are configured. Nothing to remove.'))
+      process.exit(1)
+    }
+
+    const adapter =
+      args.adapter === undefined ? await pickChannelToRemove(present) : validateRemoveAdapterArg(args.adapter, present)
+
+    if (args.yes !== true) {
+      const confirmed = await confirm({
+        message: `Remove the ${CHANNEL_LABELS[adapter]} channel? This deletes its config and credentials.`,
+        initialValue: false,
+      })
+      if (isCancel(confirmed) || !confirmed) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+    }
+
+    const result = removeChannel(cwd, adapter)
+    if (!result.ok) {
+      console.error(errorLine(result.reason))
+      process.exit(1)
+    }
+
+    process.stdout.write(`${successLine(`Removed ${CHANNEL_LABELS[adapter]} channel.`)}\n`)
+    if (result.githubCleanup !== undefined) printGithubCleanup(result.githubCleanup)
+    if (result.hadRemoteWebhooks) {
+      log.warn(
+        'GitHub webhooks registered on your repositories were NOT deleted. Remove them by hand at https://github.com/<owner>/<repo>/settings/hooks.',
+      )
+    }
+
+    await maybePromptRestart(cwd, adapter, 'removed')
+  },
+})
+
 export const channelCommand = defineCommand({
   meta: {
     name: 'channel',
@@ -194,8 +289,91 @@ export const channelCommand = defineCommand({
     add: addSub,
     set: setSub,
     reauth: reauthSub,
+    list: listSub,
+    remove: removeSub,
   },
 })
+
+function presentChannels(entries: ChannelListEntry[]): ChannelKind[] {
+  return entries.map((entry) => entry.kind)
+}
+
+async function pickChannelToRemove(present: ChannelKind[]): Promise<ChannelKind> {
+  if (present.length === 1) return present[0]!
+  const selected = await select<ChannelKind>({
+    message: 'Pick a channel to remove',
+    options: present.map((kind) => ({ value: kind, label: CHANNEL_LABELS[kind] })),
+    initialValue: present[0],
+  })
+  if (isCancel(selected)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return selected
+}
+
+function validateRemoveAdapterArg(adapter: string, present: ChannelKind[]): ChannelKind {
+  if (!isChannelKind(adapter)) {
+    console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${CHANNEL_KINDS.join(', ')}.`))
+    process.exit(1)
+  }
+  if (!present.includes(adapter)) {
+    console.error(
+      errorLine(
+        `${CHANNEL_LABELS[adapter]} ("${adapter}") is not configured. Run \`typeclaw channel list\` to see what is.`,
+      ),
+    )
+    process.exit(1)
+  }
+  return adapter
+}
+
+function formatChannelList(channels: ChannelListEntry[]): string {
+  if (channels.length === 0) return c.dim('No channels configured.')
+
+  const kindWidth = Math.max(4, ...channels.map((ch) => ch.kind.length))
+  const statusWidth = Math.max(6, ...channels.map((ch) => channelStatusText(ch).length))
+  const lines: string[] = []
+  lines.push(c.dim(`${'KIND'.padEnd(kindWidth)}  ${'STATUS'.padEnd(statusWidth)}  DETAIL`))
+  for (const ch of channels) {
+    const statusText = channelStatusText(ch)
+    const status = channelStatusOk(ch)
+      ? c.green(statusText.padEnd(statusWidth))
+      : c.yellow(statusText.padEnd(statusWidth))
+    const detail = ch.detail ?? ''
+    lines.push(`${ch.kind.padEnd(kindWidth)}  ${status}  ${c.dim(detail)}`)
+  }
+  return lines.join('\n')
+}
+
+function channelStatusOk(ch: ChannelListEntry): boolean {
+  return ch.configured && ch.hasSecrets && ch.enabled
+}
+
+function channelStatusText(ch: ChannelListEntry): string {
+  if (!ch.configured) return 'secrets-only'
+  if (!ch.hasSecrets) return 'no-secrets'
+  if (!ch.enabled) return 'disabled'
+  return 'ready'
+}
+
+function printGithubCleanup(cleanup: GithubConfigCleanup): void {
+  const parts: string[] = []
+  if (cleanup.tunnelsRemoved > 0) {
+    parts.push(`removed ${cleanup.tunnelsRemoved} GitHub webhook tunnel${cleanup.tunnelsRemoved === 1 ? '' : 's'}`)
+  }
+  if (cleanup.matchRulesRemoved.length > 0) {
+    parts.push(
+      `removed ${cleanup.matchRulesRemoved.length} repo match rule${cleanup.matchRulesRemoved.length === 1 ? '' : 's'}`,
+    )
+  }
+  if (parts.length > 0) process.stdout.write(`${c.dim(`Also ${parts.join(', ')}.`)}\n`)
+  if (cleanup.matchRulesKept.length > 0) {
+    log.warn(
+      `Left ${cleanup.matchRulesKept.length} other \`github:\` match rule(s) in roles.member untouched: ${cleanup.matchRulesKept.join(', ')}.`,
+    )
+  }
+}
 
 async function resolveReauthableAdapter(
   requested: string | undefined,
@@ -1269,12 +1447,16 @@ function reportLineAuth(result: LineAuthResult): string {
   return `LINE login failed: ${result.reason}`
 }
 
-async function maybePromptRestart(cwd: string, channel: ChannelKind): Promise<void> {
+async function maybePromptRestart(
+  cwd: string,
+  channel: ChannelKind,
+  verb: 'added' | 'removed' = 'added',
+): Promise<void> {
   const label = CHANNEL_LABELS[channel]
   const current = await status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
-      title: c.green(`${label} channel added.`),
+      title: c.green(`${label} channel ${verb}.`),
       hints: [
         { label: 'Start the agent:', command: 'typeclaw start' },
         { label: 'Then check status:', command: 'typeclaw status' },
@@ -1284,13 +1466,12 @@ async function maybePromptRestart(cwd: string, channel: ChannelKind): Promise<vo
   }
 
   const restartNow = await confirm({
-    message:
-      'Channel config is restart-required and the agent container is running. Restart it now to apply the new channel?',
+    message: `Channel config is restart-required and the agent container is running. Restart it now to apply the ${verb} channel?`,
     initialValue: true,
   })
   if (isCancel(restartNow) || !restartNow) {
     done({
-      title: c.green(`${label} channel added.`),
+      title: c.green(`${label} channel ${verb}.`),
       hints: [
         { label: 'Apply later:', command: 'typeclaw restart' },
         { label: 'Check status:', command: 'typeclaw status' },
@@ -1310,7 +1491,9 @@ async function maybePromptRestart(cwd: string, channel: ChannelKind): Promise<vo
     process.exit(1)
   }
   done({
-    title: c.green(`${label} channel added. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`),
+    title: c.green(
+      `${label} channel ${verb}. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`,
+    ),
     hints: [
       { label: 'Attach TUI:', command: 'typeclaw tui' },
       { label: 'Follow logs:', command: 'typeclaw logs -f' },
