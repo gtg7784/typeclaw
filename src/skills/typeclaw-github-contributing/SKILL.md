@@ -30,8 +30,11 @@ for base in "" "docs/" ".github/"; do
   gh api "repos/OWNER/REPO/contents/${base}" --jq '.[].name' 2>/dev/null \
     | grep -iE '^pull_request_template(\.md)?$'
 done
-# If a PULL_REQUEST_TEMPLATE/ directory exists, list the choices inside it:
-gh api "repos/OWNER/REPO/contents/.github/PULL_REQUEST_TEMPLATE" --jq '.[].name' 2>/dev/null
+# If a PULL_REQUEST_TEMPLATE/ directory exists in ANY base, list the choices inside it
+# (the directory form is supported at root, docs/, and .github/ alike):
+for base in "" "docs/" ".github/"; do
+  gh api "repos/OWNER/REPO/contents/${base}PULL_REQUEST_TEMPLATE" --jq '.[].name' 2>/dev/null
+done
 
 # Issue templates — the modern form is an ISSUE_TEMPLATE/ directory of forms;
 # the legacy form is a single ISSUE_TEMPLATE.md. Check both, in all three base dirs.
