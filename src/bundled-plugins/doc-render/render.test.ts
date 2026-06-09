@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { COMPILER_PACKAGE, COMPILER_VERSION, isModuleNotFound, missingCompilerGuidance } from './render'
 
@@ -47,4 +51,24 @@ describe('render script CLI', () => {
   // error here. The error ROUTING is covered deterministically by the
   // isModuleNotFound + missingCompilerGuidance tests above, and the end-to-end
   // exit-3 behavior is exercised in a fresh container where the cache is empty.
+})
+
+describe('compiler resolution from a nested document directory', () => {
+  test('Bun.resolveSync walks up from a deep cwd to the agent-root node_modules', async () => {
+    // Mirrors production: the package lives in the agent root's node_modules, the
+    // agent runs the render from a nested doc dir (workspace/, public/sub/, ...),
+    // and resolution must walk UP to find it. This is the load-bearing assumption
+    // behind resolving against process.cwd() rather than the script's own dir.
+    const root = mkdtempSync(join(tmpdir(), 'doc-render-resolve-'))
+    const pkgDir = join(root, 'node_modules', 'fake-renderer')
+    await mkdir(pkgDir, { recursive: true })
+    await writeFile(join(pkgDir, 'package.json'), '{"name":"fake-renderer","main":"index.js"}')
+    await writeFile(join(pkgDir, 'index.js'), 'module.exports = {}')
+
+    const docDir = join(root, 'public', 'reports', 'q2')
+    await mkdir(docDir, { recursive: true })
+
+    const resolved = Bun.resolveSync('fake-renderer', docDir)
+    expect(resolved.endsWith('/node_modules/fake-renderer/index.js')).toBe(true)
+  })
 })

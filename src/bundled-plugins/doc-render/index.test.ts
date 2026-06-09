@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
-import docRenderPlugin, { RENDER_SCRIPT_HINT_PATH, renderScriptPath } from './index'
+import docRenderPlugin, { RENDER_SCRIPT_AGENT_RELATIVE_PATH, renderScriptPath } from './index'
 
 describe('doc-render plugin', () => {
   test('contributes the skill directory and no tools or hooks', async () => {
@@ -17,15 +17,15 @@ describe('doc-render plugin', () => {
     expect(exports.hooks).toBeUndefined()
   })
 
-  test('publishes the bundled render script path to the /tmp hint', async () => {
-    await bootPlugin()
-
-    expect(existsSync(RENDER_SCRIPT_HINT_PATH)).toBe(true)
-    expect(await readFile(RENDER_SCRIPT_HINT_PATH, 'utf8')).toBe(renderScriptPath())
+  test('the bundled render script exists on disk', () => {
+    expect(existsSync(renderScriptPath())).toBe(true)
   })
 
-  test('the hinted render script actually exists on disk', () => {
-    expect(existsSync(renderScriptPath())).toBe(true)
+  test('the agent-relative render path points at the bundled script', () => {
+    // The container runs from node_modules/typeclaw/src/...; the agent-relative
+    // path the skill uses must end at the same file this package ships.
+    expect(RENDER_SCRIPT_AGENT_RELATIVE_PATH).toBe('node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts')
+    expect(renderScriptPath().endsWith('/bundled-plugins/doc-render/render.ts')).toBe(true)
   })
 })
 
@@ -68,6 +68,22 @@ describe('typeclaw-render-pdf skill', () => {
 
     expect(raw).toContain('bun add @myriaddreamin/typst-ts-node-compiler@0.7.0')
     expect(raw).not.toContain('workspace/.tools')
+  })
+
+  test('renders via the agent-readable render path, not the per-session /tmp hint', async () => {
+    const raw = await readFile(skillPath, 'utf8')
+
+    expect(raw).toContain(`bun run /agent/${RENDER_SCRIPT_AGENT_RELATIVE_PATH}`)
+    expect(raw).not.toContain('/tmp/typeclaw-doc-render-script')
+  })
+
+  test('changes into the document directory before rendering so read(...) resolves', async () => {
+    const raw = await readFile(skillPath, 'utf8')
+
+    const renderIdx = raw.indexOf('bun run /agent/node_modules/typeclaw')
+    const cdIdx = raw.lastIndexOf('\ncd ', renderIdx)
+    expect(cdIdx).toBeGreaterThan(0)
+    expect(cdIdx).toBeLessThan(renderIdx)
   })
 })
 

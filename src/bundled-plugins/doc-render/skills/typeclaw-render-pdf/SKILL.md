@@ -117,28 +117,35 @@ reach for the **Rich elements** palette below when plain prose isn't enough.
 
 Notes:
 
-- `read("report.md")` is **relative to where you run the render** (Step 3 runs
-  from the directory holding the `.typ` and `.md`). Keep them together.
+- `read("report.md")` is **relative to the render's working directory**, so Step 3
+  `cd`s into the directory holding the `.typ` and `.md` before running. Keep them
+  together.
 - Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
   install) and carry the Latin text. `"Noto Serif CJK KR"` is appended as the
   fallback so Korean/CJK glyphs resolve per-glyph wherever the Latin fonts have no
   glyph, leaving Latin runs untouched. It is only present when the container's
   `cjkFonts` toggle is on — see "## Handling CJK content".
 - `cmarker` fetches from the Typst package registry on first compile (the same
-  network the `bun add` step needs), then caches it.
+  network the `bun add` step needs). It caches under the render's `$HOME`, which
+  in a sandboxed (channel/guest) session is per-session scratch — so a later
+  session may re-fetch it. That's a one-time network hit, not an error.
 
 ## Step 3 — render
 
-The render script is **bundled with the plugin** — you do not write it. Its path
-is published at `/tmp/typeclaw-doc-render-script`. Run it from the directory
-holding your `.typ` and `.md`, passing the wrapper and output paths:
+The render script is **bundled with the plugin** — you do not write it. It lives
+at `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts`.
+
+**`cd` into the directory holding your `.typ` and `.md` first** — your shell
+starts at the agent root, and the wrapper's `read("report.md")` resolves relative
+to the render's working directory, so you must run it from there:
 
 ```sh
-RENDER="$(cat /tmp/typeclaw-doc-render-script)"
-bun run "$RENDER" report.typ report.pdf
+cd /agent/workspace            # or wherever your .typ + .md live (public/, mounts/, …)
+bun run /agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts report.typ report.pdf
 ```
 
-On success it prints `wrote report.pdf (<N> bytes)` and `report.pdf` exists.
+On success it prints `wrote report.pdf (<N> bytes)` and `report.pdf` exists in
+that directory.
 
 If it stops with **`@myriaddreamin/typst-ts-node-compiler is not installed`**
 (exit 3), run the Step 0 `bun add` and re-run. If it stops with a **`NotDir` /
@@ -301,6 +308,7 @@ might expect:
   raw-typst rich elements).
 - **Don't** build a `package.json` / `node_modules` / a render script under
   `workspace/`. The compiler installs at the agent root via `bun add`; the render
-  script is bundled with the plugin (at `/tmp/typeclaw-doc-render-script`).
+  script is bundled with the plugin (at
+  `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts`).
 - **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments.
   Link or inline instead.
