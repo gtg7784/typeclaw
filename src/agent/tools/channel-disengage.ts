@@ -34,15 +34,19 @@ export function createChannelDisengageTool({ router, origin }: CreateChannelDise
     name: 'channel_disengage',
     label: 'Channel Disengage',
     description:
-      'Stop auto-engaging on follow-up messages in THIS channel/thread. While engaged you ' +
-      "keep replying to a participant's next message without an @mention, and that " +
-      'engagement is renewed every time you reply — so in a group you can get stuck ' +
-      'answering turn after turn even after someone tells you to stop. Call this when a ' +
-      'human or peer bot asks you to be quiet / stop replying, or when you realize you are ' +
-      'in a redundant loop. After disengaging, you only re-engage in this conversation when ' +
-      'explicitly addressed again (mention, reply, or DM). This does not send any message ' +
-      'and does not affect other channels. Pair it with skip_response when you also want to ' +
-      'stay silent on the current turn.',
+      'Stop auto-engaging on follow-up messages in THIS channel/thread. Call this the moment ' +
+      'a human or peer bot tells you to stop — "disengage", "be quiet", "stop replying", ' +
+      '"stop", "back off", or the same in any language (e.g. "조용", "그만", "黙って", ' +
+      '"tais-toi", "cállate"). While engaged you keep replying to a participant\'s next ' +
+      'message without an @mention, and that engagement is renewed every time you reply — so ' +
+      'in a group you can get stuck answering turn after turn even after someone tells you to ' +
+      'stop. A reply like "ok, I will be quiet" does NOT disengage you; it re-grants the ' +
+      'stickiness they asked you to drop. Only THIS tool drops it. Also call it when you ' +
+      'notice you are in a redundant loop. After disengaging, you only re-engage in this ' +
+      'conversation when explicitly addressed again (mention, reply, or DM). This does not ' +
+      'send any message and does not affect other channels. If you want to acknowledge first, ' +
+      'send the channel_reply BEFORE this call. Pair it with skip_response when you also want ' +
+      'to stay silent on the current turn.',
     parameters: Type.Object({}),
 
     async execute() {

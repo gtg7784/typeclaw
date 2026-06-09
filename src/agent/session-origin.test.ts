@@ -371,6 +371,22 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/send that `channel_reply` FIRST, THEN call `channel_disengage`/i)
   })
 
+  test('channel origin frames an explicit quiet/disengage command as a direct call to channel_disengage, not just an ack', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    // guards the real failure: an explicit "disengage"/"조용" command was only
+    // acked via channel_reply, so stickiness was never dropped
+    expect(out).toMatch(/MUST call `channel_disengage`/i)
+    expect(out).toContain('disengage')
+    expect(out).toContain('조용')
+    expect(out).toMatch(/not enough|is not the same|does not (?:count|disengage)/i)
+  })
+
   test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
