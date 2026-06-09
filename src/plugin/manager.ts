@@ -51,11 +51,22 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
     throw new Error('plugin: spawnSubagent is not yet wired')
   }
 
+  // Non-fatal: a single unresolvable entry (uninstalled package, typo) must
+  // not abort boot for every other plugin -- warn and skip it.
+  const resolvedEntries = await Promise.all(
+    opts.entries.map(async (entry) => {
+      try {
+        return { entry, resolved: await loadEntry(entry, opts.agentDir) }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[plugin] failed to load "${entry}", ignoring: ${message}`)
+        return null
+      }
+    }),
+  )
   const allPlugins: { entry: string; resolved: ResolvedPlugin }[] = [
     ...(opts.bundled?.map((resolved) => ({ entry: `<bundled:${resolved.name}>`, resolved })) ?? []),
-    ...(await Promise.all(
-      opts.entries.map(async (entry) => ({ entry, resolved: await loadEntry(entry, opts.agentDir) })),
-    )),
+    ...resolvedEntries.filter((e): e is { entry: string; resolved: ResolvedPlugin } => e !== null),
   ]
 
   const declaredPermissions = collectDeclaredPermissions(allPlugins)

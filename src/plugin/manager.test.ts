@@ -86,6 +86,47 @@ describe('loadPlugins — atomic rollback', () => {
   })
 })
 
+describe('loadPlugins — unresolvable entry is non-fatal', () => {
+  test('warns and skips an entry that fails to resolve, still loading the rest', async () => {
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({}),
+      async execute() {
+        return { content: [] }
+      },
+    })
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'typeclaw-plugin-missing') {
+        throw new Error(`Cannot find package '${entry}'`)
+      }
+      return {
+        name: entry,
+        version: undefined,
+        source: entry,
+        defined: { plugin: async () => ({ tools: { [entry]: tool } }) },
+      }
+    }
+
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => warnings.push(args.join(' '))
+    let result
+    try {
+      result = await loadPlugins({
+        entries: ['good-one', 'typeclaw-plugin-missing', 'good-two'],
+        agentDir: '/tmp',
+        configsByName: {},
+        loadEntry,
+      })
+    } finally {
+      console.warn = originalWarn
+    }
+
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['good-one', 'good-two'])
+    expect(warnings.some((w) => w.includes('typeclaw-plugin-missing') && w.includes('Cannot find package'))).toBe(true)
+  })
+})
+
 describe('loadPlugins — config validation', () => {
   test("validates per-plugin config against the plugin's configSchema", async () => {
     const captured: { value: unknown } = { value: undefined }
