@@ -272,6 +272,8 @@ gh pr create --repo owner/repo --title "Fix: ..." --head my-branch --base main -
 
 For App auth, `GH_TOKEN` is an installation access token that refreshes automatically — it stays current as long as the adapter is running.
 
+Before you compose the issue/PR body, read `typeclaw-github-contributing` — it covers the target repo's contribution etiquette (fill the issue/PR template if one exists, honor `CONTRIBUTING.md`, match the repo's title conventions, search for duplicates first). Opening an issue or PR that ignores the repo's template reads as careless; following it reads as someone who belongs. That skill applies whenever you open a new issue/PR, whether or not the work arrived through this channel.
+
 ## Self-loop safety
 
 The adapter will **not** wake you when you assign yourself as a reviewer (e.g., via `gh pr edit --add-reviewer`). It will only wake you when someone else requests your review.
