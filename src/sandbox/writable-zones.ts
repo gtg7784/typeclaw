@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path, { isAbsolute, join, resolve } from 'node:path'
 
 export type WritableZones = {
@@ -154,47 +154,67 @@ export type PackageInstallZones = {
   protected: ProtectedZones
 }
 
-// Executable / runtime-sensitive children RO-bound on top of the package-install
-// RW root so a hostile dependency (bun runs lifecycle scripts during `bun add`)
-// cannot write code the UNSANDBOXED runtime later executes. `packages` and
-// `.agents/skills` mirror the write/edit guard's executable-surface exclusions;
-// `node_modules/typeclaw` is the symlinked runtime itself (writing it would
-// rewrite the live binary); `.git/hooks` + `.git/config` are the same hook /
-// core.hooksPath escalation closed by resolveProtectedZones. Absent entries are
-// dropped — bwrap aborts an RO-bind of a missing source, and a child that does
-// not exist cannot be the symlinked runtime or a planted skill.
-const PACKAGE_INSTALL_PROTECTED_DIRS = ['packages', '.agents/skills', 'node_modules/typeclaw'] as const
+// SECURITY: the package-install RW root is governed by an ALLOWLIST, not a
+// denylist. `bun add` writes exactly these and nothing else: `node_modules/`
+// (deps), `package.json` + `bun.lock` (manifest + lockfile, plus the temp
+// lockfile created in the root DIR). The scratch zones (`workspace`, `public`,
+// `mounts`) stay writable to match the normal jail. EVERY other existing root
+// entry is RO-bound, so a denylist of "executable/runtime-sensitive" paths is
+// not needed — it would be unbounded (any file the unsandboxed runtime reads or
+// execs, including `src/`/`scripts/` in dev-mode agents where typeclaw is a
+// file:/link: dep, the agent's own lifecycle scripts, and prompt-source files)
+// and fails OPEN for any root entry not yet listed. An allowlist fails CLOSED.
+const PACKAGE_INSTALL_WRITABLE_DIRS = ['node_modules', 'workspace', 'public', 'mounts'] as const
+const PACKAGE_INSTALL_WRITABLE_FILES = ['package.json', 'bun.lock'] as const
 
 // Resolves the jail layout for a recognized standalone dependency install
 // (`bun add` / `bun install`). The RW root lets bun create node_modules/ and its
 // temp lockfile (`bun.lock.NNN.tmp`, renamed) — a file-level bind of `bun.lock`
 // alone cannot, since the temp file needs DIRECTORY write. Pre-creates an empty
-// node_modules/ so the dir exists before the RW root bind (bwrap needs a real
-// tree; the parent RW bind makes it writable). SECURITY: rejects a symlink at
-// agentDir or any of the install-touched paths (node_modules, package.json,
-// bun.lock) — an RW root following a symlinked component would write outside the
-// jail. `.git` and the secret/private masks are NOT in the writable set here;
-// they are re-hidden by the mask + protected phases that render after the RW
-// root (see SandboxWritableRootPolicy).
+// node_modules/ so the dir exists before the RW root bind. Then RO-binds every
+// EXISTING root entry not in the writable allowlist (readdir enumeration, so a
+// new file like `src/` or a planted `cron.json` is covered without a hardcoded
+// list), plus `node_modules/typeclaw` (the live/symlinked runtime, nested under
+// the writable node_modules) and the whole `.git` (a `bun add` never needs git,
+// so RO-binding it wholesale is simpler and safer than the hooks/config carve-out
+// — it closes the hook / core.hooksPath escalation by construction).
+//
+// SECURITY: rejects a symlink at agentDir, at any install-touched path
+// (node_modules, package.json, bun.lock), and at every RO-bind source — an RW
+// root or an RO bind that follows a symlink would write/read outside the jail.
+// The secret/private masks render AFTER this protected set (subtractMasked in
+// applyBashSandbox drops any protected entry a mask already hides), so .env /
+// secrets.json / memory / sessions stay hidden, not merely RO.
 export async function resolvePackageInstallZones(agentDir: string): Promise<PackageInstallZones> {
   await assertNotSymlink(agentDir)
   await mkdir(join(agentDir, 'node_modules'), { recursive: true })
-  for (const rel of ['node_modules', 'package.json', 'bun.lock'] as const) {
+  for (const rel of ['node_modules', ...PACKAGE_INSTALL_WRITABLE_FILES] as const) {
     const target = join(agentDir, rel)
     if (await exists(target)) await assertNotSymlink(target)
   }
 
+  const writable = new Set<string>([...PACKAGE_INSTALL_WRITABLE_DIRS, ...PACKAGE_INSTALL_WRITABLE_FILES])
   const dirs: string[] = []
-  for (const rel of PACKAGE_INSTALL_PROTECTED_DIRS) {
-    const target = join(agentDir, rel)
-    if (await isRealEntry(target, 'dir')) dirs.push(target)
+  const files: string[] = []
+  for (const entry of await readdir(agentDir, { withFileTypes: true })) {
+    if (writable.has(entry.name)) continue
+    // A symlinked root entry is skipped, not RO-bound: an RO bind follows it to
+    // an outside target. Skipping leaves it under the RW root — but it is the
+    // agent's OWN symlink under its OWN root, contained by the agent-folder bind
+    // and the always-on kernel invariants, the same residual the default jail
+    // accepts for symlinks pointing outside /agent.
+    if (entry.isSymbolicLink()) continue
+    const target = join(agentDir, entry.name)
+    if (entry.isDirectory()) dirs.push(target)
+    else if (entry.isFile()) files.push(target)
   }
-  const gitProtected = await resolveProtectedZones(agentDir).catch(() => ({ dirs: [], files: [] }))
 
-  return {
-    root: agentDir,
-    protected: { dirs: dedupe([...dirs, ...gitProtected.dirs]), files: gitProtected.files },
-  }
+  // node_modules itself is writable (deps land there), but the runtime under it
+  // must not be — RO-bind it nested, last-op-wins over the writable node_modules.
+  const runtime = join(agentDir, 'node_modules', 'typeclaw')
+  if (await isRealEntry(runtime, 'dir')) dirs.push(runtime)
+
+  return { root: agentDir, protected: { dirs: dedupe(dirs), files: dedupe(files) } }
 }
 
 async function exists(target: string): Promise<boolean> {

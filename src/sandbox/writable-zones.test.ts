@@ -314,32 +314,69 @@ describe('resolvePackageInstallZones', () => {
     expect((await stat(join(agentDir, 'node_modules'))).isDirectory()).toBe(true)
   })
 
-  test('protects executable surfaces that exist (packages, .agents/skills, node_modules/typeclaw)', async () => {
-    await mkdir(join(agentDir, 'packages'))
-    await mkdir(join(agentDir, '.agents', 'skills'), { recursive: true })
-    await mkdir(join(agentDir, 'node_modules', 'typeclaw'), { recursive: true })
+  // SECURITY: the allowlist-inversion must fail closed — every root entry the
+  // unsandboxed runtime may read/execute is RO, not just a known executable set.
+  test('RO-protects runtime source trees (src/, scripts/) so lifecycle scripts cannot overwrite them', async () => {
+    await mkdir(join(agentDir, 'src'))
+    await mkdir(join(agentDir, 'scripts'))
 
     const { protected: prot } = await resolvePackageInstallZones(agentDir)
 
-    expect(prot.dirs).toContain(join(agentDir, 'packages'))
-    expect(prot.dirs).toContain(join(agentDir, '.agents/skills'))
-    expect(prot.dirs).toContain(join(agentDir, 'node_modules/typeclaw'))
+    expect(prot.dirs).toContain(join(agentDir, 'src'))
+    expect(prot.dirs).toContain(join(agentDir, 'scripts'))
   })
 
-  test('drops executable surfaces that are absent (bwrap aborts an RO-bind of a missing source)', async () => {
+  test('RO-protects prompt-source and config root files (no bun-add write need, prompt-poison vector)', async () => {
+    for (const f of ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
+      await writeFile(join(agentDir, f), 'x')
+    }
+
     const { protected: prot } = await resolvePackageInstallZones(agentDir)
 
-    expect(prot.dirs).not.toContain(join(agentDir, 'packages'))
-    expect(prot.dirs).not.toContain(join(agentDir, 'node_modules/typeclaw'))
+    for (const f of ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
+      expect(prot.files).toContain(join(agentDir, f))
+    }
   })
 
-  test('protects .git/hooks and .git/config when .git exists', async () => {
+  test('RO-protects an arbitrary unanticipated root entry (covered by readdir, no hardcoded list)', async () => {
+    await mkdir(join(agentDir, 'some-new-dir'))
+    await writeFile(join(agentDir, 'evil.sh'), '#!/bin/sh')
+
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(prot.dirs).toContain(join(agentDir, 'some-new-dir'))
+    expect(prot.files).toContain(join(agentDir, 'evil.sh'))
+  })
+
+  test('RO-protects the whole .git (bun add never needs git; closes hook/config escalation)', async () => {
     await mkdir(join(agentDir, '.git'))
 
     const { protected: prot } = await resolvePackageInstallZones(agentDir)
 
-    expect(prot.dirs).toContain(join(agentDir, '.git/hooks'))
-    expect(prot.files).toContain(join(agentDir, '.git/config'))
+    expect(prot.dirs).toContain(join(agentDir, '.git'))
+  })
+
+  test('RO-protects node_modules/typeclaw (the live runtime) while node_modules stays writable', async () => {
+    await mkdir(join(agentDir, 'node_modules', 'typeclaw'), { recursive: true })
+
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(prot.dirs).toContain(join(agentDir, 'node_modules/typeclaw'))
+    expect(prot.dirs).not.toContain(join(agentDir, 'node_modules'))
+  })
+
+  test('keeps the writable allowlist OUT of the protected set (node_modules, package.json, bun.lock, workspace, public, mounts)', async () => {
+    for (const d of ['workspace', 'public', 'mounts']) await mkdir(join(agentDir, d))
+    for (const f of ['package.json', 'bun.lock']) await writeFile(join(agentDir, f), '{}')
+
+    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    for (const d of ['node_modules', 'workspace', 'public', 'mounts']) {
+      expect(prot.dirs).not.toContain(join(agentDir, d))
+    }
+    for (const f of ['package.json', 'bun.lock']) {
+      expect(prot.files).not.toContain(join(agentDir, f))
+    }
   })
 
   test('rejects a symlinked agent root (RW root would follow it outside the jail)', async () => {
@@ -361,6 +398,20 @@ describe('resolvePackageInstallZones', () => {
       await symlink(join(outside, 'real-nm'), join(agentDir, 'node_modules'))
 
       await expect(resolvePackageInstallZones(agentDir)).rejects.toThrow(/symlink/i)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('skips a symlinked root entry rather than RO-binding it (an RO bind would follow it outside)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+    try {
+      await symlink(outside, join(agentDir, 'evil-link'))
+
+      const { protected: prot } = await resolvePackageInstallZones(agentDir)
+
+      expect(prot.dirs).not.toContain(join(agentDir, 'evil-link'))
+      expect(prot.files).not.toContain(join(agentDir, 'evil-link'))
     } finally {
       await rm(outside, { recursive: true, force: true })
     }
