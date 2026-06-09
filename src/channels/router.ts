@@ -24,6 +24,7 @@ import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
 import { formatChannelCommandHelp } from './commands'
+import { detectContinuationWillingness } from './continuation-willingness'
 import {
   countEffectiveHumans,
   decideEngagement,
@@ -239,6 +240,30 @@ export const EMPTY_TURN_RETRY_NUDGE = [
 // drop so the human is never left staring at dead air after a degenerate turn.
 export const EMPTY_TURN_FALLBACK_TEXT =
   "⚠️ I got stuck putting together a reply and couldn't finish. Could you rephrase or try again?"
+// At most one continuation nudge per logical turn. Stricter than the empty-turn
+// retry budget (2) because the turn ALREADY delivered a user-facing reply — this
+// is a one-shot correction offer, not recovery from no output.
+export const MAX_WILLINGNESS_NUDGES = 1
+// Injected when a reply that ended the turn (terminal-reply abort) promised to
+// keep working but omitted `continue: true`. Reminder-only, SYSTEM MESSAGE
+// framing so persona-rich models do not reply to the notice itself.
+export const WILLINGNESS_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your last reply said you would keep working this turn, but it ended right',
+  'after sending — a successful channel reply ends the turn unless you set',
+  '`continue: true` on it. This is an automated signal from the channel router,',
+  'not a message from anyone in the chat. **Do not acknowledge or reply to this',
+  'notice itself.**',
+  '',
+  'If you still have work to do (fetch data, run a tool, spawn a subagent, then',
+  'reply with the result), do it now — and on the status reply that precedes more',
+  'work this turn, set `continue: true`. If there is nothing left to do, reply',
+  'with `NO_REPLY`.',
+  '',
+  '---',
+].join('\n')
 // Rolling window for outbound send-rate telemetry. 5s matches Discord's
 // rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
 // 1 msg/s sustained. The window is observational; exceeding the burst
@@ -565,6 +590,18 @@ type LiveSession = {
   // increments it before injecting EMPTY_TURN_RETRY_NUDGE and reads it to decide
   // retry-vs-fallback. See the candidate===null branch.
   emptyTurnRetries: number
+  // Count of continuation nudges spent on the CURRENT logical turn, bounded by
+  // MAX_WILLINGNESS_NUDGES. Reset alongside `emptyTurnRetries` only when a real
+  // user batch starts (batch.length > 0), NOT on the reminder-only iteration the
+  // nudge itself queues — same anti-reloop discipline as the empty-turn budget.
+  willingnessNudges: number
+  // Stashed by `installChannelReplyTerminalHook` just before it aborts the turn
+  // after a successful `channel_reply` that omitted `continue: true`. Read once
+  // by `validateChannelTurn` to decide the continuation nudge. `turnSeq`-stamped
+  // (like `skippedTurn`/`skipLockedSendTurn`) so a stale record from an earlier
+  // turn can never trigger a nudge on a later one. `null` when no such reply
+  // ended this turn.
+  lastTerminalReplyAbort: { turnSeq: number; text: string } | null
   // One-shot output-token budget for the NEXT `session.prompt()` only.
   // `installChannelOutputCap` reads and clears it per stream call, so it
   // overrides the default backstop for exactly one re-prompt. Set by the
@@ -1491,6 +1528,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
         emptyTurnRetries: 0,
+        willingnessNudges: 0,
+        lastTerminalReplyAbort: null,
         nextPromptMaxTokens: undefined,
         skippedTurn: null,
         skipLockedSendTurn: null,
@@ -1746,6 +1785,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const keepTurnAlive = details?.continue === true
       if (succeeded && !keepTurnAlive && agent.signal?.aborted !== true) {
         logger.info(`[channels] ${live.keyId} terminal_after_channel_reply`)
+        const replyText = (context.toolCall.arguments as { text?: unknown } | undefined)?.text
+        live.lastTerminalReplyAbort = typeof replyText === 'string' ? { turnSeq: live.turnSeq, text: replyText } : null
         agent.abort()
       }
       return result
@@ -2029,6 +2070,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // iterations the retry itself queues do not refill the budget and loop
           // forever (and the raised cap stays scoped to the turn that set it).
           live.emptyTurnRetries = 0
+          live.willingnessNudges = 0
           live.nextPromptMaxTokens = undefined
         } else if (live.lastTurnAuthorId !== null) {
           live.currentTurnEngageReactions = []
@@ -3134,6 +3176,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { ok: true }
   }
 
+  // The turn ended via the terminal-reply abort. If that reply promised to keep
+  // working but omitted `continue: true`, queue ONE reminder-only re-prompt so
+  // the model gets a second chance to actually do it. The abort already fired
+  // (safe default preserved); this only adds an optional nudge. Bounded by
+  // MAX_WILLINGNESS_NUDGES and gated on `promptQueue` being empty so a real
+  // inbound that coalesced into this turn is never answered with a stale nudge.
+  const maybeNudgeContinuationWillingness = (live: LiveSession): void => {
+    const record = live.lastTerminalReplyAbort
+    live.lastTerminalReplyAbort = null
+    if (record === null || record.turnSeq !== live.turnSeq) return
+    if (live.willingnessNudges >= MAX_WILLINGNESS_NUDGES) return
+    if (live.promptQueue.length > 0) return
+    if (!detectContinuationWillingness(record.text)) return
+    live.willingnessNudges++
+    logger.info(
+      `[channels] ${live.keyId} willingness_nudge attempt=${live.willingnessNudges}/${MAX_WILLINGNESS_NUDGES}`,
+    )
+    live.pendingSystemReminders.push(WILLINGNESS_NUDGE)
+  }
+
   const validateChannelTurn = async (live: LiveSession, successfulSendsBeforePrompt: number): Promise<void> => {
     // `skip_response` short-circuit. Honoring it bypasses recovery entirely.
     // Stale-flag protection: only honor when stamped on the just-completed
@@ -3159,7 +3221,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
-    if (live.successfulChannelSends > successfulSendsBeforePrompt) return
+    if (live.successfulChannelSends > successfulSendsBeforePrompt) {
+      maybeNudgeContinuationWillingness(live)
+      return
+    }
 
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
       logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
