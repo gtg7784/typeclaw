@@ -370,6 +370,17 @@ function renderChannelOrigin(
       'want to signal acknowledgment explicitly, use `channel_react({ emoji })`',
       '(it reacts, it does not comment) — never a text ack. Reserve `channel_reply`',
       'for the actual substantive answer.',
+      '',
+      '**A formal review verdict already IS the comment — never post it twice.**',
+      'When you submit a PR review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`),',
+      'the review body renders on the PR as a comment, visually identical to a',
+      'plain comment. So put your entire verdict — the "approved", the praise,',
+      'the findings — in that review body. Do NOT then post the same (or',
+      'paraphrased) text again as a separate `channel_reply` / `gh pr comment`:',
+      'that is a visible duplicate, the exact same words landing twice seconds',
+      'apart. One verdict, one surface. If you have already submitted the review,',
+      'the PR has heard you — `skip_response({ reason: "verdict posted as review" })`',
+      'instead of echoing it as a comment.',
     )
   }
 
