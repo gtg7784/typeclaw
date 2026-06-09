@@ -19,14 +19,31 @@ The principle underneath all five rules below: **the repo already told you how i
 
 A contribution composed from your defaults and one composed from the repo's conventions look completely different to a maintainer. The five-second check that separates them:
 
-```sh
-# Issue & PR templates (any of these may exist; presence varies by repo)
-gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE 2>/dev/null
-gh api repos/OWNER/REPO/contents/.github/PULL_REQUEST_TEMPLATE.md 2>/dev/null
-# (templates also live at repo root or under docs/ — .github/ is just the common spot)
+**Templates do not live in one fixed spot — GitHub resolves them from several.** Probing only `.github/PULL_REQUEST_TEMPLATE.md` is the trap: a repo that keeps its template at the root, under `docs/`, or in a `PULL_REQUEST_TEMPLATE/` directory will look template-less to that one check, and you'll bypass a convention the maintainer actually set. GitHub looks in **three base locations** — the repo root, `docs/`, and `.github/` — and the filename is **case-insensitive** (`PULL_REQUEST_TEMPLATE.md`, `pull_request_template.md`). It also supports a **`PULL_REQUEST_TEMPLATE/` _directory_** of multiple named templates (same three base locations). Issue templates follow the same pattern: a single `.github/ISSUE_TEMPLATE.md`, or — far more common now — an `ISSUE_TEMPLATE/` directory of forms (`*.md` / `*.yml`).
 
-# Contribution guide
+The cheapest reliable check is to list each base directory once and scan the names, rather than guessing exact filenames:
+
+```sh
+# PR template — scan all three base dirs for any case of the file OR a PULL_REQUEST_TEMPLATE/ dir.
+# (Listing the dir surfaces both the single-file and the multi-template-directory forms at once.)
+for base in "" "docs/" ".github/"; do
+  gh api "repos/OWNER/REPO/contents/${base}" --jq '.[].name' 2>/dev/null \
+    | grep -iE '^pull_request_template(\.md)?$'
+done
+# If a PULL_REQUEST_TEMPLATE/ directory exists, list the choices inside it:
+gh api "repos/OWNER/REPO/contents/.github/PULL_REQUEST_TEMPLATE" --jq '.[].name' 2>/dev/null
+
+# Issue templates — the modern form is an ISSUE_TEMPLATE/ directory of forms;
+# the legacy form is a single ISSUE_TEMPLATE.md. Check both, in all three base dirs.
+for base in "" "docs/" ".github/"; do
+  gh api "repos/OWNER/REPO/contents/${base}ISSUE_TEMPLATE" --jq '.[].name' 2>/dev/null  # directory of forms
+  gh api "repos/OWNER/REPO/contents/${base}" --jq '.[].name' 2>/dev/null \
+    | grep -iE '^issue_template(\.md)?$'                                                 # single legacy file
+done
+
+# Contribution guide (root or .github/)
 gh api repos/OWNER/REPO/contents/CONTRIBUTING.md 2>/dev/null
+gh api repos/OWNER/REPO/contents/.github/CONTRIBUTING.md 2>/dev/null
 
 # What do existing titles look like?
 gh pr list --repo OWNER/REPO --state all --limit 20 --json title --jq '.[].title'
@@ -36,17 +53,18 @@ gh issue list --repo OWNER/REPO --state all --limit 20 --json title --jq '.[].ti
 gh issue list --repo OWNER/REPO --search "<keywords from what you're about to file>" --state all
 ```
 
-You don't need every one of these every time — but you do need to _look_ before you compose. The cost is a few API calls; the cost of skipping it is a contribution that signals you didn't read the room.
+A `grep` that matches **nothing across all three base dirs** is your evidence there is genuinely no template — a single 404 on `.github/PULL_REQUEST_TEMPLATE.md` is not. You don't need every command every time, but you do need to _look in all the supported places_ before concluding "no template" and composing from your own defaults. The cost is a few API calls; the cost of skipping it is bypassing a convention the repo set on purpose — the exact failure this skill exists to prevent.
 
 ## The five rules
 
 ### 1. Fill the issue/PR template if one exists
 
-If `gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE/*` or `.github/PULL_REQUEST_TEMPLATE.md` returns content, the maintainers want every issue/PR to follow that shape. Fetch it, read its sections, and produce a `--body` that fills each one with real content.
+If the discovery scan above surfaced a template in **any** of the supported locations (root, `docs/`, or `.github/` — single file or directory), the maintainers want every issue/PR to follow that shape. Fetch its content, read its sections, and produce a `--body` that fills each one with real content.
 
 - For PRs, the template often has a checklist ("- [ ] tests added", "- [ ] docs updated"). Fill the prose sections; for checkboxes, check only what is genuinely true and leave the rest unchecked — don't tick a box you can't back up.
-- Multiple issue templates (bug report, feature request, etc.) mean you must pick the one that matches what you're filing. A bug filed against the feature-request template is noise.
-- A repo with no template gives you latitude — but a clear, scannable body (what / why / how, repro steps for bugs) is still the courteous default.
+- A **`PULL_REQUEST_TEMPLATE/` directory** holds more than one PR template; pick the one that matches your change and fill it. (GitHub can also select one via a `?template=` URL param, but when you're filing through `gh` you choose by reading the directory and using the right file as your body.)
+- An **`ISSUE_TEMPLATE/` directory** likewise holds multiple issue forms (bug report, feature request, etc.) — pick the one that matches what you're filing. A bug filed against the feature-request template is noise. Forms may be YAML (`.yml` issue forms) rather than markdown; translate their fields into a sensible body, or use the matching markdown template if one is offered.
+- A repo with genuinely no template (the scan matched nothing in all three base dirs) gives you latitude — but a clear, scannable body (what / why / how, repro steps for bugs) is still the courteous default.
 
 ### 2. Don't bypass the template to file faster
 
