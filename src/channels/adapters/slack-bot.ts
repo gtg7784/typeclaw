@@ -359,18 +359,26 @@ export function createTypingCallback(deps: {
     // threads keep using `thread`. Either way the status is keyed on one ts.
     const statusThread =
       target.typingThread !== undefined && target.typingThread !== '' ? target.typingThread : target.thread
-    const tag = formatChannelTag
-      ? await formatChannelTag(target.workspace, statusThread ?? target.chat)
-      : `channel=${statusThread ?? target.chat}`
     if (statusThread === undefined || statusThread === null || statusThread === '') {
-      if (target.phase === 'tick') logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
+      if (target.phase === 'tick') {
+        const tag = formatChannelTag
+          ? await formatChannelTag(target.workspace, statusThread ?? target.chat)
+          : `channel=${statusThread ?? target.chat}`
+        logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
+      }
       return
     }
-    if (target.phase === 'stop') {
-      await typingTracker.clearAfterSend(target.chat, statusThread)
-      return
-    }
-    await typingTracker.setStatus(target.chat, statusThread, 'is typing...')
+    // Append to the per-(chat,thread) FIFO BEFORE awaiting anything: the FIFO
+    // only orders calls once setStatus/clearAfterSend is reached, so awaiting
+    // `formatChannelTag` first opens an unordered gap where a fire-and-forget
+    // re-arm 'tick' (router send() after a reply) can enqueue "is typing..."
+    // AFTER the turn-end 'stop' clear. Flat DMs have no threaded-reply
+    // auto-clear, so that strands the indicator until Slack's ~2-min timeout.
+    const enqueued =
+      target.phase === 'stop'
+        ? typingTracker.clearAfterSend(target.chat, statusThread)
+        : typingTracker.setStatus(target.chat, statusThread, 'is typing...')
+    await enqueued
   }
 }
 
