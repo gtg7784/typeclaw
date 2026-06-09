@@ -129,7 +129,11 @@ export type InspectFramePayload =
     }
 
 export type InspectServerMessage =
-  | { type: 'subscribed'; sessionId: string; sessionLive: boolean }
+  // supportsPing is the heartbeat capability flag. A pre-heartbeat server omits
+  // it; the client must treat its absence as "no ping support" and never send a
+  // ping (an old server answers an unknown ping with an error + close, killing
+  // the tail). Strict opt-in: only an explicit true arms round-trip probing.
+  | { type: 'subscribed'; sessionId: string; sessionLive: boolean; supportsPing?: true }
   | { type: 'frame'; ts: number; payload: InspectFramePayload }
   | { type: 'error'; message: string }
   | { type: 'pong'; id: number }

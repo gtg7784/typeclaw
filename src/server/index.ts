@@ -1318,7 +1318,7 @@ function handleInspectMessage(
     })
   }
 
-  sendInspect(ws, { type: 'subscribed', sessionId: msg.sessionId, sessionLive: live !== undefined })
+  sendInspect(ws, { type: 'subscribed', sessionId: msg.sessionId, sessionLive: live !== undefined, supportsPing: true })
 }
 
 function extractJobId(target: StreamMessage['target']): string {

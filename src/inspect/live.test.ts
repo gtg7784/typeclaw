@@ -471,7 +471,9 @@ describe('streamLive — live session events', () => {
     // read loop parked forever (event loop idle) and the transcript viewer could
     // never recover to the picker. The heartbeat watchdog detects the non-draining
     // send queue via bufferedAmount and ends the generator as a clean close.
-    const fake = makeControllableWebSocket({ bufferedAmount: 2_000_000 })
+    // supportsPing:false proves this detection needs no server cooperation —
+    // it works even against a pre-heartbeat server that never pongs.
+    const fake = makeControllableWebSocket({ bufferedAmount: 2_000_000, supportsPing: false })
     const gen = streamLive({
       url: 'ws://unused',
       sessionId: 'ses_a',
@@ -484,6 +486,35 @@ describe('streamLive — live session events', () => {
     for await (const ev of gen) events.push(ev)
     expect(events).toEqual([])
     expect(fake.closed).toBe(true)
+    expect(fake.pingsReceived).toBe(0)
+  })
+
+  test('a pre-heartbeat server (no supportsPing) is never pinged and the tail stays open', async () => {
+    // Backward-compat: an old inspect server answers an unknown `ping` with an
+    // error + close, which would kill a healthy tail. The client must therefore
+    // never probe a server that did not advertise supportsPing on `subscribed`.
+    // Such a server degrades to bufferedAmount-only liveness (covered above).
+    const fake = makeControllableWebSocket({ supportsPing: false })
+    const ctrl = new AbortController()
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      WebSocketImpl: fake.ctor,
+      heartbeatIntervalMs: 5,
+      pongTimeoutMs: 15,
+    })
+
+    const events: InspectEvent[] = []
+    const drained = (async () => {
+      for await (const ev of gen) events.push(ev)
+    })()
+    await new Promise((r) => setTimeout(r, 60))
+    expect(fake.pingsReceived).toBe(0)
+    expect(fake.closed).toBe(false)
+    ctrl.abort()
+    await drained
+    expect(events).toEqual([])
   })
 
   test('a ping with no pong within the deadline ends the generator cleanly', async () => {
@@ -658,17 +689,20 @@ function makeNeverOpeningWebSocket(): typeof WebSocket {
   return FakeWS as unknown as typeof WebSocket
 }
 
-// Fake WebSocket that opens immediately, then drives the heartbeat branches: a
-// fixed `bufferedAmount` (to exercise the wedge ceiling) and optional pong
-// echoing (round-trip liveness). The returned handle exposes live state — read
-// via getters so assertions see updates after the generator runs, not a stale
-// snapshot.
-function makeControllableWebSocket(cfg: { bufferedAmount?: number; pong?: boolean }): {
+// Fake WebSocket that opens immediately, then drives the heartbeat branches.
+// On subscribe it replies `subscribed` advertising `supportsPing` (default
+// true, matching the current server) so the client arms ping probing; set it
+// false to emulate a pre-heartbeat server. Also models a fixed `bufferedAmount`
+// (wedge ceiling) and optional pong echoing (round-trip liveness). The returned
+// handle exposes live state via getters so assertions see post-run updates, not
+// a stale snapshot.
+function makeControllableWebSocket(cfg: { bufferedAmount?: number; pong?: boolean; supportsPing?: boolean }): {
   ctor: typeof WebSocket
   readonly closed: boolean
   readonly pingsReceived: number
 } {
   const state = { closed: false, pingsReceived: 0 }
+  const supportsPing = cfg.supportsPing ?? true
   class FakeWS {
     readonly url: string
     readyState = 0
@@ -698,6 +732,19 @@ function makeControllableWebSocket(cfg: { bufferedAmount?: number; pong?: boolea
 
     send(data: string): void {
       const msg = JSON.parse(data) as { type: string; id?: number }
+      if (msg.type === 'subscribe') {
+        queueMicrotask(() =>
+          this.dispatch('message', {
+            data: JSON.stringify({
+              type: 'subscribed',
+              sessionId: 'ses_a',
+              sessionLive: true,
+              ...(supportsPing ? { supportsPing: true } : {}),
+            }),
+          }),
+        )
+        return
+      }
       if (msg.type !== 'ping') return
       state.pingsReceived += 1
       if (cfg.pong === true) {

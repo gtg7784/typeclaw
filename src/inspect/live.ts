@@ -34,6 +34,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
 
   let heartbeat: ReturnType<typeof setInterval> | null = null
   let awaitingPongSince: number | null = null
+  let supportsPing = false
 
   const stopHeartbeat = (): void => {
     if (heartbeat !== null) {
@@ -59,6 +60,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
       return
     }
     if (msg.type === 'subscribed') {
+      supportsPing = msg.supportsPing === true
       opts.onSubscribed?.(msg.sessionLive)
       return
     }
@@ -162,6 +164,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
     intervalMs: opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
     pongTimeoutMs: opts.pongTimeoutMs ?? DEFAULT_PONG_TIMEOUT_MS,
     bufferedAmountCeiling: opts.bufferedAmountCeiling ?? DEFAULT_BUFFERED_AMOUNT_CEILING,
+    supportsPing: () => supportsPing,
     isAwaitingPongSince: () => awaitingPongSince,
     setAwaitingPongSince: (at) => {
       awaitingPongSince = at
@@ -220,6 +223,9 @@ type HeartbeatOptions = {
   intervalMs: number
   pongTimeoutMs: number
   bufferedAmountCeiling: number
+  // Read live: the `subscribed` reply that sets it arrives after the timer is
+  // armed, so a snapshot taken at startHeartbeat time would always be false.
+  supportsPing: () => boolean
   isAwaitingPongSince: () => number | null
   setAwaitingPongSince: (at: number | null) => void
   setTimer: (timer: ReturnType<typeof setInterval>) => void
@@ -230,11 +236,15 @@ type HeartbeatOptions = {
 // phase; once subscribed, a wedged socket (send queue not draining, no
 // 'close'/'error') would park the read loop forever. The interval fires on the
 // event-loop timer queue independent of the dead socket, so it always runs.
-// Two independent death signals, both treated as a clean close (return, never
-// throw) so the viewer recovers to the picker:
-//   1. bufferedAmount past a ceiling — our writes are not draining.
+// Two death signals, both treated as a clean close (return, never throw) so the
+// viewer recovers to the picker:
+//   1. bufferedAmount past a ceiling — our writes are not draining. Always on:
+//      it needs no server cooperation, so it works against any server version.
 //   2. a ping with no pong within the deadline — round-trip liveness lost,
-//      which also covers idle tails (a quiet-but-healthy tail still pongs).
+//      which also covers idle tails (a quiet-but-healthy tail still pongs). Only
+//      armed when the server advertised supportsPing; a pre-heartbeat server
+//      answers an unknown ping with error+close, so probing it would kill the
+//      tail. Such a server degrades to bufferedAmount-only detection.
 function startHeartbeat(opts: HeartbeatOptions): void {
   let pingId = 0
   const tick = (): void => {
@@ -242,6 +252,7 @@ function startHeartbeat(opts: HeartbeatOptions): void {
       opts.onDead()
       return
     }
+    if (!opts.supportsPing()) return
     const awaiting = opts.isAwaitingPongSince()
     if (awaiting !== null) {
       if (Date.now() - awaiting >= opts.pongTimeoutMs) opts.onDead()
