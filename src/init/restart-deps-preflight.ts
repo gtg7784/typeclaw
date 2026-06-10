@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import { PACKAGE_FILE } from './packagejson'
 import { PACKAGES_DIR } from './paths'
@@ -39,10 +39,19 @@ export async function validateRestartDeps(options: RestartDepsPreflightOptions):
   return { ok: true }
 }
 
+// Mirrors loadLocal() in src/plugin/loader.ts: a local plugin entry is resolved
+// against cwd and confined to it (`rel.startsWith('..') || isAbsolute(rel)`
+// throws). An escaping entry (`../x`, `/abs/x`) that happens to EXIST passes a
+// bare existsSync but the loader rejects it post-stop — so the escape check must
+// run before, and independently of, the existence check.
 function checkLocalPluginPaths(cwd: string, plugins: readonly string[]): string | null {
   for (const entry of plugins) {
     if (!isLocalEntry(entry)) continue
-    const resolved = isAbsolute(entry) ? entry : join(cwd, entry)
+    const resolved = resolve(cwd, entry)
+    const rel = relative(cwd, resolved)
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      return `local plugin "${entry}" referenced in typeclaw.json#plugins escapes the agent directory; the plugin loader confines local plugins to the agent folder and would reject it after the container has stopped. Use a path inside the agent folder before restarting.`
+    }
     if (!existsSync(resolved)) {
       return `local plugin "${entry}" referenced in typeclaw.json#plugins does not exist on disk; restart would fail at dependency install. Remove the entry or restore the path before restarting.`
     }

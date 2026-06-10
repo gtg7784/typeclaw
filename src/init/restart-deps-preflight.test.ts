@@ -148,4 +148,42 @@ describe('validateRestartDeps', () => {
       await rm(cwd, { recursive: true, force: true })
     }
   })
+
+  test('refuses an existing relative path that escapes the agent directory', async () => {
+    const cwd = await makeAgentDir()
+    try {
+      // sibling.ts exists one level above cwd; a bare existsSync would pass, but
+      // the loader confines local plugins to cwd and rejects this post-stop.
+      const siblingFile = join(cwd, '..', 'sibling.ts')
+      await writeFile(siblingFile, 'export default {}')
+
+      const result = await validateRestartDeps({ cwd, plugins: ['../sibling.ts'] })
+
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('escapes the agent directory')
+
+      await rm(siblingFile, { force: true })
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('refuses an existing absolute path outside the agent directory', async () => {
+    const cwd = await makeAgentDir()
+    const outsideDir = await makeAgentDir()
+    try {
+      const abs = join(outsideDir, 'plugin.ts')
+      await writeFile(abs, 'export default {}')
+
+      const result = await validateRestartDeps({ cwd, plugins: [abs] })
+
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('escapes the agent directory')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+      await rm(outsideDir, { recursive: true, force: true })
+    }
+  })
 })
