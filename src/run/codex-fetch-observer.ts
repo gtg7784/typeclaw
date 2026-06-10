@@ -32,10 +32,14 @@ export type CodexFetchObserverOptions = {
   // measured from fetch start to body completion. Unlike `idleMs`, it does NOT
   // reset on chunk arrival, so it catches a "slow-trickle" stream that emits
   // bytes inside every idle window yet never reaches a terminal SSE event —
-  // the failure mode behind issue #394's multi-minute hang (one observed turn
-  // occupied 901s before Bun's OS socket deadline fired). Default 900_000 ms:
-  // chosen to clear known-healthy long reasoning turns (observed up to ~285s)
-  // by a wide margin, so it only trips on the pathological no-completion case.
+  // the failure mode behind issue #394's multi-minute hang (one observed
+  // request occupied 901s before Bun's OS socket deadline fired). On expiry the
+  // request is aborted with a retryable error, so this also bounds how long a
+  // user waits before the retry fires — keeping it low is a UX requirement, not
+  // just a safety net. Default 120_000 ms: across 96 observed requests the
+  // slowest *healthy* (completed) one was 45s and p99 was ~30s, with a clean
+  // gap up to the 901s hang — so 120s is ~2.7x the healthy max (ample headroom
+  // for PoP/TLS outliers) while capping a real hang at ~2min instead of ~15min.
   // Set to 0 to disable just this timer.
   overallMs?: number
   // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
@@ -57,7 +61,7 @@ const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
 const ENV_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
 const DEFAULT_IDLE_MS = 300_000
-const DEFAULT_OVERALL_MS = 900_000
+const DEFAULT_OVERALL_MS = 120_000
 const LOG_PREFIX = '[codex-fetch]'
 
 const defaultScheduler: TimeoutScheduler = {
