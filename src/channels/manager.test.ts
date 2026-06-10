@@ -313,6 +313,37 @@ describe('channel manager — restartAdapter serialization', () => {
     await mgr.stop()
   })
 
+  test('start() failure waits for in-flight siblings so none orphan past stop()', async () => {
+    cfg['slack-bot'] = enabledAdapterCfg()
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const events: string[] = []
+    const slackStartGate = deferred()
+    const slack = makeRecordingAdapter(events, 'slack', { start: slackStartGate.promise })
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b', TELEGRAM_BOT_TOKEN: 'tg-a' },
+      createSlackAdapter: () => slack,
+      createTelegramAdapter: () => {
+        throw new Error('hostd env missing')
+      },
+    })
+
+    const startCall = mgr.start()
+    // Let the telegram factory throw while slack's start() is still gated open.
+    await Promise.resolve()
+    expect(events).toEqual(['slack:start:begin'])
+
+    // Releasing slack lets it register in `live`; start() must not reject until
+    // that settles, otherwise the late registration would orphan slack.
+    slackStartGate.resolve()
+    await expect(startCall).rejects.toThrow('hostd env missing')
+    expect(slack.startCalls).toBe(1)
+
+    await mgr.stop()
+    expect(events).toContain('slack:stop:begin')
+  })
+
   test('passes tunnelUrlForChannel through to the github adapter', async () => {
     cfg.github = enabledGithubCfg()
     await writeGithubSecrets(agentDir)

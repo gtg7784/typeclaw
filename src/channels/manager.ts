@@ -300,16 +300,19 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       // Safe to fan out: `live` and every router registry are keyed by adapter
       // name, so concurrent starts never collide. Serial start would otherwise pay
       // the sum of each adapter's connect latency instead of just the slowest.
-      // `Promise.all` (not `allSettled`) keeps the prior fail-fast contract:
-      // `startAdapter` already converts expected per-adapter failures to `false`,
-      // so a rejection here is an unexpected throw (e.g. `buildAdapter`) that must
-      // still surface rather than be swallowed.
-      await Promise.all(
-        ADAPTER_IDS.flatMap((name) => {
-          const adapterCfg = cfg[name]
-          return adapterCfg === undefined ? [] : [runSerially(name, () => startAdapter(name, adapterCfg))]
-        }),
-      )
+      const starts = ADAPTER_IDS.flatMap((name) => {
+        const adapterCfg = cfg[name]
+        return adapterCfg === undefined ? [] : [runSerially(name, () => startAdapter(name, adapterCfg))]
+      })
+      // Await every launched start to settle BEFORE surfacing a failure.
+      // `startAdapter` converts expected per-adapter failures to `false`, so a
+      // rejection is an unexpected throw (e.g. `buildAdapter`) that must still
+      // fail-fast. But bailing on the first rejection (plain `Promise.all`) would
+      // leave sibling starts in flight, letting a late `live.set` orphan an adapter
+      // that the caller's subsequent `stop()` never sees. Settle all, then rethrow.
+      const results = await Promise.allSettled(starts)
+      const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+      if (failure !== undefined) throw failure.reason
     },
 
     async stop(): Promise<void> {
