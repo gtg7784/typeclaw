@@ -81,7 +81,7 @@ describe('startAgent + plugin loading', () => {
     expect(running.loadedPlugins.map((p) => p.name)).toContain('memory')
   })
 
-  test('plugin factory exception aborts startAgent and does not leak partial registrations', async () => {
+  test('a user plugin whose factory throws is skipped — startAgent still boots, no leaked registrations', async () => {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
     await writeFile(
       join(agentDir, 'typeclaw.json'),
@@ -99,9 +99,13 @@ describe('startAgent + plugin loading', () => {
 }`,
     )
 
-    await expect(startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })).rejects.toThrow(
-      /factory threw: boom/,
-    )
+    running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+    // The broken user plugin is skipped: startAgent boots, the plugin is absent
+    // from the loaded set, and it leaked no registrations keyed to its name.
+    expect(running.loadedPlugins.map((p) => p.name)).not.toContain('plugin')
+    const registry = running.pluginRuntime.get().registry
+    expect(registry.tools.filter((t) => t.pluginName === 'plugin')).toEqual([])
+    expect(registry.cronJobs.filter((j) => j.pluginName === 'plugin')).toEqual([])
   })
 
   test('plugin session.start hook fires when a websocket session opens', async () => {

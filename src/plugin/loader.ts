@@ -15,14 +15,26 @@ export type LoadPluginEntryFn = (entry: string, agentDir: string) => Promise<Res
 
 // Thrown only when a plugin entry cannot be resolved at all (uninstalled
 // package, missing local file, unresolvable export subpath). The manager
-// treats this as non-fatal and skips the entry. Every other failure --
-// path-escape, import-time evaluation throws, invalid definition -- stays a
-// plain Error so it remains a hard boot error.
+// treats this as non-fatal and skips the entry.
 export class PluginNotFoundError extends Error {
   readonly entry: string
   constructor(entry: string, message: string, options?: { cause?: unknown }) {
     super(message, options)
     this.name = 'PluginNotFoundError'
+    this.entry = entry
+  }
+}
+
+// Thrown when a plugin entry violates a security boundary (e.g. a local path
+// escaping the agent directory). Stays fatal for ALL plugins — even the
+// per-plugin tolerance for user plugin bugs MUST NOT swallow this, or a
+// malicious typeclaw.json could point at arbitrary host files and have the
+// failure silently downgraded to a warning.
+export class PluginSecurityError extends Error {
+  readonly entry: string
+  constructor(entry: string, message: string) {
+    super(message)
+    this.name = 'PluginSecurityError'
     this.entry = entry
   }
 }
@@ -44,7 +56,7 @@ async function loadLocal(entry: string, agentDir: string): Promise<ResolvedPlugi
   // cannot point at arbitrary files on the host.
   const rel = relative(agentDir, resolved)
   if (rel.startsWith('..') || isAbsolute(rel)) {
-    throw new Error(`plugin path escapes agent directory: ${entry} (resolved to ${resolved})`)
+    throw new PluginSecurityError(entry, `plugin path escapes agent directory: ${entry} (resolved to ${resolved})`)
   }
   if (!existsSync(resolved)) {
     throw new PluginNotFoundError(entry, `plugin path does not exist: ${entry} (resolved to ${resolved})`)
