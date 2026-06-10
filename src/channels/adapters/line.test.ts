@@ -183,8 +183,8 @@ describe('createLineAdapter lifecycle', () => {
     expect(router.registered.history).toBe(true)
     expect(router.registered.nameResolver).toBe(true)
 
-    listener.emit('message', {
-      type: 'message',
+    const message = {
+      type: 'message' as const,
       chat_id: 'C1',
       message_id: 'M1',
       author_id: 'U_other',
@@ -192,7 +192,8 @@ describe('createLineAdapter lifecycle', () => {
       content_type: 'text',
       content_metadata: {},
       sent_at: '2025-01-02T00:00:00.000Z',
-    })
+    }
+    listener.emit('message', message)
     await waitFor(() => routed.length > 0)
     expect(routed[0]!.text).toBe('hello bot')
     expect(routed[0]!.workspace).toBe('@line-dm')

@@ -4,6 +4,7 @@ import {
   _resetBwrapAvailabilityCacheForTests,
   _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
+  _waitForSentinelMarkerForTests,
   buildProcBindProbeScript,
   canBindProcSafely,
   canMountRealProc,
@@ -342,5 +343,43 @@ describe('resolveProcBindSafetyWithRetry', () => {
       PROC_BIND_RETRY_BACKOFF_MS,
     )
     expect(result).toBe('safe')
+  })
+})
+
+describe('waitForSentinelMarker', () => {
+  test('polls through the spawn/exec race until the marker appears', async () => {
+    let reads = 0
+    const sleeps: number[] = []
+    const result = await _waitForSentinelMarkerForTests(
+      1234,
+      () => Promise.resolve(++reads === 3),
+      (ms) => (sleeps.push(ms), Promise.resolve()),
+      1_000,
+      25,
+    )
+
+    expect(result).toBe(true)
+    expect(reads).toBe(3)
+    expect(sleeps).toEqual([25, 25])
+  })
+
+  test('returns false when the marker never appears before the readiness deadline', async () => {
+    const sleeps: number[] = []
+    let now = 0
+    const result = await _waitForSentinelMarkerForTests(
+      1234,
+      () => Promise.resolve(false),
+      (ms) => {
+        sleeps.push(ms)
+        now += ms
+        return Promise.resolve()
+      },
+      50,
+      25,
+      () => now,
+    )
+
+    expect(result).toBe(false)
+    expect(sleeps).toEqual([25, 25])
   })
 })
