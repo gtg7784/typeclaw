@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
 
-import { DEFAULT_SYSTEM_PROMPT, renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderTurnRoleAnchor, renderTurnTimeAnchor, SLIM_SYSTEM_PROMPT } from './system-prompt'
 
 describe('subagent orchestration — explicit research routing', () => {
   // Guards the regression where an explicit "do a research" directive was answered
@@ -38,6 +38,18 @@ describe('delivering reports and documents', () => {
   test('forbids hand-rolling a PDF with an ad-hoc library', () => {
     expect(DEFAULT_SYSTEM_PROMPT).toMatch(/jsPDF, pdfkit/i)
     expect(DEFAULT_SYSTEM_PROMPT).toMatch(/mojibake/i)
+  })
+})
+
+describe('version control dependency changes', () => {
+  test.each([
+    ['default prompt', DEFAULT_SYSTEM_PROMPT],
+    ['slim prompt', SLIM_SYSTEM_PROMPT],
+  ])('requires package manager install after package.json dependency edits in the %s', (_name, prompt) => {
+    expect(prompt).toContain('After editing `package.json`')
+    expect(prompt).toContain('bumping dependencies/plugins')
+    expect(prompt).toContain('matching the existing lockfile')
+    expect(prompt).toContain('Commit the lockfile change alongside the `package.json` edit')
   })
 })
 
