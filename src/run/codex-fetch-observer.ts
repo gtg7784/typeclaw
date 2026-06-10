@@ -25,8 +25,14 @@ export type CodexFetchObserverOptions = {
   ttfbMs?: number
   // Override the sliding inter-chunk idle deadline applied to the SSE body
   // reader. Resets on every chunk; if no bytes arrive within this window the
-  // body stream errors. Default: 300_000 ms, matches `openai/codex`'s Rust CLI
-  // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`. Set to 0 to disable just this timer.
+  // body stream errors. Like the overall deadline, this doubles as a recovery
+  // bound: on a silent stall the user waits this long before the retry fires,
+  // so it should not exceed the overall ceiling. Default 120_000 ms (was
+  // 300_000, which matched `openai/codex`'s Rust CLI but is 5min of dead air
+  // before recovery). 120s is loose enough for OpenAI's keepalive-less
+  // reasoning pauses (the Responses API sends no SSE heartbeats, so a quiet
+  // reasoning window is genuinely byte-silent) while bounded by the overall
+  // cap. Set to 0 to disable just this timer.
   idleMs?: number
   // Override the absolute wall-clock ceiling on a single Codex request,
   // measured from fetch start to body completion. Unlike `idleMs`, it does NOT
@@ -60,7 +66,7 @@ const ENV_TTFB_MS = 'TYPECLAW_CODEX_TTFB_MS'
 const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
 const ENV_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
-const DEFAULT_IDLE_MS = 300_000
+const DEFAULT_IDLE_MS = 120_000
 const DEFAULT_OVERALL_MS = 120_000
 const LOG_PREFIX = '[codex-fetch]'
 
