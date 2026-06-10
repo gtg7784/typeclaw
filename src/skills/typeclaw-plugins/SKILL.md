@@ -115,6 +115,13 @@ Without `configSchema`, `ctx.config` is `never` and any reference is a type erro
 
 The **derived name is the key** for the per-plugin config block at the top level of `typeclaw.json`. Two plugins with the same derived name are a boot error.
 
+Use the entry format that matches the plugin's source:
+
+- **Published npm plugin** → put the npm package specifier in `plugins[]`, e.g. `"typeclaw-gws-multi-account"` or `"typeclaw-plugin-standup-log@1.2.3"`. Do **not** invent a `./packages/...` path for a published package.
+- **Local plugin you are authoring in this agent folder** → put its relative path in `plugins[]`, e.g. `"./packages/my-plugin"`. The path must exist and point at local plugin code.
+
+If the user says to add/install an existing plugin by package name, preserve that package name. Only use `./packages/<name>` when you are creating or wiring a local workspace package that exists in this repo.
+
 ### Local path safety
 
 Local plugin paths **must resolve inside `agentDir`**. Absolute paths (`/etc/...`) and parent-traversing paths (`../../foo`) are rejected with:
@@ -125,9 +132,11 @@ plugin path escapes agent directory: <entry> (resolved to <abs-path>)
 
 This is why `./plugins/x.ts` works and `/Users/me/x.ts` does not.
 
-### Recommended location: `packages/<plugin-name>/`
+### Recommended location for new local plugins: `packages/<plugin-name>/`
 
-The agent folder is a **bun monorepo**, and `packages/` is its workspace root. **Custom plugins go there.** A `./packages/standup-log/` plugin is a real workspace package — bun installs its dependencies, the workspace symlink machinery makes it importable, and it lands in git like any other reusable code. Concretely:
+This section is about plugins you are **authoring locally**. For a published npm plugin, keep the npm package specifier in `plugins[]`; do not create or guess a local path.
+
+The agent folder is a **bun monorepo**, and `packages/` is its workspace root. **Custom local plugins go there.** A `./packages/standup-log/` plugin is a real workspace package — bun installs its dependencies, the workspace symlink machinery makes it importable, and it lands in git like any other reusable code. Concretely:
 
 ```
 packages/
