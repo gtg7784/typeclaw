@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { withGitLock } from '@/git/mutex'
 import { definePlugin, type PluginContext, type SpawnSubagentOptions, type Subagent } from '@/plugin'
 
+import { type BackupPushAuthDeps, makeDefaultAskPassEnsurer, resolveBackupPushAuthEnv } from './git-auth'
 import { COMMIT_TIMEOUT_MS, makeDefaultGitSpawn, NETWORK_TIMEOUT_MS, runBackup, type BackupResult } from './runner'
 import {
   cleanupMessageFile,
@@ -163,6 +164,7 @@ async function runBackupOnce(
     agentDir: string
     logger: { info: (m: string) => void; warn: (m: string) => void }
     spawnSubagent: PluginContext['spawnSubagent']
+    github: PluginContext['github']
   },
 ): Promise<BackupResult> {
   const messagePath = messageFilePath(payload.agentDir)
@@ -175,11 +177,21 @@ async function runBackupOnce(
     spawnedByOrigin: { kind: 'tui', sessionId: 'backup-runner' },
   }
 
+  // App-auth agents need a minted per-repo token for the runner's push (it
+  // bypasses the bash tool's credential hook). Only computed when we'll push;
+  // PAT/SSH/non-github fall back to null. Passed as `pushEnv` so the runner
+  // applies it to push/fetch ONLY — never to local commands like `git commit`,
+  // which can run repo-controlled hooks that would otherwise see the token.
+  const pushEnv = payload.pushToOrigin
+    ? ((await resolveBackupAuthEnv(payload.agentDir, ctx.github, ctx.logger)) ?? undefined)
+    : undefined
+
   const result = await withGitLock(payload.agentDir, () =>
     runBackup(
       { cwd: payload.agentDir, pushToOrigin: payload.pushToOrigin },
       {
         gitSpawn: makeDefaultGitSpawn(),
+        pushEnv,
         pickCommitMessage: async ({ status, diffstat }) => {
           await cleanupMessageFile(messagePath)
           const messagePayload: CommitMessagePayload = {
@@ -219,6 +231,48 @@ async function runBackupOnce(
 
   await cleanupMessageFile(messagePath)
   return result
+}
+
+async function resolveBackupAuthEnv(
+  agentDir: string,
+  github: PluginContext['github'],
+  logger: { warn: (m: string) => void },
+): Promise<Record<string, string> | null> {
+  const deps: BackupPushAuthDeps = {
+    hasAppTokenResolver: github.hasAppTokenResolver,
+    ghToken: process.env.GH_TOKEN,
+    resolveTokenForRepo: github.resolveTokenForRepo,
+    resolveOriginPushUrl,
+    ensureAskPassHelper: makeDefaultAskPassEnsurer(),
+  }
+  try {
+    return await resolveBackupPushAuthEnv(agentDir, deps)
+  } catch {
+    // Credential prep is best-effort: a resolver failure must not abort the
+    // backup. Falls back to the runner's inherited env (commit still happens),
+    // and the push's own failure path diagnoses if it then can't authenticate.
+    // No slug/token/error detail is logged — those are credential-adjacent.
+    logger.warn('GitHub backup auth unavailable; continuing with inherited git credentials')
+    return null
+  }
+}
+
+async function resolveOriginPushUrl(cwd: string): Promise<string | null> {
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) return null
+  try {
+    const proc = bun.spawn({
+      cmd: ['git', '-C', cwd, 'remote', 'get-url', '--push', 'origin'],
+      stdout: 'pipe',
+      stderr: 'ignore',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+    })
+    if ((await proc.exited) !== 0) return null
+    const out = (await new Response(proc.stdout).text()).trim()
+    return out === '' ? null : out
+  } catch {
+    return null
+  }
 }
 
 function describeResult(r: BackupResult): string {
