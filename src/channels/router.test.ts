@@ -18,6 +18,7 @@ import {
   CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS,
   CHANNEL_MAX_OUTPUT_TOKENS,
   createChannelRouter,
+  disengageReactionEmojiFor,
   DUPLICATE_SEND_ERROR,
   EMPTY_TURN_FALLBACK_TEXT,
   EMPTY_TURN_RETRY_NUDGE,
@@ -1816,6 +1817,17 @@ describe('ChannelRouter react on disengage', () => {
 
     // clearSticky returned normally (a throwing reaction did not propagate)
     expect(cleared).toMatchObject({ keyId: 'discord-bot:g1:c1:' })
+  })
+})
+
+describe('disengageReactionEmojiFor', () => {
+  test('falls back to a GitHub-supported emoji because GitHub cannot render zipper_mouth_face', () => {
+    expect(disengageReactionEmojiFor('github')).toBe('confused')
+  })
+
+  test('uses the default zipper_mouth_face on chat adapters that support it', () => {
+    expect(disengageReactionEmojiFor('discord-bot')).toBe('zipper_mouth_face')
+    expect(disengageReactionEmojiFor('slack-bot')).toBe('zipper_mouth_face')
   })
 })
 

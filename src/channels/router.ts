@@ -141,6 +141,17 @@ export const ENGAGE_REACTION_EMOJI = 'eyes'
 // Best-effort "zipping it / going quiet" ack dropped on the triggering message
 // when the model disengages (channel_disengage); fire-and-forget like engage :eyes:.
 export const DISENGAGE_REACTION_EMOJI = 'zipper_mouth_face'
+// Per-adapter fallback for platforms that cannot render the default. GitHub's
+// Reactions API is a fixed 8-emoji set with no zipper-mouth; 'confused' is the
+// closest "stepping back" signal it can post, so a GitHub disengage still acks
+// instead of silently no-op'ing on the unsupported result.
+const DISENGAGE_REACTION_EMOJI_OVERRIDES: Partial<Record<AdapterId, string>> = {
+  github: 'confused',
+}
+
+export function disengageReactionEmojiFor(adapter: AdapterId): string {
+  return DISENGAGE_REACTION_EMOJI_OVERRIDES[adapter] ?? DISENGAGE_REACTION_EMOJI
+}
 
 // Wake nudge pushed into a resumed channel session at boot so drain() has a
 // non-empty batch and fires a turn. The substantive instruction the model acts
@@ -3930,7 +3941,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: live.key.chat,
       thread: live.key.thread,
       reactionRef: live.currentTurnReactionRef,
-      emoji: DISENGAGE_REACTION_EMOJI,
+      emoji: disengageReactionEmojiFor(live.key.adapter),
     })
       .then((result) => {
         if (!result.ok && result.code !== 'unsupported') {
