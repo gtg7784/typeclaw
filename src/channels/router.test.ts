@@ -1734,6 +1734,91 @@ describe('ChannelRouter auto-react on engage', () => {
   })
 })
 
+describe('ChannelRouter react on disengage', () => {
+  const REACTION_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
+
+  test('reacts on the triggering message with the disengage emoji when clearSticky fires mid-turn', async () => {
+    // given an engaged turn whose triggering inbound carries a reactionRef
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const captured: ReactionRequest[] = []
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // when the model disengages during the turn (callback registered here so the
+    // engage :eyes: added during route() is not captured)
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = async () => {
+      router.registerReaction('discord-bot', async (req) => {
+        captured.push(req)
+        return { ok: true }
+      })
+      router.clearSticky(KEY)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the disengage emoji lands on the triggering message
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({
+      adapter: 'discord-bot',
+      chat: 'c1',
+      emoji: 'zipper_mouth_face',
+      reactionRef: REACTION_REF,
+    })
+  })
+
+  test('does not react when there is no live session for the key', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+
+    router.clearSticky(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('does not react when the current turn carries no reactionRef', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let called = false
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound())
+    sessions[0]!.onPrompt = async () => {
+      router.registerReaction('discord-bot', async () => {
+        called = true
+        return { ok: true }
+      })
+      router.clearSticky(KEY)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('a throwing disengage reaction never blocks clearSticky', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    let cleared: { keyId: string; cleared: number } | null = null
+    sessions[0]!.onPrompt = async () => {
+      router.registerReaction('discord-bot', async () => {
+        throw new Error('reaction api exploded')
+      })
+      cleared = router.clearSticky(KEY)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // clearSticky returned normally (a throwing reaction did not propagate)
+    expect(cleared).toMatchObject({ keyId: 'discord-bot:g1:c1:' })
+  })
+})
+
 describe('ChannelRouter drop-eyes-after-reply', () => {
   const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
   const INSTANCE_REF: ReactionRef = { adapter: 'discord-bot', value: 'reaction-instance' }
