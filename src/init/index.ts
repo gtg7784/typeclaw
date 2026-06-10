@@ -595,6 +595,11 @@ function buildPackageJson(root: string, name: string): Record<string, unknown> {
       'agent-browser': AGENT_BROWSER_VERSION,
       [GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE]: GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
     },
+    typeclaw: {
+      managedPlugins: {
+        [GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE]: GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
+      },
+    },
   }
 }
 

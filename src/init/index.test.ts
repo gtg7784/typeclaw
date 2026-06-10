@@ -899,8 +899,10 @@ describe('scaffold', () => {
 
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
+      typeclaw?: { managedPlugins?: Record<string, string> }
     }
     expect(pkg.dependencies['typeclaw-gws-multi-account']).toBe('^0.3.4')
+    expect(pkg.typeclaw?.managedPlugins?.['typeclaw-gws-multi-account']).toBe('^0.3.4')
   })
 
   test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
