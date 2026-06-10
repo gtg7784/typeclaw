@@ -11,10 +11,10 @@ Your agent folder is a **bun monorepo**. The root `package.json` declares `"work
 
 You have two free-write zones at the agent root: `workspace/` and `packages/`. Both are exempt from the non-workspace-write guard so you can edit them without acknowledging anything, but their relationship to git is opposite, and picking the wrong one is the most common mistake.
 
-| Zone         | Purpose                                                            | Tracked in git?                                                                                           | Reusable?                                    |
-| ------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `workspace/` | One-off scripts, scratch work, throwaway experiments               | **No** — entire dir is gitignored                                                                         | No (the dir itself is invisible to git)      |
-| `packages/`  | Reusable packages, custom plugins, shared utilities, internal libs | **Yes** — every file is tracked and MUST be committed when edited (only `*/node_modules/` ignored inside) | Yes (committed and importable across agents) |
+| Zone         | Purpose                                                                  | Tracked in git?                                                                                           | Reusable?                                    |
+| ------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `workspace/` | One-off scripts, scratch work, throwaway experiments                     | **No** — entire dir is gitignored                                                                         | No (the dir itself is invisible to git)      |
+| `packages/`  | Reusable packages, custom local plugins, shared utilities, internal libs | **Yes** — every file is tracked and MUST be committed when edited (only `*/node_modules/` ignored inside) | Yes (committed and importable across agents) |
 
 The two columns to internalize:
 
@@ -26,7 +26,7 @@ Anything you put in `packages/` MUST land in a commit — see `typeclaw-git`. Th
 **Decision rule, top to bottom — stop at the first match:**
 
 1. **Will another script or another part of the agent folder import this?** → `packages/<name>/`. Even if "another part" is just "tomorrow's me writing a sibling script", a reusable thing belongs here.
-2. **Is this a custom typeclaw plugin** (anything you'd list in `typeclaw.json`'s `plugins`)? → `packages/<plugin-name>/`. Always. Plugins are the canonical packages.
+2. **Is this a custom local typeclaw plugin you are authoring?** → `packages/<plugin-name>/`. If you are adding an existing or published plugin, keep its npm package specifier in `typeclaw.json#plugins`; do not create or guess a `./packages/...` path.
 3. **Will the user want to track this in git, see it in PRs, depend on it from a cron job?** → `packages/<name>/`.
 4. **Is this throwaway** — a one-shot data transformation, a debug script, a scratch experiment that exists for one task and dies? → `workspace/`.
 5. **Default if unsure** → `packages/<name>/`. Better to commit something reusable than to lose something useful in the gitignored void.
@@ -96,6 +96,8 @@ To depend on a workspace package from the **agent root** (e.g. so cron `exec` jo
 ```
 
 ## Custom typeclaw plugins live under `packages/`
+
+This section is only for plugins you are **authoring locally** in the agent folder. If the user asks to add/install an existing or published plugin, use the plugin's npm package specifier in `typeclaw.json#plugins` (for example, `"typeclaw-gws-multi-account"`) and do **not** fabricate a `./packages/...` path.
 
 If you are writing a typeclaw plugin (anything that uses `definePlugin` from `typeclaw/plugin`), the canonical home is `packages/<plugin-name>/`. The workflow:
 
