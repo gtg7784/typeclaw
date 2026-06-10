@@ -25,6 +25,7 @@ import type {
   SendResult,
 } from '@/channels/types'
 
+import { splitInboundLine } from './line-attachment'
 import { createLineChannelResolver } from './line-channel-resolver'
 import { classifyInbound } from './line-classify'
 import { toLinePlainText } from './line-format'
@@ -217,13 +218,16 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
 
       const bucket = channelResolver.lookupChat(event.chat_id)?.workspace ?? '@line-group'
       const inboundTag = await formatChannelTag(bucket, event.chat_id)
+      const { text, attachments } = splitInboundLine(event)
       logger.info(
-        `[line] inbound message_id=${event.message_id} author=${event.author_id} ${inboundTag} text_len=${(event.text ?? '').length}`,
+        `[line] inbound message_id=${event.message_id} author=${event.author_id} ${inboundTag} content_type=${event.content_type} text_len=${text.length} attachments=${attachments.length}`,
       )
 
       const verdict = classifyInbound(event, options.configRef(), {
         selfUserId,
         lookupChat: (id) => channelResolver.lookupChat(id),
+        text,
+        attachments,
         ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
       })
       if (verdict.kind === 'drop') {

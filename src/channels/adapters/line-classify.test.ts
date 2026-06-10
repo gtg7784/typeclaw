@@ -38,9 +38,57 @@ describe('classifyInbound', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
-  test('drops empty-text messages', () => {
-    const verdict = classifyInbound(event({ text: null }), CONFIG, { selfUserId: 'U_self', lookupChat: dmLookup })
+  test('drops empty-text messages with no attachments', () => {
+    const verdict = classifyInbound(event({ text: null }), CONFIG, {
+      selfUserId: 'U_self',
+      lookupChat: dmLookup,
+      text: '',
+    })
     expect(verdict).toEqual({ kind: 'drop', reason: 'empty_text' })
+  })
+
+  test('routes a non-text message when the adapter supplies a placeholder + attachment', () => {
+    const verdict = classifyInbound(event({ text: null, content_type: 'STICKER' }), CONFIG, {
+      selfUserId: 'U_self',
+      lookupChat: dmLookup,
+      text: '[LINE sticker]',
+      attachments: [{ id: 1, kind: 'sticker', ref: '' }],
+    })
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe('[LINE sticker]')
+    expect(verdict.payload.attachments).toEqual([{ id: 1, kind: 'sticker', ref: '' }])
+  })
+
+  test('routes a placeholder-only message (contact/location) with no attachments', () => {
+    const verdict = classifyInbound(event({ text: null, content_type: 'CONTACT' }), CONFIG, {
+      selfUserId: 'U_self',
+      lookupChat: dmLookup,
+      text: '[LINE contact]',
+      attachments: [],
+    })
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe('[LINE contact]')
+    expect(verdict.payload.attachments).toBeUndefined()
+  })
+
+  test('still drops a non-text message from an unknown chat', () => {
+    const verdict = classifyInbound(event({ chat_id: 'C_unknown', content_type: 'STICKER' }), CONFIG, {
+      selfUserId: 'U_self',
+      lookupChat: dmLookup,
+      text: '[LINE sticker]',
+      attachments: [{ id: 1, kind: 'sticker', ref: '' }],
+    })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'unknown_chat' })
+  })
+
+  test('still drops a non-text message authored by the bot itself', () => {
+    const verdict = classifyInbound(event({ author_id: 'U_self', content_type: 'STICKER' }), CONFIG, {
+      selfUserId: 'U_self',
+      lookupChat: dmLookup,
+      text: '[LINE sticker]',
+      attachments: [{ id: 1, kind: 'sticker', ref: '' }],
+    })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
   test('drops messages from chats not yet in the resolver', () => {
