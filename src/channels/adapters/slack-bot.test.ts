@@ -983,6 +983,25 @@ describe('createSlackHistoryCallback', () => {
     expect(result.messages.map((m) => m.text)).toEqual(['before topic', 'after topic'])
   })
 
+  test('keeps /me messages in history context', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '1700000001.000100', user: 'UALICE', subtype: 'me_message', text: '<@UBOT> waves' }],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => 'UBOT',
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages.map((m) => m.text)).toEqual(['<@UBOT> waves'])
+  })
+
   test('preserves conversations.replies order (already oldest-first)', async () => {
     // given
     const { fn } = fakeFetch({

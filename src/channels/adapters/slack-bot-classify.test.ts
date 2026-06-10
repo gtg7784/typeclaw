@@ -301,6 +301,18 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.payload.thread).toBeNull()
   })
 
+  test('routes /me messages that mention the bot because they are user-authored messages', () => {
+    const event = buildEvent({ subtype: 'me_message', text: `waves at <@${BOT_USER_ID}>` })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.text).toBe(`waves at <@${BOT_USER_ID}>`)
+  })
+
   test('top-level alias-only addressing anchors thread on the inbound ts so the bot can reply in-thread', () => {
     // given: a top-level message with no @mention and no thread_ts, but
     // containing one of the bot's plain-text aliases. Slack treats this
