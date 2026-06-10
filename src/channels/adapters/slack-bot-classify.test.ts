@@ -46,6 +46,14 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'no_user' })
   })
 
+  test('drops Slack system subtypes with a user because they are not replyable messages', () => {
+    const event = buildEvent({ subtype: 'channel_topic', text: 'set the channel topic:\nProject updates' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'slack_system_message' })
+  })
+
   test('drops messages with neither text nor files with reason=empty_text', () => {
     const event = buildEvent({ text: '' })
 
@@ -78,6 +86,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
   test('routes file-only uploads (empty text) with attachment summary so the agent sees the upload', () => {
     const event = buildEvent({
+      subtype: 'file_share',
       text: '',
       files: [
         {
@@ -105,6 +114,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
   test('appends attachment summary to user text so the agent sees BOTH text and the file when the user typed something alongside the upload', () => {
     const event = buildEvent({
+      subtype: 'file_share',
       text: 'look at this',
       files: [
         {
@@ -289,6 +299,18 @@ describe('slack-bot classifyInbound — route path', () => {
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.isBotMention).toBe(false)
     expect(verdict.payload.thread).toBeNull()
+  })
+
+  test('routes /me messages that mention the bot because they are user-authored messages', () => {
+    const event = buildEvent({ subtype: 'me_message', text: `waves at <@${BOT_USER_ID}>` })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.text).toBe(`waves at <@${BOT_USER_ID}>`)
   })
 
   test('top-level alias-only addressing anchors thread on the inbound ts so the bot can reply in-thread', () => {

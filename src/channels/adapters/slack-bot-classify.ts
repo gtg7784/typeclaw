@@ -14,6 +14,7 @@ export type SlackInboundAppMentionEvent = SlackSocketModeAppMentionEvent
 export type InboundDropReason =
   | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
   | 'no_user' // event has no `user` field (e.g. system messages: channel_join, message_changed)
+  | 'slack_system_message' // non-replyable Slack message subtype events (e.g. channel_topic)
   | 'empty_text' // event has neither text nor files — nothing for the agent to act on
   | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
@@ -60,6 +61,10 @@ export function classifyInbound(
     // subtype WITH a user (rare, but happens for legacy integrations) is
     // routed; subtype + no user still drops as `no_user`.
     return { kind: 'drop', reason: 'no_user' }
+  }
+
+  if (!isRouteableSlackMessageSubtype(event.subtype)) {
+    return { kind: 'drop', reason: 'slack_system_message' }
   }
 
   const rawText = event.text ?? ''
@@ -154,6 +159,10 @@ export function classifyInbound(
       ts: slackTsToMillis(event.ts),
     },
   }
+}
+
+export function isRouteableSlackMessageSubtype(subtype: string | undefined): boolean {
+  return subtype === undefined || subtype === 'bot_message' || subtype === 'file_share' || subtype === 'me_message'
 }
 
 // Slack encodes user mentions inline as `<@U…>` (or `<@W…>` for some org
