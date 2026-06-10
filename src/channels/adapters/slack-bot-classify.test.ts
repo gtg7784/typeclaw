@@ -86,6 +86,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
   test('routes file-only uploads (empty text) with attachment summary so the agent sees the upload', () => {
     const event = buildEvent({
+      subtype: 'file_share',
       text: '',
       files: [
         {
@@ -113,6 +114,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
   test('appends attachment summary to user text so the agent sees BOTH text and the file when the user typed something alongside the upload', () => {
     const event = buildEvent({
+      subtype: 'file_share',
       text: 'look at this',
       files: [
         {

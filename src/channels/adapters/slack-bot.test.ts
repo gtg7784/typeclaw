@@ -1013,6 +1013,7 @@ describe('createSlackHistoryCallback', () => {
         {
           ts: '1700000000.000100',
           user: 'UALICE',
+          subtype: 'file_share',
           text: '이 사진 머임??',
           thread_ts: '1700000000.000100',
           files: [{ id: 'F123', name: 'photo.png', mimetype: 'image/png' }],

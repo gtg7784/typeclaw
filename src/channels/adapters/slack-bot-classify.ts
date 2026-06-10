@@ -162,7 +162,7 @@ export function classifyInbound(
 }
 
 export function isRouteableSlackMessageSubtype(subtype: string | undefined): boolean {
-  return subtype === undefined || subtype === 'bot_message'
+  return subtype === undefined || subtype === 'bot_message' || subtype === 'file_share'
 }
 
 // Slack encodes user mentions inline as `<@U…>` (or `<@W…>` for some org
