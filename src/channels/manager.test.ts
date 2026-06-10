@@ -298,6 +298,21 @@ describe('channel manager — restartAdapter serialization', () => {
     await mgr.stop()
   })
 
+  test('start() rejects when adapter construction throws outside startAdapter catch', async () => {
+    cfg['slack-bot'] = enabledAdapterCfg()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' },
+      createSlackAdapter: () => {
+        throw new Error('hostd env missing')
+      },
+    })
+
+    await expect(mgr.start()).rejects.toThrow('hostd env missing')
+    await mgr.stop()
+  })
+
   test('passes tunnelUrlForChannel through to the github adapter', async () => {
     cfg.github = enabledGithubCfg()
     await writeGithubSecrets(agentDir)

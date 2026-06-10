@@ -300,7 +300,11 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       // Safe to fan out: `live` and every router registry are keyed by adapter
       // name, so concurrent starts never collide. Serial start would otherwise pay
       // the sum of each adapter's connect latency instead of just the slowest.
-      await Promise.allSettled(
+      // `Promise.all` (not `allSettled`) keeps the prior fail-fast contract:
+      // `startAdapter` already converts expected per-adapter failures to `false`,
+      // so a rejection here is an unexpected throw (e.g. `buildAdapter`) that must
+      // still surface rather than be swallowed.
+      await Promise.all(
         ADAPTER_IDS.flatMap((name) => {
           const adapterCfg = cfg[name]
           return adapterCfg === undefined ? [] : [runSerially(name, () => startAdapter(name, adapterCfg))]
