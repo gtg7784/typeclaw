@@ -299,9 +299,14 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
     // marker: that proves the sentinel is dumpable, same-uid, AND that this pid is
     // OUR sentinel (not a reused pid), so the ONLY thing that can deny the read
     // from inside the sandbox is the child-userns boundary (rules out a false
-    // "blocked" from dumpable=0 / uid mismatch). If the parent can't read the
-    // marker, the sentinel setup is unsound — inconclusive, fail closed, no cache.
-    if (!(await parentReadsSentinelMarker(sentinelPid))) return INCONCLUSIVE
+    // "blocked" from dumpable=0 / uid mismatch). The marker can be absent for a
+    // moment right after Bun.spawn: the child pid exists before `/usr/bin/env -i
+    // SECRET=... /bin/sleep` has exec'd and replaced its environ. Treating that
+    // startup race as immediate INCONCLUSIVE made the retry budget collapse into
+    // pure backoff time (~7.25s) and produced the first-tool `bunx` degrade even
+    // though the same host proved safe on the next call. Wait briefly for the
+    // marker before deciding setup is unsound; a real failure still fails closed.
+    if (!(await waitForSentinelMarker(sentinelPid))) return INCONCLUSIVE
 
     const proc = Bun.spawn(
       [
@@ -404,6 +409,9 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
 // briefly-saturated box; a genuinely wedged runtime still trips it and degrades.
 const PROC_BIND_PROBE_TIMEOUT_MS = 12_000
 
+const PROC_BIND_SENTINEL_READY_TIMEOUT_MS = 1_000
+const PROC_BIND_SENTINEL_READY_POLL_MS = 25
+
 // Designated probe-script exit codes. ONLY these two are a cacheable verdict;
 // every other code (a setup failure, bwrap startup failure, a signal, 127, …) is
 // inconclusive and must NOT be cached — see the exit-code interpretation in
@@ -473,6 +481,24 @@ async function parentReadsSentinelMarker(sentinelPid: number): Promise<boolean> 
     return false
   }
 }
+
+async function waitForSentinelMarker(
+  sentinelPid: number,
+  readMarker: (pid: number) => Promise<boolean> = parentReadsSentinelMarker,
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+  timeoutMs: number = PROC_BIND_SENTINEL_READY_TIMEOUT_MS,
+  pollMs: number = PROC_BIND_SENTINEL_READY_POLL_MS,
+  now: () => number = Date.now,
+): Promise<boolean> {
+  const deadline = now() + timeoutMs
+  for (;;) {
+    if (await readMarker(sentinelPid)) return true
+    if (now() >= deadline) return false
+    await sleep(pollMs)
+  }
+}
+
+export const _waitForSentinelMarkerForTests = waitForSentinelMarker
 
 export function _resetProcBindProbeCacheForTests(): void {
   procBindProbeCache.clear()
