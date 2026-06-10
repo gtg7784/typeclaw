@@ -268,6 +268,36 @@ describe('channel manager — restartAdapter serialization', () => {
     await mgr.stop()
   })
 
+  test('starts adapters concurrently rather than serially', async () => {
+    cfg['slack-bot'] = enabledAdapterCfg()
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const events: string[] = []
+    const slackStartGate = deferred()
+    const telegramStartGate = deferred()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b', TELEGRAM_BOT_TOKEN: 'tg-a' },
+      createSlackAdapter: () => makeRecordingAdapter(events, 'slack', { start: slackStartGate.promise }),
+      createTelegramAdapter: () => makeRecordingAdapter(events, 'telegram', { start: telegramStartGate.promise }),
+    })
+
+    const startCall = mgr.start()
+    await Promise.resolve()
+
+    // Both adapters have begun starting while neither has finished — impossible
+    // under serial start, where slack would block telegram until its gate opens.
+    expect(events).toEqual(['slack:start:begin', 'telegram:start:begin'])
+
+    slackStartGate.resolve()
+    telegramStartGate.resolve()
+    await startCall
+
+    expect(events).toContain('slack:start:end')
+    expect(events).toContain('telegram:start:end')
+    await mgr.stop()
+  })
+
   test('passes tunnelUrlForChannel through to the github adapter', async () => {
     cfg.github = enabledGithubCfg()
     await writeGithubSecrets(agentDir)
