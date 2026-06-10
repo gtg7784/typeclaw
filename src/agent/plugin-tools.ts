@@ -703,11 +703,17 @@ function subtractMaskedProtected(
 // probes are cached process-globally, so this resolves to one spawn per
 // container lifetime regardless of how many bash calls hit it.
 // A tmpfs degrade carries WHY it happened so the caller can pick a permanent vs
-// retryable error. 'definitive': a real cross-userns leak ('unsafe') or a host
-// with no usable namespaces — permanent. 'unverified': the safety probe stayed
-// inconclusive through its retry budget (transient load) — the next call
-// re-probes and can recover, since 'inconclusive' is never cached. Absent when
-// the strategy is not tmpfs.
+// retryable error. 'definitive': the probe returned a real cross-userns leak
+// ('unsafe') — the ONLY verdict proven permanent, so it fails closed for good.
+// 'unverified': the safety probe never reached a definitive verdict within its
+// retry budget. That covers BOTH a transient load spike AND a durable
+// incapability (no usable namespaces, a bwrap that starts but cannot set up its
+// sandbox): the probe cannot prove a NEGATIVE capability — only a leak is
+// definitive — so a genuinely incapable host also lands here and simply keeps
+// re-degrading on each call. Since 'inconclusive' is never cached, that costs a
+// re-probe but is correct: the only false case is "capable but briefly
+// saturated", which recovers; an incapable host stays degraded either way.
+// Absent when the strategy is not tmpfs.
 type ProcStrategyResolution =
   | { strategy: 'real-proc' | 'proc-bind'; degradeReason?: undefined }
   | { strategy: 'tmpfs'; degradeReason: 'definitive' | 'unverified' }
@@ -724,10 +730,11 @@ async function resolveProcStrategy(): Promise<ProcStrategyResolution> {
   if (verdict === 'safe') return { strategy: 'proc-bind' }
   // Degraded last resort: no working /proc strategy. External package runners
   // (bunx/bun add/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
-  // /proc/self/{fd,maps} are absent. An 'unsafe' verdict is a DEFINITIVE host
-  // fact (warn once — a real operator-facing limit); an 'inconclusive' one is a
-  // transient unverified state that recovers on retry, so it is NOT warned (it
-  // would cry wolf every boot storm) and is reported as retryable upstream.
+  // /proc/self/{fd,maps} are absent. Only a proven 'unsafe' (a real cross-userns
+  // leak) is DEFINITIVE — warn once (a real operator-facing limit). An
+  // 'inconclusive' is reported as retryable upstream and NOT warned (it would cry
+  // wolf every boot storm); a durably-incapable host re-degrades quietly here,
+  // since the probe cannot distinguish it from transient load.
   if (verdict === 'unsafe') {
     warnTmpfsProcFallbackOnce()
     return { strategy: 'tmpfs', degradeReason: 'definitive' }
