@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { buildRestartHandoffWiring } from './index'
+import { buildRestartHandoffWiring, currentChannelAuthor } from './index'
 import type { SessionOrigin } from './session-origin'
 
 function fakeSessionManager(sessionFile: string | undefined): SessionManager {
@@ -43,14 +43,6 @@ describe('buildRestartHandoffWiring', () => {
     })
   })
 
-  test('carries the channel author into the handoff so a self-restart re-seeds the requester', () => {
-    const result = buildRestartHandoffWiring(
-      { origin: { ...channelOrigin, lastInboundAuthorId: 'U_OWNER' }, plugins: { agentDir: '/agent' } },
-      fakeSessionManager('/agent/sessions/ses-3.jsonl'),
-    )
-    expect(result.triggeringAuthorId).toBe('U_OWNER')
-  })
-
   test('emits nothing for cron / subagent / system origins', () => {
     const cron: SessionOrigin = { kind: 'cron', jobId: 'j1', jobKind: 'prompt' }
     const subagent: SessionOrigin = { kind: 'subagent', subagent: 'explorer', parentSessionId: 'p1' }
@@ -78,5 +70,28 @@ describe('buildRestartHandoffWiring', () => {
     expect(
       buildRestartHandoffWiring({ plugins: { agentDir: '/agent' } }, fakeSessionManager('/agent/sessions/ses-1.jsonl')),
     ).toEqual({})
+  })
+})
+
+describe('currentChannelAuthor', () => {
+  test('reads the LIVE turn author, not the session-creation author', () => {
+    // given: a live origin holder advanced to a SECOND author after creation
+    const ref: { current: SessionOrigin | undefined } = {
+      current: { ...channelOrigin, lastInboundAuthorId: 'U_OPENER' },
+    }
+    const getOrigin = (): SessionOrigin | undefined => ref.current
+    expect(currentChannelAuthor(getOrigin)).toBe('U_OPENER')
+
+    // when: a different speaker drives the current turn
+    ref.current = { ...channelOrigin, lastInboundAuthorId: 'U_LATER' }
+
+    // then: the provider reflects the current turn, not the opener
+    expect(currentChannelAuthor(getOrigin)).toBe('U_LATER')
+  })
+
+  test('returns undefined for tui and channel-without-author origins', () => {
+    expect(currentChannelAuthor(() => tuiOrigin)).toBeUndefined()
+    expect(currentChannelAuthor(() => channelOrigin)).toBeUndefined()
+    expect(currentChannelAuthor(() => undefined)).toBeUndefined()
   })
 })

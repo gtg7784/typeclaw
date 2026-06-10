@@ -383,6 +383,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                     originatingSessionId: sessionManager.getSessionId(),
                     ...(options.stream ? { stream: options.stream } : {}),
                     ...buildRestartHandoffWiring(options, sessionManager),
+                    triggeringAuthorIdProvider: () => currentChannelAuthor(getOrigin),
                   }),
                 ]
               : []),
@@ -512,12 +513,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 export function buildRestartHandoffWiring(
   options: { origin?: SessionOrigin; plugins?: { agentDir: string } },
   sessionManager: SessionManager,
-): {
-  agentDir?: string
-  originatingSessionFile?: string
-  handoffOrigin?: RestartHandoffOrigin
-  triggeringAuthorId?: string
-} {
+): { agentDir?: string; originatingSessionFile?: string; handoffOrigin?: RestartHandoffOrigin } {
   const origin = options.origin
   if (origin === undefined) return {}
   const handoffOrigin = restartHandoffOriginFor(origin)
@@ -525,13 +521,17 @@ export function buildRestartHandoffWiring(
   const agentDir = options.plugins?.agentDir
   const sessionFile = sessionManager.getSessionFile()
   if (agentDir === undefined || sessionFile === undefined) return {}
-  const triggeringAuthorId = origin.kind === 'channel' ? origin.lastInboundAuthorId : undefined
-  return {
-    agentDir,
-    originatingSessionFile: sessionFile,
-    handoffOrigin,
-    ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
-  }
+  return { agentDir, originatingSessionFile: sessionFile, handoffOrigin }
+}
+
+// Reads the LIVE turn author at restart time, not the session-creation
+// snapshot. A channel session is long-lived and multi-principal: the
+// self-restart tool fires on whatever turn triggered it, so the handoff must
+// carry that turn's author (originRef.current), not whoever first opened the
+// session. Returns undefined for non-channel/no-author origins.
+export function currentChannelAuthor(getOrigin: () => SessionOrigin | undefined): string | undefined {
+  const origin = getOrigin()
+  return origin?.kind === 'channel' ? origin.lastInboundAuthorId : undefined
 }
 
 function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {

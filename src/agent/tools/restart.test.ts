@@ -372,6 +372,35 @@ describe('createRestartTool restart-pending handoff', () => {
     expect(parsed.originatingSessionFile).toBe('ses-channel.jsonl')
   })
 
+  test('writes the LIVE turn author into the handoff, not the session-creation author', async () => {
+    // given: the provider tracks a mutable holder advanced after construction
+    server = startOkServer()
+    const liveAuthor = { current: 'U_OPENER' as string | undefined }
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-channel',
+      exit: () => {},
+      agentDir,
+      originatingSessionFile: '/some/abs/path/ses-channel.jsonl',
+      handoffOrigin: {
+        kind: 'channel',
+        key: { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null },
+      },
+      triggeringAuthorIdProvider: () => liveAuthor.current,
+    })
+
+    // when: a different speaker drives the turn that fires the restart
+    liveAuthor.current = 'U_LATER'
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then: the handoff carries the current-turn author, not the opener
+    const parsed = JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8'))
+    expect(parsed.triggeringAuthorId).toBe('U_LATER')
+  })
+
   test('skips the handoff when handoffOrigin is omitted (cron/subagent/system origins)', async () => {
     // given
     server = startOkServer()
