@@ -73,6 +73,18 @@ describe('commandNeedsRealProc', () => {
     expect(commandNeedsRealProc('  bun   install  ')).toBe(true)
   })
 
+  // The bun invocation can sit AFTER a prelude that just sets up the cwd; it still
+  // runs under tmpfs /proc and still hits NotDir, so the diagnostic must catch a
+  // bun command at any shell command boundary, not only as the first word.
+  test('fires when bun runs after a chained prelude (cd / mkdir / pipe)', () => {
+    expect(commandNeedsRealProc('cd /tmp/app && bun install')).toBe(true)
+    expect(commandNeedsRealProc('mkdir app && cd app && bunx foo')).toBe(true)
+    expect(commandNeedsRealProc('mkdir app; cd app; bunx foo')).toBe(true)
+    expect(commandNeedsRealProc('cd app || bun add lodash')).toBe(true)
+    expect(commandNeedsRealProc('(cd app && bun install)')).toBe(true)
+    expect(commandNeedsRealProc('echo start\nbun run build')).toBe(true)
+  })
+
   test('does not flag bun subcommands that do not exercise the package /proc path', () => {
     expect(commandNeedsRealProc('bun test')).toBe(false)
     expect(commandNeedsRealProc('bun --version')).toBe(false)
@@ -83,5 +95,7 @@ describe('commandNeedsRealProc', () => {
     expect(commandNeedsRealProc('git status')).toBe(false)
     expect(commandNeedsRealProc('npm install')).toBe(false)
     expect(commandNeedsRealProc('echo bunx not-really')).toBe(false)
+    expect(commandNeedsRealProc('cd /tmp && npm install')).toBe(false)
+    expect(commandNeedsRealProc('cd bun && ls')).toBe(false)
   })
 })
