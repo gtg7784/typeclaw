@@ -97,6 +97,8 @@ To depend on a workspace package from the **agent root** (e.g. so cron `exec` jo
 
 ## Custom typeclaw plugins live under `packages/`
 
+This section is only for plugins you are **authoring locally** in the agent folder. If the user asks to add/install an existing or published plugin, use the plugin's npm package specifier in `typeclaw.json#plugins` (for example, `"typeclaw-gws-multi-account"`) and do **not** fabricate a `./packages/...` path.
+
 If you are writing a typeclaw plugin (anything that uses `definePlugin` from `typeclaw/plugin`), the canonical home is `packages/<plugin-name>/`. The workflow:
 
 1. **Author**: `packages/my-plugin/index.ts` exports `definePlugin({ ... })` as default.
