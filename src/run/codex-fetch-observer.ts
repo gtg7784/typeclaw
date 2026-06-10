@@ -25,9 +25,29 @@ export type CodexFetchObserverOptions = {
   ttfbMs?: number
   // Override the sliding inter-chunk idle deadline applied to the SSE body
   // reader. Resets on every chunk; if no bytes arrive within this window the
-  // body stream errors. Default: 300_000 ms, matches `openai/codex`'s Rust CLI
-  // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`. Set to 0 to disable just this timer.
+  // body stream errors. Like the overall deadline, this doubles as a recovery
+  // bound: on a silent stall the user waits this long before the retry fires,
+  // so it should not exceed the overall ceiling. Default 120_000 ms (was
+  // 300_000, which matched `openai/codex`'s Rust CLI but is 5min of dead air
+  // before recovery). 120s is loose enough for OpenAI's keepalive-less
+  // reasoning pauses (the Responses API sends no SSE heartbeats, so a quiet
+  // reasoning window is genuinely byte-silent) while bounded by the overall
+  // cap. Set to 0 to disable just this timer.
   idleMs?: number
+  // Override the absolute wall-clock ceiling on a single Codex request,
+  // measured from fetch start to body completion. Unlike `idleMs`, it does NOT
+  // reset on chunk arrival, so it catches a "slow-trickle" stream that emits
+  // bytes inside every idle window yet never reaches a terminal SSE event —
+  // the failure mode behind issue #394's multi-minute hang (one observed
+  // request occupied 901s before Bun's OS socket deadline fired). On expiry the
+  // request is aborted with a retryable error, so this also bounds how long a
+  // user waits before the retry fires — keeping it low is a UX requirement, not
+  // just a safety net. Default 120_000 ms: across 96 observed requests the
+  // slowest *healthy* (completed) one was 45s and p99 was ~30s, with a clean
+  // gap up to the 901s hang — so 120s is ~2.7x the healthy max (ample headroom
+  // for PoP/TLS outliers) while capping a real hang at ~2min instead of ~15min.
+  // Set to 0 to disable just this timer.
+  overallMs?: number
   // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
   // the wrapper can pass to `clear`. Default: `setTimeout`/`clearTimeout`.
   scheduler?: TimeoutScheduler
@@ -44,8 +64,10 @@ const ENV_DISABLE_OBSERVER = 'TYPECLAW_CODEX_FETCH_OBSERVER'
 const ENV_DISABLE_TIMEOUTS = 'TYPECLAW_CODEX_TIMEOUTS'
 const ENV_TTFB_MS = 'TYPECLAW_CODEX_TTFB_MS'
 const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
+const ENV_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
-const DEFAULT_IDLE_MS = 300_000
+const DEFAULT_IDLE_MS = 120_000
+const DEFAULT_OVERALL_MS = 120_000
 const LOG_PREFIX = '[codex-fetch]'
 
 const defaultScheduler: TimeoutScheduler = {
@@ -126,6 +148,7 @@ function readEnvMs(name: string, fallback: number): number {
 
 type BodyTapConfig = {
   idleMs: number
+  overallMs: number
   scheduler: TimeoutScheduler
 }
 
@@ -193,17 +216,44 @@ function attachBodyTimingTap(
 
   const piped = response.body.pipeThrough(tap, { preventCancel: false })
 
-  const idleController = config.idleMs > 0 ? new AbortController() : null
+  const idleController = config.idleMs > 0 || config.overallMs > 0 ? new AbortController() : null
   let idleHandle: unknown = null
   const armIdleTimer = () => {
-    if (idleController === null) return
+    if (idleController === null || config.idleMs <= 0) return
     if (idleHandle !== null) config.scheduler.clear(idleHandle)
     idleHandle = config.scheduler.set(config.idleMs, () => {
       cause = 'idle_timeout'
       idleController.abort(new Error(`Codex SSE body idle for ${config.idleMs}ms (typeclaw observer timeout)`))
     })
   }
+
+  // Absolute ceiling on the whole request, armed once and never reset. The
+  // budget is measured from `start` (before originalFetch), so the time already
+  // spent waiting for headers is subtracted here — otherwise a slow-headers
+  // request would get a fresh full `overallMs` for its body on top of the
+  // headers wait, doubling the intended ceiling. A non-positive remainder means
+  // the budget is already spent, so we schedule at 0 to abort on the next tick.
+  // Aborts the shared controller so the existing reader race tears the stream
+  // down on the first deadline to fire — idle or overall, whichever comes first.
+  let overallHandle: unknown = null
+  if (idleController !== null && config.overallMs > 0) {
+    const remainingOverallMs = Math.max(0, config.overallMs - (now() - start))
+    overallHandle = config.scheduler.set(remainingOverallMs, () => {
+      cause = 'overall_timeout'
+      idleController.abort(
+        new Error(`Codex SSE body exceeded overall deadline of ${config.overallMs}ms (typeclaw observer timeout)`),
+      )
+    })
+  }
+  const disarmOverallTimer = () => {
+    if (overallHandle !== null) {
+      config.scheduler.clear(overallHandle)
+      overallHandle = null
+    }
+  }
+
   const disarmIdleTimer = () => {
+    disarmOverallTimer()
     if (idleHandle !== null) {
       config.scheduler.clear(idleHandle)
       idleHandle = null
@@ -295,6 +345,7 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
   const timeoutsEnabled = process.env[ENV_DISABLE_TIMEOUTS] !== 'off'
   const ttfbMs = timeoutsEnabled ? (opts.ttfbMs ?? readEnvMs(ENV_TTFB_MS, DEFAULT_TTFB_MS)) : 0
   const idleMs = timeoutsEnabled ? (opts.idleMs ?? readEnvMs(ENV_IDLE_MS, DEFAULT_IDLE_MS)) : 0
+  const overallMs = timeoutsEnabled ? (opts.overallMs ?? readEnvMs(ENV_OVERALL_MS, DEFAULT_OVERALL_MS)) : 0
   const originalFetch = globalThis.fetch
 
   const wrappedImpl = async (
@@ -352,6 +403,7 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
     const requestId = response.headers.get('x-request-id')
     return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger, {
       idleMs,
+      overallMs,
       scheduler,
     })
   }
