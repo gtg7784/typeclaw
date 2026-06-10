@@ -701,6 +701,10 @@ export async function startAgent({
     console.log(`[plugin] loaded ${summarizeLoaded(pluginsLoaded.loadedPlugins, pluginRegistry)}`)
   }
 
+  for (const f of pluginsLoaded.failedPlugins) {
+    console.warn(`[plugin] DEGRADED: "${f.entry}" disabled (${f.phase}): ${f.error}`)
+  }
+
   // Container-side portbroker is instantiated only when the host plumbed a
   // broker token in via env var. Outside the container (tests, ad-hoc dev
   // runs), the env var is absent and the broker stays off — same fence as

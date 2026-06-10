@@ -3,76 +3,148 @@ import { describe, expect, test } from 'bun:test'
 import { z } from 'zod'
 
 import { defineTool } from './define'
-import { type LoadPluginEntryFn, PluginNotFoundError } from './loader'
+import { type LoadPluginEntryFn, PluginNotFoundError, PluginSecurityError } from './loader'
 import { loadPlugins, summarizeLoaded, pluginCronJobs } from './manager'
 
-describe('loadPlugins — atomic rollback', () => {
-  test('throws and discards all registrations if a factory throws', async () => {
-    const tool = defineTool({
-      description: '',
-      parameters: z.object({}),
-      async execute() {
-        return { content: [] }
-      },
-    })
+function noopTool() {
+  return defineTool({
+    description: '',
+    parameters: z.object({}),
+    async execute() {
+      return { content: [] }
+    },
+  })
+}
+
+function captureWarnings(): { warnings: string[]; restore: () => void } {
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => warnings.push(args.join(' '))
+  return { warnings, restore: () => (console.warn = original) }
+}
+
+describe('loadPlugins — user plugin failures are isolated', () => {
+  test('a user plugin whose factory throws is skipped + recorded, the rest still load', async () => {
+    const tool = noopTool()
     const loadEntry: LoadPluginEntryFn = async (entry) => {
-      if (entry === 'good') {
+      if (entry === 'bad') {
         return {
-          name: 'good',
+          name: 'bad',
           version: undefined,
-          source: 'good',
+          source: 'bad',
           defined: {
-            plugin: async () => ({ tools: { ok: tool } }),
+            plugin: async () => {
+              throw new Error('factory failed')
+            },
           },
         }
       }
       return {
-        name: 'bad',
+        name: entry,
         version: undefined,
-        source: 'bad',
-        defined: {
-          plugin: async () => {
-            throw new Error('factory failed')
-          },
-        },
+        source: entry,
+        defined: { plugin: async () => ({ tools: { [entry]: tool } }) },
       }
     }
 
-    await expect(
-      loadPlugins({ entries: ['good', 'bad'], agentDir: '/tmp', configsByName: {}, loadEntry }),
-    ).rejects.toThrow(/bad: factory threw: factory failed/)
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['good', 'bad'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['good'])
+    expect(result.failedPlugins).toEqual([
+      { entry: 'bad', phase: 'factory', error: expect.stringContaining('factory threw: factory failed') },
+    ])
+    expect(cap.warnings.some((w) => w.includes('bad') && w.includes('skipping'))).toBe(true)
   })
 
-  test('throws on conflicting tool registration mid-load and rolls back the offending plugin', async () => {
-    const tool = defineTool({
-      description: '',
-      parameters: z.object({}),
-      async execute() {
-        return { content: [] }
-      },
-    })
+  test('a user plugin with an import-time throw is skipped, not fatal', async () => {
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'broken') throw new Error(`plugin ${entry}: default export is not a definePlugin(...) result`)
+      return { name: entry, version: undefined, source: entry, defined: { plugin: async () => ({}) } }
+    }
+
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['good', 'broken'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['good'])
+    expect(result.failedPlugins.map((f) => ({ entry: f.entry, phase: f.phase }))).toEqual([
+      { entry: 'broken', phase: 'resolve' },
+    ])
+  })
+
+  test('a user plugin with an invalid config block is skipped, not fatal', async () => {
     const loadEntry: LoadPluginEntryFn = async (entry) => ({
       name: entry,
       version: undefined,
       source: entry,
-      defined: {
-        plugin: async () => ({ tools: { same: tool } }),
-      },
+      defined: { configSchema: z.object({ schedule: z.string() }), plugin: async () => ({}) },
     })
 
-    await expect(
-      loadPlugins({ entries: ['p1', 'p2'], agentDir: '/tmp', configsByName: {}, loadEntry }),
-    ).rejects.toThrow(/already registered by plugin p1/)
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({
+        entries: ['bad-config'],
+        agentDir: '/tmp',
+        configsByName: { 'bad-config': { schedule: 42 } },
+        loadEntry,
+      })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins).toEqual([])
+    expect(result.failedPlugins).toEqual([
+      { entry: 'bad-config', phase: 'config', error: expect.stringContaining('config invalid: schedule:') },
+    ])
   })
 
-  test('rejects duplicate plugin names', async () => {
-    const tool = defineTool({
-      description: '',
-      parameters: z.object({}),
-      async execute() {
-        return { content: [] }
-      },
-    })
+  test('earlier successfully-loaded user plugins survive a later plugin failure', async () => {
+    const tool = noopTool()
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'p2')
+        return {
+          name: 'p2',
+          version: undefined,
+          source: 'p2',
+          defined: {
+            plugin: async () => {
+              throw new Error('boom')
+            },
+          },
+        }
+      return {
+        name: entry,
+        version: undefined,
+        source: entry,
+        defined: { plugin: async () => ({ tools: { [entry]: tool } }) },
+      }
+    }
+
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['p1', 'p2', 'p3'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['p1', 'p3'])
+    expect(result.registry.tools.map((t) => t.toolName).sort()).toEqual(['p1', 'p3'])
+  })
+
+  test('duplicate plugin names stay fatal (global invariant, not a per-plugin skip)', async () => {
+    const tool = noopTool()
     const loadEntry: LoadPluginEntryFn = async () => ({
       name: 'same',
       version: undefined,
@@ -83,6 +155,106 @@ describe('loadPlugins — atomic rollback', () => {
     await expect(loadPlugins({ entries: ['x', 'y'], agentDir: '/tmp', configsByName: {}, loadEntry })).rejects.toThrow(
       /plugin name conflict: same/,
     )
+  })
+})
+
+describe('loadPlugins — bundled plugin failures stay fatal', () => {
+  test('a bundled plugin whose factory throws aborts boot (typeclaw bug, fail loud)', async () => {
+    const bundled = [
+      {
+        name: 'security',
+        version: undefined,
+        source: '<bundled>',
+        defined: {
+          plugin: async () => {
+            throw new Error('bundled boom')
+          },
+        },
+      },
+    ]
+    await expect(
+      loadPlugins({
+        entries: [],
+        agentDir: '/tmp',
+        configsByName: {},
+        loadEntry: async () => {
+          throw new Error('unused')
+        },
+        bundled,
+      }),
+    ).rejects.toThrow(/bundled boom/)
+  })
+
+  test('a bundled plugin with an invalid config block aborts boot', async () => {
+    const bundled = [
+      {
+        name: 'memory',
+        version: undefined,
+        source: '<bundled>',
+        defined: { configSchema: z.object({ n: z.number() }), plugin: async () => ({}) },
+      },
+    ]
+    await expect(
+      loadPlugins({
+        entries: [],
+        agentDir: '/tmp',
+        configsByName: { memory: { n: 'nope' } },
+        loadEntry: async () => {
+          throw new Error('unused')
+        },
+        bundled,
+      }),
+    ).rejects.toThrow(/memory: config invalid/)
+  })
+})
+
+describe('loadPlugins — a failed plugin does not influence the permission model', () => {
+  test("a skipped user plugin's permissions + ownerWildcardExclusions never reach the live service", async () => {
+    const ownerOrigin = { kind: 'system', component: 'test' } as const
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'failed') {
+        return {
+          name: 'failed',
+          version: undefined,
+          source: 'failed',
+          defined: {
+            permissions: ['security.bypass.failedPlugin'],
+            ownerWildcardExclusions: ['security.bypass.allowedPlugin'],
+            plugin: async () => {
+              throw new Error('boom')
+            },
+          },
+        }
+      }
+      return {
+        name: 'survivor',
+        version: undefined,
+        source: 'survivor',
+        defined: { permissions: ['security.bypass.allowedPlugin'], plugin: async () => ({}) },
+      }
+    }
+
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['survivor', 'failed'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    // given the failed plugin is reported disabled and absent from the loaded set
+    expect(result.failedPlugins.map((f) => f.entry)).toEqual(['failed'])
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['survivor'])
+
+    // then its declared permission is NOT in the known universe
+    expect(result.declaredPermissions).toContain('security.bypass.allowedPlugin')
+    expect(result.declaredPermissions).not.toContain('security.bypass.failedPlugin')
+
+    // and the live service reflects survivors only
+    expect(result.permissions.has(ownerOrigin, 'security.bypass.failedPlugin')).toBe(false)
+    // the security-critical assertion: the failed plugin's exclusion must NOT
+    // have stripped the surviving plugin's owner-wildcard bypass.
+    expect(result.permissions.has(ownerOrigin, 'security.bypass.allowedPlugin')).toBe(true)
   })
 })
 
@@ -126,17 +298,17 @@ describe('loadPlugins — unresolvable entry is non-fatal', () => {
     expect(warnings.some((w) => w.includes('typeclaw-plugin-missing') && w.includes('Cannot find package'))).toBe(true)
   })
 
-  test('does NOT swallow a non-resolution failure (invalid plugin stays fatal)', async () => {
+  test('a PluginSecurityError stays fatal even for a user plugin (path escape is never skipped)', async () => {
     const loadEntry: LoadPluginEntryFn = async (entry) => {
-      if (entry === 'broken') {
-        throw new Error(`plugin ${entry}: default export is not a definePlugin(...) result`)
+      if (entry === './escape.ts') {
+        throw new PluginSecurityError(entry, `plugin path escapes agent directory: ${entry}`)
       }
       return { name: entry, version: undefined, source: entry, defined: { plugin: async () => ({}) } }
     }
 
     await expect(
-      loadPlugins({ entries: ['good', 'broken'], agentDir: '/tmp', configsByName: {}, loadEntry }),
-    ).rejects.toThrow(/default export is not a definePlugin/)
+      loadPlugins({ entries: ['good', './escape.ts'], agentDir: '/tmp', configsByName: {}, loadEntry }),
+    ).rejects.toThrow(/escapes agent directory/)
   })
 })
 
@@ -185,7 +357,7 @@ describe('loadPlugins — config validation', () => {
     expect(captured.value).toEqual({ schedule: '0 9 * * 1' })
   })
 
-  test('rejects invalid config with plugin name + field path in the error', async () => {
+  test('records invalid config with plugin name + field path in failedPlugins (skipped, not fatal)', async () => {
     const loadEntry: LoadPluginEntryFn = async () => ({
       name: 'standup-log',
       version: undefined,
@@ -196,17 +368,24 @@ describe('loadPlugins — config validation', () => {
       },
     })
 
-    await expect(
-      loadPlugins({
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({
         entries: ['s'],
         agentDir: '/tmp',
         configsByName: { 'standup-log': { schedule: 42 } },
         loadEntry,
-      }),
-    ).rejects.toThrow(/standup-log: config invalid: schedule:/)
+      })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins).toEqual([])
+    expect(result.failedPlugins[0]?.error).toMatch(/standup-log: config invalid: schedule:/)
   })
 
-  test('rejects config block when plugin declares no configSchema', async () => {
+  test('records a config block present without a configSchema in failedPlugins (skipped, not fatal)', async () => {
     const loadEntry: LoadPluginEntryFn = async () => ({
       name: 'no-config-plugin',
       version: undefined,
@@ -216,14 +395,21 @@ describe('loadPlugins — config validation', () => {
       },
     })
 
-    await expect(
-      loadPlugins({
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({
         entries: ['s'],
         agentDir: '/tmp',
         configsByName: { 'no-config-plugin': { foo: 1 } },
         loadEntry,
-      }),
-    ).rejects.toThrow(/declares no configSchema/)
+      })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins).toEqual([])
+    expect(result.failedPlugins[0]?.error).toMatch(/declares no configSchema/)
   })
 })
 
@@ -262,7 +448,7 @@ describe('loadPlugins — markBooted gates spawnSubagent', () => {
     expect(calls).toEqual(['worker'])
   })
 
-  test('spawnSubagent inside the factory throws synchronously', async () => {
+  test('a factory that calls spawnSubagent before boot fails that plugin (recorded, not fatal)', async () => {
     const loadEntry: LoadPluginEntryFn = async () => ({
       name: 'p1',
       version: undefined,
@@ -275,9 +461,17 @@ describe('loadPlugins — markBooted gates spawnSubagent', () => {
       },
     })
 
-    await expect(loadPlugins({ entries: ['p1'], agentDir: '/tmp', configsByName: {}, loadEntry })).rejects.toThrow(
-      /before boot completed/,
-    )
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['p1'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    expect(result.loadedPlugins).toEqual([])
+    expect(result.failedPlugins[0]?.phase).toBe('factory')
+    expect(result.failedPlugins[0]?.error).toMatch(/before boot completed/)
   })
 
   test('forwards the SpawnSubagentOptions arg to the wired implementation', async () => {

@@ -1966,6 +1966,7 @@ describe('defaultRunHatching', () => {
         hostd: { state: 'disabled' },
         alreadyRunning: false,
         autoUpgrade: { kind: 'skipped-already-running' },
+        skippedPlugins: [],
       }
     }
     return { fn, calls }

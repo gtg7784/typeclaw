@@ -140,6 +140,10 @@ export type StartResult =
       // path — that one rebuilds the container from scratch.
       alreadyRunning: boolean
       autoUpgrade: AutoUpgradeOutcome
+      // npm plugins dropped this start because their package 404s in the
+      // registry. Non-fatal by design: a typo'd or unpublished plugin warns
+      // instead of blocking the launch.
+      skippedPlugins: string[]
     }
   | { ok: false; reason: string }
 
@@ -438,6 +442,7 @@ export async function start({
       hostd: stripHostDaemonControl(hostd),
       alreadyRunning: false,
       autoUpgrade: upgrade,
+      skippedPlugins: pluginReconcile.skipped,
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
@@ -758,6 +763,7 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
     hostd: { state: 'disabled' },
     alreadyRunning: true,
     autoUpgrade: { kind: 'skipped-already-running' },
+    skippedPlugins: [],
   }
 }
 

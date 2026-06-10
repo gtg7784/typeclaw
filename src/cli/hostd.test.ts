@@ -169,5 +169,6 @@ function startOk(opts: StartOptions): StartResult {
     hostd: { state: 'registered' },
     alreadyRunning: false,
     autoUpgrade: { kind: 'skipped-no-dep' },
+    skippedPlugins: [],
   }
 }
