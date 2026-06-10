@@ -25,6 +25,26 @@ const knownModelRefs = listKnownModelRefs() as [KnownModelRef, ...KnownModelRef[
 // T9 keypad: T=8, Y=9, P=7, E=3
 const DEFAULT_PORT = 8973
 
+export const GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE = 'typeclaw-gws-multi-account'
+export const GWS_MULTI_ACCOUNT_PLUGIN_VERSION = '^0.3.4'
+export const DEFAULT_PLUGINS = [`${GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE}@${GWS_MULTI_ACCOUNT_PLUGIN_VERSION}`] as const
+
+export function withDefaultPlugins(plugins: readonly string[]): string[] {
+  const configuredNames = new Set(plugins.map(pluginPackageName))
+  const defaults = DEFAULT_PLUGINS.filter((entry) => !configuredNames.has(pluginPackageName(entry)))
+  return [...defaults, ...plugins]
+}
+
+function pluginPackageName(entry: string): string {
+  if (entry.startsWith('@')) {
+    const slash = entry.indexOf('/')
+    const at = slash === -1 ? -1 : entry.indexOf('@', slash + 1)
+    return at === -1 ? entry : entry.slice(0, at)
+  }
+  const at = entry.indexOf('@')
+  return at === -1 ? entry : entry.slice(0, at)
+}
+
 // Mount names land on disk as `mounts/<name>` inside the agent folder, so they
 // share a namespace with regular filenames. Restricting to lowercase
 // alphanumerics + `-`/`_` keeps them shell-safe and avoids accidental shadowing

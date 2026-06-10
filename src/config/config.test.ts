@@ -21,6 +21,7 @@ import {
   resolveProfile,
   validateConfig,
   validateMount,
+  withDefaultPlugins,
   type Models,
 } from './config'
 
@@ -1630,6 +1631,18 @@ describe('plugin config layout', () => {
   test('plugins defaults to [] when omitted', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.plugins).toEqual([])
+  })
+
+  test('withDefaultPlugins adds the bundled GWS plugin without mutating config plugins', () => {
+    expect(withDefaultPlugins([])).toEqual(['typeclaw-gws-multi-account@^0.3.4'])
+    expect(withDefaultPlugins(['typeclaw-plugin-foo'])).toEqual([
+      'typeclaw-gws-multi-account@^0.3.4',
+      'typeclaw-plugin-foo',
+    ])
+  })
+
+  test('withDefaultPlugins lets an explicit GWS plugin entry override the default version', () => {
+    expect(withDefaultPlugins(['typeclaw-gws-multi-account@0.3.5'])).toEqual(['typeclaw-gws-multi-account@0.3.5'])
   })
 
   test('plugins accepts an array of strings', () => {
