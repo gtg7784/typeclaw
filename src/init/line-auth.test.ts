@@ -49,6 +49,73 @@ function nonPersistingClient(result: LineLoginResult): LineLoginClient {
   return { loginWithQR: login, loginWithEmail: login }
 }
 
+function loggingClient(agentDir: string): LineLoginClient {
+  const store = new SecretsLineCredentialStore({ mode: 'host', secretsPath: join(agentDir, 'secrets.json') })
+  const login = async (): Promise<LineLoginResult> => {
+    console.log(lineTokenInfoDump())
+    console.log('visible login progress')
+    await store.setAccount({
+      account_id: 'mid-logged',
+      auth_token: 'persisted-token',
+      device: 'DESKTOPMAC',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    })
+    return { authenticated: true, account_id: 'mid-logged' }
+  }
+  return { loginWithQR: login, loginWithEmail: login }
+}
+
+function lineTokenInfoDump(): Record<string, unknown> {
+  return {
+    1: 'header.payload.signature',
+    2: 'refresh.header.payload',
+    3: 3600,
+    4: { 1: 200 },
+    5: 'session-id',
+    6: 1781093119,
+  }
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {}
+  const promise = new Promise<void>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+function controlledLoggingClient(
+  agentDir: string,
+  accountId: string,
+  entered: string[],
+  release: Promise<void>,
+): LineLoginClient {
+  const store = new SecretsLineCredentialStore({ mode: 'host', secretsPath: join(agentDir, 'secrets.json') })
+  const login = async (): Promise<LineLoginResult> => {
+    entered.push(accountId)
+    console.log(lineTokenInfoDump())
+    await release
+    await store.setAccount({
+      account_id: accountId,
+      auth_token: 'persisted-token',
+      device: 'DESKTOPMAC',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    })
+    return { authenticated: true, account_id: accountId }
+  }
+  return { loginWithQR: login, loginWithEmail: login }
+}
+
+function throwingLoggingClient(): LineLoginClient {
+  const login = async (): Promise<LineLoginResult> => {
+    console.log(lineTokenInfoDump())
+    throw new Error('login exploded')
+  }
+  return { loginWithQR: login, loginWithEmail: login }
+}
+
 describe('runLineBootstrap', () => {
   test('persists the account and sets it current on a successful QR login', async () => {
     await withDir(async (dir) => {
@@ -102,6 +169,104 @@ describe('runLineBootstrap', () => {
         client: nonPersistingClient({ authenticated: true, account_id: 'mid-1' }),
       })
       expect(status).toEqual({ ok: false, reason: 'LINE login authenticated but did not persist credentials' })
+    })
+  })
+
+  test('suppresses the upstream LINE token info dump without muting other logs', async () => {
+    await withDir(async (dir) => {
+      const originalLog = console.log
+      const logged: unknown[][] = []
+      const captureLog = (...args: unknown[]) => {
+        logged.push(args)
+      }
+      console.log = captureLog
+      try {
+        const status = await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: loggingClient(dir),
+        })
+
+        expect(status).toEqual({ ok: true })
+        expect(console.log).toBe(captureLog)
+      } finally {
+        console.log = originalLog
+      }
+
+      expect(logged).toEqual([['visible login progress']])
+    })
+  })
+
+  test('serializes overlapping token dump suppression and restores console.log', async () => {
+    await withDir(async (firstDir) => {
+      await withDir(async (secondDir) => {
+        const originalLog = console.log
+        const logged: unknown[][] = []
+        const entered: string[] = []
+        const firstRelease = deferred()
+        const secondRelease = deferred()
+        const captureLog = (...args: unknown[]) => {
+          logged.push(args)
+        }
+        console.log = captureLog
+        try {
+          const first = runLineBootstrap({
+            method: 'qr',
+            agentDir: firstDir,
+            callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+            client: controlledLoggingClient(firstDir, 'mid-first', entered, firstRelease.promise),
+          })
+          const second = runLineBootstrap({
+            method: 'qr',
+            agentDir: secondDir,
+            callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+            client: controlledLoggingClient(secondDir, 'mid-second', entered, secondRelease.promise),
+          })
+
+          await Promise.resolve()
+          expect(entered).toEqual(['mid-first'])
+
+          firstRelease.resolve()
+          await expect(first).resolves.toEqual({ ok: true })
+          await Promise.resolve()
+          expect(entered).toEqual(['mid-first', 'mid-second'])
+
+          secondRelease.resolve()
+          await expect(second).resolves.toEqual({ ok: true })
+          expect(console.log).toBe(captureLog)
+        } finally {
+          console.log = originalLog
+        }
+
+        expect(logged).toEqual([])
+      })
+    })
+  })
+
+  test('restores console.log when LINE login throws', async () => {
+    await withDir(async (dir) => {
+      const originalLog = console.log
+      const logged: unknown[][] = []
+      const captureLog = (...args: unknown[]) => {
+        logged.push(args)
+      }
+      console.log = captureLog
+      try {
+        const status = await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: throwingLoggingClient(),
+        })
+
+        expect(status).toEqual({ ok: false, reason: 'login exploded' })
+        expect(console.log).toBe(captureLog)
+      } finally {
+        console.log = originalLog
+      }
+
+      expect(logged).toEqual([])
     })
   })
 })
