@@ -7355,6 +7355,30 @@ describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
     expect(captured?.handoffOrigin).toEqual({ kind: 'channel', key: KEY })
   })
 
+  test('/restart stamps triggeringAuthorId from the command invoker, not the last live-turn speaker', async () => {
+    // given: a session whose last turn was spoken by `stranger`, but /restart
+    // is invoked by `owner` — the resume must follow the invoker's role.
+    const dir = await tempDir()
+    let captured: RestartCommandContext | undefined
+    const { router } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-01-01T00-00-00-000Z_${sessionId}.jsonl`,
+      onRestart: async (ctx) => {
+        captured = ctx
+        return 'restarting'
+      },
+    })
+    await router.route(inbound({ authorId: 'stranger', authorName: 'stranger' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    // when: the owner invokes /restart via the native dispatch path
+    await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+
+    // then: the handoff carries the invoker, not the prior speaker
+    expect(captured?.originatingSessionId).toBe('ses_fake_1')
+    expect(captured?.triggeringAuthorId).toBe('owner')
+  })
+
   test('/restart passes undefined context when no session is live', async () => {
     // given: no live session for the channel
     const dir = await tempDir()
