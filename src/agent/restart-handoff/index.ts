@@ -35,6 +35,13 @@ export type RestartHandoff = {
   originatingSessionId: string
   originatingSessionFile: string
   origin: RestartHandoffOrigin
+  // Author of the inbound that owned the originating session at restart time.
+  // The synthetic resume turn has no inbound of its own, so without this a
+  // multi-principal channel session re-seeds its turn author from nothing and
+  // an author-scoped role (`discord:* author:U_OWNER`) silently demotes to
+  // whatever bare-channel rule matches on every "I'm back" turn. Optional and
+  // additive: pre-field v2 handoffs and tui handoffs omit it.
+  triggeringAuthorId?: string
 }
 
 // Atomic write via `.tmp` + rename so a crash mid-write never leaves the
@@ -158,6 +165,9 @@ function parseHandoff(raw: string): RestartHandoff | null {
     originatingSessionId: obj.originatingSessionId,
     originatingSessionFile: obj.originatingSessionFile,
     origin,
+    ...(typeof obj.triggeringAuthorId === 'string' && obj.triggeringAuthorId !== ''
+      ? { triggeringAuthorId: obj.triggeringAuthorId }
+      : {}),
   }
 }
 

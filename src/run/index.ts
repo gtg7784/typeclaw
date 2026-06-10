@@ -321,6 +321,7 @@ export async function startAgent({
                 ? { originatingSessionFile: ctx.originatingSessionFile }
                 : {}),
               handoffOrigin: ctx.handoffOrigin,
+              ...(ctx.triggeringAuthorId !== undefined ? { triggeringAuthorId: ctx.triggeringAuthorId } : {}),
             }
           : {}),
       })

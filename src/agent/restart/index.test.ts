@@ -142,6 +142,33 @@ describe('requestContainerRestart', () => {
     })
   })
 
+  test('writes triggeringAuthorId into the handoff so the resumed session re-seeds the requester', async () => {
+    // given: a hostd that accepts the restart
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+
+    // when: a channel restart carries the invoker's author
+    await requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      agentDir,
+      originatingSessionId: 'ses-origin',
+      originatingSessionFile: '/tmp/sessions/ses-origin.jsonl',
+      handoffOrigin: { kind: 'channel', key: { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null } },
+      triggeringAuthorId: 'U_OWNER',
+      restartedAt: '2026-01-02T03:04:05.000Z',
+    })
+
+    // then: the written handoff carries the author end-to-end
+    expect(JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8')).triggeringAuthorId).toBe('U_OWNER')
+  })
+
   test('publishes a container-restarting broadcast before writing the handoff on a successful ACK', async () => {
     // given: a stream whose subscriber records broadcasts, and a hostd that
     // accepts. The broadcast must carry the originating session id so the

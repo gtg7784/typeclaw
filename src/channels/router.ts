@@ -691,6 +691,12 @@ type LiveSession = {
 type ChannelCommandContext = {
   live: LiveSession | null
   event: InboundMessage | null
+  // The user who actually invoked the command, supplied by BOTH dispatch
+  // paths (text: event.authorId; native slash: options.invokerId, where
+  // event is null). /restart stamps the resume handoff's triggeringAuthorId
+  // from this so a restart resumes under the INVOKER's author-scoped role,
+  // not whichever speaker happened to own the live turn.
+  invokerId: string | null
 }
 
 export type ExecuteCommandResult =
@@ -999,6 +1005,7 @@ export type RestartCommandContext = {
   originatingSessionId: string
   originatingSessionFile?: string
   handoffOrigin: { kind: 'channel'; key: ChannelKey }
+  triggeringAuthorId?: string
 }
 
 export type ClaimHandlerInput = {
@@ -1125,18 +1132,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // Resolve the live session when one exists so the restart can write a
       // resume handoff for this conversation; still bounces from a cold channel.
       wantsLiveSession: true,
-      handler: async ({ live }) => ({
-        reply: await onRestart(
-          live !== null
-            ? {
-                originatingSessionId: live.sessionId,
-                ...(live.getTranscriptPath?.() !== undefined
-                  ? { originatingSessionFile: live.getTranscriptPath!()! }
-                  : {}),
-                handoffOrigin: { kind: 'channel', key: live.key },
-              }
-            : undefined,
-        ),
+      handler: async ({ live, invokerId }) => ({
+        reply: await onRestart(live !== null ? buildRestartCommandContext(live, invokerId) : undefined),
       }),
     })
   }
@@ -1933,6 +1930,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const buildRestartCommandContext = (live: LiveSession, invokerId: string | null): RestartCommandContext => {
+    // Prefer the command invoker: a restart resumes under the author who ran
+    // /restart, not whichever speaker last owned the live turn. Fall back to
+    // live turn state only when the dispatch path supplied no invoker.
+    const triggeringAuthorId = invokerId ?? live.currentTurnAuthorId ?? live.lastTurnAuthorId ?? undefined
+    return {
+      originatingSessionId: live.sessionId,
+      ...(live.getTranscriptPath?.() !== undefined ? { originatingSessionFile: live.getTranscriptPath!()! } : {}),
+      handoffOrigin: { kind: 'channel', key: live.key },
+      ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
+    }
+  }
+
   const buildLiveOrigin = (live: LiveSession): SessionOrigin => {
     const membership = readMembership(live.key)
     const self = resolveSelfIdentity(live.key)
@@ -2234,7 +2244,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // Gating (channel.respond / session.control) and live-session resolution stay
   // at the call sites — this helper only runs the handler and delivers the reply.
   const runChannelCommand = async (event: InboundMessage, live: LiveSession | null): Promise<CommandResult> => {
-    const result = await commands.execute(event.text, { live, event })
+    const result = await commands.execute(event.text, { live, event, invokerId: event.authorId })
     if (result.kind === 'handled' && result.reply !== undefined) {
       await send(
         {
@@ -3686,7 +3696,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
         let live: LiveSession
         try {
-          live = await ensureLive(key, undefined, undefined, {
+          live = await ensureLive(key, undefined, handoff.triggeringAuthorId, {
             sessionId: handoff.originatingSessionId,
             sessionFile: handoff.originatingSessionFile,
           })
@@ -3785,7 +3795,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const resolved = resolveLiveSessionForCommand(liveSessions, key)
       live = resolved.kind === 'found' ? resolved.session : null
     }
-    const result = await commands.execute(`/${lowered}`, { live, event: null })
+    const result = await commands.execute(`/${lowered}`, { live, event: null, invokerId: options.invokerId })
     if (result.kind === 'handled') {
       return result.reply !== undefined
         ? { kind: 'handled', name: result.name, reply: result.reply }

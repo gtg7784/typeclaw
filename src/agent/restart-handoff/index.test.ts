@@ -60,6 +60,14 @@ describe('writeRestartHandoff', () => {
     expect(result).toEqual(channelHandoff())
   })
 
+  test('round-trips a triggeringAuthorId so the resumed session re-seeds the requester', async () => {
+    await writeRestartHandoff(agentDir, channelHandoff({ triggeringAuthorId: 'U_OWNER' }))
+
+    const result = await consumeRestartHandoff(agentDir, { now: Date.parse('2026-05-26T10:00:30.000Z') })
+
+    expect(result?.triggeringAuthorId).toBe('U_OWNER')
+  })
+
   test('creates the .typeclaw/ directory on demand', async () => {
     expect(existsSync(join(agentDir, '.typeclaw'))).toBe(false)
     await writeRestartHandoff(agentDir, tuiHandoff())
@@ -165,6 +173,16 @@ describe('consumeRestartHandoff', () => {
 
     expect(result).toBeNull()
     expect(existsSync(path)).toBe(false)
+  })
+
+  test('ignores a non-string triggeringAuthorId instead of rejecting the handoff', async () => {
+    const path = restartHandoffPath(agentDir)
+    await Bun.write(path, JSON.stringify({ ...channelHandoff(), triggeringAuthorId: 42 }))
+
+    const result = await consumeRestartHandoff(agentDir, { now: Date.parse('2026-05-26T10:00:30.000Z') })
+
+    expect(result?.origin.kind).toBe('channel')
+    expect(result?.triggeringAuthorId).toBeUndefined()
   })
 
   test('returns null when a v2 channel handoff is missing its key', async () => {

@@ -7355,6 +7355,30 @@ describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
     expect(captured?.handoffOrigin).toEqual({ kind: 'channel', key: KEY })
   })
 
+  test('/restart stamps triggeringAuthorId from the command invoker, not the last live-turn speaker', async () => {
+    // given: a session whose last turn was spoken by `stranger`, but /restart
+    // is invoked by `owner` — the resume must follow the invoker's role.
+    const dir = await tempDir()
+    let captured: RestartCommandContext | undefined
+    const { router } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-01-01T00-00-00-000Z_${sessionId}.jsonl`,
+      onRestart: async (ctx) => {
+        captured = ctx
+        return 'restarting'
+      },
+    })
+    await router.route(inbound({ authorId: 'stranger', authorName: 'stranger' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    // when: the owner invokes /restart via the native dispatch path
+    await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+
+    // then: the handoff carries the invoker, not the prior speaker
+    expect(captured?.originatingSessionId).toBe('ses_fake_1')
+    expect(captured?.triggeringAuthorId).toBe('owner')
+  })
+
   test('/restart passes undefined context when no session is live', async () => {
     // given: no live session for the channel
     const dir = await tempDir()
@@ -9139,5 +9163,32 @@ describe('resumeRestartHandoff', () => {
     // then: the synthetic wake turn fired
     expect(reservation.sawInbound).toBe(false)
     expect(sessions[0]?.prompts.some((p) => p.includes('container just restarted'))).toBe(true)
+  })
+
+  test('resume wake turn re-seeds the handoff author so author-scoped roles survive restart', async () => {
+    // given: a handoff carrying the owner who issued /restart
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff({ triggeringAuthorId: 'U_OWNER' }))!
+
+    let originDuringWake: SessionOrigin | undefined
+    const captureOrigin = (): void => {
+      originDuringWake = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
+    // when: the synthetic wake turn drains
+    await reservation.resume()
+    await waitFor(() => sessions.length > 0)
+    sessions[0]!.onPrompt = captureOrigin
+    if (sessions[0]!.prompts.length > 0) captureOrigin()
+    await waitFor(() => originDuringWake !== undefined)
+
+    // then: the wake turn's origin carries the handoff author, not nothing
+    expect(originDuringWake?.kind).toBe('channel')
+    if (originDuringWake?.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringWake.lastInboundAuthorId).toBe('U_OWNER')
   })
 })

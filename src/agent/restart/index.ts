@@ -35,6 +35,10 @@ export type RequestContainerRestartOptions = {
   // startup). Required alongside agentDir + originatingSessionFile for the
   // handoff to be written; omitting it skips the handoff entirely.
   handoffOrigin?: RestartHandoffOrigin
+  // Author of the inbound that owned the restarting session, carried so the
+  // reopened channel session re-seeds the requester's identity on its resume
+  // turn (see RestartHandoff.triggeringAuthorId).
+  triggeringAuthorId?: string
   restartedAt?: string
 }
 
@@ -54,6 +58,7 @@ export async function requestContainerRestart({
   originatingSessionId,
   originatingSessionFile,
   handoffOrigin,
+  triggeringAuthorId,
   restartedAt,
 }: RequestContainerRestartOptions): Promise<RequestContainerRestartResult> {
   const request = { kind: 'restart' as const, containerName, build: build === true }
@@ -103,6 +108,7 @@ export async function requestContainerRestart({
         originatingSessionId,
         originatingSessionFile: basename(originatingSessionFile),
         origin: handoffOrigin,
+        ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
       })
     } catch {
       // intentional swallow — see the post-ACK rationale above

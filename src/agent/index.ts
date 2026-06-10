@@ -383,6 +383,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                     originatingSessionId: sessionManager.getSessionId(),
                     ...(options.stream ? { stream: options.stream } : {}),
                     ...buildRestartHandoffWiring(options, sessionManager),
+                    triggeringAuthorIdProvider: () => currentChannelAuthor(getOrigin),
                   }),
                 ]
               : []),
@@ -521,6 +522,16 @@ export function buildRestartHandoffWiring(
   const sessionFile = sessionManager.getSessionFile()
   if (agentDir === undefined || sessionFile === undefined) return {}
   return { agentDir, originatingSessionFile: sessionFile, handoffOrigin }
+}
+
+// Reads the LIVE turn author at restart time, not the session-creation
+// snapshot. A channel session is long-lived and multi-principal: the
+// self-restart tool fires on whatever turn triggered it, so the handoff must
+// carry that turn's author (originRef.current), not whoever first opened the
+// session. Returns undefined for non-channel/no-author origins.
+export function currentChannelAuthor(getOrigin: () => SessionOrigin | undefined): string | undefined {
+  const origin = getOrigin()
+  return origin?.kind === 'channel' ? origin.lastInboundAuthorId : undefined
 }
 
 function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {

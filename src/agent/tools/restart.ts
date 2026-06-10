@@ -57,6 +57,12 @@ export type CreateRestartToolOptions = {
   // alongside `originatingSessionFile` for the handoff to be written; omit to
   // skip the handoff. See buildRestartHandoffWiring in src/agent/index.ts.
   handoffOrigin?: RestartHandoffOrigin
+  // Resolves the LIVE turn author at execute time (not session-creation), so a
+  // channel self-restart in a long-lived multi-principal session resumes under
+  // the author of the turn that triggered the restart — not whoever opened the
+  // session. Called inside execute(); returns undefined for tui/no-author
+  // origins. See RestartHandoff.triggeringAuthorId.
+  triggeringAuthorIdProvider?: () => string | undefined
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -75,6 +81,7 @@ export function createRestartTool({
   agentDir,
   originatingSessionFile,
   handoffOrigin,
+  triggeringAuthorIdProvider,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
 
@@ -103,6 +110,7 @@ export function createRestartTool({
     }),
     async execute(_toolCallId, params) {
       const build = params.build === true
+      const triggeringAuthorId = triggeringAuthorIdProvider?.()
       // requestContainerRestart owns the post-ACK broadcast->handoff ordering:
       // on a successful ACK it publishes the container-restarting notice (which
       // every live session's subscribeRestartNotice turns into a transcript
@@ -121,6 +129,7 @@ export function createRestartTool({
         ...(agentDir !== undefined ? { agentDir } : {}),
         ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
         ...(handoffOrigin !== undefined ? { handoffOrigin } : {}),
+        ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
       })
       if (!result.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: result.reason }
