@@ -15,6 +15,7 @@ export {
   DOCKER_NOT_FOUND_STDERR,
   imageTagFromCwd,
   inspectContainer,
+  sanitizeDockerStderr,
   type ContainerState,
   type DockerAvailability,
   type DockerExec,

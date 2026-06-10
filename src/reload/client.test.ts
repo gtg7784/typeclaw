@@ -4,7 +4,7 @@ import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import type { ClientMessage, ServerMessage } from '@/shared'
 
-import { requestReload } from './client'
+import { ReloadConnectionError, requestReload } from './client'
 import type { ReloadResult } from './types'
 
 type WsData = Record<string, never>
@@ -89,17 +89,17 @@ describe('requestReload', () => {
   })
 
   test('rejects when the server cannot be reached', async () => {
-    await expect(requestReload({ url: 'ws://localhost:1', timeoutMs: 200 })).rejects.toThrow()
+    await expect(requestReload({ url: 'ws://localhost:1', timeoutMs: 200 })).rejects.toThrow(ReloadConnectionError)
   })
 
   test('redacts tokenized URLs in connection errors', async () => {
     try {
-      await requestReload({ url: 'ws://localhost:1?token=secret-token', timeoutMs: 200 })
+      await requestReload({ url: 'ws://localhost:1?token=sample-value', timeoutMs: 200 })
       throw new Error('expected requestReload to reject')
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       expect(message).toContain('token=%3Credacted%3E')
-      expect(message).not.toContain('secret-token')
+      expect(message).not.toContain('sample-value')
     }
   })
 

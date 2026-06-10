@@ -20,7 +20,7 @@ TypeClaw runs code in three stages with different filesystems ([/concepts/archit
 | `typeclaw tui`     | Attach an interactive TUI. Takes an optional one-shot prompt argument; `--url` to override the websocket URL.                    |
 | `typeclaw reload`  | Re-read `typeclaw.json` and apply hot-reloadable fields. Reports which fields require a restart.                                 |
 
-`--port` is the **preferred** host port. On bind conflict, `start` allocates an ephemeral port; subsequent commands resolve the actual port by querying Docker.
+`--port` is the **preferred** host port. On bind conflict, `start` allocates an ephemeral port; subsequent commands resolve the actual port by querying Docker. If Docker reports a published port but `typeclaw reload` cannot open that host websocket, reload falls back to a one-shot container-local websocket through `docker exec` and prints a repair hint; run `typeclaw restart --port 0` when safe to repair host TUI/reload connectivity.
 
 ## Providers
 

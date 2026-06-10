@@ -2,7 +2,7 @@ import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { requestReload, type ReloadResult } from '@/reload'
+import { requestReloadWithFallback, type ReloadResult } from '@/reload'
 
 import { c, errorLine, spinner } from './ui'
 
@@ -24,17 +24,28 @@ export const reload = defineCommand({
     },
   },
   async run({ args }) {
-    const url = args.url ?? (await defaultUrl())
+    const timeoutMs = Number(args.timeout)
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      console.error(errorLine(`invalid --timeout value: ${args.timeout}`))
+      process.exit(1)
+    }
+
+    const target = args.url === undefined ? await defaultTarget() : { url: args.url }
 
     const s = spinner()
     s.start('Reloading...')
     let results: ReloadResult[]
+    let recoveredHostError: string | undefined
     try {
-      results = await requestReload({ url, timeoutMs: Number(args.timeout) })
+      const response = await requestReloadWithFallback({ ...target, timeoutMs })
+      results = response.results
+      if (response.transport === 'container-local') recoveredHostError = response.hostError
     } catch (err) {
       s.error(`reload failed: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)
     }
+
+    printReloadRecoveryHint(recoveredHostError)
 
     if (results.length === 0) {
       s.stop(c.dim('Nothing to reload.'))
@@ -61,7 +72,17 @@ export const reload = defineCommand({
   },
 })
 
-async function defaultUrl(): Promise<string> {
+export function printReloadRecoveryHint(recoveredHostError: string | undefined): void {
+  if (recoveredHostError === undefined) return
+  console.error(
+    c.yellow(
+      `Recovered via container-local reload because Docker's published host port is not accepting WebSockets (${recoveredHostError}).`,
+    ),
+  )
+  console.error(c.dim('Run `typeclaw restart --port 0` when safe to repair host TUI/reload connectivity.'))
+}
+
+async function defaultTarget(): Promise<{ url: string; cwd: string; token: string | null }> {
   const cwd = findAgentDir(process.cwd()) ?? process.cwd()
   const precheck = await requireContainerRunning({ cwd })
   if (!precheck.ok) {
@@ -72,5 +93,5 @@ async function defaultUrl(): Promise<string> {
   const token = await resolveTuiToken({ cwd })
   const url = new URL(`ws://127.0.0.1:${port}`)
   if (token !== null) url.searchParams.set('token', token)
-  return url.toString()
+  return { url: url.toString(), cwd, token }
 }
