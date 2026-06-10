@@ -2,7 +2,7 @@ import type { LinePushMessageEvent } from 'agent-messenger/line'
 
 import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
 export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect'
 
@@ -22,6 +22,13 @@ export type LineInboundContext = {
   // LINE push events lack `author_name`, so the adapter resolves it (best
   // effort) and passes it here; falls back to the raw author id.
   authorName?: string
+  // The adapter splits the raw event into prompt text + attachments (non-text
+  // content types become a placeholder string and a ref-free attachment) and
+  // passes the result here, so the classifier routes on the synthesized text
+  // rather than the raw `event.text`. Omitted for plain text inbounds, where
+  // `event.text` is authoritative.
+  text?: string
+  attachments?: readonly InboundAttachment[]
 }
 
 export function classifyInbound(
@@ -36,8 +43,11 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'self_author' }
   }
 
-  const text = event.text ?? ''
-  if (text === '') return { kind: 'drop', reason: 'empty_text' }
+  const text = context.text ?? event.text ?? ''
+  const attachments = context.attachments ?? []
+  if (text === '' && attachments.length === 0) {
+    return { kind: 'drop', reason: 'empty_text' }
+  }
 
   const chatInfo = context.lookupChat(event.chat_id)
   if (chatInfo === null) {
@@ -65,6 +75,7 @@ export function classifyInbound(
       chat: event.chat_id,
       thread: null,
       text,
+      ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.message_id,
       authorId: event.author_id,
       authorName,
