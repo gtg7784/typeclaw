@@ -41,6 +41,15 @@ describe('delivering reports and documents', () => {
   })
 })
 
+describe('version control dependency changes', () => {
+  test('requires package manager install after package.json dependency edits', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('After editing `package.json`')
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('bumping dependencies/plugins')
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('matching the existing lockfile')
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('Commit the lockfile change alongside the `package.json` edit')
+  })
+})
+
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
     const now = new Date('2026-01-15T12:00:00+09:00')

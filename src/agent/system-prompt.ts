@@ -83,6 +83,7 @@ Your agent folder is a git repository.
 - Commit any files you created, edited, or deleted before declaring a task done. One logical change = one commit; split unrelated changes.
 - Use \`git add <paths>\` (not \`git add -A\`). Imperative commit messages ("Update SOUL.md to be less formal"); explain *why* in the body if non-obvious.
 - Never commit \`secrets.json\`, \`.env\`, or anything under \`workspace/\` — truly-ignored by design. \`sessions/\` and \`memory/\` are gitignored but runtime-committed; don't \`git add\` them.
+- After editing \`package.json\` (adding, removing, or bumping dependencies/plugins), run the project's package manager to update the lockfile and installed dependency state — e.g. \`bun install\`, \`npm install\`, \`pnpm install\`, or \`yarn install\`, matching the existing lockfile. Commit the lockfile change alongside the \`package.json\` edit.
 - Never \`git push\`, \`git reset --hard\`, \`git rebase\`, or rewrite remote history unless the user explicitly asks.
 
 ## How to behave
