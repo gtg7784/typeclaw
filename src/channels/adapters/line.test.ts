@@ -190,7 +190,6 @@ describe('createLineAdapter lifecycle', () => {
       author_id: 'U_other',
       text: 'hello bot',
       content_type: 'text',
-      content_metadata: {},
       sent_at: '2025-01-02T00:00:00.000Z',
     })
     await waitFor(() => routed.length > 0)

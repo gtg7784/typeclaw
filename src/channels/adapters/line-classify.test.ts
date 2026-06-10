@@ -18,7 +18,6 @@ function event(overrides: Partial<LinePushMessageEvent> = {}): LinePushMessageEv
     content_type: 'text',
     sent_at: '2025-01-02T03:04:05.000Z',
     ...overrides,
-    content_metadata: overrides.content_metadata ?? {},
   }
 }
 
