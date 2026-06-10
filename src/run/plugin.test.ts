@@ -361,8 +361,13 @@ export default {
     const registered = running.pluginRuntime.get().registry.cronJobs.find((j) => j.localId === 'watch')
     if (!registered) throw new Error('plugin handler cron job not registered')
     running.stream.publish({ target: { kind: 'cron', jobId: registered.globalId }, payload: registered.job })
-    for (let i = 0; i < 50 && !(await Bun.file(sentinelFile).exists()); i++) {
-      await new Promise((r) => setTimeout(r, 20))
+    // Budget must clear CI --parallel scheduling jitter against a real startAgent
+    // boot; a fixed 1 s window flaked (#763). Matches the session.start test above.
+    const TIMEOUT_MS = 5000
+    const POLL_MS = 25
+    const iterations = Math.ceil(TIMEOUT_MS / POLL_MS)
+    for (let i = 0; i < iterations && !(await Bun.file(sentinelFile).exists()); i++) {
+      await new Promise((r) => setTimeout(r, POLL_MS))
     }
 
     // then the handler observed a well-formed ctx
