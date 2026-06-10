@@ -128,6 +128,7 @@ describe('installCodexFetchObserver', () => {
     delete process.env.TYPECLAW_CODEX_TIMEOUTS
     delete process.env.TYPECLAW_CODEX_TTFB_MS
     delete process.env.TYPECLAW_CODEX_IDLE_MS
+    delete process.env.TYPECLAW_CODEX_OVERALL_MS
     delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
   })
 
@@ -136,6 +137,7 @@ describe('installCodexFetchObserver', () => {
     delete process.env.TYPECLAW_CODEX_TIMEOUTS
     delete process.env.TYPECLAW_CODEX_TTFB_MS
     delete process.env.TYPECLAW_CODEX_IDLE_MS
+    delete process.env.TYPECLAW_CODEX_OVERALL_MS
     delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
   })
 
@@ -576,6 +578,75 @@ describe('installCodexFetchObserver', () => {
     expect(codexLines[0]!.msg).toContain('body_bytes=18')
   })
 
+  test('Overall deadline aborts a slow-trickle stream that never trips the idle timer', async () => {
+    // Reproduces typeclaw issue #394's slow-trickle hang: the body keeps
+    // emitting bytes inside the inter-chunk idle window (so the sliding idle
+    // timer re-arms forever) but never reaches a terminal SSE event. With only
+    // TTFB + idle timers, such a stream occupies the turn until Bun's OS socket
+    // deadline fires (~900s observed in production). The overall deadline is the
+    // absolute wall-clock ceiling that catches exactly this class.
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    // idleMs=100 (small) but each chunk lands inside it, so idle never trips.
+    // overallMs=250 is exceeded while chunks are still trickling.
+    const uninstall = installCodexFetchObserver({
+      logger,
+      now: clock.now,
+      scheduler,
+      ttfbMs: 0,
+      idleMs: 100,
+      overallMs: 250,
+    })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      // Trickle chunks every 80ms — always inside the 100ms idle window, so the
+      // idle timer keeps resetting and would never fire on its own.
+      clock.set(80)
+      await ctrl.push(new TextEncoder().encode('chunk1'))
+      clock.set(160)
+      await ctrl.push(new TextEncoder().encode('chunk2'))
+      clock.set(240)
+      await ctrl.push(new TextEncoder().encode('chunk3'))
+      // Cross the overall deadline (250ms from request start) before the next chunk.
+      clock.set(260)
+      await scheduler.fire(260)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('overall deadline')
+
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    const line = codexLines[0]!.msg
+    expect(line).toContain('status=200')
+    expect(line).toContain('cause=overall_timeout')
+    expect(line).toMatch(/error=".*overall deadline.*"/)
+  })
+
   test('Idle abort listener count stays bounded across many chunks (no leak)', async () => {
     // given: a stream that will emit 100 chunks with a long idle window. The
     // pre-fix shape called `idleController.signal.addEventListener('abort', …)`
@@ -701,5 +772,130 @@ describe('installCodexFetchObserver', () => {
     const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
     expect(codexLines[0]!.msg).toContain('total_ms=250')
     expect(codexLines[0]!.msg).toContain('cause=ttfb_timeout')
+  })
+
+  test('Overall deadline fires even when the idle timer is disabled', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({
+      logger,
+      now: clock.now,
+      scheduler,
+      ttfbMs: 0,
+      idleMs: 0,
+      overallMs: 200,
+    })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(210)
+      await scheduler.fire(210)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('overall deadline')
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+  })
+
+  test('overallMs=0 disables the overall deadline (stream may run unbounded)', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({
+      logger,
+      now: clock.now,
+      scheduler,
+      ttfbMs: 0,
+      idleMs: 0,
+      overallMs: 0,
+    })
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const drainPromise = drainQuiet(response.body)
+      clock.set(1_000_000)
+      await ctrl.push(new TextEncoder().encode('late'))
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(scheduler.pending()).toBe(0)
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('cause=null')
+    expect(codexLines[0]!.msg).toContain('error=null')
+  })
+
+  test('TYPECLAW_CODEX_OVERALL_MS env var overrides default', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    process.env.TYPECLAW_CODEX_OVERALL_MS = '300'
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 0 })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(305)
+      await scheduler.fire(305)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('300ms')
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
   })
 })

@@ -28,6 +28,16 @@ export type CodexFetchObserverOptions = {
   // body stream errors. Default: 300_000 ms, matches `openai/codex`'s Rust CLI
   // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`. Set to 0 to disable just this timer.
   idleMs?: number
+  // Override the absolute wall-clock ceiling on a single Codex request,
+  // measured from fetch start to body completion. Unlike `idleMs`, it does NOT
+  // reset on chunk arrival, so it catches a "slow-trickle" stream that emits
+  // bytes inside every idle window yet never reaches a terminal SSE event —
+  // the failure mode behind issue #394's multi-minute hang (one observed turn
+  // occupied 901s before Bun's OS socket deadline fired). Default 900_000 ms:
+  // chosen to clear known-healthy long reasoning turns (observed up to ~285s)
+  // by a wide margin, so it only trips on the pathological no-completion case.
+  // Set to 0 to disable just this timer.
+  overallMs?: number
   // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
   // the wrapper can pass to `clear`. Default: `setTimeout`/`clearTimeout`.
   scheduler?: TimeoutScheduler
@@ -44,8 +54,10 @@ const ENV_DISABLE_OBSERVER = 'TYPECLAW_CODEX_FETCH_OBSERVER'
 const ENV_DISABLE_TIMEOUTS = 'TYPECLAW_CODEX_TIMEOUTS'
 const ENV_TTFB_MS = 'TYPECLAW_CODEX_TTFB_MS'
 const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
+const ENV_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
 const DEFAULT_IDLE_MS = 300_000
+const DEFAULT_OVERALL_MS = 900_000
 const LOG_PREFIX = '[codex-fetch]'
 
 const defaultScheduler: TimeoutScheduler = {
@@ -126,6 +138,7 @@ function readEnvMs(name: string, fallback: number): number {
 
 type BodyTapConfig = {
   idleMs: number
+  overallMs: number
   scheduler: TimeoutScheduler
 }
 
@@ -193,17 +206,38 @@ function attachBodyTimingTap(
 
   const piped = response.body.pipeThrough(tap, { preventCancel: false })
 
-  const idleController = config.idleMs > 0 ? new AbortController() : null
+  const idleController = config.idleMs > 0 || config.overallMs > 0 ? new AbortController() : null
   let idleHandle: unknown = null
   const armIdleTimer = () => {
-    if (idleController === null) return
+    if (idleController === null || config.idleMs <= 0) return
     if (idleHandle !== null) config.scheduler.clear(idleHandle)
     idleHandle = config.scheduler.set(config.idleMs, () => {
       cause = 'idle_timeout'
       idleController.abort(new Error(`Codex SSE body idle for ${config.idleMs}ms (typeclaw observer timeout)`))
     })
   }
+
+  // Absolute ceiling on the whole body, armed once and never reset. Aborts the
+  // shared controller so the existing reader race tears the stream down on the
+  // first deadline to fire — idle or overall, whichever comes first.
+  let overallHandle: unknown = null
+  if (idleController !== null && config.overallMs > 0) {
+    overallHandle = config.scheduler.set(config.overallMs, () => {
+      cause = 'overall_timeout'
+      idleController.abort(
+        new Error(`Codex SSE body exceeded overall deadline of ${config.overallMs}ms (typeclaw observer timeout)`),
+      )
+    })
+  }
+  const disarmOverallTimer = () => {
+    if (overallHandle !== null) {
+      config.scheduler.clear(overallHandle)
+      overallHandle = null
+    }
+  }
+
   const disarmIdleTimer = () => {
+    disarmOverallTimer()
     if (idleHandle !== null) {
       config.scheduler.clear(idleHandle)
       idleHandle = null
@@ -295,6 +329,7 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
   const timeoutsEnabled = process.env[ENV_DISABLE_TIMEOUTS] !== 'off'
   const ttfbMs = timeoutsEnabled ? (opts.ttfbMs ?? readEnvMs(ENV_TTFB_MS, DEFAULT_TTFB_MS)) : 0
   const idleMs = timeoutsEnabled ? (opts.idleMs ?? readEnvMs(ENV_IDLE_MS, DEFAULT_IDLE_MS)) : 0
+  const overallMs = timeoutsEnabled ? (opts.overallMs ?? readEnvMs(ENV_OVERALL_MS, DEFAULT_OVERALL_MS)) : 0
   const originalFetch = globalThis.fetch
 
   const wrappedImpl = async (
@@ -352,6 +387,7 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
     const requestId = response.headers.get('x-request-id')
     return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger, {
       idleMs,
+      overallMs,
       scheduler,
     })
   }
