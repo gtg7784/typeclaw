@@ -20,6 +20,17 @@ export type PermissionService = {
   // the config reloadable so role match-rule edits (typeclaw role claim,
   // hand-edits to typeclaw.json) take effect without a container restart.
   replaceRoles(roles: RolesConfig | undefined): void
+  // Rebuilds the role table with a new plugin-permission set, preserving the
+  // object identity that plugin factories captured. The plugin manager calls
+  // this AFTER the load loop to finalize the permission model from only the
+  // plugins that survived: a user plugin that failed to load must not leave
+  // its declared permissions or owner-wildcard exclusions in the live service.
+  // Optional so the many partial test stubs and the channel-respond stub need
+  // not implement it; the real service from createPermissionService always does.
+  replacePluginPermissions?(opts: {
+    pluginPermissions: readonly string[]
+    ownerWildcardExclusions: readonly string[]
+  }): void
 }
 
 export type UnknownPermissionWarning = {
@@ -34,6 +45,7 @@ export const noopPermissionService: PermissionService = {
   compareRoleSeverity: () => undefined,
   describe: () => ({ role: 'guest', permissions: [] }),
   replaceRoles: () => {},
+  replacePluginPermissions: () => {},
 }
 
 type ResolvedRole = {
@@ -109,9 +121,10 @@ function levenshtein(a: string, b: string): number {
 }
 
 export function createPermissionService(opts: CreatePermissionServiceOptions = {}): PermissionService {
-  const pluginPermissions = opts.pluginPermissions ?? []
-  const ownerWildcardExclusions = opts.ownerWildcardExclusions ?? []
-  let resolved = buildRoleTable(opts.roles ?? {}, pluginPermissions, ownerWildcardExclusions)
+  let pluginPermissions = opts.pluginPermissions ?? []
+  let ownerWildcardExclusions = opts.ownerWildcardExclusions ?? []
+  let lastRoles = opts.roles ?? {}
+  let resolved = buildRoleTable(lastRoles, pluginPermissions, ownerWildcardExclusions)
   let byName = new Map(resolved.map((r) => [r.name, r]))
 
   function resolveRole(origin: SessionOrigin | undefined): string {
@@ -186,7 +199,14 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
       return { role: name, permissions: role?.permissions ?? [] }
     },
     replaceRoles(roles) {
-      resolved = buildRoleTable(roles ?? {}, pluginPermissions, ownerWildcardExclusions)
+      lastRoles = roles ?? {}
+      resolved = buildRoleTable(lastRoles, pluginPermissions, ownerWildcardExclusions)
+      byName = new Map(resolved.map((r) => [r.name, r]))
+    },
+    replacePluginPermissions(next) {
+      pluginPermissions = next.pluginPermissions
+      ownerWildcardExclusions = next.ownerWildcardExclusions
+      resolved = buildRoleTable(lastRoles, pluginPermissions, ownerWildcardExclusions)
       byName = new Map(resolved.map((r) => [r.name, r]))
     },
   }

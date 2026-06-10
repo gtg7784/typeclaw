@@ -90,26 +90,23 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       .map((e) => ({ ...e, isBundled: false })),
   ]
 
-  const declaredPermissions = collectDeclaredPermissions(allPlugins)
-  const ownerWildcardExclusions = collectOwnerWildcardExclusions(allPlugins)
+  // Seed the permission service from BUNDLED plugins only. A user plugin's
+  // declared permissions / owner-wildcard exclusions must not enter the live
+  // service until the plugin actually survives registration — otherwise a
+  // plugin reported as disabled could still widen the allowed set or (worse)
+  // strip an owner-wildcard bypass. Bundled plugins are always survivors:
+  // their failure is fatal, so the boot aborts before this service is used.
+  const bundledPlugins = allPlugins.filter((p) => p.isBundled)
   const permissions = createPermissionService({
     ...(opts.roles !== undefined ? { roles: opts.roles } : {}),
-    pluginPermissions: declaredPermissions,
-    ownerWildcardExclusions,
+    pluginPermissions: collectDeclaredPermissions(bundledPlugins),
+    ownerWildcardExclusions: collectOwnerWildcardExclusions(bundledPlugins),
   })
 
-  // Non-fatal: surface user-declared `permissions[]` strings that aren't in
-  // the known set, so a typo like `security.bypass.secretExfilBach` is
-  // visible at boot rather than silently failing to bypass the matching
-  // guard. We log instead of throw because the runtime still functions --
-  // the unknown string just never matches anything.
-  for (const warning of findUnknownPermissions(opts.roles, declaredPermissions)) {
-    console.warn(
-      `[permissions] role "${warning.role}" declares unknown permission "${warning.permission}" — ${warning.hint}`,
-    )
-  }
+  const survivors: { entry: string; resolved: ResolvedPlugin; isBundled: boolean }[] = []
 
-  for (const { entry, resolved, isBundled } of allPlugins) {
+  for (const plugin of allPlugins) {
+    const { entry, resolved, isBundled } = plugin
     // Name conflict is a global invariant (two plugins claiming one name make
     // every later name-keyed lookup ambiguous), so it stays fatal regardless of
     // origin — never demoted to a per-plugin skip.
@@ -146,7 +143,29 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       continue
     }
 
+    survivors.push(plugin)
     loaded.push({ name: resolved.name, version: resolved.version, source: resolved.source })
+  }
+
+  // Finalize the permission model from the survivor set only. Plugin factories
+  // captured `permissions` by reference (their hooks read it at request time),
+  // so we mutate that same object in place rather than returning a new one.
+  const declaredPermissions = collectDeclaredPermissions(survivors)
+  permissions.replacePluginPermissions?.({
+    pluginPermissions: declaredPermissions,
+    ownerWildcardExclusions: collectOwnerWildcardExclusions(survivors),
+  })
+
+  // Non-fatal: surface user-declared `permissions[]` strings that aren't in
+  // the known set, so a typo like `security.bypass.secretExfilBach` is
+  // visible at boot rather than silently failing to bypass the matching
+  // guard. We log instead of throw because the runtime still functions --
+  // the unknown string just never matches anything. Run AFTER finalization so
+  // a failed plugin's declarations don't make a role's permission look known.
+  for (const warning of findUnknownPermissions(opts.roles, declaredPermissions)) {
+    console.warn(
+      `[permissions] role "${warning.role}" declares unknown permission "${warning.permission}" — ${warning.hint}`,
+    )
   }
 
   return {

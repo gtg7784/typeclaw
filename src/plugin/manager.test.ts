@@ -208,6 +208,56 @@ describe('loadPlugins — bundled plugin failures stay fatal', () => {
   })
 })
 
+describe('loadPlugins — a failed plugin does not influence the permission model', () => {
+  test("a skipped user plugin's permissions + ownerWildcardExclusions never reach the live service", async () => {
+    const ownerOrigin = { kind: 'system', component: 'test' } as const
+    const loadEntry: LoadPluginEntryFn = async (entry) => {
+      if (entry === 'failed') {
+        return {
+          name: 'failed',
+          version: undefined,
+          source: 'failed',
+          defined: {
+            permissions: ['security.bypass.failedPlugin'],
+            ownerWildcardExclusions: ['security.bypass.allowedPlugin'],
+            plugin: async () => {
+              throw new Error('boom')
+            },
+          },
+        }
+      }
+      return {
+        name: 'survivor',
+        version: undefined,
+        source: 'survivor',
+        defined: { permissions: ['security.bypass.allowedPlugin'], plugin: async () => ({}) },
+      }
+    }
+
+    const cap = captureWarnings()
+    let result
+    try {
+      result = await loadPlugins({ entries: ['survivor', 'failed'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    } finally {
+      cap.restore()
+    }
+
+    // given the failed plugin is reported disabled and absent from the loaded set
+    expect(result.failedPlugins.map((f) => f.entry)).toEqual(['failed'])
+    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['survivor'])
+
+    // then its declared permission is NOT in the known universe
+    expect(result.declaredPermissions).toContain('security.bypass.allowedPlugin')
+    expect(result.declaredPermissions).not.toContain('security.bypass.failedPlugin')
+
+    // and the live service reflects survivors only
+    expect(result.permissions.has(ownerOrigin, 'security.bypass.failedPlugin')).toBe(false)
+    // the security-critical assertion: the failed plugin's exclusion must NOT
+    // have stripped the surviving plugin's owner-wildcard bypass.
+    expect(result.permissions.has(ownerOrigin, 'security.bypass.allowedPlugin')).toBe(true)
+  })
+})
+
 describe('loadPlugins — unresolvable entry is non-fatal', () => {
   test('warns and skips an entry that fails to resolve, still loading the rest', async () => {
     const tool = defineTool({
