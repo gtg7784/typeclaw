@@ -75,6 +75,7 @@ const EMOJI_UNICODE: Record<string, string> = {
   fire: '🔥',
   eye: '👁️',
   raised_hands: '🙌',
+  zipper_mouth_face: '🤐',
 }
 
 function resolveEmoji(emoji: string): string | null {
