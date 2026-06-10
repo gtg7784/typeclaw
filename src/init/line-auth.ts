@@ -44,6 +44,8 @@ export type LineLoginClient = {
   }): Promise<LineLoginResult>
 }
 
+let lineTokenInfoSuppressionQueue: Promise<void> = Promise.resolve()
+
 export function lineSecretsPath(agentDir: string): string {
   return join(agentDir, 'secrets.json')
 }
@@ -58,19 +60,20 @@ export async function runLineBootstrap(input: LineLoginInput): Promise<LineBoots
     // ~/.config/agent-messenger to keep in sync.
     const client = input.client ?? buildLineClient(store)
 
-    const result =
+    const result = await suppressLineTokenInfoDump(() =>
       input.method === 'qr'
-        ? await client.loginWithQR({
+        ? client.loginWithQR({
             onQRUrl: async (url) => {
               await input.callbacks.onQRUrl?.(url)
             },
             onPincode: input.callbacks.onPincode,
           })
-        : await client.loginWithEmail({
+        : client.loginWithEmail({
             email: input.email,
             password: input.password,
             onPincode: input.callbacks.onPincode,
-          })
+          }),
+    )
 
     if (!result.authenticated || result.account_id === undefined) {
       const reason = result.message ?? result.error ?? 'LINE login did not authenticate'
@@ -100,4 +103,46 @@ function buildLineClient(store: SecretsLineCredentialStore): LineLoginClient {
   // calls, so it stands in as the credential manager via a structural cast.
   const credManager = store as unknown as LineCredentialManager
   return new RealLineClient(credManager) as unknown as LineLoginClient
+}
+
+async function suppressLineTokenInfoDump<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = lineTokenInfoSuppressionQueue
+  let release: () => void = () => {}
+  lineTokenInfoSuppressionQueue = new Promise((resolve) => {
+    release = resolve
+  })
+  await previous
+
+  const originalLog = console.log
+  console.log = (...args: unknown[]) => {
+    if (isLineTokenInfoDump(args)) return
+    originalLog(...args)
+  }
+  try {
+    return await fn()
+  } finally {
+    console.log = originalLog
+    release()
+  }
+}
+
+function isLineTokenInfoDump(args: unknown[]): boolean {
+  if (args.length !== 1) return false
+  const value = args[0]
+  if (value === null || typeof value !== 'object') return false
+
+  const record = value as Record<string, unknown>
+  return (
+    looksLikeJwt(record['1']) &&
+    looksLikeJwt(record['2']) &&
+    typeof record['3'] === 'number' &&
+    typeof record['4'] === 'object' &&
+    typeof record['5'] === 'string' &&
+    typeof record['6'] === 'number'
+  )
+}
+
+function looksLikeJwt(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
 }
