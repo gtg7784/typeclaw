@@ -177,17 +177,21 @@ async function runBackupOnce(
     spawnedByOrigin: { kind: 'tui', sessionId: 'backup-runner' },
   }
 
-  // App-auth agents need a minted per-repo token injected into the runner's
-  // direct git spawn (it bypasses the bash tool's credential hook). Only
-  // computed when we'll actually push; PAT/SSH/non-github fall back to null
-  // and the runner uses its inherited env.
-  const authEnv = payload.pushToOrigin ? await resolveBackupAuthEnv(payload.agentDir, ctx.github, ctx.logger) : null
+  // App-auth agents need a minted per-repo token for the runner's push (it
+  // bypasses the bash tool's credential hook). Only computed when we'll push;
+  // PAT/SSH/non-github fall back to null. Passed as `pushEnv` so the runner
+  // applies it to push/fetch ONLY — never to local commands like `git commit`,
+  // which can run repo-controlled hooks that would otherwise see the token.
+  const pushEnv = payload.pushToOrigin
+    ? ((await resolveBackupAuthEnv(payload.agentDir, ctx.github, ctx.logger)) ?? undefined)
+    : undefined
 
   const result = await withGitLock(payload.agentDir, () =>
     runBackup(
       { cwd: payload.agentDir, pushToOrigin: payload.pushToOrigin },
       {
-        gitSpawn: makeDefaultGitSpawn(authEnv ?? {}),
+        gitSpawn: makeDefaultGitSpawn(),
+        pushEnv,
         pickCommitMessage: async ({ status, diffstat }) => {
           await cleanupMessageFile(messagePath)
           const messagePayload: CommitMessagePayload = {

@@ -21,12 +21,20 @@ export type GitSpawnResult = {
   timedOut: boolean
 }
 
-export type GitSpawn = (args: readonly string[], opts: { cwd: string; timeoutMs: number }) => Promise<GitSpawnResult>
+export type GitSpawn = (
+  args: readonly string[],
+  opts: { cwd: string; timeoutMs: number; env?: Record<string, string> },
+) => Promise<GitSpawnResult>
 
 export type BackupRunnerDeps = {
   gitSpawn: GitSpawn
   pickCommitMessage: (input: { status: string; diffstat: string }) => Promise<string>
   diagnoseFailure?: (input: BackupFailureInput) => Promise<void>
+  // Credential env (GIT_ASKPASS/TYPECLAW_GIT_TOKEN/insteadOf) applied ONLY to
+  // network git invocations (push/fetch). It is deliberately NOT given to local
+  // commands — `git commit` can run repo-controlled hooks, which must never see
+  // the minted token.
+  pushEnv?: Record<string, string>
   now?: () => number
 }
 
@@ -169,8 +177,12 @@ async function pushWithRecovery(cwd: string, deps: BackupRunnerDeps, plan: Activ
   // onto. The upstream case keeps bare `fetch` (its tracking config resolves it).
   const fetchArgs = plan.kind === 'upstream' ? ['fetch'] : ['fetch', plan.remote]
   const pushedKind: BackupResult = { ok: true, kind: plan.kind === 'upstream' ? 'pushed' : 'pushed-set-upstream' }
+  // Credentials ride ONLY on the network calls (push/fetch). The rebase is
+  // local (it replays onto an already-fetched remote-tracking ref), so it runs
+  // token-free like every other local command.
+  const net = { cwd, timeoutMs: NETWORK_TIMEOUT_MS, env: deps.pushEnv }
 
-  const push = await deps.gitSpawn(pushArgs, { cwd, timeoutMs: NETWORK_TIMEOUT_MS })
+  const push = await deps.gitSpawn(pushArgs, net)
   if (push.exitCode === 0) return pushedKind
 
   if (!isNonFastForward(push)) {
@@ -178,7 +190,7 @@ async function pushWithRecovery(cwd: string, deps: BackupRunnerDeps, plan: Activ
     return { ok: false, kind: 'push-failed', reason: shortErr(push) }
   }
 
-  const fetch = await deps.gitSpawn(fetchArgs, { cwd, timeoutMs: NETWORK_TIMEOUT_MS })
+  const fetch = await deps.gitSpawn(fetchArgs, net)
   if (fetch.exitCode !== 0) {
     await maybeDiagnose(deps, {
       cwd,
@@ -203,7 +215,7 @@ async function pushWithRecovery(cwd: string, deps: BackupRunnerDeps, plan: Activ
     return { ok: false, kind: 'rebase-failed', reason: `git rebase failed: ${shortErr(rebase)}` }
   }
 
-  const push2 = await deps.gitSpawn(pushArgs, { cwd, timeoutMs: NETWORK_TIMEOUT_MS })
+  const push2 = await deps.gitSpawn(pushArgs, net)
   if (push2.exitCode !== 0) {
     await maybeDiagnose(deps, {
       cwd,
@@ -271,11 +283,8 @@ function sanitizeCommitMessage(raw: string): string {
   return rest.length > 0 ? `${subject}\n\n${rest}` : subject
 }
 
-// `extraEnv` carries git credentials (GIT_ASKPASS/TYPECLAW_GIT_TOKEN/insteadOf)
-// for App-auth pushes; it is applied LAST so its GIT_TERMINAL_PROMPT wins, but
-// NONINTERACTIVE_ENV's pager/GCM settings are folded in first either way.
-export function makeDefaultGitSpawn(extraEnv: Record<string, string> = {}): GitSpawn {
-  return withIndexLockRetry(async (args, { cwd, timeoutMs }) => {
+export function makeDefaultGitSpawn(): GitSpawn {
+  return withIndexLockRetry(async (args, { cwd, timeoutMs, env }) => {
     const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
     if (!bun) {
       return { exitCode: 127, stdout: '', stderr: 'Bun runtime not available', timedOut: false }
@@ -283,12 +292,15 @@ export function makeDefaultGitSpawn(extraEnv: Record<string, string> = {}): GitS
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
+      // Per-call `env` (credentials for push/fetch) is applied LAST so its
+      // GIT_TERMINAL_PROMPT wins; NONINTERACTIVE_ENV's pager/GCM settings still
+      // apply to every call. Local commands pass no `env` and stay token-free.
       const proc = bun.spawn({
         cmd: ['git', ...args],
         cwd,
         stdout: 'pipe',
         stderr: 'pipe',
-        env: { ...process.env, ...NONINTERACTIVE_ENV, ...extraEnv },
+        env: { ...process.env, ...NONINTERACTIVE_ENV, ...env },
         signal: controller.signal,
       })
       const exitCode = await proc.exited

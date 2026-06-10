@@ -20,12 +20,12 @@ const failResult = (stderr = 'boom', exit = 1): GitSpawnResult => ({
   timedOut: false,
 })
 
-type Call = { args: readonly string[]; cwd: string }
+type Call = { args: readonly string[]; cwd: string; env?: Record<string, string> }
 
 function makeSpawn(handler: (args: readonly string[]) => GitSpawnResult): { spawn: GitSpawn; calls: Call[] } {
   const calls: Call[] = []
-  const spawn: GitSpawn = async (args, { cwd }) => {
-    calls.push({ args, cwd })
+  const spawn: GitSpawn = async (args, { cwd, env }) => {
+    calls.push({ args, cwd, env })
     return handler(args)
   }
   return { spawn, calls }
@@ -284,6 +284,41 @@ describe('runBackup', () => {
     const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
     expect(result).toEqual({ ok: true, kind: 'pushed' })
     expect(calls.find((c) => c.args[0] === 'push')).toBeDefined()
+  })
+
+  test('pushEnv reaches push/fetch only — never local commands that can run repo hooks', async () => {
+    // given: a minted-token env and a non-fast-forward push so fetch+rebase run too
+    const cwd = await makeRepo()
+    const pushEnv = { GIT_ASKPASS: '/x/askpass', TYPECLAW_GIT_TOKEN: 'ghs_secret' }
+    let pushCount = 0
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') return okResult(' M foo\n')
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'rev-parse') return okResult('origin/main\n')
+      if (args[0] === 'push') {
+        pushCount += 1
+        return pushCount === 1 ? failResult('! [rejected] (non-fast-forward)\nUpdates were rejected', 1) : okResult()
+      }
+      if (args[0] === 'fetch') return okResult()
+      if (args[0] === 'rebase' && args[1] === 'origin/main') return okResult()
+      return okResult()
+    })
+    // when
+    await runBackup({ cwd, pushToOrigin: true }, { ...baseDeps(spawn), pushEnv })
+
+    // then: every push/fetch carries the token; the local commit/add/status/rebase
+    // (which can execute repo-controlled git hooks) must NOT see it.
+    const networkCmds = new Set(['push', 'fetch'])
+    for (const c of calls) {
+      if (networkCmds.has(c.args[0] as string)) {
+        expect(c.env).toEqual(pushEnv)
+      } else {
+        expect(c.env).toBeUndefined()
+      }
+    }
+    // sanity: the hook-executing commands actually ran in this scenario
+    expect(calls.some((c) => c.args[0] === 'commit')).toBe(true)
+    expect(calls.some((c) => c.args[0] === 'rebase' && c.args[1] === 'origin/main')).toBe(true)
   })
 
   test('on non-fast-forward push, fetches, rebases, and re-pushes', async () => {
