@@ -87,6 +87,49 @@ describe('buildHostdRestart', () => {
     })
   })
 
+  test('restart preflight refuses when dependency validation fails', async () => {
+    const preflight = buildHostdRestartPreflight('/repo/src/cli/index.ts', 'unversioned', {
+      loadConfigSync: () => configSchema.parse({ port: 8973, plugins: [] }),
+      validateRestartDeps: async () => ({ ok: false, reason: 'workspace:* failed to resolve' }),
+    })
+
+    const result = await preflight({ containerName: 'agent', cwd: '/agent-dir', build: false })
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'restart refused for agent: workspace:* failed to resolve',
+    })
+  })
+
+  test('restart preflight passes plugins from config into the dependency validator', async () => {
+    const seen: Array<{ cwd: string; plugins: readonly string[] }> = []
+    const preflight = buildHostdRestartPreflight('/repo/src/cli/index.ts', 'unversioned', {
+      loadConfigSync: () => configSchema.parse({ port: 8973, plugins: ['./packages/foo'] }),
+      validateRestartDeps: async (opts) => {
+        seen.push(opts)
+        return { ok: true }
+      },
+    })
+
+    const result = await preflight({ containerName: 'agent', cwd: '/agent-dir', build: false })
+
+    expect(result).toBeNull()
+    expect(seen).toEqual([{ cwd: '/agent-dir', plugins: ['./packages/foo'] }])
+  })
+
+  test('restart preflight proceeds when config cannot be read (start stays the fail-closed gate)', async () => {
+    const preflight = buildHostdRestartPreflight('/repo/src/cli/index.ts', 'unversioned', {
+      loadConfigSync: () => {
+        throw new Error('typeclaw.json unreadable')
+      },
+      validateRestartDeps: async () => ({ ok: false, reason: 'should not be called' }),
+    })
+
+    const result = await preflight({ containerName: 'agent', cwd: '/agent-dir', build: false })
+
+    expect(result).toBeNull()
+  })
+
   test('omitted build defaults to forceBuild:false', async () => {
     const starts: StartOptions[] = []
     const restart = buildHostdRestart('/repo/src/cli/index.ts', {

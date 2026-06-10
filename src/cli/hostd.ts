@@ -7,6 +7,7 @@ import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
+import { validateRestartDeps, type RestartDepsPreflightResult } from '@/init/restart-deps-preflight'
 
 export const hostdCommand = defineCommand({
   meta: {
@@ -43,7 +44,7 @@ export const hostdCommand = defineCommand({
       onShutdown: () => process.exit(0),
       portbroker,
       kakaoRenewal,
-      restartPreflight: buildHostdRestartPreflight(cliEntry, version),
+      restartPreflight: buildHostdRestartPreflight(cliEntry, version, defaultPreflightDeps),
       restart: hostdRestart,
     })
 
@@ -104,10 +105,42 @@ export function buildHostdRestart(
   }
 }
 
-export function buildHostdRestartPreflight(cliEntry: string, daemonVersion: string): RestartPreflight {
-  return async () => {
+export type HostdPreflightDeps = {
+  loadConfigSync: (cwd: string) => Config
+  validateRestartDeps: (opts: { cwd: string; plugins: readonly string[] }) => Promise<RestartDepsPreflightResult>
+}
+
+const defaultPreflightDeps: HostdPreflightDeps = {
+  loadConfigSync,
+  validateRestartDeps,
+}
+
+export function buildHostdRestartPreflight(
+  cliEntry: string,
+  daemonVersion: string,
+  deps: HostdPreflightDeps = defaultPreflightDeps,
+): RestartPreflight {
+  return async ({ containerName, cwd }) => {
     const drift = await detectSourceDrift(cliEntry, daemonVersion)
-    return drift ? { ok: false, reason: drift } : null
+    if (drift) return { ok: false, reason: drift }
+
+    // Read plugins through loadConfigSync, not validateConfig: a config that
+    // fails schema validation is caught later in buildHostdRestart (before
+    // stop). On read/parse failure we let the restart proceed — start() is the
+    // fail-closed gate, and a preflight that can't read config must not strand a
+    // healthy agent.
+    let plugins: readonly string[]
+    try {
+      plugins = deps.loadConfigSync(cwd).plugins
+    } catch {
+      return null
+    }
+
+    const depsCheck = await deps.validateRestartDeps({ cwd, plugins })
+    if (!depsCheck.ok) {
+      return { ok: false, reason: `restart refused for ${containerName}: ${depsCheck.reason}` }
+    }
+    return null
   }
 }
 
