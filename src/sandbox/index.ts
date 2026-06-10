@@ -27,7 +27,12 @@ export { resolveSandboxSymlinks, type SandboxSymlinkSpec } from './symlinks'
 export { commandNeedsRealProc, isPackageInstallCommand } from './package-install'
 export { ensureSessionTmpDir, isUnderTmp, mapVirtualTmpPath, SESSION_TMP_ROOT, sessionTmpDir } from './session-tmp'
 export { formatCommand, shellQuote } from './quote'
-export { SandboxDegradedProcError, SandboxPolicyError, SandboxUnavailableError } from './errors'
+export {
+  SandboxDegradedProcError,
+  SandboxPolicyError,
+  SandboxProcProbeUnverifiedError,
+  SandboxUnavailableError,
+} from './errors'
 export {
   DEFAULT_SANDBOX_ENV,
   type SandboxCommandFilter,

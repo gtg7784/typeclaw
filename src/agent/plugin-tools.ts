@@ -53,7 +53,7 @@ import {
   resolveSandboxSymlinks,
   resolveWritableZones,
   SandboxDegradedProcError,
-  type SandboxProcStrategy,
+  SandboxProcProbeUnverifiedError,
   subtractMasked,
 } from '@/sandbox'
 
@@ -644,15 +644,19 @@ async function applyBashSandbox(
   // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
   // it would never reach the sandboxed process (the non-sandboxed spawnHook
   // path does not run when the command is rewritten to a bwrap invocation).
-  const proc = await resolveProcStrategy()
+  const { strategy: proc, degradeReason } = await resolveProcStrategy()
   // Fail fast with an actionable error when /proc degraded to tmpfs AND the
   // command needs a real /proc: under tmpfs Bun would otherwise abort deep in its
-  // pipeline with the opaque "NotDir", which the model retries forever. The
-  // SandboxDegradedProcError message tells it this is an environment limit, not
-  // the command's fault. Guarded on the command so non-bun bash still runs in the
-  // degraded mode (it does not touch /proc/self/{fd,maps}).
+  // pipeline with the opaque "NotDir", which the model retries forever. Which
+  // error depends on WHY it degraded: a 'definitive' degrade (a real leak / an
+  // incapable host) is permanent → SandboxDegradedProcError ("retrying won't
+  // help"); an 'unverified' degrade (the safety probe stayed inconclusive through
+  // its retry budget, e.g. a boot-time load spike) is transient and re-probes on
+  // the next call → SandboxProcProbeUnverifiedError ("retry the same command").
+  // Guarded on the command so non-bun bash still runs in the degraded mode (it
+  // does not touch /proc/self/{fd,maps}).
   if (proc === 'tmpfs' && commandNeedsRealProc(command)) {
-    throw new SandboxDegradedProcError()
+    throw degradeReason === 'unverified' ? new SandboxProcProbeUnverifiedError() : new SandboxDegradedProcError()
   }
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [
@@ -698,26 +702,44 @@ function subtractMaskedProtected(
 // --mount-proc` in a container booted WITHOUT the cap (or vice versa). Both
 // probes are cached process-globally, so this resolves to one spawn per
 // container lifetime regardless of how many bash calls hit it.
-async function resolveProcStrategy(): Promise<SandboxProcStrategy> {
-  if (config.sandbox.realProc && (await canMountRealProc())) return 'real-proc'
+// A tmpfs degrade carries WHY it happened so the caller can pick a permanent vs
+// retryable error. 'definitive': the probe returned a real cross-userns leak
+// ('unsafe') — the ONLY verdict proven permanent, so it fails closed for good.
+// 'unverified': the safety probe never reached a definitive verdict within its
+// retry budget. That covers BOTH a transient load spike AND a durable
+// incapability (no usable namespaces, a bwrap that starts but cannot set up its
+// sandbox): the probe cannot prove a NEGATIVE capability — only a leak is
+// definitive — so a genuinely incapable host also lands here and simply keeps
+// re-degrading on each call. Since 'inconclusive' is never cached, that costs a
+// re-probe but is correct: the only false case is "capable but briefly
+// saturated", which recovers; an incapable host stays degraded either way.
+// Absent when the strategy is not tmpfs.
+type ProcStrategyResolution =
+  | { strategy: 'real-proc' | 'proc-bind'; degradeReason?: undefined }
+  | { strategy: 'tmpfs'; degradeReason: 'definitive' | 'unverified' }
+
+async function resolveProcStrategy(): Promise<ProcStrategyResolution> {
+  if (config.sandbox.realProc && (await canMountRealProc())) return { strategy: 'real-proc' }
   // Retry an 'inconclusive' proc-bind probe (transient under load) before
   // degrading — a single such hiccup must not break external-package runs on a
   // capable host. 'unsafe' still fails closed with no retry.
-  if (
-    await resolveProcBindSafetyWithRetry(
-      () => getProcBindSafetyVerdict(),
-      (ms) => Bun.sleep(ms),
-    )
+  const verdict = await resolveProcBindSafetyWithRetry(
+    () => getProcBindSafetyVerdict(),
+    (ms) => Bun.sleep(ms),
   )
-    return 'proc-bind'
+  if (verdict === 'safe') return { strategy: 'proc-bind' }
   // Degraded last resort: no working /proc strategy. External package runners
   // (bunx/bun add/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
-  // /proc/self/{fd,maps} are absent. Warn once so an operator on such an exotic
-  // host (no usable user namespaces at all) gets a diagnostic instead of the bare
-  // Bun error. Not gated on parsing the command — that heuristic is fragile (see
-  // PR #696); this is a strategy-level notice, fail-closed and command-agnostic.
-  warnTmpfsProcFallbackOnce()
-  return 'tmpfs'
+  // /proc/self/{fd,maps} are absent. Only a proven 'unsafe' (a real cross-userns
+  // leak) is DEFINITIVE — warn once (a real operator-facing limit). An
+  // 'inconclusive' is reported as retryable upstream and NOT warned (it would cry
+  // wolf every boot storm); a durably-incapable host re-degrades quietly here,
+  // since the probe cannot distinguish it from transient load.
+  if (verdict === 'unsafe') {
+    warnTmpfsProcFallbackOnce()
+    return { strategy: 'tmpfs', degradeReason: 'definitive' }
+  }
+  return { strategy: 'tmpfs', degradeReason: 'unverified' }
 }
 
 let tmpfsProcFallbackWarned = false

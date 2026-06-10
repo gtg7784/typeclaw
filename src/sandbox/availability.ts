@@ -220,29 +220,46 @@ export function canBindProcSafely(options?: { bwrapPath?: string }): Promise<boo
 // leak-block guarantee — it only buys more chances to PROVE it.
 export const PROC_BIND_RETRY_BACKOFF_MS = [250, 1_000, 2_000, 4_000] as const
 
+// The retrying resolver returns the SAME three states as the probe, never a
+// boolean: 'safe' selects proc-bind; the two failure states stay DELIBERATELY
+// distinct so the caller reacts differently. 'unsafe' is a DEFINITIVE host fact
+// (a real cross-userns environ leak was observed, or the binary is genuinely
+// absent) — permanent, fail closed, retrying buys nothing. 'inconclusive' means
+// the safety probe never returned a definitive verdict within the backoff budget
+// (a boot-time CPU/IO storm tripping the probe's own timeout) — it proves NOTHING
+// about the host, so the SAME container can recover on a later call once the
+// spike passes. Folding these two into a single boolean `false` is what made a
+// transient boot-storm degrade look permanent: the caller degraded to tmpfs AND
+// told the model "retrying won't help", so a capable host stayed broken until
+// restart.
+//
 // proc-bind selection must distinguish "definitely unavailable" from "couldn't
-// verify right now". A DEFINITIVE verdict is final: 'safe'→true; a real userns
-// leak ('unsafe')→false with NO retry. Only an 'inconclusive' verdict (transient
-// probe failure that proves nothing about the host) is retried, because degrading
-// the bash call to tmpfs over a transient hiccup is what silently broke
+// verify right now". A DEFINITIVE verdict is final: 'safe'; a real userns leak
+// ('unsafe') with NO retry. Only an 'inconclusive' verdict (transient probe
+// failure that proves nothing about the host) is retried, because degrading the
+// bash call to tmpfs over a transient hiccup is what silently broke
 // external-package runs on capable hosts. 'inconclusive' is never cached
 // (see the cache type), so each retry re-probes from scratch. After the backoff
-// budget is exhausted we fail CLOSED — an unverified leak-block is never treated
-// as safe. Pure and dependency-injected (probe + sleep) so the retry policy is
-// unit-testable without spawning processes; production passes
-// getProcBindSafetyVerdict and Bun.sleep.
+// budget is exhausted we return 'inconclusive' — an unverified leak-block is
+// never treated as safe, but the RESULT (a transient unknown, not a definitive
+// 'unsafe') lets the caller offer a retryable degrade. Pure and
+// dependency-injected (probe + sleep) so the retry policy is unit-testable
+// without spawning processes; production passes getProcBindSafetyVerdict and
+// Bun.sleep.
 export async function resolveProcBindSafetyWithRetry(
   probe: () => Promise<ProcBindSafetyVerdict>,
   sleep: (ms: number) => Promise<void>,
   backoffMs: readonly number[] = PROC_BIND_RETRY_BACKOFF_MS,
-): Promise<boolean> {
+): Promise<ProcBindSafetyVerdict> {
   for (let attempt = 0; ; attempt++) {
     const verdict = await probe()
-    if (verdict === 'safe') return true
-    if (verdict === 'unsafe') return false
+    if (verdict === 'safe') return 'safe'
+    if (verdict === 'unsafe') return 'unsafe'
 
     const backoff = backoffMs[attempt]
-    if (backoff === undefined) return false
+    // Budget exhausted: still unverified. Report 'inconclusive' (NOT 'unsafe') so
+    // the caller knows this is a retryable unknown, not a definitive host fact.
+    if (backoff === undefined) return 'inconclusive'
     await sleep(backoff)
   }
 }

@@ -41,3 +41,29 @@ export class SandboxDegradedProcError extends Error {
     )
   }
 }
+
+// Distinct from SandboxDegradedProcError: that one is the PERMANENT verdict (a
+// real userns leak, or a host with no usable namespaces — retrying is futile).
+// This one fires when the proc-bind safety probe stayed 'inconclusive' through
+// its whole retry budget — typically a boot-time CPU/IO storm tripping the
+// probe's own timeout. The host is very likely capable; the probe just couldn't
+// prove it RIGHT NOW. Because an 'inconclusive' verdict is never cached, the next
+// bash call re-probes from scratch and usually promotes to proc-bind once the
+// spike passes. So the message tells the model the OPPOSITE of the permanent
+// case: retrying IS the fix. Without this split, a single unlucky boot-storm
+// probe degraded a fully-capable container to tmpfs and told the agent it was a
+// permanent environment limit — so it gave up instead of retrying.
+export class SandboxProcProbeUnverifiedError extends Error {
+  override readonly name = 'SandboxProcProbeUnverifiedError'
+  constructor() {
+    super(
+      'sandbox /proc strategy could not be verified right now: the cap-free ' +
+        'proc-bind safety probe stayed inconclusive (usually transient load on the ' +
+        'host while the container was starting up), so this bun package command ' +
+        '(bun install / bun add / bunx / bun run) was held back rather than run ' +
+        'under a broken /proc. This is almost certainly temporary and NOT a problem ' +
+        'with the command or the package: retry the SAME command in a few seconds — ' +
+        'the next attempt re-probes and normally succeeds.',
+    )
+  }
+}
