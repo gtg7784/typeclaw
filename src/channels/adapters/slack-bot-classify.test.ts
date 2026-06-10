@@ -46,6 +46,14 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'no_user' })
   })
 
+  test('drops Slack system subtypes with a user because they are not replyable messages', () => {
+    const event = buildEvent({ subtype: 'channel_topic', text: 'set the channel topic:\nProject updates' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'slack_system_message' })
+  })
+
   test('drops messages with neither text nor files with reason=empty_text', () => {
     const event = buildEvent({ text: '' })
 

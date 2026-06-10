@@ -1316,6 +1316,7 @@ function dropHint(reason: InboundDropReason): string {
     case 'no_user':
     case 'pre_connect':
     case 'self_author':
+    case 'slack_system_message':
       return ''
   }
 }
