@@ -193,17 +193,83 @@ describe('runBackup', () => {
     expect(commitIdx).toBeGreaterThan(addFIndices[1]!)
   })
 
-  test('skips push when there is no upstream', async () => {
+  test('no upstream but origin exists and HEAD is a branch: pushes with -u and sets tracking', async () => {
+    // given: a fresh repo with origin configured but no `branch.<name>.{remote,merge}`
+    // tracking — the default state for an agent folder nobody ran `git push -u` on.
     const cwd = await makeRepo()
     const { spawn, calls } = makeSpawn((args) => {
       if (args[0] === 'status') return okResult(' M foo\n')
       if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
       if (args[0] === 'rev-parse') return failResult('not a tracking branch', 128)
+      if (args[0] === 'remote' && args[1] === 'get-url') return okResult('https://example.com/repo.git\n')
+      if (args[0] === 'symbolic-ref') return okResult('main\n')
+      if (args[0] === 'push') return okResult()
+      return okResult()
+    })
+    // when
+    const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
+    // then: pushed with -u to origin HEAD:main, establishing tracking in one shot
+    expect(result).toEqual({ ok: true, kind: 'pushed-set-upstream' })
+    const push = calls.find((c) => c.args[0] === 'push')
+    expect(push?.args).toEqual(['push', '-u', 'origin', 'HEAD:main'])
+  })
+
+  test('no upstream and no origin remote: commits only (legitimate offline state)', async () => {
+    const cwd = await makeRepo()
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') return okResult(' M foo\n')
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'rev-parse') return failResult('not a tracking branch', 128)
+      if (args[0] === 'remote' && args[1] === 'get-url') return failResult('No such remote', 2)
       return okResult()
     })
     const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
     expect(result).toEqual({ ok: true, kind: 'committed' })
     expect(calls.find((c) => c.args[0] === 'push')).toBeUndefined()
+  })
+
+  test('no upstream, origin exists, but detached HEAD: commits only (no branch to track)', async () => {
+    const cwd = await makeRepo()
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') return okResult(' M foo\n')
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'rev-parse') return failResult('not a tracking branch', 128)
+      if (args[0] === 'remote' && args[1] === 'get-url') return okResult('https://example.com/repo.git\n')
+      if (args[0] === 'symbolic-ref') return failResult('ref HEAD is not a symbolic ref', 128)
+      return okResult()
+    })
+    const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
+    expect(result).toEqual({ ok: true, kind: 'committed' })
+    expect(calls.find((c) => c.args[0] === 'push')).toBeUndefined()
+  })
+
+  test('set-upstream push routes non-fast-forward through fetch/rebase/re-push', async () => {
+    const cwd = await makeRepo()
+    let pushCount = 0
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') return okResult(' M foo\n')
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'rev-parse') return failResult('no upstream', 128)
+      if (args[0] === 'remote' && args[1] === 'get-url') return okResult('https://example.com/repo.git\n')
+      if (args[0] === 'symbolic-ref') return okResult('main\n')
+      if (args[0] === 'push') {
+        pushCount += 1
+        return pushCount === 1 ? failResult('! [rejected] (non-fast-forward)\nUpdates were rejected', 1) : okResult()
+      }
+      if (args[0] === 'fetch') return okResult()
+      if (args[0] === 'rebase' && args[1] === 'origin/main') return okResult()
+      return okResult()
+    })
+    const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
+    expect(result).toEqual({ ok: true, kind: 'rebased-and-pushed' })
+    expect(calls.filter((c) => c.args[0] === 'push').length).toBe(2)
+    // both attempts use the same set-upstream args so tracking is still set on retry
+    for (const p of calls.filter((c) => c.args[0] === 'push')) {
+      expect(p.args).toEqual(['push', '-u', 'origin', 'HEAD:main'])
+    }
+    // no tracking ref exists yet, so the recovery fetch must name origin explicitly
+    expect(calls.find((c) => c.args[0] === 'fetch')?.args).toEqual(['fetch', 'origin'])
+    expect(calls.find((c) => c.args[0] === 'rebase' && c.args[1] === 'origin/main')).toBeDefined()
   })
 
   test('pushes when upstream is configured', async () => {
