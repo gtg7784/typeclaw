@@ -999,6 +999,7 @@ export type RestartCommandContext = {
   originatingSessionId: string
   originatingSessionFile?: string
   handoffOrigin: { kind: 'channel'; key: ChannelKey }
+  triggeringAuthorId?: string
 }
 
 export type ClaimHandlerInput = {
@@ -1126,17 +1127,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // resume handoff for this conversation; still bounces from a cold channel.
       wantsLiveSession: true,
       handler: async ({ live }) => ({
-        reply: await onRestart(
-          live !== null
-            ? {
-                originatingSessionId: live.sessionId,
-                ...(live.getTranscriptPath?.() !== undefined
-                  ? { originatingSessionFile: live.getTranscriptPath!()! }
-                  : {}),
-                handoffOrigin: { kind: 'channel', key: live.key },
-              }
-            : undefined,
-        ),
+        reply: await onRestart(live !== null ? buildRestartCommandContext(live) : undefined),
       }),
     })
   }
@@ -1930,6 +1921,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       })
     } catch (err) {
       logger.warn(`[channels] session.turn.end hook threw for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
+  const buildRestartCommandContext = (live: LiveSession): RestartCommandContext => {
+    const triggeringAuthorId = live.currentTurnAuthorId ?? live.lastTurnAuthorId ?? undefined
+    return {
+      originatingSessionId: live.sessionId,
+      ...(live.getTranscriptPath?.() !== undefined ? { originatingSessionFile: live.getTranscriptPath!()! } : {}),
+      handoffOrigin: { kind: 'channel', key: live.key },
+      ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
     }
   }
 
@@ -3686,7 +3687,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
         let live: LiveSession
         try {
-          live = await ensureLive(key, undefined, undefined, {
+          live = await ensureLive(key, undefined, handoff.triggeringAuthorId, {
             sessionId: handoff.originatingSessionId,
             sessionFile: handoff.originatingSessionFile,
           })

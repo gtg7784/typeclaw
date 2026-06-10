@@ -9140,4 +9140,31 @@ describe('resumeRestartHandoff', () => {
     expect(reservation.sawInbound).toBe(false)
     expect(sessions[0]?.prompts.some((p) => p.includes('container just restarted'))).toBe(true)
   })
+
+  test('resume wake turn re-seeds the handoff author so author-scoped roles survive restart', async () => {
+    // given: a handoff carrying the owner who issued /restart
+    const dir = await tempDir()
+    await seedMapping(dir, 'ses_origin', '2026-05-02T16-56-52-380Z_ses_origin.jsonl')
+    const { router, sessions } = makeRouter(dir, {
+      transcriptPathFor: (sessionId) => `/tmp/fake/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`,
+    })
+    const reservation = router.reserveRestartHandoff(channelHandoff({ triggeringAuthorId: 'U_OWNER' }))!
+
+    let originDuringWake: SessionOrigin | undefined
+    const captureOrigin = (): void => {
+      originDuringWake = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
+    // when: the synthetic wake turn drains
+    await reservation.resume()
+    await waitFor(() => sessions.length > 0)
+    sessions[0]!.onPrompt = captureOrigin
+    if (sessions[0]!.prompts.length > 0) captureOrigin()
+    await waitFor(() => originDuringWake !== undefined)
+
+    // then: the wake turn's origin carries the handoff author, not nothing
+    expect(originDuringWake?.kind).toBe('channel')
+    if (originDuringWake?.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringWake.lastInboundAuthorId).toBe('U_OWNER')
+  })
 })
