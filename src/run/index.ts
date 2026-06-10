@@ -28,7 +28,14 @@ import {
   type SubagentCompletionBridge,
 } from '@/channels'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
-import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync, reloadConfig } from '@/config'
+import {
+  createConfigReloadable,
+  getConfig,
+  loadConfigSync,
+  loadPluginConfigsSync,
+  reloadConfig,
+  withDefaultPlugins,
+} from '@/config'
 import {
   type CountStore,
   type CronConsumer,
@@ -162,7 +169,7 @@ export async function startAgent({
   }
   const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
   const pluginsLoaded = await loadPlugins({
-    entries: cwdConfig.plugins,
+    entries: withDefaultPlugins(cwdConfig.plugins),
     agentDir: cwd,
     configsByName: pluginConfigsByName,
     bundled: BUNDLED_PLUGINS,
