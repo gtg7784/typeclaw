@@ -6,12 +6,23 @@ import { splitPluginEntrySpec } from '@/plugin'
 
 const PACKAGE_FILE = 'package.json'
 
+const NOOP: ReconcilePluginDepsResult = { changed: false, files: [], skipped: [] }
+
 export type ReconcilePluginDepsResult = {
   changed: boolean
   files: string[]
+  // Plugins skipped because their package could not be found in the registry
+  // (npm 404 / E404). A missing plugin must not block `start`: the entry is
+  // dropped from this reconcile pass and surfaced here so the caller can warn.
+  skipped: string[]
 }
 
-export type ResolveLatestVersion = (packageName: string) => Promise<string>
+// Resolves a bare plugin name to its latest published version. Returns null
+// when the package genuinely does not exist in the registry (404 / E404) so
+// the caller can skip it without blocking start. Throws on every other failure
+// (network outage, missing bun runtime, empty registry response) — those are
+// transient or environmental, not "plugin not found", and must still block.
+export type ResolveLatestVersion = (packageName: string) => Promise<string | null>
 
 export type ReconcilePluginDepsOptions = {
   cwd: string
@@ -31,27 +42,27 @@ export async function reconcilePluginDeps(options: ReconcilePluginDepsOptions): 
   const resolveLatest = options.resolveLatest ?? resolveLatestFromRegistry
 
   const pkgPath = join(cwd, PACKAGE_FILE)
-  if (!existsSync(pkgPath)) return { changed: false, files: [] }
+  if (!existsSync(pkgPath)) return NOOP
 
   let raw: string
   try {
     raw = await readFile(pkgPath, 'utf8')
   } catch {
-    return { changed: false, files: [] }
+    return NOOP
   }
 
   let pkg: PackageJsonShape
   try {
     const parsed = JSON.parse(raw) as unknown
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { changed: false, files: [] }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return NOOP
     pkg = parsed as PackageJsonShape
   } catch {
-    return { changed: false, files: [] }
+    return NOOP
   }
 
   const dependencies = { ...pkg.dependencies }
   const previousManaged = readManagedPlugins(pkg)
-  const desired = await resolveDesiredManaged(plugins, previousManaged, resolveLatest)
+  const { desired, skipped } = await resolveDesiredManaged(plugins, previousManaged, resolveLatest)
 
   let changed = false
 
@@ -73,11 +84,11 @@ export async function reconcilePluginDeps(options: ReconcilePluginDepsOptions): 
 
   if (!managedEqual(previousManaged, desired)) changed = true
 
-  if (!changed) return { changed: false, files: [] }
+  if (!changed) return { changed: false, files: [], skipped }
 
   const next = withManagedPlugins({ ...pkg, dependencies: sortKeys(dependencies) }, desired)
   await writeFile(pkgPath, `${JSON.stringify(next, null, 2)}\n`)
-  return { changed: true, files: [PACKAGE_FILE] }
+  return { changed: true, files: [PACKAGE_FILE], skipped }
 }
 
 type PackageJsonShape = {
@@ -97,19 +108,30 @@ async function resolveDesiredManaged(
   plugins: readonly string[],
   previousManaged: Record<string, string>,
   resolveLatest: ResolveLatestVersion,
-): Promise<Record<string, string>> {
+): Promise<{ desired: Record<string, string>; skipped: string[] }> {
   const desired: Record<string, string> = {}
+  const skipped: string[] = []
   for (const entry of plugins) {
     if (isLocalEntry(entry)) continue
     const { name, versionSpec } = splitPluginEntrySpec(entry)
     if (name.length === 0) continue
     if (versionSpec !== undefined) {
       desired[name] = versionSpec
-    } else {
-      desired[name] = previousManaged[name] ?? (await resolveLatest(name))
+      continue
     }
+    const pinned = previousManaged[name]
+    if (pinned !== undefined) {
+      desired[name] = pinned
+      continue
+    }
+    const resolved = await resolveLatest(name)
+    if (resolved === null) {
+      skipped.push(name)
+      continue
+    }
+    desired[name] = resolved
   }
-  return sortKeys(desired)
+  return { desired: sortKeys(desired), skipped }
 }
 
 function isLocalEntry(entry: string): boolean {
@@ -154,7 +176,7 @@ function sortKeys(obj: Record<string, string>): Record<string, string> {
   return out
 }
 
-async function resolveLatestFromRegistry(packageName: string): Promise<string> {
+async function resolveLatestFromRegistry(packageName: string): Promise<string | null> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) throw new Error(`cannot resolve latest version for ${packageName}: bun runtime not available`)
   const proc = bun.spawn({
@@ -164,10 +186,18 @@ async function resolveLatestFromRegistry(packageName: string): Promise<string> {
   })
   const code = await proc.exited
   if (code !== 0) {
-    const stderr = await new Response(proc.stderr).text()
-    throw new Error(`failed to resolve latest version for ${packageName}: ${stderr.trim() || `exit ${code}`}`)
+    const stderr = (await new Response(proc.stderr).text()).trim()
+    if (isPackageNotFound(stderr)) return null
+    throw new Error(`failed to resolve latest version for ${packageName}: ${stderr || `exit ${code}`}`)
   }
   const version = (await new Response(proc.stdout).text()).trim().replace(/^["']|["']$/g, '')
   if (version.length === 0) throw new Error(`registry returned no version for ${packageName}`)
   return version
+}
+
+// A registry 404 means the package does not exist — a user typo or an
+// unpublished plugin — which `start` must tolerate, not abort on. Network and
+// auth failures are deliberately NOT matched here so they keep throwing.
+export function isPackageNotFound(stderr: string): boolean {
+  return /\bE404\b/.test(stderr) || /\b404\b/.test(stderr) || /not found/i.test(stderr)
 }

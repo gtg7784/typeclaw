@@ -152,6 +152,7 @@ export type StartLikeResult = {
   containerId: string
   hostd: { state: 'registered' } | { state: 'unavailable'; reason: string } | { state: 'disabled' }
   autoUpgrade?: AutoUpgradeOutcome
+  skippedPlugins?: string[]
 }
 
 export function renderStartSuccess(result: StartLikeResult): string {
@@ -165,6 +166,11 @@ export function renderStartSuccess(result: StartLikeResult): string {
       const tint = result.autoUpgrade.kind === 'exact-pin-respected' ? c.yellow : c.cyan
       lines.push(tint(message))
     }
+  }
+
+  if (result.skippedPlugins && result.skippedPlugins.length > 0) {
+    const list = result.skippedPlugins.join(', ')
+    lines.push(`${c.yellow('Skipped plugins not found in the registry:')} ${list}`)
   }
 
   if (result.alreadyRunning) {

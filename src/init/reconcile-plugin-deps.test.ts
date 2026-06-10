@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { reconcilePluginDeps } from './reconcile-plugin-deps'
+import { isPackageNotFound, reconcilePluginDeps } from './reconcile-plugin-deps'
 
 async function makeAgentDir(pkg: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-reconcile-'))
@@ -193,6 +193,86 @@ describe('reconcilePluginDeps', () => {
       expect(result.files).toEqual([])
     } finally {
       await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('skips a bare-name plugin that does not exist in the registry and reports it', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: { typeclaw: '0.35.0' } })
+    try {
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['foo-bar'],
+        resolveLatest: async () => null,
+      })
+      expect(result.skipped).toEqual(['foo-bar'])
+      expect(result.changed).toBe(false)
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['foo-bar']).toBeUndefined()
+      expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('0.35.0')
+      expect(pkg.typeclaw).toBeUndefined()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('still materializes resolvable plugins when a sibling plugin is not found', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['foo-bar', 'typeclaw-plugin-ok'],
+        resolveLatest: async (name) => (name === 'foo-bar' ? null : '2.0.0'),
+      })
+      expect(result.changed).toBe(true)
+      expect(result.skipped).toEqual(['foo-bar'])
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['typeclaw-plugin-ok']).toBe('2.0.0')
+      expect((pkg.dependencies as Record<string, string>)['foo-bar']).toBeUndefined()
+      expect((pkg.typeclaw as Record<string, unknown>).managedPlugins).toEqual({ 'typeclaw-plugin-ok': '2.0.0' })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('propagates a hard resolver failure instead of skipping (network errors still block)', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      await expect(
+        reconcilePluginDeps({
+          cwd: dir,
+          plugins: ['typeclaw-plugin-foo'],
+          resolveLatest: async () => {
+            throw new Error('network down')
+          },
+        }),
+      ).rejects.toThrow('network down')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('isPackageNotFound', () => {
+  test('treats registry 404 signals as not-found', () => {
+    for (const stderr of [
+      'error: package "foo-bar" not found',
+      'GET https://registry.npmjs.org/foo-bar - 404 Not Found',
+      'npm error code E404',
+      '404 Not Found - GET https://registry.npmjs.org/foo-bar',
+    ]) {
+      expect(isPackageNotFound(stderr)).toBe(true)
+    }
+  })
+
+  test('does NOT treat transient/auth failures as not-found', () => {
+    for (const stderr of [
+      'error: getaddrinfo ENOTFOUND registry.npmjs.org',
+      'connect ETIMEDOUT 1.2.3.4:443',
+      'npm error code E401 Unauthorized',
+      'error: socket hang up',
+      '',
+    ]) {
+      expect(isPackageNotFound(stderr)).toBe(false)
     }
   })
 })

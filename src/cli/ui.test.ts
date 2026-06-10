@@ -279,6 +279,28 @@ describe('renderStartSuccess', () => {
     expect(upgradeIdx).toBeGreaterThanOrEqual(0)
     expect(startedIdx).toBeGreaterThan(upgradeIdx)
   })
+
+  test('renders a yellow warning listing plugins skipped as not found', () => {
+    const out = withForcedColor(() =>
+      renderStartSuccess(baseResult({ skippedPlugins: ['foo-bar', 'typeclaw-plugin-missing'] })),
+    )
+    expect(out).toContain('Skipped plugins not found in the registry:')
+    expect(out).toContain('foo-bar')
+    expect(out).toContain('typeclaw-plugin-missing')
+    expect(out).toContain('\u001b[33m')
+  })
+
+  test('omits the skipped-plugins line when none were skipped', () => {
+    const emptyOut = withNoColor(() => renderStartSuccess(baseResult({ skippedPlugins: [] })))
+    const undefinedOut = withNoColor(() => renderStartSuccess(baseResult()))
+    expect(emptyOut).not.toContain('Skipped plugins')
+    expect(undefinedOut).not.toContain('Skipped plugins')
+  })
+
+  test('still reports start success even when a plugin was skipped', () => {
+    const out = withNoColor(() => renderStartSuccess(baseResult({ skippedPlugins: ['foo-bar'] })))
+    expect(out).toContain('started on host port 8973')
+  })
 })
 
 describe('errorLine / successLine', () => {
