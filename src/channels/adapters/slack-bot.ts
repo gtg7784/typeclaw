@@ -38,6 +38,7 @@ import {
   classifyInbound,
   describeSlackFile,
   type InboundDropReason,
+  isRouteableSlackMessageSubtype,
   renderPlaceholder,
   type SlackInboundAppMentionEvent,
   type SlackInboundMessageEvent,
@@ -694,7 +695,7 @@ export function createSlackHistoryCallback(deps: {
     }
 
     const botUserId = botUserIdRef()
-    const rawMessages = raw.messages ?? []
+    const rawMessages = (raw.messages ?? []).filter((message) => isRouteableSlackMessageSubtype(message.subtype))
     const mapped = rawMessages.map((m) => mapSlackMessage(m, botUserId))
     // History payloads carry no profile, so mapSlackMessage echoes the raw
     // id into authorName; resolve it here so prompts show display names.
