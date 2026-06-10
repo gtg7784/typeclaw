@@ -142,8 +142,19 @@ export type SandboxPolicy = {
 // guard: the container env holds FIREWORKS_API_KEY and GH_TOKEN, and env
 // inheritance is the single highest-risk exfil path for prompt-injected bash.
 // HOME points at /tmp because the sandbox mounts /tmp as a fresh tmpfs.
+//
+// BUN_TMPDIR / BUN_INSTALL both point under /tmp because `--clearenv` strips
+// the host's TMPDIR, and bun refuses to run without a writable scratch dir it
+// can discover: `bunx`, `bun add`, and `bun run <pkg-bin>` abort with
+// "Unexpected accessing temporary directory. Please set $BUN_TMPDIR or
+// $BUN_INSTALL". /tmp is always writable inside the sandbox (fresh tmpfs, or
+// the per-session bind that overrides it), so both are safe targets. Without
+// these, every sandboxed bun invocation — the core subagent install path —
+// fails before it starts.
 export const DEFAULT_SANDBOX_ENV: Record<string, string> = {
   PATH: '/usr/local/bin:/usr/bin:/bin',
   HOME: '/tmp',
   LANG: 'C.UTF-8',
+  BUN_TMPDIR: '/tmp',
+  BUN_INSTALL: '/tmp/.bun',
 }
