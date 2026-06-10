@@ -9,6 +9,7 @@ import {
   canMountRealProc,
   ensureBwrapAvailable,
   getProcBindSafetyVerdict,
+  PROC_BIND_RETRY_BACKOFF_MS,
   type ProcBindSafetyVerdict,
   resolveProcBindSafetyWithRetry,
   resolveProcSelfExe,
@@ -308,5 +309,36 @@ describe('resolveProcBindSafetyWithRetry', () => {
     expect(result).toBe(false)
     expect(probes).toBe(1)
     expect(calls).toEqual([])
+  })
+
+  // Regression guard for the deployed tmpfs-degrade bug: a transient 'inconclusive'
+  // run must get MORE than the old two retries to ride out a boot-time load spike
+  // before failing closed. Pins the default budget so a future trim back to the
+  // narrow [250,1000] (which broke `bun install` on a saturated box) fails here.
+  test('the default budget retries enough to outlast a sustained spike, then fails closed', async () => {
+    expect(PROC_BIND_RETRY_BACKOFF_MS.length).toBeGreaterThanOrEqual(4)
+    const { sleep, calls } = recordingSleep()
+    let probes = 0
+    const result = await resolveProcBindSafetyWithRetry(
+      () => (probes++, Promise.resolve('inconclusive')),
+      sleep,
+      PROC_BIND_RETRY_BACKOFF_MS,
+    )
+    expect(result).toBe(false)
+    expect(probes).toBe(PROC_BIND_RETRY_BACKOFF_MS.length + 1)
+    expect(calls).toEqual([...PROC_BIND_RETRY_BACKOFF_MS])
+  })
+
+  test('the default budget rides a late "safe" verdict to success (recovers after the spike)', async () => {
+    const { sleep } = recordingSleep()
+    // inconclusive for the first three attempts, then the spike passes and it verifies
+    const verdicts: ProcBindSafetyVerdict[] = ['inconclusive', 'inconclusive', 'inconclusive', 'safe']
+    let i = 0
+    const result = await resolveProcBindSafetyWithRetry(
+      () => Promise.resolve(verdicts[i++] ?? 'inconclusive'),
+      sleep,
+      PROC_BIND_RETRY_BACKOFF_MS,
+    )
+    expect(result).toBe(true)
   })
 })
