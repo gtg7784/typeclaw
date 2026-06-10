@@ -10,6 +10,13 @@ export type RequestReloadOptions = {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 
+export class ReloadConnectionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ReloadConnectionError'
+  }
+}
+
 export async function requestReload({
   url,
   scope,
@@ -26,11 +33,15 @@ export async function requestReload({
     }
     const onError = (err: unknown) => {
       cleanup()
-      reject(new Error(`failed to connect to ${displayUrl}: ${err instanceof Error ? err.message : String(err)}`))
+      reject(
+        new ReloadConnectionError(
+          `failed to connect to ${displayUrl}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      )
     }
     const onClose = () => {
       cleanup()
-      reject(new Error(`connection to ${displayUrl} closed before opening`))
+      reject(new ReloadConnectionError(`connection to ${displayUrl} closed before opening`))
     }
     const cleanup = () => {
       if (timer !== undefined) clearTimeout(timer)
@@ -41,7 +52,7 @@ export async function requestReload({
     timer = setTimeout(() => {
       cleanup()
       ws.close()
-      reject(new Error(`timed out connecting to ${displayUrl} after ${timeoutMs}ms`))
+      reject(new ReloadConnectionError(`timed out connecting to ${displayUrl} after ${timeoutMs}ms`))
     }, timeoutMs)
     ws.addEventListener('open', onOpen, { once: true })
     ws.addEventListener('error', onError, { once: true })
