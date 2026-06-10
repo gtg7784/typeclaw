@@ -9,6 +9,7 @@ import { classifyInbound, type LineChatLookup } from './line-classify'
 const CONFIG = {} as ChannelAdapterConfig
 
 function event(overrides: Partial<LinePushMessageEvent> = {}): LinePushMessageEvent {
+  const metadata = { content_metadata: {} as Record<string, string> }
   return {
     type: 'message',
     chat_id: 'C1',
@@ -17,6 +18,7 @@ function event(overrides: Partial<LinePushMessageEvent> = {}): LinePushMessageEv
     text: 'hello',
     content_type: 'text',
     sent_at: '2025-01-02T03:04:05.000Z',
+    ...metadata,
     ...overrides,
   }
 }

@@ -5,6 +5,7 @@ import type { LinePushMessageEvent } from 'agent-messenger/line'
 import { normalizeLineContentType, splitInboundLine } from './line-attachment'
 
 function event(overrides: Partial<LinePushMessageEvent> = {}): LinePushMessageEvent {
+  const metadata = { content_metadata: {} as Record<string, string> }
   return {
     type: 'message',
     chat_id: 'C1',
@@ -13,6 +14,7 @@ function event(overrides: Partial<LinePushMessageEvent> = {}): LinePushMessageEv
     text: null,
     content_type: 'NONE',
     sent_at: '2025-01-02T03:04:05.000Z',
+    ...metadata,
     ...overrides,
   }
 }
