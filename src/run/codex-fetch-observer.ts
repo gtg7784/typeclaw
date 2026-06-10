@@ -217,12 +217,18 @@ function attachBodyTimingTap(
     })
   }
 
-  // Absolute ceiling on the whole body, armed once and never reset. Aborts the
-  // shared controller so the existing reader race tears the stream down on the
-  // first deadline to fire — idle or overall, whichever comes first.
+  // Absolute ceiling on the whole request, armed once and never reset. The
+  // budget is measured from `start` (before originalFetch), so the time already
+  // spent waiting for headers is subtracted here — otherwise a slow-headers
+  // request would get a fresh full `overallMs` for its body on top of the
+  // headers wait, doubling the intended ceiling. A non-positive remainder means
+  // the budget is already spent, so we schedule at 0 to abort on the next tick.
+  // Aborts the shared controller so the existing reader race tears the stream
+  // down on the first deadline to fire — idle or overall, whichever comes first.
   let overallHandle: unknown = null
   if (idleController !== null && config.overallMs > 0) {
-    overallHandle = config.scheduler.set(config.overallMs, () => {
+    const remainingOverallMs = Math.max(0, config.overallMs - (now() - start))
+    overallHandle = config.scheduler.set(remainingOverallMs, () => {
       cause = 'overall_timeout'
       idleController.abort(
         new Error(`Codex SSE body exceeded overall deadline of ${config.overallMs}ms (typeclaw observer timeout)`),

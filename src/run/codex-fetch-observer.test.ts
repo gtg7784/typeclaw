@@ -647,6 +647,107 @@ describe('installCodexFetchObserver', () => {
     expect(line).toMatch(/error=".*overall deadline.*"/)
   })
 
+  test('Overall deadline counts time spent waiting for headers (measured from fetch start)', async () => {
+    // The ceiling is "from fetch start to body completion", so a slow-headers
+    // request must NOT receive a fresh full overallMs for its body. Headers
+    // arrive at t=200 with overallMs=250, leaving only 50ms of body budget — the
+    // body must abort at t=250, not at t=450 (which a body-only timer would give).
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(200)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({
+      logger,
+      now: clock.now,
+      scheduler,
+      ttfbMs: 0,
+      idleMs: 0,
+      overallMs: 250,
+    })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(250)
+      await scheduler.fire(250)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('overall deadline')
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+  })
+
+  test('Overall deadline aborts immediately when the budget is already spent on headers', async () => {
+    // Headers arrive at t=300 with overallMs=250 — the budget is exhausted
+    // before the body starts. The remainder clamps to 0, so the body aborts on
+    // the very next tick rather than getting any additional time.
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(300)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({
+      logger,
+      now: clock.now,
+      scheduler,
+      ttfbMs: 0,
+      idleMs: 0,
+      overallMs: 250,
+    })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(300)
+      await scheduler.fire(300)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('overall deadline')
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+  })
+
   test('Idle abort listener count stays bounded across many chunks (no leak)', async () => {
     // given: a stream that will emit 100 chunks with a long idle window. The
     // pre-fix shape called `idleController.signal.addEventListener('abort', …)`
