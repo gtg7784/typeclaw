@@ -100,11 +100,17 @@ describe('buildSandboxedCommand network policy', () => {
 })
 
 describe('buildSandboxedCommand env policy', () => {
-  test('re-introduces only PATH, HOME, LANG by default after --clearenv', () => {
+  test('re-introduces only the default allowlist after --clearenv', () => {
     const argv = argvOf('true')
     expect(valueAfter(argv, '--setenv')).toBe('PATH')
     const setenvKeys = argv.filter((_, i) => argv[i - 1] === '--setenv')
-    expect(setenvKeys).toEqual(['PATH', 'HOME', 'LANG'])
+    expect(setenvKeys).toEqual(['PATH', 'HOME', 'LANG', 'BUN_TMPDIR', 'BUN_INSTALL'])
+  })
+
+  test('gives bun a writable temp/install dir under /tmp so bunx does not abort', () => {
+    const joined = argvOf('true').join(' ')
+    expect(joined).toContain('--setenv BUN_TMPDIR /tmp')
+    expect(joined).toContain('--setenv BUN_INSTALL /tmp/.bun')
   })
 
   test('applies explicit env.set entries', () => {
