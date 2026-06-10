@@ -45,7 +45,15 @@ Commit message comes from the `backup-message` subagent, which sees a truncated 
 
 ## What it pushes
 
-When `pushToOrigin: true` and the current branch has an upstream (`git rev-parse --abbrev-ref --symbolic-full-name @{upstream}` succeeds), the runner runs `git push`. On non-fast-forward rejection, it runs `git fetch` then `git rebase <upstream>` then `git push` again.
+When `pushToOrigin: true`, the runner picks a push plan after committing:
+
+- **Branch has an upstream** (`git rev-parse --abbrev-ref --symbolic-full-name @{upstream}` succeeds): run `git push`.
+- **No upstream, but `origin` exists and `HEAD` is a real branch**: run `git push -u origin HEAD:<branch>`, which pushes _and_ establishes tracking in one shot. This is the common case for a fresh agent folder nobody ran `git push -u` on by hand — previously the runner committed forever and never pushed here. Every later cycle then takes the plain-upstream path.
+- **No `origin`, or detached `HEAD`**: commit only (a legitimate offline / no-remote state). No push is attempted and no diagnostics are written.
+
+On non-fast-forward rejection (either push shape), the runner runs `git fetch` then `git rebase <remote-branch>` then re-pushes with the same args. Only `origin` is ever acted on for the set-upstream case — the runner never guesses a destination the operator didn't configure.
+
+**Credentials.** The runner spawns `git` directly (not via the `bash` tool), so the `github-cli-auth` plugin's `tool.before` credential injection does **not** fire for it. For **GitHub App auth** the backup plugin mints a per-repo installation token for `origin`'s github.com slug and injects it into the runner's git env via the same `GIT_ASKPASS` helper the bash path uses (token in `TYPECLAW_GIT_TOKEN`, never in argv/config; ssh remotes rewritten to https via `insteadOf`). Classic/fine-grained PATs, SSH-key, and credential-helper setups are left untouched — the runner uses its inherited process env. Non-github origins are never minted for.
 
 If any network step fails (rebase conflict, auth failure, network timeout), the runner aborts cleanly and spawns the `backup-diagnose` subagent. That subagent has `bash`, `read`, and `write` tools and writes a short human-readable report to `<agentDir>/sessions/backup-diagnostics.log`. The diagnose subagent is explicitly forbidden from force-pushing or resolving merge conflicts itself.
 
@@ -77,5 +85,6 @@ This feature came up as: "periodically check for dirty files and commit; LLM pic
 
 ## Tests
 
-- `runner.test.ts` — deterministic runner unit tests (status parsing, force-add of `sessions/`, push-only-with-upstream, rebase-on-non-fast-forward, diagnose-on-rebase-conflict, advisory-throw isolation, sanitize-commit-message).
+- `runner.test.ts` — deterministic runner unit tests (status parsing, force-add of `sessions/`, push-with-upstream, push-and-set-upstream when origin exists but tracking is absent, commit-only on no-origin / detached-HEAD, rebase-on-non-fast-forward for both push shapes, diagnose-on-rebase-conflict, advisory-throw isolation, sanitize-commit-message).
+- `git-auth.test.ts` — credential-env resolution (App-auth mints for the origin slug; PAT/SSH/non-github/unavailable-token all fall back to inherited env).
 - `index.test.ts` — plugin composition tests (subagent/hook surface, config schema defaults and validation, debounce, active-turn gating, self-induced-turn exclusion, coalescing).
