@@ -70,7 +70,11 @@ describe('refreshPackageJson', () => {
       private: true,
       type: 'module',
       scripts: { test: 'bun test' },
-      dependencies: { typeclaw: 'file:../typeclaw', 'agent-browser': '^0.26.0' },
+      dependencies: {
+        typeclaw: 'file:../typeclaw',
+        'agent-browser': '^0.26.0',
+        'typeclaw-gws-multi-account': '^0.3.4',
+      },
       devDependencies: { '@types/bun': 'latest' },
       customField: { keep: 'me' },
     })
@@ -82,7 +86,11 @@ describe('refreshPackageJson', () => {
     expect(pkg.private).toBe(true)
     expect(pkg.type).toBe('module')
     expect(pkg.scripts).toEqual({ test: 'bun test' })
-    expect(pkg.dependencies).toEqual({ typeclaw: 'file:../typeclaw', 'agent-browser': '^0.26.0' })
+    expect(pkg.dependencies).toEqual({
+      typeclaw: 'file:../typeclaw',
+      'agent-browser': '^0.26.0',
+      'typeclaw-gws-multi-account': '^0.3.4',
+    })
     expect(pkg.devDependencies).toEqual({ '@types/bun': 'latest' })
     expect(pkg.customField).toEqual({ keep: 'me' })
   })

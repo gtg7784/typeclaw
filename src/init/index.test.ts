@@ -894,6 +894,17 @@ describe('scaffold', () => {
     expect(pkg.dependencies['agent-browser']).toMatch(/^[\^~]?\d+\.\d+\.\d+/)
   })
 
+  test('package.json bundles typeclaw-gws-multi-account for Google Workspace account switching', async () => {
+    await scaffold(root)
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      typeclaw?: { managedPlugins?: Record<string, string> }
+    }
+    expect(pkg.dependencies['typeclaw-gws-multi-account']).toBe('^0.3.4')
+    expect(pkg.typeclaw?.managedPlugins?.['typeclaw-gws-multi-account']).toBe('^0.3.4')
+  })
+
   test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
     await scaffold(root)
 

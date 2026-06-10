@@ -43,12 +43,17 @@ afterEach(async () => {
 // is a no-op. Tests that want to exercise the migration path should call
 // `writePackageJsonPreMigration` instead.
 async function writePackageJson(dir: string, deps: Record<string, string>): Promise<void> {
+  const dependencies = {
+    'typeclaw-gws-multi-account': '^0.3.4',
+    ...deps,
+  }
   const pkg = {
     name: basename(dir),
     private: true,
     type: 'module',
     workspaces: ['packages/*'],
-    dependencies: deps,
+    dependencies,
+    typeclaw: { managedPlugins: { 'typeclaw-gws-multi-account': '^0.3.4' } },
   }
   await writeFile(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
   await mkdir(join(dir, 'packages'), { recursive: true })
@@ -56,7 +61,16 @@ async function writePackageJson(dir: string, deps: Record<string, string>): Prom
 }
 
 async function writePackageJsonPreMigration(dir: string, deps: Record<string, string>): Promise<void> {
-  const pkg = { name: basename(dir), private: true, type: 'module', dependencies: deps }
+  const pkg = {
+    name: basename(dir),
+    private: true,
+    type: 'module',
+    dependencies: {
+      'typeclaw-gws-multi-account': '^0.3.4',
+      ...deps,
+    },
+    typeclaw: { managedPlugins: { 'typeclaw-gws-multi-account': '^0.3.4' } },
+  }
   await writeFile(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
 }
 
@@ -1753,6 +1767,86 @@ describe('start (composition)', () => {
       dependencies: Record<string, string>
     }
     expect(written.dependencies['typeclaw-plugin-foo']).toBe('2.0.0')
+  })
+
+  test('default GWS plugin is reconciled into existing agents without a plugins config entry', async () => {
+    await writeDockerfile(root)
+    const pkg = {
+      name: basename(root),
+      private: true,
+      type: 'module',
+      workspaces: ['packages/*'],
+      dependencies: { typeclaw: '^0.3.4' },
+    }
+    await writeFile(join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+    await mkdir(join(root, 'packages'), { recursive: true })
+    await writeFile(join(root, 'packages', '.gitkeep'), '')
+    await writeTypeclawConfig(root)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+    const written = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      typeclaw?: { managedPlugins?: Record<string, string> }
+    }
+    expect(written.dependencies['typeclaw-gws-multi-account']).toBe('^0.3.4')
+    expect(written.typeclaw?.managedPlugins?.['typeclaw-gws-multi-account']).toBe('^0.3.4')
+  })
+
+  test('explicit GWS plugin config overrides the bundled default version', async () => {
+    await writeDockerfile(root)
+    const pkg = {
+      name: basename(root),
+      private: true,
+      type: 'module',
+      workspaces: ['packages/*'],
+      dependencies: { typeclaw: '^0.3.4' },
+    }
+    await writeFile(join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+    await mkdir(join(root, 'packages'), { recursive: true })
+    await writeFile(join(root, 'packages', '.gitkeep'), '')
+    const config = {
+      models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+      plugins: ['typeclaw-gws-multi-account@0.3.5'],
+    }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+    const written = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      typeclaw?: { managedPlugins?: Record<string, string> }
+    }
+    expect(written.dependencies['typeclaw-gws-multi-account']).toBe('0.3.5')
+    expect(written.typeclaw?.managedPlugins?.['typeclaw-gws-multi-account']).toBe('0.3.5')
   })
 
   test('managed plugin removal from typeclaw.json -> ensureDeps forced even without --build', async () => {

@@ -3,7 +3,14 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
+import {
+  config,
+  configSchema,
+  GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE,
+  GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
+  migrateLegacyConfigShape,
+  type Config,
+} from '@/config'
 import {
   DEFAULT_MODEL_REF,
   KNOWN_PROVIDERS,
@@ -577,7 +584,6 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
 // to function. The Dockerfile pre-downloads Chromium too, so the agent
 // can drive a browser without any first-run setup.
 const AGENT_BROWSER_VERSION = '^0.26.0'
-
 function buildPackageJson(root: string, name: string): Record<string, unknown> {
   return {
     name,
@@ -587,6 +593,12 @@ function buildPackageJson(root: string, name: string): Record<string, unknown> {
     dependencies: {
       typeclaw: resolveTypeclawSpec(root),
       'agent-browser': AGENT_BROWSER_VERSION,
+      [GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE]: GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
+    },
+    typeclaw: {
+      managedPlugins: {
+        [GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE]: GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
+      },
     },
   }
 }

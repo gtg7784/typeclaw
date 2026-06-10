@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { expandMountPath, loadConfigSync, type Config } from '@/config'
+import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config } from '@/config'
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
@@ -263,7 +263,7 @@ export async function start({
     // field is trustworthy by construction.
     const pluginReconcile = await reconcilePluginDeps({
       cwd,
-      plugins: (await loadTypeclawConfig(cwd)).plugins,
+      plugins: withDefaultPlugins((await loadTypeclawConfig(cwd)).plugins),
     }).catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }) as const)
     if ('error' in pluginReconcile) {
       return { ok: false, reason: `plugin dependency reconcile failed: ${pluginReconcile.error}` }
