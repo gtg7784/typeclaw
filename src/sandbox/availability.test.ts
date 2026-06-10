@@ -238,7 +238,7 @@ describe('resolveProcSelfExe', () => {
 describe('resolveProcBindSafetyWithRetry', () => {
   // A scripted probe + recording sleep let these assert the retry POLICY (the
   // core of the inconclusive-retry fix) directly: how many times it probes, whether it sleeps,
-  // and the final boolean — with no process spawning and no host dependence.
+  // and the final verdict — with no process spawning and no host dependence.
   function scriptedProbe(verdicts: ProcBindSafetyVerdict[]): () => Promise<ProcBindSafetyVerdict> {
     let i = 0
     return () => Promise.resolve(verdicts[Math.min(i++, verdicts.length - 1)] ?? 'inconclusive')
@@ -248,11 +248,11 @@ describe('resolveProcBindSafetyWithRetry', () => {
     return { sleep: (ms) => (calls.push(ms), Promise.resolve()), calls }
   }
 
-  test('"safe" on the first probe returns true and never sleeps', async () => {
+  test('"safe" on the first probe returns "safe" and never sleeps', async () => {
     const { sleep, calls } = recordingSleep()
     let probes = 0
     const result = await resolveProcBindSafetyWithRetry(() => (probes++, Promise.resolve('safe')), sleep, [250, 1_000])
-    expect(result).toBe(true)
+    expect(result).toBe('safe')
     expect(probes).toBe(1)
     expect(calls).toEqual([])
   })
@@ -265,7 +265,7 @@ describe('resolveProcBindSafetyWithRetry', () => {
       sleep,
       [250, 1_000],
     )
-    expect(result).toBe(false)
+    expect(result).toBe('unsafe')
     expect(probes).toBe(1)
     expect(calls).toEqual([])
   })
@@ -275,11 +275,11 @@ describe('resolveProcBindSafetyWithRetry', () => {
     const { sleep, calls } = recordingSleep()
     const result = await resolveProcBindSafetyWithRetry(scriptedProbe(['inconclusive', 'safe']), sleep, [250, 1_000])
     // then: it backed off once before the successful re-probe
-    expect(result).toBe(true)
+    expect(result).toBe('safe')
     expect(calls).toEqual([250])
   })
 
-  test('exhausting the backoff budget on persistent "inconclusive" fails CLOSED', async () => {
+  test('exhausting the budget on persistent "inconclusive" returns "inconclusive" (retryable, NOT a definitive "unsafe")', async () => {
     // given: every probe is inconclusive (sustained contention)
     const { sleep, calls } = recordingSleep()
     let probes = 0
@@ -288,25 +288,27 @@ describe('resolveProcBindSafetyWithRetry', () => {
       sleep,
       [250, 1_000],
     )
-    // then: initial + 2 retries = 3 probes, 2 sleeps, then fail closed (never true)
-    expect(result).toBe(false)
+    // then: initial + 2 retries = 3 probes, 2 sleeps. The result is 'inconclusive'
+    // (a retryable unknown), NEVER 'safe' (fail closed) and NEVER 'unsafe' (that
+    // would tell the caller it is a PERMANENT host fact and suppress recovery).
+    expect(result).toBe('inconclusive')
     expect(probes).toBe(3)
     expect(calls).toEqual([250, 1_000])
   })
 
-  test('"unsafe" after an "inconclusive" still fails closed and stops retrying', async () => {
+  test('"unsafe" after an "inconclusive" still returns "unsafe" and stops retrying', async () => {
     const { sleep, calls } = recordingSleep()
     const result = await resolveProcBindSafetyWithRetry(scriptedProbe(['inconclusive', 'unsafe']), sleep, [250, 1_000])
-    expect(result).toBe(false)
+    expect(result).toBe('unsafe')
     // only the one backoff before the definitive 'unsafe'; no further sleeps
     expect(calls).toEqual([250])
   })
 
-  test('an empty backoff budget probes exactly once then fails closed (no retry, no sleep)', async () => {
+  test('an empty backoff budget probes exactly once then returns its verdict (no retry, no sleep)', async () => {
     const { sleep, calls } = recordingSleep()
     let probes = 0
     const result = await resolveProcBindSafetyWithRetry(() => (probes++, Promise.resolve('inconclusive')), sleep, [])
-    expect(result).toBe(false)
+    expect(result).toBe('inconclusive')
     expect(probes).toBe(1)
     expect(calls).toEqual([])
   })
@@ -315,7 +317,7 @@ describe('resolveProcBindSafetyWithRetry', () => {
   // run must get MORE than the old two retries to ride out a boot-time load spike
   // before failing closed. Pins the default budget so a future trim back to the
   // narrow [250,1000] (which broke `bun install` on a saturated box) fails here.
-  test('the default budget retries enough to outlast a sustained spike, then fails closed', async () => {
+  test('the default budget retries enough to outlast a sustained spike, then returns "inconclusive"', async () => {
     expect(PROC_BIND_RETRY_BACKOFF_MS.length).toBeGreaterThanOrEqual(4)
     const { sleep, calls } = recordingSleep()
     let probes = 0
@@ -324,7 +326,7 @@ describe('resolveProcBindSafetyWithRetry', () => {
       sleep,
       PROC_BIND_RETRY_BACKOFF_MS,
     )
-    expect(result).toBe(false)
+    expect(result).toBe('inconclusive')
     expect(probes).toBe(PROC_BIND_RETRY_BACKOFF_MS.length + 1)
     expect(calls).toEqual([...PROC_BIND_RETRY_BACKOFF_MS])
   })
@@ -339,6 +341,6 @@ describe('resolveProcBindSafetyWithRetry', () => {
       sleep,
       PROC_BIND_RETRY_BACKOFF_MS,
     )
-    expect(result).toBe(true)
+    expect(result).toBe('safe')
   })
 })
