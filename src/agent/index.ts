@@ -512,7 +512,12 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 export function buildRestartHandoffWiring(
   options: { origin?: SessionOrigin; plugins?: { agentDir: string } },
   sessionManager: SessionManager,
-): { agentDir?: string; originatingSessionFile?: string; handoffOrigin?: RestartHandoffOrigin } {
+): {
+  agentDir?: string
+  originatingSessionFile?: string
+  handoffOrigin?: RestartHandoffOrigin
+  triggeringAuthorId?: string
+} {
   const origin = options.origin
   if (origin === undefined) return {}
   const handoffOrigin = restartHandoffOriginFor(origin)
@@ -520,7 +525,13 @@ export function buildRestartHandoffWiring(
   const agentDir = options.plugins?.agentDir
   const sessionFile = sessionManager.getSessionFile()
   if (agentDir === undefined || sessionFile === undefined) return {}
-  return { agentDir, originatingSessionFile: sessionFile, handoffOrigin }
+  const triggeringAuthorId = origin.kind === 'channel' ? origin.lastInboundAuthorId : undefined
+  return {
+    agentDir,
+    originatingSessionFile: sessionFile,
+    handoffOrigin,
+    ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
+  }
 }
 
 function restartHandoffOriginFor(origin: SessionOrigin): RestartHandoffOrigin | null {

@@ -57,6 +57,10 @@ export type CreateRestartToolOptions = {
   // alongside `originatingSessionFile` for the handoff to be written; omit to
   // skip the handoff. See buildRestartHandoffWiring in src/agent/index.ts.
   handoffOrigin?: RestartHandoffOrigin
+  // Author of the inbound that owned this session, carried into the handoff so
+  // a channel self-restart resumes under the requester's author-scoped role
+  // (see RestartHandoff.triggeringAuthorId). Omitted for tui/no-author origins.
+  triggeringAuthorId?: string
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -75,6 +79,7 @@ export function createRestartTool({
   agentDir,
   originatingSessionFile,
   handoffOrigin,
+  triggeringAuthorId,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
 
@@ -121,6 +126,7 @@ export function createRestartTool({
         ...(agentDir !== undefined ? { agentDir } : {}),
         ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
         ...(handoffOrigin !== undefined ? { handoffOrigin } : {}),
+        ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
       })
       if (!result.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: result.reason }

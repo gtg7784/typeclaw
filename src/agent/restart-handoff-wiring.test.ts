@@ -43,6 +43,14 @@ describe('buildRestartHandoffWiring', () => {
     })
   })
 
+  test('carries the channel author into the handoff so a self-restart re-seeds the requester', () => {
+    const result = buildRestartHandoffWiring(
+      { origin: { ...channelOrigin, lastInboundAuthorId: 'U_OWNER' }, plugins: { agentDir: '/agent' } },
+      fakeSessionManager('/agent/sessions/ses-3.jsonl'),
+    )
+    expect(result.triggeringAuthorId).toBe('U_OWNER')
+  })
+
   test('emits nothing for cron / subagent / system origins', () => {
     const cron: SessionOrigin = { kind: 'cron', jobId: 'j1', jobKind: 'prompt' }
     const subagent: SessionOrigin = { kind: 'subagent', subagent: 'explorer', parentSessionId: 'p1' }
