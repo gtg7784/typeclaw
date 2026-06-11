@@ -75,6 +75,7 @@ const BASELINE_APT_PACKAGES = [
   'util-linux',
   'bubblewrap',
   'jq',
+  'libgomp1',
 ] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
@@ -546,6 +547,14 @@ function renderEntrypointShimLayer(): string {
 RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
  && chmod +x ${TYPECLAW_ENTRYPOINT_PATH}`
 }
+
+// Layer 7: install @huggingface/transformers with linux-native onnxruntime binary.
+// The host node_modules may carry a macOS binary via the bind mount; this layer
+// ensures the linux onnxruntime-node addon is present in the container's bun cache.
+const LAYER_TRANSFORMERS_INSTALL = `# Layer 7: install @huggingface/transformers with linux-native onnxruntime binary.
+# The host node_modules may carry a macOS binary via the bind mount; this layer
+# ensures the linux onnxruntime-node addon is present in the container's bun cache.
+RUN bun add @huggingface/transformers`
 
 // Claude Code's official installer is `curl | bash`, not apt — can't live
 // in APT_FEATURES. Layer placed after the toggle apt install (so curl + ca-
@@ -1210,6 +1219,8 @@ ARG TARGETARCH
 
 ${ghKeyringLayer}${toggleAptLayer}${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${renderEntrypointShimLayer()}
 
+${LAYER_TRANSFORMERS_INSTALL}
+
 `
 }
 
@@ -1271,6 +1282,8 @@ ${LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER}
 ${LAYER_5_CHROME_FOR_TESTING}
 
 ${cloudflaredBlock}${claudeCodeBlock}${codexCliBlock}${renderEntrypointShimLayer()}
+
+${LAYER_TRANSFORMERS_INSTALL}
 
 `
 }
