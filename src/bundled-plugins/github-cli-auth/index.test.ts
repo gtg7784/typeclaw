@@ -5,13 +5,21 @@ import { join } from 'node:path'
 
 import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import type { GithubTokenResolveResult } from '@/channels/github-token-bridge'
-import { noopPermissionService } from '@/permissions'
-import type { PluginContext, ToolBeforeEvent } from '@/plugin'
+import { noopPermissionService, type PermissionService } from '@/permissions'
+import type { PluginContext, PluginLogger, ToolBeforeEvent } from '@/plugin'
 
 import { resetGitAskPassHelperForTests } from './git-askpass'
 import githubCliAuthPlugin from './index'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
+
+// resolveHiddenPaths checks fs.see.private + fs.see.secrets; granting both
+// yields empty masks => runsUnsandboxed() true, matching owner/trusted. The
+// default noopPermissionService grants nothing => sandboxed (member/guest).
+const unsandboxedPermissions: PermissionService = {
+  ...noopPermissionService,
+  has: (_origin, permission) => permission === 'fs.see.private' || permission === 'fs.see.secrets',
+}
 
 const originalToken = process.env.GH_TOKEN
 const originalGithubToken = process.env.GITHUB_TOKEN
@@ -23,24 +31,31 @@ afterEach(() => {
   else process.env.GITHUB_TOKEN = originalGithubToken
 })
 
+type HookOpts = { permissions?: PermissionService; logger?: PluginLogger }
+
 function pluginContext(
   resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>,
   hasAppTokenResolver = true,
+  opts: HookOpts = {},
 ): PluginContext<undefined> {
   return {
     name: 'github-cli-auth',
     version: undefined,
     agentDir: '/agent',
     config: undefined,
-    logger: noopLogger,
-    permissions: noopPermissionService,
+    logger: opts.logger ?? noopLogger,
+    permissions: opts.permissions ?? noopPermissionService,
     github: { resolveTokenForRepo: resolve, hasAppTokenResolver: () => hasAppTokenResolver },
     spawnSubagent: async () => {},
   }
 }
 
-async function hookFor(resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>, hasAppTokenResolver = true) {
-  const exports = await githubCliAuthPlugin.plugin(pluginContext(resolve, hasAppTokenResolver))
+async function hookFor(
+  resolve: (repoSlug: string) => Promise<GithubTokenResolveResult>,
+  hasAppTokenResolver = true,
+  opts: HookOpts = {},
+) {
+  const exports = await githubCliAuthPlugin.plugin(pluginContext(resolve, hasAppTokenResolver, opts))
   const hook = exports.hooks?.['tool.before']
   if (!hook) throw new Error('plugin did not register tool.before')
   return hook
@@ -127,31 +142,59 @@ describe('github-cli-auth plugin', () => {
     expect(resolverCalled).toBe(false)
   })
 
-  test('classic PAT: passes through unchanged (cross-owner)', async () => {
+  test('classic PAT (unsandboxed): injects the PAT for a repo-targeting gh, does not mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
-    const hook = await hookFor(tokenResolver('ghs_minted'))
-    const event = bashEvent('gh pr view 12')
-
-    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
-
-    expect(result).toBeUndefined()
-    expect(event.args.command).toBe('gh pr view 12')
-  })
-
-  test('fine-grained PAT: leaves command as-is, does not mint', async () => {
-    process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
     const event = bashEvent('gh pr view -R acme/widgets')
 
-    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+    const result = await hook(event, hookCtx)
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh pr view -R acme/widgets')
+    // Unsandboxed: the PAT already rides inherited env; we re-assert it in the
+    // overlay (no minting) so behavior is explicit and matches the git path.
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghp_classic' })
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('classic PAT (unsandboxed): non-repo-targeting gh passes through (nothing to inject)', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'), true, { permissions: unsandboxedPermissions })
+    const event = bashEvent('gh pr view 12')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh pr view 12')
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
+  test('fine-grained PAT (unsandboxed): leaves command as-is, injects the PAT, does not mint', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    let resolverCalled = false
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
+    const event = bashEvent('gh pr view -R acme/widgets')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args.command).toBe('gh pr view -R acme/widgets')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'github_pat_xyz' })
     expect(resolverCalled).toBe(false)
   })
 
@@ -167,37 +210,45 @@ describe('github-cli-auth plugin', () => {
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
   })
 
-  test('classic PAT: strips a redundant -R on gh api without minting a token', async () => {
+  test('classic PAT (unsandboxed): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
     const event = bashEvent('gh api repos/acme/widgets/issues -R acme/widgets')
 
-    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+    const result = await hook(event, hookCtx)
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh api repos/acme/widgets/issues')
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghp_classic' })
     expect(resolverCalled).toBe(false)
   })
 
-  test('fine-grained PAT: strips a redundant -R on gh api without minting a token', async () => {
+  test('fine-grained PAT (unsandboxed): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
     process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
     const event = bashEvent('gh api repos/acme/widgets/issues --repo=acme/widgets')
 
-    const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
+    const result = await hook(event, hookCtx)
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh api repos/acme/widgets/issues')
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'github_pat_xyz' })
     expect(resolverCalled).toBe(false)
   })
 
@@ -365,6 +416,58 @@ describe('github-cli-auth plugin', () => {
   })
 })
 
+describe('github-cli-auth plugin — .env PAT role gating (gh path)', () => {
+  test('PAT (sandboxed) + App minter: mints a per-repo App token instead of the withheld PAT', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const mintedSlugs: string[] = []
+    const hook = await hookFor(async (slug) => {
+      mintedSlugs.push(slug)
+      return { kind: 'token', token: 'ghs_minted' }
+    }, true)
+    const event = bashEvent('gh pr view -R acme/widgets')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
+    expect(mintedSlugs).toEqual(['acme/widgets'])
+  })
+
+  test('PAT (sandboxed) + no App minter: blocks with the withheld-PAT guidance and warns once', async () => {
+    process.env.GH_TOKEN = 'github_pat_xyz'
+    const warnings: string[] = []
+    const logger = {
+      info: () => {},
+      warn: (m: string): void => {
+        warnings.push(m)
+      },
+      error: () => {},
+    }
+    const hook = await hookFor(tokenResolver('ghs_minted'), false, { logger })
+
+    const first = await hook(bashEvent('gh pr view -R acme/widgets'), hookCtx)
+    const second = await hook(bashEvent('gh pr view -R acme/other'), hookCtx)
+
+    expect(first).toMatchObject({ block: true })
+    expect((first as { reason: string }).reason).toContain('sandboxed')
+    expect(second).toMatchObject({ block: true })
+    // warn is deduped to once per process to avoid log spam on every command.
+    expect(warnings.length).toBe(1)
+  })
+
+  test('PAT (sandboxed) + no minter: a malformed (block-class) gh command keeps its own block reason', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'), false)
+
+    // -R conflicts with the literal path => analyzer block; that reason wins over
+    // the withheld-PAT message because the command is unsafe regardless of auth.
+    const result = await hook(bashEvent('gh api repos/victim/private/issues -R acme/widgets'), hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    expect((result as { reason: string }).reason).not.toContain('sandboxed')
+  })
+})
+
 describe('github-cli-auth plugin — git path', () => {
   const askpassDir = mkdtempSync(join(tmpdir(), 'typeclaw-askpass-it-'))
   process.env.TYPECLAW_GIT_ASKPASS_PATH = join(askpassDir, 'typeclaw-git-askpass')
@@ -470,36 +573,74 @@ describe('github-cli-auth plugin — git path', () => {
     expect(JSON.stringify(event.args.command)).not.toContain('ghs_minted')
   })
 
-  test('classic PAT: does not mint for git', async () => {
+  test('classic PAT (unsandboxed): injects GIT_ASKPASS with the PAT, does not mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
     const event = bashEvent('git clone https://github.com/acme/widgets.git')
 
     const result = await hook(event, hookCtx)
 
     expect(result).toBeUndefined()
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    const overlay = event.args[TYPECLAW_INTERNAL_BASH_ENV] as Record<string, string>
+    expect(overlay.TYPECLAW_GIT_TOKEN).toBe('ghp_classic')
+    expect(overlay.GIT_ASKPASS).toBeDefined()
+    expect(JSON.stringify(event.args.command)).not.toContain('ghp_classic')
     expect(resolverCalled).toBe(false)
   })
 
-  test('fine-grained PAT: does not mint for git', async () => {
+  test('fine-grained PAT (unsandboxed): injects GIT_ASKPASS with the PAT, does not mint', async () => {
     process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: unsandboxedPermissions },
+    )
     const event = bashEvent('git clone https://github.com/acme/widgets.git')
 
     const result = await hook(event, hookCtx)
 
     expect(result).toBeUndefined()
-    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    const overlay = event.args[TYPECLAW_INTERNAL_BASH_ENV] as Record<string, string>
+    expect(overlay.TYPECLAW_GIT_TOKEN).toBe('github_pat_xyz')
+    expect(overlay.GIT_ASKPASS).toBeDefined()
     expect(resolverCalled).toBe(false)
+  })
+
+  test('PAT (sandboxed) + App minter: mints a per-repo App token for git instead of the withheld PAT', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'), true)
+    const event = bashEvent('git clone https://github.com/acme/widgets.git')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    const overlay = event.args[TYPECLAW_INTERNAL_BASH_ENV] as Record<string, string>
+    expect(overlay.TYPECLAW_GIT_TOKEN).toBe('ghs_minted')
+    expect(overlay.GIT_ASKPASS).toBeDefined()
+  })
+
+  test('PAT (sandboxed) + no App minter: blocks git with the withheld-PAT guidance', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    const hook = await hookFor(tokenResolver('ghs_minted'), false)
+    const event = bashEvent('git clone https://github.com/acme/widgets.git')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    expect((result as { reason: string }).reason).toContain('sandboxed')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 
   test('non-github explicit-URL git command passes through without minting', async () => {
