@@ -220,7 +220,7 @@ describe('review verdict idempotency guard', () => {
   // done) but GitHub's reviews read still lags, reporting NONE — the exact gap that
   // landed two APPROVEs on PR #691. The resolver returns NONE so these exercise the
   // raw-NONE path the shield is allowed to override.
-  const LAG_WINDOW_MS = 60_000
+  const LAG_WINDOW_MS = 120_000
   function makeShaGuard(headSha: string | null, now?: () => number) {
     return createApproveIdempotencyGuard({
       resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' }),
@@ -329,6 +329,33 @@ describe('review verdict idempotency guard', () => {
     clock += LAG_WINDOW_MS - 1
     const dup = await g.guard({ callId: 'a2', workspace: WS, prNumber: 39, verdict: 'APPROVE' })
     expect(dup?.block).toBe(true)
+  })
+
+  test('thread fan-out: four sequential same-commit APPROVEs ~5s apart land only the first', async () => {
+    // The real incident: one channel session per inline review thread each fired a
+    // formal APPROVE on the same head while GitHub's reviews read still lagged
+    // (NONE). With detection now arming the shield on the first landed verdict, the
+    // three followers within the window are blocked.
+    let clock = 1_000
+    const g = makeShaGuard('sha-abc', () => clock)
+    const first = await g.guard({ callId: 't1', workspace: WS, prNumber: 224, verdict: 'APPROVE' })
+    expect(first).toBeNull()
+    await g.release({ callId: 't1', succeeded: true })
+    for (const callId of ['t2', 't3', 't4']) {
+      clock += 5_000
+      const dup = await g.guard({ callId, workspace: WS, prNumber: 224, verdict: 'APPROVE' })
+      expect(dup?.block).toBe(true)
+    }
+  })
+
+  test('a legitimate re-APPROVE just past the 2-minute window is allowed', async () => {
+    let clock = 1_000
+    const g = makeShaGuard('sha-abc', () => clock)
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 42, verdict: 'APPROVE' })
+    await g.release({ callId: 'a1', succeeded: true })
+    clock += LAG_WINDOW_MS + 1
+    const after = await g.guard({ callId: 'a2', workspace: WS, prNumber: 42, verdict: 'APPROVE' })
+    expect(after).toBeNull()
   })
 
   test('the landed cache is process-wide: a second plugin instance sees the first instance landed verdict', async () => {

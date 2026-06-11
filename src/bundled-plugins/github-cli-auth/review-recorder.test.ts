@@ -99,4 +99,44 @@ describe('review recorder', () => {
     commitReviewIfSucceeded({ sessionId: SESSION, callId: 'c8', result: textResult('(no recognizable output)') })
     expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 42, verdict: 'APPROVE' })).toBe(false)
   })
+
+  describe('post-execution backstop (pre-detection missed)', () => {
+    const LANDED_APPROVED = `{"id":7,"node_id":"PRR_x","state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/77"}`
+
+    test('credits a landed APPROVE from the REST response when no pending entry exists', () => {
+      // no noteReviewCommand — simulates a command shape the before-detector missed
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b1', result: textResult(LANDED_APPROVED) })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 77, verdict: 'APPROVE' })).toBe(true)
+    })
+
+    test('credits a landed CHANGES_REQUESTED from the REST response', () => {
+      const out = `{"state":"CHANGES_REQUESTED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/78"}`
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b2', result: textResult(out) })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 78, verdict: 'REQUEST_CHANGES' })).toBe(true)
+    })
+
+    test('does NOT credit when the state is present but a failure marker is also present (fail closed)', () => {
+      const out = `gh: Validation Failed (HTTP 422) {"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/79"}`
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b3', result: textResult(out) })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 79, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit a decisive state with no recoverable PR url', () => {
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b4', result: textResult('{"state":"APPROVED"}') })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 77, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit a COMMENT review state', () => {
+      const out = `{"state":"COMMENTED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/80"}`
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b5', result: textResult(out) })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 80, verdict: 'APPROVE' })).toBe(false)
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 80, verdict: 'REQUEST_CHANGES' })).toBe(false)
+    })
+
+    test('the pending-entry path takes precedence over the backstop', async () => {
+      await noteReviewCommand({ callId: 'b6', command: `gh api /repos/${WS}/pulls/81/reviews -f event=APPROVE` })
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b6', result: textResult(SUCCESS_OUTPUT) })
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 81, verdict: 'APPROVE' })).toBe(true)
+    })
+  })
 })

@@ -73,10 +73,15 @@ const LEASE_TTL_MS = 5 * 60_000
 // read-after-write lag rather than a genuine absence. GitHub's `/pulls/<n>/reviews`
 // list lags a write by up to ~10s, so a second engagement turn firing in that
 // window reads NONE and would land a duplicate. Observed duplicates were ~10-18s
-// apart; 60s is a comfortable lag margin without making a legitimate re-verdict
-// wait long. This window only shadows a raw NONE on the SAME verdict (+ same or
+// apart originally; a later fan-out incident spread FOUR sequential APPROVEs over
+// ~15s (one channel session per inline review thread), each ~3-7s after the last —
+// well inside the read lag yet beyond a single turn. 120s gives margin for that
+// thread fan-out plus slow API indexing without turning the shield into a human-
+// facing rate limit (a legitimate re-verdict after a new push carries a new head
+// SHA and bypasses this entirely; staying under ~5min avoids blocking genuine
+// re-reviews). This window only shadows a raw NONE on the SAME verdict (+ same or
 // uncertain head) — a DISMISSED/CHANGES_REQUESTED/flipped-verdict all bypass it.
-const RECENT_LANDED_TTL_MS = 60_000
+const RECENT_LANDED_TTL_MS = 120_000
 
 type Reservation = {
   key: string

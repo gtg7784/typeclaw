@@ -6,6 +6,15 @@ import type { ReviewVerdict } from '@/channels/github-review-turn-ledger'
 // inline `-f/-F event=...`, and the `gh pr review` porcelain. Returns null when
 // the command is not a verdict-bearing review submission (incl. COMMENT reviews,
 // which carry no false-receipt risk and are not tracked).
+//
+// The `gh` invocation does NOT have to lead the command. The observed duplicate-
+// approval incident used four different shapes — `cd /agent && gh api …`,
+// `tmp=$(mktemp); … ; gh api --input "$tmp"`, a heredoc-then-`gh` two-stager, and
+// the canonical bare `gh api …`. Only the bare shape was detected, so the
+// idempotency guard never armed for the other three and the duplicates landed.
+// Detection therefore scans every shell-separated segment for a `gh` invocation,
+// independent of `analyzeGhCommand` (which is a token-injection-safety gate, not a
+// proxy for "will this command execute" — a classic PAT skips that block).
 
 // `source` drives success detection downstream: the REST endpoints echo the
 // created review JSON, while the `gh pr review` porcelain prints a plain
@@ -24,13 +33,26 @@ export type GhReviewDetectInput = {
   inputFileContents?: string | null
 }
 
-const REVIEWS_ENDPOINT = /\/repos\/([^/\s]+)\/([^/\s]+)\/pulls\/(\d+)\/reviews\b/
+// `gh api` accepts the endpoint with or without a leading slash
+// (`repos/o/r/pulls/N/reviews` and `/repos/…` both work), so the match is
+// anchored on a `repos/` boundary, not a slash. The observed compound shape
+// `cd /agent && gh api -X POST repos/o/r/pulls/224/reviews …` used the
+// slash-less form and was missed by the slash-anchored pattern.
+const REVIEWS_ENDPOINT = /(?:^|\/)repos\/([^/\s]+)\/([^/\s]+)\/pulls\/(\d+)\/reviews\b/
 
 export function detectReviewSubmission(input: GhReviewDetectInput): DetectedReview | null {
-  const args = splitArgs(input.command)
-  if (args[0] !== 'gh') return null
+  const fileContents = input.inputFileContents ?? null
+  for (const segment of ghSegments(input.command)) {
+    const detected = detectInGhSegment(segment, fileContents)
+    if (detected !== null) return detected
+  }
+  return null
+}
+
+// Each segment is the argv of one `gh` invocation found anywhere in the command.
+function detectInGhSegment(args: readonly string[], fileContents: string | null): DetectedReview | null {
   const sub = args[1]
-  if (sub === 'api') return detectApiReview(args, input.inputFileContents ?? null)
+  if (sub === 'api') return detectApiReview(args, fileContents)
   if (sub === 'pr' && args[2] === 'review') return detectPrReview(args)
   return null
 }
@@ -139,37 +161,84 @@ function isRepoSlug(value: string | undefined): boolean {
   return owner !== undefined && owner !== '' && name !== undefined && name !== '' && rest.length === 0
 }
 
-// Quote-aware whitespace split. The interceptor guarantees a single bare `gh`
-// command before we record (no pipes/substitution), so this only needs to honor
-// quotes, not full shell grammar.
-function splitArgs(command: string): string[] {
-  const out: string[] = []
-  let cur = ''
+// Yields the argv of every `gh` invocation in the command, one per shell-
+// separated segment. A segment runs from one command separator (`&&`, `||`, `;`,
+// `|`, newline) to the next; within it we strip leading `VAR=value` assignments
+// (so `tmp=$(mktemp) gh …` and a `VAR=…` prefix both still see `gh` first) and
+// recognise `gh` as the segment's command word. Quote-aware so an embedded `;`
+// or `gh` inside a quoted body (e.g. a review `-f body='…'`) is not mistaken for
+// a separator or a second invocation.
+function* ghSegments(command: string): Generator<readonly string[]> {
+  for (const segment of splitSegments(command)) {
+    const args = stripLeadingAssignments(segment)
+    if (args[0] === 'gh') yield args
+  }
+}
+
+// Drop leading `NAME=value` tokens (env-var prefixes) so the command word that
+// follows them is the one we classify. `tmp=$(mktemp)` tokenises to a single
+// `tmp=$(mktemp)` token here (the `$(…)` stays attached), which this skips.
+function stripLeadingAssignments(args: readonly string[]): readonly string[] {
+  let i = 0
+  while (i < args.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[i] as string)) i++
+  return args.slice(i)
+}
+
+// Quote-aware split into shell segments AND tokens. Segments break on top-level
+// `&&`, `||`, `;`, `|`, and newlines (outside quotes). Heredoc bodies are NOT
+// modelled — a heredoc writes a payload file consumed by a later `gh … --input`
+// segment, and that file's contents are resolved separately (review-recorder
+// reads it off disk); detection here only needs the `gh` segment itself.
+function splitSegments(command: string): string[][] {
+  const segments: string[][] = []
+  let cur: string[] = []
+  let tok = ''
   let quote: '"' | "'" | null = null
-  let has = false
-  for (const ch of command) {
+  let hasTok = false
+  const endTok = () => {
+    if (hasTok) {
+      cur.push(tok)
+      tok = ''
+      hasTok = false
+    }
+  }
+  const endSeg = () => {
+    endTok()
+    if (cur.length > 0) {
+      segments.push(cur)
+      cur = []
+    }
+  }
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string
     if (quote !== null) {
       if (ch === quote) quote = null
-      else cur += ch
-      has = true
+      else tok += ch
+      hasTok = true
       continue
     }
     if (ch === '"' || ch === "'") {
       quote = ch
-      has = true
+      hasTok = true
       continue
     }
-    if (ch === ' ' || ch === '\t' || ch === '\n') {
-      if (has) {
-        out.push(cur)
-        cur = ''
-        has = false
-      }
+    const next = command[i + 1]
+    if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
+      endSeg()
+      i++
       continue
     }
-    cur += ch
-    has = true
+    if (ch === ';' || ch === '|' || ch === '\n') {
+      endSeg()
+      continue
+    }
+    if (ch === ' ' || ch === '\t' || ch === '\r') {
+      endTok()
+      continue
+    }
+    tok += ch
+    hasTok = true
   }
-  if (has) out.push(cur)
-  return out
+  endSeg()
+  return segments
 }

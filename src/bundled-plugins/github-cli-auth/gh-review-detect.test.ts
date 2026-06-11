@@ -87,6 +87,56 @@ describe('detectReviewSubmission — gh pr review porcelain', () => {
   })
 })
 
+describe('detectReviewSubmission — gh not at the start of the command', () => {
+  test('compound: cd /agent && gh api ... -f event=APPROVE (slash-less endpoint)', () => {
+    const result = detectReviewSubmission({
+      command: "cd /agent && gh api -X POST repos/acme/widgets/pulls/224/reviews -f event=APPROVE -f body='ok'",
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 224, verdict: 'APPROVE', source: 'api' })
+  })
+
+  test('compound with semicolon: cd /agent; gh pr review N --request-changes', () => {
+    const result = detectReviewSubmission({
+      command: 'cd /agent; gh pr review 224 --repo acme/widgets --request-changes',
+    })
+    expect(result).toEqual({
+      workspace: 'acme/widgets',
+      prNumber: 224,
+      verdict: 'REQUEST_CHANGES',
+      source: 'pr-review',
+    })
+  })
+
+  test('var-prefixed: tmp=$(mktemp) && gh api ... --input "$tmp" resolves the file verdict', () => {
+    const result = detectReviewSubmission({
+      command:
+        'tmp=$(mktemp /tmp/review-XXXX.json) && gh api -X POST /repos/acme/widgets/pulls/224/reviews --input "$tmp"',
+      inputFileContents: '{"event":"APPROVE","body":"verified"}',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 224, verdict: 'APPROVE', source: 'api' })
+  })
+
+  test('heredoc payload then gh --input on a later line resolves the file verdict', () => {
+    const result = detectReviewSubmission({
+      command:
+        "cat > /tmp/review.json <<'JSON'\n" +
+        '{"event":"APPROVE","body":"looks good"}\n' +
+        'JSON\n' +
+        'gh api -X POST /repos/acme/widgets/pulls/224/reviews --input /tmp/review.json',
+      inputFileContents: '{"event":"APPROVE","body":"looks good"}',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 224, verdict: 'APPROVE', source: 'api' })
+  })
+
+  test('a quoted body containing "; gh" or a fake endpoint is not mistaken for a second invocation', () => {
+    const result = detectReviewSubmission({
+      command:
+        "gh api -X POST /repos/acme/widgets/pulls/3/reviews -f event=APPROVE -f body='see; gh api repos/x/y/pulls/9/reviews -f event=REQUEST_CHANGES'",
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 3, verdict: 'APPROVE', source: 'api' })
+  })
+})
+
 describe('detectReviewSubmission — non-matches', () => {
   test('a plain pr view is null', () => {
     expect(detectReviewSubmission({ command: 'gh pr view 12 -R acme/widgets' })).toBeNull()
