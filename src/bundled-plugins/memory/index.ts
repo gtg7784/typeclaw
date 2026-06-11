@@ -16,6 +16,11 @@ import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-l
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { memorySearchTool } from './search-tool'
+import { writeRetrievalCache } from './vector/cache-write'
+import { vectorConfigSchema } from './vector/config'
+import { buildLazyIndex, hybridSearch } from './vector/hybrid'
+import { makeAppendHook } from './vector/index-on-write'
+import { VectorStore } from './vector/store'
 
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
@@ -120,6 +125,7 @@ const memoryConfigSchema = z
     // in milliseconds instead of the production 30s.
     retrievalSpawnTimeoutMs: z.number().int().min(1).default(RETRIEVAL_SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
+    vector: vectorConfigSchema,
   })
   .default({
     idleMs: DEFAULT_IDLE_MS,
@@ -128,6 +134,7 @@ const memoryConfigSchema = z
     minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
     retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
+    vector: { enabled: false },
   })
 
 export default definePlugin({
@@ -284,6 +291,27 @@ export default definePlugin({
       await ctx.spawnSubagent('memory-retrieval', payload, retrievalSpawnOptions)
     }
 
+    const runVectorRetrieval = async (event: {
+      sessionId: string
+      agentDir: string
+      userPrompt: string
+    }): Promise<void> => {
+      const shards = await loadAllShards(event.agentDir)
+      const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
+      if (plan.mode === 'direct') return
+
+      const dbPath = join(event.agentDir, 'memory', '.vectors', 'index.db')
+      const store = VectorStore.open(dbPath)
+      try {
+        await buildLazyIndex(store, event.agentDir)
+        const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
+        const content = results.map((result) => `## ${result.heading}\n\n${result.excerpt}`).join('\n\n')
+        await writeRetrievalCache(event.agentDir, event.sessionId, content)
+      } finally {
+        store.close()
+      }
+    }
+
     // Subagents are constructed at boot here (rather than imported as constants)
     // so their lifecycle logs route through the plugin logger and pick up the
     // `[plugin:memory]` prefix. Without this, they would write directly to
@@ -293,10 +321,16 @@ export default definePlugin({
       warn: (m: string) => ctx.logger.warn(m),
       error: (m: string) => ctx.logger.error(m),
     }
+    const appendVectorStore = ctx.config.vector.enabled
+      ? VectorStore.open(join(ctx.agentDir, 'memory', '.vectors', 'index.db'))
+      : undefined
 
     return {
       subagents: {
-        'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
+        'memory-logger': createMemoryLoggerSubagent({
+          logger: subagentLogger,
+          ...(appendVectorStore !== undefined ? { onFragmentsAppended: makeAppendHook(appendVectorStore) } : {}),
+        }),
         'memory-retrieval': createMemoryRetrievalSubagent({
           logger: subagentLogger,
           timeoutMs: retrievalSpawnTimeoutMs,
@@ -415,9 +449,15 @@ export default definePlugin({
         // the promise.
         'session.turn.start': (event) => {
           if (event.origin?.kind === 'subagent') return
-          void runMemoryRetrieval(event).catch((err) => {
-            ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
-          })
+          if (ctx.config.vector.enabled) {
+            void runVectorRetrieval(event).catch((err) => {
+              ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
+            })
+          } else {
+            void runMemoryRetrieval(event).catch((err) => {
+              ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
+            })
+          }
         },
         // The memory-logger spawn is intentionally detached (`void`) instead
         // of awaited. The channel router calls `tearDownLive` synchronously
