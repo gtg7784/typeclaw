@@ -18,6 +18,7 @@ import {
   type SubagentShared,
 } from '@/agent/subagents'
 import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
+import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
   createChannelManager,
@@ -215,6 +216,11 @@ export async function startAgent({
   // v2-only parser rejects the file and hydrate below sees no channels. Runs
   // exactly once per folder; a folder already at v2 is a no-op.
   runStartupMigrations(cwd)
+  if (isStartupVectorIndexEnabled(pluginConfigsByName.memory)) {
+    await buildStartupVectorIndex(cwd).catch((err) => {
+      console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
 
   // Channel adapters read `process.env[TOKEN_ENV]` (see channels/manager.ts).
   // Hydrate fills any unset env var from secrets.json#channels via env-wins:
@@ -833,6 +839,12 @@ export async function startAgent({
     channelManager,
     stop,
   }
+}
+
+function isStartupVectorIndexEnabled(config: unknown): boolean {
+  if (typeof config !== 'object' || config === null || !('vector' in config)) return false
+  const vector = (config as { vector?: unknown }).vector
+  return typeof vector === 'object' && vector !== null && (vector as { enabled?: unknown }).enabled === true
 }
 
 function buildLocalTuiUrl(port: number, token: string | null): string {

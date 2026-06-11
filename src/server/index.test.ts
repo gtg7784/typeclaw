@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -1059,6 +1059,48 @@ describe('createServer with stream — input queueing bugfix', () => {
     expect(session.promptCalls).toEqual([expect.stringContaining('hello')])
 
     ws.close()
+  })
+
+  test('stream drain appends retrieval context populated by session.turn.start hooks', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const agentDir = await mkdtemp(join(tmpdir(), 'server-retrieval-'))
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'retriever',
+      agentDir,
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.turn.start': (event) => {
+          expect(event.userPrompt).toBe('hello')
+          if (event.retrievalContext === undefined) throw new Error('missing retrievalContext')
+          event.retrievalContext.results = '## Retrieved memory\n\n### Topic\n\nExcerpt'
+        },
+      },
+    )
+    const { url } = await startWithSession(session, {
+      stream,
+      agentDir,
+      pluginRegistry: EMPTY_REGISTRY,
+      pluginHooks: hooks,
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
+    await waitForState(() => session.promptCalls.length > 0)
+
+    // then
+    const prompt = session.promptCalls[0] ?? ''
+    expect(prompt).toContain('<current-time>')
+    expect(prompt).toContain('hello')
+    expect(prompt).toContain('## Retrieved memory\n\n### Topic\n\nExcerpt')
+
+    session.resolvePrompt()
+    ws.close()
+    await rm(agentDir, { recursive: true, force: true })
   })
 
   test('emits prompt_started before invoking session.prompt() so the TUI can render execution-order history', async () => {

@@ -1917,18 +1917,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
-  const fireSessionTurnStart = async (live: LiveSession, userPrompt: string): Promise<void> => {
-    if (!live.hooks) return
+  const fireSessionTurnStart = async (live: LiveSession, userPrompt: string): Promise<{ results: string }> => {
+    const retrievalContext = { results: '' }
+    if (!live.hooks) return retrievalContext
     try {
       await live.hooks.runSessionTurnStart({
         sessionId: live.sessionId,
         agentDir: options.agentDir,
         userPrompt,
         origin: buildLiveOrigin(live),
+        retrievalContext,
       })
     } catch (err) {
       logger.warn(`[channels] session.turn.start hook threw for ${live.keyId}: ${describe(err)}`)
     }
+    return retrievalContext
   }
 
   const fireSessionTurnEnd = async (live: LiveSession): Promise<void> => {
@@ -2149,9 +2152,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
-        await fireSessionTurnStart(live, text)
+        const retrievalContext = await fireSessionTurnStart(live, text)
+        const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
         try {
-          await live.session.prompt(text)
+          await live.session.prompt(promptText)
           await validateChannelTurn(live, successfulSendsBeforePrompt)
           live.consecutiveAborts = 0
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)

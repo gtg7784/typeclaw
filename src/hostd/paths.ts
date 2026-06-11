@@ -56,6 +56,10 @@ export function keysDir(): string {
   return join(homeRoot(), KEYS_DIR)
 }
 
+export function modelsDir(): string {
+  return join(homeRoot(), 'models')
+}
+
 // Throws on any name that could traverse out of registrationsDir() or
 // confuse the filesystem. Caller's responsibility to handle the error;
 // don't catch-and-ignore — an invalid name is a protocol violation.
@@ -82,8 +86,10 @@ export async function ensureDirs(): Promise<void> {
   await mkdir(logDir(), { recursive: true })
   await mkdir(registrationsDir(), { recursive: true })
   await mkdir(keysDir(), { recursive: true })
+  await mkdir(modelsDir(), { recursive: true })
   await chmod(runDir(), 0o700).catch(() => {})
   await chmod(logDir(), 0o700).catch(() => {})
   await chmod(registrationsDir(), 0o700).catch(() => {})
   await chmod(keysDir(), 0o700).catch(() => {})
+  await chmod(modelsDir(), 0o700).catch(() => {})
 }

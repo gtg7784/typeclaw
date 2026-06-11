@@ -9,7 +9,7 @@ import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io
 const DEFAULT_MAX_RESULTS = 10
 const EXCERPT_CONTEXT_LINES = 3
 
-type TopicMatch = {
+export type TopicMatch = {
   source: 'topic'
   shardPath: string
   slug: string
@@ -18,7 +18,7 @@ type TopicMatch = {
   fullBody?: string
 }
 
-type StreamMatch = {
+export type StreamMatch = {
   source: 'stream'
   streamPath: string
   date: string
@@ -28,11 +28,11 @@ type StreamMatch = {
   fullBody?: string
 }
 
-type MemorySearchMatch = TopicMatch | StreamMatch
+export type MemorySearchMatch = TopicMatch | StreamMatch
 
-type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: number } | { error: string }
+export type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: number } | { error: string }
 
-type Matcher = (haystack: string) => boolean
+export type Matcher = (haystack: string) => boolean
 
 export const memorySearchTool = defineTool({
   description:
@@ -101,7 +101,7 @@ function distinctTokens(query: string): string[] {
   ]
 }
 
-function buildMatcher(query: string, asRegex: boolean): Matcher | string {
+export function buildMatcher(query: string, asRegex: boolean): Matcher | string {
   if (asRegex) {
     try {
       const regex = new RegExp(query, 'i')
@@ -122,7 +122,7 @@ function buildMatcher(query: string, asRegex: boolean): Matcher | string {
 // before topic matches when `maxResults` is exhausted. The agent reading
 // results in this order sees long-term consolidated truth before recent
 // ephemeral fragments, which mirrors the injection-side rendering order.
-function searchAll(
+export function searchAll(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   matcher: Matcher,
@@ -165,7 +165,7 @@ function searchAll(
 // natural enumeration order (topics first in loadAllShards order, then stream
 // days newest-first), so the established ordering contract holds within each
 // score band. maxResults truncation is applied last, after ranking.
-function searchAllRanked(
+export function searchAllRanked(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   tokens: string[],

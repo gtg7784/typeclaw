@@ -7,6 +7,7 @@ import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config } from
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
+import { homeRoot } from '@/hostd/paths'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
 import {
@@ -622,6 +623,10 @@ export async function planStart({
     const target = `${MOUNT_TARGET_PREFIX}/${mount.name}`
     runArgs.push('-v', mount.readOnly ? `${hostPath}:${target}:ro` : `${hostPath}:${target}`)
   }
+
+  // Shared model cache mount for embeddings and other ML models
+  runArgs.push('-v', `${homeRoot()}/models:/opt/models:ro`)
+  runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
 
   runArgs.push(imageTag)
 

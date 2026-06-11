@@ -16,7 +16,13 @@ export async function isMemoryRetrievalCacheWriteAllowed(options: {
 }): Promise<boolean> {
   const { tool, args, agentDir, origin } = options
   if (tool !== 'write') return false
-  if (origin?.kind !== 'subagent' || origin.subagent !== 'memory-retrieval') return false
+  // Allow the memory-retrieval subagent (existing path) OR the in-process
+  // vector retrieval writer (system origin with component='memory-retrieval').
+  // The in-process path runs under the session origin, not a subagent, so we
+  // check for the system component name as the trusted internal actor.
+  const isMemoryRetrievalSubagent = origin?.kind === 'subagent' && origin.subagent === 'memory-retrieval'
+  const isInProcessWriter = origin?.kind === 'system' && origin.component === 'memory-retrieval'
+  if (!isMemoryRetrievalSubagent && !isInProcessWriter) return false
 
   const rawPath = args.path
   if (typeof rawPath !== 'string') return false
