@@ -34,7 +34,7 @@ afterEach(async () => {
 })
 
 describe('vector session.turn.start hook', () => {
-  test('keeps an older vector retrieval from overwriting a newer cache write', async () => {
+  test('coalesces overlapping vector retrievals so the in-flight cache write is not invalidated', async () => {
     const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
@@ -64,12 +64,12 @@ describe('vector session.turn.start hook', () => {
 
     await waitFor(async () => {
       const content = await readCache().catch(() => '')
-      return content.includes('Second Topic')
+      return content.includes('First Topic')
     })
     await Bun.sleep(80)
 
     const content = await readCache()
-    expect(content).toStartWith('## Second Topic')
+    expect(content).toStartWith('## First Topic')
   })
 })
 
