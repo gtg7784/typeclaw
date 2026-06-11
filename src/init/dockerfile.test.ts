@@ -1360,9 +1360,20 @@ describe('network egress entrypoint shim', () => {
     )
   })
 
-  test('Xvfb startup failure is loud: helper polls liveness with kill -0 and exits non-zero with a stderr line on early exit or socket timeout', () => {
+  test('Xvfb startup failure is loud: helper detects an early exit via a status-file handshake (NOT kill -0, which reports zombies as alive) and exits non-zero with a stderr line on early exit or socket timeout', () => {
     const shim = buildEntrypointShim()
-    expect(shim).toContain('kill -0 "$xvfb_pid"')
+    // A monitor subshell waits for Xvfb and records its exit; the poll loop
+    // reads the status file. The liveness probe must NOT be `kill -0`: it
+    // returns success on an unreaped zombie, so an instantly-dead Xvfb was
+    // reported as alive until the 3s timeout (the flaky-test root cause).
+    expect(shim).not.toMatch(/^\s*if ! kill -0/m)
+    expect(shim).toContain('xvfb_status="/tmp/typeclaw-xvfb-status.$$"')
+    // The status-file check must precede the socket check, so a "created the
+    // socket then immediately died" Xvfb is still treated as a failure.
+    const statusIdx = shim.indexOf('[ -f "$xvfb_status" ]')
+    const socketIdx = shim.indexOf('[ -S /tmp/.X11-unix/X99 ]')
+    expect(statusIdx).toBeGreaterThan(-1)
+    expect(socketIdx).toBeGreaterThan(statusIdx)
     expect(shim).toMatch(/typeclaw-entrypoint: Xvfb exited immediately[^\n]+\n[^\n]+exit 1/)
     expect(shim).toMatch(/typeclaw-entrypoint: Xvfb did not create \/tmp\/\.X11-unix\/X99[^\n]+\n[^\n]+exit 1/)
   })

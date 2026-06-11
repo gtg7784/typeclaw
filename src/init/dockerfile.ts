@@ -293,9 +293,20 @@ set -eu
 #    (missing library, port conflict, malformed args). Without the
 #    explicit liveness probe below, the shim would then export DISPLAY
 #    and exec bun, agent-browser launches would die with "cannot open
-#    display", and the operator would chase a phantom bug. We capture
-#    $! and \`kill -0\` it on every poll iteration so an early exit
-#    becomes a clear stderr line and a non-zero shim exit.
+#    display", and the operator would chase a phantom bug. A monitor
+#    subshell owns Xvfb, \`wait\`s for it, and drops a status file the
+#    instant it exits; the poll loop checks that file (before the socket
+#    check) so an early exit becomes a clear stderr line and a non-zero
+#    shim exit.
+#
+#    We do NOT probe liveness with \`kill -0 "\$xvfb_pid"\`. A backgrounded
+#    child that exits before the shell \`wait\`s for it becomes a zombie,
+#    and \`kill -0\` returns success on a zombie PID (it still exists in
+#    the process table). Under load the shell reaps the zombie lazily, so
+#    \`kill -0\` reported the dead Xvfb as alive for up to the full 3s
+#    window — the loop then timed out and printed the misleading "did not
+#    create socket within 3s" diagnostic instead of "exited immediately".
+#    The status-file handshake sidesteps zombie semantics entirely.
 #
 # We DO NOT use \`xvfb-run\`. xvfb-run hangs forever when it runs as
 # PID 1 inside a container: its SIGUSR1-based ready handshake races
@@ -451,30 +462,45 @@ start_xvfb() {
   if ! command -v Xvfb >/dev/null 2>&1; then
     return 0
   fi
-  setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
-    -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
-    >/dev/null 2>&1 &
+  # A monitor subshell owns Xvfb and \`wait\`s for it (the bare command
+  # blocks until exit), then writes Xvfb's exit code to a status file.
+  # The poll loop below reads that file instead of probing \`kill -0\` —
+  # see invariant 2 above for why zombie semantics make \`kill -0\`
+  # unreliable. \`set +e\` inside the subshell keeps the outer \`set -e\`
+  # from killing the monitor before it records a non-zero Xvfb exit.
+  xvfb_status="/tmp/typeclaw-xvfb-status.$$"
+  rm -f "$xvfb_status"
+  (
+    set +e
+    setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
+      -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
+      >/dev/null 2>&1
+    printf '%s\\n' "$?" > "$xvfb_status"
+  ) &
   xvfb_pid=$!
   export DISPLAY=:99
-  # Poll the socket every 10ms up to ~3s. Xvfb cold start is typically
-  # ~20-50ms on a modern host; 3s covers slow Docker Desktop VMs,
-  # Rosetta/QEMU emulation, and loaded CI runners. We also \`kill -0\`
-  # the pid each iteration so an Xvfb that died immediately surfaces
-  # as a clear error instead of a 3-second hang followed by silent
-  # "cannot open display" downstream.
+  # Poll every 10ms up to ~3s. Xvfb cold start is typically ~20-50ms on
+  # a modern host; 3s covers slow Docker Desktop VMs, Rosetta/QEMU
+  # emulation, and loaded CI runners. The status-file check comes FIRST
+  # so an Xvfb that creates the socket and then immediately dies is still
+  # treated as a startup failure.
   i=0
   while [ $i -lt 300 ]; do
-    if [ -S /tmp/.X11-unix/X99 ]; then
-      unset i xvfb_pid
-      return 0
-    fi
-    if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+    if [ -f "$xvfb_status" ]; then
+      wait "$xvfb_pid" 2>/dev/null || true
+      rm -f "$xvfb_status"
       echo "typeclaw-entrypoint: Xvfb exited immediately; cannot start headed display (docker.file.xvfb=true)" >&2
       exit 1
+    fi
+    if [ -S /tmp/.X11-unix/X99 ]; then
+      rm -f "$xvfb_status"
+      unset i xvfb_pid xvfb_status
+      return 0
     fi
     sleep 0.01
     i=$((i + 1))
   done
+  rm -f "$xvfb_status"
   echo "typeclaw-entrypoint: Xvfb did not create /tmp/.X11-unix/X99 within 3s; refusing to continue (docker.file.xvfb=true)" >&2
   exit 1
 }
