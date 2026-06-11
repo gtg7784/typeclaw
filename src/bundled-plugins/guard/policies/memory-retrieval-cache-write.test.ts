@@ -25,6 +25,24 @@ describe('memory-retrieval-cache-write guard helper', () => {
     ).resolves.toBe(false)
   })
 
+  test('allows in-process vector writer (system origin with component=memory-retrieval)', async () => {
+    await expect(
+      allowed('write', 'memory/.retrieval-cache/s1.md', {
+        kind: 'system',
+        component: 'memory-retrieval',
+      }),
+    ).resolves.toBe(true)
+  })
+
+  test('denies system origin with wrong component', async () => {
+    await expect(
+      allowed('write', 'memory/.retrieval-cache/s1.md', {
+        kind: 'system',
+        component: 'memory-logger',
+      }),
+    ).resolves.toBe(false)
+  })
+
   test('denies tui origin', async () => {
     await expect(allowed('write', 'memory/.retrieval-cache/s1.md', { kind: 'tui', sessionId: 's1' })).resolves.toBe(
       false,
