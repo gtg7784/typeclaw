@@ -8,6 +8,7 @@ import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
 import { topicShardPath, topicsDir } from './paths'
+import { buildStartupVectorIndex } from './vector/startup'
 
 mock.module('@huggingface/transformers', () => ({
   env: {},
@@ -38,6 +39,7 @@ describe('vector session.turn.start hook', () => {
     const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
+    await buildStartupVectorIndex(agentDir)
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({

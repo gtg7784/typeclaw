@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { renderShard } from '../frontmatter'
-import { hybridSearch, buildLazyIndex, type EmbedFn } from './hybrid'
+import { hybridSearch, type EmbedFn } from './hybrid'
 import { VectorStore, type VectorRow } from './store'
 
 const MODEL = 'test-model'
@@ -76,63 +76,6 @@ describe('hybridSearch', () => {
 
       expect(results.slice(0, 3).map((result) => result.key)).toContain('english-i18n')
       expect(results.find((result) => result.key === 'english-i18n')?.rrfScore).toBeCloseTo(1 / 61, 10)
-    } finally {
-      store.close()
-    }
-  })
-})
-
-describe('buildLazyIndex', () => {
-  it('embeds topic shards as passages and skips rebuild when rows are current', async () => {
-    const { agentDir, store } = createFixture()
-    let calls = 0
-    try {
-      writeTopic(agentDir, 'lazy-topic', 'Lazy Topic', 'This topic is indexed on first retrieval.')
-      const embedFn: EmbedFn = async (texts, type) => {
-        calls += 1
-        expect(type).toBe('passage')
-        expect(texts).toEqual(['Lazy Topic\nThis topic is indexed on first retrieval.'])
-        return [vector({ 4: 1 })]
-      }
-
-      await buildLazyIndex(store, agentDir, embedFn)
-      await buildLazyIndex(store, agentDir, embedFn)
-
-      expect(calls).toBe(1)
-      expect(store.getAll().map((stored) => [stored.id, stored.source, stored.key, stored.dims])).toEqual([
-        ['topic:lazy-topic', 'topic', 'lazy-topic', 8],
-      ])
-    } finally {
-      store.close()
-    }
-  })
-
-  it('indexes missing topic shards even when append-time stream rows already exist', async () => {
-    const { agentDir, store } = createFixture()
-    let calls = 0
-    try {
-      writeTopic(agentDir, 'existing-topic', 'Existing Topic', 'This shard predates vector memory retrieval.')
-      store.upsert({
-        id: 'stream:2026-06-11#frag-1',
-        source: 'stream',
-        key: '2026-06-11#frag-1',
-        model: MODEL,
-        dims: 8,
-        embedding: vector({ 0: 1 }),
-        contentHash: 'append-time-stream-hash',
-      })
-
-      const embedFn: EmbedFn = async (texts, type) => {
-        calls += 1
-        expect(type).toBe('passage')
-        expect(texts).toEqual(['Existing Topic\nThis shard predates vector memory retrieval.'])
-        return [vector({ 5: 1 })]
-      }
-
-      await buildLazyIndex(store, agentDir, embedFn)
-
-      expect(calls).toBe(1)
-      expect(store.getAll().map((stored) => stored.id)).toEqual(['stream:2026-06-11#frag-1', 'topic:existing-topic'])
     } finally {
       store.close()
     }

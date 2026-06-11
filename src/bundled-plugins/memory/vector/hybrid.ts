@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto'
 
-import { withGitLock } from '@/git/mutex'
-
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
 import type { StreamEvent } from '../stream-events'
@@ -43,41 +41,12 @@ export async function hybridSearch(
   return fuseLanes(vectorRows, keywordMatches, index).slice(0, topK)
 }
 
-export async function buildLazyIndex(store: VectorStore, agentDir: string, embedFn: EmbedFn = embed): Promise<void> {
-  if (findMissingPassages(store, await collectPassages(agentDir)).length === 0) return
-
-  await withGitLock(agentDir, async () => {
-    const passages = findMissingPassages(store, await collectPassages(agentDir))
-    if (passages.length === 0) return
-
-    const embeddings = await embedFn(
-      passages.map((passage) => passage.text),
-      'passage',
-    )
-
-    for (let i = 0; i < passages.length; i++) {
-      const passage = passages[i]!
-      const embedding = embeddings[i]
-      if (embedding === undefined) continue
-      store.upsert({
-        id: passage.id,
-        source: passage.source,
-        key: passage.key,
-        model: MODEL_NAME,
-        dims: embedding.length,
-        embedding,
-        contentHash: hashContent(passage.text),
-      })
-    }
-  })
-}
-
-async function collectPassages(agentDir: string): Promise<Passage[]> {
+export async function collectPassages(agentDir: string): Promise<Passage[]> {
   const [shards, streamDays] = await Promise.all([loadAllShards(agentDir), readAllUndreamedStreamDays(agentDir)])
   return buildPassages(shards, streamDays)
 }
 
-function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
+export function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
   const existing = new Map(store.getAll().map((row) => [row.id, row]))
   return passages.filter((passage) => {
     const row = existing.get(passage.id)
@@ -225,7 +194,7 @@ function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex')
 }
 
-type Passage = {
+export type Passage = {
   id: string
   source: 'topic' | 'stream'
   key: string

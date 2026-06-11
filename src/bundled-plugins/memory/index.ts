@@ -18,7 +18,7 @@ import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './pat
 import { memorySearchTool } from './search-tool'
 import { writeRetrievalCache } from './vector/cache-write'
 import { vectorConfigSchema } from './vector/config'
-import { buildLazyIndex, hybridSearch } from './vector/hybrid'
+import { hybridSearch } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
 import { VectorStore } from './vector/store'
 
@@ -304,7 +304,6 @@ export default definePlugin({
       const dbPath = join(event.agentDir, 'memory', '.vectors', 'index.db')
       const store = VectorStore.open(dbPath)
       try {
-        await buildLazyIndex(store, event.agentDir)
         const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
         const content = results.map((result) => `## ${result.heading}\n\n${result.excerpt}`).join('\n\n')
         await writeRetrievalCache(event.agentDir, event.sessionId, content)
