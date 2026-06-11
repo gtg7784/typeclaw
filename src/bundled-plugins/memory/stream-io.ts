@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
 import { streamsDir } from './paths'
-import { parseEventLine, type StreamEvent } from './stream-events'
+import { parseEventLine, type FragmentEvent, type StreamEvent } from './stream-events'
 
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -104,10 +104,18 @@ export function __resetStreamFileCacheForTests(): void {
   streamFileCache.clear()
 }
 
-export async function appendEvents(path: string, events: readonly StreamEvent[]): Promise<void> {
+export async function appendEvents(
+  path: string,
+  events: readonly StreamEvent[],
+  onFragmentsAppended?: (fragments: FragmentEvent[]) => Promise<void>,
+): Promise<void> {
   if (events.length === 0) return
   const joined = events.map((e) => `${JSON.stringify(e)}\n`).join('')
   await appendFile(path, joined, 'utf-8')
+  if (onFragmentsAppended === undefined) return
+
+  const fragments = events.filter((event): event is FragmentEvent => event.type === 'fragment')
+  if (fragments.length > 0) await onFragmentsAppended(fragments)
 }
 
 export async function writeEventsAtomic(path: string, events: readonly StreamEvent[]): Promise<void> {
