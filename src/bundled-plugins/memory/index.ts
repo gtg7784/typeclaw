@@ -151,6 +151,7 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
     const linesAtLastRun = new Map<string, number>()
+    const vectorRetrievalTurns = new Map<string, number>()
     // Per-session stream-file cursor: the JSONL line count of the daily
     // stream file at the END of this session's most recent memory-logger
     // spawn. Keyed by sessionId, valued by `{ date, lineCount }`. Honored
@@ -295,6 +296,7 @@ export default definePlugin({
       sessionId: string
       agentDir: string
       userPrompt: string
+      turn: number
     }): Promise<void> => {
       const shards = await loadAllShards(event.agentDir)
       const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
@@ -306,6 +308,7 @@ export default definePlugin({
         await buildLazyIndex(store, event.agentDir)
         const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
         const content = results.map((result) => `## ${result.heading}\n\n${result.excerpt}`).join('\n\n')
+        if (vectorRetrievalTurns.get(event.sessionId) !== event.turn) return
         await writeRetrievalCache(event.agentDir, event.sessionId, content)
       } finally {
         store.close()
@@ -450,7 +453,9 @@ export default definePlugin({
         'session.turn.start': (event) => {
           if (event.origin?.kind === 'subagent') return
           if (ctx.config.vector.enabled) {
-            void runVectorRetrieval(event).catch((err) => {
+            const turn = (vectorRetrievalTurns.get(event.sessionId) ?? 0) + 1
+            vectorRetrievalTurns.set(event.sessionId, turn)
+            void runVectorRetrieval({ ...event, turn }).catch((err) => {
               ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
             })
           } else {
@@ -487,6 +492,7 @@ export default definePlugin({
         'session.end': (event) => {
           if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
+          vectorRetrievalTurns.delete(event.sessionId)
           const sessionId = event.sessionId
           // The skip path detaches via `void (async () => …)()` because
           // readSize requires an await. fireMemoryLogger itself captures its

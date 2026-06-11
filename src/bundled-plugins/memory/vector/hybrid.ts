@@ -44,13 +44,12 @@ export async function hybridSearch(
 }
 
 export async function buildLazyIndex(store: VectorStore, agentDir: string, embedFn: EmbedFn = embed): Promise<void> {
-  if (store.getAll().length > 0) return
+  if (findMissingPassages(store, await collectPassages(agentDir)).length === 0) return
 
   await withGitLock(agentDir, async () => {
-    if (store.getAll().length > 0) return
+    const passages = findMissingPassages(store, await collectPassages(agentDir))
+    if (passages.length === 0) return
 
-    const [shards, streamDays] = await Promise.all([loadAllShards(agentDir), readAllUndreamedStreamDays(agentDir)])
-    const passages = buildPassages(shards, streamDays)
     const embeddings = await embedFn(
       passages.map((passage) => passage.text),
       'passage',
@@ -70,6 +69,19 @@ export async function buildLazyIndex(store: VectorStore, agentDir: string, embed
         contentHash: hashContent(passage.text),
       })
     }
+  })
+}
+
+async function collectPassages(agentDir: string): Promise<Passage[]> {
+  const [shards, streamDays] = await Promise.all([loadAllShards(agentDir), readAllUndreamedStreamDays(agentDir)])
+  return buildPassages(shards, streamDays)
+}
+
+function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
+  const existing = new Map(store.getAll().map((row) => [row.id, row]))
+  return passages.filter((passage) => {
+    const row = existing.get(passage.id)
+    return row === undefined || row.model !== MODEL_NAME || row.contentHash !== hashContent(passage.text)
   })
 }
 
