@@ -11,9 +11,9 @@ import { streamFilePath } from './paths'
 import { detectSecrets } from './secret-detector'
 import { newEventId, timestampFromId } from './stream-events'
 import type { FragmentEvent, WatermarkEvent } from './stream-events'
-import { appendEvents, readEvents } from './stream-io'
+import { appendEvents, readEvents, type FragmentsAppendedContext } from './stream-io'
 
-export type FragmentsAppendedHook = (fragments: FragmentEvent[]) => Promise<void>
+export type FragmentsAppendedHook = (fragments: FragmentEvent[], context: FragmentsAppendedContext) => Promise<void>
 
 export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
   return defineTool({
@@ -63,7 +63,18 @@ export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
       }
 
       await mkdir(dirname(streamPath), { recursive: true })
-      await appendEvents(streamPath, [fragment, watermark], onFragmentsAppended)
+      await appendEvents(
+        streamPath,
+        [fragment, watermark],
+        onFragmentsAppended,
+        onFragmentsAppended
+          ? (err) => {
+              ctx.logger?.warn(
+                `[memory] post-append vector hook failed: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
+          : undefined,
+      )
 
       return {
         content: [{ type: 'text' as const, text: `Appended memory fragment and watermark to ${streamPath}` }],

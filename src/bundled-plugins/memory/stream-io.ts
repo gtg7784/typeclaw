@@ -1,5 +1,5 @@
 import { readFile, appendFile, readdir, stat, writeFile, rename } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
 import { streamsDir } from './paths'
@@ -7,6 +7,11 @@ import { parseEventLine, type FragmentEvent, type StreamEvent } from './stream-e
 
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
+
+export type FragmentsAppendedContext = {
+  path: string
+  date: string | null
+}
 
 // Per-file event cache. `(mtimeMs, ctimeMs, size)` is the invalidation key,
 // mirroring `load-shards.ts`'s shard cache. The three writers in this module
@@ -107,7 +112,8 @@ export function __resetStreamFileCacheForTests(): void {
 export async function appendEvents(
   path: string,
   events: readonly StreamEvent[],
-  onFragmentsAppended?: (fragments: FragmentEvent[]) => Promise<void>,
+  onFragmentsAppended?: (fragments: FragmentEvent[], context: FragmentsAppendedContext) => Promise<void>,
+  onHookError?: (err: unknown) => void,
 ): Promise<void> {
   if (events.length === 0) return
   const joined = events.map((e) => `${JSON.stringify(e)}\n`).join('')
@@ -115,7 +121,18 @@ export async function appendEvents(
   if (onFragmentsAppended === undefined) return
 
   const fragments = events.filter((event): event is FragmentEvent => event.type === 'fragment')
-  if (fragments.length > 0) await onFragmentsAppended(fragments)
+  if (fragments.length === 0) return
+
+  const context: FragmentsAppendedContext = { path, date: streamDateFromPath(path) }
+  try {
+    await onFragmentsAppended(fragments, context)
+  } catch (err) {
+    onHookError?.(err)
+  }
+}
+
+function streamDateFromPath(path: string): string | null {
+  return STREAM_DATE_FROM_FILENAME.exec(basename(path))?.[1] ?? null
 }
 
 export async function writeEventsAtomic(path: string, events: readonly StreamEvent[]): Promise<void> {

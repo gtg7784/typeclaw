@@ -64,6 +64,52 @@ describe('vector session.turn.start hook', () => {
       '## Retrieved memory\n\n### Second Topic\n\nSecond topic excerpt from vector retrieval.',
     )
   })
+
+  test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
+    const memoryPlugin = (await import('./index')).default
+    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
+    if (!parsed.success) throw new Error(parsed.error.message)
+    const ctx = createPluginContext({
+      name: 'memory',
+      version: undefined,
+      agentDir,
+      config: parsed.data,
+      logger: createPluginLogger('memory'),
+      permissions: noopPermissionService,
+      spawnSubagent: async () => {},
+      isBooted: () => true,
+    })
+    const exports = await memoryPlugin.plugin(ctx)
+
+    expect(exports.subagents).toBeDefined()
+    expect(exports.subagents!['memory-logger']).toBeDefined()
+    const memoryLoggerSubagent = exports.subagents!['memory-logger']!
+    expect(memoryLoggerSubagent.customTools).toBeDefined()
+    expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
+  })
+
+  test('memory-logger subagent is created without onFragmentsAppended hook when vector.enabled is false', async () => {
+    const memoryPlugin = (await import('./index')).default
+    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: false } })
+    if (!parsed.success) throw new Error(parsed.error.message)
+    const ctx = createPluginContext({
+      name: 'memory',
+      version: undefined,
+      agentDir,
+      config: parsed.data,
+      logger: createPluginLogger('memory'),
+      permissions: noopPermissionService,
+      spawnSubagent: async () => {},
+      isBooted: () => true,
+    })
+    const exports = await memoryPlugin.plugin(ctx)
+
+    expect(exports.subagents).toBeDefined()
+    expect(exports.subagents!['memory-logger']).toBeDefined()
+    const memoryLoggerSubagent = exports.subagents!['memory-logger']!
+    expect(memoryLoggerSubagent.customTools).toBeDefined()
+    expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
+  })
 })
 
 async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {

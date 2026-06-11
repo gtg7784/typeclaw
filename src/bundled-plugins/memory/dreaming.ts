@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { z } from 'zod'
 
@@ -19,12 +19,16 @@ import {
   loadDreamingState,
   saveDreamingState,
 } from './dreaming-state'
+import { fragmentContentHash } from './fragment-parser'
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
-import { listShardSlugs, loadAllShards } from './load-shards'
+import { listShardSlugs, loadAllShards, loadShard } from './load-shards'
 import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
+import { embed, MODEL_NAME } from './vector/embedder'
+import type { EmbedFn } from './vector/hybrid'
+import { VectorStore } from './vector/store'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
@@ -137,6 +141,7 @@ export type CompactionStats = {
   filesCompacted: number
   watermarksDropped: number
   fragmentsDropped: number
+  droppedFragmentIds: string[]
 }
 
 export type CompactionOptions = {
@@ -179,7 +184,12 @@ export async function compactDailyStreams(
   touchedDates: readonly string[],
   options: CompactionOptions,
 ): Promise<CompactionStats> {
-  const stats: CompactionStats = { filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 }
+  const stats: CompactionStats = {
+    filesCompacted: 0,
+    watermarksDropped: 0,
+    fragmentsDropped: 0,
+    droppedFragmentIds: [],
+  }
   const useLegacyFlatStreams = !existsSync(streamsDir(agentDir))
 
   for (const date of touchedDates) {
@@ -212,6 +222,7 @@ export async function compactDailyStreams(
       if (event.type === 'fragment') {
         if (options.applyFragmentGc && dreamedIds.has(event.id) && !citedIds.has(event.id)) {
           fragmentsDropped++
+          stats.droppedFragmentIds.push(`${date}#${event.id}`)
           continue
         }
         kept.push(event)
@@ -229,6 +240,63 @@ export async function compactDailyStreams(
   }
 
   return stats
+}
+
+export async function syncTopicVectorsFromSnapshotDiff(
+  agentDir: string,
+  snapshotBefore: ReadonlyMap<string, Buffer>,
+  snapshotAfter: ReadonlyMap<string, Buffer>,
+  embedFn: EmbedFn = embed,
+): Promise<void> {
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  if (!existsSync(dbPath)) return
+
+  const store = VectorStore.open(dbPath)
+  try {
+    for (const [path, afterBuf] of snapshotAfter) {
+      const beforeBuf = snapshotBefore.get(path)
+      if (beforeBuf !== undefined && beforeBuf.equals(afterBuf)) continue
+
+      const slug = slugFromSnapshotPath(path)
+      const shard = await loadShard(agentDir, slug)
+      if (shard === null) continue
+      const text = `${shard.frontmatter.heading}\n${shard.body}`
+      const [embedding] = await embedFn([text], 'passage')
+      if (embedding === undefined) continue
+      store.upsert({
+        id: `topic:${slug}`,
+        source: 'topic',
+        key: slug,
+        model: MODEL_NAME,
+        dims: embedding.length,
+        embedding,
+        contentHash: fragmentContentHash({ topic: shard.frontmatter.heading, body: shard.body }),
+      })
+    }
+
+    for (const path of snapshotBefore.keys()) {
+      if (!snapshotAfter.has(path)) store.delete(`topic:${slugFromSnapshotPath(path)}`)
+    }
+  } finally {
+    store.close()
+  }
+}
+
+function slugFromSnapshotPath(path: string): string {
+  return basename(path, '.md')
+}
+
+function deleteStreamVectorsForDroppedFragments(agentDir: string, droppedFragmentIds: readonly string[]): void {
+  if (droppedFragmentIds.length === 0) return
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  if (!existsSync(dbPath)) return
+
+  const store = VectorStore.open(dbPath)
+  try {
+    store.deleteMany(droppedFragmentIds.map((fragmentId) => `stream:${fragmentId}`))
+  } finally {
+    store.close()
+  }
 }
 
 const EMPTY_ID_SET: ReadonlySet<string> = new Set()
@@ -928,11 +996,13 @@ const dreamingDeleteTopicShardTool = defineTool({
 export type CreateDreamingSubagentOptions = {
   commitMemory?: (cwd: string) => Promise<void>
   logger?: DreamingLogger
+  vectorEmbedFn?: EmbedFn
 }
 
 export function createDreamingSubagent(options: CreateDreamingSubagentOptions = {}): Subagent<DreamingPayload> {
   const commit = options.commitMemory ?? commitMemorySnapshot
   const logger = options.logger ?? consoleLogger
+  const vectorEmbedFn = options.vectorEmbedFn ?? embed
 
   return {
     systemPrompt: DREAMING_SYSTEM_PROMPT,
@@ -1009,7 +1079,20 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         }
       }
 
-      if (shardsRewrittenThisRun) await recomputeFrontmatterForAllShards(ctx.payload.agentDir, logger)
+      if (shardsRewrittenThisRun) {
+        await recomputeFrontmatterForAllShards(ctx.payload.agentDir, logger)
+        const snapshotAfterFrontmatter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+        await syncTopicVectorsFromSnapshotDiff(
+          ctx.payload.agentDir,
+          snapshotBefore,
+          snapshotAfterFrontmatter,
+          vectorEmbedFn,
+        ).catch((err: unknown) => {
+          logger.warn(
+            `[dreaming] vector topic sync failed (index will be repaired on next startup): ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
+      }
 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
@@ -1027,6 +1110,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
           `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped} fragment_gc=${shardsRewrittenThisRun ? 'on' : 'off'}`,
         )
       }
+      deleteStreamVectorsForDroppedFragments(ctx.payload.agentDir, compaction.droppedFragmentIds)
 
       try {
         await commit(ctx.payload.agentDir)

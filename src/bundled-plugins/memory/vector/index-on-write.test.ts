@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fragmentContentHash } from '../fragment-parser'
 import { streamFilePath } from '../paths'
 import type { FragmentEvent, WatermarkEvent } from '../stream-events'
-import { appendEvents } from '../stream-io'
+import { appendEvents, readEvents } from '../stream-io'
 import type { EmbedFn } from './hybrid'
 import { makeAppendHook } from './index-on-write'
 import { VectorStore } from './store'
@@ -35,8 +35,9 @@ describe('makeAppendHook', () => {
 
     try {
       const hook = makeAppendHook(store, embedFn)
-      await appendEvents(streamFilePath(agentDir, '2026-06-11'), [fragment, watermark], hook)
-      await appendEvents(streamFilePath(agentDir, '2026-06-11'), [watermarkEvent('watermark-2')], hook)
+      const streamPath = streamFilePath(agentDir, '2026-06-11')
+      await appendEvents(streamPath, [fragment, watermark], hook)
+      await appendEvents(streamPath, [watermarkEvent('watermark-2')], hook)
 
       const [row] = store.getByIds(['stream:2026-06-11#frag-1'])
       expect(row?.source).toBe('stream')
@@ -59,13 +60,54 @@ describe('makeAppendHook', () => {
 
     try {
       const hook = makeAppendHook(store, embedFn)
-      await appendEvents(streamFilePath(agentDir, '2026-06-11'), [fragment], hook)
+      const streamPath = streamFilePath(agentDir, '2026-06-11')
+      await appendEvents(streamPath, [fragment], hook)
       const updatedAt = store.getByIds(['stream:2026-06-11#same'])[0]?.updatedAt
 
-      await appendEvents(streamFilePath(agentDir, '2026-06-11'), [fragment], hook)
+      await appendEvents(streamPath, [fragment], hook)
 
       expect(store.getByIds(['stream:2026-06-11#same'])[0]?.updatedAt).toBe(updatedAt)
       expect(embedCalls).toBe(1)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('QA 2.1b: throwing hook preserves JSONL append and calls onHookError', async () => {
+    const { agentDir, store } = await createFixture()
+    const fragment = fragmentEvent('frag-throw')
+    const watermark = watermarkEvent('watermark-throw')
+    let hookErrorCalled = false
+    let capturedError: unknown = null
+    const embedFn: EmbedFn = async () => {
+      return [vector({ 0: 1 })]
+    }
+
+    try {
+      const hook = makeAppendHook(store, embedFn)
+      const streamPath = streamFilePath(agentDir, '2026-06-11')
+
+      // Wrap the hook to throw an error
+      const throwingHook = async (frags: FragmentEvent[], context: any) => {
+        await hook(frags, context)
+        throw new Error('Simulated hook failure')
+      }
+
+      // Call appendEvents with onHookError callback
+      await appendEvents(streamPath, [fragment, watermark], throwingHook, (err) => {
+        hookErrorCalled = true
+        capturedError = err
+      })
+
+      // Verify JSONL was appended despite hook error
+      const events = await readEvents(streamPath)
+      expect(events.some((e) => e.type === 'fragment' && e.id === 'frag-throw')).toBe(true)
+      expect(events.some((e) => e.type === 'watermark' && e.id === 'watermark-throw')).toBe(true)
+
+      // Verify onHookError was called with the error
+      expect(hookErrorCalled).toBe(true)
+      expect(capturedError).toBeInstanceOf(Error)
+      expect((capturedError as Error).message).toBe('Simulated hook failure')
     } finally {
       store.close()
     }

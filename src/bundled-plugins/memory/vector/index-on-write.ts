@@ -1,5 +1,6 @@
 import { fragmentContentHash } from '../fragment-parser'
 import type { FragmentEvent } from '../stream-events'
+import type { FragmentsAppendedContext } from '../stream-io'
 import { embed, MODEL_NAME } from './embedder'
 import type { EmbedFn } from './hybrid'
 import type { VectorStore } from './store'
@@ -7,10 +8,10 @@ import type { VectorStore } from './store'
 export function makeAppendHook(
   store: VectorStore,
   embedFn: EmbedFn = embed,
-): (fragments: FragmentEvent[]) => Promise<void> {
-  return async (fragments) => {
+): (fragments: FragmentEvent[], context: FragmentsAppendedContext) => Promise<void> {
+  return async (fragments, context) => {
     for (const fragment of fragments) {
-      const key = streamKey(fragment)
+      const key = `${context.date ?? fragment.ts.slice(0, 10)}#${fragment.id}`
       const id = `stream:${key}`
       const contentHash = fragmentContentHash(fragment)
       const existing = store.getByIds([id])[0]
@@ -30,8 +31,4 @@ export function makeAppendHook(
       })
     }
   }
-}
-
-function streamKey(fragment: FragmentEvent): string {
-  return `${fragment.ts.slice(0, 10)}#${fragment.id}`
 }
