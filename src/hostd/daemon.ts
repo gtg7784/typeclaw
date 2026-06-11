@@ -61,6 +61,7 @@ export type DaemonOptions = {
   // deregister. Omit to disable in tests / when the agent has no kakaotalk
   // channel configured.
   kakaoRenewal?: KakaoRenewalCallbacks
+  provisionModels?: boolean
 }
 
 export type RestartPreflight = (input: {
@@ -224,9 +225,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   const log = opts.onLog ?? (() => {})
-  void ensureModels().catch((error: unknown) => {
-    log({ kind: 'daemon-model-provision-warning', reason: stringifyError(error) })
-  })
+  if (opts.provisionModels ?? process.env.NODE_ENV !== 'test') {
+    void ensureModels().catch((error: unknown) => {
+      log({ kind: 'daemon-model-provision-warning', reason: stringifyError(error) })
+    })
+  }
   const exec = opts.exec ?? defaultDockerExec
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
