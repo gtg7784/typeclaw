@@ -146,13 +146,13 @@ describe('displayWidth', () => {
     expect(displayWidth('abc')).toBe(3)
   })
 
-  test('counts CJK ideographs as two columns each', () => {
-    expect(displayWidth('김철수')).toBe(6)
-    expect(displayWidth('日本語')).toBe(6)
+  test('counts CJK ideographs as 1.7 columns each', () => {
+    expect(displayWidth('김철수')).toBeCloseTo(5.1)
+    expect(displayWidth('日本語')).toBeCloseTo(5.1)
   })
 
-  test('counts emoji as two columns', () => {
-    expect(displayWidth('✅')).toBe(2)
+  test('counts emoji as 1.7 columns', () => {
+    expect(displayWidth('✅')).toBeCloseTo(1.7)
   })
 
   test('ignores zero-width and combining marks', () => {
@@ -161,30 +161,78 @@ describe('displayWidth', () => {
   })
 
   test('mixes widths additively', () => {
-    expect(displayWidth('a김b')).toBe(4)
+    expect(displayWidth('a김b')).toBeCloseTo(3.7)
   })
 })
 
 describe('convertDiscordTables — wide-character alignment', () => {
+  // CJK glyphs are 1.7 visual units but padding inserts whole spaces, so rows
+  // can no longer be EXACTLY equal width — they are apportioned to within ~1
+  // visual unit of each other (see computePads). Assert that bound, not equality.
+  const visualWidth = (line: string) =>
+    displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+
   test('aligns columns by VISUAL width, not code-unit length', () => {
     const input = ['| name | status |', '|------|--------|', '| 김철수 | ✅ ok |', '| bob | done |'].join('\n')
 
-    const lines = convertDiscordTables(input).split('\n')
-    const visualWidth = (line: string) =>
-      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
-
-    const widths = lines.map(visualWidth)
-    expect(new Set(widths).size).toBe(1)
+    const widths = convertDiscordTables(input).split('\n').map(visualWidth)
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1 + 1e-9)
   })
 
   test('a CJK cell wider than its header still aligns the body', () => {
     const input = ['| id | n |', '|----|---|', '| 1 | 김철수 |', '| 22 | x |'].join('\n')
 
-    const lines = convertDiscordTables(input).split('\n')
-    const visualWidth = (line: string) =>
-      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+    const widths = convertDiscordTables(input).split('\n').map(visualWidth)
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1 + 1e-9)
+  })
 
-    const widths = lines.map(visualWidth)
-    expect(new Set(widths).size).toBe(1)
+  test('does not over-pad a CJK column the way the old 2.0 model did', () => {
+    // Over-padding shows up on the LATIN cell that must catch up to the CJK
+    // column max, not on the CJK cell itself (which is the max and gets no
+    // padding either way). A second column forces the table to convert and gives
+    // the latin "label" cell a boundary to pad against. 가나다라마 (5 Hangul) is
+    // the col-0 max — 5 * 1.7 = 8.5 → "label" pads to a 9-cell slot, then the
+    // 2-space separator puts column 1 at offset 11. The old 2.0 model sized that
+    // column at 10, so column 1 would have started at 12; assert it is earlier.
+    const input = ['| label | n |', '|-------|---|', '| 가나다라마 | x |'].join('\n')
+    const header = convertDiscordTables(input).split('\n')[0]!
+    const inner = header.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, '')
+    const col1Start = displayWidth(inner.slice(0, inner.indexOf('n')))
+    expect(col1Start).toBeLessThan(12)
+  })
+
+  test('keeps every column START aligned across rows, not just total row width', () => {
+    // Matching total row width can hide a drifted column boundary: a row may
+    // spend its extra space in an early column while another spends it late.
+    // Distinct cell tokens let us locate each column's start and measure the
+    // visual offset before it — these must agree within one cell across rows.
+    const rows = [
+      ['목적', '추천', '이유'],
+      ['힐링 안전', 'a', '4가지 조건'],
+      ['x', '나가사키', 'y'],
+      ['bob', 'osaka', 'cheap'],
+    ]
+    const input = [
+      `| ${rows[0]!.join(' | ')} |`,
+      '|---|---|---|',
+      ...rows.slice(1).map((r) => `| ${r.join(' | ')} |`),
+    ].join('\n')
+
+    const lines = convertDiscordTables(input).split('\n')
+    const strip = (line: string) => line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, '')
+
+    const startOffsets = (columnIndex: number) =>
+      lines.map((line, rowIndex) => {
+        const inner = strip(line)
+        const token = rows[rowIndex]![columnIndex]!
+        const at = inner.indexOf(token)
+        expect(at).toBeGreaterThanOrEqual(0)
+        return displayWidth(inner.slice(0, at))
+      })
+
+    for (let c = 0; c < rows[0]!.length; c++) {
+      const offsets = startOffsets(c)
+      expect(Math.max(...offsets) - Math.min(...offsets)).toBeLessThanOrEqual(1 + 1e-9)
+    }
   })
 })
