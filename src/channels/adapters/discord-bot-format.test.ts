@@ -146,13 +146,13 @@ describe('displayWidth', () => {
     expect(displayWidth('abc')).toBe(3)
   })
 
-  test('counts CJK ideographs as two columns each', () => {
-    expect(displayWidth('김철수')).toBe(6)
-    expect(displayWidth('日本語')).toBe(6)
+  test('counts CJK ideographs as 1.7 columns each', () => {
+    expect(displayWidth('김철수')).toBeCloseTo(5.1)
+    expect(displayWidth('日本語')).toBeCloseTo(5.1)
   })
 
-  test('counts emoji as two columns', () => {
-    expect(displayWidth('✅')).toBe(2)
+  test('counts emoji as 1.7 columns', () => {
+    expect(displayWidth('✅')).toBeCloseTo(1.7)
   })
 
   test('ignores zero-width and combining marks', () => {
@@ -161,30 +161,38 @@ describe('displayWidth', () => {
   })
 
   test('mixes widths additively', () => {
-    expect(displayWidth('a김b')).toBe(4)
+    expect(displayWidth('a김b')).toBeCloseTo(3.7)
   })
 })
 
 describe('convertDiscordTables — wide-character alignment', () => {
+  // CJK glyphs are 1.7 visual units but padding inserts whole spaces, so rows
+  // can no longer be EXACTLY equal width — they are apportioned to within ~1
+  // visual unit of each other (see computePads). Assert that bound, not equality.
+  const visualWidth = (line: string) =>
+    displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+
   test('aligns columns by VISUAL width, not code-unit length', () => {
     const input = ['| name | status |', '|------|--------|', '| 김철수 | ✅ ok |', '| bob | done |'].join('\n')
 
-    const lines = convertDiscordTables(input).split('\n')
-    const visualWidth = (line: string) =>
-      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
-
-    const widths = lines.map(visualWidth)
-    expect(new Set(widths).size).toBe(1)
+    const widths = convertDiscordTables(input).split('\n').map(visualWidth)
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1 + 1e-9)
   })
 
   test('a CJK cell wider than its header still aligns the body', () => {
     const input = ['| id | n |', '|----|---|', '| 1 | 김철수 |', '| 22 | x |'].join('\n')
 
-    const lines = convertDiscordTables(input).split('\n')
-    const visualWidth = (line: string) =>
-      displayWidth(line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, ''))
+    const widths = convertDiscordTables(input).split('\n').map(visualWidth)
+    expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1 + 1e-9)
+  })
 
-    const widths = lines.map(visualWidth)
-    expect(new Set(widths).size).toBe(1)
+  test('does not over-pad pure-CJK columns the way the old 2.0 model did', () => {
+    // 가나다라마 (5 Hangul) = 8.5 units; the latin header "label" = 5 units.
+    // The CJK cell is the column max, so it gets no padding; "label" pads up to
+    // ~8.5 → 9 chars total. Under the old 2.0 model the column was 10 wide.
+    const input = ['| label |', '|-------|', '| 가나다라마 |'].join('\n')
+    const bodyLine = convertDiscordTables(input).split('\n')[1]!
+    const bodyWidth = visualWidth(bodyLine)
+    expect(bodyWidth).toBeLessThanOrEqual(9)
   })
 })

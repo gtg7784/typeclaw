@@ -88,37 +88,62 @@ function splitRow(row: string): string[] {
 }
 
 function computeWidths(rows: string[][]): number[] {
-  const widths: number[] = []
-  for (const row of rows) {
-    for (let c = 0; c < row.length; c++) {
-      const cellWidth = displayWidth(row[c]!)
-      if (widths[c] === undefined || cellWidth > widths[c]!) {
-        widths[c] = cellWidth
-      }
-    }
-  }
-  return widths
+  const columnCount = Math.max(0, ...rows.map((row) => row.length))
+  return Array.from({ length: columnCount }, (_, c) => Math.max(0, ...rows.map((row) => displayWidth(row[c] ?? ''))))
 }
 
 function padRow(cells: string[], widths: number[]): string {
-  const padded = widths.map((width, c) => padToWidth(cells[c] ?? '', width))
+  const pads = computePads(cells, widths)
   // Two spaces between columns keeps them visually distinct inside the
   // monospaced span without a vertical-bar separator.
-  return padded.join('  ')
+  return widths.map((_, c) => (cells[c] ?? '') + ' '.repeat(pads[c]!)).join('  ')
 }
 
-function padToWidth(cell: string, width: number): string {
-  const pad = width - displayWidth(cell)
-  return pad > 0 ? cell + ' '.repeat(pad) : cell
+// Column widths are fractional (a CJK glyph is 1.7), but padding inserts whole
+// spaces. Rounding each cell's deficit independently lets per-row rounding error
+// accumulate, so rows drift apart. Instead we round the ROW's total deficit once
+// and hand out the integer spaces by largest fractional remainder (Hamilton
+// apportionment). This bounds every rendered row to within 0.5 visual units of
+// the ideal width, so any two rows differ by at most ~1 space — the tightest
+// alignment achievable with whole-space padding.
+const REMAINDER_EPSILON = 1e-9
+
+function computePads(cells: string[], widths: number[]): number[] {
+  const deficits = widths.map((width, c) => Math.max(0, width - displayWidth(cells[c] ?? '')))
+  const basePads = deficits.map((d) => Math.floor(d))
+  const baseTotal = basePads.reduce((sum, p) => sum + p, 0)
+  const desiredTotal = Math.round(deficits.reduce((sum, d) => sum + d, 0))
+
+  let extras = desiredTotal - baseTotal
+  const byRemainder = deficits
+    .map((d, index) => ({ index, remainder: d - Math.floor(d) }))
+    .filter((item) => item.remainder > REMAINDER_EPSILON)
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index)
+
+  const pads = [...basePads]
+  for (const { index } of byRemainder) {
+    if (extras <= 0) break
+    pads[index]!++
+    extras--
+  }
+  return pads
 }
 
 // Discord's monospaced inline-code font renders CJK ideographs, full-width
-// punctuation, and most emoji at two columns, while combining/zero-width marks
-// take none. `String.prototype.padEnd` counts UTF-16 code units, so padding by
-// `.length` leaves wide-character tables visually ragged. We iterate by code
-// point and sum per-glyph column widths so every cell pads to the same VISUAL
-// width. The ranges below are the standard East-Asian-Wide / Wide blocks plus
-// the common emoji planes; this is the same wcwidth approximation editors use.
+// punctuation, and most emoji WIDER than a latin glyph, while combining/
+// zero-width marks take none. `String.prototype.padEnd` counts UTF-16 code
+// units, so padding by `.length` leaves wide-character tables visually ragged.
+// We iterate by code point and sum per-glyph column widths so every cell pads
+// to (near) the same VISUAL width. The ranges below are the standard
+// East-Asian-Wide / Wide blocks plus the common emoji planes.
+//
+// The wide multiplier is 1.7, not the textbook wcwidth value of 2: Discord's
+// proportional code font renders a Hangul/CJK glyph at roughly 1.7x a latin
+// monospace cell, so charging 2 over-pads CJK columns and leaves them visibly
+// too wide. Because `displayWidth` is now fractional, padding (which can only
+// insert whole spaces) is apportioned at the row level — see `padRow`.
+const WIDE_CHAR_WIDTH = 1.7
+
 export function displayWidth(text: string): number {
   let width = 0
   for (const ch of text) {
@@ -129,7 +154,7 @@ export function displayWidth(text: string): number {
 
 function charWidth(cp: number): number {
   if (isZeroWidth(cp)) return 0
-  if (isWide(cp)) return 2
+  if (isWide(cp)) return WIDE_CHAR_WIDTH
   return 1
 }
 
