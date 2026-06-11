@@ -7,7 +7,7 @@ import type { LineLoginResult } from 'agent-messenger/line'
 
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
 
-import { runLineBootstrap, type LineLoginClient } from './line-auth'
+import { lineConfigDir, runLineBootstrap, type LineLoginClient } from './line-auth'
 
 async function withDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'typeclaw-line-auth-'))
@@ -39,6 +39,27 @@ function fakeClient(agentDir: string, result: LineLoginResult): LineLoginClient 
     loginWithQR: persist,
     loginWithEmail: persist,
   }
+}
+
+// Like fakeClient, but invokes `onLogin` synchronously inside the login call so
+// a test can observe process state (e.g. AGENT_MESSENGER_CONFIG_DIR) while the
+// SDK would be constructing its storage.
+function observingClient(agentDir: string, result: LineLoginResult, onLogin: () => void): LineLoginClient {
+  const store = new SecretsLineCredentialStore({ mode: 'host', secretsPath: join(agentDir, 'secrets.json') })
+  const persist = async (): Promise<LineLoginResult> => {
+    onLogin()
+    if (result.authenticated && result.account_id !== undefined) {
+      await store.setAccount({
+        account_id: result.account_id,
+        auth_token: 'persisted-token',
+        device: 'DESKTOPMAC',
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      })
+    }
+    return result
+  }
+  return { loginWithQR: persist, loginWithEmail: persist }
 }
 
 // Models an SDK that authenticates but never calls setAccount() — nothing
@@ -117,6 +138,86 @@ function throwingLoggingClient(): LineLoginClient {
 }
 
 describe('runLineBootstrap', () => {
+  test('points the SDK E2EE storage at the agent workspace during login, then restores the env', async () => {
+    await withDir(async (dir) => {
+      const saved = process.env.AGENT_MESSENGER_CONFIG_DIR
+      delete process.env.AGENT_MESSENGER_CONFIG_DIR
+      try {
+        let duringLogin: string | undefined
+        await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: observingClient(dir, { authenticated: true, account_id: 'mid-cfg' }, () => {
+            duringLogin = process.env.AGENT_MESSENGER_CONFIG_DIR
+          }),
+        })
+        // set for the SDK during login...
+        expect(duringLogin ?? '').toBe(lineConfigDir(dir))
+        // ...and restored afterward so it cannot leak into a later bootstrap
+        expect(process.env.AGENT_MESSENGER_CONFIG_DIR).toBeUndefined()
+      } finally {
+        if (saved === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+        else process.env.AGENT_MESSENGER_CONFIG_DIR = saved
+      }
+    })
+  })
+
+  test('does not let a second bootstrap inherit the first agent dir', async () => {
+    await withDir(async (dirA) => {
+      await withDir(async (dirB) => {
+        const saved = process.env.AGENT_MESSENGER_CONFIG_DIR
+        delete process.env.AGENT_MESSENGER_CONFIG_DIR
+        try {
+          await runLineBootstrap({
+            method: 'qr',
+            agentDir: dirA,
+            callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+            client: fakeClient(dirA, { authenticated: true, account_id: 'mid-a' }),
+          })
+
+          let duringSecond: string | undefined
+          await runLineBootstrap({
+            method: 'qr',
+            agentDir: dirB,
+            callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+            client: observingClient(dirB, { authenticated: true, account_id: 'mid-b' }, () => {
+              duringSecond = process.env.AGENT_MESSENGER_CONFIG_DIR
+            }),
+          })
+          // the second bootstrap uses its OWN agent dir, not the first's
+          expect(duringSecond ?? '').toBe(lineConfigDir(dirB))
+        } finally {
+          if (saved === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+          else process.env.AGENT_MESSENGER_CONFIG_DIR = saved
+        }
+      })
+    })
+  })
+
+  test('does not override an already-set config dir (container stage owns it)', async () => {
+    await withDir(async (dir) => {
+      const saved = process.env.AGENT_MESSENGER_CONFIG_DIR
+      process.env.AGENT_MESSENGER_CONFIG_DIR = '/agent/workspace/.agent-messenger'
+      try {
+        let duringLogin: string | undefined
+        await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: observingClient(dir, { authenticated: true, account_id: 'mid-cfg2' }, () => {
+            duringLogin = process.env.AGENT_MESSENGER_CONFIG_DIR
+          }),
+        })
+        expect(duringLogin ?? '').toBe('/agent/workspace/.agent-messenger')
+        expect(process.env.AGENT_MESSENGER_CONFIG_DIR ?? '').toBe('/agent/workspace/.agent-messenger')
+      } finally {
+        if (saved === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+        else process.env.AGENT_MESSENGER_CONFIG_DIR = saved
+      }
+    })
+  })
+
   test('persists the account and sets it current on a successful QR login', async () => {
     await withDir(async (dir) => {
       const status = await runLineBootstrap({

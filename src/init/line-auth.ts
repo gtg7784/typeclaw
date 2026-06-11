@@ -50,30 +50,49 @@ export function lineSecretsPath(agentDir: string): string {
   return join(agentDir, 'secrets.json')
 }
 
+// The SDK persists E2EE (Letter-Sealing) key material under
+// `<AGENT_MESSENGER_CONFIG_DIR>/line-storage/`. The container sets that env to
+// the agent workspace (src/init/dockerfile.ts), but a host-stage login (init /
+// `channel reauth line`) would otherwise fall back to `~/.config/agent-messenger`
+// — so the E2EE key gets written somewhere the container never reads, and inbound
+// Letter-Sealing messages stay undecryptable. Point the host login at the same
+// per-agent dir the container uses so the key lands where the runtime reads it.
+export function lineConfigDir(agentDir: string): string {
+  return join(agentDir, 'workspace', '.agent-messenger')
+}
+
 export async function runLineBootstrap(input: LineLoginInput): Promise<LineBootstrapStatus> {
   try {
     const store = new SecretsLineCredentialStore({ mode: 'host', secretsPath: lineSecretsPath(input.agentDir) })
-    // The LINE SDK persists the minted auth_token + certificate by calling
-    // setAccount() on whatever credential manager the client was built with.
-    // Wiring our secrets.json-backed store in here means a successful login
-    // writes straight to secrets.json#channels.line — no second copy in
-    // ~/.config/agent-messenger to keep in sync.
-    const client = input.client ?? buildLineClient(store)
 
-    const result = await suppressLineTokenInfoDump(() =>
-      input.method === 'qr'
-        ? client.loginWithQR({
-            onQRUrl: async (url) => {
-              await input.callbacks.onQRUrl?.(url)
-            },
-            onPincode: input.callbacks.onPincode,
-          })
-        : client.loginWithEmail({
-            email: input.email,
-            password: input.password,
-            onPincode: input.callbacks.onPincode,
-          }),
-    )
+    // The env is set only for the duration of client construction + login (when
+    // the SDK reads it to locate line-storage) and restored after, so a second
+    // bootstrap for a different agent in the same process can't inherit the
+    // first agent's path. An already-set value (the container's Dockerfile env)
+    // is left untouched.
+    const result = await withLineConfigDir(lineConfigDir(input.agentDir), () => {
+      // The LINE SDK persists the minted auth_token + certificate by calling
+      // setAccount() on whatever credential manager the client was built with.
+      // Wiring our secrets.json-backed store in here means a successful login
+      // writes straight to secrets.json#channels.line — no second copy in
+      // ~/.config/agent-messenger to keep in sync.
+      const client = input.client ?? buildLineClient(store)
+
+      return suppressLineTokenInfoDump(() =>
+        input.method === 'qr'
+          ? client.loginWithQR({
+              onQRUrl: async (url) => {
+                await input.callbacks.onQRUrl?.(url)
+              },
+              onPincode: input.callbacks.onPincode,
+            })
+          : client.loginWithEmail({
+              email: input.email,
+              password: input.password,
+              onPincode: input.callbacks.onPincode,
+            }),
+      )
+    })
 
     if (!result.authenticated || result.account_id === undefined) {
       const reason = result.message ?? result.error ?? 'LINE login did not authenticate'
@@ -103,6 +122,16 @@ function buildLineClient(store: SecretsLineCredentialStore): LineLoginClient {
   // calls, so it stands in as the credential manager via a structural cast.
   const credManager = store as unknown as LineCredentialManager
   return new RealLineClient(credManager) as unknown as LineLoginClient
+}
+
+async function withLineConfigDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.AGENT_MESSENGER_CONFIG_DIR
+  if (previous === undefined) process.env.AGENT_MESSENGER_CONFIG_DIR = dir
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+  }
 }
 
 async function suppressLineTokenInfoDump<T>(fn: () => Promise<T>): Promise<T> {
