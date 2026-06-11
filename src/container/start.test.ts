@@ -314,7 +314,7 @@ describe('planStart', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    const mirrorMounts = plan.runArgs.filter((a) => a.endsWith(':ro'))
+    const mirrorMounts = plan.runArgs.filter((a) => a.endsWith(':ro') && !a.includes('/opt/models'))
     expect(mirrorMounts).toHaveLength(0)
   })
 
@@ -324,7 +324,7 @@ describe('planStart', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs.filter((a) => a.endsWith(':ro'))).toHaveLength(0)
+    expect(plan.runArgs.filter((a) => a.endsWith(':ro') && !a.includes('/opt/models'))).toHaveLength(0)
   })
 
   test('reports needsBuild based on imageExists input', async () => {
@@ -490,6 +490,40 @@ describe('planStart mounts', () => {
     await writeTypeclawConfig(root, { mounts: [{ name: 'BadName', path: '/x' }] })
 
     await expect(planStart({ cwd: root, hostPort: 8973, imageExists: true })).rejects.toThrow()
+  })
+})
+
+describe('planStart model mount', () => {
+  test('adds shared model cache mount at /opt/models:ro', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('-v')
+    expect(plan.runArgs).toContain(`${process.env.HOME}/.typeclaw/models:/opt/models:ro`)
+  })
+
+  test('sets TYPECLAW_MODEL_CACHE env var to /opt/models', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('-e')
+    expect(plan.runArgs).toContain('TYPECLAW_MODEL_CACHE=/opt/models')
+  })
+
+  test('model mount appears before imageTag (last positional arg)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
+    const mountIdx = plan.runArgs.indexOf(`${process.env.HOME}/.typeclaw/models:/opt/models:ro`)
+    expect(mountIdx).toBeGreaterThan(-1)
+    expect(mountIdx).toBeLessThan(plan.runArgs.length - 1)
   })
 })
 
