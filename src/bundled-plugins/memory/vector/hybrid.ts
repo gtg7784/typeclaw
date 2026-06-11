@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { fragmentContentHash } from '../fragment-parser'
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
 import type { StreamEvent } from '../stream-events'
@@ -50,7 +51,7 @@ export function findMissingPassages(store: VectorStore, passages: Passage[]): Pa
   const existing = new Map(store.getAll().map((row) => [row.id, row]))
   return passages.filter((passage) => {
     const row = existing.get(passage.id)
-    return row === undefined || row.model !== MODEL_NAME || row.contentHash !== hashContent(passage.text)
+    return row === undefined || row.model !== MODEL_NAME || row.contentHash !== passage.contentHash
   })
 }
 
@@ -136,6 +137,7 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
         source: 'topic',
         key: shard.slug,
         text: `${shard.frontmatter.heading}\n${shard.body}`,
+        contentHash: fragmentContentHash({ topic: shard.frontmatter.heading, body: shard.body }),
       }),
     ),
     ...streamDays.flatMap((day) =>
@@ -143,10 +145,18 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
         if (event.type === 'watermark') return []
         if (event.type === 'fragment') {
           const key = `${day.date}#${event.id}`
-          return [{ id: `stream:${key}`, source: 'stream', key, text: `${event.topic}\n${event.body}` }]
+          return [
+            {
+              id: `stream:${key}`,
+              source: 'stream',
+              key,
+              text: `${event.topic}\n${event.body}`,
+              contentHash: fragmentContentHash(event),
+            },
+          ]
         }
         const key = `${day.date}#legacy-${hashContent(event.text).slice(0, 12)}`
-        return [{ id: `stream:${key}`, source: 'stream', key, text: event.text }]
+        return [{ id: `stream:${key}`, source: 'stream', key, text: event.text, contentHash: hashContent(event.text) }]
       }),
     ),
   ]
@@ -199,4 +209,5 @@ export type Passage = {
   source: 'topic' | 'stream'
   key: string
   text: string
+  contentHash: string
 }

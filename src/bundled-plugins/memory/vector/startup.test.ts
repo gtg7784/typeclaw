@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { syncTopicVectorsFromSnapshotDiff } from '../dreaming'
 import { renderShard } from '../frontmatter'
+import { streamFilePath } from '../paths'
+import type { FragmentEvent } from '../stream-events'
+import { appendEvents } from '../stream-io'
 import type { EmbedFn } from './hybrid'
+import { makeAppendHook } from './index-on-write'
 import { buildStartupVectorIndex } from './startup'
 import { VectorStore } from './store'
 
@@ -62,6 +67,41 @@ describe('buildStartupVectorIndex', () => {
     expect(calls).toBe(1)
   })
 
+  it('does not re-embed passages already indexed by append and dream writers on restart', async () => {
+    const agentDir = createAgentDir()
+    mkdirSync(join(agentDir, 'memory', 'streams'), { recursive: true })
+    const embeddedTexts: string[] = []
+    const embedFn: EmbedFn = async (texts, type) => {
+      expect(type).toBe('passage')
+      embeddedTexts.push(...texts)
+      return texts.map((_, index) => vector({ [index]: 1 }))
+    }
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      await appendEvents(
+        streamFilePath(agentDir, '2026-06-11'),
+        [fragmentEvent('append-frag', 'Append Topic', 'Append body.')],
+        makeAppendHook(store, embedFn),
+      )
+    } finally {
+      store.close()
+    }
+    writeTopic(agentDir, 'dream-topic', 'Dream Topic', 'Dreamed body.')
+    const dreamTopicPath = join(agentDir, 'memory', 'topics', 'dream-topic.md')
+    await syncTopicVectorsFromSnapshotDiff(
+      agentDir,
+      new Map(),
+      new Map([[dreamTopicPath, readFileSync(dreamTopicPath)]]),
+      embedFn,
+    )
+    embeddedTexts.length = 0
+
+    const result = await buildStartupVectorIndex(agentDir, embedFn)
+
+    expect(result).toEqual({ built: false, count: 0 })
+    expect(embeddedTexts).toEqual([])
+  })
+
   it('embeds only missing passages when the startup index is partial', async () => {
     const agentDir = createAgentDir()
     writeTopic(agentDir, 'current-topic', 'Current Topic', 'Already indexed content.')
@@ -106,6 +146,18 @@ function writeFragment(agentDir: string, date: string, id: string, topic: string
     join(agentDir, 'memory', 'streams', `${date}.jsonl`),
     `${JSON.stringify({ type: 'fragment', id, ts: '2026-06-11T00:00:00.000Z', source: 'test', entry: 'test', topic, body })}\n`,
   )
+}
+
+function fragmentEvent(id: string, topic: string, body: string): FragmentEvent {
+  return {
+    type: 'fragment',
+    id,
+    ts: '2026-06-11T00:00:00.000Z',
+    source: 'test',
+    entry: 'test',
+    topic,
+    body,
+  }
 }
 
 function vector(values: Record<number, number>): Float32Array {

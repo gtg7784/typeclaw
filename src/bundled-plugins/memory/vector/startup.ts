@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
 import { MODEL_NAME, embed } from './embedder'
@@ -32,7 +31,7 @@ export async function buildStartupVectorIndex(
         model: MODEL_NAME,
         dims: embedding.length,
         embedding,
-        contentHash: hashContent(passage.text),
+        contentHash: passage.contentHash,
       })
       count += 1
     }
@@ -41,8 +40,4 @@ export async function buildStartupVectorIndex(
   } finally {
     store.close()
   }
-}
-
-function hashContent(content: string): string {
-  return createHash('sha256').update(content).digest('hex')
 }
