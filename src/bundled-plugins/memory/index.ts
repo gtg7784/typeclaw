@@ -18,7 +18,6 @@ import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './pat
 import { memorySearchTool } from './search-tool'
 import { vectorConfigSchema } from './vector/config'
 import { hybridSearch } from './vector/hybrid'
-import { makeAppendHook } from './vector/index-on-write'
 import { VectorStore } from './vector/store'
 
 const DEFAULT_IDLE_MS = 60_000
@@ -299,15 +298,10 @@ export default definePlugin({
       warn: (m: string) => ctx.logger.warn(m),
       error: (m: string) => ctx.logger.error(m),
     }
-    const appendVectorStore = ctx.config.vector.enabled
-      ? VectorStore.open(join(ctx.agentDir, 'memory', '.vectors', 'index.db'))
-      : undefined
-
     return {
       subagents: {
         'memory-logger': createMemoryLoggerSubagent({
           logger: subagentLogger,
-          ...(appendVectorStore !== undefined ? { onFragmentsAppended: makeAppendHook(appendVectorStore) } : {}),
         }),
         'memory-retrieval': createMemoryRetrievalSubagent({
           logger: subagentLogger,
