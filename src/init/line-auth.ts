@@ -50,8 +50,20 @@ export function lineSecretsPath(agentDir: string): string {
   return join(agentDir, 'secrets.json')
 }
 
+// The SDK persists E2EE (Letter-Sealing) key material under
+// `<AGENT_MESSENGER_CONFIG_DIR>/line-storage/`. The container sets that env to
+// the agent workspace (src/init/dockerfile.ts), but a host-stage login (init /
+// `channel reauth line`) would otherwise fall back to `~/.config/agent-messenger`
+// — so the E2EE key gets written somewhere the container never reads, and inbound
+// Letter-Sealing messages stay undecryptable. Point the host login at the same
+// per-agent dir the container uses so the key lands where the runtime reads it.
+export function lineConfigDir(agentDir: string): string {
+  return join(agentDir, 'workspace', '.agent-messenger')
+}
+
 export async function runLineBootstrap(input: LineLoginInput): Promise<LineBootstrapStatus> {
   try {
+    process.env.AGENT_MESSENGER_CONFIG_DIR ??= lineConfigDir(input.agentDir)
     const store = new SecretsLineCredentialStore({ mode: 'host', secretsPath: lineSecretsPath(input.agentDir) })
     // The LINE SDK persists the minted auth_token + certificate by calling
     // setAccount() on whatever credential manager the client was built with.

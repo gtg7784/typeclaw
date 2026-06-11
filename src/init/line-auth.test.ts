@@ -7,7 +7,7 @@ import type { LineLoginResult } from 'agent-messenger/line'
 
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
 
-import { runLineBootstrap, type LineLoginClient } from './line-auth'
+import { lineConfigDir, runLineBootstrap, type LineLoginClient } from './line-auth'
 
 async function withDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'typeclaw-line-auth-'))
@@ -117,6 +117,44 @@ function throwingLoggingClient(): LineLoginClient {
 }
 
 describe('runLineBootstrap', () => {
+  test('points the SDK E2EE storage at the agent workspace when the config dir is unset', async () => {
+    await withDir(async (dir) => {
+      const saved = process.env.AGENT_MESSENGER_CONFIG_DIR
+      delete process.env.AGENT_MESSENGER_CONFIG_DIR
+      try {
+        await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: fakeClient(dir, { authenticated: true, account_id: 'mid-cfg' }),
+        })
+        expect(process.env.AGENT_MESSENGER_CONFIG_DIR ?? '').toBe(lineConfigDir(dir))
+      } finally {
+        if (saved === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+        else process.env.AGENT_MESSENGER_CONFIG_DIR = saved
+      }
+    })
+  })
+
+  test('does not override an already-set config dir (container stage owns it)', async () => {
+    await withDir(async (dir) => {
+      const saved = process.env.AGENT_MESSENGER_CONFIG_DIR
+      process.env.AGENT_MESSENGER_CONFIG_DIR = '/agent/workspace/.agent-messenger'
+      try {
+        await runLineBootstrap({
+          method: 'qr',
+          agentDir: dir,
+          callbacks: { onPincode: () => {}, onQRUrl: () => {} },
+          client: fakeClient(dir, { authenticated: true, account_id: 'mid-cfg2' }),
+        })
+        expect(process.env.AGENT_MESSENGER_CONFIG_DIR ?? '').toBe('/agent/workspace/.agent-messenger')
+      } finally {
+        if (saved === undefined) delete process.env.AGENT_MESSENGER_CONFIG_DIR
+        else process.env.AGENT_MESSENGER_CONFIG_DIR = saved
+      }
+    })
+  })
+
   test('persists the account and sets it current on a successful QR login', async () => {
     await withDir(async (dir) => {
       const status = await runLineBootstrap({
