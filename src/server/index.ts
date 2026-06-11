@@ -760,17 +760,23 @@ export function createServer({
             }
             send(ws, { type: 'prompt_started', messageId: `local-${crypto.randomUUID()}`, text: msg.text })
             const fallbackHooks = state.runtimeSnapshot?.hooks
+            const retrievalContext: { results: string } = { results: '' }
             if (fallbackHooks !== undefined && agentDir !== undefined) {
               await fallbackHooks.runSessionTurnStart({
                 sessionId: state.sessionFileId,
                 agentDir,
                 userPrompt: msg.text,
                 origin: state.origin,
+                retrievalContext,
               })
             }
             state.lastUsage = null
             try {
-              await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${msg.text}`)
+              const turnText =
+                retrievalContext.results.length > 0
+                  ? `${renderTurnTimeAnchor()}\n\n${msg.text}\n\n${retrievalContext.results}`
+                  : `${renderTurnTimeAnchor()}\n\n${msg.text}`
+              await state.session.prompt(turnText)
               send(ws, doneMessage(state))
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err)
@@ -1019,15 +1025,24 @@ function makeIdleHookCaller(state: SessionState): () => Promise<void> {
 function makeTurnHookCallers(
   state: SessionState,
   agentDir: string | undefined,
-): { fireTurnStart: (userPrompt: string) => Promise<void>; fireTurnEnd: () => Promise<void> } {
+): { fireTurnStart: (userPrompt: string) => Promise<{ results: string }>; fireTurnEnd: () => Promise<void> } {
   const hooks: HookBus | undefined = state.runtimeSnapshot?.hooks
   if (hooks === undefined || agentDir === undefined) {
-    return { fireTurnStart: async () => {}, fireTurnEnd: async () => {} }
+    return { fireTurnStart: async () => ({ results: '' }), fireTurnEnd: async () => {} }
   }
   const turnEndEvent = { sessionId: state.sessionFileId, agentDir, origin: state.origin }
   return {
-    fireTurnStart: (userPrompt) =>
-      hooks.runSessionTurnStart({ sessionId: state.sessionFileId, agentDir, userPrompt, origin: state.origin }),
+    fireTurnStart: async (userPrompt) => {
+      const retrievalContext = { results: '' }
+      await hooks.runSessionTurnStart({
+        sessionId: state.sessionFileId,
+        agentDir,
+        userPrompt,
+        origin: state.origin,
+        retrievalContext,
+      })
+      return retrievalContext
+    },
     fireTurnEnd: () => hooks.runSessionTurnEnd(turnEndEvent),
   }
 }
@@ -1058,10 +1073,14 @@ async function drain(
         }).catch((err) => logger.error(`[server] ${state.sessionFileId}: todo turn-start failed: ${describeErr(err)}`))
       }
 
-      await fireTurnStart(item.text)
+      const retrievalContext = await fireTurnStart(item.text)
       state.lastUsage = null
       try {
-        await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${item.text}`)
+        const turnText =
+          retrievalContext.results.length > 0
+            ? `${renderTurnTimeAnchor()}\n\n${item.text}\n\n${retrievalContext.results}`
+            : `${renderTurnTimeAnchor()}\n\n${item.text}`
+        await state.session.prompt(turnText)
         send(ws, doneMessage(state))
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

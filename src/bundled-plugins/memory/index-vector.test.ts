@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,20 +8,19 @@ import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
 import { topicShardPath, topicsDir } from './paths'
-import { buildStartupVectorIndex } from './vector/startup'
 
-mock.module('@huggingface/transformers', () => ({
-  env: {},
-  pipeline: async () => async (texts: string[]) => {
-    const data = new Float32Array(texts.length * 768)
-    for (let i = 0; i < texts.length; i++) {
-      const text = texts[i] ?? ''
-      if (text.includes('slow first prompt')) await Bun.sleep(40)
-      data[i * 768] = text.includes('second prompt') || text.includes('Second Topic') ? 1 : 0
-      data[i * 768 + 1] = text.includes('slow first prompt') || text.includes('First Topic') ? 1 : 0
-    }
-    return { data }
+const hybridSearchMock = mock(async () => [
+  {
+    source: 'topic' as const,
+    key: 'second-topic',
+    heading: 'Second Topic',
+    excerpt: 'Second topic excerpt from vector retrieval.',
+    rrfScore: 1,
   },
+])
+
+mock.module('./vector/hybrid', () => ({
+  hybridSearch: hybridSearchMock,
 }))
 
 let agentDir: string
@@ -35,11 +34,10 @@ afterEach(async () => {
 })
 
 describe('vector session.turn.start hook', () => {
-  test('coalesces overlapping vector retrievals so the in-flight cache write is not invalidated', async () => {
+  test('populates retrieval context synchronously for the current turn', async () => {
     const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
-    await buildStartupVectorIndex(agentDir)
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
@@ -55,23 +53,16 @@ describe('vector session.turn.start hook', () => {
     const exports = await memoryPlugin.plugin(ctx)
 
     const hookCtx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_vector', agentDir, userPrompt: 'slow first prompt' },
-      hookCtx,
-    )
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_vector', agentDir, userPrompt: 'second prompt' },
+      { sessionId: 'ses_vector', agentDir, userPrompt: 'second prompt', retrievalContext },
       hookCtx,
     )
 
-    await waitFor(async () => {
-      const content = await readCache().catch(() => '')
-      return content.includes('First Topic')
-    })
-    await Bun.sleep(80)
-
-    const content = await readCache()
-    expect(content).toStartWith('## First Topic')
+    expect(hybridSearchMock).toHaveBeenCalledWith('second prompt', expect.anything(), agentDir, 10)
+    expect(retrievalContext.results).toBe(
+      '## Retrieved memory\n\n### Second Topic\n\nSecond topic excerpt from vector retrieval.',
+    )
   })
 })
 
@@ -81,17 +72,4 @@ async function writeTopic(dir: string, slug: string, heading: string, body: stri
     topicShardPath(dir, slug),
     renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-06-11' }, body),
   )
-}
-
-async function readCache(): Promise<string> {
-  return readFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_vector.md'), 'utf8')
-}
-
-async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = performance.now() + 5_000
-  while (performance.now() < deadline) {
-    if (await predicate()) return
-    await Bun.sleep(10)
-  }
-  throw new Error('timed out waiting for predicate')
 }

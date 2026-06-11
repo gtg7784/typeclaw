@@ -182,6 +182,9 @@ export type SessionTurnStartEvent = {
   agentDir: string
   userPrompt: string
   origin?: SessionOrigin
+  // Mutable ref: plugin writes retrieval results here; server/router reads after hook returns.
+  // Only populated when vector.enabled and injection plan is index mode.
+  retrievalContext?: { results: string }
 }
 
 export type SessionTurnEndEvent = {

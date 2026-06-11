@@ -16,7 +16,6 @@ import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-l
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { memorySearchTool } from './search-tool'
-import { writeRetrievalCache } from './vector/cache-write'
 import { vectorConfigSchema } from './vector/config'
 import { hybridSearch } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
@@ -151,7 +150,6 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
     const linesAtLastRun = new Map<string, number>()
-    const vectorRetrievalInFlight = new Set<string>()
     // Per-session stream-file cursor: the JSONL line count of the daily
     // stream file at the END of this session's most recent memory-logger
     // spawn. Keyed by sessionId, valued by `{ date, lineCount }`. Honored
@@ -292,26 +290,6 @@ export default definePlugin({
       await ctx.spawnSubagent('memory-retrieval', payload, retrievalSpawnOptions)
     }
 
-    const runVectorRetrieval = async (event: {
-      sessionId: string
-      agentDir: string
-      userPrompt: string
-    }): Promise<void> => {
-      const shards = await loadAllShards(event.agentDir)
-      const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
-      if (plan.mode === 'direct') return
-
-      const dbPath = join(event.agentDir, 'memory', '.vectors', 'index.db')
-      const store = VectorStore.open(dbPath)
-      try {
-        const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
-        const content = results.map((result) => `## ${result.heading}\n\n${result.excerpt}`).join('\n\n')
-        await writeRetrievalCache(event.agentDir, event.sessionId, content)
-      } finally {
-        store.close()
-      }
-    }
-
     // Subagents are constructed at boot here (rather than imported as constants)
     // so their lifecycle logs route through the plugin logger and pick up the
     // `[plugin:memory]` prefix. Without this, they would write directly to
@@ -411,54 +389,27 @@ export default definePlugin({
         // before each `session.prompt(text)` call with the actual text the
         // session is about to receive.
         //
-        // The hook body is fully detached. `runSessionTurnStart` has no
-        // per-handler timeout (unlike session.prompt/idle/end), and the
-        // caller awaits it before `session.prompt(text)` runs — so an
-        // inline `await loadAllShards(...)` would gate every channel turn
-        // on N shard reads. Detaching mirrors PR #337's "fire-and-forget
-        // the slow work" pattern, pushed one level earlier to cover both
-        // the shard read AND the LLM spawn.
-        //
-        // Per-turn instead of per-session-creation means N spawns over the
-        // session's lifetime, but the subagent's own `inFlightKey` on
-        // `parentSessionId` (memory-retrieval.ts) coalesces overlapping
-        // fires: if turn N's retrieval is still running when turn N+1 fires,
-        // the second spawn is dropped with a warning, and the cache from
-        // turn N is still consumed by turn N+1 via the documented
-        // lag-by-one-prompt contract (load-memory.ts:appendRetrievalCache).
-        //
-        // Known limitation: a detached spawn can theoretically settle after
-        // `session.end` has unlinked the cache file, leaving a single ~5 KB
-        // file in memory/.retrieval-cache/ that never gets read. The next
-        // session.end that matches this sessionId would clean it up, but
-        // sessionIds are UUIDv7 so reuse is effectively never. Fix would
-        // serialize session.end behind the in-flight spawn, which
-        // re-introduces the cold-start blocking shape PR #337 fixed. The
-        // leaked file is bounded (one per disconnected session) and lives
-        // in a dir already marked transient.
-        //
-        // ctx.spawnSubagent IS reject-able in production: it wraps
-        // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
-        // directly with no try/catch. SubagentConsumer's catch only protects
-        // stream-initiated spawns (target.kind === 'new-session'), not the
-        // direct ctx.spawnSubagent path the hooks use. Same for
-        // loadAllShards' fs errors. The .catch() on the void-discarded
-        // promise below is load-bearing — without it, every shard-read or
-        // handler failure (LLM provider error, payload validation throw)
-        // would surface as an unhandled rejection because nothing awaits
-        // the promise.
-        'session.turn.start': (event) => {
+        'session.turn.start': async (event) => {
           if (event.origin?.kind === 'subagent') return
           if (ctx.config.vector.enabled) {
-            if (vectorRetrievalInFlight.has(event.sessionId)) return
-            vectorRetrievalInFlight.add(event.sessionId)
-            void runVectorRetrieval(event)
-              .catch((err) => {
-                ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
-              })
-              .finally(() => {
-                vectorRetrievalInFlight.delete(event.sessionId)
-              })
+            if (event.retrievalContext === undefined) return
+            const shards = await loadAllShards(event.agentDir)
+            const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
+            if (plan.mode === 'direct') return
+            const dbPath = join(event.agentDir, 'memory', '.vectors', 'index.db')
+            const store = VectorStore.open(dbPath)
+            try {
+              const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
+              if (results.length > 0) {
+                event.retrievalContext.results = `## Retrieved memory\n\n${results
+                  .map((result) => `### ${result.heading}\n\n${result.excerpt}`)
+                  .join('\n\n')}`
+              }
+            } catch (err) {
+              ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
+            } finally {
+              store.close()
+            }
           } else {
             void runMemoryRetrieval(event).catch((err) => {
               ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
