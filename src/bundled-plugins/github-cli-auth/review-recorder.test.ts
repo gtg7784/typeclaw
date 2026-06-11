@@ -6,12 +6,16 @@ import { join } from 'node:path'
 import { hasReview, resetReviewTurn } from '@/channels/github-review-turn-ledger'
 import type { ToolResult } from '@/plugin'
 
+import { __resetReviewVerdictGuardForTest, createApproveIdempotencyGuard } from './approve-idempotency'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
 
 const SESSION = 'ses_recorder'
 const WS = 'acme/widgets'
 
-afterEach(() => resetReviewTurn(SESSION))
+afterEach(() => {
+  resetReviewTurn(SESSION)
+  __resetReviewVerdictGuardForTest()
+})
 
 function textResult(text: string): ToolResult {
   return { content: [{ type: 'text', text }] }
@@ -137,6 +141,48 @@ describe('review recorder', () => {
       await noteReviewCommand({ callId: 'b6', command: `gh api /repos/${WS}/pulls/81/reviews -f event=APPROVE` })
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b6', result: textResult(SUCCESS_OUTPUT) })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 81, verdict: 'APPROVE' })).toBe(true)
+    })
+
+    test('a pending-path commit returns no landedFromResult (release arms the shield)', async () => {
+      await noteReviewCommand({ callId: 'b7', command: `gh api /repos/${WS}/pulls/82/reviews -f event=APPROVE` })
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b7', result: textResult(SUCCESS_OUTPUT) })
+      expect(result.committed).toBe(true)
+      expect(result.landedFromResult).toBeNull()
+    })
+
+    test('the backstop result returns landedFromResult for the caller to arm the shield', () => {
+      const out = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/83"}`
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b8', result: textResult(out) })
+      expect(result.committed).toBe(true)
+      expect(result.landedFromResult).toEqual({ workspace: WS, prNumber: 83, verdict: 'APPROVE', source: 'api' })
+    })
+  })
+
+  // Mirrors the plugin's tool.after wiring (index.ts): commitReviewIfSucceeded ->
+  // verdictGuard.noteLandedReview for the backstop path, then the next submission
+  // hits guard(). Proves the advertised "arm the dedupe window" actually holds for
+  // the fallback path — the gap the reviewer flagged.
+  describe('integration: backstop arms the idempotency lag shield', () => {
+    function makeGuard(headSha: string | null) {
+      return createApproveIdempotencyGuard({
+        resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' }),
+        resolveHeadSha: async () => headSha,
+      })
+    }
+
+    test('pre-detection missed, REST response detected, next same-commit APPROVE is blocked while GitHub returns NONE', async () => {
+      const guard = makeGuard('sha-abc')
+      // given: a verdict landed via a shape the before-detector missed (no pending,
+      // no guard() reservation) — only the REST result proves it
+      const out = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/90"}`
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'i1', result: textResult(out) })
+      // when: the plugin wires the recovered verdict into the guard, as tool.after does
+      expect(result.landedFromResult).not.toBeNull()
+      if (result.landedFromResult !== null) await guard.noteLandedReview(result.landedFromResult)
+      // then: a second engagement turn's same-commit APPROVE is deduped even though
+      // GitHub's reviews read still lags (NONE)
+      const dup = await guard.guard({ callId: 'i2', workspace: WS, prNumber: 90, verdict: 'APPROVE' })
+      expect(dup?.block).toBe(true)
     })
   })
 })

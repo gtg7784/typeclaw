@@ -358,6 +358,36 @@ describe('review verdict idempotency guard', () => {
     expect(after).toBeNull()
   })
 
+  test('noteLandedReview arms the shield with no prior reservation (backstop path)', async () => {
+    // given: a verdict landed via a command shape pre-detection missed — no guard()
+    // ran, so there is no reservation and release() could not arm the shield
+    const g = makeShaGuard('sha-abc')
+    await g.noteLandedReview({ workspace: WS, prNumber: 43, verdict: 'APPROVE' })
+    // when: the next same-commit APPROVE fires while GitHub still reports NONE
+    const dup = await g.guard({ callId: 'a1', workspace: WS, prNumber: 43, verdict: 'APPROVE' })
+    // then: the lag shield blocks it — the gap the backstop was meant to close
+    expect(dup?.block).toBe(true)
+  })
+
+  test('noteLandedReview respects head SHA: a re-review on a new head is still allowed', async () => {
+    let currentSha = 'sha-old'
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' }),
+      resolveHeadSha: async () => currentSha,
+    })
+    await g.noteLandedReview({ workspace: WS, prNumber: 44, verdict: 'APPROVE' })
+    currentSha = 'sha-new'
+    const reapprove = await g.guard({ callId: 'a1', workspace: WS, prNumber: 44, verdict: 'APPROVE' })
+    expect(reapprove).toBeNull()
+  })
+
+  test('noteLandedReview ignores a non-verdict event', async () => {
+    const g = makeShaGuard('sha-abc')
+    await g.noteLandedReview({ workspace: WS, prNumber: 45, verdict: 'COMMENT' as 'APPROVE' })
+    const next = await g.guard({ callId: 'a1', workspace: WS, prNumber: 45, verdict: 'APPROVE' })
+    expect(next).toBeNull()
+  })
+
   test('the landed cache is process-wide: a second plugin instance sees the first instance landed verdict', async () => {
     const deps = {
       resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' as EffectiveVerdict }),

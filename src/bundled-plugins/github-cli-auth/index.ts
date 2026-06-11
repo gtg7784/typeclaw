@@ -165,12 +165,18 @@ export default definePlugin({
         },
         'tool.after': async (event) => {
           checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
-          const committed = commitReviewIfSucceeded({
+          const review = commitReviewIfSucceeded({
             sessionId: event.sessionId,
             callId: event.callId,
             result: event.result,
           })
-          await verdictGuard.release({ callId: event.callId, succeeded: committed })
+          await verdictGuard.release({ callId: event.callId, succeeded: review.committed })
+          // A backstop-recovered verdict had no guard() reservation, so release()
+          // could not arm the lag shield — do it explicitly here so the next
+          // same-commit submission is deduped.
+          if (review.landedFromResult !== null) {
+            await verdictGuard.noteLandedReview(review.landedFromResult)
+          }
         },
       },
     }

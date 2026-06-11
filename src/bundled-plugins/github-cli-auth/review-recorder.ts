@@ -36,30 +36,43 @@ export async function noteReviewCommand(args: { callId: string; command: string 
   return { dump: detectReviewDump({ command: args.command, inputFileContents }), detected }
 }
 
-export function commitReviewIfSucceeded(args: { sessionId: string; callId: string; result: ToolResult }): boolean {
+export type CommitReviewResult = {
+  // Whether a verdict was credited this turn (drives verdictGuard.release()).
+  committed: boolean
+  // Set ONLY on the backstop path (pre-detection missed): the caller must arm the
+  // idempotency lag shield with this, since no guard() reservation exists to do it
+  // via release(). Null on the pending path, where release() arms the shield.
+  landedFromResult: DetectedReview | null
+}
+
+export function commitReviewIfSucceeded(args: {
+  sessionId: string
+  callId: string
+  result: ToolResult
+}): CommitReviewResult {
   const text = collectText(args.result.content)
   const detected = pending.get(args.callId)
   if (detected !== undefined) {
     pending.delete(args.callId)
-    if (!looksSucceeded(detected, text)) return false
+    if (!looksSucceeded(detected, text)) return { committed: false, landedFromResult: null }
     recordReview({
       sessionId: args.sessionId,
       workspace: detected.workspace,
       prNumber: detected.prNumber,
       verdict: detected.verdict,
     })
-    return true
+    return { committed: true, landedFromResult: null }
   }
 
   const landed = detectLandedReviewFromResult(text)
-  if (landed === null) return false
+  if (landed === null) return { committed: false, landedFromResult: null }
   recordReview({
     sessionId: args.sessionId,
     workspace: landed.workspace,
     prNumber: landed.prNumber,
     verdict: landed.verdict,
   })
-  return true
+  return { committed: true, landedFromResult: landed }
 }
 
 // Authoritative post-execution credit from a REST create-review response, used
