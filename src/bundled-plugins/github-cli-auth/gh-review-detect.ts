@@ -57,6 +57,56 @@ function detectInGhSegment(args: readonly string[], fileContents: string | null)
   return null
 }
 
+export type ReviewSubmissionAttempt = { workspace: string; prNumber: number }
+
+// Submission INTENT, verdict aside: a `gh api .../pulls/N/reviews` with a POST
+// method, or a `gh pr review N` carrying a verdict flag. Gates the post-execution
+// backstop so it only fires for a command that actually tried to CREATE a review.
+// A bare `gh api .../pulls/N/reviews` is a GET that LISTS existing reviews; its
+// response array can contain `"state":"APPROVED"` and a pulls URL, which would
+// otherwise make the backstop credit a review that never landed this turn. A read
+// is not an attempt and returns null here.
+export function detectReviewSubmissionAttempt(command: string): ReviewSubmissionAttempt | null {
+  for (const args of ghSegments(command)) {
+    const attempt = attemptInGhSegment(args)
+    if (attempt !== null) return attempt
+  }
+  return null
+}
+
+function attemptInGhSegment(args: readonly string[]): ReviewSubmissionAttempt | null {
+  const sub = args[1]
+  if (sub === 'api') {
+    if (!isPostMethod(args)) return null
+    const endpoint = args.find((a) => REVIEWS_ENDPOINT.test(a))
+    if (endpoint === undefined) return null
+    const m = REVIEWS_ENDPOINT.exec(endpoint)
+    if (m === null) return null
+    const prNumber = Number(m[3])
+    if (!Number.isSafeInteger(prNumber)) return null
+    return { workspace: `${m[1]}/${m[2]}`, prNumber }
+  }
+  if (sub === 'pr' && args[2] === 'review') {
+    const detected = detectPrReview(args)
+    return detected === null ? null : { workspace: detected.workspace, prNumber: detected.prNumber }
+  }
+  return null
+}
+
+// `gh api` defaults to GET; creating a review is a POST. Accept `-X POST` /
+// `--method POST` in both `flag value` and `flag=value` shapes, case-insensitive.
+function isPostMethod(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === undefined) continue
+    if ((a === '-X' || a === '--method') && (args[i + 1] ?? '').toUpperCase() === 'POST') return true
+    if ((a.startsWith('-X=') || a.startsWith('--method=')) && a.slice(a.indexOf('=') + 1).toUpperCase() === 'POST') {
+      return true
+    }
+  }
+  return false
+}
+
 function detectApiReview(args: readonly string[], fileContents: string | null): DetectedReview | null {
   const endpoint = args.find((a) => REVIEWS_ENDPOINT.test(a))
   if (endpoint === undefined) return null
