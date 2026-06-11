@@ -186,14 +186,19 @@ describe('convertDiscordTables — wide-character alignment', () => {
     expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1 + 1e-9)
   })
 
-  test('does not over-pad pure-CJK columns the way the old 2.0 model did', () => {
-    // 가나다라마 (5 Hangul) = 8.5 units; the latin header "label" = 5 units.
-    // The CJK cell is the column max, so it gets no padding; "label" pads up to
-    // ~8.5 → 9 chars total. Under the old 2.0 model the column was 10 wide.
-    const input = ['| label |', '|-------|', '| 가나다라마 |'].join('\n')
-    const bodyLine = convertDiscordTables(input).split('\n')[1]!
-    const bodyWidth = visualWidth(bodyLine)
-    expect(bodyWidth).toBeLessThanOrEqual(9)
+  test('does not over-pad a CJK column the way the old 2.0 model did', () => {
+    // Over-padding shows up on the LATIN cell that must catch up to the CJK
+    // column max, not on the CJK cell itself (which is the max and gets no
+    // padding either way). A second column forces the table to convert and gives
+    // the latin "label" cell a boundary to pad against. 가나다라마 (5 Hangul) is
+    // the col-0 max — 5 * 1.7 = 8.5 → "label" pads to a 9-cell slot, then the
+    // 2-space separator puts column 1 at offset 11. The old 2.0 model sized that
+    // column at 10, so column 1 would have started at 12; assert it is earlier.
+    const input = ['| label | n |', '|-------|---|', '| 가나다라마 | x |'].join('\n')
+    const header = convertDiscordTables(input).split('\n')[0]!
+    const inner = header.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, '')
+    const col1Start = displayWidth(inner.slice(0, inner.indexOf('n')))
+    expect(col1Start).toBeLessThan(12)
   })
 
   test('keeps every column START aligned across rows, not just total row width', () => {
