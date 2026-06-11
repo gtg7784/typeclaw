@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { detectReviewSubmission } from './gh-review-detect'
+import { detectReviewSubmission, detectReviewSubmissionAttempt } from './gh-review-detect'
 
 describe('detectReviewSubmission — REST --input', () => {
   test('APPROVE in the input file is detected', () => {
@@ -156,5 +156,38 @@ describe('detectReviewSubmission — non-matches', () => {
 
   test('a non-gh command is null', () => {
     expect(detectReviewSubmission({ command: 'echo gh api reviews event=APPROVE' })).toBeNull()
+  })
+})
+
+describe('detectReviewSubmissionAttempt — submission intent, verdict aside', () => {
+  test('a POST to the reviews endpoint is an attempt even with no extractable verdict', () => {
+    expect(
+      detectReviewSubmissionAttempt('gh api -X POST /repos/acme/widgets/pulls/12/reviews --input /tmp/r.json'),
+    ).toEqual({ workspace: 'acme/widgets', prNumber: 12 })
+  })
+
+  test('--method POST (and slash-less endpoint, after cd) is an attempt', () => {
+    expect(
+      detectReviewSubmissionAttempt('cd /agent && gh api --method POST repos/acme/widgets/pulls/13/reviews'),
+    ).toEqual({ workspace: 'acme/widgets', prNumber: 13 })
+  })
+
+  test('a bare reviews GET (no method) is NOT an attempt', () => {
+    expect(detectReviewSubmissionAttempt('gh api /repos/acme/widgets/pulls/12/reviews')).toBeNull()
+  })
+
+  test('an explicit GET on the reviews endpoint is NOT an attempt', () => {
+    expect(detectReviewSubmissionAttempt('gh api -X GET /repos/acme/widgets/pulls/12/reviews')).toBeNull()
+  })
+
+  test('gh pr review with a verdict flag is an attempt', () => {
+    expect(detectReviewSubmissionAttempt('gh pr review 42 --approve -R acme/widgets')).toEqual({
+      workspace: 'acme/widgets',
+      prNumber: 42,
+    })
+  })
+
+  test('a non-reviews POST is NOT an attempt', () => {
+    expect(detectReviewSubmissionAttempt('gh api -X POST /repos/acme/widgets/issues/12/comments -f body=hi')).toBeNull()
   })
 })

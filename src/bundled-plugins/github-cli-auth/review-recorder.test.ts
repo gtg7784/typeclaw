@@ -107,30 +107,75 @@ describe('review recorder', () => {
   describe('post-execution backstop (pre-detection missed)', () => {
     const LANDED_APPROVED = `{"id":7,"node_id":"PRR_x","state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/77"}`
 
-    test('credits a landed APPROVE from the REST response when no pending entry exists', () => {
-      // no noteReviewCommand — simulates a command shape the before-detector missed
+    // The backstop now fires only after tool.before saw a real POST submission
+    // attempt whose verdict it could not extract. A heredoc-bodied POST with the
+    // payload in a separate file the before-detector did not resolve is the
+    // canonical "attempt seen, verdict missed" case used to arm these tests.
+    async function noteMissedAttempt(callId: string, prNumber: number): Promise<void> {
+      await noteReviewCommand({
+        callId,
+        command: `gh api -X POST /repos/${WS}/pulls/${prNumber}/reviews --input /tmp/missing-${prNumber}.json`,
+      })
+    }
+
+    test('credits a landed APPROVE from the REST response for an attempted POST whose verdict was missed', async () => {
+      await noteMissedAttempt('b1', 77)
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b1', result: textResult(LANDED_APPROVED) })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 77, verdict: 'APPROVE' })).toBe(true)
     })
 
-    test('credits a landed CHANGES_REQUESTED from the REST response', () => {
+    test('credits a landed CHANGES_REQUESTED from the REST response', async () => {
+      await noteMissedAttempt('b2', 78)
       const out = `{"state":"CHANGES_REQUESTED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/78"}`
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b2', result: textResult(out) })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 78, verdict: 'REQUEST_CHANGES' })).toBe(true)
     })
 
-    test('does NOT credit when the state is present but a failure marker is also present (fail closed)', () => {
+    test('does NOT credit a reviews-list READ whose response array carries a decisive state', async () => {
+      // given: a GET that LISTS existing reviews (no -X POST) — not a submission
+      await noteReviewCommand({ callId: 'bread', command: `gh api /repos/${WS}/pulls/84/reviews` })
+      // when: the response array contains an existing APPROVED review + a pulls URL
+      const out = `[{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/84"}]`
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'bread', result: textResult(out) })
+      // then: no attempt marker was recorded, so the backstop never runs
+      expect(result.committed).toBe(false)
+      expect(result.landedFromResult).toBeNull()
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 84, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit when no submission attempt was recorded at all', () => {
+      const result = commitReviewIfSucceeded({
+        sessionId: SESSION,
+        callId: 'bnone',
+        result: textResult(LANDED_APPROVED),
+      })
+      expect(result.committed).toBe(false)
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 77, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit when the attempted PR does not match the PR in the response', async () => {
+      await noteMissedAttempt('bmismatch', 85)
+      const out = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/999"}`
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'bmismatch', result: textResult(out) })
+      expect(result.committed).toBe(false)
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 999, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit when the state is present but a failure marker is also present (fail closed)', async () => {
+      await noteMissedAttempt('b3', 79)
       const out = `gh: Validation Failed (HTTP 422) {"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/79"}`
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b3', result: textResult(out) })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 79, verdict: 'APPROVE' })).toBe(false)
     })
 
-    test('does NOT credit a decisive state with no recoverable PR url', () => {
+    test('does NOT credit a decisive state with no recoverable PR url', async () => {
+      await noteMissedAttempt('b4', 77)
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b4', result: textResult('{"state":"APPROVED"}') })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 77, verdict: 'APPROVE' })).toBe(false)
     })
 
-    test('does NOT credit a COMMENT review state', () => {
+    test('does NOT credit a COMMENT review state', async () => {
+      await noteMissedAttempt('b5', 80)
       const out = `{"state":"COMMENTED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/80"}`
       commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b5', result: textResult(out) })
       expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 80, verdict: 'APPROVE' })).toBe(false)
@@ -150,7 +195,8 @@ describe('review recorder', () => {
       expect(result.landedFromResult).toBeNull()
     })
 
-    test('the backstop result returns landedFromResult for the caller to arm the shield', () => {
+    test('the backstop result returns landedFromResult for the caller to arm the shield', async () => {
+      await noteMissedAttempt('b8', 83)
       const out = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/83"}`
       const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'b8', result: textResult(out) })
       expect(result.committed).toBe(true)
@@ -172,8 +218,13 @@ describe('review recorder', () => {
 
     test('pre-detection missed, REST response detected, next same-commit APPROVE is blocked while GitHub returns NONE', async () => {
       const guard = makeGuard('sha-abc')
-      // given: a verdict landed via a shape the before-detector missed (no pending,
-      // no guard() reservation) — only the REST result proves it
+      // given: a POST create-review whose verdict the before-detector missed (no
+      // pending, no guard() reservation) but whose submission intent it DID record
+      await noteReviewCommand({
+        callId: 'i1',
+        command: `gh api -X POST /repos/${WS}/pulls/90/reviews --input /tmp/missing-90.json`,
+      })
+      // and: only the REST result proves the landed verdict
       const out = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/90"}`
       const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'i1', result: textResult(out) })
       // when: the plugin wires the recovered verdict into the guard, as tool.after does

@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises'
 import { recordReview } from '@/channels/github-review-turn-ledger'
 import type { ContentPart, ToolResult } from '@/plugin'
 
-import { detectReviewSubmission, type DetectedReview } from './gh-review-detect'
+import {
+  detectReviewSubmission,
+  detectReviewSubmissionAttempt,
+  type DetectedReview,
+  type ReviewSubmissionAttempt,
+} from './gh-review-detect'
 import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-detect'
 
 // Bridges the bash `gh` interceptor to the false-receipt ledger: at tool.before
@@ -19,8 +24,11 @@ import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-de
 // the before-detector. This only arms the dedupe window for the NEXT submission —
 // it cannot un-land a duplicate already posted — but that is precisely what the
 // sequential fan-out incident needed: the first landed APPROVE must arm the shield.
+// The backstop is gated on a tool.before submission-ATTEMPT marker so it never
+// fires for a reviews-list READ whose response happens to carry a decisive state.
 
 const pending = new Map<string, DetectedReview>()
+const submissionAttempts = new Map<string, ReviewSubmissionAttempt>()
 
 const MAX_INPUT_BYTES = 1_000_000
 
@@ -33,6 +41,13 @@ export async function noteReviewCommand(args: { callId: string; command: string 
   const inputFileContents = await readInputFile(args.command)
   const detected = detectReviewSubmission({ command: args.command, inputFileContents })
   if (detected !== null) pending.set(args.callId, detected)
+  // Record submission INTENT even when the verdict could not be extracted (a
+  // missed shape): only such a command may later arm the backstop, so a reviews
+  // READ — which is not an attempt — can never be miscredited as a landed review.
+  else {
+    const attempt = detectReviewSubmissionAttempt(args.command)
+    if (attempt !== null) submissionAttempts.set(args.callId, attempt)
+  }
   return { dump: detectReviewDump({ command: args.command, inputFileContents }), detected }
 }
 
@@ -64,8 +79,19 @@ export function commitReviewIfSucceeded(args: {
     return { committed: true, landedFromResult: null }
   }
 
+  // The backstop runs ONLY for a command that tool.before saw as a real
+  // submission attempt (POST create-review) but whose verdict it could not
+  // extract. This excludes a reviews-list READ outright, and the PR-match below
+  // rejects a stray pulls URL for a different PR in the output.
+  const attempt = submissionAttempts.get(args.callId)
+  if (attempt === undefined) return { committed: false, landedFromResult: null }
+  submissionAttempts.delete(args.callId)
+
   const landed = detectLandedReviewFromResult(text)
   if (landed === null) return { committed: false, landedFromResult: null }
+  if (landed.workspace !== attempt.workspace || landed.prNumber !== attempt.prNumber) {
+    return { committed: false, landedFromResult: null }
+  }
   recordReview({
     sessionId: args.sessionId,
     workspace: landed.workspace,
