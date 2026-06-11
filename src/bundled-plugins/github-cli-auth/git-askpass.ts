@@ -12,12 +12,22 @@ import { dirname, join } from 'node:path'
 // `insteadOf`/`pushurl` rewrite redirected to) we exit non-zero WITHOUT printing
 // the token, so a redirect can never exfiltrate it. The analyzer already blocks
 // the known redirect vectors; this is defense-in-depth at the credential edge.
-// The host match is on \`//github.com/\` and \`//github.com'\` (git wraps the URL
-// in quotes: \`Password for 'https://github.com': \`) so it cannot be fooled by
-// \`evil-github.com\` or \`github.com.evil/\`.
+//
+// Two prompt shapes must match, because git rewrites the host between the two
+// prompts of a single clone/fetch: it first asks `Username for
+// 'https://github.com': `, and AFTER we answer `x-access-token` it folds that
+// userinfo into the host of the SECOND prompt — `Password for
+// 'https://x-access-token@github.com': `. So we accept both bare-host
+// (\`//github.com/\` or \`//github.com'\`) and userinfo-host
+// (\`//<user>@github.com/\` or \`//<user>@github.com'\`). The anchor is the
+// literal \`github.com\` immediately followed by \`/\` or the closing quote git
+// wraps the URL in, so it cannot be fooled by \`evil-github.com\`,
+// \`github.com.evil/\`, or \`x@github.com.evil/\`. Without the userinfo arm the
+// password prompt falls through to \`exit 1\` and every HTTPS clone/fetch fails
+// with "unable to read askpass response".
 const ASKPASS_SCRIPT = `#!/bin/sh
 case "$1" in
-  *//github.com/*|*//github.com\\'*) : ;;
+  *//github.com/*|*//github.com\\'*|*//*@github.com/*|*//*@github.com\\'*) : ;;
   *) exit 1 ;;
 esac
 case "$1" in

@@ -72,6 +72,29 @@ describe('ensureGitAskPassHelper — host-scoped behavior (executed)', () => {
     expect(out).toBe('x-access-token')
   })
 
+  // The password prompt git actually sends: once the helper answers
+  // `x-access-token` to the username prompt, git folds that userinfo into the
+  // host of the password prompt. This is the exact string a real HTTPS clone
+  // produces; without the userinfo arm in the guard it falls through to exit 1
+  // and the clone dies with "unable to read askpass response".
+  test('emits the token for the userinfo-host password prompt git sends after the username', async () => {
+    const { code, out } = await run("Password for 'https://x-access-token@github.com': ")
+    expect(code).toBe(0)
+    expect(out).toBe('ghs_secret_token')
+  })
+
+  test('is not fooled by a userinfo prompt whose host is a suffix lookalike', async () => {
+    const { code, out } = await run("Password for 'https://x-access-token@github.com.evil.test': ")
+    expect(code).toBe(1)
+    expect(out).toBe('')
+  })
+
+  test('is not fooled by a userinfo prompt whose real host is not github.com', async () => {
+    const { code, out } = await run("Password for 'https://github.com@evil.example/': ")
+    expect(code).toBe(1)
+    expect(out).toBe('')
+  })
+
   test('refuses (exit 1, no token) for a non-github host prompt', async () => {
     const { code, out } = await run("Password for 'https://evil.example': ")
     expect(code).toBe(1)
