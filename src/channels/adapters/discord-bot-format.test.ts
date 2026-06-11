@@ -195,4 +195,39 @@ describe('convertDiscordTables — wide-character alignment', () => {
     const bodyWidth = visualWidth(bodyLine)
     expect(bodyWidth).toBeLessThanOrEqual(9)
   })
+
+  test('keeps every column START aligned across rows, not just total row width', () => {
+    // Matching total row width can hide a drifted column boundary: a row may
+    // spend its extra space in an early column while another spends it late.
+    // Distinct cell tokens let us locate each column's start and measure the
+    // visual offset before it — these must agree within one cell across rows.
+    const rows = [
+      ['목적', '추천', '이유'],
+      ['힐링 안전', 'a', '4가지 조건'],
+      ['x', '나가사키', 'y'],
+      ['bob', 'osaka', 'cheap'],
+    ]
+    const input = [
+      `| ${rows[0]!.join(' | ')} |`,
+      '|---|---|---|',
+      ...rows.slice(1).map((r) => `| ${r.join(' | ')} |`),
+    ].join('\n')
+
+    const lines = convertDiscordTables(input).split('\n')
+    const strip = (line: string) => line.replace(/^\*\*/, '').replace(/\*\*$/, '').replace(/^`|`$/g, '')
+
+    const startOffsets = (columnIndex: number) =>
+      lines.map((line, rowIndex) => {
+        const inner = strip(line)
+        const token = rows[rowIndex]![columnIndex]!
+        const at = inner.indexOf(token)
+        expect(at).toBeGreaterThanOrEqual(0)
+        return displayWidth(inner.slice(0, at))
+      })
+
+    for (let c = 0; c < rows[0]!.length; c++) {
+      const offsets = startOffsets(c)
+      expect(Math.max(...offsets) - Math.min(...offsets)).toBeLessThanOrEqual(1 + 1e-9)
+    }
+  })
 })

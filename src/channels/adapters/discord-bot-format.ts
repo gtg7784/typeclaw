@@ -89,7 +89,7 @@ function splitRow(row: string): string[] {
 
 function computeWidths(rows: string[][]): number[] {
   const columnCount = Math.max(0, ...rows.map((row) => row.length))
-  return Array.from({ length: columnCount }, (_, c) => Math.max(0, ...rows.map((row) => displayWidth(row[c] ?? ''))))
+  return Array.from({ length: columnCount }, (_, c) => Math.max(0, ...rows.map((row) => widthTenths(row[c] ?? ''))))
 }
 
 function padRow(cells: string[], widths: number[]): string {
@@ -99,63 +99,72 @@ function padRow(cells: string[], widths: number[]): string {
   return widths.map((_, c) => (cells[c] ?? '') + ' '.repeat(pads[c]!)).join('  ')
 }
 
-// Column widths are fractional (a CJK glyph is 1.7), but padding inserts whole
-// spaces. Rounding each cell's deficit independently lets per-row rounding error
-// accumulate, so rows drift apart. Instead we round the ROW's total deficit once
-// and hand out the integer spaces by largest fractional remainder (Hamilton
-// apportionment). This bounds every rendered row to within 0.5 visual units of
-// the ideal width, so any two rows differ by at most ~1 space — the tightest
-// alignment achievable with whole-space padding.
-const REMAINDER_EPSILON = 1e-9
-
+// A CJK glyph is 1.7 cells wide, so column widths are fractional while padding
+// can only insert whole spaces. The naive fix — round each column's deficit on
+// its own — keeps total row widths close but lets the START of column N drift
+// between rows (a row may earn an extra space in column 1 that another row
+// spends in column 3), which is exactly the misalignment a table must avoid.
+//
+// Instead we make every column BOUNDARY prefix-stable: the running deficit up to
+// column c is rounded to whole spaces once, and each cell's pad is the delta of
+// consecutive rounded prefixes. Because the rounding target at boundary c (the
+// column max-widths plus separators before it) is the same constant for every
+// row, each boundary lands within half a cell of the same offset across rows —
+// the tightest column alignment whole-space padding allows.
+//
+// Widths are carried in TENTHS of a cell (latin 10, wide 17) so the arithmetic
+// is exact integers; 1.7 has no finite binary form and would otherwise let
+// rounding flip on float noise.
 function computePads(cells: string[], widths: number[]): number[] {
-  const deficits = widths.map((width, c) => Math.max(0, width - displayWidth(cells[c] ?? '')))
-  const basePads = deficits.map((d) => Math.floor(d))
-  const baseTotal = basePads.reduce((sum, p) => sum + p, 0)
-  const desiredTotal = Math.round(deficits.reduce((sum, d) => sum + d, 0))
-
-  let extras = desiredTotal - baseTotal
-  const byRemainder = deficits
-    .map((d, index) => ({ index, remainder: d - Math.floor(d) }))
-    .filter((item) => item.remainder > REMAINDER_EPSILON)
-    .sort((a, b) => b.remainder - a.remainder || a.index - b.index)
-
-  const pads = [...basePads]
-  for (const { index } of byRemainder) {
-    if (extras <= 0) break
-    pads[index]!++
-    extras--
+  const pads: number[] = []
+  let prefixDeficit = 0
+  let prevPrefixPad = 0
+  for (let c = 0; c < widths.length; c++) {
+    prefixDeficit += Math.max(0, widths[c]! - widthTenths(cells[c] ?? ''))
+    const prefixPad = roundTenthsToSpaces(prefixDeficit)
+    pads.push(Math.max(0, prefixPad - prevPrefixPad))
+    prevPrefixPad = prefixPad
   }
   return pads
+}
+
+const CELL_TENTHS = 10
+
+function roundTenthsToSpaces(tenths: number): number {
+  return Math.floor((tenths + CELL_TENTHS / 2) / CELL_TENTHS)
+}
+
+function widthTenths(text: string): number {
+  let tenths = 0
+  for (const ch of text) {
+    tenths += charWidthTenths(ch.codePointAt(0)!)
+  }
+  return tenths
+}
+
+function charWidthTenths(cp: number): number {
+  if (isZeroWidth(cp)) return 0
+  if (isWide(cp)) return WIDE_CHAR_TENTHS
+  return CELL_TENTHS
 }
 
 // Discord's monospaced inline-code font renders CJK ideographs, full-width
 // punctuation, and most emoji WIDER than a latin glyph, while combining/
 // zero-width marks take none. `String.prototype.padEnd` counts UTF-16 code
 // units, so padding by `.length` leaves wide-character tables visually ragged.
-// We iterate by code point and sum per-glyph column widths so every cell pads
-// to (near) the same VISUAL width. The ranges below are the standard
-// East-Asian-Wide / Wide blocks plus the common emoji planes.
+// The ranges below are the standard East-Asian-Wide / Wide blocks plus the
+// common emoji planes.
 //
 // The wide multiplier is 1.7, not the textbook wcwidth value of 2: Discord's
 // proportional code font renders a Hangul/CJK glyph at roughly 1.7x a latin
 // monospace cell, so charging 2 over-pads CJK columns and leaves them visibly
-// too wide. Because `displayWidth` is now fractional, padding (which can only
-// insert whole spaces) is apportioned at the row level — see `padRow`.
-const WIDE_CHAR_WIDTH = 1.7
+// too wide. `displayWidth` reports that fractional width in cells; the table
+// padder works in the integer `widthTenths` domain to keep boundary rounding
+// exact — see `computePads`.
+const WIDE_CHAR_TENTHS = 17
 
 export function displayWidth(text: string): number {
-  let width = 0
-  for (const ch of text) {
-    width += charWidth(ch.codePointAt(0)!)
-  }
-  return width
-}
-
-function charWidth(cp: number): number {
-  if (isZeroWidth(cp)) return 0
-  if (isWide(cp)) return WIDE_CHAR_WIDTH
-  return 1
+  return widthTenths(text) / CELL_TENTHS
 }
 
 function isZeroWidth(cp: number): boolean {
