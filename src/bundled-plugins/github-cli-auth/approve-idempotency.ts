@@ -33,6 +33,13 @@ export type ReviewVerdictGuard = {
     verdict: ReviewVerdict
   }) => Promise<ApproveBlock | null>
   release: (args: { callId: string; succeeded: boolean }) => Promise<void>
+  // Arms the read-after-write lag shield for a verdict that landed WITHOUT a prior
+  // guard() reservation. The pre-execution detector can miss a review-submission
+  // command shape, so the verdict is only recovered post-hoc from the REST result
+  // (review-recorder's backstop). Without this, `release()` has no reservation for
+  // that callId and never writes `recentLandedByPr`, leaving the next same-commit
+  // submission undeduped — the exact gap the backstop was meant to close.
+  noteLandedReview: (args: { workspace: string; prNumber: number; verdict: ReviewVerdict }) => Promise<void>
 }
 
 // Back-compat alias: the guard now covers REQUEST_CHANGES too, not just APPROVE.
@@ -73,10 +80,15 @@ const LEASE_TTL_MS = 5 * 60_000
 // read-after-write lag rather than a genuine absence. GitHub's `/pulls/<n>/reviews`
 // list lags a write by up to ~10s, so a second engagement turn firing in that
 // window reads NONE and would land a duplicate. Observed duplicates were ~10-18s
-// apart; 60s is a comfortable lag margin without making a legitimate re-verdict
-// wait long. This window only shadows a raw NONE on the SAME verdict (+ same or
+// apart originally; a later fan-out incident spread FOUR sequential APPROVEs over
+// ~15s (one channel session per inline review thread), each ~3-7s after the last —
+// well inside the read lag yet beyond a single turn. 120s gives margin for that
+// thread fan-out plus slow API indexing without turning the shield into a human-
+// facing rate limit (a legitimate re-verdict after a new push carries a new head
+// SHA and bypasses this entirely; staying under ~5min avoids blocking genuine
+// re-reviews). This window only shadows a raw NONE on the SAME verdict (+ same or
 // uncertain head) — a DISMISSED/CHANGES_REQUESTED/flipped-verdict all bypass it.
-const RECENT_LANDED_TTL_MS = 60_000
+const RECENT_LANDED_TTL_MS = 120_000
 
 type Reservation = {
   key: string
@@ -229,6 +241,20 @@ export function createApproveIdempotencyGuard(deps: {
       } finally {
         releaseReservation(args.callId, reservation)
       }
+    },
+
+    async noteLandedReview(args): Promise<void> {
+      if (args.verdict !== 'APPROVE' && args.verdict !== 'REQUEST_CHANGES') return
+      // No pre-submit head was captured (guard() never ran), so the best pin we
+      // can prove is the CURRENT head. A null resolve becomes the uncertainty
+      // sentinel, which still matches the current head for the lag window — the
+      // same conservative behaviour release() uses for a push-during-review.
+      const headSha = (await deps.resolveHeadSha?.({ workspace: args.workspace, prNumber: args.prNumber })) ?? null
+      recentLandedByPr.set(prKey(args.workspace, args.prNumber), {
+        verdict: args.verdict,
+        headSha,
+        landedAt: now(),
+      })
     },
   }
 }

@@ -12,6 +12,13 @@ import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-de
 // succeeded. Strict success detection is the safe bias here — wrongly crediting a
 // review that never landed would re-open the false-receipt hole, so an ambiguous
 // result is treated as "not landed" and left uncredited.
+//
+// A post-execution BACKSTOP runs when pre-detection produced no pending entry: the
+// REST create-review response is authoritative (it echoes the landed review's
+// `state` and the PR url), so we can credit a verdict whose command shape dodged
+// the before-detector. This only arms the dedupe window for the NEXT submission —
+// it cannot un-land a duplicate already posted — but that is precisely what the
+// sequential fan-out incident needed: the first landed APPROVE must arm the shield.
 
 const pending = new Map<string, DetectedReview>()
 
@@ -29,18 +36,79 @@ export async function noteReviewCommand(args: { callId: string; command: string 
   return { dump: detectReviewDump({ command: args.command, inputFileContents }), detected }
 }
 
-export function commitReviewIfSucceeded(args: { sessionId: string; callId: string; result: ToolResult }): boolean {
+export type CommitReviewResult = {
+  // Whether a verdict was credited this turn (drives verdictGuard.release()).
+  committed: boolean
+  // Set ONLY on the backstop path (pre-detection missed): the caller must arm the
+  // idempotency lag shield with this, since no guard() reservation exists to do it
+  // via release(). Null on the pending path, where release() arms the shield.
+  landedFromResult: DetectedReview | null
+}
+
+export function commitReviewIfSucceeded(args: {
+  sessionId: string
+  callId: string
+  result: ToolResult
+}): CommitReviewResult {
+  const text = collectText(args.result.content)
   const detected = pending.get(args.callId)
-  if (detected === undefined) return false
-  pending.delete(args.callId)
-  if (!looksSucceeded(detected, collectText(args.result.content))) return false
+  if (detected !== undefined) {
+    pending.delete(args.callId)
+    if (!looksSucceeded(detected, text)) return { committed: false, landedFromResult: null }
+    recordReview({
+      sessionId: args.sessionId,
+      workspace: detected.workspace,
+      prNumber: detected.prNumber,
+      verdict: detected.verdict,
+    })
+    return { committed: true, landedFromResult: null }
+  }
+
+  const landed = detectLandedReviewFromResult(text)
+  if (landed === null) return { committed: false, landedFromResult: null }
   recordReview({
     sessionId: args.sessionId,
-    workspace: detected.workspace,
-    prNumber: detected.prNumber,
-    verdict: detected.verdict,
+    workspace: landed.workspace,
+    prNumber: landed.prNumber,
+    verdict: landed.verdict,
   })
-  return true
+  return { committed: true, landedFromResult: landed }
+}
+
+// Authoritative post-execution credit from a REST create-review response, used
+// only when pre-detection missed (no pending entry). Requires ALL of: a decisive
+// landed `state`, a recoverable PR identity from the echoed `pull_request_url`,
+// and no failure marker — so a partial/garbled capture or an unrelated success
+// line cannot fabricate a verdict. COMMENT and DISMISSED are not decisive and are
+// ignored, matching the before-detector's scope.
+function detectLandedReviewFromResult(text: string): DetectedReview | null {
+  if (FAILURE_MARKERS.some((m) => text.includes(m))) return null
+  const verdict = landedVerdictFromState(text)
+  if (verdict === null) return null
+  const pr = prFromPullRequestUrl(text)
+  if (pr === null) return null
+  return { workspace: pr.workspace, prNumber: pr.prNumber, verdict, source: 'api' }
+}
+
+// The create-review response echoes `"state": "APPROVED" | "CHANGES_REQUESTED"`.
+// Tolerant of the spacing both `gh api` (compact) and a piped `jq .` (pretty)
+// produce.
+function landedVerdictFromState(text: string): DetectedReview['verdict'] | null {
+  if (/"state"\s*:\s*"APPROVED"/.test(text)) return 'APPROVE'
+  if (/"state"\s*:\s*"CHANGES_REQUESTED"/.test(text)) return 'REQUEST_CHANGES'
+  return null
+}
+
+// The review object carries `"pull_request_url":
+// "https://api.github.com/repos/<owner>/<repo>/pulls/<n>"`, the authoritative PR
+// identity for the landed review. Recovered here so a shape-dodging command is
+// still credited to the right PR.
+function prFromPullRequestUrl(text: string): { workspace: string; prNumber: number } | null {
+  const m = /\/repos\/([^/\s"]+)\/([^/\s"]+)\/pulls\/(\d+)\b/.exec(text)
+  if (m === null) return null
+  const prNumber = Number(m[3])
+  if (!Number.isSafeInteger(prNumber)) return null
+  return { workspace: `${m[1]}/${m[2]}`, prNumber }
 }
 
 async function readInputFile(command: string): Promise<string | null> {
