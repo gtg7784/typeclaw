@@ -555,6 +555,14 @@ type LiveSession = {
   // sends never poison the tracker. The fuzzy-match upgrade is intentionally
   // deferred — exact-match has zero false-positive risk by construction.
   lastSentText: Map<string, string>
+  // Session leaf-entry id captured at the moment the most recent successful
+  // channel send landed this turn. `validateChannelTurn` compares it to the
+  // turn-end leaf: a DIFFERENT assistant `stop` leaf means the model replied,
+  // kept working, then ended with FRESH final prose it forgot to deliver
+  // (the `continue: true` progress-reply bug) — recover it. A leaf that still
+  // matches is narration the model emitted BEFORE/with the reply that already
+  // landed, so it stays suppressed. Reset to null on every new prompt batch.
+  lastSendLeafId: string | null
   // Per-(chat:thread) ring of send timestamps (epoch ms) within the rolling
   // SEND_RATE_WINDOW_MS window. Append-on-send, prune-on-read. Lifecycle is
   // wall-clock (NOT cleared on new prompt batches) because rate is a
@@ -1532,6 +1540,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         lastSentText: new Map(),
+        lastSendLeafId: null,
         sendTimestamps: new Map(),
         successfulChannelSends: 0,
         turnSeq: 0,
@@ -2089,6 +2098,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           )
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+          live.lastSendLeafId = null
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
           // A real user batch starts a fresh logical turn → restore the full
           // empty-turn retry budget and drop any raised output-token budget left
@@ -3164,6 +3174,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     if (live) {
       live.successfulChannelSends++
+      live.lastSendLeafId = live.session.sessionManager.getLeafEntry()?.id ?? null
       live.policyDeniedToolSendsThisTurn.delete(sendKey)
       // Don't stop the heartbeat here: the agent may still be mid-turn and
       // about to send another reply. drain()'s finally block owns turn-end
@@ -3249,9 +3260,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
+    // A send landed this turn, but the model may have posted a `continue: true`
+    // progress reply, kept working, then ENDED with its final answer as plain
+    // prose — never calling a channel tool again. The terminal-reply abort fires
+    // only for a `channel_reply` WITHOUT `continue: true`, so that `stopReason:
+    // 'stop'` text leaf is left undelivered and unguarded (the false-receipt
+    // guard is github-only). The discriminator is leaf IDENTITY: only when the
+    // turn-end `stop` leaf is a DIFFERENT entry than the one in place at the last
+    // send did the model produce fresh post-reply prose. A leaf unchanged since
+    // the send is narration the model emitted with/before the reply that already
+    // landed — suppress it, as before.
     if (live.successfulChannelSends > successfulSendsBeforePrompt) {
       maybeNudgeContinuationWillingness(live)
-      return
+      const trailing = recoverableAssistantText(live.session)
+      if (trailing === null || trailing.source !== 'leaf') return
+      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
+      // Belt-and-suspenders: the recovery send is `source:'system'` and so skips
+      // send()'s duplicate guard. Reject a fresh leaf whose body is byte-identical
+      // to what already went out this turn, so an undelivered conclusion never
+      // echoes a reply the user already saw.
+      const sendKey = consecutiveSendKey(live.key.chat, live.key.thread)
+      if (live.lastSentText.get(sendKey) === normalizeSendText(trailing.text)) return
     }
 
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
