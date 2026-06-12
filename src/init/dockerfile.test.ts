@@ -945,6 +945,46 @@ describe('cjkFonts toggle', () => {
   })
 })
 
+describe('transformers native-deps layer (sharp + onnxruntime linux binaries)', () => {
+  test('inline (dev) form installs @huggingface/transformers plus sharp and its arch-matched linux platform packages — without the explicit @img/sharp-linux-* install the container crashes at startup with "Could not load the sharp module using the linux-<arch> runtime", because the bind-mounted host node_modules carries macOS sharp binaries', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('bun add')
+    expect(out).toContain('@huggingface/transformers')
+    expect(out).toContain('sharp@0.34.5')
+    expect(out).toContain('"@img/sharp-linux-${SHARP_ARCH}@0.34.5"')
+    expect(out).toContain('"@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4"')
+  })
+
+  test('layer resolves SHARP_ARCH from $TARGETARCH (arm64 -> arm64, else x64) with an amd64 fallback so a bare `docker build` without buildx stays deterministic', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('SHARP_ARCH="$(if [ "${TARGETARCH:-amd64}" = "arm64" ]; then echo arm64; else echo x64; fi)"')
+  })
+
+  test('versioned (base-image) form installs the same native-deps set — drift guard so GHCR-base agents whose base image predates this fix still get linux sharp binaries seeded by the per-agent layer', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    expect(out).toContain('@huggingface/transformers')
+    expect(out).toContain('sharp@0.34.5')
+    expect(out).toContain('"@img/sharp-linux-${SHARP_ARCH}@0.34.5"')
+    expect(out).toContain('"@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4"')
+  })
+
+  test('base Dockerfile installs the native-deps layer too — future base images are self-contained so a fresh GHCR-base agent does not depend on the per-agent layer to avoid the sharp crash', () => {
+    const out = buildBaseDockerfile()
+    expect(out).toContain('@huggingface/transformers')
+    expect(out).toContain('sharp@0.34.5')
+    expect(out).toContain('"@img/sharp-linux-${SHARP_ARCH}@0.34.5"')
+    expect(out).toContain('"@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4"')
+  })
+
+  test('sharp and its libvips platform package are pinned to the same versions @huggingface/transformers@^4.2.0 resolves (0.34.5 / 1.2.4) — mismatched sharp/libvips platform packages are a known load-time failure mode', () => {
+    const out = buildDockerfile()
+    const sharpVersions = out.match(/@img\/sharp-linux-\$\{SHARP_ARCH\}@(\S+?)"/)
+    const libvipsVersions = out.match(/@img\/sharp-libvips-linux-\$\{SHARP_ARCH\}@(\S+?)"/)
+    expect(sharpVersions?.[1]).toBe('0.34.5')
+    expect(libvipsVersions?.[1]).toBe('1.2.4')
+  })
+})
+
 describe('curl-impersonate layer', () => {
   test('embeds the pinned version in the release URL — bumping a constant is a deliberate, reviewable change, not a moving "latest" target', () => {
     const out = buildDockerfile()
