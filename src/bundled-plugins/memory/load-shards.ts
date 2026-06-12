@@ -38,32 +38,23 @@ const shardCache = new Map<string, Map<string, ShardCacheEntry>>()
 export async function loadAllShards(agentDir: string, options: { logger?: Logger } = {}): Promise<TopicShard[]> {
   const slugs = await listShardSlugs(agentDir)
   const cache = getOrCreateCache(agentDir)
+
+  // Per-shard stat+read fans out concurrently. resolveShard only READS the
+  // cache and returns the write it wants, so applying writes after all tasks
+  // settle keeps the parallel phase race-free. slugs is pre-sorted and
+  // Promise.all preserves input order, so the result stays slug-sorted.
+  const outcomes = await Promise.all(slugs.map((slug) => resolveShard(agentDir, slug, cache, options)))
+
   const shards: TopicShard[] = []
   const seen = new Set<string>()
-
-  for (const slug of slugs) {
-    seen.add(slug)
-    const path = topicShardPath(agentDir, slug)
-    const fileStat = await statShard(path)
-    if (fileStat === null) {
-      cache.delete(slug)
+  for (const outcome of outcomes) {
+    seen.add(outcome.slug)
+    if (outcome.kind === 'missing') {
+      cache.delete(outcome.slug)
       continue
     }
-
-    const cached = cache.get(slug)
-    if (
-      cached !== undefined &&
-      cached.mtimeMs === fileStat.mtimeMs &&
-      cached.ctimeMs === fileStat.ctimeMs &&
-      cached.size === fileStat.size
-    ) {
-      if (cached.shard !== null) shards.push(cached.shard)
-      continue
-    }
-
-    const shard = await readAndParseShard(path, slug, options)
-    cache.set(slug, { mtimeMs: fileStat.mtimeMs, ctimeMs: fileStat.ctimeMs, size: fileStat.size, shard })
-    if (shard !== null) shards.push(shard)
+    if (outcome.kind === 'read') cache.set(outcome.slug, outcome.entry)
+    if (outcome.shard !== null) shards.push(outcome.shard)
   }
 
   // Drop cache entries whose underlying files have disappeared so a later
@@ -73,6 +64,41 @@ export async function loadAllShards(agentDir: string, options: { logger?: Logger
   }
 
   return shards
+}
+
+type ShardOutcome =
+  | { kind: 'missing'; slug: string }
+  | { kind: 'cached'; slug: string; shard: TopicShard | null }
+  | { kind: 'read'; slug: string; shard: TopicShard | null; entry: ShardCacheEntry }
+
+async function resolveShard(
+  agentDir: string,
+  slug: string,
+  cache: Map<string, ShardCacheEntry>,
+  options: { logger?: Logger },
+): Promise<ShardOutcome> {
+  const path = topicShardPath(agentDir, slug)
+  const fileStat = await statShard(path)
+  if (fileStat === null) return { kind: 'missing', slug }
+
+  const cached = cache.get(slug)
+  if (
+    cached !== undefined &&
+    cached.mtimeMs === fileStat.mtimeMs &&
+    cached.ctimeMs === fileStat.ctimeMs &&
+    cached.size === fileStat.size
+  ) {
+    return { kind: 'cached', slug, shard: cached.shard }
+  }
+
+  const shard = await readAndParseShard(path, slug, options)
+  const entry: ShardCacheEntry = {
+    mtimeMs: fileStat.mtimeMs,
+    ctimeMs: fileStat.ctimeMs,
+    size: fileStat.size,
+    shard,
+  }
+  return { kind: 'read', slug, shard, entry }
 }
 
 export async function loadShard(
