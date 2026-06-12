@@ -366,9 +366,17 @@ function excerptForLine(lines: string[], matchIndex: number): string {
   return lines.slice(start, end).join('\n')
 }
 
+const EMPTY_RESULT_GUIDANCE =
+  'No matching memory. This is the authoritative result — memory_search already covers both topic shards and undreamed stream events. Do not fall back to grep/find/bash or manually reading memory/topics, memory/streams, or sessions; accept that no relevant memory exists and proceed.'
+
+// The empty-set note rides in the LLM-facing `text` ONLY. `details` stays the
+// pure struct: `keywordLane` reads `searchAll` directly (never this layer) and
+// the structured tests assert on `details`, so both must see no `note`.
 function resultToToolResult(result: MemorySearchResult) {
+  const isEmpty = 'matches' in result && result.matches.length === 0
+  const text = isEmpty ? JSON.stringify({ ...result, note: EMPTY_RESULT_GUIDANCE }) : JSON.stringify(result)
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+    content: [{ type: 'text' as const, text }],
     details: result,
   }
 }
