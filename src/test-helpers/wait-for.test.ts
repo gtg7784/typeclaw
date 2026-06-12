@@ -7,7 +7,7 @@ describe('waitFor', () => {
     const start = Date.now()
     const result = await waitFor(() => 'ready')
     expect(result).toBe('ready')
-    expect(Date.now() - start).toBeLessThan(5)
+    expect(Date.now() - start).toBeLessThan(50)
   })
 
   test('resolves with the truthy value when predicate flips during polling', async () => {

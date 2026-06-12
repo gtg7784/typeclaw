@@ -4,7 +4,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { type Subagent, readTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
-import { appendTool, advanceWatermarkTool } from './append-tool'
+import { advanceWatermarkTool, createAppendTool, type FragmentsAppendedHook } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { streamFilePath, streamsDir } from './paths'
 import { readLatestWatermark } from './watermark'
@@ -299,12 +299,14 @@ const consoleLogger: MemoryLoggerLogger = {
 
 export type CreateMemoryLoggerSubagentOptions = {
   logger?: MemoryLoggerLogger
+  onFragmentsAppended?: FragmentsAppendedHook
 }
 
 export function createMemoryLoggerSubagent(
   options: CreateMemoryLoggerSubagentOptions = {},
 ): Subagent<MemoryLoggerPayload> {
   const logger = options.logger ?? consoleLogger
+  const appendTool = createAppendTool(options.onFragmentsAppended)
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
     // Logging is "read transcript past the watermark, decide 0-N fragments,

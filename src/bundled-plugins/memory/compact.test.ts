@@ -191,7 +191,7 @@ describe('compactDailyStreams: combined rules', () => {
       applyFragmentGc: true,
     })
 
-    expect(stats).toEqual({ filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 })
+    expect(stats).toEqual({ filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0, droppedFragmentIds: [] })
     expect(await readEvents(path)).toEqual(before)
   })
 

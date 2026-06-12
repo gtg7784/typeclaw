@@ -7,14 +7,18 @@ import type { RunSession, SubagentContext } from '@/plugin'
 
 import {
   commitMemorySnapshot,
+  compactDailyStreams,
   createDreamingSubagent,
   DREAM_EMOJI_POOL,
   type DreamingLogger,
   type DreamingPayload,
   isDreamingPayload,
 } from './dreaming'
-import { DREAMING_STATE_FILE, loadDreamingState } from './dreaming-state'
+import { addDreamedIds, DREAMING_STATE_FILE, emptyState, getDreamedIds, loadDreamingState } from './dreaming-state'
 import { renderShard } from './frontmatter'
+import { MODEL_NAME } from './vector/embedder'
+import type { EmbedFn } from './vector/hybrid'
+import { VectorStore, type VectorRow } from './vector/store'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -95,11 +99,13 @@ async function invokeDreaming(
     logger?: DreamingLogger
     runSession?: RunSession
     throwOnRunSession?: boolean
+    vectorEmbedFn?: EmbedFn
   } = {},
 ): Promise<{ prompts: string[] }> {
   const subagent = createDreamingSubagent({
     commitMemory: options.commitMemory ?? (async () => {}),
     logger: options.logger ?? silentLogger,
+    ...(options.vectorEmbedFn !== undefined ? { vectorEmbedFn: options.vectorEmbedFn } : {}),
   })
   const captured = captureRunSession()
   const runSession = options.throwOnRunSession
@@ -582,6 +588,119 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     expect(infos.some((m) => m.startsWith('[dreaming] compaction') && m.includes('files=1'))).toBe(true)
   })
+
+  test('QA 2.3: reindexes changed topic shards and deletes removed topic vectors after a successful dream', async () => {
+    await writeFile(streamFile('2026-04-27'), [fragmentLine('old'), fragmentLine('gone'), fragmentLine('new')].join(''))
+    await writeTopicShard('old', shardText('Old', ['Old.', '', 'fragments:', '- streams/2026-04-27#f-old'].join('\n')))
+    await writeTopicShard(
+      'gone',
+      shardText('Gone', ['Gone.', '', 'fragments:', '- streams/2026-04-27#f-gone'].join('\n')),
+    )
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('topic:old', 'topic', 'old', vector({ 0: 1 }), 'old-hash'))
+    store.upsert(vectorRow('topic:gone', 'topic', 'gone', vector({ 1: 1 }), 'gone-hash'))
+    store.close()
+    const embeddedTexts: string[] = []
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'old',
+        shardText(
+          'Old updated',
+          ['Old updated.', '', 'fragments:', '- streams/2026-04-27#f-old', '- streams/2026-04-27#f-gone'].join('\n'),
+        ),
+      )
+      await writeTopicShard(
+        'new',
+        shardText('New', ['New.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n')),
+      )
+      await rm(topicShard('gone'))
+    }
+
+    await invokeDreaming(agentDir, { runSession, vectorEmbedFn: embedRecording(embeddedTexts) })
+
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['topic:gone'])).toEqual([])
+      expect(
+        afterStore
+          .getByIds(['topic:old', 'topic:new'])
+          .map((row) => row.id)
+          .sort(),
+      ).toEqual(['topic:new', 'topic:old'])
+      expect(embeddedTexts).toContain(
+        [
+          'Old updated',
+          'Old updated.',
+          '',
+          'fragments:',
+          '- streams/2026-04-27#f-old',
+          '- streams/2026-04-27#f-gone',
+        ].join('\n'),
+      )
+      expect(embeddedTexts).toContain(['New', 'New.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n'))
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('vector sync failure is best-effort: dream still advances dreamed-ids and commits', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('f1'))
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.close()
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const runSession: RunSession = async () => {
+      await writeTopicShard('t1', shardText('T1', ['T1.', '', 'fragments:', '- streams/2026-04-27#f1'].join('\n')))
+    }
+
+    await invokeDreaming(agentDir, {
+      runSession,
+      logger,
+      vectorEmbedFn: async () => {
+        throw new Error('model unavailable')
+      },
+    })
+
+    const state = await loadDreamingState(agentDir)
+    expect(getDreamedIds(state, '2026-04-27').size).toBeGreaterThan(0)
+    expect(warnings.some((w) => w.includes('vector topic sync failed'))).toBe(true)
+  })
+
+  test('QA 2.4: deletes stream vectors for fragments dropped by dreaming compaction', async () => {
+    await writeFile(streamFile('2026-04-27'), [fragmentLine('cited'), fragmentLine('drop')].join(''))
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('stream:2026-04-27#f-cited', 'stream', '2026-04-27#f-cited', vector({ 0: 1 }), 'cited'))
+    store.upsert(vectorRow('stream:2026-04-27#f-drop', 'stream', '2026-04-27#f-drop', vector({ 1: 1 }), 'drop'))
+    store.close()
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'kept',
+        shardText('Kept', ['Kept.', '', 'fragments:', '- streams/2026-04-27#f-cited'].join('\n')),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession, vectorEmbedFn: async () => [vector({ 2: 1 })] })
+
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['stream:2026-04-27#f-cited']).map((row) => row.id)).toEqual([
+        'stream:2026-04-27#f-cited',
+      ])
+      expect(afterStore.getByIds(['stream:2026-04-27#f-drop'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('QA 2.5: compactDailyStreams returns vector keys for dropped fragments', async () => {
+    await writeFile(streamFile('2026-04-27'), [fragmentLine('cited'), fragmentLine('drop')].join(''))
+    const state = addDreamedIds(emptyState(), '2026-04-27', ['f-cited', 'f-drop'], 'now')
+    const cited = new Map([['2026-04-27', new Set(['f-cited'])]])
+
+    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-04-27'], { applyFragmentGc: true })
+
+    expect(stats.droppedFragmentIds).toEqual(['2026-04-27#f-drop'])
+  })
 })
 
 describe('dreaming subagent (runtime-managed shard frontmatter)', () => {
@@ -919,6 +1038,32 @@ describe('dreaming subagent (orchestration)', () => {
     expect(warnings.some((m) => m.startsWith('[dreaming] run threw') && m.includes('LLM blew up'))).toBe(true)
   })
 })
+
+function vectorRow(
+  id: string,
+  source: 'topic' | 'stream',
+  key: string,
+  embedding: Float32Array,
+  contentHash: string,
+): Omit<VectorRow, 'updatedAt'> {
+  return { id, source, key, model: MODEL_NAME, dims: embedding.length, embedding, contentHash }
+}
+
+function embedRecording(texts: string[]): EmbedFn {
+  return async (input, type) => {
+    expect(type).toBe('passage')
+    texts.push(...input)
+    return input.map((_, index) => vector({ [index]: 1 }))
+  }
+}
+
+function vector(values: Record<number, number>): Float32Array {
+  const result = new Float32Array(8)
+  for (const [index, value] of Object.entries(values)) {
+    result[Number(index)] = value
+  }
+  return result
+}
 
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> {
   const proc = Bun.spawn({
