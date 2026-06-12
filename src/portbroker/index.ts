@@ -20,6 +20,12 @@ export {
   type UpstreamConnection,
   type UpstreamHandlers,
 } from './container-server'
+export {
+  __resetForwardRequestBus,
+  publishForwardRequest,
+  subscribeForwardRequest,
+  type ForwardRequestEvent,
+} from './forward-request-bus'
 export { __resetForwardResultBus, publishForwardResult, subscribeForwardResult } from './forward-result-bus'
 export { bindWithForward, type BindFactory, type BindResult, type BindWithForwardOptions } from './bind-with-forward'
 export {

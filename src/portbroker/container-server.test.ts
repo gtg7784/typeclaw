@@ -6,6 +6,7 @@ import {
   type UpstreamConnection,
   type UpstreamHandlers,
 } from './container-server'
+import type { ForwardRequestEvent } from './forward-request-bus'
 import { decodeBytes, encodeBytes, type ContainerToHostd, type HostdToContainer } from './protocol'
 
 type FakeSocket = BrokerSocket & {
@@ -340,5 +341,72 @@ describe('createContainerBroker port-forward-result', () => {
     await expect(
       dispatch(broker, ws, { type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 }),
     ).resolves.toBeUndefined()
+  })
+})
+
+describe('createContainerBroker port-forward-request', () => {
+  test('published in-process request is sent after auth', async () => {
+    const subscribers: Array<(event: ForwardRequestEvent) => void> = []
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardRequestSubscribe: (cb) => {
+        subscribers.push(cb)
+        return () => {}
+      },
+    })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+    await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
+
+    subscribers[0]?.({ targetPort: 4848, hostCandidates: [4848, 4849], reason: 'agent-browser-dashboard' })
+
+    expect(ws.outbox).toContainEqual({
+      type: 'port-forward-request',
+      targetPort: 4848,
+      hostCandidates: [4848, 4849],
+      reason: 'agent-browser-dashboard',
+    })
+  })
+
+  test('reconnect re-emits stored reserved request after broker-hello-ack', async () => {
+    const subscribers: Array<(event: ForwardRequestEvent) => void> = []
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardRequestSubscribe: (cb) => {
+        subscribers.push(cb)
+        return () => {}
+      },
+    })
+    const first = makeFakeSocket()
+    broker.open(first)
+    await dispatch(broker, first, { type: 'broker-hello', token: 't' })
+    subscribers[0]?.({ targetPort: 4848, hostCandidates: [4848, 4849] })
+    broker.close(first)
+
+    const second = makeFakeSocket()
+    broker.open(second)
+    await dispatch(broker, second, { type: 'broker-hello', token: 't' })
+
+    expect(second.outbox).toEqual([
+      { type: 'broker-hello-ack' },
+      { type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848, 4849] },
+    ])
+  })
+
+  test('does not emit request before broker-hello-ack', () => {
+    const subscribers: Array<(event: ForwardRequestEvent) => void> = []
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardRequestSubscribe: (cb) => {
+        subscribers.push(cb)
+        return () => {}
+      },
+    })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+
+    subscribers[0]?.({ targetPort: 4848, hostCandidates: [4848] })
+
+    expect(ws.outbox).toEqual([])
   })
 })

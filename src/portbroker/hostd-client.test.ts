@@ -96,8 +96,13 @@ function makeFakeHostSocket(): FakeHostSocket {
   return sock
 }
 
-function makeFakeListenHost(opts: { failPorts?: Set<number>; listeners: Map<number, FakeListener> }): ListenHostFn {
+function makeFakeListenHost(opts: {
+  failPorts?: Set<number>
+  listeners: Map<number, FakeListener>
+  calls?: Array<{ host: string; port: number }>
+}): ListenHostFn {
   return async (host, port, handlers) => {
+    opts.calls?.push({ host, port })
     if (opts.failPorts?.has(port)) throw new Error('EADDRINUSE')
     const sockets: FakeHostSocket[] = []
     const listener: FakeListener = {
@@ -126,6 +131,7 @@ function setup(opts: {
 }) {
   const ws = makeFakeWs()
   const listeners = new Map<number, FakeListener>()
+  const listenCalls: Array<{ host: string; port: number }> = []
   const events: PortForwardEvent[] = []
   const fatalAuthFailures: string[] = []
   const broker = createBroker({
@@ -137,10 +143,14 @@ function setup(opts: {
     onEvent: (e) => events.push(e),
     onFatalAuthFailure: (reason) => fatalAuthFailures.push(reason),
     connectWs: opts.connectWs ?? (async () => ws),
-    listenHost: makeFakeListenHost({ ...(opts.failPorts ? { failPorts: opts.failPorts } : {}), listeners }),
+    listenHost: makeFakeListenHost({
+      ...(opts.failPorts ? { failPorts: opts.failPorts } : {}),
+      listeners,
+      calls: listenCalls,
+    }),
     reconnectDelaysMs: [10, 10],
   })
-  return { broker, ws, listeners, events, fatalAuthFailures }
+  return { broker, ws, listeners, listenCalls, events, fatalAuthFailures }
 }
 
 describe('createBroker', () => {
@@ -473,6 +483,86 @@ describe('createBroker', () => {
     ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
     const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
     expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: false, reason: 'policy excluded' })
+    await broker.stop()
+  })
+
+  test('reserved request binds the first free host candidate and targets the requested container port', async () => {
+    const { broker, ws, listeners, events } = setup({ policy: { allow: '*' }, failPorts: new Set([4848]) })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848, 4849] })
+
+    const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
+    expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: true, hostPort: 4849 })
+    expect(listeners.has(4849)).toBe(true)
+    expect(events.find((e) => e.kind === 'port-forward-opened')).toMatchObject({ port: 4848, hostPort: 4849 })
+
+    const sock = makeFakeHostSocket()
+    ;(listeners.get(4849) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
+    const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
+    expect(open.port).toBe(4848)
+    await broker.stop()
+  })
+
+  test('reserved request reports failure when all host candidates are busy', async () => {
+    const { broker, ws } = setup({ policy: { allow: '*' }, failPorts: new Set([4848, 4849]) })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848, 4849] })
+
+    const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
+    expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: false, reason: 'EADDRINUSE' })
+    await broker.stop()
+  })
+
+  test('reserved forward suppresses auto-watcher double bind for the same target port', async () => {
+    const { broker, ws, listenCalls } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848] })
+    await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
+
+    ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
+    await expectStable(() => listenCalls.filter((call) => call.port === 4848).length > 1, {
+      durationMs: 30,
+      description: 'duplicate reserved target bind',
+    })
+    expect(listenCalls.filter((call) => call.port === 4848)).toHaveLength(1)
+    await broker.stop()
+  })
+
+  test('port-listen-closed for a reserved target does not remove the reserved listener', async () => {
+    const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848] })
+    await waitFor(() => listeners.has(4848))
+
+    ws.emit({ type: 'port-listen-closed', port: 4848 })
+
+    expect(listeners.get(4848)?.stopped).toBe(false)
+    await broker.stop()
+  })
+
+  test('relay-open nack closes only that host socket while the reserved listener stays bound', async () => {
+    const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848] })
+    await waitFor(() => listeners.has(4848))
+
+    const sock = makeFakeHostSocket()
+    ;(listeners.get(4848) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
+    const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
+    ws.emit({ type: 'relay-open-nack', streamId: open.streamId, reason: 'ECONNREFUSED' })
+
+    expect(sock.ended).toBe(true)
+    expect(listeners.get(4848)?.stopped).toBe(false)
     await broker.stop()
   })
 })

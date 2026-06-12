@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 
 import type { ServerWebSocket } from 'bun'
 
+import type { ForwardRequestEvent } from './forward-request-bus'
 import { parseProcNetTcp } from './proc-net-tcp'
 import { decodeBytes, encodeBytes, type ContainerToHostd, type HostdToContainer, type StreamId } from './protocol'
 
@@ -23,6 +24,7 @@ export type ContainerBrokerOptions = {
   // to the host side. Without it, code that picks an in-container port has no
   // way to detect host-side EADDRINUSE collisions across containers.
   onForwardResult?: (event: ForwardResultEvent) => void
+  onForwardRequestSubscribe?: (cb: (event: ForwardRequestEvent) => void) => () => void
 }
 
 export type ForwardResultEvent =
@@ -72,6 +74,8 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
   }
 
   const sessions = new WeakMap<BrokerSocket, SessionState>()
+  const sockets = new Set<BrokerSocket>()
+  const reserved = new Map<number, ForwardRequestEvent>()
 
   const send = (ws: BrokerSocket, msg: ContainerToHostd): void => {
     try {
@@ -97,6 +101,22 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
       state.pollTimer = null
     }
   }
+
+  const sendReservedRequest = (ws: BrokerSocket, request: ForwardRequestEvent): void => {
+    send(ws, {
+      type: 'port-forward-request',
+      targetPort: request.targetPort,
+      hostCandidates: request.hostCandidates,
+      ...(request.reason !== undefined ? { reason: request.reason } : {}),
+    })
+  }
+
+  opts.onForwardRequestSubscribe?.((event) => {
+    reserved.set(event.targetPort, event)
+    for (const ws of sockets) {
+      if (ws.data.authed) sendReservedRequest(ws, event)
+    }
+  })
 
   const tickWatcher = async (ws: BrokerSocket, state: SessionState): Promise<void> => {
     const next = await snapshotPorts()
@@ -158,6 +178,7 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
   return {
     open(ws) {
       sessions.set(ws, { pollTimer: null, lastSnapshot: new Map(), upstreams: new Map() })
+      sockets.add(ws)
     },
 
     async message(ws, raw) {
@@ -187,6 +208,7 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
         ws.data.authed = true
         log({ kind: 'authed' })
         send(ws, { type: 'broker-hello-ack' })
+        for (const request of reserved.values()) sendReservedRequest(ws, request)
         return
       }
 
@@ -252,6 +274,7 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
         } catch {}
       }
       state.upstreams.clear()
+      sockets.delete(ws)
       sessions.delete(ws)
     },
   }
