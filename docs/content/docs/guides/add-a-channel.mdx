@@ -1,6 +1,6 @@
 ---
 title: Add a channel
-description: Give the agent another inbox — Slack, Discord, Telegram, GitHub, KakaoTalk, or LINE
+description: Give the agent another inbox — Slack, Discord, Telegram, GitHub, LINE, or KakaoTalk
 icon: MessagesSquare
 ---
 
@@ -8,7 +8,7 @@ import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
 import { Callout } from 'fumadocs-ui/components/callout'
 import { Steps, Step } from 'fumadocs-ui/components/steps'
 
-A **channel** is any platform the agent talks through — Slack, Discord, Telegram, GitHub, KakaoTalk, LINE. Same agent, many inboxes.
+A **channel** is any platform the agent talks through — Slack, Discord, Telegram, GitHub, LINE, KakaoTalk. Same agent, many inboxes.
 
 You already wired your **first** channel during `typeclaw init` (and, if you accepted the claim prompt it offered, you're paired as its owner too). This guide is for adding **another** one — a second platform, or your first if you chose "skip" back in `init`. The flow is the same either way.
 
@@ -174,8 +174,8 @@ The wiring is the same shape everywhere — `typeclaw channel add <platform>`, t
 typeclaw channel add discord-bot     # bot token
 typeclaw channel add telegram-bot    # bot token
 typeclaw channel add github          # PAT or GitHub App; needs a public URL
-typeclaw channel add kakaotalk       # email + password, stored encrypted
 typeclaw channel add line            # QR or email login, stored in secrets.json
+typeclaw channel add kakaotalk       # email + password, stored encrypted
 ```
 
 <Accordions>
@@ -200,15 +200,15 @@ GitHub delivers events over webhooks, so it needs a public URL to reach your con
 
 </Accordion>
 
-<Accordion title="KakaoTalk — credentials that renew themselves">
-
-KakaoTalk is the only adapter whose login expires (about every 7 days). TypeClaw renews it for you automatically using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model.
-
-</Accordion>
-
 <Accordion title="LINE — a personal account, not a bot">
 
 LINE logs in as a real user account by QR or email/PIN and stores the resulting account record in `secrets.json`. It sends plain text only — no outbound attachments, stickers, rich formatting, or bot-style mentions. See the [LINE adapter reference](/docs/reference/line) for the rest.
+
+</Accordion>
+
+<Accordion title="KakaoTalk — credentials that renew themselves">
+
+KakaoTalk is the only adapter whose login expires (about every 7 days). TypeClaw renews it for you automatically using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model.
 
 </Accordion>
 
