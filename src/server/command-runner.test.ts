@@ -728,6 +728,64 @@ describe('runPromptForCommand', () => {
     expect(new Set(seen).size).toBe(3)
   })
 
+  // Regression guard: forwarding suppressSystemMemory removed system-prompt
+  // memory from command/handler sessions, but this path never fired
+  // session.turn.start, so a vector agent's command prompts got NO memory at
+  // all. The turn-start hook must run and its retrievalContext.results must be
+  // appended to the prompt text, mirroring the TUI/channel/cron/subagent paths.
+  test('fires session.turn.start and appends retrievalContext.results to the command prompt', async () => {
+    const { sessionFactory, agentDir } = makeSessionFactoryForTest()
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'retriever',
+      agentDir,
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.turn.start': (event) => {
+          if (event.retrievalContext !== undefined) event.retrievalContext.results = '# Memory\n\ncommand fact'
+        },
+      },
+    )
+    const runtime = createPluginRuntime({
+      registry: emptyRegistry(),
+      hooks,
+      subagents: {},
+      pluginSubagentByShim: new WeakMap(),
+      hasAnyPluginContent: false,
+      loadedPlugins: [],
+      materializedSkills: null,
+    })
+    let promptedText = ''
+    const fakeCreate = async (): Promise<{ session: object; dispose: () => Promise<void> }> => ({
+      session: {
+        prompt: async (text: string) => {
+          promptedText = text
+        },
+        getLastAssistantText: () => 'ok',
+        dispose: () => {},
+        abort: async () => {},
+      } as object,
+      dispose: async () => {},
+    })
+
+    await runPromptForCommand({
+      text: 'run the report',
+      origin: { kind: 'cron', jobId: 'test', jobKind: 'handler', scheduledByOrigin: { kind: 'config-file' } },
+      runtime,
+      agentDir,
+      permissions: noopPermissionService,
+      signal: new AbortController().signal,
+      runtimeVersion: '0.0.0-test',
+      containerName: 'test-agent',
+      sessionFactory,
+      suppressSystemMemory: true,
+      _createSession: fakeCreate as Parameters<typeof runPromptForCommand>[0]['_createSession'],
+    })
+
+    expect(promptedText).toContain('run the report')
+    expect(promptedText).toContain('# Memory\n\ncommand fact')
+  })
+
   // Regression guard: cron-handler / plugin-command ctx.prompt sessions used to
   // be created without channelRouter, so buildChannelTools emitted no
   // channel_send. A handler told to post to a channel then had no tool and

@@ -418,8 +418,24 @@ export async function runPromptForCommand(args: {
     ...(args.suppressSystemMemory !== undefined ? { suppressSystemMemory: args.suppressSystemMemory } : {}),
   })
   const detachAbort = bindSignalToSession(args.signal, session)
+  // Mirror the other turn drivers (TUI/channel/cron/subagent): fire
+  // session.turn.start with a retrievalContext so a vector agent — whose
+  // system-prompt `# Memory` section is suppressed — gets its long-term memory
+  // injected per-turn into the user prompt here too. Without this, command and
+  // handler prompt sessions would have no memory at all under vector mode.
+  const turnEvent = { sessionId, agentDir: args.agentDir, origin: args.origin }
+  const retrievalContext = { results: '' }
   try {
-    await session.prompt(`${renderTurnTimeAnchor()}\n\n${args.text}`)
+    await snapshot.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: args.text, retrievalContext })
+    const turnText =
+      retrievalContext.results.length > 0
+        ? `${renderTurnTimeAnchor()}\n\n${args.text}\n\n${retrievalContext.results}`
+        : `${renderTurnTimeAnchor()}\n\n${args.text}`
+    try {
+      await session.prompt(turnText)
+    } finally {
+      await snapshot.hooks.runSessionTurnEnd(turnEvent)
+    }
     return session.getLastAssistantText() ?? ''
   } finally {
     detachAbort()
