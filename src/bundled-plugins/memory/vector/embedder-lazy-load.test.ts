@@ -9,12 +9,14 @@ import { describe, expect, mock, test } from 'bun:test'
 // dragging sharp onto every boot and crashing the container. This test proves
 // the import is deferred to first embed.
 let transformersEvaluated = false
+let lastPipelineOptions: Record<string, unknown> | undefined
 
 mock.module('@huggingface/transformers', () => {
   transformersEvaluated = true
   return {
     env: {},
-    pipeline: async () => {
+    pipeline: async (_task: string, _model: string, options?: Record<string, unknown>) => {
+      lastPipelineOptions = options
       const extractor = () => ({ data: new Float32Array(768) })
       return extractor
     },
@@ -33,5 +35,14 @@ describe('embedder lazy transformers load', () => {
 
     await getEmbedder()
     expect(transformersEvaluated).toBe(true)
+  })
+
+  test('loads the q8 variant locally (dtype pinned, local_files_only preserved)', async () => {
+    const { getEmbedder } = await import('./embedder')
+
+    await getEmbedder()
+
+    expect(lastPipelineOptions?.dtype).toBe('q8')
+    expect(lastPipelineOptions?.local_files_only).toBe(true)
   })
 })

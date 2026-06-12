@@ -3,13 +3,15 @@ import { mkdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const pipelineCalls: string[] = []
+type PipelineCall = { model: string; options: Record<string, unknown> | undefined }
+
+const pipelineCalls: PipelineCall[] = []
 let releasePipeline: (() => void) | null = null
 
 mock.module('@huggingface/transformers', () => ({
   env: {},
-  pipeline: async (_task: string, model: string) => {
-    pipelineCalls.push(model)
+  pipeline: async (_task: string, model: string, options?: Record<string, unknown>) => {
+    pipelineCalls.push({ model, options })
     await new Promise<void>((resolve) => {
       releasePipeline = resolve
     })
@@ -42,8 +44,13 @@ describe('ensureModels', () => {
 
     const { modelsDir } = await import('./paths')
 
-    expect(pipelineCalls).toEqual(['Xenova/multilingual-e5-base'])
+    expect(pipelineCalls.map((call) => call.model)).toEqual(['Xenova/multilingual-e5-base'])
     expect((await stat(modelsDir())).isDirectory()).toBe(true)
+  })
+
+  test('downloads the q8 (quantized) variant, not the fp32 default', async () => {
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]?.options?.dtype).toBe('q8')
   })
 
   test('modelsDir points under TYPECLAW_HOME', async () => {
