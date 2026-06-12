@@ -602,6 +602,8 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     const promptsAfterAlias = prompts.length
     expect(promptsAfterAlias - promptsBeforeAlias).toBe(1)
     expect(prompts[prompts.length - 1]).toContain('모모야')
+
+    await mgr.stop()
   })
 
   test('forwards selfAliasesRef to the slack adapter so the classifier can anchor threads on alias-only inbounds', async () => {
