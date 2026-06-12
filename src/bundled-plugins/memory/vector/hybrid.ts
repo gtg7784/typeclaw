@@ -59,47 +59,69 @@ function keywordLane(
   return 'matches' in result ? result.matches : []
 }
 
-// Parent-child fusion. Each lane hit scores its node by RRF rank, then nodes
-// collapse to their parent topic via the citation link: a matched fragment
-// contributes to the topic that cites it, never as a standalone result. An
-// undreamed fragment (no citing topic yet) resolves to itself, preserving the
-// freshness window. Collapsed parents take the MAX of their members' scores,
-// not the sum — sum would over-rank often-revised topics purely for having more
-// historical citations to match (PARADE: max beats sum for concentrated relevance).
+// Reciprocal Rank Fusion across two rankers (vector + keyword). Each lane is
+// collapsed to per-parent scores INDEPENDENTLY (MAX over a parent's children
+// within that lane), then the two lanes' per-parent scores are SUMMED. The two
+// reductions are different on purpose:
+//
+//   - WITHIN a lane, a topic's children (the fragments citing it) collapse by
+//     MAX — summing would over-rank often-revised topics purely for having more
+//     historical citations to match (PARADE: max beats sum for concentrated
+//     relevance).
+//   - ACROSS lanes, the per-parent contributions SUM — cross-ranker agreement
+//     is the entire signal RRF exists to capture. A topic found by BOTH the
+//     vector and the keyword lane must outrank one found by a single lane, so
+//     its score is 1/(k+rankVector) + 1/(k+rankKeyword). Collapsing both lanes
+//     into one map and taking MAX (the previous behavior) discarded that
+//     agreement, leaving every result carrying a single lane's reciprocal rank.
 function fuseLanes(
   vectorRows: VectorRow[],
   keywordMatches: MemorySearchMatch[],
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
   parentSlugsByFragmentId: Map<string, Set<string>>,
 ): HybridSearchResult[] {
+  const vectorLane = collapseLane(
+    vectorRows.map((row, i) => ({ source: row.source, key: row.key, score: 1 / (RRF_K + i + 1) })),
+    index,
+    parentSlugsByFragmentId,
+  )
+  const keywordLane = collapseLane(
+    keywordMatches.map((match, i) => ({ source: match.source, key: matchKey(match), score: 1 / (RRF_K + i + 1) })),
+    index,
+    parentSlugsByFragmentId,
+  )
+
   const fused = new Map<string, HybridSearchResult>()
-
-  for (let i = 0; i < vectorRows.length; i++) {
-    const row = vectorRows[i]!
-    addScore(fused, index, row.source, row.key, 1 / (RRF_K + i + 1), parentSlugsByFragmentId)
-  }
-
-  for (let i = 0; i < keywordMatches.length; i++) {
-    const match = keywordMatches[i]!
-    addScore(fused, index, match.source, matchKey(match), 1 / (RRF_K + i + 1), parentSlugsByFragmentId)
+  for (const lane of [vectorLane, keywordLane]) {
+    for (const [fusedKey, { content, score }] of lane) {
+      const existing = fused.get(fusedKey)
+      if (existing !== undefined) existing.rrfScore += score
+      else fused.set(fusedKey, { ...content, rrfScore: score })
+    }
   }
 
   return [...fused.values()].sort((a, b) => b.rrfScore - a.rrfScore || a.key.localeCompare(b.key))
 }
 
-function addScore(
-  fused: Map<string, HybridSearchResult>,
+type LaneHit = { source: 'topic' | 'stream'; key: string; score: number }
+type LaneEntry = { content: Omit<HybridSearchResult, 'rrfScore'>; score: number }
+
+// Returns one lane's per-parent scores so the caller can SUM across lanes;
+// folding straight into a shared map would force a cross-lane MAX instead.
+function collapseLane(
+  hits: LaneHit[],
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
-  source: 'topic' | 'stream',
-  nodeKey: string,
-  score: number,
   parentSlugsByFragmentId: Map<string, Set<string>>,
-): void {
-  for (const { fusedKey, content } of resolveToParents(source, nodeKey, index, parentSlugsByFragmentId)) {
-    const existing = fused.get(fusedKey)
-    if (existing !== undefined) existing.rrfScore = Math.max(existing.rrfScore, score)
-    else fused.set(fusedKey, { ...content, rrfScore: score })
+): Map<string, LaneEntry> {
+  const lane = new Map<string, LaneEntry>()
+  for (const hit of hits) {
+    for (const { fusedKey, content } of resolveToParents(hit.source, hit.key, index, parentSlugsByFragmentId)) {
+      const existing = lane.get(fusedKey)
+      if (existing !== undefined) existing.score = Math.max(existing.score, hit.score)
+      else lane.set(fusedKey, { content, score: hit.score })
+    }
   }
+  return lane
 }
 
 // A matched fragment collapses to EVERY topic that cites it (a fragment can back
