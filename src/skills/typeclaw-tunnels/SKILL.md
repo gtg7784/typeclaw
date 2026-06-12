@@ -113,7 +113,10 @@ When a tunnel has no public URL, **diagnose the root cause directly — don't st
 
 1. **Read `typeclaw.json`.** Look at `tunnels[]` (is the tunnel even configured? which `provider`?) and `docker.file.cloudflared` (is it `true`?).
 2. **Check the binary:** `command -v cloudflared`. If a `cloudflare-quick` / `cloudflare-named` tunnel is configured but this prints nothing, the cloudflared layer was never installed — that is the root cause (see "### `cloudflared` is not installed" below).
-3. **Check the upstream is alive:** the service the tunnel points at must be listening on its `upstreamPort` inside the container (e.g. `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:<upstreamPort>/`).
+3. **Check the upstream is alive — but probe the right port per provider:**
+   - `cloudflare-quick`: the service must be listening on the tunnel's `upstreamPort` from `typeclaw.json` (e.g. `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:<upstreamPort>/`).
+   - `cloudflare-named`: there is **no** `upstreamPort` (the schema rejects it; the dashboard's Public Hostname mapping `localhost:<port>` captures the upstream — see the named-tunnel section above). Ask the user which port the dashboard's Public Hostname points at, then probe `127.0.0.1:<that port>`.
+   - `external`: the upstream lives behind the user's own reverse proxy, so there is no container-local port to probe — skip this check unless the user names the upstream.
 
 Then tell the user honestly and offer the fix. For the common "hand-added tunnel, no `cloudflared`" case, send something like:
 
