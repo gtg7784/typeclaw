@@ -7,6 +7,7 @@ import {
   type KnownProviderId,
   type KnownProviderVendorId,
 } from '@/config/providers'
+import { checkpointFromSelections, type WizardCheckpointStore } from '@/init/checkpoint'
 import type { ModelOption } from '@/init/models-dev'
 
 import {
@@ -98,6 +99,7 @@ describe('collectWizardInputs back-aware flow', () => {
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
       runOAuthLogin: async () => ({ ok: true }),
       askOAuthFailureRecovery: async () => 'abort',
+      confirmResumeCheckpoint: async () => 'start-over',
       ...overrides,
     }
   }
@@ -1246,5 +1248,171 @@ describe('recommended models', () => {
     const b = model('openai/gpt-5.4')
     const sorted = sortRecommendedFirst([a, b])
     expect(sorted.map((o) => o.ref)).toEqual(['openai/gpt-5.4-nano', 'openai/gpt-5.4'])
+  })
+})
+
+describe('collectWizardInputs wizard-answer checkpoint', () => {
+  const FIREWORKS_REF = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+  const fireworksModel: ModelOption = {
+    providerId: 'fireworks',
+    providerName: 'Fireworks',
+    modelId: 'accounts/fireworks/routers/kimi-k2p6-turbo',
+    modelName: 'Kimi K2.6 Turbo',
+    ref: FIREWORKS_REF,
+    contextWindow: 256000,
+    reasoning: true,
+    curated: true,
+    supportsVision: true,
+  }
+
+  function inMemoryStore(initial?: ReturnType<typeof checkpointFromSelections>): {
+    store: WizardCheckpointStore
+    saved: () => ReturnType<typeof checkpointFromSelections> | undefined
+    clears: () => number
+  } {
+    let current = initial
+    let clears = 0
+    return {
+      store: {
+        load: async () => current,
+        save: async (_cwd, checkpoint) => {
+          current = checkpoint
+        },
+        clear: async () => {
+          current = undefined
+          clears += 1
+        },
+      },
+      saved: () => current,
+      clears: () => clears,
+    }
+  }
+
+  function basePrompts(overrides: Partial<WizardPrompts> = {}): WizardPrompts {
+    return {
+      loadCatalog: async () => ({ options: [fireworksModel], source: 'curated' }),
+      readExistingApiKey: async () => null,
+      hasExistingOAuthCredentials: async () => false,
+      pickVendor: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderVendorId }),
+      pickProviderVariant: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId, auto: true }),
+      pickModel: async () => ({ kind: 'value', value: fireworksModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
+      askApiKey: async () => ({ kind: 'value', value: 'fw_test' }),
+      validateApiKey: async () => ({ kind: 'ok' as const }),
+      pickVisionVendor: async () => ({ kind: 'value', value: 'skip' }),
+      pickVisionProviderVariant: async () => ({ kind: 'value', value: 'openai' as KnownProviderId, auto: true }),
+      pickVisionModel: async () => ({ kind: 'value', value: fireworksModel }),
+      pickChannel: async () => ({ kind: 'value', value: 'none' }),
+      hasExistingChannelSecrets: async () => false,
+      runChannelFlow: async () => ({ kind: 'value', value: {} }),
+      runOAuthLogin: async () => ({ ok: true }),
+      askOAuthFailureRecovery: async () => 'abort',
+      confirmResumeCheckpoint: async () => 'start-over',
+      ...overrides,
+    }
+  }
+
+  test('persists selections to the store as the wizard advances', async () => {
+    const { store, saved } = inMemoryStore()
+    await collectWizardInputs('/agent', basePrompts(), { checkpointStore: store })
+
+    const checkpoint = saved()
+    expect(checkpoint?.vendorId).toBe('fireworks')
+    expect(checkpoint?.providerId).toBe('fireworks')
+    expect(checkpoint?.modelRef).toBe(FIREWORKS_REF)
+    expect(checkpoint?.channelChoice).toBe('none')
+  })
+
+  test('never persists secret material', async () => {
+    const { store, saved } = inMemoryStore()
+    await collectWizardInputs('/agent', basePrompts(), { checkpointStore: store })
+    const serialized = JSON.stringify(saved())
+    expect(serialized).not.toContain('fw_test')
+    expect(serialized).not.toContain('apiKey')
+    expect(serialized).not.toContain('llmAuth')
+  })
+
+  test('prompts to resume when a checkpoint exists and seeds prior answers', async () => {
+    const existing = checkpointFromSelections({
+      cwd: '/agent',
+      vendorId: 'fireworks',
+      providerId: 'fireworks',
+      modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+      channelChoice: 'none',
+    })
+    const { store } = inMemoryStore(existing)
+
+    let confirmCalls = 0
+    let modelInitial: string | undefined
+    await collectWizardInputs(
+      '/agent',
+      basePrompts({
+        confirmResumeCheckpoint: async () => {
+          confirmCalls += 1
+          return 'resume'
+        },
+        pickModel: async (_options, _providerId, initial) => {
+          modelInitial = initial
+          return { kind: 'value', value: fireworksModel }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    expect(confirmCalls).toBe(1)
+    expect(modelInitial).toBe(FIREWORKS_REF)
+  })
+
+  test('start-over discards the existing checkpoint without seeding', async () => {
+    const existing = checkpointFromSelections({
+      cwd: '/agent',
+      vendorId: 'openai',
+      providerId: 'openai',
+      modelRef: 'openai/gpt-5.4',
+    })
+    const { store, clears } = inMemoryStore(existing)
+
+    let vendorInitial: string | undefined
+    await collectWizardInputs(
+      '/agent',
+      basePrompts({
+        confirmResumeCheckpoint: async () => 'start-over',
+        pickVendor: async (_options, initial) => {
+          vendorInitial = initial
+          return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    expect(vendorInitial).toBeUndefined()
+    expect(clears()).toBeGreaterThanOrEqual(1)
+  })
+
+  test('--reset ignores the checkpoint entirely (no resume prompt, no save)', async () => {
+    const existing = checkpointFromSelections({ cwd: '/agent', vendorId: 'openai' })
+    const { store } = inMemoryStore(existing)
+
+    let confirmCalls = 0
+    await collectWizardInputs(
+      '/agent',
+      basePrompts({
+        confirmResumeCheckpoint: async () => {
+          confirmCalls += 1
+          return 'resume'
+        },
+      }),
+      { checkpointStore: store, reset: true },
+    )
+
+    expect(confirmCalls).toBe(0)
+    // reset leaves the pre-existing checkpoint untouched (no save overwrote it).
+    expect(store.load('/agent')).resolves.toEqual(existing)
+  })
+
+  test('works without a checkpoint store (back-compat)', async () => {
+    const result = await collectWizardInputs('/agent', basePrompts())
+    expect(result.model).toBe(fireworksModel)
   })
 })
