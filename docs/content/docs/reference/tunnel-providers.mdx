@@ -97,9 +97,3 @@ type TunnelUrlChangedPayload = {
 ```
 
 Channel adapters subscribe via this broadcast, NOT by polling the tunnel manager. Plugin-contributed adapters with webhook needs should subscribe via the same broadcast filter.
-
-## Upstream-port pitfall
-
-Some services pair a host-facing compatibility proxy with a separate in-container server (the bundled `agent-browser` plugin is the canonical example: `/tmp/typeclaw-agent-browser-proxy-port` is the proxy, `/tmp/typeclaw-agent-browser-upstream-port` is the actual dashboard server). The tunnel's `upstreamPort` must name the **in-container server**, not the proxy. Tunneling the proxy port silently double-hops.
-
-The rule generalizes: any service that pairs a host-side proxy/forwarder with a container-side server publishes both ports separately, and `upstreamPort` always names the container-side one.

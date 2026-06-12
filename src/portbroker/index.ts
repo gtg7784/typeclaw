@@ -27,7 +27,6 @@ export {
   type ForwardRequestEvent,
 } from './forward-request-bus'
 export { __resetForwardResultBus, publishForwardResult, subscribeForwardResult } from './forward-result-bus'
-export { bindWithForward, type BindFactory, type BindResult, type BindWithForwardOptions } from './bind-with-forward'
 export {
   createBroker,
   type Broker,

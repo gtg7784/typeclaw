@@ -66,7 +66,7 @@ Webhook server itself is not a separate module — the GitHub adapter in `src/ch
 - **Channel adapters subscribe to `tunnel-url-changed`; they don't call the manager directly.** The broadcast is the contract.
 - **External tunnels are the universal escape hatch.** No subprocess, no signup, no Dockerfile dep.
 - **The provider enum is intentionally scoped to what's implemented.** Future PRs widen the enum and the manager switch together.
-- **`upstreamPort` is container-side.** For channel tunnels this is automatic. For manual tunnels with a host-facing proxy companion (e.g. agent-browser publishes `proxy-port` and `upstream-port` separately), point at the upstream, not the proxy. The bundled agent-browser skill carries the user-facing version.
+- **`upstreamPort` is container-side.** For channel tunnels this is automatic. For manual tunnels, point at the container service's listening port. Host-forwards from the port broker are a separate host-side reachability surface.
 
 ## WebSocket endpoints
 
