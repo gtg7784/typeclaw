@@ -8,6 +8,7 @@ import {
   normalizeCitation,
   parseCitations,
   splitCitationsBySection,
+  stripCitationLines,
 } from './citations'
 
 const ID_A = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
@@ -191,5 +192,39 @@ describe('splitCitationsBySection', () => {
 
     expect(all.get('2026-05-21')).toEqual(new Set([ID_B]))
     expect(all.get('2026-05-20')).toEqual(new Set([ID_A]))
+  })
+})
+
+describe('stripCitationLines', () => {
+  test('removes citation lines and the fragments:/superseded: headings, keeping the belief', () => {
+    const body = [
+      'The user consistently uses pnpm.',
+      'fragments:',
+      `- streams/2026-05-21#${ID_A}`,
+      `- streams/2026-05-22#${ID_B}`,
+      'superseded:',
+      `- streams/2026-05-20#${ID_C}`,
+    ].join('\n')
+
+    expect(stripCitationLines(body)).toBe('The user consistently uses pnpm.')
+  })
+
+  test('preserves multi-paragraph prose while collapsing the blank run left by stripping', () => {
+    const body = [
+      'A proposal rationale.',
+      '',
+      'A second paragraph.',
+      '',
+      'fragments:',
+      `- streams/2026-05-21#${ID_A}`,
+    ].join('\n')
+
+    expect(stripCitationLines(body)).toBe('A proposal rationale.\n\nA second paragraph.')
+  })
+
+  test('returns an empty string for a citation-only body', () => {
+    const body = ['fragments:', `- streams/2026-05-21#${ID_A}`].join('\n')
+
+    expect(stripCitationLines(body)).toBe('')
   })
 })
