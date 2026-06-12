@@ -15,6 +15,10 @@ import { VectorStore, type VectorRow } from './vector/store'
 
 const DIMS = 8
 const BAND_SIZE = 8
+// A single token that appears in no slug, heading, or body, so the keyword lane
+// returns nothing and the vector lane is the ONLY source a hit can come from —
+// any retrieved topic proves real semantic retrieval ran, not substring search.
+const QUERY = 'zzqxvtrprobe'
 
 let agentDir: string
 
@@ -30,29 +34,31 @@ afterEach(async () => {
 describe('vector retrieval end-to-end through session.turn.start', () => {
   test('index-mode turn surfaces only the vector winner and suppresses the no-match band', async () => {
     // given: a flat band of decoy topics plus one winner aligned to the query
-    // axis. Every body shares NO word with the query, so a regression to the
-    // substring/token memory_search lane would retrieve nothing — only the real
-    // vector lane can surface the winner. The bodies sum past the 4 KB budget,
-    // forcing index mode (the only path that runs hybridSearch).
+    // axis. Bodies share no token with the query, so the keyword lane is inert
+    // and only the real vector lane can surface the winner. Bodies are sized so
+    // their byte sum alone exceeds the 4 KB budget, forcing index mode (the only
+    // path that runs hybridSearch) regardless of frontmatter overhead.
     for (let i = 0; i < BAND_SIZE; i++) {
-      await writeTopic(agentDir, `decoy-${i}`, `Decoy ${i}`, `Carbonara guanciale pecorino ${i}. ${pad(700)}`)
+      await writeTopic(agentDir, `decoy-${i}`, `Decoy ${i}`, `culinary filler ${i}. ${pad(900)}`)
     }
-    await writeTopic(agentDir, 'orbital-mechanics', 'Orbital Mechanics', `Apogee perigee inclination. ${pad(700)}`)
+    await writeTopic(agentDir, 'orbital-mechanics', 'Orbital Mechanics', `Apogee perigee inclination. ${pad(900)}`)
 
-    seedBand(agentDir)
-    seedWinner(agentDir, 'topic:orbital-mechanics', 'orbital-mechanics')
+    seedVectors(agentDir)
     __setQueryEmbedFnForTests(queryAligned())
 
-    const exports = await bootVectorPlugin(4096)
+    const infos: string[] = []
+    const exports = await bootVectorPlugin(4096, capturingLogger(infos))
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_e2e', agentDir, userPrompt: 'how do satellites stay in orbit', retrievalContext },
+      { sessionId: 'ses_e2e', agentDir, userPrompt: QUERY, retrievalContext },
       hookCtx(),
     )
 
-    // then: the relevance gate kept the vector-aligned winner above the band and
-    // suppressed every decoy. The render reached the index-mode `# Memory`
-    // framing with the winner's body, not the lag-by-one retrieval-cache path.
+    // then: the over-budget plan took the index path (not direct mode, which
+    // would render every shard), the relevance gate kept the vector-aligned
+    // winner above the band and suppressed every decoy, and the winner's body
+    // rendered under the index-mode `# Memory` framing.
+    expect(infos).toContain('[vector-retrieval] mode=index topic_results=1 stream_results=0')
     expect(retrievalContext.results).toContain('# Memory')
     expect(retrievalContext.results).toContain('## Orbital Mechanics')
     expect(retrievalContext.results).toContain('Apogee perigee inclination.')
@@ -61,7 +67,7 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
   })
 })
 
-async function bootVectorPlugin(injectionBudgetBytes: number) {
+async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
   const memoryPlugin = (await import('./index')).default
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
@@ -70,7 +76,7 @@ async function bootVectorPlugin(injectionBudgetBytes: number) {
     version: undefined,
     agentDir,
     config: parsed.data,
-    logger: createPluginLogger('memory'),
+    logger,
     permissions: noopPermissionService,
     spawnSubagent: async () => {},
     isBooted: () => true,
@@ -82,6 +88,15 @@ function hookCtx() {
   return { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 }
 
+function capturingLogger(infos: string[]) {
+  return {
+    ...createPluginLogger('memory'),
+    info: (msg: string) => {
+      infos.push(msg)
+    },
+  }
+}
+
 async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
   await mkdir(topicsDir(dir), { recursive: true })
   await writeFile(
@@ -90,22 +105,13 @@ async function writeTopic(dir: string, slug: string, heading: string, body: stri
   )
 }
 
-function seedBand(dir: string): void {
-  withStore(dir, (store) => {
+function seedVectors(dir: string): void {
+  const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
+  try {
     for (let i = 0; i < BAND_SIZE; i++) {
       store.upsert(unitRow(`topic:decoy-${i}`, `decoy-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
     }
-  })
-}
-
-function seedWinner(dir: string, id: string, key: string): void {
-  withStore(dir, (store) => store.upsert(unitRow(id, key, alignedVector())))
-}
-
-function withStore(dir: string, fn: (store: VectorStore) => void): void {
-  const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
-  try {
-    fn(store)
+    store.upsert(unitRow('topic:orbital-mechanics', 'orbital-mechanics', alignedVector()))
   } finally {
     store.close()
   }
