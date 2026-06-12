@@ -295,7 +295,7 @@ export async function start({
     // otherwise the startup vector index build fails. Kick the download off here
     // (idempotent + file-locked) so it overlaps the docker build, then await it
     // just before `docker run`. A vector-opted-out agent never reaches this, so
-    // a host whose containers are all opted out never downloads the ~1.4 GB
+    // a host whose containers are all opted out never downloads the ~280 MB
     // model — including every agent under `typeclaw compose`, since each agent's
     // start() makes this decision independently. The `.catch` swallow only keeps
     // an early return between here and the await from logging an unhandled
