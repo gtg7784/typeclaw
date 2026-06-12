@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, writeFile as writeFileFs } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile as writeFileFs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -606,6 +606,30 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
     await router.__testing!.flushDebounce(KEY)
     await waitForPersistedLastInboundAt(dir, 2000)
+  })
+
+  test('stop() flushes the fire-and-forget persist before returning', async () => {
+    // given: an engaged inbound schedules a fire-and-forget `void persist()`
+    //   (the lastInboundAt write) but we never poll or flushDebounce for it
+    const dir = await tempDir()
+    const logs: string[] = []
+    const nowRef = { value: 4242 }
+    const { router } = makeRouter(dir, { nowRef, logs })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+
+    // when: stop() returns
+    await router.stop()
+
+    // then: the write has already landed (no poll needed) — proving stop()
+    //   awaited the persist chain rather than leaving it racing teardown
+    const loaded = await loadChannelSessions(dir)
+    expect(loaded[0]?.lastInboundAt).toBe(4242)
+
+    // and: deleting the dir right after stop() — exactly what test afterEach
+    //   does — produces no "failed to persist" error, because nothing is
+    //   still writing into it
+    await rm(dir, { recursive: true, force: true })
+    expect(logs.some((l) => l.includes('failed to persist'))).toBe(false)
   })
 
   test('v3-loaded record with lastInboundAt=0 forces rollover on first inbound', async () => {

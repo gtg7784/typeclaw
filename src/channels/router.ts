@@ -1173,6 +1173,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   let mappings: ChannelSessionRecord[] | null = null
   let loadOnce: Promise<void> | null = null
   let persistChain: Promise<void> = Promise.resolve()
+  // Sealed by teardown so no late fire-and-forget caller appends to persistChain
+  // after the flush captured it. `await persistChain` only drains what's enqueued
+  // when it evaluates; a write appended afterward would still race a caller that
+  // deletes the agent dir right after stop() resolves.
+  let closing = false
 
   const ensureLoaded = async (): Promise<void> => {
     if (mappings !== null) return
@@ -1185,12 +1190,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const persist = async (): Promise<void> => {
-    if (mappings === null) return
-    persistChain = persistChain.then(async () => {
+    if (mappings === null || closing) return
+    // Caller awaits `next` un-caught to observe write errors; the chain holds the
+    // caught version so one rejection can't poison it or escape as unhandled.
+    const next = persistChain.then(async () => {
       if (mappings === null) return
       await saveChannelSessions(options.agentDir, mappings, logger)
     })
-    await persistChain
+    persistChain = next.catch(() => {})
+    await next
   }
 
   const createForChannel: CreateSessionForChannel =
@@ -3613,6 +3621,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   gcTimer.unref?.()
 
   const stop = async (): Promise<void> => {
+    closing = true
     if (gcTimer) clearInterval(gcTimer)
     gcTimer = null
     liveGeneration++
@@ -3621,6 +3630,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     for (const live of all) {
       await tearDownLive(live)
     }
+    await persistChain
   }
 
   // Drops every in-memory session but KEEPS the on-disk records, so the next
@@ -3638,9 +3648,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     liveGeneration++
     const all = Array.from(liveSessions.values())
     liveSessions.clear()
+    // Seal only around the flush — unlike stop() the router keeps serving after a
+    // roles reload, so re-enable persist() once pending writes have drained.
+    closing = true
     for (const live of all) {
       await tearDownLive(live)
     }
+    await persistChain
+    closing = false
   }
 
   // Boot-time resume for a restart that originated from a channel session, in
