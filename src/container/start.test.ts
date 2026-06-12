@@ -1125,6 +1125,13 @@ describe('commitSystemFile', () => {
 
 type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
 
+// Matches the image build regardless of frontend: `docker build ...` (legacy)
+// or `docker buildx build ...` (BuildKit). Tests assert on the build call
+// without caring which verb start() chose.
+function isBuildCall(args: string[]): boolean {
+  return args[0] === 'build' || (args[0] === 'buildx' && args[1] === 'build')
+}
+
 type ContainerScenario =
   | { exists: false }
   | {
@@ -1145,6 +1152,8 @@ function fakeDockerExec(scenario: {
   imageExists: boolean
   container: ContainerScenario
   dockerPlatformName?: string
+  buildxAvailable?: boolean
+  buildxBuildFails?: boolean
 }): {
   exec: DockerExec
   calls: RecordedCall[]
@@ -1169,6 +1178,13 @@ function fakeDockerExec(scenario: {
     }
     if (args[0] === 'version') {
       return { exitCode: 0, stdout: `${scenario.dockerPlatformName ?? 'Docker Engine'}\n`, stderr: '' }
+    }
+    if (args[0] === 'buildx' && args[1] === 'version') {
+      // Default to available: the agent Dockerfile is BuildKit-only, so a
+      // realistic host has buildx. Tests opt into the missing case explicitly.
+      return scenario.buildxAvailable === false
+        ? { exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' }
+        : { exitCode: 0, stdout: 'buildx v0.0.0\n', stderr: '' }
     }
     if (args[0] === 'inspect') {
       if (rmReturned && containerState.exists) {
@@ -1220,7 +1236,12 @@ function fakeDockerExec(scenario: {
       // the pre-existing happy-path tests continue to see immediate "gone".
       return { exitCode: 0, stdout: '', stderr: '' }
     }
-    if (args[0] === 'build') {
+    if (isBuildCall(args)) {
+      // Simulate "buildx plugin present but the build fails" (e.g. no usable
+      // builder). The legacy `docker build` retry still succeeds.
+      if (scenario.buildxBuildFails && args[0] === 'buildx') {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: no builder instance found' }
+      }
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'run') {
@@ -1349,10 +1370,85 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(true)
-    const buildCall = calls.find((c) => c.args[0] === 'build')
+    const buildCall = calls.find((c) => isBuildCall(c.args))
     expect(buildCall).toBeDefined()
     expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
+  })
+
+  test('builds via `docker buildx build` (BuildKit frontend) so the Dockerfile cache mounts are honored', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: false, container: { exists: false }, buildxAvailable: true })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const buildCall = calls.find((c) => isBuildCall(c.args))
+    expect(buildCall?.args.slice(0, 2)).toEqual(['buildx', 'build'])
+    expect(buildCall?.dockerfileSnapshot).toContain('# syntax=docker/dockerfile:1.7')
+    expect(buildCall?.dockerfileSnapshot).toContain('--mount=type=cache')
+  })
+
+  test('without buildx, falls back to legacy `docker build` against a BuildKit-stripped Dockerfile so start still succeeds', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: false, container: { exists: false }, buildxAvailable: false })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const buildCall = calls.find((c) => isBuildCall(c.args))
+    expect(buildCall?.args[0]).toBe('build')
+    expect(buildCall?.args).not.toContain('buildx')
+    // The Dockerfile on disk must be BuildKit-free, or the legacy build chokes.
+    expect(buildCall?.dockerfileSnapshot).not.toContain('# syntax=')
+    expect(buildCall?.dockerfileSnapshot).not.toContain('--mount=type=cache')
+  })
+
+  test('when a buildx BUILD fails, transparently falls back to legacy `docker build` and start still succeeds', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      buildxBuildFails: true,
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const buildCalls = calls.filter((c) => isBuildCall(c.args))
+    // First attempt is buildx; after it fails we retry with the legacy builder.
+    expect(buildCalls[0]?.args.slice(0, 2)).toEqual(['buildx', 'build'])
+    const legacy = buildCalls.find((c) => c.args[0] === 'build')
+    expect(legacy).toBeDefined()
+    // The retry rewrote the Dockerfile to its BuildKit-stripped form.
+    expect(legacy?.dockerfileSnapshot).not.toContain('# syntax=')
+    expect(legacy?.dockerfileSnapshot).not.toContain('--mount=type=cache')
+    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
   })
 
   test('start refreshes Dockerfile with custom append lines from typeclaw.json', async () => {
@@ -1372,7 +1468,7 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(true)
-    const buildCall = calls.find((c) => c.args[0] === 'build')
+    const buildCall = calls.find((c) => isBuildCall(c.args))
     if (!buildCall?.dockerfileSnapshot) throw new Error('expected docker build to capture Dockerfile snapshot')
     expect(buildCall.dockerfileSnapshot).toContain('RUN echo from-config')
     expect(buildCall.dockerfileSnapshot.indexOf('RUN echo from-config')).toBeLessThan(
@@ -1397,7 +1493,7 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(true)
-    const buildCall = calls.find((c) => c.args[0] === 'build')
+    const buildCall = calls.find((c) => isBuildCall(c.args))
     if (!buildCall?.dockerfileSnapshot) throw new Error('expected docker build to capture Dockerfile snapshot')
     expect(buildCall.dockerfileSnapshot).toMatch(/apt-get install -y --no-install-recommends[\s\S]+\bffmpeg\b/)
   })
@@ -2214,7 +2310,7 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(true)
-    expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
+    expect(calls.find((c) => isBuildCall(c.args))).toBeUndefined()
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
   })
 
@@ -2238,7 +2334,7 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.built).toBe(true)
-    const buildCall = calls.find((c) => c.args[0] === 'build')
+    const buildCall = calls.find((c) => isBuildCall(c.args))
     expect(buildCall).toBeDefined()
     expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
@@ -2264,7 +2360,7 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.built).toBe(false)
-    expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
+    expect(calls.find((c) => isBuildCall(c.args))).toBeUndefined()
   })
 
   test('is idempotent when a container with the same name is already running', async () => {
@@ -2296,7 +2392,7 @@ describe('start (composition)', () => {
     expect(result.containerId).toBe('fake-running-id-123456')
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
     expect(calls.find((c) => c.args[0] === 'rm')).toBeUndefined()
-    expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
+    expect(calls.find((c) => isBuildCall(c.args))).toBeUndefined()
     const onDisk = await readFile(join(root, 'Dockerfile'), 'utf8')
     expect(onDisk).toBe('FROM stale\n')
   })
