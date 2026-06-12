@@ -983,6 +983,35 @@ describe('transformers native-deps layer (sharp + onnxruntime linux binaries)', 
     expect(sharpVersions?.[1]).toBe('0.34.5')
     expect(libvipsVersions?.[1]).toBe('1.2.4')
   })
+
+  // Regression guard for the bind-mount masking failure. `typeclaw start`
+  // bind-mounts the host agent folder over /agent at runtime, so a `bun add`
+  // run under WORKDIR /agent populates /agent/node_modules — which is hidden
+  // behind the mount at runtime, so the linux sharp binaries never resolve and
+  // the container crashes ("Could not load the sharp module"). The install MUST
+  // run from WORKDIR / (landing in the unmasked /node_modules) and then restore
+  // WORKDIR /agent. These tests fail if either WORKDIR is dropped.
+  for (const [label, render] of [
+    ['inline (dev)', () => buildDockerfile()],
+    ['versioned (base-image)', () => buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })],
+    ['base', () => buildBaseDockerfile()],
+  ] as const) {
+    test(`${label} form installs the native deps from / (unmasked by the /agent bind mount) and restores WORKDIR /agent`, () => {
+      const out = render()
+      const installIdx = out.indexOf('@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4')
+      expect(installIdx).toBeGreaterThan(-1)
+
+      const beforeInstall = out.slice(0, installIdx)
+      const afterInstall = out.slice(installIdx)
+
+      // WORKDIR / must immediately precede the install (no intervening WORKDIR).
+      const lastWorkdirBefore = beforeInstall.lastIndexOf('\nWORKDIR ')
+      expect(beforeInstall.slice(lastWorkdirBefore)).toContain('\nWORKDIR /\n')
+
+      // WORKDIR /agent must be restored right after the install.
+      expect(afterInstall).toContain('\nWORKDIR /agent')
+    })
+  }
 })
 
 describe('curl-impersonate layer', () => {

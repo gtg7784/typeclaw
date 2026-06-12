@@ -578,8 +578,8 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 //
 // The host node_modules is bind-mounted over /agent at runtime carrying
 // whatever binaries the host (typically macOS) resolved, so this layer seeds
-// the container's bun install cache with the LINUX binaries that win at
-// runtime. Two native-dep mechanisms, fixed differently:
+// LINUX binaries into an image path that survives the bind mount and still
+// wins Node/Bun resolution. Two native-dep mechanisms, fixed differently:
 //
 //   1. onnxruntime-node ships its addon via a POSTINSTALL that materializes the
 //      binary inside the package dir, so a plain `bun add` covers it.
@@ -594,6 +594,18 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 //      the linux-<arch> runtime") and the container exits at startup. We
 //      install the arch-matched linux platform packages EXPLICITLY to fix it.
 //
+// CRITICAL — install location. `typeclaw start` bind-mounts the host agent
+// folder over /agent at runtime (`-v <cwd>:/agent`), so anything written under
+// /agent/node_modules at BUILD time is MASKED at runtime and can never win.
+// The prior fix ran this `bun add` under `WORKDIR /agent`, populating
+// /agent/node_modules — invisible behind the bind mount, so the sharp crash
+// persisted. We install from `WORKDIR /` instead: the linux packages land in
+// the IMAGE's /node_modules, which is NOT masked by the /agent mount. Node/Bun
+// resolution for `require('@img/sharp-linux-<arch>')` ascends from
+// /agent/node_modules/sharp up the directory chain and finds /node_modules,
+// so the linux binary resolves. WORKDIR is restored to /agent afterwards so
+// later layers and the runtime CWD are unchanged.
+//
 // Versions are pinned to what @huggingface/transformers@^4.2.0 resolves today.
 // A future transformers bump that moves sharp must bump `sharp@`,
 // `@img/sharp-linux-*`, and `@img/sharp-libvips-linux-*` together — mismatched
@@ -601,15 +613,18 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // `arm64` or `amd64`; an empty value (bare `docker build` without buildx) falls
 // back to x64 for determinism.
 const LAYER_TRANSFORMERS_INSTALL = `# Layer 7: install @huggingface/transformers with its linux-native binaries.
-# Seeds the container's bun cache with the linux onnxruntime-node addon AND
-# sharp's linux platform packages (@img/sharp-linux-*) so both resolve past the
-# bind-mounted host node_modules. See src/init/dockerfile.ts for the rationale.
+# Installs the linux onnxruntime-node addon AND sharp's linux platform packages
+# (@img/sharp-linux-*) into the image's /node_modules so they survive the
+# runtime /agent bind mount and still win Node/Bun resolution from
+# /agent/node_modules/sharp. See src/init/dockerfile.ts for the rationale.
+WORKDIR /
 RUN SHARP_ARCH="$(if [ "\${TARGETARCH:-amd64}" = "arm64" ]; then echo arm64; else echo x64; fi)" \\
  && bun add \\
       @huggingface/transformers \\
       sharp@0.34.5 \\
       "@img/sharp-linux-\${SHARP_ARCH}@0.34.5" \\
-      "@img/sharp-libvips-linux-\${SHARP_ARCH}@1.2.4"`
+      "@img/sharp-libvips-linux-\${SHARP_ARCH}@1.2.4"
+WORKDIR /agent`
 
 // Claude Code's official installer is `curl | bash`, not apt — can't live
 // in APT_FEATURES. Layer placed after the toggle apt install (so curl + ca-
