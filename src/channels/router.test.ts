@@ -147,6 +147,18 @@ class FakeSession {
   setAssistantMessage(message: AssistantMessage): void {
     this.leafEntry = messageEntry(message)
   }
+
+  // A `length`-truncated leaf with ONLY text blocks (no synthetic toolCall),
+  // matching the production shape: the model interleaved leaked `<think>` prose
+  // with its real answer and hit the output cap. Each string becomes its own
+  // text block so visibleAssistantText joins them exactly as in production.
+  setAssistantLengthLeaf(...texts: string[]): void {
+    this.leafEntry = messageEntry({
+      ...assistantMessage(''),
+      content: texts.map((text) => ({ type: 'text', text })),
+      stopReason: 'length',
+    })
+  }
 }
 
 async function tempDir(): Promise<string> {
@@ -3604,6 +3616,86 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.route(inbound({ text: 'fresh question' }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
+  })
+
+  test('length-leaf recovery: strips leaked think blocks and posts the surviving answer (no retry)', async () => {
+    // Regression for the production silent-drop (2026-06-12): a channel turn hit
+    // the output cap after interleaving leaked `<think>` reasoning with a
+    // complete final answer; the old recoverableAssistantText threw it all away
+    // as an unrecoverable 'length' leaf and the turn fell silent.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ask something hard' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantLengthLeaf('<think>long reasoning</think>', '\n\nHere is the real answer.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent.map((s) => s.text)).toEqual(['Here is the real answer.'])
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+  })
+
+  test('length-leaf recovery: a think-only length leaf retries with the raised budget (nothing to post)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ask something hard' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      await streamOnce(sessions[0]!)
+      if (attempt === 1) {
+        // Pure leaked reasoning, no answer after stripping → must retry, not post.
+        sessions[0]!.setAssistantLengthLeaf('<think>never-ending reasoning</think>')
+        return
+      }
+      sessions[0]!.setAssistantText('recovered answer')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'recovered answer' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent.map((s) => s.text)).toEqual(['recovered answer'])
+    expect(logs.some((m) => m.includes('empty_turn_retry attempt=1'))).toBe(true)
+    expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS)
+  })
+
+  test('length-leaf recovery: plain length text with NO think evidence stays on the retry path (not posted)', async () => {
+    // A truncated 'length' leaf with no `<think>` span is genuinely ambiguous
+    // (possibly a broken partial), so it keeps the historical retry behavior
+    // rather than posting raw truncated output.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ask something hard' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantLengthLeaf('plain truncated output with no think tags')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.some((s) => s.text === 'plain truncated output with no think tags')).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(true)
   })
 
   test("empty-turn guard: an 'aborted' truncation retries under the DEFAULT cap, not the raised budget", async () => {
