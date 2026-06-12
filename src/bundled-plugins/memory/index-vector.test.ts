@@ -34,35 +34,46 @@ afterEach(async () => {
 })
 
 describe('vector session.turn.start hook', () => {
-  test('populates retrieval context synchronously for the current turn', async () => {
+  test('over-budget turn runs hybrid search and injects top-K under # Memory framing', async () => {
     const memoryPlugin = (await import('./index')).default
+    // given: two 3 KB shards (6 KB total) with a 4 KB budget → index mode
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
-    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
-    if (!parsed.success) throw new Error(parsed.error.message)
-    const ctx = createPluginContext({
-      name: 'memory',
-      version: undefined,
-      agentDir,
-      config: parsed.data,
-      logger: createPluginLogger('memory'),
-      permissions: noopPermissionService,
-      spawnSubagent: async () => {},
-      isBooted: () => true,
-    })
-    const exports = await memoryPlugin.plugin(ctx)
+    const exports = await bootVectorPlugin(memoryPlugin, 4096)
 
-    const hookCtx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
       { sessionId: 'ses_vector', agentDir, userPrompt: 'second prompt', retrievalContext },
-      hookCtx,
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
     )
 
     expect(hybridSearchMock).toHaveBeenCalledWith('second prompt', expect.anything(), agentDir, 10)
-    expect(retrievalContext.results).toBe(
-      '## Retrieved memory\n\n### Second Topic\n\nSecond topic excerpt from vector retrieval.',
+    expect(retrievalContext.results).toContain('# Memory')
+    expect(retrievalContext.results).toContain('## Second Topic')
+    expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
+    expect(retrievalContext.results).not.toContain('## Retrieved memory')
+  })
+
+  test('under-budget turn injects ALL shard bodies without hybrid search (direct mode)', async () => {
+    hybridSearchMock.mockClear()
+    const memoryPlugin = (await import('./index')).default
+    // given: two small shards well under the budget → direct mode
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'first body')
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'second body')
+    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+
+    const retrievalContext = { results: '' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_vector', agentDir, userPrompt: 'anything', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
     )
+
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(retrievalContext.results).toContain('# Memory')
+    expect(retrievalContext.results).toContain('## First Topic')
+    expect(retrievalContext.results).toContain('first body')
+    expect(retrievalContext.results).toContain('## Second Topic')
+    expect(retrievalContext.results).toContain('second body')
   })
 
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
@@ -111,6 +122,22 @@ describe('vector session.turn.start hook', () => {
     expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
   })
 })
+
+async function bootVectorPlugin(memoryPlugin: typeof import('./index').default, injectionBudgetBytes: number) {
+  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
+  if (!parsed.success) throw new Error(parsed.error.message)
+  const ctx = createPluginContext({
+    name: 'memory',
+    version: undefined,
+    agentDir,
+    config: parsed.data,
+    logger: createPluginLogger('memory'),
+    permissions: noopPermissionService,
+    spawnSubagent: async () => {},
+    isBooted: () => true,
+  })
+  return memoryPlugin.plugin(ctx)
+}
 
 async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
   await mkdir(topicsDir(dir), { recursive: true })
