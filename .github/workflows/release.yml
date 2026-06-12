@@ -7,33 +7,43 @@ on:
         description: 'Version (x.y.z)'
         required: true
 
+# Serialize releases by version so two dispatches of the same version can't
+# race each other into a half-published state. `cancel-in-progress: false`:
+# a release in flight must NEVER be cancelled mid-publish — the GHCR-first/
+# npm-second ordering and the irreversible `npm publish` depend on the job
+# running to completion once started. A duplicate dispatch waits instead.
+concurrency:
+  group: release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+# Base image repo, reused across the build/merge jobs. Single source so a
+# future repo rename touches one line. Matches GHCR_BASE_IMAGE_REPO in
+# src/init/cli-version.ts (the value the per-agent Dockerfile FROMs).
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/typeclaw-base
+
+# Job-default permissions are read-only; each job widens only what it needs
+# (packages: write for the GHCR push/merge jobs, contents: write + id-token:
+# write for the final publish job). Keeping the workflow-level grant minimal
+# means the checks job — which runs untrusted-ish test code — can't push.
 permissions:
-  contents: write
-  id-token: write
-  packages: write
+  contents: read
 
 jobs:
-  release:
+  # ─────────────────────────── checks ───────────────────────────
+  # Runs the full release gate (typecheck/lint/format/test) EXACTLY ONCE,
+  # validates the version, bumps package.json, and emits the base Dockerfile
+  # as an artifact the build matrix consumes. Splitting this out of the build
+  # matrix is what keeps the gate from running per-arch. ci.yml already runs
+  # these on every PR; this is the belt-and-suspenders release-time gate.
+  checks:
+    name: Validate and test
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
-        # SSH deploy key (write-enabled) is the only credential allowed to
-        # bypass the `main` branch ruleset (required PR + status check). The
-        # default GITHUB_TOKEN cannot push directly to main, and adding it
-        # to `bypass_actors` is impossible — GitHub Actions itself is not an
-        # installable App. The deploy key, by contrast, is repo-scoped (not
-        # account-scoped like a PAT) and lives in the ruleset's bypass list
-        # via `actor_type: DeployKey`. See:
-        # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets#bypass
-        #
-        # `actions/checkout` configures the origin remote with this key, so
-        # the `Commit and tag` step below can `git push` over SSH without
-        # any further setup. `persist-credentials: true` (the default) is
-        # required — turning it off strips the auth and the push falls back
-        # to anonymous HTTPS.
-        with:
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -55,7 +65,11 @@ jobs:
         # GHCR. Pre-flight matters because `npm version ${{ inputs.version }}`
         # interpolates the value into a shell command — without this gate, a
         # malformed `inputs.version` only fails at the Docker tag validation
-        # step, AFTER the npm package and git tag are already public.
+        # step, AFTER the npm package and git tag are already public. The
+        # validated value is re-exported as a job output so downstream jobs
+        # consume `needs.checks.outputs.version` instead of re-interpolating
+        # the raw (unvalidated-at-that-point) input.
+        id: version
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -63,6 +77,7 @@ jobs:
             echo "::error::Invalid version: '$VERSION' (expected strict x.y.z)"
             exit 1
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -93,10 +108,271 @@ jobs:
         # the slower GitHub Actions runners.
         run: bun test --parallel --timeout 30000
 
+      - name: Generate base Dockerfile
+        # Same source as base-image.yml (PR validation) — the published base
+        # image is a function of src/init/dockerfile.ts at this commit,
+        # tagged with the CLI version. The per-agent Dockerfile written by
+        # `typeclaw start` pins this exact tag. Emitted here (once) and
+        # handed to both build legs via artifact so the two native runners
+        # build from byte-identical Dockerfiles.
+        run: bun run scripts/emit-base-dockerfile.ts > base.Dockerfile
+
+      - name: Show generated Dockerfile
+        run: cat base.Dockerfile
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: base-dockerfile
+          path: base.Dockerfile
+          if-no-files-found: error
+
+  # ─────────────────────────── build-base ───────────────────────────
+  # One leg per target architecture, each on a NATIVE runner — amd64 on
+  # `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` — instead of emulating
+  # arm64 under QEMU on a single amd64 runner. The recipe's heavy native
+  # installs (@huggingface/transformers + sharp + onnxruntime, Chrome for
+  # Testing, curl-impersonate) run ~5x slower under emulation; native runners
+  # build both arches in parallel. Mirrors the topology base-image.yml
+  # already uses for PR validation.
+  #
+  # Each leg pushes its single-platform image BY DIGEST (push-by-digest=true),
+  # NOT to a tag. The version-named tags (`:X.Y.Z`, `:latest`) are written
+  # exactly once, by the merge-base job below, via `imagetools create` — so
+  # there is never a window where `:X.Y.Z` resolves to a single-arch image.
+  # This preserves the "single writer for version-named tags" invariant
+  # across the split: the build legs write only content-addressed digests,
+  # the merge job writes the human/CLI-facing tags atomically.
+  build-base:
+    name: Build base image / ${{ matrix.arch }}
+    needs: checks
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # No fail-fast: a break on one arch still runs the other to completion,
+      # so a cross-arch recipe bug (package exists on amd64 but not arm64) is
+      # diagnosable from one run. The merge job below refuses to proceed
+      # unless BOTH digests are present, so a partial build can't be merged.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: base-dockerfile
+          path: .
+
+      - name: Show generated Dockerfile
+        run: cat base.Dockerfile
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        # push-by-digest=true uploads the single-platform image as a
+        # content-addressed blob+manifest with NO tag. `name` gives the
+        # repository the digest lands under; name-canonical=true makes the
+        # exported `digest` output a fully-qualified `repo@sha256:...` ref
+        # the merge job can pass straight to `imagetools create`.
+        #
+        # Do NOT add a "skip if exists" guard: partial-failure recovery
+        # (digests pushed, npm publish failed) depends on a re-run re-pushing
+        # identical content so the merge+verify steps have something to
+        # assemble. Re-pushing the same digest to GHCR is idempotent.
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: base.Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Per-arch registry cache, written mode=max. release is the trusted
+          # publishing context, so it keeps the per-arch refs warm for the
+          # next release (and for base-image.yml PR validation, which reads
+          # the same `:cache-<arch>` refs). Per-arch (not one shared `:cache`)
+          # because the two legs run concurrently and would race a single ref.
+          cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY_IMAGE }}:cache-${{ matrix.arch }},mode=max
+
+      - name: Export digest
+        # The merge job needs each leg's digest, but matrix legs share one
+        # logical job-output namespace (the second leg's output would clobber
+        # the first). The canonical workaround: each leg writes an empty file
+        # NAMED after its digest into a per-arch artifact; the merge job
+        # downloads all of them with merge-multiple and reconstructs the
+        # refs. `${digest#sha256:}` strips the algo prefix so the bare hex is
+        # a valid filename.
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─────────────────────────── merge-base ───────────────────────────
+  # Assembles the two single-arch digests into multi-arch manifest LISTS at
+  # `:X.Y.Z` and `:latest`, then verifies both are anonymously pullable on
+  # both platforms. This is the SINGLE WRITER of the version-named tags. It
+  # `needs:` the whole build matrix, so it only runs once both arches pushed
+  # their digests. The verify step is the publish gate: the release job
+  # `needs: merge-base`, so npm publish cannot run unless a real multi-arch
+  # manifest resolved and pulled cleanly from a logged-out client.
+  merge-base:
+    name: Merge and verify base image
+    needs: [checks, build-base]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest lists
+        # `imagetools create` is idempotent: re-running overwrites the tag to
+        # point at the same manifest list (GHCR has no immutability policy as
+        # of 2026), so a partial-failure re-run re-assembles cleanly. Both
+        # `:X.Y.Z` and `:latest` are created in one invocation so they always
+        # become manifest lists together — `:latest` can never lag at a
+        # single-arch or stale version. The guard refuses to proceed unless
+        # exactly two digests arrived, so a half-built matrix (one arch
+        # failed under fail-fast:false) cannot produce a single-arch
+        # `:X.Y.Z`.
+        env:
+          VERSION: ${{ needs.checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          refs=()
+          for digest_file in "${{ runner.temp }}"/digests/*; do
+            refs+=("${REGISTRY_IMAGE}@sha256:$(basename "$digest_file")")
+          done
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "::error::Expected exactly 2 platform digests, got ${#refs[@]}"
+            printf '%s\n' "${refs[@]}"
+            exit 1
+          fi
+          docker buildx imagetools create \
+            -t "${REGISTRY_IMAGE}:${VERSION}" \
+            -t "${REGISTRY_IMAGE}:latest" \
+            "${refs[@]}"
+
+      - name: Verify base image is anonymously pullable on both platforms
+        # The end-user contract is "an unauthenticated `docker pull` from a
+        # fresh machine resolves both linux/amd64 and linux/arm64 manifests."
+        # The login from the steps above must be cleared first — otherwise a
+        # private package could pass verification on a credentialed runner
+        # and then fail on every user's first `typeclaw start`.
+        #
+        # Four checks, each closing a distinct failure mode:
+        #   (a) `imagetools inspect` on :X.Y.Z confirms the manifest list and
+        #       both per-platform manifests exist as a single atomic record.
+        #   (b) `docker pull --platform linux/amd64` proves the amd64 layer
+        #       blobs are actually pullable, not just referenced.
+        #   (c) `docker pull --platform linux/arm64` does the same for arm64.
+        #   (d) `imagetools inspect` on :latest confirms the human-facing tag
+        #       is ALSO a multi-arch list, not left behind by the merge.
+        #
+        # No retries: `imagetools create` is immediately consistent, and the
+        # pulls run from a fresh connection. If any step fails the image is
+        # not safe to release — and because the release job `needs:` this
+        # one, a failure here blocks the irreversible npm publish.
+        env:
+          VERSION: ${{ needs.checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY_IMAGE}:${VERSION}"
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$IMAGE"
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker pull --platform linux/arm64 "$IMAGE"
+          docker buildx imagetools inspect "${REGISTRY_IMAGE}:latest"
+
+  # ─────────────────────────── release ───────────────────────────
+  # The irreversible publish path, gated on a verified multi-arch base image.
+  #
+  # GHCR base image FIRST (built+merged+verified by the jobs above), npm
+  # SECOND. Order matters: a user who `npm install`s typeclaw@X.Y.Z and runs
+  # `typeclaw start` writes a per-agent Dockerfile that does
+  # `FROM ghcr.io/typeclaw/typeclaw-base:X.Y.Z` (see src/init/dockerfile.ts).
+  # If `npm publish` ran before the GHCR image existed, there is a window
+  # where users can install a CLI version whose base image does not yet
+  # exist. `needs: merge-base` (which verified the image is pullable) closes
+  # that race. The npm publish below remains the cardinal irreversible step;
+  # everything before it is already in place by the time this job starts.
+  release:
+    name: Publish npm, tag, and release
+    needs: [checks, merge-base]
+    runs-on: ubuntu-latest
+    # id-token: write is required for `npm publish --provenance` (OIDC
+    # trusted publishing) — and ONLY this job needs it. contents: write is
+    # for the git push of the version bump + tag (over the deploy key).
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        # SSH deploy key (write-enabled) is the only credential allowed to
+        # bypass the `main` branch ruleset (required PR + status check). The
+        # default GITHUB_TOKEN cannot push directly to main, and adding it
+        # to `bypass_actors` is impossible — GitHub Actions itself is not an
+        # installable App. The deploy key, by contrast, is repo-scoped (not
+        # account-scoped like a PAT) and lives in the ruleset's bypass list
+        # via `actor_type: DeployKey`. See:
+        # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets#bypass
+        #
+        # `actions/checkout` configures the origin remote with this key, so
+        # the `Commit and tag` step below can `git push` over SSH without
+        # any further setup. `persist-credentials: true` (the default) is
+        # required — turning it off strips the auth and the push falls back
+        # to anonymous HTTPS.
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Ensure npm CLI supports OIDC trusted publishing
         # npm trusted publishing requires npm ≥ 11.5.1. Node 24's bundled npm
@@ -115,96 +391,16 @@ jobs:
         # package.json is the only place a version lives. `--allow-same-version`
         # makes this idempotent across re-runs. Mutates package.json in the
         # runner only; the bumped value is pushed by `Commit and tag` after
-        # every downstream publish succeeds.
-        run: npm version ${{ inputs.version }} --no-git-tag-version --allow-same-version
-
-      # ─────────────── GHCR base image first, npm second ───────────────
-      # Order matters: a user who `npm install typeclaw@X.Y.Z` and runs
-      # `typeclaw start` writes a per-agent Dockerfile that does
-      # `FROM ghcr.io/typeclaw/typeclaw-base:X.Y.Z` (see src/init/dockerfile.ts).
-      # If `npm publish` ran before the GHCR push, there is a window where
-      # users can install a CLI version whose base image does not yet exist.
-      # Publishing the image first — and verifying it is pullable — closes
-      # that race. The npm publish below remains the cardinal irreversible
-      # step; everything before it must already be in place.
-
-      - name: Generate base Dockerfile
-        # Same source as base-image.yml (PR validation) — the published base
-        # image is a function of src/init/dockerfile.ts at this commit,
-        # tagged with the CLI version. The per-agent Dockerfile written by
-        # `typeclaw start` pins this exact tag.
-        run: bun run scripts/emit-base-dockerfile.ts > base.Dockerfile
-
-      - name: Show generated Dockerfile
-        run: cat base.Dockerfile
-
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push base image
-        # Tagged `:${{ inputs.version }}` for pinning from the CLI and
-        # `:latest` for humans pulling manually. No `:sha-...` tag because
-        # the version IS the pin — release.yml owns the version → image
-        # mapping as the single writer for version-named tags. Re-pushing
-        # the same content to GHCR is idempotent (no immutability policy
-        # exists on GHCR as of 2026, so the second push overwrites with
-        # identical layers and the tag points at the same digest). Do NOT
-        # add a "skip if exists" guard here: partial-failure recovery
-        # (image pushed, npm publish failed) depends on a re-run re-pushing
-        # the same content so the verify step below has something to pull.
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: base.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/typeclaw-base:${{ inputs.version }}
-            ghcr.io/${{ github.repository_owner }}/typeclaw-base:latest
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache,mode=max
-
-      - name: Verify base image is anonymously pullable on both platforms
-        # The end-user contract is "an unauthenticated `docker pull` from a
-        # fresh machine resolves both linux/amd64 and linux/arm64 manifests."
-        # The login from the push step must be cleared first — otherwise a
-        # private package could pass verification on a credentialed runner
-        # and then fail on every user's first `typeclaw start`.
-        #
-        # Three checks, each closing a distinct failure mode:
-        #   (a) `imagetools inspect` confirms the manifest list and both
-        #       per-platform manifests exist as a single atomic record.
-        #   (b) `docker pull --platform linux/amd64` proves the amd64 layer
-        #       blobs are actually pullable, not just referenced.
-        #   (c) `docker pull --platform linux/arm64` does the same for arm64.
-        #
-        # No retries: `imagetools inspect` should be immediately consistent
-        # after `build-push-action` exits, and the pulls run from a fresh
-        # connection. If any step fails the image is not safe to release.
-        env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/typeclaw-base:${{ inputs.version }}
-        run: |
-          docker logout ghcr.io
-          docker buildx imagetools inspect "$IMAGE"
-          docker pull --platform linux/amd64 "$IMAGE"
-          docker pull --platform linux/arm64 "$IMAGE"
+        # every downstream publish succeeds. Re-done here (not carried from
+        # the checks job) because this job is a fresh checkout/runner.
+        run: npm version ${{ needs.checks.outputs.version }} --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
         # Cardinal irreversible step. npm enforces version immutability —
         # once typeclaw@X.Y.Z is on the registry, that name is burned
         # forever. By the time this step runs, the GHCR image at the same
-        # version tag has been pushed AND verified pullable, so any user
-        # who installs typeclaw@X.Y.Z within seconds of this step
+        # version tag has been pushed AND verified pullable (merge-base job),
+        # so any user who installs typeclaw@X.Y.Z within seconds of this step
         # completing will succeed at `typeclaw start`.
         #
         # Idempotency guard: if a previous run already published this
@@ -214,8 +410,8 @@ jobs:
         # non-zero when the package@version is missing — so a non-empty
         # stdout means "already published, skip."
         run: |
-          if [ -n "$(npm view typeclaw@${{ inputs.version }} version 2>/dev/null || true)" ]; then
-            echo "typeclaw@${{ inputs.version }} already published, skipping npm publish"
+          if [ -n "$(npm view typeclaw@${{ needs.checks.outputs.version }} version 2>/dev/null || true)" ]; then
+            echo "typeclaw@${{ needs.checks.outputs.version }} already published, skipping npm publish"
           else
             npm publish --provenance --access public
           fi
@@ -239,20 +435,20 @@ jobs:
           git config user.name "Typeey"
           git config user.email "typeeybird@gmail.com"
           git add package.json
-          git diff --staged --quiet || git commit -m "${{ inputs.version }}"
+          git diff --staged --quiet || git commit -m "${{ needs.checks.outputs.version }}"
           git push origin HEAD
-          git tag -f "${{ inputs.version }}"
-          git push --force origin "refs/tags/${{ inputs.version }}"
+          git tag -f "${{ needs.checks.outputs.version }}"
+          git push --force origin "refs/tags/${{ needs.checks.outputs.version }}"
 
       - name: Create GitHub Release
         # Idempotency guard: skip if the release for this tag already exists
         # (e.g. a previous run got this far but failed elsewhere). `gh release
         # view` exits non-zero when the release doesn't exist.
         run: |
-          if gh release view "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "Release ${{ inputs.version }} already exists, skipping"
+          if gh release view "${{ needs.checks.outputs.version }}" >/dev/null 2>&1; then
+            echo "Release ${{ needs.checks.outputs.version }} already exists, skipping"
           else
-            gh release create "${{ inputs.version }}" --generate-notes
+            gh release create "${{ needs.checks.outputs.version }}" --generate-notes
           fi
         env:
           GH_TOKEN: ${{ github.token }}
