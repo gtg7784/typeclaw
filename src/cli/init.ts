@@ -35,9 +35,17 @@ import {
   type KakaotalkAuthResult,
   type LLMAuth,
 } from '@/init'
+import {
+  checkpointFromSelections,
+  createLocalWizardCheckpointStore,
+  sanitizeCheckpointAgainstCatalog,
+  type WizardAnswerCheckpointV1,
+  type WizardCheckpointStore,
+} from '@/init/checkpoint'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
+import { detectInitProgress } from '@/init/progress'
 import {
   API_KEY_DASHBOARD_URL,
   MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
@@ -159,9 +167,10 @@ export const init = defineCommand({
     }
     preflightSpinner.stop('Docker is reachable.')
 
+    const checkpointStore = createLocalWizardCheckpointStore()
     let collected: CollectedInputs
     try {
-      collected = await collectWizardInputs(cwd, defaultWizardPrompts, { reset })
+      collected = await collectWizardInputs(cwd, defaultWizardPrompts, { reset, checkpointStore })
     } catch (error) {
       if (error instanceof WizardAbortedError) {
         if (error.oauthCredentialsSaved) {
@@ -271,6 +280,10 @@ export const init = defineCommand({
     }
 
     if (hatchingOk) {
+      // Clear the resume checkpoint only on full success (hatching ok). A
+      // failed install/dockerfile/git/hatching leaves it in place so the next
+      // `typeclaw init` — or `typeclaw start` (PR2) — can resume.
+      await checkpointStore.clear(cwd).catch(() => {})
       const claimableChannel =
         channelChoice !== 'none' && channelChoice !== 'github' ? channelDisplayName(channelChoice) : null
       const hints: Array<{ label: string; command: string }> = []
@@ -415,10 +428,12 @@ export interface WizardPrompts {
     reason: string,
     apiKeyAvailable: boolean,
   ) => Promise<OAuthFailureRecovery>
+  confirmResumeCheckpoint: (checkpoint: WizardAnswerCheckpointV1) => Promise<'resume' | 'start-over'>
 }
 
 export type CollectWizardInputsOptions = {
   reset?: boolean
+  checkpointStore?: WizardCheckpointStore
 }
 
 export type OAuthFailureRecovery = 'retry' | 'api-key' | 'abort'
@@ -448,6 +463,7 @@ export const defaultWizardPrompts: WizardPrompts = {
     }
   },
   askOAuthFailureRecovery,
+  confirmResumeCheckpoint,
 }
 
 export async function collectWizardInputs(
@@ -456,11 +472,45 @@ export async function collectWizardInputs(
   options: CollectWizardInputsOptions = {},
 ): Promise<CollectedInputs> {
   const reset = options.reset === true
+  const checkpointStore = options.checkpointStore
   const catalog = await prompts.loadCatalog()
   const state: WizardState = { catalog }
   let step: StepId = 'pick-vendor'
   let pendingBackOrigin: StepId | null = null
   let oauthCredentialsSaved = false
+
+  // Resume saved wizard answers from a prior unfinished init. `--reset` skips
+  // this entirely (the user asked to re-answer everything). Route through the
+  // shared detectInitProgress() predicate so init/start/restart classify a
+  // checkpoint identically: only an `incomplete` init (checkpoint + not
+  // hatched) offers resume; a `complete-stale-checkpoint` (checkpoint that
+  // outlived a hatched agent) is cleared and ignored, matching the contract.
+  if (!reset && checkpointStore !== undefined) {
+    const progress = await detectInitProgress({ cwd, checkpointStore })
+    if (progress.kind === 'complete-stale-checkpoint') {
+      await checkpointStore.clear(cwd).catch(() => {})
+    } else if (progress.kind === 'incomplete') {
+      // Sanitize against the freshly-loaded catalog BEFORE showing the resume
+      // prompt. `load` only validates version/cwd/updatedAt, so a checkpoint
+      // with a since-removed provider/model id reaches here intact; describing
+      // or seeding it raw would crash on `KNOWN_PROVIDERS[providerId]`. Pruning
+      // first means the prompt, the seed, and any partial answers all see only
+      // catalog-valid fields.
+      const catalogRefs = new Set(catalog.options.map((option) => option.ref))
+      const sanitized = sanitizeCheckpointAgainstCatalog(progress.checkpoint, catalogRefs)
+      const decision = await prompts.confirmResumeCheckpoint(sanitized)
+      if (decision === 'resume') {
+        seedWizardState(state, sanitized)
+      } else {
+        await checkpointStore.clear(cwd)
+      }
+    }
+  }
+
+  const persistCheckpoint = async (): Promise<void> => {
+    if (reset || checkpointStore === undefined) return
+    await checkpointStore.save(cwd, projectCheckpoint(cwd, state)).catch(() => {})
+  }
 
   const abort = (): never => {
     throw new WizardAbortedError({ oauthCredentialsSaved })
@@ -492,6 +542,11 @@ export async function collectWizardInputs(
   }
 
   while (true) {
+    // Persist the cumulative selections at the top of every iteration so a
+    // mid-wizard abort keeps everything answered so far. Running it here (not
+    // per-case) means back-navigation — which clears downstream fields before
+    // looping — overwrites the projection too, so stale answers never linger.
+    await persistCheckpoint()
     switch (step) {
       case 'pick-vendor': {
         const result = onResult(step, await prompts.pickVendor(catalog.options, state.vendorId))
@@ -869,6 +924,72 @@ function finalize(state: WizardState, channelSecrets: CollectedInputs['channelSe
     reuseExistingChannel: state.channelReuseExisting === true,
     channelSecrets,
   }
+}
+
+async function confirmResumeCheckpoint(checkpoint: WizardAnswerCheckpointV1): Promise<'resume' | 'start-over'> {
+  const summary = describeCheckpoint(checkpoint)
+  const choice = await select({
+    message: 'Found answers from a previous, unfinished init. Resume from them?',
+    options: [
+      { value: 'resume' as const, label: 'Resume', hint: summary },
+      { value: 'start-over' as const, label: 'Start over', hint: 'discard saved answers and pick everything again' },
+    ],
+    initialValue: 'resume' as const,
+  })
+  if (isCancel(choice)) return 'start-over'
+  return choice
+}
+
+function describeCheckpoint(checkpoint: WizardAnswerCheckpointV1): string {
+  const parts: string[] = []
+  // Defense-in-depth: callers sanitize before describing, but a raw provider id
+  // missing from KNOWN_PROVIDERS must degrade to the id string, never throw.
+  if (checkpoint.modelRef !== undefined) parts.push(checkpoint.modelRef)
+  else if (checkpoint.providerId !== undefined) {
+    parts.push(KNOWN_PROVIDERS[checkpoint.providerId]?.name ?? checkpoint.providerId)
+  }
+  if (checkpoint.visionModelRef !== undefined) parts.push(`vision: ${checkpoint.visionModelRef}`)
+  if (checkpoint.channelChoice !== undefined && checkpoint.channelChoice !== 'none') {
+    parts.push(`channel: ${checkpoint.channelChoice}`)
+  }
+  return parts.length > 0 ? parts.join(', ') : 'partial selections'
+}
+
+// Pre-populate wizard state from a sanitized checkpoint so each prompt's
+// `initial` argument fast-forwards the user to their prior choice. Only seeds
+// fields whose upstream selections are all present and catalog-valid; the
+// sanitize pass already dropped stale refs, so a missing field here just means
+// that step prompts fresh.
+function seedWizardState(state: WizardState, checkpoint: WizardAnswerCheckpointV1): void {
+  state.vendorId = checkpoint.vendorId
+  state.providerId = checkpoint.providerId
+  state.model = resolveModelOption(state.catalog, checkpoint.modelRef)
+  state.authMethod = checkpoint.authMethod
+  state.visionVendorId = checkpoint.visionVendorId
+  state.visionProviderId = checkpoint.visionProviderId
+  state.visionModel = resolveModelOption(state.catalog, checkpoint.visionModelRef)
+  state.visionAuthMethod = checkpoint.visionAuthMethod
+  state.channelChoice = checkpoint.channelChoice
+}
+
+function resolveModelOption(catalog: WizardState['catalog'], ref: KnownModelRef | undefined): ModelOption | undefined {
+  if (catalog === undefined || ref === undefined) return undefined
+  return catalog.options.find((option) => option.ref === ref)
+}
+
+function projectCheckpoint(cwd: string, state: WizardState): WizardAnswerCheckpointV1 {
+  return checkpointFromSelections({
+    cwd,
+    ...(state.vendorId !== undefined ? { vendorId: state.vendorId } : {}),
+    ...(state.providerId !== undefined ? { providerId: state.providerId } : {}),
+    ...(state.model?.ref !== undefined ? { modelRef: state.model.ref } : {}),
+    ...(state.authMethod !== undefined ? { authMethod: state.authMethod } : {}),
+    ...(state.visionVendorId !== undefined ? { visionVendorId: state.visionVendorId } : {}),
+    ...(state.visionProviderId !== undefined ? { visionProviderId: state.visionProviderId } : {}),
+    ...(state.visionModel?.ref !== undefined ? { visionModelRef: state.visionModel.ref } : {}),
+    ...(state.visionAuthMethod !== undefined ? { visionAuthMethod: state.visionAuthMethod } : {}),
+    ...(state.channelChoice !== undefined ? { channelChoice: state.channelChoice } : {}),
+  })
 }
 
 function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
