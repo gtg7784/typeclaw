@@ -10,6 +10,7 @@ icon: Inbox
 | [`discord-bot`](/docs/reference/discord-bot)   | bot token                                                                                      | gateway intents  | no          |                                                        |
 | [`telegram-bot`](/docs/reference/telegram-bot) | bot token                                                                                      | long polling     | no          |                                                        |
 | [`github`](/docs/reference/github)             | fine-grained PAT, or GitHub App (`appId` + `privateKey`; installations auto-resolved per repo) | webhook delivery | yes         | pairs with a tunnel for inbound webhooks               |
+| [`line`](/docs/reference/line)                 | sub-device login (QR or email + PIN)                                                           | LINE protocol    | no          | personal-account adapter; plain-text outbound only     |
 | [`kakaotalk`](/docs/reference/kakaotalk)       | sub-device login (email + password, stored encrypted)                                          | LOCO protocol    | no          | survives 7-day token expiry via host-side renewal cron |
 
 ## `channels.<adapter>` shape
@@ -28,6 +29,7 @@ icon: Inbox
       "webhookPort": 8975,
       "webhookUrl": "https://hooks.example.com/github"
     },
+    "line": { "enabled": true },
     "kakaotalk": { "enabled": true }
   }
 }
@@ -63,7 +65,7 @@ When a message arrives:
 
 The router never blocks on a slow adapter. Each adapter owns its own outbound queue.
 
-When the agent's first send of a turn lands later than `quotedReply.queueDelayMs` after the inbound was received, OR the channel had observed messages between the inbound and the reply, the router prepends a single-line `> @author: excerpt` markdown blockquote referencing the inbound so the user can see which message the reply is anchored to even after the channel has scrolled. Slack and Discord get platform-native `<@authorId>` mentions inside the quote; Telegram, KakaoTalk, and GitHub fall back to plain author names because they have no reliable id-only mention syntax inside markdown. Anchoring is first-send-only per turn — multi-part replies don't repeat the quote on every chunk.
+When the agent's first send of a turn lands later than `quotedReply.queueDelayMs` after the inbound was received, OR the channel had observed messages between the inbound and the reply, the router prepends a single-line `> @author: excerpt` markdown blockquote referencing the inbound so the user can see which message the reply is anchored to even after the channel has scrolled. Slack and Discord get platform-native `<@authorId>` mentions inside the quote; Telegram, LINE, KakaoTalk, and GitHub fall back to plain author names because they have no reliable id-only mention syntax inside markdown. Anchoring is first-send-only per turn — multi-part replies don't repeat the quote on every chunk.
 
 ## Per-adapter quirks
 
@@ -73,6 +75,7 @@ When the agent's first send of a turn lands later than `quotedReply.queueDelayMs
 | `discord-bot`  | requires `MESSAGE_CONTENT` intent enabled in the Discord developer portal; bot must be invited to a server with `bot` + `applications.commands` scopes and the recommended permission bitfield `277025508416` before it can receive anything (`channel add discord-bot` prints a ready-to-click invite URL with this value pre-filled)                                                                                                                                              |
 | `telegram-bot` | long polling means no public URL, but only one process can poll a given bot token at a time                                                                                                                                                                                                                                                                                                                                                                                         |
 | `github`       | adapter restarts on tunnel URL change and re-registers the webhook automatically. Reviews fire only on an explicit `review_requested` event — in **PAT** mode the bot is a real user requested by its login; in **GitHub App** mode the App can't be a `requested_reviewer`, so you request its **decoy user account** instead ([GitHub decoy reviewer](/docs/internals/github-decoy-reviewer)). Team-reviewer requests are honored when the bot is a member of the requested team. |
+| `line`         | LINE has no native @-mention or reply syntax surfaced to the adapter, so group and square engagement is alias-driven; outbound attachments are rejected because the SDK exposes text sends only                                                                                                                                                                                                                                                                                     |
 | `kakaotalk`    | LOCO clients hold the current token in a closure; token renewal triggers a container restart via the host daemon                                                                                                                                                                                                                                                                                                                                                                    |
 
 To invite the `discord-bot` by hand, substitute your application ID into:
