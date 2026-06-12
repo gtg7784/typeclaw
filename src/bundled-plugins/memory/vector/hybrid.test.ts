@@ -109,6 +109,39 @@ describe('hybridSearch', () => {
     }
   })
 
+  it('collapses a matched fragment to EVERY topic that cites it', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given one fragment cited by two distinct topics
+      const fragmentId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      writeTopic(
+        agentDir,
+        'package-manager',
+        'Package Manager',
+        ['User uses pnpm.', 'fragments:', `- streams/2026-06-10#${fragmentId}`].join('\n'),
+      )
+      writeTopic(
+        agentDir,
+        'docker-preferences',
+        'Docker Preferences',
+        ['User prefers minimal images.', 'fragments:', `- streams/2026-06-10#${fragmentId}`].join('\n'),
+      )
+      writeStreamFragment(agentDir, '2026-06-10', fragmentId, 'pnpm', 'Uses pnpm and minimal Docker images.')
+      store.upsert(row(`stream:2026-06-10#${fragmentId}`, `2026-06-10#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+
+      // when the shared fragment matches by vector
+      const results = await hybridSearch('pnpm docker', store, agentDir, 5, embedFrom({ 0: 1 }))
+
+      // then BOTH citing topics surface, and the fragment never appears standalone
+      const keys = results.map((result) => result.key)
+      expect(keys).toContain('package-manager')
+      expect(keys).toContain('docker-preferences')
+      expect(results.find((result) => result.source === 'stream')).toBeUndefined()
+    } finally {
+      store.close()
+    }
+  })
+
   it('ranks a parent by the MAX of its children, not the sum', async () => {
     const { agentDir, store } = createFixture()
     try {
