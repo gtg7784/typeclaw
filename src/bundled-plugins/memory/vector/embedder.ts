@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import type { env as TransformersEnvValue, pipeline as TransformersPipeline } from '@huggingface/transformers'
 
 import { homeRoot } from '../../../hostd/paths'
+import { boundEmbeddableText } from './truncation'
 
 export const MODEL_NAME = 'Xenova/multilingual-e5-base'
 export const DIMS = 768
@@ -55,7 +56,16 @@ export class Embedder {
   async embed(texts: string[], type: EmbedType): Promise<Float32Array[]> {
     if (texts.length === 0) return []
 
-    const output = await this.extractor(prefixTexts(texts, type), { pooling: 'mean', normalize: true })
+    // Bound every input to the model's token budget BEFORE the tokenizer sees it.
+    // The tokenizer would otherwise truncate silently at 512 tokens; bounding
+    // here makes the cut deterministic and owned by us (the leading heading /
+    // belief sentence — the load-bearing retrieval signal — always survives
+    // because it comes first). The dreaming subagent separately compacts the
+    // shards that trip this, but bounding guarantees no silent loss even for
+    // inputs dreaming never rewrites, including queries.
+    const bounded = texts.map((text) => boundEmbeddableText(text).text)
+
+    const output = await this.extractor(prefixTexts(bounded, type), { pooling: 'mean', normalize: true })
     return toEmbeddings(output.data, texts.length)
   }
 }
