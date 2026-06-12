@@ -79,7 +79,7 @@ This says: the `discord-bot` adapter is enabled with default engagement; one spe
 This is a **`roles`** edit, not a `channels` edit. See the `typeclaw-permissions` skill for the full procedure. Short version:
 
 1. Get the platform ID (Discord channel ID, Slack channel ID, Telegram chat ID, KakaoTalk chat ID, LINE chat ID).
-2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`, `line:<chat>`). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
+2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`, and for LINE the bucketed form `line:dm/<chatId>`, `line:group/<chatId>`, or `line:square/<chatId>` — pick the bucket from the chat's classification; an unbucketed `line:<chatId>` is read as a workspace and never matches). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
 3. **`roles.<role>.match[]` edits are live-reloadable** — they take effect on the next `typeclaw reload` (the classifier marks `roles.match` as `applied`, and the permission service rebuilds its role table). Only `roles.<role>.permissions[]` edits are restart-required. So adding a match-rule to admit a channel applies on `reload`; no container restart needed.
 
 ### When the user asks "stop replying in this channel"
