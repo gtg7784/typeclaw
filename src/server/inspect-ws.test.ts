@@ -142,6 +142,45 @@ describe('/inspect WS handler', () => {
     ws.close()
   })
 
+  test('list_live returns only registry sessions that carry an origin', async () => {
+    // given a registry with one origin-bearing live session and one subscribe-only entry
+    const registry = new LiveSessionRegistry()
+    registry.register({ sessionId: 'ses_subscribe_only', session: createFakeAgent() })
+    registry.register({
+      sessionId: 'ses_live',
+      session: createFakeAgent(),
+      origin: { kind: 'channel', adapter: 'slack', workspace: 'w', chat: 'c', thread: null },
+      registeredAtMs: 4242,
+    })
+
+    const { url } = await startServer({ liveSessionRegistry: registry })
+    const { ws, waitFor } = await connectInspect(url)
+
+    // when the client asks for the live listing
+    ws.send(JSON.stringify({ type: 'list_live' }))
+    const reply = await waitFor((m) => m.type === 'live_sessions')
+    if (reply.type !== 'live_sessions') throw new Error('unreachable')
+
+    // then only the origin-bearing session is returned
+    expect(reply.sessions).toHaveLength(1)
+    expect(reply.sessions[0]).toEqual({
+      sessionId: 'ses_live',
+      origin: { kind: 'channel', adapter: 'slack', workspace: 'w', chat: 'c', thread: null },
+      registeredAtMs: 4242,
+    })
+    ws.close()
+  })
+
+  test('list_live returns an empty list when no registry is wired', async () => {
+    const { url } = await startServer({})
+    const { ws, waitFor } = await connectInspect(url)
+    ws.send(JSON.stringify({ type: 'list_live' }))
+    const reply = await waitFor((m) => m.type === 'live_sessions')
+    if (reply.type !== 'live_sessions') throw new Error('unreachable')
+    expect(reply.sessions).toEqual([])
+    ws.close()
+  })
+
   test('text_delta events forward as frames', async () => {
     const registry = new LiveSessionRegistry()
     const session = createFakeAgent()

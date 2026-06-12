@@ -3,6 +3,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession as defaultCreateSession } from '@/agent'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
+import { sessionMetaPayload } from '@/agent/session-meta'
 import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
 import { capJsonlFileInPlace } from '@/bundled-plugins/tool-result-cap/cap-jsonl'
 import type { CapOptions } from '@/bundled-plugins/tool-result-cap/cap-result'
@@ -144,7 +145,12 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
     })
 
     const sessionId = sessionManager.getSessionId()
-    deps.liveSessionRegistry?.register({ sessionId, session })
+    deps.liveSessionRegistry?.register({
+      sessionId,
+      session,
+      origin: sessionMetaPayload(origin).origin,
+      registeredAtMs: Date.now(),
+    })
 
     return {
       session,
