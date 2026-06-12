@@ -57,6 +57,37 @@ describe('loadAllShards', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('broken')
   })
+
+  test('many shards stay slug-sorted and body-aligned regardless of parallel read completion order', async () => {
+    const agentDir = await makeAgentDir()
+    // Shuffled write order: proves the result order comes from the sorted slug
+    // listing, not from the order reads happen to settle in under concurrency.
+    const slugs = ['k', 'a', 'z', 'm', 'c', 't', 'b', 'q', 'e', 'r', 'd', 'n', 'g', 'p', 's']
+    for (const slug of slugs) await writeShard(agentDir, slug, slug.toUpperCase(), `${slug}-body\n`)
+
+    const shards = await loadAllShards(agentDir)
+
+    const sorted = [...slugs].sort()
+    expect(shards.map((shard) => shard.slug)).toEqual(sorted)
+    expect(shards.map((shard) => shard.body)).toEqual(sorted.map((slug) => `${slug}-body\n`))
+  })
+
+  test('a malformed shard anywhere in the set never shifts the ordering of valid shards', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'apple', 'Apple', 'apple\n')
+    // Malformed entry sorts into the MIDDLE of the slug listing; the parallel
+    // fan-out must drop it without displacing the neighbours that read fine.
+    await writeFile(topicShardPath(agentDir, 'mango'), '---\nheading: Mango\n', 'utf8')
+    await writeShard(agentDir, 'pear', 'Pear', 'pear\n')
+    await writeShard(agentDir, 'zebra', 'Zebra', 'zebra\n')
+    const warnings: string[] = []
+
+    const shards = await loadAllShards(agentDir, { logger: { warn: (m) => warnings.push(m) } })
+
+    expect(shards.map((shard) => shard.slug)).toEqual(['apple', 'pear', 'zebra'])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('mango')
+  })
 })
 
 describe('loadShard', () => {
