@@ -1310,3 +1310,51 @@ describe('dream commit message', () => {
     expect(await lastCommitSubject(agentDir)).toMatch(/^dream: watermarks only /)
   })
 })
+
+describe('dreaming over-budget compaction signal', () => {
+  function vectorIndexPath(): string {
+    return join(agentDir, 'memory', '.vectors', 'index.db')
+  }
+
+  async function createVectorIndex(): Promise<void> {
+    VectorStore.open(vectorIndexPath()).close()
+  }
+
+  const overBudgetBody = `${'verbose legacy prose. '.repeat(400)}\n\nfragments:\n- streams/2026-05-16#f-seed`
+
+  test('surfaces an over-budget shard in the dreaming prompt when the vector index exists', async () => {
+    await writeFile(streamFile('2026-05-16'), fragmentLine('seed'))
+    await writeTopicShard('bloated-topic', shardText('a bloated legacy topic', overBudgetBody))
+    await createVectorIndex()
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('Over the embedding budget')
+    expect(prompts[0]).toContain('bloated-topic')
+    expect(prompts[0]).toContain('preserving EVERY')
+  })
+
+  test('does NOT surface the over-budget table when the vector index is absent (vector off)', async () => {
+    await writeFile(streamFile('2026-05-16'), fragmentLine('seed'))
+    await writeTopicShard('bloated-topic', shardText('a bloated legacy topic', overBudgetBody))
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).not.toContain('Over the embedding budget')
+  })
+
+  test('does NOT surface a compact shard that fits the budget', async () => {
+    await writeFile(streamFile('2026-05-16'), fragmentLine('seed'))
+    await writeTopicShard(
+      'compact-topic',
+      shardText('the user prefers bun over npm', 'fragments:\n- streams/2026-05-16#f-seed'),
+    )
+    await createVectorIndex()
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts[0]).not.toContain('Over the embedding budget')
+  })
+})

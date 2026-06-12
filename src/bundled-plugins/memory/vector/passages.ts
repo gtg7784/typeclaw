@@ -7,6 +7,7 @@ import { buildParentLinks } from '../parent-link'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import type { VectorStore } from './store'
+import { fragmentEmbeddableText } from './truncation'
 
 export type Passage = {
   id: string
@@ -56,7 +57,7 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
               id: `stream:${key}`,
               source: 'stream',
               key,
-              text: `${event.topic}\n${event.body}`,
+              text: fragmentEmbeddableText(event),
               contentHash: fragmentContentHash(event),
             },
           ]

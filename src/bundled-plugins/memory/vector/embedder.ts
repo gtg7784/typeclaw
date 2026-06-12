@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import type { env as TransformersEnvValue, pipeline as TransformersPipeline } from '@huggingface/transformers'
 
 import { homeRoot } from '../../../hostd/paths'
+import { type BoundedText, boundEmbeddableText, MAX_MODEL_TOKENS } from './truncation'
 
 export const MODEL_NAME = 'Xenova/multilingual-e5-base'
 export const DIMS = 768
@@ -55,7 +56,28 @@ export class Embedder {
   async embed(texts: string[], type: EmbedType): Promise<Float32Array[]> {
     if (texts.length === 0) return []
 
-    const output = await this.extractor(prefixTexts(texts, type), { pooling: 'mean', normalize: true })
+    // Bound every input to the model's token budget BEFORE the tokenizer sees it.
+    // The tokenizer would otherwise truncate silently at 512 tokens; bounding
+    // here makes the cut deterministic and owned by us (the leading heading /
+    // belief sentence — the load-bearing retrieval signal — always survives
+    // because it comes first). The dreaming subagent separately compacts the
+    // topic shards that trip this, but bounding guarantees no silent loss even
+    // for inputs dreaming never rewrites — queries and stream fragments — which
+    // the dreaming over_budget table does not cover, so this is their only
+    // observability path.
+    const results = texts.map((text) => boundEmbeddableText(text))
+    warnIfBounded(results, type)
+
+    const output = await this.extractor(
+      prefixTexts(
+        results.map((r) => r.text),
+        type,
+      ),
+      {
+        pooling: 'mean',
+        normalize: true,
+      },
+    )
     return toEmbeddings(output.data, texts.length)
   }
 }
@@ -69,6 +91,20 @@ export function getEmbedder(): Promise<Embedder> {
 
 export async function embed(texts: string[], type: EmbedType): Promise<Float32Array[]> {
   return (await getEmbedder()).embed(texts, type)
+}
+
+// Structured, content-free signal when any input was bounded, so a truncation
+// is observable in logs (the dreaming over_budget table only covers topic
+// shards — this is the only path for queries and stream fragments). Logs counts
+// and the worst estimate only, never the text, so memory content can't leak.
+function warnIfBounded(results: readonly BoundedText[], type: EmbedType): void {
+  const trimmed = results.filter((r) => r.bounded)
+  if (trimmed.length === 0) return
+  const worst = trimmed.reduce((max, r) => Math.max(max, r.estimatedTokens), 0)
+  console.warn(
+    `[memory] vector embedding: bounded ${trimmed.length}/${results.length} ${type} input(s) to the ` +
+      `${MAX_MODEL_TOKENS}-token model limit (worst ~${worst} est. tokens); their tail is not embedded`,
+  )
 }
 
 function configureTransformers(env: TransformersEnv): void {
