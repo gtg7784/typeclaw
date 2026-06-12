@@ -100,21 +100,25 @@ function makeFakeListenHost(opts: {
   failPorts?: Set<number>
   listeners: Map<number, FakeListener>
   calls?: Array<{ host: string; port: number }>
+  // Remap requested → bound port to model an OS-assigned (port-0) bind where the
+  // listener's port diverges from the requested target.
+  boundPortFor?: (requestedPort: number) => number
 }): ListenHostFn {
   return async (host, port, handlers) => {
     opts.calls?.push({ host, port })
     if (opts.failPorts?.has(port)) throw new Error('EADDRINUSE')
+    const boundPort = opts.boundPortFor ? opts.boundPortFor(port) : port
     const sockets: FakeHostSocket[] = []
     const listener: FakeListener = {
-      port,
+      port: boundPort,
       stopped: false,
-      bound: { host, port },
+      bound: { host, port: boundPort },
       sockets,
       stop: () => {
         listener.stopped = true
       },
     }
-    opts.listeners.set(port, listener)
+    opts.listeners.set(boundPort, listener)
     ;(listener as unknown as { _accept: (s: FakeHostSocket) => void })._accept = (s) => {
       sockets.push(s)
       handlers.onConnection(s)
@@ -128,6 +132,7 @@ function setup(opts: {
   resolveHostPort?: () => Promise<number | null>
   failPorts?: Set<number>
   connectWs?: () => Promise<WsClient>
+  boundPortFor?: (requestedPort: number) => number
 }) {
   const ws = makeFakeWs()
   const listeners = new Map<number, FakeListener>()
@@ -145,6 +150,7 @@ function setup(opts: {
     connectWs: opts.connectWs ?? (async () => ws),
     listenHost: makeFakeListenHost({
       ...(opts.failPorts ? { failPorts: opts.failPorts } : {}),
+      ...(opts.boundPortFor ? { boundPortFor: opts.boundPortFor } : {}),
       listeners,
       calls: listenCalls,
     }),
@@ -432,6 +438,31 @@ describe('createBroker', () => {
     })
     await waitFor(() => broker.forwardedPorts().length === 2)
     expect(broker.forwardedPorts().sort()).toEqual([5173, 8080])
+    await broker.stop()
+  })
+
+  test('dedups a re-announced target when the bound host port differs from the target', async () => {
+    // The forwarders map is keyed by the bound host port, which diverges from
+    // the target on an OS-assigned bind. The duplicate guard must still dedup by
+    // target port, or a re-announced 5173 binds a second host listener.
+    const { broker, ws, listenCalls } = setup({
+      policy: { allow: '*' },
+      boundPortFor: (requested) => requested + 10_000,
+    })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
+    await waitFor(() => broker.forwardedPorts().includes(15173))
+
+    ws.emit({ type: 'port-listen-opened', port: 5173, bindAddr: '127.0.0.1' })
+    await expectStable(() => listenCalls.filter((c) => c.port === 5173).length > 1, {
+      durationMs: 30,
+      description: 'duplicate auto-forward bind',
+    })
+
+    expect(listenCalls.filter((c) => c.port === 5173)).toHaveLength(1)
+    expect(broker.forwardedPorts()).toEqual([15173])
     await broker.stop()
   })
 

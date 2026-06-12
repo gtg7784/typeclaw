@@ -170,9 +170,20 @@ export function createBroker(opts: BrokerOptions): Broker {
   const isReservedTarget = (targetPort: number): boolean =>
     reservedTargets.has(targetPort) || pendingReservedTargets.has(targetPort)
 
+  const hasAutoForwarderForTarget = (targetPort: number): boolean => {
+    for (const fwd of forwarders.values()) {
+      if (!fwd.reserved && fwd.targetPort === targetPort) return true
+    }
+    return false
+  }
+
   const installForwarder = async (targetPort: number, bindAddr: BindAddr): Promise<void> => {
     if (isReservedTarget(targetPort)) return
-    if (forwarders.has(targetPort)) return
+    // Dedup by targetPort, not the map key: the map is keyed by the bound host
+    // port, which diverges from targetPort on an ephemeral bind, so a
+    // `forwarders.has(targetPort)` guard would miss an existing forward and bind
+    // a second host listener for the same container port.
+    if (hasAutoForwarderForTarget(targetPort)) return
     if (!shouldForward({ policy: opts.policy, port: targetPort })) {
       // Policy excluded the port. Tell the container so consumers waiting on
       // port-forward-result can surface a diagnostic instead of hanging.
