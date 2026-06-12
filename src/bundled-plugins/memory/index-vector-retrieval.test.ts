@@ -7,7 +7,7 @@ import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
-import { __setQueryEmbedFnForTests } from './index'
+import { createMemoryPluginForTests } from './index'
 import { topicShardPath, topicsDir } from './paths'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
@@ -27,7 +27,6 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  __setQueryEmbedFnForTests(undefined)
   await rm(agentDir, { recursive: true, force: true })
 })
 
@@ -44,7 +43,6 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
     await writeTopic(agentDir, 'orbital-mechanics', 'Orbital Mechanics', `Apogee perigee inclination. ${pad(900)}`)
 
     seedVectors(agentDir)
-    __setQueryEmbedFnForTests(queryAligned())
 
     const infos: string[] = []
     const exports = await bootVectorPlugin(4096, capturingLogger(infos))
@@ -68,7 +66,7 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
 })
 
 async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
-  const memoryPlugin = (await import('./index')).default
+  const memoryPlugin = createMemoryPluginForTests({ queryEmbedFn: queryAligned() })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({

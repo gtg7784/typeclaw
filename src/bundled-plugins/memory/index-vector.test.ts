@@ -7,8 +7,13 @@ import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
+import { createMemoryPluginForTests } from './index'
 import { topicShardPath, topicsDir } from './paths'
 
+// Injected per plugin instance via the factory, NOT mock.module: a module-level
+// mock of './vector/hybrid' leaks into any sibling test that loads `./index` in
+// the same worker (e.g. the real-pipeline test in index-vector-retrieval), which
+// surfaced as a CI-only flake. The factory scopes the fake to this file's boot.
 const hybridSearchMock = mock(async () => [
   {
     source: 'topic' as const,
@@ -18,10 +23,6 @@ const hybridSearchMock = mock(async () => [
     rrfScore: 1,
   },
 ])
-
-mock.module('./vector/hybrid', () => ({
-  hybridSearch: hybridSearchMock,
-}))
 
 let agentDir: string
 
@@ -35,11 +36,10 @@ afterEach(async () => {
 
 describe('vector session.turn.start hook', () => {
   test('over-budget turn runs hybrid search and injects top-K under # Memory framing', async () => {
-    const memoryPlugin = (await import('./index')).default
     // given: two 3 KB shards (6 KB total) with a 4 KB budget → index mode
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
-    const exports = await bootVectorPlugin(memoryPlugin, 4096)
+    const exports = await bootVectorPlugin(4096)
 
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
@@ -62,11 +62,10 @@ describe('vector session.turn.start hook', () => {
 
   test('under-budget turn injects ALL shard bodies without hybrid search (direct mode)', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     // given: two small shards well under the budget → direct mode
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'first body')
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'second body')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
 
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
@@ -84,10 +83,9 @@ describe('vector session.turn.start hook', () => {
 
   test('zero-shard direct mode still logs the mode=direct topics=0 signal', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     // given: a fresh agent with no topic shards → direct mode, zero shards
     const infos: string[] = []
-    const exports = await bootVectorPlugin(memoryPlugin, 16384, capturingLogger(infos))
+    const exports = await bootVectorPlugin(16384, capturingLogger(infos))
 
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
@@ -103,9 +101,8 @@ describe('vector session.turn.start hook', () => {
 
   test('second direct-mode turn dedups unchanged bodies to slug references', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'first body')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
@@ -127,9 +124,8 @@ describe('vector session.turn.start hook', () => {
 
   test('a changed shard body re-injects in full on the next turn', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'topic', 'Topic', 'original body')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
@@ -148,9 +144,8 @@ describe('vector session.turn.start hook', () => {
 
   test('dedup state is per-session: a different session still gets the full body', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'topic', 'Topic', 'shared body')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
@@ -168,9 +163,8 @@ describe('vector session.turn.start hook', () => {
 
   test('session.end clears dedup state so a resurrected session re-injects in full', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     await writeTopic(agentDir, 'topic', 'Topic', 'durable body')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
@@ -188,11 +182,10 @@ describe('vector session.turn.start hook', () => {
 
   test('channel direct-mode turn force-indexes every shard heading without hybrid search', async () => {
     hybridSearchMock.mockClear()
-    const memoryPlugin = (await import('./index')).default
     // given: two under-budget topics → direct mode, but a channel origin
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'channel-private body one')
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'channel-private body two')
-    const exports = await bootVectorPlugin(memoryPlugin, 16384)
+    const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
     const origin = {
@@ -218,7 +211,7 @@ describe('vector session.turn.start hook', () => {
   })
 
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
-    const memoryPlugin = (await import('./index')).default
+    const memoryPlugin = createMemoryPluginForTests()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
@@ -241,7 +234,7 @@ describe('vector session.turn.start hook', () => {
   })
 
   test('memory-logger subagent is created without onFragmentsAppended hook when vector.enabled is false', async () => {
-    const memoryPlugin = (await import('./index')).default
+    const memoryPlugin = createMemoryPluginForTests()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: false } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
@@ -264,11 +257,8 @@ describe('vector session.turn.start hook', () => {
   })
 })
 
-async function bootVectorPlugin(
-  memoryPlugin: typeof import('./index').default,
-  injectionBudgetBytes: number,
-  logger = createPluginLogger('memory'),
-) {
+async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
+  const memoryPlugin = createMemoryPluginForTests({ hybridSearch: hybridSearchMock })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
