@@ -11,6 +11,7 @@ import { formatLocalDate, formatLocalDateTime } from '@/shared'
 import { checkCitationSupersetAcrossShards, summarizeMissingCitations } from './citation-superset'
 import { parseCitations } from './citations'
 import { deleteTopicShardTool } from './delete-tool'
+import { computeDreamingMetrics } from './dreaming-metrics'
 import {
   addDreamedIds,
   DREAMING_STATE_FILE,
@@ -1082,9 +1083,11 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         }
       }
 
+      let metrics = computeDreamingMetrics(snapshotBefore, snapshotBefore)
       if (shardsRewrittenThisRun) {
         await recomputeFrontmatterForAllShards(ctx.payload.agentDir, logger)
         const snapshotAfterFrontmatter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+        metrics = computeDreamingMetrics(snapshotBefore, snapshotAfterFrontmatter)
         await syncTopicVectorsFromSnapshotDiff(
           ctx.payload.agentDir,
           snapshotBefore,
@@ -1117,7 +1120,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
 
       try {
         await commit(ctx.payload.agentDir)
-        logger.info(`[dreaming] done elapsed_ms=${Date.now() - start}`)
+        logger.info(
+          `[dreaming] done topics_created=${metrics.topicsCreated} topics_removed=${metrics.topicsRemoved} superseded_new=${metrics.supersededDelta} fragments_dropped=${compaction.fragmentsDropped} elapsed_ms=${Date.now() - start}`,
+        )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(`[dreaming] commit failed: ${message} elapsed_ms=${Date.now() - start}`)
