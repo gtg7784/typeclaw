@@ -382,6 +382,67 @@ describe('hybridSearch keyword lane', () => {
       store.close()
     }
   })
+
+  it('does not let a function-word-heavy legacy shard outrank the real content match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a verbose shard echoing ONLY the prompt's function words, and a
+      // terse shard carrying the actual content terms
+      writeTopic(agentDir, 'aaa-legacy', 'Legacy', 'Can you what we about the it over here they had this that.')
+      writeTopic(agentDir, 'zzz-real', 'Real', 'The deploy schedule moved to Friday.')
+
+      // when the prompt buries 'deploy schedule' among function words (no vector hit)
+      const results = await hybridSearch(
+        'can you what we about the deploy schedule',
+        store,
+        agentDir,
+        5,
+        embedFrom({ 7: 1 }),
+      )
+
+      // then only the real content shard surfaces; function words score nothing,
+      // so the legacy shard never enters the lane
+      expect(results[0]?.key).toBe('zzz-real')
+      expect(results.map((r) => r.key)).not.toContain('aaa-legacy')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('does not match a short token inside an unrelated word (ascii-boundary)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a noise shard where 'in'/'do' only appear INSIDE other words
+      writeTopic(agentDir, 'noise', 'Noise', 'Ongoing documentation lives in the index folder.')
+      // and a real shard where the tokens stand alone
+      writeTopic(agentDir, 'real', 'Real', 'CI uses Go for the deploy helper.')
+
+      // when the query's tokens are short standalone words (no vector hit)
+      const results = await hybridSearch('ci go', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then only the shard with standalone tokens matches; the substring noise does not
+      expect(results.map((r) => r.key)).toContain('real')
+      expect(results.map((r) => r.key)).not.toContain('noise')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('still retrieves standalone short content tokens (pr, ci) under ascii-boundary', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose body carries standalone short tokens
+      writeTopic(agentDir, 'short-tokens', 'Short Tokens', 'The PR landed after CI went green.')
+
+      // when the prompt asks about them among function words (no vector hit)
+      const results = await hybridSearch('what about the pr and ci', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then boundary matching keeps the standalone short tokens retrievable
+      expect(results.map((r) => r.key)).toContain('short-tokens')
+    } finally {
+      store.close()
+    }
+  })
 })
 
 describe('hybridSearch relevance gate', () => {

@@ -210,19 +210,27 @@ export function searchAll(
 // natural enumeration order (topics first in loadAllShards order, then stream
 // days newest-first), so the established ordering contract holds within each
 // score band. maxResults truncation is applied last, after ranking.
+//
+// `tokenMatchMode` defaults to 'substring' (the tool-path contract: `memory_search`
+// is a deliberate agent query). The hybrid keyword lane opts into 'ascii-boundary'
+// because its query is a whole user prompt, where unanchored substrings let short
+// tokens ('in', 'do', 'ci') match inside unrelated words and over-score verbose
+// shards. Both the match predicate and the score use the SAME per-token matchers,
+// so a shard cannot rank on a hit the matcher wouldn't have counted.
 export function searchAllRanked(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   tokens: string[],
-  options: { full: boolean; maxResults: number },
+  options: { full: boolean; maxResults: number; tokenMatchMode?: 'substring' | 'ascii-boundary' },
 ): MemorySearchResult {
+  const tokenMatchers = tokens.map((t) => buildTokenMatcher(t, options.tokenMatchMode ?? 'substring'))
   const anyToken: Matcher = (haystack) => {
     const lower = haystack.toLowerCase()
-    return tokens.some((t) => lower.includes(t))
+    return tokenMatchers.some((matches) => matches(lower))
   }
   const scoreOf = (text: string): number => {
     const lower = text.toLowerCase()
-    return tokens.reduce((n, t) => (lower.includes(t) ? n + 1 : n), 0)
+    return tokenMatchers.reduce((n, matches) => (matches(lower) ? n + 1 : n), 0)
   }
 
   const scored: Array<{ match: MemorySearchMatch; score: number; order: number }> = []
@@ -249,6 +257,27 @@ export function searchAllRanked(
     return { matches: scored.slice(0, options.maxResults).map((s) => s.match), truncatedAt: options.maxResults }
   }
   return { matches: scored.map((s) => s.match) }
+}
+
+// A per-token predicate over an ALREADY-lowercased haystack. 'substring' is plain
+// `includes`. 'ascii-boundary' anchors ASCII tokens between alnum boundaries
+// (NOT `\b`, which is unreliable for CJK) so 'in'/'do' stop matching inside
+// 'reload'/'docker'; a token containing any non-ASCII char (e.g. '홍길동') has no
+// reliable ASCII boundary and falls back to substring.
+function buildTokenMatcher(token: string, mode: 'substring' | 'ascii-boundary'): (lowerHaystack: string) => boolean {
+  if (mode === 'substring' || hasNonAscii(token)) {
+    return (lower) => lower.includes(token)
+  }
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const boundary = new RegExp(`(?:^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`)
+  return (lower) => boundary.test(lower)
+}
+
+export function hasNonAscii(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 0x7f) return true
+  }
+  return false
 }
 
 function shardSearchText(shard: TopicShard): string {

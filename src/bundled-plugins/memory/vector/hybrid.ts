@@ -5,6 +5,7 @@ import { buildParentLinks } from '../parent-link'
 import {
   buildMatcher,
   distinctTokens,
+  hasNonAscii,
   searchAll,
   searchAllRanked,
   type MemorySearchMatch,
@@ -109,7 +110,11 @@ function keywordLane(
   const tokens = distinctHybridContentTokens(query)
   if (tokens.length === 0) return []
   if (tokens.length === 1 && tokens[0] === query.trim().toLowerCase()) return []
-  const ranked = searchAllRanked(shards, streamDays, tokens, { full: false, maxResults })
+  const ranked = searchAllRanked(shards, streamDays, tokens, {
+    full: false,
+    maxResults,
+    tokenMatchMode: 'ascii-boundary',
+  })
   return 'matches' in ranked ? ranked.matches : []
 }
 
@@ -226,6 +231,7 @@ const HYBRID_PROMPT_STOPWORDS = new Set([
 function distinctHybridContentTokens(query: string): string[] {
   return distinctTokens(query).filter((token) => {
     const core = token.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+    if (core.length === 0) return hasNonAscii(token)
     if (!/^[a-z]+$/.test(core)) return true
     return !HYBRID_PROMPT_STOPWORDS.has(core)
   })
