@@ -38,8 +38,8 @@ export async function hybridSearch(
     embedFn([query], 'query'),
   ])
 
-  const { parentSlugByFragmentId } = buildParentLinks(shards)
-  const index = buildContentIndex(shards, streamDays)
+  const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
+  const index = buildContentIndex(shards, streamDays, supersededFragmentIds)
   const vectorRows =
     queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2, EMBEDDING_MODEL_ID)
   const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
@@ -132,9 +132,15 @@ function fragmentIdFromKey(streamKey: string): string | null {
   return id.startsWith('legacy-') ? null : id
 }
 
+// Superseded fragments are kept out of the content index entirely, so both
+// lanes drop them: the keyword lane can match a superseded body, but resolving
+// it finds no active parent link and then no `stream` fallback here, so the
+// stale fragment never surfaces as a standalone result (mirrors the passage-set
+// exclusion that keeps superseded fragments out of the vector lane).
 function buildContentIndex(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
+  supersededFragmentIds: Set<string>,
 ): Map<string, Omit<HybridSearchResult, 'rrfScore'>> {
   const index = new Map<string, Omit<HybridSearchResult, 'rrfScore'>>()
 
@@ -149,7 +155,7 @@ function buildContentIndex(
 
   for (const day of streamDays) {
     for (const event of day.events) {
-      const item = streamIndexItem(day, event)
+      const item = streamIndexItem(day, event, supersededFragmentIds)
       if (item !== null) index.set(laneKey('stream', item.key), item)
     }
   }
@@ -157,9 +163,14 @@ function buildContentIndex(
   return index
 }
 
-function streamIndexItem(day: UndreamedStreamDay, event: StreamEvent): Omit<HybridSearchResult, 'rrfScore'> | null {
+function streamIndexItem(
+  day: UndreamedStreamDay,
+  event: StreamEvent,
+  supersededFragmentIds: Set<string>,
+): Omit<HybridSearchResult, 'rrfScore'> | null {
   if (event.type === 'watermark') return null
   if (event.type === 'fragment') {
+    if (supersededFragmentIds.has(event.id)) return null
     return {
       source: 'stream',
       key: `${day.date}#${event.id}`,

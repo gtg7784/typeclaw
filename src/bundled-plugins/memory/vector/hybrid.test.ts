@@ -136,6 +136,41 @@ describe('hybridSearch', () => {
     }
   })
 
+  it('never returns a superseded fragment as a standalone keyword/stream result', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a topic whose belief switched to pnpm, keeping the bun fragment superseded
+      const activeId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      const supersededId = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
+      writeTopic(
+        agentDir,
+        'package-manager',
+        'Package Manager',
+        [
+          'User uses pnpm.',
+          'fragments:',
+          `- streams/2026-06-10#${activeId}`,
+          'superseded:',
+          `- streams/2026-06-10#${supersededId}`,
+        ].join('\n'),
+      )
+      // both fragment bodies are on the live stream and both match the keyword "bun"
+      writeStreamFragments(agentDir, '2026-06-10', [
+        { id: activeId, topic: 'pnpm', body: 'User switched to pnpm from bun.' },
+        { id: supersededId, topic: 'bun', body: 'User uses bun as the package manager.' },
+      ])
+
+      // when the query matches the superseded body (no vector hits)
+      const results = await hybridSearch('bun', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the superseded fragment never appears as a standalone stream result
+      expect(results.some((result) => result.source === 'stream')).toBe(false)
+      expect(results.some((result) => result.key === `2026-06-10#${supersededId}`)).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
   it('keeps an undreamed fragment (no citing topic) as a stream result', async () => {
     const { agentDir, store } = createFixture()
     try {
@@ -172,10 +207,30 @@ function writeTopic(agentDir: string, slug: string, heading: string, body: strin
 }
 
 function writeStreamFragment(agentDir: string, date: string, id: string, topic: string, body: string): void {
+  writeStreamFragments(agentDir, date, [{ id, topic, body }])
+}
+
+function writeStreamFragments(
+  agentDir: string,
+  date: string,
+  fragments: Array<{ id: string; topic: string; body: string }>,
+): void {
   const streamsDir = join(agentDir, 'memory', 'streams')
   mkdirSync(streamsDir, { recursive: true })
-  const event = { type: 'fragment', id, ts: `${date}T12:00:00.000Z`, source: 'ses_test', entry: 'e1', topic, body }
-  writeFileSync(join(streamsDir, `${date}.jsonl`), `${JSON.stringify(event)}\n`)
+  const lines = fragments
+    .map(({ id, topic, body }) =>
+      JSON.stringify({
+        type: 'fragment',
+        id,
+        ts: `${date}T12:00:00.000Z`,
+        source: 'ses_test',
+        entry: 'e1',
+        topic,
+        body,
+      }),
+    )
+    .join('\n')
+  writeFileSync(join(streamsDir, `${date}.jsonl`), `${lines}\n`)
 }
 
 function row(
