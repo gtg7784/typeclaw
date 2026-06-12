@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { afterEach, describe, expect, it } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -109,6 +110,50 @@ describe('runVectorIndexDoctor', () => {
     expect(fixOutcome.changedPaths).toEqual([])
     expect(existsSync(dbPath(agentDir))).toBe(false)
   })
+
+  it('warns with a pruning fix (no crash) when a row has a malformed embedding blob', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    seedTopicVector(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    // A blob whose byte length is not a multiple of 4 throws in Float32Array
+    // decode; the doctor must still report it instead of crashing.
+    insertRawRow(agentDir, { id: 'topic:broken', model: EMBEDDING_MODEL_ID, dims: DIMS, blobBytes: DIMS * 4 - 3 })
+
+    const result = await runVectorIndexDoctor(agentDir)
+
+    expect(result.status).toBe('warning')
+    expect(result.details).toContainEqual('1 row(s) with a malformed embedding blob')
+    expect(result.fix?.apply).toBeDefined()
+
+    await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger: noopLogger() })
+
+    const after = inspectVectorIndex(dbPath(agentDir))
+    if (after.kind !== 'ok') throw new Error('expected ok after fix')
+    expect(after.malformed).toEqual([])
+    expect(after.rowIds).toEqual(['topic:alpha'])
+  })
+
+  it('prunes a current-model row whose dims differ from DIMS', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    seedTopicVector(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    insertRawRow(agentDir, { id: 'topic:wrongdims', model: EMBEDDING_MODEL_ID, dims: 256, blobBytes: 256 * 4 })
+
+    const before = inspectVectorIndex(dbPath(agentDir))
+    if (before.kind !== 'ok') throw new Error('expected ok seed')
+    expect(before.modelMismatch).toEqual(['topic:wrongdims'])
+
+    const result = await runVectorIndexDoctor(agentDir)
+    expect(result.status).toBe('warning')
+    expect(result.details).toContainEqual('1 row(s) from a different embedding model/dims')
+
+    await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger: noopLogger() })
+
+    const after = inspectVectorIndex(dbPath(agentDir))
+    if (after.kind !== 'ok') throw new Error('expected ok after fix')
+    expect(after.modelMismatch).toEqual([])
+    expect(after.rowIds).toEqual(['topic:alpha'])
+  })
 })
 
 function createAgentDir(): string {
@@ -147,6 +192,23 @@ function seedTopicVector(
     contentHash: fragmentContentHash({ topic: heading, body }),
   })
   store.close()
+}
+
+function insertRawRow(agentDir: string, row: { id: string; model: string; dims: number; blobBytes: number }): void {
+  const db = new Database(dbPath(agentDir))
+  db.query(
+    'INSERT INTO vectors (id, source, key, model, dims, embedding, content_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    row.id,
+    'topic',
+    row.id.replace(/^topic:/, ''),
+    row.model,
+    row.dims,
+    Buffer.alloc(row.blobBytes),
+    row.id,
+    '2026-06-11T00:00:00.000Z',
+  )
+  db.close()
 }
 
 function noopLogger() {

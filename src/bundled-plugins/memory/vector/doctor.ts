@@ -4,7 +4,6 @@ import { join } from 'node:path'
 
 import type { PluginCheckResult } from '@/plugin'
 
-import { EMBEDDING_MODEL_ID } from './embedder'
 import { inspectVectorIndex, type VectorIndexProblem } from './inspect'
 import { collectPassages, findMissingPassages } from './passages'
 import { VectorStore } from './store'
@@ -88,8 +87,7 @@ function summarize(dbPath: string, s: Summary): PluginCheckResult {
       apply: async () => {
         const store = VectorStore.open(dbPath)
         try {
-          store.deleteOtherModels(EMBEDDING_MODEL_ID)
-          store.deleteMany([...s.orphans, ...s.malformed])
+          store.deleteMany(repairable)
         } finally {
           store.close()
         }

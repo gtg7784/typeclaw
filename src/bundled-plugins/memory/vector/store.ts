@@ -13,6 +13,8 @@ export type VectorRow = {
   updatedAt: string
 }
 
+export type VectorMeta = { id: string; model: string; contentHash: string }
+
 type StoredVectorRow = {
   id: string
   source: 'topic' | 'stream'
@@ -115,6 +117,18 @@ export class VectorStore {
 
   getAll(): VectorRow[] {
     return this.db.query<StoredVectorRow, []>('SELECT * FROM vectors ORDER BY id').all().map(toVectorRow)
+  }
+
+  // Metadata only — never decodes the embedding BLOB, so a row whose blob is
+  // malformed (byte length not a multiple of 4) can't throw here the way
+  // getAll's Float32Array decode would.
+  getAllMeta(): VectorMeta[] {
+    return this.db
+      .query<{ id: string; model: string; content_hash: string }, []>(
+        'SELECT id, model, content_hash FROM vectors ORDER BY id',
+      )
+      .all()
+      .map((row) => ({ id: row.id, model: row.model, contentHash: row.content_hash }))
   }
 
   getByIds(ids: string[]): VectorRow[] {

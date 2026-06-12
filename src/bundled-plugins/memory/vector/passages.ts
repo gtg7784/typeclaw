@@ -20,7 +20,7 @@ export async function collectPassages(agentDir: string): Promise<Passage[]> {
 }
 
 export function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
-  const existing = new Map(store.getAll().map((row) => [row.id, row]))
+  const existing = new Map(store.getAllMeta().map((row) => [row.id, row]))
   return passages.filter((passage) => {
     const row = existing.get(passage.id)
     return row === undefined || row.model !== EMBEDDING_MODEL_ID || row.contentHash !== passage.contentHash
