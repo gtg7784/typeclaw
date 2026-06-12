@@ -2262,6 +2262,86 @@ esac
   })
 })
 
+describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)', () => {
+  const allTogglesOn = {
+    gh: true,
+    tmux: true,
+    python: true,
+    ffmpeg: true,
+    cjkFonts: true,
+    xvfb: true,
+    cloudflared: true,
+    claudeCode: true,
+    codexCli: true,
+    append: [],
+  } as Parameters<typeof buildDockerfile>[0]
+
+  test('buildKit defaults to ON — keeps the # syntax pragma and cache mounts', () => {
+    for (const baseImageVersion of ['0.36.8', null]) {
+      const df = buildDockerfile(allTogglesOn, { baseImageVersion })
+      expect(df).toContain('# syntax=docker/dockerfile:1.7')
+      expect(df).toContain('--mount=type=cache,target=/var/cache/apt')
+      expect(df).toContain('--mount=type=cache,target=/root/.bun/install/cache')
+    }
+  })
+
+  test('buildKit:false omits the pragma and every cache mount, with no malformed RUN', () => {
+    for (const baseImageVersion of ['0.36.8', null]) {
+      const df = buildDockerfile(allTogglesOn, { baseImageVersion, buildKit: false })
+      expect(df).not.toContain('# syntax=')
+      expect(df).not.toContain('--mount')
+      // The commands the mounts used to wrap are intact and well-formed.
+      expect(df).toContain('RUN apt-get update')
+      expect(df).toContain('RUN bun install -g @openai/codex')
+      // No artifacts from mechanical rewriting: no double RUN, no dangling `\`,
+      // no `RUN ` with a stray gap where a mount used to be.
+      expect(df).not.toContain('RUN RUN')
+      expect(df).not.toContain('RUN  ')
+      expect(df.split('\n').filter((l) => l.trim() === '\\')).toHaveLength(0)
+    }
+  })
+
+  test('the agent-browser install RUN is well-formed in both modes', () => {
+    const bk = buildDockerfile(allTogglesOn, { baseImageVersion: null })
+    const lg = buildDockerfile(allTogglesOn, { baseImageVersion: null, buildKit: false })
+    expect(bk).toContain('RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\')
+    expect(lg).toContain('RUN bun install -g agent-browser')
+  })
+
+  test('legacy mode still emits ENTRYPOINT/CMD and preserves user append verbatim (incl. `<<` that would fool a text parser)', () => {
+    const df = buildDockerfile(
+      { append: ['RUN echo "usage: cat <<EOF"', 'LABEL note="x << y"'] } as Parameters<typeof buildDockerfile>[0],
+      { baseImageVersion: '0.36.8', buildKit: false },
+    )
+    expect(df).toContain('RUN echo "usage: cat <<EOF"')
+    expect(df).toContain('LABEL note="x << y"')
+    expect(df).toContain('ENTRYPOINT [')
+    expect(df).toContain('CMD ["run"]')
+  })
+
+  test('the two modes produce the same image recipe — identical once the pragma and cache mounts are normalized away', () => {
+    const bk = buildDockerfile(allTogglesOn, { baseImageVersion: null })
+    const lg = buildDockerfile(allTogglesOn, { baseImageVersion: null, buildKit: false })
+    // Collapse each Dockerfile to its logical instructions (join `\`
+    // continuations, drop the pragma + every `--mount=type=cache` token). If the
+    // two modes describe the same build, the normalized forms are identical —
+    // proving legacy isn't a different image, just one without cross-build cache.
+    const normalize = (s: string) =>
+      s
+        .replace(/\\\n\s*/g, ' ') // join line-continuations into one logical line
+        .split('\n')
+        .map((l) =>
+          l
+            .replace(/--mount=type=cache,\S+\s*/g, '')
+            .replace(/\s+/g, ' ')
+            .trimEnd(),
+        )
+        .filter((l) => l !== '# syntax=docker/dockerfile:1.7')
+        .join('\n')
+    expect(normalize(bk)).toBe(normalize(lg))
+  })
+})
+
 function extractWrapperBody(dockerfile: string): string {
   const shebangIdx = dockerfile.indexOf('#!/bin/sh')
   const endIdx = dockerfile.indexOf('\nTYPECLAW_AGENT_BROWSER_WRAPPER_EOF', shebangIdx)

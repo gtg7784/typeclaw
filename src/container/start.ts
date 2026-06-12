@@ -30,6 +30,7 @@ import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
+  buildxAvailable,
   classifyRmStderr,
   cleanupRunCorpse,
   containerNameFromCwd,
@@ -283,11 +284,17 @@ export async function start({
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
     }
     await commitSystemFile(cwd, DEPENDENCY_FILES, upgradeCommitMessage ?? 'Update dependencies')
+    // Probe buildx up front so the Dockerfile we write matches the builder we
+    // will use. buildx present -> emit the BuildKit Dockerfile and build with
+    // `docker buildx build` (fast, cache mounts honored). buildx absent -> emit
+    // the BuildKit-stripped variant and fall back to legacy `docker build`, so
+    // `typeclaw start` still succeeds (just without cross-build apt/bun caches).
+    const hasBuildx = await buildxAvailable(exec)
     // Dockerfile refresh AFTER ensureDeps so the version pin in the FROM
     // line resolves against the agent's installed node_modules/typeclaw —
     // ensures the base image's CLI version matches the runtime the
     // container will actually load.
-    const dockerfileRefresh = await refreshDockerfile(cwd)
+    const dockerfileRefresh = await refreshDockerfile(cwd, { buildKit: hasBuildx })
 
     // Provision the embedding model only when THIS agent opts into vector. The
     // container embedder runs with local_files_only, so the model must already
@@ -379,8 +386,14 @@ export async function start({
 
     let built = false
     if (plan.needsBuild) {
-      const build = await exec(['build', '-t', plan.imageTag, plan.buildContext], { cwd, inheritStdio: true })
-      if (build.exitCode !== 0) {
+      const buildOk = await runImageBuild({
+        exec,
+        cwd,
+        imageTag: plan.imageTag,
+        buildContext: plan.buildContext,
+        hasBuildx,
+      })
+      if (!buildOk) {
         await cleanupHostDaemonRegistration(containerName, hostd)
         return { ok: false, reason: 'docker build failed' }
       }
@@ -688,17 +701,48 @@ async function resolvePublishHost(exec: DockerExec): Promise<string> {
 // the cheapest correct signal: the build context for `docker build` is the
 // Dockerfile itself, so equal contents definitionally produce an equivalent
 // image.
-export async function refreshDockerfile(cwd: string): Promise<{ changed: boolean }> {
+export async function refreshDockerfile(cwd: string, opts: { buildKit?: boolean } = {}): Promise<{ changed: boolean }> {
   const cfg = await loadTypeclawConfig(cwd)
   const next = buildDockerfile(cfg.docker.file, {
     baseImageVersion: resolveBaseImageVersion(cwd),
     cjkFontsAuto: hostLocaleIsCjk(),
+    buildKit: opts.buildKit,
   })
   const path = join(cwd, DOCKERFILE)
   const prev = await readFile(path, 'utf8').catch(() => null)
   if (prev === next) return { changed: false }
   await writeFile(path, next)
   return { changed: true }
+}
+
+// Builds the agent image with a seamless buildx->legacy fallback. The preferred
+// frontend is chosen from `hasBuildx`; if a buildx build FAILS (e.g. the plugin
+// is installed but there is no usable builder/driver), we transparently rewrite
+// the Dockerfile to its BuildKit-stripped form and retry once with the legacy
+// `docker build`. The user sees one successful `typeclaw start` instead of a
+// buildx-specific dead end. A genuine Dockerfile error fails both paths, so the
+// retry costs at most one extra attempt before the real error surfaces.
+async function runImageBuild(args: {
+  exec: DockerExec
+  cwd: string
+  imageTag: string
+  buildContext: string
+  hasBuildx: boolean
+}): Promise<boolean> {
+  const { exec, cwd, imageTag, buildContext, hasBuildx } = args
+  if (hasBuildx) {
+    // `--load` puts the image in the local store so the subsequent `docker run`
+    // finds it. Non-default buildx drivers (docker-container, etc.) export to
+    // the build cache ONLY without it; on the default `docker` driver --load is
+    // already implied, so passing it unconditionally is a safe no-op there.
+    const buildx = await exec(['buildx', 'build', '--load', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
+    if (buildx.exitCode === 0) return true
+    // buildx failed — fall back to the legacy builder against a stripped
+    // Dockerfile so a misconfigured-buildx host still ends up with an image.
+    await refreshDockerfile(cwd, { buildKit: false })
+  }
+  const legacy = await exec(['build', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
+  return legacy.exitCode === 0
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {

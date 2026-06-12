@@ -98,6 +98,15 @@ export async function checkDockerAvailable(exec: DockerExec = defaultDockerExec)
   }
 }
 
+// `docker buildx version` exits 0 only when the buildx CLI plugin is installed.
+// `start` uses this to pick the build path: buildx present -> `docker buildx
+// build` with the BuildKit Dockerfile (`--mount=type=cache` + the `# syntax=`
+// pragma, fast cached rebuilds); absent -> a BuildKit-stripped Dockerfile built
+// with the legacy `docker build`. Either way the agent image builds.
+export async function buildxAvailable(exec: DockerExec = defaultDockerExec): Promise<boolean> {
+  return (await exec(['buildx', 'version'])).exitCode === 0
+}
+
 export function containerNameFromCwd(cwd: string): string {
   return sanitizeContainerName(basename(resolve(cwd)))
 }

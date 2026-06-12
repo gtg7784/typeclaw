@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  buildxAvailable,
   checkDockerAvailable,
   classifyRmStderr,
   cleanupRunCorpse,
@@ -380,5 +381,20 @@ describe('sanitizeDockerStderr', () => {
 
   test('leaves an already-clean single-line message untouched', () => {
     expect(sanitizeDockerStderr('some plain error')).toBe('some plain error')
+  })
+})
+
+describe('buildxAvailable', () => {
+  test('true when `docker buildx version` exits 0', async () => {
+    const exec: DockerExec = async (args) => {
+      expect(args).toEqual(['buildx', 'version'])
+      return { exitCode: 0, stdout: 'buildx v0.33.0\n', stderr: '' }
+    }
+    expect(await buildxAvailable(exec)).toBe(true)
+  })
+
+  test('false when the buildx plugin is missing (non-zero exit)', async () => {
+    const exec: DockerExec = async () => ({ exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' })
+    expect(await buildxAvailable(exec)).toBe(false)
   })
 })
