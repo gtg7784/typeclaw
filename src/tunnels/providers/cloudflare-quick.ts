@@ -3,12 +3,14 @@ import type { Unsubscribe } from '@/stream'
 import { createLogRing, type LogLineSubscriber, type LogRing } from '../log-ring'
 import { extractQuickTunnelUrl } from '../quick-url-parser'
 import type { TunnelConfig, TunnelProviderHandle, TunnelState } from '../types'
+import { isUpstreamReachable, type UpstreamProbe } from '../upstream-probe'
 import { isBinaryNotFound, MISSING_BINARY_DETAIL } from './cloudflared-binary'
 
 const DEFAULT_BINARY = 'cloudflared'
 const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 10_000, 30_000]
 const DEFAULT_MAX_FAILURES_WITHOUT_URL = 10
 const DEFAULT_STOP_GRACE_MS = 5_000
+const DEFAULT_UPSTREAM_RECHECK_MS = 2_000
 
 export type CloudflareQuickProviderOptions = {
   config: TunnelConfig
@@ -18,6 +20,8 @@ export type CloudflareQuickProviderOptions = {
   restartBackoffMs?: number[]
   maxConsecutiveFailuresWithoutUrl?: number
   stopGraceMs?: number
+  probeUpstream?: UpstreamProbe
+  upstreamRecheckMs?: number
 }
 
 export type CloudflareQuickProviderHandle = TunnelProviderHandle & {
@@ -38,6 +42,8 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   const restartBackoffMs = options.restartBackoffMs ?? DEFAULT_RESTART_BACKOFF_MS
   const maxConsecutiveFailuresWithoutUrl = options.maxConsecutiveFailuresWithoutUrl ?? DEFAULT_MAX_FAILURES_WITHOUT_URL
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS
+  const probeUpstream = options.probeUpstream ?? isUpstreamReachable
+  const upstreamRecheckMs = options.upstreamRecheckMs ?? DEFAULT_UPSTREAM_RECHECK_MS
   const logs = createLogRing()
   const state: TunnelState = {
     name: config.name,
@@ -53,8 +59,53 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   let stopping = false
   let proc: ReturnType<typeof Bun.spawn> | null = null
   let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let recheckTimer: ReturnType<typeof setTimeout> | null = null
   let restartFailuresWithoutUrl = 0
   let attemptEmittedUrl = false
+  let broadcastedUrl: string | null = null
+
+  function clearRecheckTimer(): void {
+    if (recheckTimer !== null) {
+      clearTimeout(recheckTimer)
+      recheckTimer = null
+    }
+  }
+
+  // cloudflared emits the URL once, but the upstream service may still be
+  // booting. We broadcast the URL immediately (channel adapters need it) yet
+  // gate `healthy` on a real upstream probe, re-checking on an interval so the
+  // status flips to healthy the moment the service comes up — and surfaces a
+  // 502-explaining detail until then.
+  async function onQuickUrl(url: string): Promise<void> {
+    attemptEmittedUrl = true
+    restartFailuresWithoutUrl = 0
+    state.url = url
+    state.lastUrlAt = Date.now()
+    if (broadcastedUrl !== url) {
+      broadcastedUrl = url
+      onUrlChange(url)
+    }
+    await reprobeUpstream()
+  }
+
+  async function reprobeUpstream(): Promise<void> {
+    if (!started || stopping || state.url === null) return
+    const reachable = await probeUpstream(upstreamPort)
+    if (!started || stopping || state.url === null) return
+    if (reachable) {
+      state.status = 'healthy'
+      state.detail = 'quick tunnel URL emitted; upstream reachable'
+      clearRecheckTimer()
+      return
+    }
+    state.status = 'unhealthy'
+    state.detail = `quick tunnel URL emitted but upstream 127.0.0.1:${upstreamPort} is not reachable (requests will 502)`
+    clearRecheckTimer()
+    recheckTimer = setTimeout(() => {
+      recheckTimer = null
+      void reprobeUpstream()
+    }, upstreamRecheckMs)
+  }
 
   async function launch(): Promise<void> {
     if (!started || stopping) return
@@ -81,13 +132,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
     void pumpStderr(spawned.stderr, logs, (line) => {
       const url = extractQuickTunnelUrl(line)
       if (url === null) return
-      attemptEmittedUrl = true
-      restartFailuresWithoutUrl = 0
-      state.url = url
-      state.status = 'healthy'
-      state.lastUrlAt = Date.now()
-      state.detail = 'quick tunnel URL emitted'
-      onUrlChange(url)
+      void onQuickUrl(url)
     })
 
     void spawned.exited.then((code) => {
@@ -99,6 +144,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   }
 
   function handleExit(code: number): void {
+    clearRecheckTimer()
     if (!attemptEmittedUrl) restartFailuresWithoutUrl += 1
     if (restartFailuresWithoutUrl >= maxConsecutiveFailuresWithoutUrl) {
       state.status = 'permanently-failed'
@@ -127,6 +173,8 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
       if (!started && proc === null) return
       started = false
       stopping = true
+      broadcastedUrl = null
+      clearRecheckTimer()
       if (retryTimer !== null) {
         clearTimeout(retryTimer)
         retryTimer = null

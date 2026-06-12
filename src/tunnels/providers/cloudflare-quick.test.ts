@@ -45,6 +45,7 @@ sleep 30
       upstreamPort: 8975,
       binary,
       onUrlChange: (url) => urls.push(url),
+      probeUpstream: async () => true,
       stopGraceMs: 10,
     })
 
@@ -53,6 +54,7 @@ sleep 30
       await waitFor(() => urls.length === 1, { description: 'quick tunnel URL' })
 
       expect(urls).toEqual(['https://fake.trycloudflare.com'])
+      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy after probe' })
       expect(provider.snapshot()).toMatchObject({ status: 'healthy', url: 'https://fake.trycloudflare.com' })
       expect(provider.tail()).toContain('2026-01-01T00:00:00Z INF | https://fake.trycloudflare.com |')
       expect((await readFile(argvFile, 'utf8')).split('\n').filter(Boolean)).toEqual([
@@ -154,6 +156,7 @@ sleep 30
       upstreamPort: 8975,
       binary,
       onUrlChange: (url) => urls.push(url),
+      probeUpstream: async () => true,
       restartBackoffMs: [5],
       stopGraceMs: 10,
     })
@@ -163,7 +166,7 @@ sleep 30
       await waitFor(() => urls.length === 1, { description: 'URL after restart' })
 
       expect(await readFile(countFile, 'utf8')).toBe('2')
-      expect(provider.snapshot().status).toBe('healthy')
+      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy after restart probe' })
       await provider.stop()
     } finally {
       await provider.stop()
@@ -221,6 +224,7 @@ sleep 30
       upstreamPort: 8975,
       binary,
       onUrlChange: () => {},
+      probeUpstream: async () => true,
       stopGraceMs: 10,
     })
 
@@ -231,6 +235,77 @@ sleep 30
       await provider.stop()
 
       expect(provider.snapshot().status).toBe('stopped')
+    } finally {
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
+  it('broadcasts the URL but stays unhealthy when the upstream is unreachable', async () => {
+    const scratchDir = createScratchDir()
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+echo "https://no-upstream.trycloudflare.com" >&2
+trap 'exit 0' TERM
+sleep 30
+`,
+    )
+    const urls: string[] = []
+    const provider = createCloudflareQuickProvider({
+      config,
+      upstreamPort: 4851,
+      binary,
+      onUrlChange: (url) => urls.push(url),
+      probeUpstream: async () => false,
+      upstreamRecheckMs: 5,
+      stopGraceMs: 10,
+    })
+
+    try {
+      await provider.start()
+      await waitFor(() => provider.snapshot().status === 'unhealthy', { description: 'unhealthy on dead upstream' })
+
+      expect(urls).toEqual(['https://no-upstream.trycloudflare.com'])
+      const snap = provider.snapshot()
+      expect(snap.url).toBe('https://no-upstream.trycloudflare.com')
+      expect(snap.detail).toContain('4851')
+      expect(snap.detail).toContain('502')
+      await provider.stop()
+    } finally {
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
+  it('flips to healthy on recheck once the upstream comes up', async () => {
+    const scratchDir = createScratchDir()
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+echo "https://slow-upstream.trycloudflare.com" >&2
+trap 'exit 0' TERM
+sleep 30
+`,
+    )
+    let upstreamReady = false
+    const provider = createCloudflareQuickProvider({
+      config,
+      upstreamPort: 4851,
+      binary,
+      onUrlChange: () => {},
+      probeUpstream: async () => upstreamReady,
+      upstreamRecheckMs: 5,
+      stopGraceMs: 10,
+    })
+
+    try {
+      await provider.start()
+      await waitFor(() => provider.snapshot().status === 'unhealthy', { description: 'unhealthy before upstream' })
+
+      upstreamReady = true
+      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy after upstream comes up' })
+      await provider.stop()
     } finally {
       await provider.stop()
       rmSync(scratchDir, { recursive: true, force: true })
