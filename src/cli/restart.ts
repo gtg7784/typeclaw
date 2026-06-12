@@ -1,9 +1,11 @@
+import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
 import { start, stop } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { guardIncompleteInit } from './incomplete-init'
 import { c, errorLine, renderStartSuccess, spinner } from './ui'
 
 export const restartCommand = defineCommand({
@@ -30,6 +32,25 @@ export const restartCommand = defineCommand({
     if (!isInitialized(cwd)) {
       console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
       process.exit(1)
+    }
+
+    // Check before stop: a half-initialized agent usually has no running
+    // container, so stopping first is noise. restart inherits the same
+    // incomplete-init UX as start.
+    const guard = await guardIncompleteInit({
+      cwd,
+      interactive: Boolean(process.stdout.isTTY),
+      confirmContinue: async () => {
+        const proceed = await confirm({ message: 'Try restarting anyway?', initialValue: false })
+        return !isCancel(proceed) && proceed === true
+      },
+    })
+    if (guard.action === 'block') {
+      console.error(errorLine(guard.message))
+      process.exit(1)
+    }
+    if (guard.action === 'abort') {
+      process.exit(0)
     }
 
     const validated = validateConfig(cwd)

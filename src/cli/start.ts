@@ -1,9 +1,11 @@
+import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { guardIncompleteInit } from './incomplete-init'
 import { errorLine, renderStartSuccess, spinner } from './ui'
 
 export const startCommand = defineCommand({
@@ -30,6 +32,22 @@ export const startCommand = defineCommand({
     if (!isInitialized(cwd)) {
       console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
       process.exit(1)
+    }
+
+    const guard = await guardIncompleteInit({
+      cwd,
+      interactive: Boolean(process.stdout.isTTY),
+      confirmContinue: async () => {
+        const proceed = await confirm({ message: 'Try starting anyway?', initialValue: false })
+        return !isCancel(proceed) && proceed === true
+      },
+    })
+    if (guard.action === 'block') {
+      console.error(errorLine(guard.message))
+      process.exit(1)
+    }
+    if (guard.action === 'abort') {
+      process.exit(0)
     }
 
     const validated = validateConfig(cwd)
