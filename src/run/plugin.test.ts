@@ -42,6 +42,10 @@ async function writePlugin(dir: string, body: string) {
 }
 
 describe('startAgent + plugin loading', () => {
+  // 60s, not the global 30s: this is the first test to boot a full agent
+  // (startAgent → server + agent-browser + memory plugins) and `await import()`
+  // a temp plugin, paying Bun's cold transpile + graph resolution. ~hundreds of
+  // ms in isolation, but starves past 30s under full 18-worker contention.
   test('loads a local plugin and merges its cron job under __plugin_<name>_<key>', async () => {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
     await writeFile(
@@ -68,7 +72,7 @@ describe('startAgent + plugin loading', () => {
     expect(ids).toContain('__plugin_plugin_weekly-digest')
     expect(running.loadedPlugins.map((p) => p.name)).toContain('plugin')
     expect(running.loadedPlugins.map((p) => p.name)).toContain('memory')
-  })
+  }, 60_000)
 
   test('a user plugin whose factory throws is skipped — startAgent still boots, no leaked registrations', async () => {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))

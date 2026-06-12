@@ -61,6 +61,10 @@ describe('derivePluginNameFromPackage', () => {
 })
 
 describe('loadPluginEntry — local path', () => {
+  // 60s, not the global 30s: this writes a temp plugin then `await import()`s it,
+  // paying Bun's cold transpile + module-resolution of the `@/plugin` graph. That
+  // is ~400ms in isolation but starves past 30s under full 18-worker contention.
+  // The budget absorbs the starvation while still failing loudly on a real hang.
   test('loads a relative-path plugin and derives name from basename', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
     try {
@@ -79,7 +83,7 @@ export default definePlugin({
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   test('throws PluginNotFoundError when local path does not exist', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-loader-'))
