@@ -5,11 +5,11 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { fragmentContentHash } from '../fragment-parser'
 import { renderShard } from '../frontmatter'
 import { runVectorIndexDoctor } from './doctor'
 import { DIMS, EMBEDDING_MODEL_ID } from './embedder'
 import { inspectVectorIndex } from './inspect'
+import { topicPassage } from './passages'
 import { VectorStore } from './store'
 
 const testDirs: string[] = []
@@ -211,7 +211,7 @@ function seedTopicVector(
     model,
     dims: DIMS,
     embedding: new Float32Array(DIMS),
-    contentHash: fragmentContentHash({ topic: heading, body }),
+    contentHash: topicPassage(slug, heading, body).contentHash,
   })
   store.close()
 }

@@ -55,6 +55,29 @@ export function isCitationLine(line: string): boolean {
   return CITATION_LINE.test(line)
 }
 
+// Drops `fragments:`/`superseded:` headings and citation lines, leaving only the
+// belief prose. The embedding input must exclude them: mean-pooling a body of one
+// belief sentence + dozens of `streams/<date>#<uuidv7>` lines dilutes the belief
+// and pulls every topic vector toward the shared citation-list structure. The
+// citations stay in the on-disk body (the load-bearing parent-child links); only
+// the text handed to the embedder is stripped.
+export function stripCitationLines(body: string): string {
+  const kept = body.split('\n').filter((line) => !isCitationLine(line) && !SECTION_HEADING.test(line))
+  return collapseBlankRuns(kept).join('\n').trim()
+}
+
+function collapseBlankRuns(lines: string[]): string[] {
+  const out: string[] = []
+  let prevBlank = false
+  for (const line of lines) {
+    const blank = line.trim() === ''
+    if (blank && prevBlank) continue
+    out.push(line)
+    prevBlank = blank
+  }
+  return out
+}
+
 // Superseded citations stay cited (so the citation-superset GC invariant never
 // drops them) but must be excluded from retrieval, so a superseded "uses bun"
 // fragment can't surface as a hook for the current "uses pnpm" belief.

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { stripCitationLines } from '../citations'
 import { fragmentContentHash } from '../fragment-parser'
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
@@ -13,6 +14,16 @@ export type Passage = {
   key: string
   text: string
   contentHash: string
+}
+
+// The single source of truth for a topic's embedded text + freshness hash, so the
+// startup index build and dreaming's per-pass refresh stay byte-identical. The
+// contentHash covers the EMBEDDED text (not the raw body): changing how the text
+// is derived must invalidate every existing topic row, but `fragmentContentHash`
+// over the unchanged raw body would not — `findMissingPassages` would skip them.
+export function topicPassage(slug: string, heading: string, body: string): Passage {
+  const text = `${heading}\n${stripCitationLines(body)}`
+  return { id: `topic:${slug}`, source: 'topic', key: slug, text, contentHash: hashContent(text) }
 }
 
 export async function collectPassages(agentDir: string): Promise<Passage[]> {
@@ -31,15 +42,7 @@ export function findMissingPassages(store: VectorStore, passages: Passage[]): Pa
 function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): Passage[] {
   const { supersededFragmentIds } = buildParentLinks(shards)
   return [
-    ...shards.map(
-      (shard): Passage => ({
-        id: `topic:${shard.slug}`,
-        source: 'topic',
-        key: shard.slug,
-        text: `${shard.frontmatter.heading}\n${shard.body}`,
-        contentHash: fragmentContentHash({ topic: shard.frontmatter.heading, body: shard.body }),
-      }),
-    ),
+    ...shards.map((shard): Passage => topicPassage(shard.slug, shard.frontmatter.heading, shard.body)),
     ...streamDays.flatMap((day) =>
       day.events.flatMap((event): Passage[] => {
         if (event.type === 'watermark') return []

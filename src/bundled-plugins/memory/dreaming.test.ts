@@ -628,17 +628,10 @@ describe('dreaming subagent (compaction wiring)', () => {
           .map((row) => row.id)
           .sort(),
       ).toEqual(['topic:new', 'topic:old'])
-      expect(embeddedTexts).toContain(
-        [
-          'Old updated',
-          'Old updated.',
-          '',
-          'fragments:',
-          '- streams/2026-04-27#f-old',
-          '- streams/2026-04-27#f-gone',
-        ].join('\n'),
-      )
-      expect(embeddedTexts).toContain(['New', 'New.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n'))
+      // The citation lines and `fragments:` heading are stripped before embedding;
+      // only the heading + belief prose reaches the embedder.
+      expect(embeddedTexts).toContain('Old updated\nOld updated.')
+      expect(embeddedTexts).toContain('New\nNew.')
     } finally {
       afterStore.close()
     }
