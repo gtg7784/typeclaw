@@ -29,14 +29,12 @@ export const restartCommand = defineCommand({
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
-    if (!isInitialized(cwd)) {
-      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
-      process.exit(1)
-    }
-
-    // Check before stop: a half-initialized agent usually has no running
-    // container, so stopping first is noise. restart inherits the same
-    // incomplete-init UX as start.
+    // Runs before BOTH isInitialized and stop. A wizard abort persists a
+    // checkpoint before scaffold writes typeclaw.json, so a checkpoint-but-no-
+    // config dir is an incomplete init that should get resume guidance, not the
+    // generic config-missing error — and a half-init agent usually has no
+    // container to stop. A `continue` falls through to isInitialized, which
+    // still catches a truly uninitialized dir.
     const guard = await guardIncompleteInit({
       cwd,
       interactive: Boolean(process.stdout.isTTY),
@@ -51,6 +49,11 @@ export const restartCommand = defineCommand({
     }
     if (guard.action === 'abort') {
       process.exit(0)
+    }
+
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
+      process.exit(1)
     }
 
     const validated = validateConfig(cwd)

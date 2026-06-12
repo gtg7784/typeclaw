@@ -29,11 +29,12 @@ export const startCommand = defineCommand({
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
-    if (!isInitialized(cwd)) {
-      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
-      process.exit(1)
-    }
-
+    // Runs BEFORE the isInitialized check: a wizard abort persists a checkpoint
+    // before scaffold writes typeclaw.json, so a checkpoint-but-no-config dir is
+    // an incomplete init, not a "never initialized" one. Guarding first means
+    // that case gets the resume guidance instead of the generic config-missing
+    // error. A `continue` (no incomplete checkpoint, or "try anyway") falls
+    // through to isInitialized, which still catches a truly uninitialized dir.
     const guard = await guardIncompleteInit({
       cwd,
       interactive: Boolean(process.stdout.isTTY),
@@ -48,6 +49,11 @@ export const startCommand = defineCommand({
     }
     if (guard.action === 'abort') {
       process.exit(0)
+    }
+
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
+      process.exit(1)
     }
 
     const validated = validateConfig(cwd)
