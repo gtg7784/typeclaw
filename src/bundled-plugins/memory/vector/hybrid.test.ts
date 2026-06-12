@@ -333,6 +333,55 @@ describe('hybridSearch keyword lane', () => {
       store.close()
     }
   })
+
+  it('injects no keyword-only memory for a low-information prompt of only common words', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given shards that happen to contain common function words in their bodies
+      writeTopic(agentDir, 'note-a', 'Note A', 'We did say that it was about the thing here.')
+      writeTopic(agentDir, 'note-b', 'Note B', 'What we have is over there with them.')
+
+      // when the whole prompt carries no content token (vector lane gated out)
+      const results = await hybridSearch('what did we say about it', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the keyword lane contributes nothing — no arbitrary memory is injected
+      expect(results).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps content tokens when a prompt mixes stopwords with real terms', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose content words ('pr', '#651', 'reload') the prompt shares
+      writeTopic(agentDir, 'pr-651', 'PR 651', 'PR #651 fixed channel reload handling.')
+
+      // when the prompt buries those terms among stopwords (no vector hit)
+      const results = await hybridSearch('how does the PR #651 reload work', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the surviving content tokens still retrieve the shard
+      expect(results.map((r) => r.key)).toContain('pr-651')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('retrieves a non-ASCII (CJK) content token that the English stopword filter must not drop', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard keyed on a Korean name
+      writeTopic(agentDir, 'person-note', 'Person Note', 'Reply conventions for 홍길동 in the group chat.')
+
+      // when a Korean prompt mixes the name with function words (no vector hit)
+      const results = await hybridSearch('어디서 홍길동 얘기했지', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the non-ASCII token survives filtering and retrieves the shard
+      expect(results.map((r) => r.key)).toContain('person-note')
+    } finally {
+      store.close()
+    }
+  })
 })
 
 describe('hybridSearch relevance gate', () => {
