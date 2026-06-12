@@ -485,10 +485,17 @@ export async function collectWizardInputs(
   if (!reset && checkpointStore !== undefined) {
     const saved = await checkpointStore.load(cwd)
     if (saved !== undefined) {
-      const decision = await prompts.confirmResumeCheckpoint(saved)
+      // Sanitize against the freshly-loaded catalog BEFORE showing the resume
+      // prompt. `load` only validates version/cwd/updatedAt, so a checkpoint
+      // with a since-removed provider/model id reaches here intact; describing
+      // or seeding it raw would crash on `KNOWN_PROVIDERS[providerId]`. Pruning
+      // first means the prompt, the seed, and any partial answers all see only
+      // catalog-valid fields.
+      const catalogRefs = new Set(catalog.options.map((option) => option.ref))
+      const sanitized = sanitizeCheckpointAgainstCatalog(saved, catalogRefs)
+      const decision = await prompts.confirmResumeCheckpoint(sanitized)
       if (decision === 'resume') {
-        const catalogRefs = new Set(catalog.options.map((option) => option.ref))
-        seedWizardState(state, sanitizeCheckpointAgainstCatalog(saved, catalogRefs))
+        seedWizardState(state, sanitized)
       } else {
         await checkpointStore.clear(cwd)
       }
@@ -930,8 +937,12 @@ async function confirmResumeCheckpoint(checkpoint: WizardAnswerCheckpointV1): Pr
 
 function describeCheckpoint(checkpoint: WizardAnswerCheckpointV1): string {
   const parts: string[] = []
+  // Defense-in-depth: callers sanitize before describing, but a raw provider id
+  // missing from KNOWN_PROVIDERS must degrade to the id string, never throw.
   if (checkpoint.modelRef !== undefined) parts.push(checkpoint.modelRef)
-  else if (checkpoint.providerId !== undefined) parts.push(KNOWN_PROVIDERS[checkpoint.providerId].name)
+  else if (checkpoint.providerId !== undefined) {
+    parts.push(KNOWN_PROVIDERS[checkpoint.providerId]?.name ?? checkpoint.providerId)
+  }
   if (checkpoint.visionModelRef !== undefined) parts.push(`vision: ${checkpoint.visionModelRef}`)
   if (checkpoint.channelChoice !== undefined && checkpoint.channelChoice !== 'none') {
     parts.push(`channel: ${checkpoint.channelChoice}`)

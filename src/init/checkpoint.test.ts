@@ -151,6 +151,25 @@ describe('createHostWizardCheckpointStore', () => {
     await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
     expect(existsSync(initStateDir())).toBe(true)
   })
+
+  test('rejects a checkpoint whose optional field has a non-string type', async () => {
+    const store = createHostWizardCheckpointStore()
+    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
+    const { readdir } = await import('node:fs/promises')
+    const [file] = await readdir(initStateDir())
+    const path = join(initStateDir(), file!)
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    // given: a structurally corrupt providerId (number instead of string)
+    await writeFile(path, JSON.stringify({ ...parsed, providerId: 42 }))
+    expect(await store.load('/agent/one')).toBeUndefined()
+  })
+
+  test('accepts a checkpoint whose optional fields are absent', async () => {
+    const store = createHostWizardCheckpointStore()
+    await store.save('/agent/two', checkpointFromSelections({ cwd: '/agent/two' }))
+    const loaded = await store.load('/agent/two')
+    expect(loaded?.cwd).toBe('/agent/two')
+  })
 })
 
 describe('sanitizeCheckpointAgainstCatalog', () => {

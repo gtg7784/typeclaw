@@ -175,5 +175,21 @@ function isValidCheckpoint(value: unknown): value is WizardAnswerCheckpointV1 {
   if (v.version !== WIZARD_CHECKPOINT_VERSION) return false
   if (typeof v.cwd !== 'string') return false
   if (typeof v.updatedAt !== 'string') return false
-  return true
+  // Every optional selection field must be a string when present. Membership
+  // (is this a real provider/model?) is the sanitizer's job, but a non-string
+  // here is structurally corrupt and would later index KNOWN_PROVIDERS or join
+  // into prompt text with a wrong shape — reject it at load.
+  return OPTIONAL_STRING_FIELDS.every((field) => v[field] === undefined || typeof v[field] === 'string')
 }
+
+const OPTIONAL_STRING_FIELDS = [
+  'vendorId',
+  'providerId',
+  'modelRef',
+  'authMethod',
+  'visionVendorId',
+  'visionProviderId',
+  'visionModelRef',
+  'visionAuthMethod',
+  'channelChoice',
+] as const satisfies ReadonlyArray<keyof WizardAnswerCheckpointV1>

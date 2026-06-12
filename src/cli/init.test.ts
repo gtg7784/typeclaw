@@ -1411,6 +1411,36 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
     expect(store.load('/agent')).resolves.toEqual(existing)
   })
 
+  test('sanitizes a stale provider out before the resume prompt sees it', async () => {
+    // given: a checkpoint whose provider no longer exists in the live catalog
+    const stale = {
+      version: 1 as const,
+      cwd: '/agent',
+      updatedAt: 'now',
+      vendorId: 'made-up-vendor',
+      providerId: 'made-up-provider',
+      channelChoice: 'slack',
+    } as unknown as ReturnType<typeof checkpointFromSelections>
+    const { store } = inMemoryStore(stale)
+
+    let seen: ReturnType<typeof checkpointFromSelections> | undefined
+    await collectWizardInputs(
+      '/agent',
+      basePrompts({
+        confirmResumeCheckpoint: async (checkpoint) => {
+          seen = checkpoint
+          return 'start-over'
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    // then: the stale vendor/provider are pruned, the valid channel survives
+    expect(seen?.vendorId).toBeUndefined()
+    expect(seen?.providerId).toBeUndefined()
+    expect(seen?.channelChoice).toBe('slack')
+  })
+
   test('works without a checkpoint store (back-compat)', async () => {
     const result = await collectWizardInputs('/agent', basePrompts())
     expect(result.model).toBe(fireworksModel)
