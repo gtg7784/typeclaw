@@ -19,7 +19,7 @@ afterEach(() => {
 })
 
 describe('hybridSearch', () => {
-  it('QA 1.6: fuses exact-ID keyword hits and semantic vector hits via MAX-child RRF', async () => {
+  it('QA 1.6: sums vector + keyword reciprocal ranks for a hit found by both lanes', async () => {
     const { agentDir, store } = createFixture()
     try {
       writeTopic(agentDir, 'pr-651', 'PR 651 Review', 'PR #651 fixed channel reload handling.')
@@ -36,8 +36,7 @@ describe('hybridSearch', () => {
       const exact = exactResults.find((result) => result.key === 'pr-651')
 
       expect(exactResults.slice(0, 3).map((result) => result.key)).toContain('pr-651')
-      // pr-651 is hit by both lanes; MAX fusion keeps the best lane score (1/61), not the sum.
-      expect(exact?.rrfScore).toBeCloseTo(1 / 61, 10)
+      expect(exact?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
 
       const semanticResults = await hybridSearch(
         'focused memory summary retrieval',
@@ -50,6 +49,26 @@ describe('hybridSearch', () => {
 
       expect(semanticResults.slice(0, 3).map((result) => result.key)).toContain('semantic-cache')
       expect(semantic?.rrfScore).toBeCloseTo(1 / 61, 10)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('lifts a low-vector-rank topic above pure-cosine noise when the keyword lane corroborates', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeTopic(agentDir, 'person-note', 'Person Note', 'Reply conventions for 홍길동 in the group chat.')
+      writeTopic(agentDir, 'noise-a', 'Noise A', 'Unrelated English PR review note about channel reload.')
+      writeTopic(agentDir, 'noise-b', 'Noise B', 'Another unrelated English note about docker builds.')
+
+      store.upsert(row('topic:noise-a', 'noise-a', vector({ 0: 0.9 })))
+      store.upsert(row('topic:noise-b', 'noise-b', vector({ 0: 0.8 })))
+      store.upsert(row('topic:person-note', 'person-note', vector({ 0: 0.1 })))
+
+      const results = await hybridSearch('홍길동', store, agentDir, 3, embedFrom({ 0: 1 }))
+
+      expect(results[0]?.key).toBe('person-note')
+      expect(results[0]?.rrfScore).toBeGreaterThan(results[1]?.rrfScore ?? 0)
     } finally {
       store.close()
     }
