@@ -60,6 +60,36 @@ export type InspectClientMessage =
   // distinguish "idle" from "dead"; a missed pong can. Guards a wedged
   // WebSocket that stays ESTABLISHED yet never fires 'close'/'error'.
   | { type: 'ping'; id: number }
+  // One-shot query for sessions live in the container's registry but not yet on
+  // disk (pi-coding-agent defers the first .jsonl write to the first assistant
+  // message). Lets the host-stage inspect picker show in-flight sessions before
+  // their reply lands. Answered with a single `live_sessions` reply.
+  | { type: 'list_live' }
+
+// Wire mirror of MinimalSessionOrigin (@/agent/session-meta). Duplicated rather
+// than imported because @/shared is a leaf module — @/agent depends on it, so
+// importing back would create a cycle. A compile-time assertion in session-meta
+// keeps the two structurally in sync; drift fails typecheck.
+export type LiveSessionOriginPayload =
+  | { kind: 'tui' }
+  | { kind: 'cron'; jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' | 'handler' }
+  | {
+      kind: 'channel'
+      adapter: string
+      workspace: string
+      workspaceName?: string
+      chat: string
+      chatName?: string
+      thread: string | null
+    }
+  | { kind: 'subagent'; subagent: string; parentSessionId: string }
+  | { kind: 'system'; component: string }
+
+export type LiveSessionPayload = {
+  sessionId: string
+  origin: LiveSessionOriginPayload
+  registeredAtMs: number
+}
 
 export type InspectFramePayload =
   | { kind: 'text_delta'; sessionId: string; delta: string }
@@ -137,6 +167,7 @@ export type InspectServerMessage =
   | { type: 'frame'; ts: number; payload: InspectFramePayload }
   | { type: 'error'; message: string }
   | { type: 'pong'; id: number }
+  | { type: 'live_sessions'; sessions: LiveSessionPayload[] }
 
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }

@@ -14,6 +14,8 @@ export {
   type InspectClientMessage,
   type InspectFramePayload,
   type InspectServerMessage,
+  type LiveSessionOriginPayload,
+  type LiveSessionPayload,
   type PromptDelivery,
   type QueueStateItem,
   type ReloadResultPayload,

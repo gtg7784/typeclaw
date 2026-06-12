@@ -1,4 +1,14 @@
+import type { LiveSessionOriginPayload } from '@/shared'
+
 import type { SessionOrigin } from './session-origin'
+
+// Bidirectional structural equality with the wire mirror in @/shared/protocol.
+// @/shared cannot import this module (it is a leaf), so the type cannot be
+// shared directly; these assignments fail typecheck if either side drifts.
+const _originIsWireCompatible: LiveSessionOriginPayload = null as unknown as MinimalSessionOrigin
+const _wireIsOriginCompatible: MinimalSessionOrigin = null as unknown as LiveSessionOriginPayload
+void _originIsWireCompatible
+void _wireIsOriginCompatible
 
 export const SESSION_META_CUSTOM_TYPE = 'typeclaw.session-meta'
 
