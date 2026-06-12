@@ -1,9 +1,11 @@
+import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { guardIncompleteInit } from './incomplete-init'
 import { errorLine, renderStartSuccess, spinner } from './ui'
 
 export const startCommand = defineCommand({
@@ -26,6 +28,28 @@ export const startCommand = defineCommand({
   },
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+
+    // Runs BEFORE the isInitialized check: a wizard abort persists a checkpoint
+    // before scaffold writes typeclaw.json, so a checkpoint-but-no-config dir is
+    // an incomplete init, not a "never initialized" one. Guarding first means
+    // that case gets the resume guidance instead of the generic config-missing
+    // error. A `continue` (no incomplete checkpoint, or "try anyway") falls
+    // through to isInitialized, which still catches a truly uninitialized dir.
+    const guard = await guardIncompleteInit({
+      cwd,
+      interactive: Boolean(process.stdout.isTTY),
+      confirmContinue: async () => {
+        const proceed = await confirm({ message: 'Try starting anyway?', initialValue: false })
+        return !isCancel(proceed) && proceed === true
+      },
+    })
+    if (guard.action === 'block') {
+      console.error(errorLine(guard.message))
+      process.exit(1)
+    }
+    if (guard.action === 'abort') {
+      process.exit(0)
+    }
 
     if (!isInitialized(cwd)) {
       console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
