@@ -3,10 +3,12 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
+import { agentUsesVector } from '@/bundled-plugins/memory/vector/config'
 import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config } from '@/config'
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
+import { ensureModels } from '@/hostd/models'
 import { homeRoot } from '@/hostd/paths'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
@@ -287,6 +289,20 @@ export async function start({
     // container will actually load.
     const dockerfileRefresh = await refreshDockerfile(cwd)
 
+    // Provision the embedding model only when THIS agent opts into vector. The
+    // container embedder runs with local_files_only, so the model must already
+    // be on the host's ~/.typeclaw/models cache before the container boots —
+    // otherwise the startup vector index build fails. Kick the download off here
+    // (idempotent + file-locked) so it overlaps the docker build, then await it
+    // just before `docker run`. A vector-opted-out agent never reaches this, so
+    // a host whose containers are all opted out never downloads the ~1.4 GB
+    // model — including every agent under `typeclaw compose`, since each agent's
+    // start() makes this decision independently. The `.catch` swallow only keeps
+    // an early return between here and the await from logging an unhandled
+    // rejection; the real error is surfaced when we await at the run site below.
+    const modelsReady = agentUsesVector(cwd) ? ensureModels() : null
+    modelsReady?.catch(() => {})
+
     if (state.exists) {
       // Container holds the name but is not running. Without `--rm`, this is
       // now the normal post-stop / post-crash state: the corpse stays around
@@ -369,6 +385,18 @@ export async function start({
         return { ok: false, reason: 'docker build failed' }
       }
       built = true
+    }
+
+    if (modelsReady) {
+      try {
+        await modelsReady
+      } catch (error) {
+        await cleanupHostDaemonRegistration(containerName, hostd)
+        return {
+          ok: false,
+          reason: `embedding model provisioning failed (memory.vector.enabled): ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
     }
 
     let run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
@@ -624,9 +652,15 @@ export async function planStart({
     runArgs.push('-v', mount.readOnly ? `${hostPath}:${target}:ro` : `${hostPath}:${target}`)
   }
 
-  // Shared model cache mount for embeddings and other ML models
-  runArgs.push('-v', `${homeRoot()}/models:/opt/models:ro`)
-  runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
+  // Shared model cache mount for embeddings. Gated on vector opt-in: a
+  // vector-opted-out container has no embedder to feed, and the host never
+  // populates ~/.typeclaw/models for it (see ensureModels gating in start()),
+  // so mounting an empty cache would only invite a confusing local_files_only
+  // miss if something inside the container reached for the model anyway.
+  if (agentUsesVector(cwd)) {
+    runArgs.push('-v', `${homeRoot()}/models:/opt/models:ro`)
+    runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
+  }
 
   runArgs.push(imageTag)
 
