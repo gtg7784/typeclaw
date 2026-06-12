@@ -429,6 +429,40 @@ describe('session.turn.start hook', () => {
 
     expect(spawned).toHaveLength(0)
   })
+
+  // Opt-out invariant guard for `suppressSystemMemory === memory.vector.enabled`:
+  // with vector OFF (default) memory lives only in the system prompt, so the
+  // non-vector hook branch must never write the per-turn `retrievalContext` bag.
+  // Writing it would double-inject (system prompt + user turn). The sentinel
+  // surviving proves the opt-out path leaves the bag untouched in BOTH plans.
+  test('leaves retrievalContext.results empty when vector is off (index-mode plan)', async () => {
+    // given: over-budget shards → index mode (the branch that spawns memory-retrieval)
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    const retrievalContext = { results: 'SENTINEL' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_optout_index', agentDir, userPrompt: 'what do I know?', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+
+    expect(retrievalContext.results).toBe('SENTINEL')
+  })
+
+  test('leaves retrievalContext.results empty when vector is off (direct-mode plan)', async () => {
+    // given: a small shard well under budget → direct mode (no spawn)
+    await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const retrievalContext = { results: 'SENTINEL' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_optout_direct', agentDir, userPrompt: 'small?', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+
+    expect(retrievalContext.results).toBe('SENTINEL')
+  })
 })
 
 describe('session.idle hook (debouncer)', () => {
