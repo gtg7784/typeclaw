@@ -7,7 +7,7 @@ import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import type { Passage } from './passages'
-import { gateRelevance } from './relevance-gate'
+import { clearsBaseline, gateRelevance, streamAdmissionBaseline } from './relevance-gate'
 import { VectorStore, type VectorRow } from './store'
 
 export { collectPassages, findMissingPassages, type Passage } from './passages'
@@ -47,42 +47,39 @@ export async function hybridSearch(
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
 }
 
-// The vector lane, gated by per-query relevance. Topic and stream rows are
-// gated SEPARATELY: only the topic partition is subject to the no-match veto.
+// The vector lane, gated by per-query relevance. Both row kinds are judged
+// against ONE query-local no-match band, derived from the TOPIC score
+// distribution alone (topics are the only stable-enough corpus to estimate the
+// ambient band; sparse streams consume the band but never define it, so a
+// nearest-neighbour cluster of fragments can't move the bar).
 //
-// The relevance gate reads the full TOPIC score distribution (E5's no-match
-// band is a topic-level property; stream fragments are sparse and would skew
-// the baseline) and decides how many topic candidates clear this query's
-// baseline — zero when nothing does. Stream rows are NEVER vetoed by that
-// topic-distribution verdict: a flat topic band means "no consolidated topic
-// matches," not "the relevant undreamed fragment doesn't match." Letting a
-// topic no-match drop stream candidates would silently break the freshness
-// window — the common case where the only relevant content for a query is a
-// stream fragment no topic cites yet. Stream rows keep the ungated top-(topK*2).
+//   - Topic rows: the gate keeps the knee above the band, or empties the topic
+//     partition entirely when no topic clears it.
+//   - Stream rows: admitted one-by-one only when they clear the SAME band by
+//     the shared margin. A genuine fresh fragment (well above the band) survives
+//     the freshness window; an irrelevant in-band neighbour is dropped, so a
+//     no-match query can't leak closest-neighbours-regardless through streams.
 //
-// When the topic partition is below the gate's small-corpus floor there is no
-// band to measure, so topics also pass ungated. An empty merged lane composes
-// with RRF exactly like a lane that found nothing, so a genuine keyword hit
-// still survives a full cosine no-match.
-const GATE_TOPIC_FLOOR = 6
-
+// Topic suppression uses the floor-gated verdict (gateRelevance): below the
+// floor topics pass ungated, since a tiny index can't form a reliable band and
+// a false negative is cheaper than suppressing the only memory. Stream
+// admission uses streamAdmissionBaseline, which tolerates a below-floor topic
+// set — even a few topics give the contrast a vector-only fragment match needs,
+// and it returns null (dropping uncorroborated streams) only when NO topics
+// exist at all. A lexically-corroborated fragment still reaches RRF via the
+// separate keyword lane. An empty merged lane composes with RRF exactly like a
+// lane that found nothing, so a genuine keyword hit survives a full no-match.
 function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK: number): VectorRow[] {
   const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
   const topicRows = scored.filter(({ row }) => row.source === 'topic')
-  const streamRows = scored.filter(({ row }) => row.source === 'stream').slice(0, topK * 2)
+  const streamRows = scored.filter(({ row }) => row.source === 'stream')
 
-  const keptTopics =
-    topicRows.length < GATE_TOPIC_FLOOR
-      ? topicRows.slice(0, topK * 2)
-      : topicRows.slice(
-          0,
-          gateRelevance(
-            topicRows.map(({ score }) => score),
-            topK * 2,
-          ),
-        )
+  const topicScores = topicRows.map(({ score }) => score)
+  const keptTopics = topicRows.slice(0, gateRelevance(topicScores, topK * 2))
+  const streamBaseline = streamAdmissionBaseline(topicScores)
+  const keptStreams = streamRows.filter(({ score }) => clearsBaseline(score, streamBaseline)).slice(0, topK * 2)
 
-  return [...keptTopics, ...streamRows].sort((a, b) => b.score - a.score).map(({ row }) => row)
+  return [...keptTopics, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
 }
 
 function keywordLane(

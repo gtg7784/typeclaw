@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'bun:test'
 
-import { gateRelevance } from './relevance-gate'
+import { clearsBaseline, gateRelevance, streamAdmissionBaseline } from './relevance-gate'
 
-// Score fixtures reproduced from the live typeeybot index (193 topics,
-// multilingual-e5-base@q8). E5 compresses unrelated cosines into a ~0.70-0.85
-// band, so the discriminating signal is top1 - baseline(pack), NOT absolute
-// value. NO-MATCH queries land top1-baseline <= 0.051; HAS-MATCH queries land
-// >= 0.074. See PR description for the full battery.
+// Score fixtures reproduced from a live ~193-topic index (multilingual-e5-base
+// @q8). E5 compresses unrelated cosines into a ~0.70-0.85 band, so the
+// discriminating signal is top1 - baseline(pack), NOT absolute value. NO-MATCH
+// queries land top1-baseline <= 0.051; HAS-MATCH queries land >= 0.074. See PR
+// description for the full battery.
 function band(top: number, baseline: number, n: number): number[] {
   const scores = [top]
   for (let i = 1; i < n; i++) scores.push(baseline + (Math.random() - 0.5) * 0.004)
@@ -83,5 +83,29 @@ describe('gateRelevance', () => {
     const kept = gateRelevance(scores, 10)
 
     expect(kept).toBeGreaterThan(0)
+  })
+})
+
+describe('streamAdmissionBaseline + clearsBaseline', () => {
+  it('returns null when no topic scores exist (nothing to contrast against)', () => {
+    expect(streamAdmissionBaseline([])).toBeNull()
+    expect(clearsBaseline(0.99, null)).toBe(false)
+  })
+
+  it('tolerates a below-floor topic set (a few topics still give a contrast signal)', () => {
+    const baseline = streamAdmissionBaseline([0.5, 0.49])
+
+    expect(baseline).not.toBeNull()
+    // a clear stream winner stands above the small topic band
+    expect(clearsBaseline(1.0, baseline)).toBe(true)
+    // an in-band stream neighbor does not
+    expect(clearsBaseline(0.5, baseline)).toBe(false)
+  })
+
+  it('admits a stream row only when it clears the topic band by the margin', () => {
+    const baseline = streamAdmissionBaseline(Array.from({ length: 30 }, () => 0.78))
+
+    expect(clearsBaseline(0.781, baseline)).toBe(false)
+    expect(clearsBaseline(0.78 + 0.06, baseline)).toBe(true)
   })
 })
