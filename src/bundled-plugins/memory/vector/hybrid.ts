@@ -7,6 +7,7 @@ import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import type { Passage } from './passages'
+import { gateRelevance } from './relevance-gate'
 import { VectorStore, type VectorRow } from './store'
 
 export { collectPassages, findMissingPassages, type Passage } from './passages'
@@ -40,11 +41,34 @@ export async function hybridSearch(
 
   const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
   const index = buildContentIndex(shards, streamDays, supersededFragmentIds)
-  const vectorRows =
-    queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2, EMBEDDING_MODEL_ID)
+  const vectorRows = queryEmbeddings[0] === undefined ? [] : gatedVectorLane(queryEmbeddings[0], store, topK)
   const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
 
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
+}
+
+// The vector lane, gated by per-query relevance. The relevance gate reads the
+// full TOPIC score distribution (E5's no-match band is a topic-level property;
+// stream fragments are sparse and would skew the baseline) and decides how many
+// candidates clear this query's baseline — zero when nothing does, which empties
+// the vector lane. An empty vector lane composes with RRF exactly like a lane
+// that found nothing, so a genuine keyword hit still survives a cosine no-match.
+//
+// The gate only has a baseline to judge against when topic vectors are present.
+// Below the gate's own small-corpus floor (including the freshness-window case
+// where the only vectors are undreamed stream fragments and no topic is indexed
+// yet) there is no band to measure, so the lane falls back to the ungated
+// top-(topK*2) — suppressing here would drop a legitimate stream-only match.
+const GATE_TOPIC_FLOOR = 6
+
+function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK: number): VectorRow[] {
+  const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
+  const topicScores = scored.filter(({ row }) => row.source === 'topic').map(({ score }) => score)
+  if (topicScores.length < GATE_TOPIC_FLOOR) return scored.slice(0, topK * 2).map(({ row }) => row)
+
+  const keep = gateRelevance(topicScores, topK * 2)
+  if (keep === 0) return []
+  return scored.slice(0, keep).map(({ row }) => row)
 }
 
 function keywordLane(
