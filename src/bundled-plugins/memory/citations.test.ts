@@ -7,6 +7,7 @@ import {
   isCitationLine,
   normalizeCitation,
   parseCitations,
+  splitCitationsBySection,
 } from './citations'
 
 const ID_A = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
@@ -140,5 +141,55 @@ describe('normalizeCitation', () => {
     expect(normalizeCitation('memory/2026-05-20#abc and memory/2026-05-21#def')).toBe(
       'streams/2026-05-20#abc and streams/2026-05-21#def',
     )
+  })
+})
+
+describe('splitCitationsBySection', () => {
+  test('routes citations under fragments: to active and superseded: to superseded', () => {
+    // given
+    const body = [
+      'User uses pnpm (switched from bun).',
+      '',
+      'fragments:',
+      `- streams/2026-05-21#${ID_B}`,
+      '',
+      'superseded:',
+      `- streams/2026-05-20#${ID_A}`,
+    ].join('\n')
+
+    // when
+    const { active, superseded } = splitCitationsBySection(body)
+
+    // then
+    expect(active).toEqual(new Set([ID_B]))
+    expect(superseded).toEqual(new Set([ID_A]))
+  })
+
+  test('treats citations before any heading as active (legacy shards)', () => {
+    const body = ['Some belief.', '', `- streams/2026-05-20#${ID_A}`].join('\n')
+
+    expect(splitCitationsBySection(body)).toEqual({ active: new Set([ID_A]), superseded: new Set() })
+  })
+
+  test('re-affirmed fact in both sections resolves to active', () => {
+    const body = ['fragments:', `- streams/2026-05-22#${ID_C}`, 'superseded:', `- streams/2026-05-20#${ID_C}`].join(
+      '\n',
+    )
+
+    const { active, superseded } = splitCitationsBySection(body)
+
+    expect(active).toEqual(new Set([ID_C]))
+    expect(superseded).toEqual(new Set())
+  })
+
+  test('parseCitations stays section-blind so GC still pins superseded fragments', () => {
+    const body = ['fragments:', `- streams/2026-05-21#${ID_B}`, 'superseded:', `- streams/2026-05-20#${ID_A}`].join(
+      '\n',
+    )
+
+    const all = parseCitations(body)
+
+    expect(all.get('2026-05-21')).toEqual(new Set([ID_B]))
+    expect(all.get('2026-05-20')).toEqual(new Set([ID_A]))
   })
 })
