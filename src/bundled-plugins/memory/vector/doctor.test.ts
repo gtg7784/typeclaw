@@ -154,6 +154,28 @@ describe('runVectorIndexDoctor', () => {
     expect(after.modelMismatch).toEqual([])
     expect(after.rowIds).toEqual(['topic:alpha'])
   })
+
+  it('counts a row that is both orphaned and malformed once, not twice', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    seedTopicVector(agentDir, 'alpha', 'Alpha', 'Body of alpha.')
+    // No topic file backs this row (orphaned) AND its blob is malformed; it
+    // lands in both buckets, so the prune count must dedupe to 1.
+    insertRawRow(agentDir, { id: 'topic:ghost', model: EMBEDDING_MODEL_ID, dims: DIMS, blobBytes: DIMS * 4 - 3 })
+
+    const result = await runVectorIndexDoctor(agentDir)
+
+    expect(result.status).toBe('warning')
+    expect(result.fix?.description).toContain('Delete 1 ')
+
+    const fixOutcome = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger: noopLogger() })
+    expect(fixOutcome.summary).toContain('pruned 1 ')
+    expect(fixOutcome.changedPaths).toEqual([])
+
+    const after = inspectVectorIndex(dbPath(agentDir))
+    if (after.kind !== 'ok') throw new Error('expected ok after fix')
+    expect(after.rowIds).toEqual(['topic:alpha'])
+  })
 })
 
 function createAgentDir(): string {

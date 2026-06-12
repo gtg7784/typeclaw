@@ -62,7 +62,9 @@ type Summary = {
 }
 
 function summarize(dbPath: string, s: Summary): PluginCheckResult {
-  const repairable = [...s.orphans, ...s.modelMismatch, ...s.malformed]
+  // Dedupe: a row can be both orphaned and malformed/variant, so the union by
+  // id keeps the count and the deletion list honest.
+  const repairable = [...new Set([...s.orphans, ...s.modelMismatch, ...s.malformed])]
   const details: string[] = []
   if (s.orphans.length > 0) details.push(`${s.orphans.length} orphaned row(s) for deleted topics/fragments`)
   if (s.modelMismatch.length > 0) {
