@@ -59,12 +59,24 @@ describe('gateRelevance', () => {
     expect(kept).toBeGreaterThan(0)
   })
 
+  it('passes ungated when the non-head tail is too short to trust (n=6..9)', () => {
+    // given: 9 shards in a flat band — once the top 5 are dropped, only 4 scores
+    // remain. A zero-suppression verdict off a 1-4 score median is too noisy, so
+    // a flat band that WOULD suppress at n>=10 must instead pass ungated here.
+    for (const n of [6, 7, 8, 9]) {
+      const scores = [0.792, ...Array.from({ length: n - 1 }, () => 0.78)]
+
+      expect(gateRelevance(scores, 10)).toBeGreaterThan(0)
+    }
+  })
+
   it('returns zero for an empty score list', () => {
     expect(gateRelevance([], 10)).toBe(0)
   })
 
-  it('uses a median baseline for a mid-size corpus (6 <= n < 20) and still suppresses a flat band', () => {
-    // given: 10 shards all in a flat ~0.78 band (no real match)
+  it('suppresses a flat band once the non-head tail is long enough (n>=10)', () => {
+    // given: 10 shards all in a flat ~0.78 band (no real match) — exactly at the
+    // gated floor, so the gate now runs and the flat band suppresses to zero.
     const scores = [0.792, ...Array.from({ length: 9 }, () => 0.78)]
 
     const kept = gateRelevance(scores, 10)
@@ -100,6 +112,25 @@ describe('streamAdmissionBaseline + clearsBaseline', () => {
     expect(clearsBaseline(1.0, baseline)).toBe(true)
     // an in-band stream neighbor does not
     expect(clearsBaseline(0.5, baseline)).toBe(false)
+  })
+
+  it('returns null for a single topic (one score is not an ambient band)', () => {
+    expect(streamAdmissionBaseline([0.9])).toBeNull()
+    expect(clearsBaseline(0.99, streamAdmissionBaseline([0.9]))).toBe(false)
+  })
+
+  it('excludes a strong top topic from the small-corpus band so fresh streams can still inject (n=2..5)', () => {
+    // given: a strong top topic over an ambient band. The old rule kept the head
+    // in the pack on n<=5, so a fresh fragment had to beat the BEST topic by the
+    // margin and never injected. Trimming top1 contrasts against the band, so a
+    // fragment clearing the AMBIENT topics by the margin is admitted.
+    const topicScores = [0.9, 0.78, 0.77, 0.76]
+    const baseline = streamAdmissionBaseline(topicScores)
+
+    // a fragment well clear of the ambient ~0.77 band injects despite the 0.9 top
+    expect(clearsBaseline(0.84, baseline)).toBe(true)
+    // an in-band fragment still does not
+    expect(clearsBaseline(0.78, baseline)).toBe(false)
   })
 
   it('admits a stream row only when it clears the topic band by the margin', () => {
