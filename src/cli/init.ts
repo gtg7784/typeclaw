@@ -45,6 +45,7 @@ import {
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
+import { detectInitProgress } from '@/init/progress'
 import {
   API_KEY_DASHBOARD_URL,
   MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
@@ -479,12 +480,16 @@ export async function collectWizardInputs(
   let oauthCredentialsSaved = false
 
   // Resume saved wizard answers from a prior unfinished init. `--reset` skips
-  // this entirely (the user asked to re-answer everything). On "start over" we
-  // clear the stale checkpoint now so an abort before the first save doesn't
-  // leave the discarded answers behind.
+  // this entirely (the user asked to re-answer everything). Route through the
+  // shared detectInitProgress() predicate so init/start/restart classify a
+  // checkpoint identically: only an `incomplete` init (checkpoint + not
+  // hatched) offers resume; a `complete-stale-checkpoint` (checkpoint that
+  // outlived a hatched agent) is cleared and ignored, matching the contract.
   if (!reset && checkpointStore !== undefined) {
-    const saved = await checkpointStore.load(cwd)
-    if (saved !== undefined) {
+    const progress = await detectInitProgress({ cwd, checkpointStore })
+    if (progress.kind === 'complete-stale-checkpoint') {
+      await checkpointStore.clear(cwd).catch(() => {})
+    } else if (progress.kind === 'incomplete') {
       // Sanitize against the freshly-loaded catalog BEFORE showing the resume
       // prompt. `load` only validates version/cwd/updatedAt, so a checkpoint
       // with a since-removed provider/model id reaches here intact; describing
@@ -492,7 +497,7 @@ export async function collectWizardInputs(
       // first means the prompt, the seed, and any partial answers all see only
       // catalog-valid fields.
       const catalogRefs = new Set(catalog.options.map((option) => option.ref))
-      const sanitized = sanitizeCheckpointAgainstCatalog(saved, catalogRefs)
+      const sanitized = sanitizeCheckpointAgainstCatalog(progress.checkpoint, catalogRefs)
       const decision = await prompts.confirmResumeCheckpoint(sanitized)
       if (decision === 'resume') {
         seedWizardState(state, sanitized)
