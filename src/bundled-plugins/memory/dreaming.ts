@@ -300,6 +300,44 @@ function deleteStreamVectorsForDroppedFragments(agentDir: string, droppedFragmen
   }
 }
 
+// A dreamed-AND-cited fragment's `stream:*` row is redundant: hybridSearch
+// collapses any match on it to the citing topic, whose `topic:*` row is already
+// a candidate. It surfaces no new result, yet still consumes one of
+// store.query's finite `topK * 2` pre-fusion slots by raw cosine — displacing a
+// DISTINCT topic. Without this, one such row accrues per cited fragment for the
+// whole container uptime (only startup `pruneStaleRows` clears them), so a
+// many-day topic hoards proportionally more slots: the popularity bias MAX-child
+// ranking exists to prevent. Pruning per-pass is the same deletion startup does
+// (dreamed-and-cited fragments leave the undreamed passage set), advanced from
+// per-restart to per-pass. Undreamed rows are kept — they resolve to themselves
+// and ARE the freshness window; `makeAppendHook` re-embeds only on fresh APPEND,
+// so a pruned row is never resurrected mid-uptime.
+export function deleteRedundantDreamedCitedStreamVectors(
+  agentDir: string,
+  dreamedState: DreamingState,
+  citedIdsByDate: ReadonlyMap<string, ReadonlySet<string>>,
+): number {
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  if (!existsSync(dbPath)) return 0
+
+  const redundantIds: string[] = []
+  for (const [date, citedIds] of citedIdsByDate) {
+    const dreamedIds = getDreamedIds(dreamedState, date)
+    for (const fragmentId of citedIds) {
+      if (dreamedIds.has(fragmentId)) redundantIds.push(`stream:${date}#${fragmentId}`)
+    }
+  }
+  if (redundantIds.length === 0) return 0
+
+  const store = VectorStore.open(dbPath)
+  try {
+    store.deleteMany(redundantIds)
+  } finally {
+    store.close()
+  }
+  return redundantIds.length
+}
+
 const EMPTY_ID_SET: ReadonlySet<string> = new Set()
 
 async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
@@ -1117,6 +1155,10 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         )
       }
       deleteStreamVectorsForDroppedFragments(ctx.payload.agentDir, compaction.droppedFragmentIds)
+      const redundantVectors = deleteRedundantDreamedCitedStreamVectors(ctx.payload.agentDir, advanced, citedIdsByDate)
+      if (redundantVectors > 0) {
+        logger.info(`[dreaming] pruned redundant dreamed-and-cited stream vectors=${redundantVectors}`)
+      }
 
       try {
         await commit(ctx.payload.agentDir)

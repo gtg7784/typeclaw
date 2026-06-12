@@ -10,6 +10,7 @@ import {
   compactDailyStreams,
   createDreamingSubagent,
   DREAM_EMOJI_POOL,
+  deleteRedundantDreamedCitedStreamVectors,
   type DreamingLogger,
   type DreamingPayload,
   isDreamingPayload,
@@ -683,10 +684,58 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
     try {
-      expect(afterStore.getByIds(['stream:2026-04-27#f-cited']).map((row) => row.id)).toEqual([
-        'stream:2026-04-27#f-cited',
-      ])
+      // The cited fragment is now dreamed too, so its standalone stream row is
+      // redundant (the parent topic covers it) and is pruned alongside the GC'd one.
+      expect(afterStore.getByIds(['stream:2026-04-27#f-cited'])).toEqual([])
       expect(afterStore.getByIds(['stream:2026-04-27#f-drop'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('a dreaming run prunes the redundant stream vector of a dreamed-and-cited fragment', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('new'))
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('stream:2026-04-27#f-new', 'stream', '2026-04-27#f-new', vector({ 0: 1 }), 'new'))
+    store.close()
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'beliefs',
+        shardText('Beliefs', ['Beliefs.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n')),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession, vectorEmbedFn: async () => [vector({ 2: 1 })] })
+
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['stream:2026-04-27#f-new'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('deleteRedundantDreamedCitedStreamVectors removes dreamed-and-cited rows but keeps undreamed and uncited ones', async () => {
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('stream:2026-04-27#f-cited', 'stream', '2026-04-27#f-cited', vector({ 0: 1 }), 'cited'))
+    store.upsert(vectorRow('stream:2026-04-27#f-fresh', 'stream', '2026-04-27#f-fresh', vector({ 1: 1 }), 'fresh'))
+    store.upsert(vectorRow('stream:2026-04-27#f-uncited', 'stream', '2026-04-27#f-uncited', vector({ 2: 1 }), 'unc'))
+    store.close()
+    const dreamed = addDreamedIds(emptyState(), '2026-04-27', ['f-cited', 'f-uncited'], 'now')
+    const citedByDate = new Map([['2026-04-27', new Set(['f-cited', 'f-fresh'])]])
+
+    const pruned = deleteRedundantDreamedCitedStreamVectors(agentDir, dreamed, citedByDate)
+
+    expect(pruned).toBe(1)
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      // dreamed + cited → pruned; undreamed-but-cited (freshness window) and
+      // dreamed-but-uncited (left for the GC path) both survive this helper.
+      expect(afterStore.getByIds(['stream:2026-04-27#f-cited'])).toEqual([])
+      expect(afterStore.getByIds(['stream:2026-04-27#f-fresh']).map((r) => r.id)).toEqual(['stream:2026-04-27#f-fresh'])
+      expect(afterStore.getByIds(['stream:2026-04-27#f-uncited']).map((r) => r.id)).toEqual([
+        'stream:2026-04-27#f-uncited',
+      ])
     } finally {
       afterStore.close()
     }
