@@ -1,6 +1,10 @@
 import { join } from 'node:path'
 
-import { env as transformersEnv, pipeline } from '@huggingface/transformers'
+// Type-only import: erased at runtime, so it does NOT evaluate
+// @huggingface/transformers (which eagerly `import sharp`s, crashing the
+// container at startup when sharp's linux binary is missing). The runtime
+// values are pulled lazily via `loadTransformers()` below.
+import type { env as TransformersEnvValue, pipeline as TransformersPipeline } from '@huggingface/transformers'
 
 import { homeRoot } from '../../../hostd/paths'
 
@@ -9,13 +13,31 @@ export const DIMS = 768
 
 export type EmbedType = 'query' | 'passage'
 
-type FeatureExtractor = Awaited<ReturnType<typeof pipeline<'feature-extraction'>>>
+type TransformersEnv = typeof TransformersEnvValue
+type FeatureExtractor = Awaited<ReturnType<typeof TransformersPipeline<'feature-extraction'>>>
+
+// Defer the transformers (and thus sharp/onnxruntime) module load until an
+// embedding is actually requested. typeclaw's memory plugin is always loaded
+// and `vector.enabled` defaults to false, so a top-level static import would
+// drag the heavy native stack onto every container boot — and crash it when
+// sharp can't resolve its platform binary. Memoized so the module evaluates
+// at most once.
+let transformersModulePromise: Promise<{ env: TransformersEnv; pipeline: typeof TransformersPipeline }> | undefined
+
+function loadTransformers(): Promise<{ env: TransformersEnv; pipeline: typeof TransformersPipeline }> {
+  transformersModulePromise ??= import('@huggingface/transformers').then((mod) => ({
+    env: mod.env,
+    pipeline: mod.pipeline,
+  }))
+  return transformersModulePromise
+}
 
 export class Embedder {
   private constructor(private readonly extractor: FeatureExtractor) {}
 
   static async load(): Promise<Embedder> {
-    configureTransformers()
+    const { env, pipeline } = await loadTransformers()
+    configureTransformers(env)
     const extractor = await pipeline('feature-extraction', MODEL_NAME, { local_files_only: true })
     return new Embedder(extractor)
   }
@@ -39,9 +61,9 @@ export async function embed(texts: string[], type: EmbedType): Promise<Float32Ar
   return (await getEmbedder()).embed(texts, type)
 }
 
-function configureTransformers(): void {
-  transformersEnv.localModelPath = modelCachePath()
-  transformersEnv.allowRemoteModels = false
+function configureTransformers(env: TransformersEnv): void {
+  env.localModelPath = modelCachePath()
+  env.allowRemoteModels = false
 }
 
 function modelCachePath(): string {
