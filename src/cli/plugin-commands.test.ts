@@ -157,13 +157,16 @@ describe('discoverCommands', () => {
     expect(result.loadErrors).toEqual([])
   })
 
+  // 60s, not the global 30s: discoverCommands `await import()`s a temp plugin,
+  // paying Bun's cold transpile + `@/plugin` graph resolution (~400ms in
+  // isolation) that starves past 30s under full 18-worker contention.
   test('lists commands from a local plugin', async () => {
     const dir = await mkTempAgent(HOST_ECHO_PLUGIN)
     const result = await discoverCommands({ cwd: dir })
     expect(result.commands.map((c) => c.commandName)).toEqual(['host-echo'])
     expect(result.commands[0]?.command.surface).toBe('host')
     expect(result.loadErrors).toEqual([])
-  })
+  }, 60_000)
 
   test('records load errors and continues', async () => {
     const dir = await mkTempAgent()
