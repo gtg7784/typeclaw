@@ -1,8 +1,11 @@
+import { join } from 'node:path'
+
 import type { LiveSourceFactory, RunInspectResult } from './index'
 import { createTranscriptView, streamInspectTarget } from './index'
 import type { ViewerItem } from './item'
 import { streamLogs } from './logs-item'
 import type { OpenItemContext, OpenItemResult, TailController } from './loop'
+import { resolveSession } from './session-list'
 import { runTuiViewer } from './tui-item'
 import type { InspectFilter } from './types'
 
@@ -28,7 +31,14 @@ export type OpenViewerDeps = {
 // would corrupt input). The line/JSON session path and logs run UNDER the tail
 // scope, which owns the raw-mode esc/q/ctrl-c handling.
 export function openViewerItem(deps: OpenViewerDeps) {
-  return async (item: ViewerItem, ctx: OpenItemContext): Promise<OpenItemResult> => {
+  return async (rawItem: ViewerItem, ctx: OpenItemContext): Promise<OpenItemResult> => {
+    // A live-only row captured `sessionFile: ''` when it was listed. By the time
+    // the user opens it the reply may have flushed to disk AND the registry
+    // entry may be gone — leaving the live tail broadcast-only and skipping the
+    // now-existing transcript. Re-resolve against the sessions dir so a
+    // flushed session opens as its real disk summary (replay + live tail).
+    const item = await reresolveLiveItem(rawItem, deps.cwd, deps.stderr)
+
     if (item.kind === 'tui') {
       const result = await runTuiViewer({
         resolveUrl: deps.resolveTuiUrl,
@@ -91,6 +101,17 @@ export function openViewerItem(deps: OpenViewerDeps) {
       scope.dispose()
     }
   }
+}
+
+export async function reresolveLiveItem(
+  item: ViewerItem,
+  cwd: string,
+  onWarn: (line: string) => void,
+): Promise<ViewerItem> {
+  if (item.kind === 'logs' || item.summary.live !== true) return item
+  const resolved = await resolveSession(join(cwd, 'sessions'), item.summary.sessionId, onWarn)
+  if (!resolved.ok) return item
+  return { kind: 'session', summary: resolved.summary, writable: false }
 }
 
 function toResult(escToPicker: boolean, scope: TailController): RunInspectResult {
