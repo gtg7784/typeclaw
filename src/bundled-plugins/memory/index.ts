@@ -148,15 +148,21 @@ const VECTOR_TURN_TOP_K = 10
 async function renderVectorTurnMemory(
   event: { agentDir: string; userPrompt: string; origin?: SessionOrigin },
   injectionBudgetBytes: number,
+  logger?: { info: (msg: string) => void },
 ): Promise<string> {
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   if (plan.mode === 'direct') {
     if (plan.shards.length === 0) return ''
+    logger?.info(`[vector-retrieval] mode=direct topics=${plan.shards.length}`)
     return renderMemorySection(plan, { origin: event.origin })
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
   try {
     const results = await hybridSearch(event.userPrompt, store, event.agentDir, VECTOR_TURN_TOP_K)
+    const topicHits = results.reduce((n, r) => (r.source === 'topic' ? n + 1 : n), 0)
+    logger?.info(
+      `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${results.length - topicHits}`,
+    )
     return renderRetrievedMemorySection(results, { origin: event.origin })
   } finally {
     store.close()
@@ -427,7 +433,11 @@ export default definePlugin({
             // memory via the system prompt either.
             if (event.retrievalContext === undefined) return
             try {
-              event.retrievalContext.results = await renderVectorTurnMemory(event, ctx.config.injectionBudgetBytes)
+              event.retrievalContext.results = await renderVectorTurnMemory(
+                event,
+                ctx.config.injectionBudgetBytes,
+                ctx.logger,
+              )
             } catch (err) {
               ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
             }
