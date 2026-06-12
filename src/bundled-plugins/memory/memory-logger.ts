@@ -7,6 +7,7 @@ import { formatLocalDate } from '@/shared'
 import { advanceWatermarkTool, createAppendTool, type FragmentsAppendedHook } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { streamFilePath, streamsDir } from './paths'
+import { readEvents } from './stream-io'
 import { readLatestWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({
@@ -339,13 +340,17 @@ export function createMemoryLoggerSubagent(
       const memoryDir = streamsDir(ctx.payload.agentDir)
       const streamFile = streamFilePath(ctx.payload.agentDir, today)
       const watermark = await readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
+      const fragmentsBefore = await countFragments(streamFile)
       const start = Date.now()
       logger.info(
         `[memory-logger] ${ctx.payload.parentSessionId} start stream=${today}.jsonl watermark=${watermark ?? 'none'}`,
       )
       try {
         await runSession({ userPrompt: buildInitialPrompt(ctx.payload, streamFile, watermark) })
-        logger.info(`[memory-logger] ${ctx.payload.parentSessionId} done elapsed_ms=${Date.now() - start}`)
+        const fragmentsWritten = (await countFragments(streamFile)) - fragmentsBefore
+        logger.info(
+          `[memory-logger] ${ctx.payload.parentSessionId} done fragments_written=${fragmentsWritten} elapsed_ms=${Date.now() - start}`,
+        )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(
@@ -355,6 +360,11 @@ export function createMemoryLoggerSubagent(
       }
     },
   }
+}
+
+async function countFragments(streamFile: string): Promise<number> {
+  const events = await readEvents(streamFile)
+  return events.reduce((n, event) => (event.type === 'fragment' ? n + 1 : n), 0)
 }
 
 export const memoryLoggerSubagent: Subagent<MemoryLoggerPayload> = createMemoryLoggerSubagent()
