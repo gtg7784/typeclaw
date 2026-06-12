@@ -60,6 +60,17 @@ export function modelsDir(): string {
   return join(homeRoot(), 'models')
 }
 
+// Host-stage scratch for in-progress `typeclaw init` runs. The wizard-answer
+// checkpoint (non-secret selections) lives here, keyed by a hash of the agent
+// folder's cwd, so it survives a failed/aborted init and a deletion of the
+// half-scaffolded agent folder. Lives under host state — NOT in the agent
+// folder — because the wizard runs before scaffold exists and an in-folder
+// file would need separate `.gitignore` ownership for a folder that may never
+// be created.
+export function initStateDir(): string {
+  return join(homeRoot(), 'init')
+}
+
 // Throws on any name that could traverse out of registrationsDir() or
 // confuse the filesystem. Caller's responsibility to handle the error;
 // don't catch-and-ignore — an invalid name is a protocol violation.
@@ -87,9 +98,11 @@ export async function ensureDirs(): Promise<void> {
   await mkdir(registrationsDir(), { recursive: true })
   await mkdir(keysDir(), { recursive: true })
   await mkdir(modelsDir(), { recursive: true })
+  await mkdir(initStateDir(), { recursive: true })
   await chmod(runDir(), 0o700).catch(() => {})
   await chmod(logDir(), 0o700).catch(() => {})
   await chmod(registrationsDir(), 0o700).catch(() => {})
   await chmod(keysDir(), 0o700).catch(() => {})
   await chmod(modelsDir(), 0o700).catch(() => {})
+  await chmod(initStateDir(), 0o700).catch(() => {})
 }

@@ -4,6 +4,7 @@ export {
   containerSocketPath,
   ensureDirs,
   homeRoot,
+  initStateDir,
   lockfilePath,
   logDir,
   logfilePath,

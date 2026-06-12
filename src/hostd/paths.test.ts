@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   ensureDirs,
   homeRoot,
+  initStateDir,
   lockfilePath,
   logfilePath,
   pidfilePath,
@@ -43,11 +44,16 @@ describe('paths', () => {
     expect(registrationsDir()).toBe(join(home, 'run', 'registrations'))
   })
 
-  test('ensureDirs creates run/, log/, and registrations/', async () => {
+  test('initStateDir lands under TYPECLAW_HOME', () => {
+    expect(initStateDir()).toBe(join(home, 'init'))
+  })
+
+  test('ensureDirs creates run/, log/, registrations/, and init/', async () => {
     await ensureDirs()
     expect(existsSync(join(home, 'run'))).toBe(true)
     expect(existsSync(join(home, 'log'))).toBe(true)
     expect(existsSync(join(home, 'run', 'registrations'))).toBe(true)
+    expect(existsSync(join(home, 'init'))).toBe(true)
   })
 
   test('registrationFilePath returns a path under registrationsDir for valid names', () => {
