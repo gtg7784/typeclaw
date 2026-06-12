@@ -979,6 +979,67 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(prompt.indexOf('unrelated')).toBeLessThan(prompt.indexOf('hey bot'))
   })
 
+  test('seeds the session.turn.start retrieval query with the pure user message, not recent context or framing', async () => {
+    const dir = await tempDir()
+    const turnStartPrompts: string[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async () => {},
+      runSessionIdle: async () => {},
+      runSessionPrompt: async () => {},
+      runSessionTurnStart: async (e) => {
+        turnStartPrompts.push(e.userPrompt)
+      },
+      runSessionTurnEnd: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const { router } = makeRouter(dir, { hooks })
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    turnStartPrompts.length = 0
+    await router.route(inbound({ isBotMention: false, authorId: 'bob', authorName: 'bob', text: 'unrelated chatter' }))
+    await router.route(inbound({ text: 'what was that PR about?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const query = turnStartPrompts[0]!
+    expect(query).toBe('what was that PR about?')
+    expect(query).not.toContain('Recent context')
+    expect(query).not.toContain('Current message')
+    expect(query).not.toContain('unrelated chatter')
+    expect(query).not.toContain(FIXED_INBOUND_ISO)
+    expect(query).not.toContain('<@alice>')
+  })
+
+  test('joins a multi-message batch into the retrieval query without author or timestamp framing', async () => {
+    const dir = await tempDir()
+    const turnStartPrompts: string[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async () => {},
+      runSessionIdle: async () => {},
+      runSessionPrompt: async () => {},
+      runSessionTurnStart: async (e) => {
+        turnStartPrompts.push(e.userPrompt)
+      },
+      runSessionTurnEnd: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const { router } = makeRouter(dir, { hooks })
+    await router.route(inbound({ text: 'first line' }))
+    await router.route(inbound({ text: 'second line' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(turnStartPrompts[0]!).toBe('first line\nsecond line')
+  })
+
   test('labels the current message even when there is no recent context', async () => {
     // Regression: the `## Current message` header used to be gated on
     // observed.length > 0, so a turn carrying only the current message (no
