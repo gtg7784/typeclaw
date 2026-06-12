@@ -79,15 +79,26 @@ export class VectorStore {
       )
   }
 
-  query(embedding: Float32Array, topK: number): VectorRow[] {
+  query(embedding: Float32Array, topK: number, modelId: string): VectorRow[] {
     if (topK <= 0) return []
 
-    return this.getAll()
-      .filter((row) => row.dims === embedding.length)
+    // Filter by embedding identity, not dims alone: a stale row from a different
+    // model/dtype variant can share the same dims but lives in an incompatible
+    // vector space, so cosine against it is garbage. Excluding it here keeps a
+    // partial re-embed (mixed variants mid-rebuild) at reduced recall, never
+    // wrong scores.
+    return this.db
+      .query<StoredVectorRow, [string, number]>('SELECT * FROM vectors WHERE model = ? AND dims = ?')
+      .all(modelId, embedding.length)
+      .map(toVectorRow)
       .map((row) => ({ row, score: cosineSimilarity(embedding, row.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
       .map(({ row }) => row)
+  }
+
+  deleteOtherModels(modelId: string): void {
+    this.db.query('DELETE FROM vectors WHERE model != ?').run(modelId)
   }
 
   delete(id: string): void {

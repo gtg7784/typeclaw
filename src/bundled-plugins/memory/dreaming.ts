@@ -26,7 +26,7 @@ import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
-import { embed, MODEL_NAME } from './vector/embedder'
+import { embed, EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
 import { VectorStore } from './vector/store'
 
@@ -267,7 +267,7 @@ export async function syncTopicVectorsFromSnapshotDiff(
         id: `topic:${slug}`,
         source: 'topic',
         key: slug,
-        model: MODEL_NAME,
+        model: EMBEDDING_MODEL_ID,
         dims: embedding.length,
         embedding,
         contentHash: fragmentContentHash({ topic: shard.frontmatter.heading, body: shard.body }),
