@@ -180,13 +180,28 @@ export function createBroker(opts: BrokerOptions): Broker {
       return
     }
     try {
+      // The host listen port — not targetPort — is the forwarders map key, so
+      // the connection callback must look up by it. They coincide for ordinary
+      // 1:1 auto-forwards but diverge whenever the OS reassigns the bind (e.g. a
+      // port-0 ephemeral bind), at which point routing by targetPort misses the
+      // map and silently drops the connection. Captured after the await; a
+      // connection can only arrive once the listener is bound.
+      let boundHostPort: number | undefined
       const listener = await listenHost(hostBind, targetPort, {
-        onConnection: (sock) => handleHostConnection(targetPort, sock),
+        onConnection: (sock) => {
+          if (boundHostPort === undefined) {
+            try {
+              sock.end()
+            } catch {}
+            return
+          }
+          handleHostConnection(boundHostPort, sock)
+        },
       })
-      // Ordinary auto-forwards are 1:1, so targetPort and hostPort match.
-      forwarders.set(listener.port, {
+      boundHostPort = listener.port
+      forwarders.set(boundHostPort, {
         targetPort,
-        hostPort: listener.port,
+        hostPort: boundHostPort,
         bindAddr,
         reserved: false,
         listener,
@@ -196,10 +211,10 @@ export function createBroker(opts: BrokerOptions): Broker {
         kind: 'port-forward-opened',
         containerName: opts.containerName,
         port: targetPort,
-        hostPort: listener.port,
+        hostPort: boundHostPort,
         bindAddr,
       })
-      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: listener.port })
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: boundHostPort })
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       log(`forward bind ${targetPort}: ${reason}`)
@@ -227,29 +242,41 @@ export function createBroker(opts: BrokerOptions): Broker {
     let lastReason = 'no host candidates'
     for (const hostPort of hostCandidates) {
       try {
+        // `port` stays the in-container target; the host listen port is the
+        // forwarders map key the connection callback must route by. Reserved
+        // forwards deliberately allow the two to differ, so route by the actual
+        // bound port, captured after the await.
+        let boundHostPort: number | undefined
         const listener = await listenHost(hostBind, hostPort, {
-          onConnection: (sock) => handleHostConnection(hostPort, sock),
+          onConnection: (sock) => {
+            if (boundHostPort === undefined) {
+              try {
+                sock.end()
+              } catch {}
+              return
+            }
+            handleHostConnection(boundHostPort, sock)
+          },
         })
-        // `port` remains the in-container target; `hostPort` is what the host
-        // browser opens. Reserved forwards deliberately allow them to differ.
-        forwarders.set(listener.port, {
+        boundHostPort = listener.port
+        forwarders.set(boundHostPort, {
           targetPort,
-          hostPort: listener.port,
+          hostPort: boundHostPort,
           bindAddr: '127.0.0.1',
           reserved: true,
           listener,
           streams: new Map(),
         })
-        reservedTargets.set(targetPort, listener.port)
+        reservedTargets.set(targetPort, boundHostPort)
         pendingReservedTargets.delete(targetPort)
         emit({
           kind: 'port-forward-opened',
           containerName: opts.containerName,
           port: targetPort,
-          hostPort: listener.port,
+          hostPort: boundHostPort,
           bindAddr: '127.0.0.1',
         })
-        if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: listener.port })
+        if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: boundHostPort })
         return
       } catch (err) {
         lastReason = err instanceof Error ? err.message : String(err)
@@ -512,7 +539,7 @@ async function defaultConnectWs(url: string): Promise<WsClient> {
   })
 }
 
-function defaultListenHost(
+export function defaultListenHost(
   host: string,
   port: number,
   handlers: { onConnection: (sock: HostSocket) => void },

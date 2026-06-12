@@ -8,7 +8,7 @@ import {
   type UpstreamConnection,
   type UpstreamHandlers,
 } from './container-server'
-import { createBroker, type Broker } from './hostd-client'
+import { createBroker, defaultListenHost, type Broker, type ListenHostFn } from './hostd-client'
 import type { PortForwardEvent } from './protocol'
 
 type Harness = {
@@ -52,6 +52,14 @@ async function startHarness(opts: {
     return conn
   }
 
+  // Force the host-side bind onto an OS-assigned ephemeral port. The target
+  // port from the proc snapshot is the in-container port; binding it verbatim
+  // on the host means any worker (or local process — 5173 is Vite's default)
+  // already holding it loses the `Bun.listen` to EADDRINUSE, wedging the
+  // `port-forward-opened` waitFor until the 30s deadline. Callers read the real
+  // port back from the emitted event's `hostPort`.
+  const listenHostEphemeral: ListenHostFn = (host, _port, handlers) => defaultListenHost(host, 0, handlers)
+
   const containerBroker: ContainerBroker = createContainerBroker({
     expectedToken: 'shared-token',
     pollIntervalMs: 10,
@@ -90,6 +98,7 @@ async function startHarness(opts: {
     resolveHostPort: async () => containerServer.port ?? null,
     brokerToken: 'shared-token',
     onEvent: (e) => events.push(e),
+    listenHost: listenHostEphemeral,
     reconnectDelaysMs: [10, 10],
   })
 
@@ -108,6 +117,13 @@ async function startHarness(opts: {
 const procWith5173Loopback = `   0: 0100007F:1435 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1`
 const procEmpty = ``
 
+type PortForwardOpened = Extract<PortForwardEvent, { kind: 'port-forward-opened' }>
+
+const findOpened = (events: PortForwardEvent[], port?: number): PortForwardOpened | undefined =>
+  events.find(
+    (e): e is PortForwardOpened => e.kind === 'port-forward-opened' && (port === undefined || e.port === port),
+  )
+
 describe('end-to-end portbroker pipeline', () => {
   let harness: Harness | null = null
 
@@ -121,14 +137,11 @@ describe('end-to-end portbroker pipeline', () => {
   test('full handshake → snapshot → forwarder bound → host connection → bytes flow → close', async () => {
     harness = await startHarness({ procSnapshots: [procWith5173Loopback], policy: { allow: '*' } })
     harness.broker.start()
-    await waitFor(() => harness!.events.find((e) => e.kind === 'port-forward-opened' && e.port === 5173))
-
-    const opened = harness.events.find((e) => e.kind === 'port-forward-opened' && e.port === 5173)
-    expect(opened).toBeDefined()
+    const opened = await waitFor(() => findOpened(harness!.events, 5173))
 
     const sock = await Bun.connect({
       hostname: '127.0.0.1',
-      port: 5173,
+      port: opened.hostPort,
       socket: {
         open(s) {
           s.write(new TextEncoder().encode('GET / HTTP/1.1\r\nHost: x\r\n\r\n'))
@@ -161,7 +174,7 @@ describe('end-to-end portbroker pipeline', () => {
     const closedEvents = harness.events.filter((e) => e.kind === 'port-forward-closed' && e.port === 5173)
     expect(closedEvents.length).toBeGreaterThanOrEqual(1)
     expect(closedEvents[0]).toMatchObject({ reason: 'container-released' })
-    expect(harness.broker.forwardedPorts()).not.toContain(5173)
+    expect(harness.broker.forwardedPorts()).toEqual([])
   })
 
   test('disabled by allow:[] — no events, no broker connect', async () => {
@@ -180,21 +193,22 @@ describe('end-to-end portbroker pipeline', () => {
       policy: { allow: '*', deny: [9229] },
     })
     harness.broker.start()
-    await waitFor(() => harness!.broker.forwardedPorts().length > 0)
+    const opened = await waitFor(() => findOpened(harness!.events))
 
-    expect(harness.broker.forwardedPorts()).toEqual([5173])
+    expect(opened.port).toBe(5173)
+    expect(findOpened(harness.events, 9229)).toBeUndefined()
   })
 
   test('bytes flow downstream — container-side data reaches host client', async () => {
     harness = await startHarness({ procSnapshots: [procWith5173Loopback], policy: { allow: '*' } })
     harness.broker.start()
-    await waitFor(() => harness!.broker.forwardedPorts().includes(5173))
+    const opened = await waitFor(() => findOpened(harness!.events, 5173))
 
     const received: Uint8Array[] = []
     let sockHandle: Awaited<ReturnType<typeof Bun.connect>> | null = null
     sockHandle = await Bun.connect({
       hostname: '127.0.0.1',
-      port: 5173,
+      port: opened.hostPort,
       socket: {
         open(s) {
           s.write(new TextEncoder().encode('hi'))
