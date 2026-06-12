@@ -2173,6 +2173,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+          live.lastSendLeafId = null
         } finally {
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
@@ -3275,12 +3276,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const trailing = recoverableAssistantText(live.session)
       if (trailing === null || trailing.source !== 'leaf') return
       if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
-      // Belt-and-suspenders: the recovery send is `source:'system'` and so skips
-      // send()'s duplicate guard. Reject a fresh leaf whose body is byte-identical
-      // to what already went out this turn, so an undelivered conclusion never
-      // echoes a reply the user already saw.
-      const sendKey = consecutiveSendKey(live.key.chat, live.key.thread)
-      if (live.lastSentText.get(sendKey) === normalizeSendText(trailing.text)) return
     }
 
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
@@ -3491,6 +3486,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.warn(
         `[channels] ${live.keyId}: suppressed recovery (github review guard) reason=${JSON.stringify(recoveryBlock)} text_len=${assistantText.length}`,
       )
+      return
+    }
+
+    // Duplicate guard on the FINAL outbound body. Must run here, after the
+    // plain-text-tool-call extraction may have rewritten `assistantText` — a
+    // dedupe on the raw leaf would miss a fresh `channel_reply({"text":"X"})`
+    // leak leaf whose extracted body equals a reply already sent this turn. The
+    // recovery send is `source:'system'`, which bypasses send()'s own dup guard,
+    // so reject the byte-identical re-post here. No-op on the zero-send path:
+    // `lastSentText` is cleared at batch start and only filled by this turn's
+    // sends, so it never matches when nothing was sent.
+    const sendKey = consecutiveSendKey(live.key.chat, live.key.thread)
+    if (live.lastSentText.get(sendKey) === normalizeSendText(assistantText)) {
+      logger.info(`[channels] ${live.keyId}: suppressed recovery (duplicate of reply already sent this turn)`)
       return
     }
 
