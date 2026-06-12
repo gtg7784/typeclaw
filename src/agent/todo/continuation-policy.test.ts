@@ -119,8 +119,13 @@ describe('parseContinuationState (fail-closed validation)', () => {
   })
 
   test('an unknown stopReason collapses the outcome to null (idle then fails closed)', () => {
-    const corrupt = { lastTurnOutcome: { turnId: 't', stopReason: 'length', endedAt: 1 } }
+    const corrupt = { lastTurnOutcome: { turnId: 't', stopReason: 'bananas', endedAt: 1 } }
     expect(parseContinuationState(corrupt).lastTurnOutcome).toBeNull()
+  })
+
+  test('a length stopReason round-trips (budget truncation is continuation-eligible)', () => {
+    const state = { lastTurnOutcome: { turnId: 't', stopReason: 'length', endedAt: 1 } }
+    expect(parseContinuationState(state).lastTurnOutcome).toEqual({ turnId: 't', stopReason: 'length', endedAt: 1 })
   })
 
   test('an unknown suppressor value is dropped', () => {
@@ -152,6 +157,11 @@ describe('decideContinuation', () => {
   test('skips when the last turn was a user abort', () => {
     const d = decide(baseState({ lastTurnOutcome: { turnId: 't', stopReason: 'aborted', endedAt: 1 } }))
     expect(d).toEqual({ kind: 'skip', reason: 'turn-not-safe' })
+  })
+
+  test('injects after a length truncation (budget exhaustion is continuation-eligible)', () => {
+    const d = decide(baseState({ lastTurnOutcome: { turnId: 't', stopReason: 'length', endedAt: 1 } }))
+    expect(d.kind).toBe('inject')
   })
 
   test('skips while the user-abort durable suppressor is set', () => {

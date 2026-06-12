@@ -39,10 +39,13 @@ export type ContinuationEpisode = {
 // The outcome of the most recently completed turn, recorded from the
 // `message_end` subscription (authoritative) or a prompt `finally` fallback.
 // `stopReason: 'unknown'` is the fail-closed value: an idle that sees it does
-// not auto-inject.
+// not auto-inject. `'length'` is a budget truncation (the turn ran out of
+// output tokens, often mid-thinking) — a legitimate unfinished turn that the
+// continuation budget/stagnation guards are designed to bound, so it is
+// continuation-eligible, NOT fail-closed.
 export type TurnOutcome = {
   turnId: string
-  stopReason: 'stop' | 'aborted' | 'error' | 'unknown'
+  stopReason: 'stop' | 'length' | 'aborted' | 'error' | 'unknown'
   endedAt: number
   // Total tokens the just-completed turn consumed (from the assistant
   // message's usage). Accumulated into the episode's cumulativeTokens so the
@@ -73,7 +76,7 @@ export function emptyContinuationState(): ContinuationState {
   }
 }
 
-const STOP_REASONS = new Set<TurnOutcome['stopReason']>(['stop', 'aborted', 'error', 'unknown'])
+const STOP_REASONS = new Set<TurnOutcome['stopReason']>(['stop', 'length', 'aborted', 'error', 'unknown'])
 
 // Validate a persisted state object field-by-field and fail closed: any field
 // that does not match the expected shape is dropped to its empty value rather

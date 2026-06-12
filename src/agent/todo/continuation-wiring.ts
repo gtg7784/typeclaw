@@ -14,9 +14,11 @@ import { writeTodos } from './store'
 
 // Map a pi `message_end` event's stopReason onto the TurnOutcome stopReason
 // space. Anything we don't recognize collapses to 'unknown' so the idle path
-// fails closed (no auto-injection on an outcome we can't classify).
+// fails closed (no auto-injection on an outcome we can't classify). 'length'
+// is preserved (not collapsed) because a budget-truncated turn is a legitimate
+// unfinished turn the continuation guards should be allowed to resume.
 export function classifyStopReason(raw: unknown): TurnOutcome['stopReason'] {
-  if (raw === 'stop' || raw === 'aborted' || raw === 'error') return raw
+  if (raw === 'stop' || raw === 'length' || raw === 'aborted' || raw === 'error') return raw
   return 'unknown'
 }
 
