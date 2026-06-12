@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { fragmentContentHash } from '../fragment-parser'
 import { loadAllShards, type TopicShard } from '../load-shards'
+import { buildParentLinks } from '../parent-link'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import type { VectorStore } from './store'
@@ -28,6 +29,7 @@ export function findMissingPassages(store: VectorStore, passages: Passage[]): Pa
 }
 
 function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): Passage[] {
+  const { supersededFragmentIds } = buildParentLinks(shards)
   return [
     ...shards.map(
       (shard): Passage => ({
@@ -42,6 +44,9 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
       day.events.flatMap((event): Passage[] => {
         if (event.type === 'watermark') return []
         if (event.type === 'fragment') {
+          // Superseded fragments stay cited for GC/history but are not embedded:
+          // they must never be a retrieval hook for a belief they no longer back.
+          if (supersededFragmentIds.has(event.id)) return []
           const key = `${day.date}#${event.id}`
           return [
             {
