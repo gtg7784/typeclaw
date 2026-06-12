@@ -311,4 +311,54 @@ sleep 30
       rmSync(scratchDir, { recursive: true, force: true })
     }
   })
+
+  it('does not mark healthy when a probe resolves after cloudflared has already exited', async () => {
+    const scratchDir = createScratchDir()
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+echo "https://exited.trycloudflare.com" >&2
+exit 1
+`,
+    )
+    let releaseProbe!: () => void
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve
+    })
+    let probeStarted = false
+    const provider = createCloudflareQuickProvider({
+      config,
+      upstreamPort: 4851,
+      binary,
+      onUrlChange: () => {},
+      // Probe blocks until released; by then the process has exited and the
+      // tunnel is in restart backoff. A reachable result must NOT win.
+      probeUpstream: async () => {
+        probeStarted = true
+        await probeGate
+        return true
+      },
+      restartBackoffMs: [30_000],
+      upstreamRecheckMs: 5,
+      stopGraceMs: 10,
+    })
+
+    try {
+      await provider.start()
+      await waitFor(() => probeStarted, { description: 'probe started' })
+      await waitFor(() => provider.snapshot().detail.includes('restarting'), { description: 'restart backoff entered' })
+
+      releaseProbe()
+      await Bun.sleep(20)
+
+      const snap = provider.snapshot()
+      expect(snap.status).not.toBe('healthy')
+      expect(snap.detail).toContain('restarting')
+      await provider.stop()
+    } finally {
+      releaseProbe()
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
 })

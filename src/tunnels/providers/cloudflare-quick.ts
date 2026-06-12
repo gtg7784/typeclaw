@@ -63,6 +63,12 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   let restartFailuresWithoutUrl = 0
   let attemptEmittedUrl = false
   let broadcastedUrl: string | null = null
+  // Identifies the current live cloudflared attempt. Bumped on every launch, on
+  // process exit, and on stop. A probe captures the generation it was started
+  // under; if the process exits (into restart backoff) or the tunnel is stopped
+  // while a probe is in flight, the resolved probe sees a stale generation and
+  // bails — so it can never mark a dead process's tunnel healthy.
+  let launchGeneration = 0
 
   function clearRecheckTimer(): void {
     if (recheckTimer !== null) {
@@ -76,7 +82,8 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   // gate `healthy` on a real upstream probe, re-checking on an interval so the
   // status flips to healthy the moment the service comes up — and surfaces a
   // 502-explaining detail until then.
-  async function onQuickUrl(url: string): Promise<void> {
+  async function onQuickUrl(url: string, generation: number): Promise<void> {
+    if (generation !== launchGeneration) return
     attemptEmittedUrl = true
     restartFailuresWithoutUrl = 0
     state.url = url
@@ -85,13 +92,13 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
       broadcastedUrl = url
       onUrlChange(url)
     }
-    await reprobeUpstream()
+    await reprobeUpstream(generation)
   }
 
-  async function reprobeUpstream(): Promise<void> {
-    if (!started || stopping || state.url === null) return
+  async function reprobeUpstream(generation: number): Promise<void> {
+    if (generation !== launchGeneration || !started || stopping || state.url === null) return
     const reachable = await probeUpstream(upstreamPort)
-    if (!started || stopping || state.url === null) return
+    if (generation !== launchGeneration || !started || stopping || state.url === null) return
     if (reachable) {
       state.status = 'healthy'
       state.detail = 'quick tunnel URL emitted; upstream reachable'
@@ -103,13 +110,14 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
     clearRecheckTimer()
     recheckTimer = setTimeout(() => {
       recheckTimer = null
-      void reprobeUpstream()
+      void reprobeUpstream(generation)
     }, upstreamRecheckMs)
   }
 
   async function launch(): Promise<void> {
     if (!started || stopping) return
 
+    const generation = ++launchGeneration
     attemptEmittedUrl = false
     state.status = 'starting'
     state.detail = 'starting cloudflared'
@@ -132,7 +140,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
     void pumpStderr(spawned.stderr, logs, (line) => {
       const url = extractQuickTunnelUrl(line)
       if (url === null) return
-      void onQuickUrl(url)
+      void onQuickUrl(url, generation)
     })
 
     void spawned.exited.then((code) => {
@@ -144,6 +152,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   }
 
   function handleExit(code: number): void {
+    launchGeneration += 1
     clearRecheckTimer()
     if (!attemptEmittedUrl) restartFailuresWithoutUrl += 1
     if (restartFailuresWithoutUrl >= maxConsecutiveFailuresWithoutUrl) {
@@ -174,6 +183,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
       started = false
       stopping = true
       broadcastedUrl = null
+      launchGeneration += 1
       clearRecheckTimer()
       if (retryTimer !== null) {
         clearTimeout(retryTimer)
