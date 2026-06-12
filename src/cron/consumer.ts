@@ -227,8 +227,13 @@ async function runPromptOnce(
               ...(created.origin !== undefined ? { origin: created.origin } : {}),
             }
           : undefined
+      // Per-turn memory injection for vector agents: the turn-start hook writes
+      // the rendered memory block into `retrievalContext.results`, which we
+      // append to the prompt text below (vector agents have no system-prompt
+      // `# Memory` section). Empty for non-vector agents.
+      const retrievalContext = { results: '' }
       if (created.hooks && turnEvent !== undefined) {
-        await created.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: job.prompt })
+        await created.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: job.prompt, retrievalContext })
       }
       // Bridge the CronSession wrapper into the AgentSession surface the
       // fallback helper expects:
@@ -243,7 +248,8 @@ async function runPromptOnce(
       // regular method that reads `this._eventListeners`. Destructuring drops
       // the receiver.
       const sessionForHelper: AgentSession = {
-        prompt: (text: string) => created.prompt(text),
+        prompt: (text: string) =>
+          created.prompt(retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text),
         subscribe: created.session?.subscribe.bind(created.session) ?? (() => () => {}),
       } as unknown as AgentSession
       return {

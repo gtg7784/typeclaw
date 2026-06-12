@@ -503,6 +503,42 @@ describe('createCronConsumer', () => {
     consumer.stop()
   })
 
+  test('appends retrievalContext.results from session.turn.start to the cron prompt text', async () => {
+    // given: a hook that injects per-turn memory (as the vector memory plugin does)
+    const stream = createStream()
+    const events: string[] = []
+    const hooks = fakeHooks(events)
+    hooks.runSessionTurnStart = async (e) => {
+      if (e.retrievalContext !== undefined) e.retrievalContext.results = '# Memory\n\nremembered fact'
+    }
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({
+        prompt: async (text: string) => {
+          events.push(`prompt:${text}`)
+        },
+        hooks,
+        sessionId: 'cron-sess-mem',
+        agentDir: '/agent',
+        getTranscriptPath: () => '/tmp/transcript-mem.jsonl',
+      }),
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('mem-job', 'do work'))
+    await new Promise((r) => setImmediate(r))
+
+    // then: the prompt carries both the user text and the injected memory block
+    const promptEvent = events.find((e) => e.startsWith('prompt:'))
+    expect(promptEvent).toContain('do work')
+    expect(promptEvent).toContain('# Memory\n\nremembered fact')
+
+    consumer.stop()
+  })
+
   test('fires session.end even when prompt throws so plugins can react to abnormal termination', async () => {
     // given
     const stream = createStream()

@@ -291,6 +291,29 @@ describe('invokeSubagent', () => {
     expect(events).toEqual(['idle:sub-sess-1:/tmp/sub-transcript.jsonl', 'end:sub-sess-1'])
   })
 
+  test('appends retrievalContext.results from session.turn.start to the subagent prompt text', async () => {
+    // given: a turn-start hook that injects per-turn memory (vector agents)
+    const { session, calls } = fakeSession()
+    const hooks = makeFakeHookBus([])
+    hooks.runSessionTurnStart = async (e) => {
+      if (e.retrievalContext !== undefined) e.retrievalContext.results = '# Memory\n\nsubagent fact'
+    }
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => ({ session, hooks, sessionId: 'sub-mem', agentDir: '/agent' }),
+      agentDir: '/agent',
+      userPrompt: 'hi there',
+    })
+
+    // then: the prompt carries the user text, the time anchor, and injected memory
+    expect(calls.prompt).toHaveLength(1)
+    expect(calls.prompt[0]).toContain('hi there')
+    expect(calls.prompt[0]).toContain('# Memory\n\nsubagent fact')
+  })
+
   test('fires session.end even when the prompt throws so plugins can react to abnormal subagent termination', async () => {
     // given
     const events: string[] = []
