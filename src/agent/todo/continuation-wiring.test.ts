@@ -34,6 +34,7 @@ afterEach(async () => {
 describe('classifyStopReason', () => {
   test('passes through known reasons and collapses the rest to unknown', () => {
     expect(classifyStopReason('stop')).toBe('stop')
+    expect(classifyStopReason('length')).toBe('length')
     expect(classifyStopReason('aborted')).toBe('aborted')
     expect(classifyStopReason('error')).toBe('error')
     expect(classifyStopReason('tool_calls')).toBe('unknown')
