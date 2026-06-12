@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import {
   KNOWN_PROVIDERS,
@@ -11,7 +10,14 @@ import {
   type KnownProviderId,
   type KnownProviderVendorId,
 } from '@/config/providers'
-import { initStateDir } from '@/hostd'
+
+// In-folder scratch for an in-progress `typeclaw init`, co-located with the
+// agent it describes. Lives under the agent's `.typeclaw/` (the same gitignored
+// local-scratch dir as the persistent-$HOME overlay), so it self-cleans when
+// the half-init folder is deleted, survives a folder rename mid-init, and is
+// inspectable right next to the thing being resumed. Gitignored via
+// `TRULY_IGNORED_PATTERNS`; never committed.
+export const INIT_CHECKPOINT_PATH = join('.typeclaw', 'init-progress.json')
 
 export const WIZARD_CHECKPOINT_VERSION = 1
 
@@ -133,11 +139,10 @@ function pruneProvider(
 }
 
 function checkpointFilePath(cwd: string): string {
-  const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 32)
-  return join(initStateDir(), `${hash}.json`)
+  return join(cwd, INIT_CHECKPOINT_PATH)
 }
 
-export function createHostWizardCheckpointStore(): WizardCheckpointStore {
+export function createLocalWizardCheckpointStore(): WizardCheckpointStore {
   return {
     async load(cwd) {
       const path = checkpointFilePath(cwd)
@@ -151,12 +156,13 @@ export function createHostWizardCheckpointStore(): WizardCheckpointStore {
       return parsed
     },
 
-    // Atomic write: temp + rename within initStateDir() so a crash mid-write
-    // never leaves a half-written file that `load` would misparse and discard.
+    // Atomic write: temp + rename within the agent's .typeclaw/ so a crash
+    // mid-write never leaves a half-written file that `load` would misparse and
+    // discard.
     async save(cwd, checkpoint) {
       const final = checkpointFilePath(cwd)
       const tmp = `${final}.${process.pid}.tmp`
-      await mkdir(initStateDir(), { recursive: true })
+      await mkdir(dirname(final), { recursive: true })
       await writeFile(tmp, JSON.stringify(checkpoint), { mode: 0o600 })
       await rename(tmp, final)
     },

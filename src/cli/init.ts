@@ -37,7 +37,7 @@ import {
 } from '@/init'
 import {
   checkpointFromSelections,
-  createHostWizardCheckpointStore,
+  createLocalWizardCheckpointStore,
   sanitizeCheckpointAgainstCatalog,
   type WizardAnswerCheckpointV1,
   type WizardCheckpointStore,
@@ -167,7 +167,7 @@ export const init = defineCommand({
     }
     preflightSpinner.stop('Docker is reachable.')
 
-    const checkpointStore = createHostWizardCheckpointStore()
+    const checkpointStore = createLocalWizardCheckpointStore()
     let collected: CollectedInputs
     try {
       collected = await collectWizardInputs(cwd, defaultWizardPrompts, { reset, checkpointStore })

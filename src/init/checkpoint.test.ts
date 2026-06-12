@@ -2,13 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
-import { initStateDir } from '@/hostd'
+import { dirname, join } from 'node:path'
 
 import {
   checkpointFromSelections,
-  createHostWizardCheckpointStore,
+  createLocalWizardCheckpointStore,
+  INIT_CHECKPOINT_PATH,
   sanitizeCheckpointAgainstCatalog,
   WIZARD_CHECKPOINT_VERSION,
   type WizardAnswerCheckpointV1,
@@ -16,20 +15,19 @@ import {
 
 const KIMI_REF = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' as WizardAnswerCheckpointV1['modelRef']
 
-let home: string
-let prev: string | undefined
+let agent: string
 
 beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), 'typeclaw-checkpoint-'))
-  prev = process.env.TYPECLAW_HOME
-  process.env.TYPECLAW_HOME = home
+  agent = await mkdtemp(join(tmpdir(), 'typeclaw-checkpoint-'))
 })
 
 afterEach(async () => {
-  if (prev === undefined) delete process.env.TYPECLAW_HOME
-  else process.env.TYPECLAW_HOME = prev
-  await rm(home, { recursive: true, force: true })
+  await rm(agent, { recursive: true, force: true })
 })
+
+function checkpointPath(cwd: string): string {
+  return join(cwd, INIT_CHECKPOINT_PATH)
+}
 
 describe('checkpointFromSelections', () => {
   test('projects only the supplied non-secret selections', () => {
@@ -72,103 +70,106 @@ describe('checkpointFromSelections', () => {
   })
 })
 
-describe('createHostWizardCheckpointStore', () => {
+describe('createLocalWizardCheckpointStore', () => {
   test('save then load round-trips the checkpoint', async () => {
-    const store = createHostWizardCheckpointStore()
+    const store = createLocalWizardCheckpointStore()
     const checkpoint = checkpointFromSelections({
-      cwd: '/agent/one',
+      cwd: agent,
       vendorId: 'fireworks',
       providerId: 'fireworks',
       modelRef: KIMI_REF,
       channelChoice: 'discord',
     })
 
-    await store.save('/agent/one', checkpoint)
-    const loaded = await store.load('/agent/one')
+    await store.save(agent, checkpoint)
+    const loaded = await store.load(agent)
 
     expect(loaded).toEqual(checkpoint)
   })
 
+  test('writes to <cwd>/.typeclaw/init-progress.json', async () => {
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    expect(existsSync(join(agent, '.typeclaw', 'init-progress.json'))).toBe(true)
+  })
+
   test('load returns undefined when no checkpoint exists', async () => {
-    const store = createHostWizardCheckpointStore()
-    expect(await store.load('/agent/missing')).toBeUndefined()
+    const store = createLocalWizardCheckpointStore()
+    expect(await store.load(agent)).toBeUndefined()
   })
 
   test('distinct cwds get distinct checkpoint files', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/a', checkpointFromSelections({ cwd: '/agent/a', vendorId: 'fireworks' }))
-    await store.save('/agent/b', checkpointFromSelections({ cwd: '/agent/b', vendorId: 'openai' }))
+    const store = createLocalWizardCheckpointStore()
+    const other = await mkdtemp(join(tmpdir(), 'typeclaw-checkpoint-b-'))
+    try {
+      await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+      await store.save(other, checkpointFromSelections({ cwd: other, vendorId: 'openai' }))
 
-    expect((await store.load('/agent/a'))?.vendorId).toBe('fireworks')
-    expect((await store.load('/agent/b'))?.vendorId).toBe('openai')
+      expect((await store.load(agent))?.vendorId).toBe('fireworks')
+      expect((await store.load(other))?.vendorId).toBe('openai')
+    } finally {
+      await rm(other, { recursive: true, force: true })
+    }
   })
 
   test('clear removes the checkpoint file', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
-    await store.clear('/agent/one')
-    expect(await store.load('/agent/one')).toBeUndefined()
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    await store.clear(agent)
+    expect(await store.load(agent)).toBeUndefined()
   })
 
   test('clear on a missing checkpoint is a no-op', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.clear('/agent/never-saved')
-    expect(await store.load('/agent/never-saved')).toBeUndefined()
+    const store = createLocalWizardCheckpointStore()
+    await store.clear(agent)
+    expect(await store.load(agent)).toBeUndefined()
   })
 
   test('save leaves no .tmp residue', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
     const { readdir } = await import('node:fs/promises')
-    const entries = await readdir(initStateDir())
+    const entries = await readdir(join(agent, '.typeclaw'))
     expect(entries.some((e) => e.endsWith('.tmp'))).toBe(false)
-    expect(entries.length).toBe(1)
+    expect(entries).toContain('init-progress.json')
   })
 
   test('load tolerates a corrupt (non-JSON) file', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
-    const { readdir } = await import('node:fs/promises')
-    const [file] = await readdir(initStateDir())
-    await writeFile(join(initStateDir(), file!), 'not json {{{')
-    expect(await store.load('/agent/one')).toBeUndefined()
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    await writeFile(checkpointPath(agent), 'not json {{{')
+    expect(await store.load(agent)).toBeUndefined()
   })
 
   test('load rejects a checkpoint with the wrong schema version', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
-    const { readdir } = await import('node:fs/promises')
-    const [file] = await readdir(initStateDir())
-    const path = join(initStateDir(), file!)
-    const parsed = JSON.parse(await readFile(path, 'utf8'))
-    await writeFile(path, JSON.stringify({ ...parsed, version: 999 }))
-    expect(await store.load('/agent/one')).toBeUndefined()
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    const parsed = JSON.parse(await readFile(checkpointPath(agent), 'utf8'))
+    await writeFile(checkpointPath(agent), JSON.stringify({ ...parsed, version: 999 }))
+    expect(await store.load(agent)).toBeUndefined()
   })
 
-  test('save creates initStateDir on demand', async () => {
-    const store = createHostWizardCheckpointStore()
-    expect(existsSync(initStateDir())).toBe(false)
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
-    expect(existsSync(initStateDir())).toBe(true)
+  test('save creates the .typeclaw/ dir on demand', async () => {
+    const store = createLocalWizardCheckpointStore()
+    expect(existsSync(join(agent, '.typeclaw'))).toBe(false)
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    expect(existsSync(dirname(checkpointPath(agent)))).toBe(true)
   })
 
   test('rejects a checkpoint whose optional field has a non-string type', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/one', checkpointFromSelections({ cwd: '/agent/one', vendorId: 'fireworks' }))
-    const { readdir } = await import('node:fs/promises')
-    const [file] = await readdir(initStateDir())
-    const path = join(initStateDir(), file!)
-    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent, vendorId: 'fireworks' }))
+    const parsed = JSON.parse(await readFile(checkpointPath(agent), 'utf8'))
     // given: a structurally corrupt providerId (number instead of string)
-    await writeFile(path, JSON.stringify({ ...parsed, providerId: 42 }))
-    expect(await store.load('/agent/one')).toBeUndefined()
+    await writeFile(checkpointPath(agent), JSON.stringify({ ...parsed, providerId: 42 }))
+    expect(await store.load(agent)).toBeUndefined()
   })
 
   test('accepts a checkpoint whose optional fields are absent', async () => {
-    const store = createHostWizardCheckpointStore()
-    await store.save('/agent/two', checkpointFromSelections({ cwd: '/agent/two' }))
-    const loaded = await store.load('/agent/two')
-    expect(loaded?.cwd).toBe('/agent/two')
+    const store = createLocalWizardCheckpointStore()
+    await store.save(agent, checkpointFromSelections({ cwd: agent }))
+    const loaded = await store.load(agent)
+    expect(loaded?.cwd).toBe(agent)
   })
 })
 
