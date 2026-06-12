@@ -1,23 +1,20 @@
 import { join } from 'node:path'
 
 import { definePlugin } from '@/plugin'
-import { bindWithForward } from '@/portbroker'
+import { publishForwardRequest, subscribeForwardResult } from '@/portbroker'
 
-import { AGENT_BROWSER_DASHBOARD_PROXY_PORT, startDashboardProxy, type DashboardProxy } from './dashboard-proxy'
 import { installShim, KNOWN_BIN_PATHS, type InstallShimResult } from './shim-install'
 
 type SafeResult = InstallShimResult | { kind: 'error'; binPath: string; error: unknown }
 
 // Documented in skills/agent-browser/SKILL.md so the agent can discover which
-// port the proxy actually bound to (4848 + a 10-port fallback range). Moving
-// or renaming this path requires updating the skill in lockstep.
+// host port the reserved dashboard forward actually bound. Moving or renaming
+// this path requires updating the skill in lockstep.
 const PROXY_PORT_HINT_PATH = '/tmp/typeclaw-agent-browser-proxy-port'
-const PORT_CANDIDATE_RANGE = 10
-const BROKER_HANDSHAKE_DELAY_MS = 1_000
-const FORWARD_RESULT_TIMEOUT_MS = 10_000
+const DASHBOARD_TARGET_PORT = 4848
+const DASHBOARD_HOST_CANDIDATES = [4848, 4849, 4850, 4851, 4852, 4853, 4854, 4855, 4856, 4857] as const
 
-let activeProxy: DashboardProxy | null = null
-let bindingInFlight: Promise<void> | null = null
+let unsubscribeForwardResult: (() => void) | null = null
 
 export default definePlugin({
   plugin: async (ctx) => {
@@ -25,20 +22,7 @@ export default definePlugin({
       logInstallResult(ctx.logger, safeInstallShim(binPath))
     }
 
-    // Kick off the proxy bind in the background and let the plugin factory
-    // return immediately. Two reasons:
-    //   1. The container-side broker is created AFTER pluginsLoaded.markBooted()
-    //      runs (see src/run/index.ts). If we awaited bindWithForward here, we
-    //      would block the boot sequence past 20s of timeouts before the broker
-    //      even existed to send forward-result events.
-    //   2. The dashboard isn't typically used at boot — the user runs
-    //      `agent-browser dashboard start` later. The proxy has plenty of time
-    //      to settle before its first request.
-    if (activeProxy === null && bindingInFlight === null) {
-      bindingInFlight = bindProxyAfterBrokerSettles(ctx.logger).finally(() => {
-        bindingInFlight = null
-      })
-    }
+    requestDashboardForward(ctx.logger)
 
     return {
       skillsDirs: [join(import.meta.dir, 'skills')],
@@ -46,63 +30,35 @@ export default definePlugin({
   },
 })
 
-export function __resetProxyForTesting(): void {
-  activeProxy?.stop()
-  activeProxy = null
-  bindingInFlight = null
+export function __resetForwardRequestForTesting(): void {
+  unsubscribeForwardResult?.()
+  unsubscribeForwardResult = null
 }
 
-export function __waitForProxyBindForTesting(): Promise<void> {
-  return bindingInFlight ?? Promise.resolve()
-}
-
-async function bindProxyAfterBrokerSettles(logger: {
-  info: (msg: string) => void
-  warn: (msg: string) => void
-}): Promise<void> {
-  // Give the run-loop time to construct the container broker and let it
-  // complete its WS handshake with hostd. Without this the first candidate
-  // bind fires before the broker is ready, the bus never delivers a result,
-  // and we waste the full timeout × candidate-count budget tearing down
-  // every port in the range. The exact delay isn't load-bearing — anything
-  // longer than the broker's connect+hello round-trip works.
-  if (defaultBrokerEnabled()) {
-    await Bun.sleep(BROKER_HANDSHAKE_DELAY_MS)
-  }
-
-  const config = readPortConfig()
-  const candidates = buildCandidatePorts(config.listenPort)
-  const upstreamOverride = config.upstreamPort
-
-  const result = await bindWithForward<DashboardProxy>({
-    candidates,
-    timeoutMs: FORWARD_RESULT_TIMEOUT_MS,
-    factory: (port) => {
-      try {
-        const proxy = startDashboardProxy({ listenPort: port, upstreamPort: upstreamOverride })
-        return Promise.resolve({ resource: proxy, close: () => proxy.stop() })
-      } catch (error) {
-        logger.warn(`bind ${port} failed: ${String(error)}`)
-        return Promise.resolve(null)
-      }
-    },
-    onLog: (msg) => logger.info(`[bind-with-forward] ${msg}`),
-  })
-
-  if (result === null) {
-    logger.warn(
-      `could not allocate a host-forwardable dashboard proxy port from ${candidates[0]}-${candidates[candidates.length - 1]}; ` +
-        `remote dashboard access will not work until another container releases its port`,
-    )
+function requestDashboardForward(logger: { info: (msg: string) => void; warn: (msg: string) => void }): void {
+  if (!defaultBrokerEnabled()) {
+    recordProxyPort('TypeClaw dashboard forwarding unavailable: hostd broker is disabled.', logger)
     return
   }
 
-  activeProxy = result.resource
-  recordProxyPort(result.port, logger)
-  logger.info(
-    `dashboard proxy listening on port ${result.port}` +
-      (result.hostPort !== null ? ` (forwarded to host:${result.hostPort})` : ''),
-  )
+  if (unsubscribeForwardResult === null) {
+    unsubscribeForwardResult = subscribeForwardResult((event) => {
+      if (event.port !== DASHBOARD_TARGET_PORT) return
+      if (event.ok) {
+        recordProxyPort(String(event.hostPort), logger)
+        logger.info(`agent-browser dashboard forward reserved on host:${event.hostPort}`)
+        return
+      }
+      recordProxyPort(`TypeClaw dashboard forwarding unavailable: ${event.reason}`, logger)
+      logger.warn(`agent-browser dashboard forward failed: ${event.reason}`)
+    })
+  }
+
+  publishForwardRequest({
+    targetPort: DASHBOARD_TARGET_PORT,
+    hostCandidates: [...DASHBOARD_HOST_CANDIDATES],
+    reason: 'agent-browser-dashboard',
+  })
 }
 
 function defaultBrokerEnabled(): boolean {
@@ -110,45 +66,14 @@ function defaultBrokerEnabled(): boolean {
   return token !== undefined && token.length > 0
 }
 
-function buildCandidatePorts(start: number): number[] {
-  const out: number[] = []
-  for (let i = 0; i < PORT_CANDIDATE_RANGE; i += 1) out.push(start + i)
-  return out
-}
-
-function recordProxyPort(port: number, logger: { warn: (msg: string) => void }): void {
+function recordProxyPort(contents: string, logger: { warn: (msg: string) => void }): void {
   try {
-    Bun.write(PROXY_PORT_HINT_PATH, String(port))
+    Bun.write(PROXY_PORT_HINT_PATH, contents)
   } catch (error) {
     // Hint is informational (lets a future `typeclaw status` or a human shell
     // session report which port to open). Failure is non-fatal.
     logger.warn(`failed to write ${PROXY_PORT_HINT_PATH}: ${String(error)}`)
   }
-}
-
-type PortConfig = { listenPort: number; upstreamPort: number | undefined }
-
-function readPortConfig(): PortConfig {
-  const overrideUpstream = process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT']
-  return {
-    listenPort: numberFromEnv('TYPECLAW_DASHBOARD_PROXY_PORT', AGENT_BROWSER_DASHBOARD_PROXY_PORT),
-    upstreamPort:
-      overrideUpstream === undefined || overrideUpstream === '' ? undefined : numberOrUndefined(overrideUpstream),
-  }
-}
-
-function numberOrUndefined(raw: string): number | undefined {
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) return undefined
-  return parsed
-}
-
-function numberFromEnv(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '') return fallback
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) return fallback
-  return parsed
 }
 
 function safeInstallShim(binPath: string): SafeResult {

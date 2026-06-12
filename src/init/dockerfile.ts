@@ -1491,7 +1491,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \\
 const LAYER_4_AGENT_BROWSER_INSTALL = `# Layer 4 (volatile): install agent-browser globally so it survives the
 # runtime bind-mount over /agent/node_modules.
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\
-    bun install -g agent-browser`
+    bun install -g agent-browser@^0.27.0`
 
 // Layer 4.5: shim the agent-browser binary with a wrapper that calls
 // \`agent-browser close\` before \`open\`/\`goto\`/\`navigate\` when headed

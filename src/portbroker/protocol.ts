@@ -15,6 +15,7 @@ export type HostdToContainer =
 export type ContainerToHostd =
   | { type: 'broker-hello-ack' }
   | { type: 'broker-hello-nack'; reason: string }
+  | { type: 'port-forward-request'; targetPort: number; hostCandidates: number[]; reason?: string }
   | { type: 'port-listen-snapshot'; ports: Array<{ port: number; bindAddr: BindAddr }> }
   | { type: 'port-listen-opened'; port: number; bindAddr: BindAddr }
   | { type: 'port-listen-closed'; port: number }
@@ -24,8 +25,14 @@ export type ContainerToHostd =
   | { type: 'relay-close'; streamId: StreamId; side: 'upstream' | 'downstream' }
 
 export type PortForwardEvent =
-  | { kind: 'port-forward-opened'; containerName: string; port: number; bindAddr: BindAddr }
-  | { kind: 'port-forward-closed'; containerName: string; port: number; reason: PortForwardCloseReason }
+  | { kind: 'port-forward-opened'; containerName: string; port: number; hostPort: number; bindAddr: BindAddr }
+  | {
+      kind: 'port-forward-closed'
+      containerName: string
+      port: number
+      hostPort: number
+      reason: PortForwardCloseReason
+    }
   | { kind: 'port-forward-failed'; containerName: string; port: number; reason: string }
 
 export type PortForwardCloseReason = 'container-released' | 'host-error' | 'deregistered' | 'broker-stopped'

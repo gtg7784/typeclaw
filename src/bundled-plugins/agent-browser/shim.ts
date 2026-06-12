@@ -3,17 +3,10 @@
 // bash-regex `tool.before` block, which was leaky (missed shell variations,
 // bypassed by `typeclaw shell`, by spawned subprocesses, by the user typing
 // it directly). Now ANY in-container `agent-browser` caller routes through
-// here — the dashboard subcommand transparently gets its --port rewritten
-// onto the agent-process-owned proxy's upstream port, every other subcommand
-// passes through unchanged. The proxy itself lives in the long-lived agent
-// process (see src/bundled-plugins/agent-browser/index.ts); the shim does NOT own its
-// lifecycle, because `agent-browser dashboard start` daemonizes upstream and
-// returns immediately — a shim-owned proxy would die the moment start exits.
+// here and gets the anti-fingerprint User-Agent default before execing the
+// real upstream binary unchanged.
 
 import { existsSync } from 'node:fs'
-
-import { writePortHint } from './dashboard-discovery'
-import { AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT } from './dashboard-proxy'
 
 export const REAL_BIN_ENV = 'TYPECLAW_AGENT_BROWSER_REAL_BIN'
 
@@ -60,71 +53,6 @@ export function injectUserAgentEnv(
   env[USER_AGENT_ENV] = defaultUa
 }
 
-export type DashboardIntent = 'start' | 'stop' | 'other'
-
-export function classifyDashboardCommand(argv: readonly string[]): DashboardIntent {
-  // Find the first non-flag token. `agent-browser` takes no pre-subcommand
-  // global flags today; the loop is defensive against future ones.
-  let dashboardIdx = -1
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!
-    if (arg.startsWith('-')) continue
-    if (arg !== 'dashboard') return 'other'
-    dashboardIdx = i
-    break
-  }
-  if (dashboardIdx === -1) return 'other'
-
-  // Look for the next non-flag token after `dashboard`. Upstream treats a
-  // missing subcommand as `start`, so we do too. `--port <n>` and `-p <n>`
-  // consume two argv entries; the value is not a subcommand and must not be
-  // classified as one.
-  for (let i = dashboardIdx + 1; i < argv.length; i += 1) {
-    const arg = argv[i]!
-    if (arg === '--port' || arg === '-p') {
-      i += 1
-      continue
-    }
-    if (arg.startsWith('-')) continue
-    if (arg === 'stop') return 'stop'
-    if (arg === 'start') return 'start'
-    return 'other'
-  }
-  return 'start'
-}
-
-export function rewriteDashboardArgs(argv: readonly string[], upstreamPort: number): string[] {
-  // Force --port to upstreamPort regardless of what the caller passed. The
-  // proxy on AGENT_BROWSER_DASHBOARD_PROXY_PORT (4848) is the only externally
-  // visible surface; honoring a user --port would let a caller bypass the
-  // proxy by listening directly on the externally forwarded port. Insert
-  // `start` explicitly when the caller relied on the implicit-start behavior
-  // so the appended `--port` lands on a subcommand upstream accepts.
-  const stripped: string[] = []
-  let i = 0
-  while (i < argv.length) {
-    const arg = argv[i]!
-    if (arg === '--port' || arg === '-p') {
-      i += 2
-      continue
-    }
-    if (arg.startsWith('--port=')) {
-      i += 1
-      continue
-    }
-    stripped.push(arg)
-    i += 1
-  }
-
-  const dashboardIdx = stripped.findIndex((a) => !a.startsWith('-'))
-  const hasSubcommand = stripped.slice(dashboardIdx + 1).some((a) => !a.startsWith('-'))
-  const out = hasSubcommand
-    ? [...stripped]
-    : [...stripped.slice(0, dashboardIdx + 1), 'start', ...stripped.slice(dashboardIdx + 1)]
-  out.push('--port', String(upstreamPort))
-  return out
-}
-
 export function resolveRealAgentBrowserBin(): string {
   // Set by the installer when it moves the upstream symlink aside. Honored
   // first so unit tests can point at a stub without touching the filesystem.
@@ -152,7 +80,6 @@ export function resolveRealAgentBrowserBin(): string {
 export type ShimOptions = {
   argv?: readonly string[]
   realBin?: string
-  upstreamPort?: number
   spawn?: (cmd: string[]) => { exited: Promise<number> }
   env?: Record<string, string | undefined>
 }
@@ -160,29 +87,11 @@ export type ShimOptions = {
 export async function runShim(opts: ShimOptions = {}): Promise<number> {
   const argv = opts.argv ?? process.argv.slice(2)
   const realBin = opts.realBin ?? resolveRealAgentBrowserBin()
-  const upstreamPort = opts.upstreamPort ?? AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT
   const spawn = opts.spawn ?? defaultSpawn
   const env = opts.env ?? process.env
 
   injectUserAgentEnv(argv, env)
-
-  const intent = classifyDashboardCommand(argv)
-  if (intent !== 'start') {
-    return await spawn([realBin, ...argv]).exited
-  }
-
-  // Record the rewritten port to the hint file so the long-lived proxy can
-  // use it as the fast-path upstream lookup. The proxy still falls back to
-  // procfs discovery if the hint is wrong, but the hint avoids that work
-  // on the common path where the shim is the one starting the dashboard.
-  try {
-    writePortHint(upstreamPort)
-  } catch {
-    // Hint is an optimization; failure to write it is non-fatal.
-  }
-
-  const rewritten = rewriteDashboardArgs(argv, upstreamPort)
-  return await spawn([realBin, ...rewritten]).exited
+  return await spawn([realBin, ...argv]).exited
 }
 
 function defaultSpawn(cmd: string[]): { exited: Promise<number> } {

@@ -38,8 +38,9 @@ The dashboard takes a moment to come up and the user needs time to open the URL.
    needed.)
 2. Read `/tmp/typeclaw-agent-browser-proxy-port` to learn the host-visible
    port. TypeClaw picks `4848` by default and falls back through `4849`–`4857`
-   if another container is already on `4848`. If the file is missing, the proxy
-   hasn't finished binding yet — wait a second and retry, or fall back to `4848`.
+   if another container is already on `4848`. If the file contains a diagnostic
+   instead of a number, forwarding is unavailable; report that message instead
+   of inventing a URL.
 3. Tell the user: **"Open `http://localhost:<port>` in your browser."** Over
    Tailscale or LAN, the same port works on the host's external address:
    `http://<host>:<port>`.
@@ -47,37 +48,11 @@ The dashboard takes a moment to come up and the user needs time to open the URL.
 5. When the user is done, they hand control back implicitly — just resume your
    normal `agent-browser` commands. Session state is shared with the dashboard.
 
-The compatibility proxy on `:4848` (or the fallback port) rewrites the
-dashboard's hardcoded loopback URLs so the externally visible URL works over
-Tailscale and other remote networks. No special flag, tool, or config required.
-**Always share the proxy port URL — never `localhost:<raw-session-port>`** —
-those raw ports are inside the container and unreachable from the host.
-
-### Don't confuse the proxy port with the dashboard port
-
-There are two ports in play. Both sockets live inside the container, but
-they have very different audiences:
-
-| File                                        | Audience                 | What it's for                                                                                                                                                                                                                                                        |
-| ------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/tmp/typeclaw-agent-browser-proxy-port`    | **Host browser**         | The port the host browser opens (`http://localhost:<proxy-port>`). Host-forwarded via hostd; the compatibility proxy rewrites the dashboard's hardcoded loopback URLs so they work over Tailscale/LAN. **Default `4848`, falls back to `4849`–`4857` on collision.** |
-| `/tmp/typeclaw-agent-browser-upstream-port` | **In-container clients** | The actual `agent-browser dashboard` server. **Default `4849`.** This is what other in-container processes (Cloudflare tunnels, in-container `curl`, in-container scripts) must talk to. Not host-forwarded — there's no point.                                      |
-
-**For Cloudflare tunnels and anything else that originates inside the
-container, use the upstream-port file, NOT the proxy-port file.** Cloudflare's
-`cloudflared` runs in the container's netns and connects to `127.0.0.1:<port>`
-directly — it doesn't traverse the compatibility proxy and gains nothing from
-it. Pointing a tunnel at the proxy port silently tunnels the proxy's listen
-socket instead of the dashboard; the tunnel comes up, the URL "works" against
-the proxy's pass-through paths, but anything dashboard-specific (sessions,
-WebSocket activity feed, JSON API) breaks in non-obvious ways.
-
-Common-failure shape: reading `proxy-port` mechanically because it's the
-file you remembered, then passing that to `typeclaw tunnel add` or to a
-`cloudflared --url http://127.0.0.1:<port>` invocation. **Read the
-`upstream-port` file for tunnel upstreams.** When in doubt, run
-`agent-browser dashboard status` (or check the `agent-browser dashboard
-start` log line — it prints the upstream URL).
+The dashboard is served directly by `agent-browser` on one origin; TypeClaw only
+reserves a host-forward for that port. No special flag, tool, or config is
+required. **Always share the hint-file URL — never
+`localhost:<raw-session-port>`** — raw session ports are inside the container and
+unreachable from the host.
 
 ### When NOT to use the dashboard
 

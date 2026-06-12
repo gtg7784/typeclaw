@@ -4,10 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import {
-  __resetProxyForTesting as resetDashboardProxy,
-  __waitForProxyBindForTesting as waitForDashboardProxyBind,
-} from '@/bundled-plugins/agent-browser'
+import { __resetForwardRequestForTesting as resetDashboardForwardRequest } from '@/bundled-plugins/agent-browser'
 import { createChannelRouter, type ChannelManager, type ChannelManagerOptions } from '@/channels'
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
@@ -31,23 +28,15 @@ let running: Awaited<ReturnType<typeof startAgent>> | null = null
 let savedBrokerToken: string | undefined
 
 beforeEach(() => {
-  // startAgent boots the agent-browser plugin, whose dashboard proxy otherwise
-  // binds the hardcoded default 4848. Pin it to an ephemeral port (0) instead.
-  // The broker must stay disabled while the override is 0: bindWithForward
-  // waits for a forward-result keyed on the literal candidate 0, but the broker
-  // reports the OS-assigned port, so a present token would hang the bind on a
-  // timeout. Clear the token so port 0 is a pure local ephemeral bind.
+  // startAgent boots the agent-browser plugin. Keep the broker token absent so
+  // these run-loop tests do not publish a reserved dashboard forward request
+  // into an unrelated in-process bus subscriber.
   savedBrokerToken = process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
   delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
-  process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
 })
 
 afterEach(async () => {
-  // Drain the agent-browser background bind before restoring env so an in-flight
-  // bind can't read a half-reset environment (see the beforeEach rationale).
-  await waitForDashboardProxyBind()
-  resetDashboardProxy()
-  delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
+  resetDashboardForwardRequest()
   if (savedBrokerToken === undefined) delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
   else process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = savedBrokerToken
   if (!running) return

@@ -85,13 +85,21 @@ export function createBroker(opts: BrokerOptions): Broker {
   const listenHost = opts.listenHost ?? defaultListenHost
 
   type ForwarderState = {
-    port: number
+    targetPort: number
+    hostPort: number
     bindAddr: BindAddr
+    reserved: boolean
     listener: HostListener
     streams: Map<StreamId, { sock: HostSocket; opened: boolean; pending: Uint8Array[] }>
   }
 
   const forwarders = new Map<number, ForwarderState>()
+  const reservedTargets = new Map<number, number>()
+  // Targets claimed by a reserved forward whose host bind is still in flight.
+  // Marked synchronously BEFORE awaiting listenHost() so a concurrent
+  // port-listen snapshot/opened for the same target cannot slip past the
+  // reserved guard and install a competing auto-forward during the await.
+  const pendingReservedTargets = new Set<number>()
   let ws: WsClient | null = null
   let nextStreamId: StreamId = 1
   let stopped = false
@@ -112,8 +120,8 @@ export function createBroker(opts: BrokerOptions): Broker {
     }
   }
 
-  const closeStream = (port: number, streamId: StreamId, sendClose: boolean): void => {
-    const fwd = forwarders.get(port)
+  const closeStream = (hostPort: number, streamId: StreamId, sendClose: boolean): void => {
+    const fwd = forwarders.get(hostPort)
     if (!fwd) return
     const stream = fwd.streams.get(streamId)
     if (!stream) return
@@ -124,7 +132,7 @@ export function createBroker(opts: BrokerOptions): Broker {
     if (sendClose && ws) ws.send({ type: 'relay-close', streamId, side: 'downstream' })
   }
 
-  const handleHostConnection = (port: number, sock: HostSocket): void => {
+  const handleHostConnection = (hostPort: number, sock: HostSocket): void => {
     if (!ws) {
       try {
         sock.end()
@@ -132,7 +140,7 @@ export function createBroker(opts: BrokerOptions): Broker {
       return
     }
     const streamId = allocStreamId()
-    const fwd = forwarders.get(port)
+    const fwd = forwarders.get(hostPort)
     if (!fwd) {
       try {
         sock.end()
@@ -153,53 +161,136 @@ export function createBroker(opts: BrokerOptions): Broker {
       }
     })
     sock.onClose(() => {
-      closeStream(port, streamId, true)
+      closeStream(hostPort, streamId, true)
     })
 
-    if (ws) ws.send({ type: 'relay-open', streamId, port })
+    if (ws) ws.send({ type: 'relay-open', streamId, port: fwd.targetPort })
   }
 
-  const installForwarder = async (port: number, bindAddr: BindAddr): Promise<void> => {
-    if (forwarders.has(port)) return
-    if (!shouldForward({ policy: opts.policy, port })) {
-      // Policy excluded the port. Tell the container so it can stop waiting
-      // (e.g. the agent-browser plugin's bind-with-forward retry loop). Without
-      // this, the container would block on the forward-result timeout for
-      // every policy-denied port.
-      if (ws) ws.send({ type: 'port-forward-result', port, ok: false, reason: 'policy excluded' })
+  const isReservedTarget = (targetPort: number): boolean =>
+    reservedTargets.has(targetPort) || pendingReservedTargets.has(targetPort)
+
+  const installForwarder = async (targetPort: number, bindAddr: BindAddr): Promise<void> => {
+    if (isReservedTarget(targetPort)) return
+    if (forwarders.has(targetPort)) return
+    if (!shouldForward({ policy: opts.policy, port: targetPort })) {
+      // Policy excluded the port. Tell the container so consumers waiting on
+      // port-forward-result can surface a diagnostic instead of hanging.
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: false, reason: 'policy excluded' })
       return
     }
     try {
-      const listener = await listenHost(hostBind, port, {
-        onConnection: (sock) => handleHostConnection(port, sock),
+      const listener = await listenHost(hostBind, targetPort, {
+        onConnection: (sock) => handleHostConnection(targetPort, sock),
       })
-      forwarders.set(port, { port, bindAddr, listener, streams: new Map() })
-      emit({ kind: 'port-forward-opened', containerName: opts.containerName, port, bindAddr })
-      if (ws) ws.send({ type: 'port-forward-result', port, ok: true, hostPort: listener.port })
+      // Ordinary auto-forwards are 1:1, so targetPort and hostPort match.
+      forwarders.set(listener.port, {
+        targetPort,
+        hostPort: listener.port,
+        bindAddr,
+        reserved: false,
+        listener,
+        streams: new Map(),
+      })
+      emit({
+        kind: 'port-forward-opened',
+        containerName: opts.containerName,
+        port: targetPort,
+        hostPort: listener.port,
+        bindAddr,
+      })
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: listener.port })
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
-      log(`forward bind ${port}: ${reason}`)
-      emit({ kind: 'port-forward-failed', containerName: opts.containerName, port, reason })
-      if (ws) ws.send({ type: 'port-forward-result', port, ok: false, reason })
+      log(`forward bind ${targetPort}: ${reason}`)
+      emit({ kind: 'port-forward-failed', containerName: opts.containerName, port: targetPort, reason })
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: false, reason })
     }
   }
 
-  const removeForwarder = (port: number, reason: 'container-released' | 'host-error'): void => {
-    const fwd = forwarders.get(port)
+  const installReservedForwarder = async (targetPort: number, hostCandidates: number[]): Promise<void> => {
+    const existingHostPort = reservedTargets.get(targetPort)
+    if (existingHostPort !== undefined) {
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: existingHostPort })
+      return
+    }
+    if (!shouldForward({ policy: opts.policy, port: targetPort })) {
+      if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: false, reason: 'policy excluded' })
+      return
+    }
+
+    // Claim the target and evict any auto-forward that already won the race
+    // before the reserved bind below yields control to the event loop.
+    pendingReservedTargets.add(targetPort)
+    removeAutoForwarderForTarget(targetPort, 'container-released')
+
+    let lastReason = 'no host candidates'
+    for (const hostPort of hostCandidates) {
+      try {
+        const listener = await listenHost(hostBind, hostPort, {
+          onConnection: (sock) => handleHostConnection(hostPort, sock),
+        })
+        // `port` remains the in-container target; `hostPort` is what the host
+        // browser opens. Reserved forwards deliberately allow them to differ.
+        forwarders.set(listener.port, {
+          targetPort,
+          hostPort: listener.port,
+          bindAddr: '127.0.0.1',
+          reserved: true,
+          listener,
+          streams: new Map(),
+        })
+        reservedTargets.set(targetPort, listener.port)
+        pendingReservedTargets.delete(targetPort)
+        emit({
+          kind: 'port-forward-opened',
+          containerName: opts.containerName,
+          port: targetPort,
+          hostPort: listener.port,
+          bindAddr: '127.0.0.1',
+        })
+        if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: true, hostPort: listener.port })
+        return
+      } catch (err) {
+        lastReason = err instanceof Error ? err.message : String(err)
+        log(`reserved forward bind ${hostPort} for ${targetPort}: ${lastReason}`)
+      }
+    }
+    pendingReservedTargets.delete(targetPort)
+    emit({ kind: 'port-forward-failed', containerName: opts.containerName, port: targetPort, reason: lastReason })
+    if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: false, reason: lastReason })
+  }
+
+  const removeForwarder = (hostPort: number, reason: 'container-released' | 'host-error'): void => {
+    const fwd = forwarders.get(hostPort)
     if (!fwd) return
-    forwarders.delete(port)
+    forwarders.delete(hostPort)
+    if (fwd.reserved) reservedTargets.delete(fwd.targetPort)
     try {
       fwd.listener.stop()
     } catch {}
-    for (const [streamId] of fwd.streams) closeStream(port, streamId, false)
-    emit({ kind: 'port-forward-closed', containerName: opts.containerName, port, reason })
+    for (const [streamId] of fwd.streams) closeStream(hostPort, streamId, false)
+    emit({
+      kind: 'port-forward-closed',
+      containerName: opts.containerName,
+      port: fwd.targetPort,
+      hostPort: fwd.hostPort,
+      reason,
+    })
+  }
+
+  const removeAutoForwarderForTarget = (targetPort: number, reason: 'container-released' | 'host-error'): void => {
+    for (const [hostPort, fwd] of Array.from(forwarders)) {
+      if (!fwd.reserved && fwd.targetPort === targetPort) removeForwarder(hostPort, reason)
+    }
   }
 
   const teardownAllForwarders = (reason: 'broker-stopped' | 'deregistered' | 'host-error'): void => {
-    for (const port of Array.from(forwarders.keys())) {
-      const fwd = forwarders.get(port)
+    for (const hostPort of Array.from(forwarders.keys())) {
+      const fwd = forwarders.get(hostPort)
       if (!fwd) continue
-      forwarders.delete(port)
+      forwarders.delete(hostPort)
+      if (fwd.reserved) reservedTargets.delete(fwd.targetPort)
       try {
         fwd.listener.stop()
       } catch {}
@@ -209,7 +300,19 @@ export function createBroker(opts: BrokerOptions): Broker {
           stream?.sock.end()
         } catch {}
       }
-      emit({ kind: 'port-forward-closed', containerName: opts.containerName, port, reason })
+      emit({
+        kind: 'port-forward-closed',
+        containerName: opts.containerName,
+        port: fwd.targetPort,
+        hostPort: fwd.hostPort,
+        reason,
+      })
+    }
+  }
+
+  const teardownAutoForwarders = (reason: 'host-error'): void => {
+    for (const [hostPort, fwd] of Array.from(forwarders)) {
+      if (!fwd.reserved) removeForwarder(hostPort, reason)
     }
   }
 
@@ -228,14 +331,19 @@ export function createBroker(opts: BrokerOptions): Broker {
         return
       case 'port-listen-snapshot':
         for (const { port, bindAddr } of msg.ports) {
-          void installForwarder(port, bindAddr)
+          if (!isReservedTarget(port)) void installForwarder(port, bindAddr)
         }
         return
       case 'port-listen-opened':
+        if (isReservedTarget(msg.port)) return
         void installForwarder(msg.port, msg.bindAddr)
         return
       case 'port-listen-closed':
-        removeForwarder(msg.port, 'container-released')
+        if (isReservedTarget(msg.port)) return
+        removeAutoForwarderForTarget(msg.port, 'container-released')
+        return
+      case 'port-forward-request':
+        void installReservedForwarder(msg.targetPort, msg.hostCandidates)
         return
       case 'relay-open-ack': {
         const port = findStreamPort(msg.streamId)
@@ -303,7 +411,7 @@ export function createBroker(opts: BrokerOptions): Broker {
     client.onMessage(handleContainerMessage)
     client.onClose(() => {
       ws = null
-      teardownAllForwarders('host-error')
+      teardownAutoForwarders('host-error')
       scheduleReconnect()
     })
 

@@ -1,65 +1,73 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { rmSync, readFileSync } from 'node:fs'
 
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
+import {
+  __resetForwardRequestBus,
+  __resetForwardResultBus,
+  publishForwardResult,
+  subscribeForwardRequest,
+} from '@/portbroker'
 
-import agentBrowserPlugin, { __resetProxyForTesting, __waitForProxyBindForTesting } from './index'
+import agentBrowserPlugin, { __resetForwardRequestForTesting } from './index'
 
-beforeEach(() => {
-  process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
-  process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT'] = '0'
-})
+const HINT_PATH = '/tmp/typeclaw-agent-browser-proxy-port'
 
-afterEach(async () => {
-  // Drain the background bind before clearing env. Otherwise an in-flight bind
-  // reads readPortConfig() after the delete, falls back to the default 4848,
-  // and collides with whatever parallel test holds that port (flaky warning).
-  await __waitForProxyBindForTesting()
-  __resetProxyForTesting()
-  delete process.env['TYPECLAW_DASHBOARD_PROXY_PORT']
-  delete process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT']
+afterEach(() => {
+  __resetForwardRequestForTesting()
+  __resetForwardRequestBus()
+  __resetForwardResultBus()
+  delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
+  rmSync(HINT_PATH, { force: true })
 })
 
 describe('agent-browser plugin', () => {
-  test('contributes the agent-browser skill directory and no hooks/tools', async () => {
+  test('factory returns immediately, exports the skill directory, and no hooks/tools', async () => {
+    process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = 'tok'
+    const factoryStart = Date.now()
+
     const exports = await bootPlugin('/agent')
 
+    expect(Date.now() - factoryStart).toBeLessThan(500)
     expect(exports.skillsDirs).toEqual([expect.stringContaining('bundled-plugins/agent-browser/skills')])
     expect(exports.tools).toBeUndefined()
     expect(exports.hooks).toBeUndefined()
   })
 
-  test('binds the dashboard proxy in the background after the plugin factory returns', async () => {
-    const messages: string[] = []
-    const logger = {
-      info: (msg: string) => messages.push(`info:${msg}`),
-      warn: (msg: string) => messages.push(`warn:${msg}`),
-      error: (msg: string) => messages.push(`error:${msg}`),
-    }
+  test('publishes a reserved forward request and records the won host port from the result bus', async () => {
+    process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = 'tok'
+    const requests: unknown[] = []
+    subscribeForwardRequest((event) => requests.push(event))
 
-    const factoryStart = Date.now()
-    await agentBrowserPlugin.plugin(
-      createPluginContext({
-        name: 'agent-browser',
-        version: undefined,
-        agentDir: '/agent',
-        config: undefined,
-        logger,
-        permissions: noopPermissionService,
-        spawnSubagent: async () => {},
-        isBooted: () => true,
-      }),
-    )
-    const factoryReturnedAt = Date.now()
+    await bootPlugin('/agent')
+    publishForwardResult({ port: 4848, ok: true, hostPort: 4851 })
 
-    // Factory must return immediately — the bind happens off the critical path.
-    // Without this guarantee the boot sequence would block on bindWithForward
-    // before the broker that delivers forward-result events even exists.
-    expect(factoryReturnedAt - factoryStart).toBeLessThan(500)
+    await waitFor(() => readHint() === '4851')
+    expect(requests).toEqual([
+      {
+        targetPort: 4848,
+        hostCandidates: [4848, 4849, 4850, 4851, 4852, 4853, 4854, 4855, 4856, 4857],
+        reason: 'agent-browser-dashboard',
+      },
+    ])
+  })
 
-    await __waitForProxyBindForTesting()
+  test('broker-disabled writes a diagnostic instead of a confident port', async () => {
+    await bootPlugin('/agent')
 
-    expect(messages.some((m) => m.startsWith('info:dashboard proxy listening on port '))).toBe(true)
+    await waitFor(() => readHint().includes('broker is disabled'))
+    expect(readHint()).not.toBe('4848')
+  })
+
+  test('forward failure writes a diagnostic instead of a confident port', async () => {
+    process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = 'tok'
+    await bootPlugin('/agent')
+
+    publishForwardResult({ port: 4848, ok: false, reason: 'EADDRINUSE' })
+
+    await waitFor(() => readHint().includes('unavailable'))
+    expect(readHint()).not.toBe('4848')
   })
 })
 
@@ -76,4 +84,21 @@ async function bootPlugin(agentDir: string) {
       isBooted: () => true,
     }),
   )
+}
+
+function readHint(): string {
+  try {
+    return readFileSync(HINT_PATH, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await Bun.sleep(10)
+  }
+  throw new Error('condition not met')
 }

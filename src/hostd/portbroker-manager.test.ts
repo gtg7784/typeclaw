@@ -58,6 +58,7 @@ describe('createPortbrokerManager Tailscale Serve', () => {
       kind: 'port-forward-opened',
       containerName: 'coder',
       port: 5173,
+      hostPort: 5173,
       bindAddr: '127.0.0.1',
     })
     await settle()
@@ -65,7 +66,7 @@ describe('createPortbrokerManager Tailscale Serve', () => {
     await manager.stop('coder', 'deregistered')
     expect(stopped).toBe(1)
     expect(forwarded).toEqual([
-      { kind: 'port-forward-opened', containerName: 'coder', port: 5173, bindAddr: '127.0.0.1' },
+      { kind: 'port-forward-opened', containerName: 'coder', port: 5173, hostPort: 5173, bindAddr: '127.0.0.1' },
     ])
     expect(calls).toEqual([
       ['status', '--json'],
@@ -76,6 +77,44 @@ describe('createPortbrokerManager Tailscale Serve', () => {
       { kind: 'tailscale-serve-opened', containerName: 'coder', port: 5173 },
       { kind: 'tailscale-serve-closed', containerName: 'coder', port: 5173 },
     ])
+  })
+
+  test('serves the bound host port for reserved forwards', async () => {
+    const calls: string[][] = []
+    let captured: BrokerOptions | null = null
+    const manager = createPortbrokerManager({
+      resolveHostPortFor: async () => 12345,
+      tailscaleExec: fakeTailscaleExec(calls),
+      createBrokerFor: (opts): Broker => {
+        captured = opts
+        return { start: () => {}, stop: async () => {}, forwardedPorts: () => [] }
+      },
+    })
+
+    await manager.start({
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      policy: { allow: '*' },
+      wsHostPort: 12345,
+      brokerToken: 'tok',
+      onEvent: () => {},
+      onTailscaleServeEvent: () => {},
+    })
+
+    requireCapturedOptions(captured).onEvent({
+      kind: 'port-forward-opened',
+      containerName: 'coder',
+      port: 4848,
+      hostPort: 4849,
+      bindAddr: '127.0.0.1',
+    })
+    await settle()
+
+    expect(calls).toEqual([
+      ['status', '--json'],
+      ['serve', '--bg', '--tcp=4849', '4849'],
+    ])
+    await manager.stop('coder', 'deregistered')
   })
 
   test('off-switch policy never opens a broker connection or serves tailscale ports', async () => {

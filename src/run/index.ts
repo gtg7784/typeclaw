@@ -57,7 +57,7 @@ import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
 import type { CronHandlerContext } from '@/plugin/types'
-import { createContainerBroker, publishForwardResult } from '@/portbroker'
+import { createContainerBroker, publishForwardResult, subscribeForwardRequest } from '@/portbroker'
 import { formatChannelReloadSummary, ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import {
@@ -743,11 +743,10 @@ export async function startAgent({
               payload: { kind: 'portbroker-log', event },
             })
           },
-          // Re-publish to the in-process bus so consumers (today: the
-          // agent-browser plugin's bind-with-forward retry loop) can subscribe
-          // without holding a reference to the broker. See src/portbroker/
-          // forward-result-bus.ts for the contract.
+          // Re-publish to in-process buses so plugin code can talk to the
+          // broker without holding a ContainerBroker reference.
           onForwardResult: (event) => publishForwardResult(event),
+          onForwardRequestSubscribe: (cb) => subscribeForwardRequest(cb),
         })
       : undefined
   const containerBrokerOpt = containerBroker ? { containerBroker } : {}

@@ -1,9 +1,8 @@
 // In-process event bus for `port-forward-result` events emitted by the
 // host-side broker over the WS to the container side. Lives as a module-level
 // singleton so the run-loop wiring (src/run/index.ts) can publish events from
-// the broker callback while consumers (e.g. the agent-browser plugin's
-// bind-with-forward retry loop) subscribe by importing this module without
-// needing a reference to the ContainerBroker itself.
+// the broker callback while consumers subscribe by importing this module
+// without needing a reference to the ContainerBroker itself.
 //
 // Tests should call `__resetForwardResultBus()` in afterEach so subscriptions
 // from a previous test don't leak.
