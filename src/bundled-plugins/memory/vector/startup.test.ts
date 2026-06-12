@@ -4,10 +4,10 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { fragmentContentHash } from '../fragment-parser'
 import { renderShard } from '../frontmatter'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import type { EmbedFn } from './hybrid'
+import { topicPassage } from './passages'
 import { buildStartupVectorIndex } from './startup'
 import { VectorStore } from './store'
 
@@ -102,7 +102,7 @@ describe('buildStartupVectorIndex', () => {
       model: 'Xenova/multilingual-e5-base@fp32',
       dims: 8,
       embedding: vector({ 0: 1 }),
-      contentHash: fragmentContentHash({ topic: 'Carried Over', body: 'Content unchanged across a dtype switch.' }),
+      contentHash: topicPassage('carried-over', 'Carried Over', 'Content unchanged across a dtype switch.').contentHash,
     })
     seed.close()
     const embeddedTexts: string[] = []
@@ -125,6 +125,31 @@ describe('buildStartupVectorIndex', () => {
     } finally {
       store.close()
     }
+  })
+
+  it('embeds only the belief prose, stripping citation lines from the topic text', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(
+      agentDir,
+      'package-manager',
+      'Package Manager',
+      [
+        'The user consistently uses pnpm.',
+        'fragments:',
+        '- streams/2026-06-11#019e2eca-6fc5-71ef-add9-67a0955a4b35',
+        '- streams/2026-06-12#019e2ecf-f2d5-70ee-83f6-005fb5451c51',
+        'superseded:',
+        '- streams/2026-06-10#019e2ec0-1111-7000-8000-000000000000',
+      ].join('\n'),
+    )
+    const embeddedTexts: string[] = []
+
+    await buildStartupVectorIndex(agentDir, async (texts) => {
+      embeddedTexts.push(...texts)
+      return texts.map(() => vector({ 1: 1 }))
+    })
+
+    expect(embeddedTexts).toEqual(['Package Manager\nThe user consistently uses pnpm.'])
   })
 
   it('prunes superseded stream rows so they cannot crowd active candidates', async () => {

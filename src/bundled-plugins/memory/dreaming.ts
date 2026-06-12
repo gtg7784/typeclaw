@@ -20,7 +20,6 @@ import {
   loadDreamingState,
   saveDreamingState,
 } from './dreaming-state'
-import { fragmentContentHash } from './fragment-parser'
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
 import { listShardSlugs, loadAllShards, loadShard } from './load-shards'
 import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
@@ -29,6 +28,7 @@ import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
 import { embed, EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
+import { topicPassage } from './vector/passages'
 import { VectorStore } from './vector/store'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -261,17 +261,17 @@ export async function syncTopicVectorsFromSnapshotDiff(
       const slug = slugFromSnapshotPath(path)
       const shard = await loadShard(agentDir, slug)
       if (shard === null) continue
-      const text = `${shard.frontmatter.heading}\n${shard.body}`
-      const [embedding] = await embedFn([text], 'passage')
+      const passage = topicPassage(slug, shard.frontmatter.heading, shard.body)
+      const [embedding] = await embedFn([passage.text], 'passage')
       if (embedding === undefined) continue
       store.upsert({
-        id: `topic:${slug}`,
-        source: 'topic',
-        key: slug,
+        id: passage.id,
+        source: passage.source,
+        key: passage.key,
         model: EMBEDDING_MODEL_ID,
         dims: embedding.length,
         embedding,
-        contentHash: fragmentContentHash({ topic: shard.frontmatter.heading, body: shard.body }),
+        contentHash: passage.contentHash,
       })
     }
 
