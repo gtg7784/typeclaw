@@ -97,4 +97,41 @@ describe('listViewerItems', () => {
     expect(writableSessionId).toBeNull()
     expect(items.filter((i) => i.kind === 'tui')).toHaveLength(0)
   })
+
+  test('overlays a live-only registry session not yet on disk', async () => {
+    // given one disk session and a registry session with no .jsonl yet
+    await seed(`a_${ID_A}.jsonl`, { kind: 'tui' }, 1000)
+
+    const { items } = await listViewerItems({
+      sessionsDir,
+      containerRunning: true,
+      liveSessions: [
+        { sessionId: ID_B, origin: { kind: 'cron', jobId: 'j', jobKind: 'prompt' }, registeredAtMs: 9_000_000 },
+      ],
+    })
+
+    // then the live session appears as a read-only session row flagged live
+    const liveItem = items.find((i) => i.kind !== 'logs' && i.summary.sessionId === ID_B)
+    expect(liveItem).toBeDefined()
+    if (liveItem === undefined || liveItem.kind === 'logs') throw new Error('unreachable')
+    expect(liveItem.summary.live).toBe(true)
+    expect(liveItem.writable).toBe(false)
+  })
+
+  test('a live tui session already flushed to disk is not duplicated', async () => {
+    // given a tui session present both on disk and in the registry
+    await seed(`a_${ID_A}.jsonl`, { kind: 'tui' }, 1000)
+
+    const { items } = await listViewerItems({
+      sessionsDir,
+      containerRunning: true,
+      liveSessions: [{ sessionId: ID_A, origin: { kind: 'tui' }, registeredAtMs: 9_000_000 }],
+    })
+
+    // then it appears exactly once, sourced from disk (no live flag)
+    const rows = items.filter((i) => i.kind !== 'logs' && i.summary.sessionId === ID_A)
+    expect(rows).toHaveLength(1)
+    if (rows[0]?.kind === 'logs') throw new Error('unreachable')
+    expect(rows[0]?.summary.live).toBeUndefined()
+  })
 })
