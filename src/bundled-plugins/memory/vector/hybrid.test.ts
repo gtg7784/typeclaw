@@ -115,6 +115,9 @@ describe('hybridSearch', () => {
       )
       writeStreamFragment(agentDir, '2026-06-10', fragmentId, 'pnpm', 'User installs with pnpm.')
       store.upsert(row(`stream:2026-06-10#${fragmentId}`, `2026-06-10#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+      // production always embeds every shard, so the citing topic has a vector;
+      // it is off-query here so the stream hit (cosine 1) clearly stands above it
+      store.upsert(row('topic:package-manager', 'package-manager', vector({ 5: 1 })))
 
       // when the fragment matches by vector
       const results = await hybridSearch('pnpm', store, agentDir, 5, embedFrom({ 0: 1 }))
@@ -147,6 +150,10 @@ describe('hybridSearch', () => {
       )
       writeStreamFragment(agentDir, '2026-06-10', fragmentId, 'pnpm', 'Uses pnpm and minimal Docker images.')
       store.upsert(row(`stream:2026-06-10#${fragmentId}`, `2026-06-10#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+      // production always embeds every shard; both citing topics carry off-query
+      // vectors so the stream hit (cosine 1) clearly stands above them
+      store.upsert(row('topic:package-manager', 'package-manager', vector({ 5: 1 })))
+      store.upsert(row('topic:docker-preferences', 'docker-preferences', vector({ 6: 1 })))
 
       // when the shared fragment matches by vector
       const results = await hybridSearch('pnpm docker', store, agentDir, 5, embedFrom({ 0: 1 }))
@@ -243,6 +250,154 @@ describe('hybridSearch', () => {
   })
 })
 
+describe('hybridSearch relevance gate', () => {
+  it('suppresses the vector lane when no topic clears the per-query baseline (no-match)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a flat band of topics, none meaningfully closer to the query than
+      // the rest — the E5 no-match shape. Query has no keyword hit either.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+
+      const results = await hybridSearch('zxqw nonexistent gibberish token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps a topic whose vector clearly stands above the baseline (real match)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a flat band plus one topic that aligns strongly with the query
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+      writeTopic(agentDir, 'winner', 'Winner', 'The clearly matching topic for the query.')
+      store.upsert(row('topic:winner', 'winner', vector({ 0: 1 })))
+
+      const results = await hybridSearch('the matching query', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results[0]?.key).toBe('winner')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('lets a keyword hit survive even when the vector lane is fully suppressed', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a flat no-match vector band, but ONE topic literally contains the
+      // rare token the user typed — high-precision lexical evidence must survive
+      // the cosine no-match veto.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+      writeTopic(agentDir, 'pr-851', 'PR 851', 'Notes about PR #851 zxqw-marker handling.')
+      store.upsert(row('topic:pr-851', 'pr-851', bandedVector(0.779)))
+
+      const results = await hybridSearch('zxqw-marker', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results.map((r) => r.key)).toContain('pr-851')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never suppresses a below-floor corpus to zero', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: only 3 shards — too few to estimate a baseline
+      writeTopic(agentDir, 'a', 'A', 'Note A.')
+      writeTopic(agentDir, 'b', 'B', 'Note B.')
+      writeTopic(agentDir, 'c', 'C', 'Note C.')
+      store.upsert(row('topic:a', 'a', bandedVector(0.78)))
+      store.upsert(row('topic:b', 'b', bandedVector(0.779)))
+      store.upsert(row('topic:c', 'c', bandedVector(0.778)))
+
+      const results = await hybridSearch('anything', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results.length).toBeGreaterThan(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps a stream-vector match even when the topic distribution is a flat no-match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a full flat topic band (no topic clears the baseline) PLUS one
+      // undreamed stream fragment that the query semantically matches, and NO
+      // keyword hit — the freshness-window case. The topic no-match must not
+      // veto the relevant stream candidate.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'fresh', 'A brand new undreamed observation.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+
+      const results = await hybridSearch('zxqw nonexistent gibberish token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      const streamHit = results.find((r) => r.source === 'stream')
+      expect(streamHit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('suppresses an in-band stream neighbor on a no-match query (no closest-neighbor leak)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a flat topic no-match band AND a stream fragment that also sits
+      // inside the band (an irrelevant nearest neighbor, not a real match), with
+      // no keyword hit. The stream row must NOT inject — otherwise the no-match
+      // query leaks closest-neighbors-regardless through the stream partition.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'noise', 'An unrelated undreamed fragment.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, bandedVector(0.781), 'stream'))
+
+      const results = await hybridSearch('zxqw nonexistent gibberish token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('drops a semantic-only stream row when there is no topic baseline to judge it', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: too few topics to form a baseline, plus an in-band stream neighbor
+      // with no keyword corroboration — with no band to measure against, an
+      // uncorroborated semantic-only stream row must not inject on a no-match.
+      writeTopic(agentDir, 'a', 'A', 'Note A.')
+      writeTopic(agentDir, 'b', 'B', 'Note B.')
+      store.upsert(row('topic:a', 'a', bandedVector(0.5)))
+      store.upsert(row('topic:b', 'b', bandedVector(0.49)))
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'noise', 'An unrelated undreamed fragment.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, bandedVector(0.5), 'stream'))
+
+      const results = await hybridSearch('zxqw nonexistent gibberish token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results.some((r) => r.source === 'stream')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+})
+
 function createFixture(): { agentDir: string; store: VectorStore } {
   const agentDir = join(tmpdir(), `typeclaw-hybrid-${randomUUID()}`)
   testDirs.push(agentDir)
@@ -304,6 +459,17 @@ function row(
 
 function embedFrom(values: Record<number, number>): EmbedFn {
   return async () => [vector(values)]
+}
+
+// A unit vector whose cosine against the query unit vector vector({ 0: 1 }) is
+// exactly `target`: put `target` on axis 0 and the remaining magnitude on a
+// shared off-query axis, so a whole band of these sits at near-identical cosine
+// to the query — the flat E5 no-match distribution.
+function bandedVector(target: number): Float32Array {
+  const result = new Float32Array(8)
+  result[0] = target
+  result[1] = Math.sqrt(Math.max(0, 1 - target * target))
+  return result
 }
 
 function vector(values: Record<number, number>): Float32Array {

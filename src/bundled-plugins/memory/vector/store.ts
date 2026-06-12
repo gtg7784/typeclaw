@@ -15,6 +15,8 @@ export type VectorRow = {
 
 export type VectorMeta = { id: string; model: string; contentHash: string }
 
+export type ScoredVectorRow = { row: VectorRow; score: number }
+
 type StoredVectorRow = {
   id: string
   source: 'topic' | 'stream'
@@ -83,20 +85,27 @@ export class VectorStore {
 
   query(embedding: Float32Array, topK: number, modelId: string): VectorRow[] {
     if (topK <= 0) return []
+    return this.queryScored(embedding, modelId)
+      .slice(0, topK)
+      .map(({ row }) => row)
+  }
 
-    // Filter by embedding identity, not dims alone: a stale row from a different
-    // model/dtype variant can share the same dims but lives in an incompatible
-    // vector space, so cosine against it is garbage. Excluding it here keeps a
-    // partial re-embed (mixed variants mid-rebuild) at reduced recall, never
-    // wrong scores.
+  // Same cosine scan as `query` but returns every compatible row WITH its score
+  // and unsliced, so a caller can reason about the full score distribution (the
+  // relevance gate's per-query baseline) before deciding how many to keep.
+  //
+  // Filter by embedding identity, not dims alone: a stale row from a different
+  // model/dtype variant can share the same dims but lives in an incompatible
+  // vector space, so cosine against it is garbage. Excluding it here keeps a
+  // partial re-embed (mixed variants mid-rebuild) at reduced recall, never
+  // wrong scores.
+  queryScored(embedding: Float32Array, modelId: string): ScoredVectorRow[] {
     return this.db
       .query<StoredVectorRow, [string, number]>('SELECT * FROM vectors WHERE model = ? AND dims = ?')
       .all(modelId, embedding.length)
       .map(toVectorRow)
       .map((row) => ({ row, score: cosineSimilarity(embedding, row.embedding) }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, topK)
-      .map(({ row }) => row)
   }
 
   deleteOtherModels(modelId: string): void {
