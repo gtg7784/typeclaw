@@ -11,7 +11,13 @@ import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
-import { loadMemoryInjectionPlan, renderDedupedMemorySection, renderRetrievedMemorySection } from './load-memory'
+import {
+  forceIndexForChannel,
+  loadMemoryInjectionPlan,
+  renderDedupedMemorySection,
+  renderMemorySection,
+  renderRetrievedMemorySection,
+} from './load-memory'
 import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
@@ -148,9 +154,10 @@ const VECTOR_TURN_TOP_K = 10
 // re-sending identical bodies every turn while keeping every topic named and
 // recoverable. Over budget falls back to top-K hybrid search.
 //
-// Channel origins are forced to index mode here (headings/slugs only) BEFORE the
-// dedup split — the dedup path renders full bodies, which must never reach a
-// channel turn (memory-bleed defense). Dedup state is therefore non-channel only.
+// Channel origins never carry bodies (memory-bleed defense). A channel direct-mode
+// turn is force-indexed to a headings/slugs-only section over EVERY shard, not run
+// through hybridSearch: hybrid is relevance-filtered top-K, so an off-topic turn or
+// stale vector index could silently drop headings that direct mode always had.
 async function renderVectorTurnMemory(
   event: { agentDir: string; userPrompt: string; origin?: SessionOrigin },
   injectionBudgetBytes: number,
@@ -159,7 +166,12 @@ async function renderVectorTurnMemory(
 ): Promise<string> {
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   const isChannel = event.origin?.kind === 'channel'
-  if (plan.mode === 'direct' && !isChannel) {
+  if (plan.mode === 'direct' && isChannel) {
+    const indexed = forceIndexForChannel(plan, { origin: event.origin, injectionBudgetBytes })
+    logger?.info(`[vector-retrieval] mode=index topics=${plan.shards.length} channel=forced`)
+    return renderMemorySection(indexed, { origin: event.origin })
+  }
+  if (plan.mode === 'direct') {
     const { full, unchanged } = partitionDirectShards(plan.shards, injectedState)
     logger?.info(`[vector-retrieval] mode=direct topics=${plan.shards.length} full=${full.length}`)
     return renderDedupedMemorySection(full, unchanged)

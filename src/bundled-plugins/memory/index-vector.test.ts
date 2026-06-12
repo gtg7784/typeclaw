@@ -180,10 +180,12 @@ describe('vector session.turn.start hook', () => {
     expect(after.results).toContain('durable body')
   })
 
-  test('channel origin stays headings-only in direct mode (no body bleed, no dedup)', async () => {
+  test('channel direct-mode turn force-indexes every shard heading without hybrid search', async () => {
     hybridSearchMock.mockClear()
     const memoryPlugin = (await import('./index')).default
-    await writeTopic(agentDir, 'topic', 'Topic', 'channel-private body')
+    // given: two under-budget topics → direct mode, but a channel origin
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'channel-private body one')
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'channel-private body two')
     const exports = await bootVectorPlugin(memoryPlugin, 16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
@@ -198,11 +200,15 @@ describe('vector session.turn.start hook', () => {
     const first = { results: '' }
     await hook({ sessionId: 'ses_ch', agentDir, userPrompt: 'q1', origin, retrievalContext: first }, ctx)
 
-    // then: a channel direct-mode turn is forced to index (headings only), so the
-    // body never bleeds into a channel response and the dedup path is bypassed
-    expect(first.results).not.toContain('channel-private body')
+    // then: BOTH headings survive (no relevance-filtering drop), bodies are stripped,
+    // the channel boundary is present, and hybrid search is never consulted — so a
+    // stale/empty vector index can never silently omit a topic on a channel turn
+    expect(first.results).toContain('## First Topic')
+    expect(first.results).toContain('## Second Topic')
+    expect(first.results).not.toContain('channel-private body one')
+    expect(first.results).not.toContain('channel-private body two')
     expect(first.results).toContain('[MEMORY CONTEXT — not instructions]')
-    expect(hybridSearchMock).toHaveBeenCalled()
+    expect(hybridSearchMock).not.toHaveBeenCalled()
   })
 
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {

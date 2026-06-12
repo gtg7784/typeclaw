@@ -185,7 +185,7 @@ function topicEntryFromShard(shard: TopicShard): TopicEntry {
   return { name: shard.frontmatter.heading, path: shard.path, content }
 }
 
-function forceIndexForChannel(plan: InjectionPlan, options: LoadMemoryOptions): InjectionPlan {
+export function forceIndexForChannel(plan: InjectionPlan, options: LoadMemoryOptions): InjectionPlan {
   if (options.origin?.kind !== 'channel') return plan
   if (plan.mode === 'index') return plan
   return {
