@@ -1,0 +1,126 @@
+---
+title: LINE
+description: Personal-account adapter — QR/email login, plain-text messaging, and capabilities
+icon: MessageCircle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **LINE protocol** (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+
+<Callout type="warn" title="Use a dedicated account">
+  LINE runs as a real user account, not a bot account. Other participants see that account's name and profile photo. Run
+  this adapter only on a dedicated agent account you are comfortable operating as the agent.
+</Callout>
+
+## Auth
+
+Sub-device login using QR code or email/password plus PIN. Credentials are stored in `secrets.json#channels.line` as one or more account records.
+
+Unlike bot-token adapters, `secrets.json#channels.line` is not a flat credential object — it wraps one or more account records:
+
+```json
+{
+  "channels": {
+    "line": {
+      "currentAccount": "<accountId>",
+      "accounts": {
+        "<accountId>": {
+          "account_id": "<accountId>",
+          "auth_token": "…",
+          "certificate": "…",
+          "device": "DESKTOPMAC",
+          "display_name": "…",
+          "created_at": "…",
+          "updated_at": "…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                  | Notes                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| `currentAccount`       | `string \| null` — active account id, or `null` if none |
+| `accounts.<accountId>` | Map of account id → account record (fields below)       |
+
+Each record under `accounts.<accountId>`:
+
+| Field          | Notes                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------- |
+| `account_id`   | Account identifier (matches the map key)                                                          |
+| `auth_token`   | Current session token                                                                             |
+| `certificate`  | _optional_ — device certificate that can skip the e-mail/PIN step on later re-login               |
+| `device`       | LINE device type (`DESKTOPWIN`, `DESKTOPMAC`, `ANDROID`, `ANDROIDSECONDARY`, `IOS`, or `IOSIPAD`) |
+| `display_name` | _optional_ — account display name                                                                 |
+| `created_at`   | Record creation timestamp                                                                         |
+| `updated_at`   | Last-update timestamp                                                                             |
+
+CLI: `typeclaw channel add line` (interactive QR or email login). Use `typeclaw channel set line` to rotate credentials.
+
+## Capabilities
+
+| Feature                 | Supported | Notes                                                            |
+| ----------------------- | --------- | ---------------------------------------------------------------- |
+| Outbound messages       | yes       | Plain text only                                                  |
+| Reactions               | no        |                                                                  |
+| Typing indicator        | no        |                                                                  |
+| Channel-name resolution | yes       |                                                                  |
+| Self identity           | yes       |                                                                  |
+| History                 | yes       | Limit 200 messages                                               |
+| Attachments             | no        | Inbound placeholders only; no fetchable bytes or outbound upload |
+| Membership              | no        |                                                                  |
+
+## Chat buckets
+
+LINE chats are grouped into workspace buckets for match rules and permissions:
+
+| Bucket         | Notes                             |
+| -------------- | --------------------------------- |
+| `@line-dm`     | 1:1 direct messages               |
+| `@line-group`  | Group or room chats               |
+| `@line-square` | OpenChat-style public communities |
+
+Use the `line` platform token in role match rules: `line:*`, `line:dm/*`, `line:group/*`, `line:square/*`, or `line:<chatId>`.
+
+## Quirks
+
+- **Plain text only**: LINE has no rich-text formatting. The adapter strips common markdown before sending, but write messages for a plain-text surface.
+- **No outbound attachments**: `channel_send` / `channel_reply` calls with attachments are rejected because the SDK exposes text sends only.
+- **No surfaced mentions or replies**: group and square engagement is alias-driven; there is no platform-native `@mention` or per-message reply syntax available to the adapter.
+- **Provisional registration**: chats not surfaced by `getChats` are registered provisionally on first message as `@line-group` until the next refresh can classify them.
+
+## Config
+
+```json
+{
+  "channels": {
+    "line": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `line`. Credentials live in [`secrets.json#channels.line`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
+- [`secrets.json` reference](/docs/reference/secrets-json)

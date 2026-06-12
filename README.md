@@ -31,7 +31,7 @@ If you're like me, TypeClaw is the right choice. If not, that's fine too.
 
 - 🐳 **Sandboxed by default** — every agent runs in its own Docker container with `.env` injection and bind-mounted host folders
 - 🔌 **Plugin system** — plain TypeScript modules contribute tools, skills, subagents, channels, commands, and typed config
-- 💬 **Multi-channel** — Slack, Discord, Telegram, KakaoTalk, GitHub webhooks, and a websocket TUI; one agent, many inboxes
+- 💬 **Multi-channel** — Slack, Discord, Telegram, KakaoTalk, LINE, GitHub webhooks, and a websocket TUI; one agent, many inboxes
 - ⏰ **Cron** — schedule prompts or shell commands; per-job coalescing so slow jobs don't pile up
 - 📚 **Skills on demand** — markdown procedures the agent loads only when relevant; zero token cost until used
 - 🔎 **Web research** — bundled `scout` subagent plus first-class `web_search` and `web_fetch` tools (DuckDuckGo via curl-impersonate, Wikipedia)
@@ -97,7 +97,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bu
 
 ## Acknowledgments
 
-- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `kakaotalk`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
+- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `kakaotalk`, `line`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
 - **Subagent architecture** is inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by [@code-yeongyu](https://github.com/code-yeongyu). Thanks for the shape that made this clean.
 
 ## License

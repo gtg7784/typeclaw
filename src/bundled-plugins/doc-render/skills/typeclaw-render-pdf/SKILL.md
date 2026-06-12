@@ -266,8 +266,8 @@ reports. For authored documents, stay on the Typst path above.
   ```
 
   Use a human-friendly `filename` and an absolute path. Slack, Discord, Telegram,
-  and KakaoTalk upload the file; the GitHub adapter has no attachment support, so
-  there post a link or paste the markdown.
+  and KakaoTalk upload the file; LINE and the GitHub adapter have no attachment
+  support, so there post a link or paste the markdown.
 
 - **Replying in a thread** — use `channel_reply` with the same `attachments` shape.
 

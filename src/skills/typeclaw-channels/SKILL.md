@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channels
-description: "TypeClaw channel behavior: how the agent decides to engage vs. stay silent on external messenger inbound (Discord, Slack, Telegram, KakaoTalk). Covers the `channels.<adapter>.engagement` triggers (mention/reply/dm), reply stickiness, the non-configurable solo-human fallback, history-prefetch windows, and the `alias` system — plain-text names the agent answers to, substring match semantics, peer-name suppressors, and engagement priority. Load when the user asks why the agent did or did not respond in a channel, wants to change when it auto-replies, asks to 'be quieter'/'stop auto-replying', wants it to answer to a nickname, or mentions engagement, stickiness, aliases, mentions, trigger words, suppressors, or '응답', '호출', '채널', '별칭', '왜 답을 안 해'. Access control (who is admitted at all) lives in `roles` — see typeclaw-permissions. The `channels`/`alias` schema, defaults, and safe-edit workflow live in typeclaw-config."
+description: "TypeClaw channel behavior: how the agent decides to engage vs. stay silent on external messenger inbound (Discord, Slack, Telegram, KakaoTalk, LINE). Covers the `channels.<adapter>.engagement` triggers (mention/reply/dm), reply stickiness, the non-configurable solo-human fallback, history-prefetch windows, and the `alias` system — plain-text names the agent answers to, substring match semantics, peer-name suppressors, and engagement priority. Load when the user asks why the agent did or did not respond in a channel, wants to change when it auto-replies, asks to 'be quieter'/'stop auto-replying', wants it to answer to a nickname, or mentions engagement, stickiness, aliases, mentions, trigger words, suppressors, or '응답', '호출', '채널', '별칭', '왜 답을 안 해'. Access control (who is admitted at all) lives in `roles` — see typeclaw-permissions. The `channels`/`alias` schema, defaults, and safe-edit workflow live in typeclaw-config."
 ---
 
 # typeclaw-channels
@@ -16,7 +16,7 @@ Both `channels` and `alias` are **live-reloadable** — edits take effect on the
 
 ## Channels
 
-`channels` configures which external messenger adapters are enabled and how the engagement layer should behave on each. **Access control lives in `roles`, not here** — to admit a chat, declare a role match-rule that covers it (see `typeclaw-permissions`). The shape is `channels: { "<adapter-id>": { engagement, history, enabled } }`. Today the adapters are `discord-bot`, `slack-bot`, `telegram-bot`, and `kakaotalk`.
+`channels` configures which external messenger adapters are enabled and how the engagement layer should behave on each. **Access control lives in `roles`, not here** — to admit a chat, declare a role match-rule that covers it (see `typeclaw-permissions`). The shape is `channels: { "<adapter-id>": { engagement, history, enabled } }`. Today the adapters are `discord-bot`, `slack-bot`, `telegram-bot`, `kakaotalk`, and `line`.
 
 The channels block is **live-reloadable** — edits take effect on the next `reload`, no container restart.
 
@@ -78,8 +78,8 @@ This says: the `discord-bot` adapter is enabled with default engagement; one spe
 
 This is a **`roles`** edit, not a `channels` edit. See the `typeclaw-permissions` skill for the full procedure. Short version:
 
-1. Get the platform ID (Discord channel ID, Slack channel ID, Telegram chat ID, KakaoTalk chat ID).
-2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
+1. Get the platform ID (Discord channel ID, Slack channel ID, Telegram chat ID, KakaoTalk chat ID, LINE chat ID).
+2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`, `line:<chat>`). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
 3. **`roles.<role>.match[]` edits are live-reloadable** — they take effect on the next `typeclaw reload` (the classifier marks `roles.match` as `applied`, and the permission service rebuilds its role table). Only `roles.<role>.permissions[]` edits are restart-required. So adding a match-rule to admit a channel applies on `reload`; no container restart needed.
 
 ### When the user asks "stop replying in this channel"
