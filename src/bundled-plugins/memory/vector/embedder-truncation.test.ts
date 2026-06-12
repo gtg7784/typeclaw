@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { DIMS } from './embedder'
 import { estimateTokens, TEXT_TOKEN_BUDGET } from './truncation'
@@ -56,5 +56,41 @@ describe('embedder bounding', () => {
 
     const seen = (lastExtractorInput ?? []).map((t) => t.replace(/^query: /, ''))
     expect(estimateTokens(seen[0] ?? '')).toBeLessThanOrEqual(TEXT_TOKEN_BUDGET)
+  })
+})
+
+describe('embedder bounding observability', () => {
+  let warnings: string[]
+  const originalWarn = console.warn
+
+  beforeEach(() => {
+    warnings = []
+    console.warn = (message?: unknown) => {
+      warnings.push(String(message))
+    }
+  })
+
+  afterEach(() => {
+    console.warn = originalWarn
+  })
+
+  test('emits a content-free warning naming the type and count when an input is bounded', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(['in budget', overBudgetText], 'query')
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('[memory]')
+    expect(warnings[0]).toContain('query')
+    expect(warnings[0]).toContain('1/2')
+    expect(warnings[0]).not.toContain('word')
+  })
+
+  test('does not warn when every input is within budget', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(['short a', 'short b'], 'passage')
+
+    expect(warnings).toHaveLength(0)
   })
 })

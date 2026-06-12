@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { boundEmbeddableText, estimateTokens, fragmentEmbeddableText, isOverBudget, TEXT_TOKEN_BUDGET } from './truncation'
+import {
+  boundEmbeddableText,
+  estimateTokens,
+  fragmentEmbeddableText,
+  isOverBudget,
+  TEXT_TOKEN_BUDGET,
+} from './truncation'
 
 describe('estimateTokens', () => {
   test('counts CJK characters at one token each', () => {
