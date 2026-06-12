@@ -38,6 +38,9 @@ describe('hybridSearch', () => {
       expect(exactResults.slice(0, 3).map((result) => result.key)).toContain('pr-651')
       expect(exact?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
 
+      // A natural-language prompt whose words ('focused', 'memory', 'retrieval')
+      // appear scattered in the body — never as the whole phrase. The token-OR
+      // keyword fallback corroborates the vector hit, so both lanes sum (2/61).
       const semanticResults = await hybridSearch(
         'focused memory summary retrieval',
         store,
@@ -48,7 +51,7 @@ describe('hybridSearch', () => {
       const semantic = semanticResults.find((result) => result.key === 'semantic-cache')
 
       expect(semanticResults.slice(0, 3).map((result) => result.key)).toContain('semantic-cache')
-      expect(semantic?.rrfScore).toBeCloseTo(1 / 61, 10)
+      expect(semantic?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
     } finally {
       store.close()
     }
@@ -244,6 +247,198 @@ describe('hybridSearch', () => {
       // then it resolves to itself as a stream result
       const hit = results.find((result) => result.source === 'stream')
       expect(hit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
+})
+
+describe('hybridSearch keyword lane', () => {
+  it('retrieves a shard via token-OR fallback for a full natural-language prompt', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose terms all appear, but never as the whole prompt phrase
+      writeTopic(agentDir, 'channel-reload', 'Channel Reload', 'PR #651 fixed channel reload handling.')
+
+      // when the query is a full sentence that never appears verbatim (no vector hit)
+      const results = await hybridSearch(
+        'where did we discuss the channel reload handling change',
+        store,
+        agentDir,
+        5,
+        embedFrom({ 7: 1 }),
+      )
+
+      // then the keyword lane still finds it via OR-matched tokens
+      expect(results.map((r) => r.key)).toContain('channel-reload')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('ranks a multi-token match above an alphabetically-earlier single-token match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given an alphabetically-early shard hitting one token and a late shard hitting two
+      writeTopic(agentDir, 'aaa-single', 'AAA Single', 'Mentions only docker here.')
+      writeTopic(agentDir, 'zzz-double', 'ZZZ Double', 'Mentions docker and reload together.')
+
+      // when the prompt's tokens hit both (no vector hit, no verbatim phrase)
+      const results = await hybridSearch('how do docker and reload interact', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the richer (two-token) match outranks the alphabetically-earlier one-token match
+      const single = results.findIndex((r) => r.key === 'aaa-single')
+      const double = results.findIndex((r) => r.key === 'zzz-double')
+      expect(double).toBeGreaterThanOrEqual(0)
+      expect(single).toBeGreaterThanOrEqual(0)
+      expect(double).toBeLessThan(single)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('truncates the keyword lane after ranking, not alphabetically', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given many alphabetically-early one-token shards and one late two-token shard
+      for (let i = 0; i < 12; i++) {
+        writeTopic(agentDir, `aaa-${i}`, `Weak ${i}`, 'Only docker is mentioned here.')
+      }
+      writeTopic(agentDir, 'zzz-strong', 'Strong', 'Mentions docker and reload together.')
+
+      // when topK=1 forces the lane to keep a single best result (no vector hit)
+      const results = await hybridSearch('docker reload', store, agentDir, 1, embedFrom({ 7: 1 }))
+
+      // then the late two-token match survives instead of an alphabetically-early weak one
+      expect(results[0]?.key).toBe('zzz-strong')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps exact-phrase precision when the whole query appears verbatim', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given two shards both containing every token, but only one the exact phrase
+      writeTopic(agentDir, 'exact', 'Exact', 'The runbook says docker reload first.')
+      writeTopic(agentDir, 'scattered', 'Scattered', 'Docker is here; reload is mentioned far away.')
+
+      // when the query IS a verbatim phrase in one shard (no vector hit)
+      const results = await hybridSearch('docker reload', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the phrase path returns the exact match and never widens to token-OR
+      expect(results.map((r) => r.key)).toContain('exact')
+      expect(results.map((r) => r.key)).not.toContain('scattered')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('injects no keyword-only memory for a low-information prompt of only common words', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given shards that happen to contain common function words in their bodies
+      writeTopic(agentDir, 'note-a', 'Note A', 'We did say that it was about the thing here.')
+      writeTopic(agentDir, 'note-b', 'Note B', 'What we have is over there with them.')
+
+      // when the whole prompt carries no content token (vector lane gated out)
+      const results = await hybridSearch('what did we say about it', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the keyword lane contributes nothing — no arbitrary memory is injected
+      expect(results).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps content tokens when a prompt mixes stopwords with real terms', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose content words ('pr', '#651', 'reload') the prompt shares
+      writeTopic(agentDir, 'pr-651', 'PR 651', 'PR #651 fixed channel reload handling.')
+
+      // when the prompt buries those terms among stopwords (no vector hit)
+      const results = await hybridSearch('how does the PR #651 reload work', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the surviving content tokens still retrieve the shard
+      expect(results.map((r) => r.key)).toContain('pr-651')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('retrieves a non-ASCII (CJK) content token that the English stopword filter must not drop', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard keyed on a Korean name
+      writeTopic(agentDir, 'person-note', 'Person Note', 'Reply conventions for 홍길동 in the group chat.')
+
+      // when a Korean prompt mixes the name with function words (no vector hit)
+      const results = await hybridSearch('어디서 홍길동 얘기했지', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the non-ASCII token survives filtering and retrieves the shard
+      expect(results.map((r) => r.key)).toContain('person-note')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('does not let a function-word-heavy legacy shard outrank the real content match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a verbose shard echoing ONLY the prompt's function words, and a
+      // terse shard carrying the actual content terms
+      writeTopic(agentDir, 'aaa-legacy', 'Legacy', 'Can you what we about the it over here they had this that.')
+      writeTopic(agentDir, 'zzz-real', 'Real', 'The deploy schedule moved to Friday.')
+
+      // when the prompt buries 'deploy schedule' among function words (no vector hit)
+      const results = await hybridSearch(
+        'can you what we about the deploy schedule',
+        store,
+        agentDir,
+        5,
+        embedFrom({ 7: 1 }),
+      )
+
+      // then only the real content shard surfaces; function words score nothing,
+      // so the legacy shard never enters the lane
+      expect(results[0]?.key).toBe('zzz-real')
+      expect(results.map((r) => r.key)).not.toContain('aaa-legacy')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('does not match a short token inside an unrelated word (ascii-boundary)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a noise shard where 'in'/'do' only appear INSIDE other words
+      writeTopic(agentDir, 'noise', 'Noise', 'Ongoing documentation lives in the index folder.')
+      // and a real shard where the tokens stand alone
+      writeTopic(agentDir, 'real', 'Real', 'CI uses Go for the deploy helper.')
+
+      // when the query's tokens are short standalone words (no vector hit)
+      const results = await hybridSearch('ci go', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then only the shard with standalone tokens matches; the substring noise does not
+      expect(results.map((r) => r.key)).toContain('real')
+      expect(results.map((r) => r.key)).not.toContain('noise')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('still retrieves standalone short content tokens (pr, ci) under ascii-boundary', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose body carries standalone short tokens
+      writeTopic(agentDir, 'short-tokens', 'Short Tokens', 'The PR landed after CI went green.')
+
+      // when the prompt asks about them among function words (no vector hit)
+      const results = await hybridSearch('what about the pr and ci', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then boundary matching keeps the standalone short tokens retrievable
+      expect(results.map((r) => r.key)).toContain('short-tokens')
     } finally {
       store.close()
     }

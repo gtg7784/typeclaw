@@ -2,7 +2,15 @@ import { createHash } from 'node:crypto'
 
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
-import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
+import {
+  buildMatcher,
+  distinctTokens,
+  hasNonAscii,
+  searchAll,
+  searchAllRanked,
+  type MemorySearchMatch,
+  type StreamMatch,
+} from '../search-tool'
 import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
@@ -82,6 +90,11 @@ function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK:
   return [...keptTopics, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
 }
 
+// Phrase-first, then token-OR fallback (mirrors `memory_search`). `hybridSearch`'s
+// query is always the whole user prompt, which never appears verbatim in a shard,
+// so a phrase-only lane returns nothing every real turn and RRF degenerates to the
+// vector lane alone. The `searchAllRanked` fallback also gives RRF a
+// matched-token-count rank (truncated after ranking) instead of alphabetical order.
 function keywordLane(
   query: string,
   shards: TopicShard[],
@@ -90,8 +103,138 @@ function keywordLane(
 ): MemorySearchMatch[] {
   const matcher = buildMatcher(query, false)
   if (typeof matcher === 'string') return []
-  const result = searchAll(shards, streamDays, matcher, { full: false, maxResults })
-  return 'matches' in result ? result.matches : []
+  const phrase = searchAll(shards, streamDays, matcher, { full: false, maxResults })
+  const phraseMatches = 'matches' in phrase ? phrase.matches : []
+  if (phraseMatches.length > 0) return phraseMatches
+
+  const tokens = distinctHybridContentTokens(query)
+  if (tokens.length === 0) return []
+  if (tokens.length === 1 && tokens[0] === query.trim().toLowerCase()) return []
+  const ranked = searchAllRanked(shards, streamDays, tokens, {
+    full: false,
+    maxResults,
+    tokenMatchMode: 'ascii-boundary',
+  })
+  return 'matches' in ranked ? ranked.matches : []
+}
+
+// Stopwords are judged ONLY against a token's ASCII-alpha core (below), so this
+// set is intentionally English-only — non-ASCII tokens never reach it.
+const HYBRID_PROMPT_STOPWORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'and',
+  'or',
+  'but',
+  'i',
+  'me',
+  'my',
+  'mine',
+  'you',
+  'your',
+  'yours',
+  'he',
+  'him',
+  'his',
+  'she',
+  'her',
+  'hers',
+  'it',
+  'its',
+  'we',
+  'us',
+  'our',
+  'ours',
+  'they',
+  'them',
+  'their',
+  'theirs',
+  'this',
+  'that',
+  'these',
+  'those',
+  'here',
+  'there',
+  'what',
+  'when',
+  'where',
+  'who',
+  'whom',
+  'whose',
+  'why',
+  'how',
+  'which',
+  'is',
+  'am',
+  'are',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'do',
+  'does',
+  'did',
+  'doing',
+  'have',
+  'has',
+  'had',
+  'having',
+  'can',
+  'could',
+  'should',
+  'would',
+  'will',
+  'may',
+  'might',
+  'must',
+  'about',
+  'as',
+  'at',
+  'by',
+  'for',
+  'from',
+  'in',
+  'into',
+  'of',
+  'on',
+  'onto',
+  'to',
+  'with',
+  'without',
+  'over',
+  'under',
+  'after',
+  'before',
+  'between',
+  'up',
+  'down',
+  'out',
+  'off',
+  'say',
+  'said',
+  'thing',
+  'things',
+  'stuff',
+])
+
+// The hybrid lane's query is a whole user prompt, so its tokens include
+// function words ('what', 'we', 'the', 'about'). Token-OR matching on those
+// alone would make the keyword lane non-empty for a low-information prompt and,
+// when the vector lane is gated out, inject arbitrary memory instead of no
+// result. The tool path's `distinctTokens` stays untouched — there the query is
+// a deliberate agent search, not a sentence. Stopwords are judged ONLY on a
+// token's ASCII-alpha core, so non-ASCII tokens ('홍길동'), numerics ('#651'),
+// and short content words ('pr', 'ci', 'go') all survive; no length filter,
+// which would wrongly drop CJK and short content.
+function distinctHybridContentTokens(query: string): string[] {
+  return distinctTokens(query).filter((token) => {
+    const core = token.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+    if (core.length === 0) return hasNonAscii(token)
+    if (!/^[a-z]+$/.test(core)) return true
+    return !HYBRID_PROMPT_STOPWORDS.has(core)
+  })
 }
 
 // Reciprocal Rank Fusion across two rankers (vector + keyword). Each lane is
