@@ -72,6 +72,61 @@ describe('memorySearchTool', () => {
     await expect(call(agentDir, { query: 'absent' })).resolves.toEqual({ matches: [] })
   })
 
+  test('topic lookup returns the one shard with its full body, no fuzzy search', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'kakaotalk-tone', 'KakaoTalk tone', 'Reply formally in this group.\nmore body.\n')
+    await writeShard(agentDir, 'kakaotalk-other', 'KakaoTalk other', 'Different group, different tone.\n')
+
+    const result = await call(agentDir, { topic: 'kakaotalk-tone' })
+
+    expect(result).toEqual({
+      matches: [
+        {
+          source: 'topic',
+          shardPath: topicShardPath(agentDir, 'kakaotalk-tone'),
+          slug: 'kakaotalk-tone',
+          heading: 'KakaoTalk tone',
+          excerpt: 'Reply formally in this group.\nmore body.',
+          fullBody: 'Reply formally in this group.\nmore body.\n',
+        },
+      ],
+    })
+  })
+
+  test('topic lookup for a missing slug returns an empty matches array', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'present', 'Present', 'body\n')
+
+    await expect(call(agentDir, { topic: 'absent-slug' })).resolves.toEqual({ matches: [] })
+  })
+
+  test('topic lookup with a path-traversal slug returns a structured error, not a throw', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'present', 'Present', 'body\n')
+
+    const result = await call(agentDir, { topic: '../escape' })
+
+    expect('error' in result).toBe(true)
+  })
+
+  test('rejects calls that supply neither query nor topic', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'present', 'Present', 'body\n')
+
+    const result = await call(agentDir, {})
+
+    expect('error' in result).toBe(true)
+  })
+
+  test('rejects calls that supply both query and topic', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'present', 'Present', 'body\n')
+
+    const result = await call(agentDir, { query: 'body', topic: 'present' })
+
+    expect('error' in result).toBe(true)
+  })
+
   test('regex match finds citation strings in body text', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'citations', 'Citations', 'See streams/2026-05-20#abc123 for source.\n')

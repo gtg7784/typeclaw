@@ -358,8 +358,18 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
   }
 
   const items: RetrievedMemoryItem[] = [
-    { heading: 'KakaoTalk reply conventions', excerpt: 'the-user-prefers-formal-speech body excerpt' },
-    { heading: 'GitHub channel role configuration', excerpt: 'roles-are-keyed-on-first-message body excerpt' },
+    {
+      source: 'topic',
+      key: 'kakaotalk-reply-conventions',
+      heading: 'KakaoTalk reply conventions',
+      excerpt: 'the-user-prefers-formal-speech body excerpt',
+    },
+    {
+      source: 'topic',
+      key: 'github-channel-role-configuration',
+      heading: 'GitHub channel role configuration',
+      excerpt: 'roles-are-keyed-on-first-message body excerpt',
+    },
   ]
 
   test('returns empty string when there are no retrieved items', () => {
@@ -380,6 +390,30 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
     expect(section).toContain('memory_search')
+  })
+
+  test('channel origin exposes each topic slug so the agent can look it up exactly', () => {
+    const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
+
+    expect(section).toContain('kakaotalk-reply-conventions')
+    expect(section).toContain('github-channel-role-configuration')
+  })
+
+  test('channel directive names the exact topic-lookup call', () => {
+    const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
+
+    expect(section).toContain('topic:')
+  })
+
+  test('channel origin omits a slug hint for undreamed stream items (no shard to look up)', () => {
+    const streamItems: RetrievedMemoryItem[] = [
+      { source: 'stream', key: '2026-06-12#frag1', heading: 'recent observation', excerpt: 'fresh body' },
+    ]
+
+    const section = renderRetrievedMemorySection(streamItems, { origin: channelOrigin })
+
+    expect(section).toContain('## recent observation')
+    expect(section).not.toContain('2026-06-12#frag1')
   })
 
   test('channel origin keeps the privilege boundary', () => {
