@@ -84,7 +84,7 @@ LINE chats are grouped into workspace buckets for match rules and permissions:
 | `@line-group`  | Group or room chats               |
 | `@line-square` | OpenChat-style public communities |
 
-Use the `line` platform token in role match rules: `line:*`, `line:dm/*`, `line:group/*`, `line:square/*`, or `line:<chatId>`.
+Use the `line` platform token in role match rules: `line:*` covers all LINE chats, while `line:dm/*`, `line:group/*`, and `line:square/*` cover each bucket. A concrete chat is addressed by its bucket, e.g. `line:dm/<chatId>`, `line:group/<chatId>`, or `line:square/<chatId>` — `line:<chatId>` (no bucket) does **not** match, since the parser reads an unbucketed scope as a workspace and LINE chats live under bucket workspaces.
 
 ## Quirks
 
