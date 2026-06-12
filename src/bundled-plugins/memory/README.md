@@ -106,6 +106,16 @@ A `[dreaming] citation-superset violation: …` warning logs the dropped ids and
 - **`memory/.dreaming-state.json`** — per-day dreamed-id sets.
 - **`memory/.retrieval-cache/<sessionId>.md`** — ephemeral retrieval summaries. Written by `memory-retrieval`, read by `loadMemory` on the next prompt of the same session, unlinked on `session.end`.
 
+## Observability
+
+The plugin emits structured `[plugin:memory]` log lines (no separate metrics infra). The load-bearing per-run signals:
+
+- **`[memory-logger] <session> done fragments_written=N elapsed_ms=…`** — how many fragments a logger run captured (delta of fragment events in today's stream).
+- **`[dreaming] done topics_created=N topics_removed=N superseded_new=N fragments_dropped=N elapsed_ms=…`** — consolidation activity per run: new/removed topic shards (by snapshot path diff), net citations moved into `superseded:`, and fragments GC'd. `topics_created` + reinforcement is the "is memory getting sharper" signal; `superseded_new` is contradiction-edit volume. Derived by `computeDreamingMetrics` from the pre/post shard snapshots.
+- **`[vector-retrieval] mode=index topic_results=N stream_results=N`** (or `mode=direct topics=N`) — per-turn retrieval breakdown. `stream_results` counts undreamed-fragment hits that self-resolved (no citing topic yet) — the freshness-window usage signal that informs whether the undreamed surface earns its keep.
+
+These are intentionally verbose for now so behavior is observable in logs; trim once the useful subset is known.
+
 ## How `session.idle` works
 
 Core fires `session.idle` immediately after every `session.prompt()` completion. The plugin owns the debounce: a `Map<sessionId, Timeout>` reset on every event. When the timer fires, the plugin spawns `memory-logger` for that session — unless the min-delta gate suppresses the spawn (see below).
