@@ -3303,7 +3303,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
     }
 
-    const candidate = recoverableAssistantText(live.session)
+    let candidate = recoverableAssistantText(live.session)
+    // A `length` leaf is recovered ONLY when stripping leaked `<think>…</think>`
+    // spans actually removed something AND leaves a postable reply. The removal
+    // is the positive signal that this was leaked-reasoning-plus-real-prose (the
+    // production shape: interleaved think-text ending in a complete answer) — a
+    // truncated `length` leaf with no think evidence is genuinely ambiguous and
+    // stays on the raised-budget empty-turn retry below, exactly as before.
+    if (candidate?.source === 'length-leaf') {
+      const stripped = stripThinkBlocks(candidate.text)
+      const removedThink = stripped !== candidate.text
+      candidate =
+        removedThink &&
+        stripped !== '' &&
+        !endsWithNoReplySignal(stripped) &&
+        !isUpstreamEmptyResponseSentinel(stripped)
+          ? { ...candidate, text: stripped }
+          : null
+    }
     if (candidate === null) {
       // No recoverable assistant prose: the turn ended with no usable reply.
       // Three distinct shapes, handled differently:
@@ -4737,13 +4754,21 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 // assistant message — i.e., text the user should see but didn't, because the
 // model failed to call `channel_reply`/`channel_send` before its turn ended.
 //
-// Three recovery shapes:
+// Four recovery shapes:
 //
 //   - source: 'leaf'
 //     The leaf entry IS an assistant message with `stopReason === 'stop'`.
 //     The model finished its turn with visible text but never called a channel
 //     tool. Pre-existing behavior; this is what the historical
 //     `latestAssistantText` covered.
+//
+//   - source: 'length-leaf'
+//     The leaf IS an assistant message with `stopReason === 'length'` — the
+//     model hit the output cap, typically after interleaving reasoning past the
+//     budget, but its text blocks usually hold a complete answer. Returned raw;
+//     validateChannelTurn strips leaked `<think>` spans and posts the remainder
+//     only if a real reply survives, else diverts to the raised-budget retry.
+//     Observed against claude on a channel turn that fell silent (2026-06-12).
 //
 //   - source: 'mid-turn'
 //     The leaf IS an assistant message with `stopReason === 'toolUse'` that
@@ -4770,11 +4795,10 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 //
 // Returns null when no recovery is appropriate:
 //   - No leaf, no messages in branch, branch is malformed
-//   - Leaf is an assistant with `stopReason` of 'length' / 'error' / 'aborted'
-//     and is NOT preceded by a toolResult pattern — we don't recover partial
-//     errored output because it's typically a truncation, not a deliberate
-//     reply. Only 'stop' (turn-complete) and 'toolUse' (committed to a tool
-//     plan, prose stranded) signal text the model meant for the user.
+//   - Leaf is an assistant with `stopReason` of 'error' / 'aborted' and is NOT
+//     preceded by a toolResult pattern — we don't recover an upstream provider
+//     failure ('error') or a terminal-reply abort ('aborted'); neither is a
+//     deliberate reply. ('length' IS recovered now — see 'length-leaf' above.)
 //   - Leaf is a user/system message (model hasn't responded yet)
 //
 // `visibleAssistantText` returning '' (empty string) is a valid recovery
@@ -4782,7 +4806,7 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 // true) handle the no-content case explicitly via the `no_reply` log.
 function recoverableAssistantText(
   session: AgentSession,
-): { text: string; source: 'leaf' | 'mid-turn' | 'pre-tool' } | null {
+): { text: string; source: 'leaf' | 'mid-turn' | 'pre-tool' | 'length-leaf' } | null {
   const leaf = session.sessionManager.getLeafEntry()
   if (!leaf) return null
 
@@ -4792,10 +4816,20 @@ function recoverableAssistantText(
     }
     // The model committed to a tool plan but its visible prose never reached
     // the channel and no follow-up message that would have called a channel
-    // tool was persisted. Recover the stranded prose. Other non-'stop' stop
-    // reasons (length/error/aborted) are truncations, not deliberate replies.
+    // tool was persisted. Recover the stranded prose.
     if (leaf.message.stopReason === 'toolUse') {
       return { text: visibleAssistantText(leaf.message), source: 'mid-turn' }
+    }
+    // A `length` leaf hit the output cap but routinely carries a complete (or
+    // near-complete) answer in its text blocks — the model just kept reasoning
+    // past the budget. Surfacing it as 'length-leaf' lets validateChannelTurn
+    // strip leaked think-spans and post the answer if any survives, while still
+    // diverting a think-only `length` turn to the raised-budget retry. A leaf
+    // that also carries a toolCall block was truncated mid-tool-planning, not on
+    // a final answer, so it is NOT the recoverable shape. `error` (provider
+    // failure) and `aborted` (terminal-reply abort) stay unrecoverable too.
+    if (leaf.message.stopReason === 'length' && !hasToolCall(leaf.message)) {
+      return { text: visibleAssistantText(leaf.message), source: 'length-leaf' }
     }
     return null
   }
@@ -4843,6 +4877,10 @@ function visibleAssistantText(message: AssistantMessage): string {
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('')
+}
+
+function hasToolCall(message: AssistantMessage): boolean {
+  return message.content.some((block) => block.type === 'toolCall')
 }
 
 // Lenient on purpose: distilled / smaller models routinely drift off the
