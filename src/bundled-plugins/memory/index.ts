@@ -17,6 +17,7 @@ import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './me
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { memorySearchTool } from './search-tool'
 import { vectorConfigSchema } from './vector/config'
+import { runVectorIndexDoctor } from './vector/doctor'
 import { hybridSearch } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
 import { VectorStore } from './vector/store'
@@ -559,10 +560,25 @@ export default definePlugin({
             }
           },
         },
+        'vector-index': {
+          description: 'vector index is consistent with memory (only when memory.vector is enabled)',
+          run: async (dctx) => {
+            if (!vectorEnabled(dctx.config)) {
+              return { status: 'ok', message: 'vector memory not enabled; skipping index health check' }
+            }
+            return runVectorIndexDoctor(dctx.agentDir)
+          },
+        },
       },
     }
   },
 })
+
+function vectorEnabled(config: unknown): boolean {
+  if (typeof config !== 'object' || config === null) return false
+  const parsed = vectorConfigSchema.safeParse((config as Record<string, unknown>).vector)
+  return parsed.success && parsed.data.enabled
+}
 
 async function readSize(path: string): Promise<number> {
   try {

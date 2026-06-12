@@ -1503,4 +1503,31 @@ describe('doctor checks', () => {
     expect(fixResult.summary).toContain('deleted')
     expect(existsSync(backupPath)).toBe(false)
   })
+
+  test('vector-index: no-op ok when memory.vector is not enabled', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const check = exports.doctorChecks?.['vector-index']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: false } }, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('not enabled')
+    expect(result.fix).toBeUndefined()
+  })
+
+  test('vector-index: when enabled, runs the real index check (ok for an empty agent)', async () => {
+    // Booting with vector enabled opens the store, which creates the index DB,
+    // so the realistic enabled-but-empty agent is healthy (nothing to index).
+    const { exports } = await bootMemoryPlugin(agentDir, { vector: { enabled: true } })
+
+    const check = exports.doctorChecks?.['vector-index']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: true } }, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('0/0')
+  })
 })
