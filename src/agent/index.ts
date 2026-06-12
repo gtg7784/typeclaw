@@ -221,6 +221,12 @@ export type CreateSessionOptions = {
   subagentRegistry?: SubagentRegistry
   createSessionForSubagent?: CreateSessionForSubagent
   allowBackgroundFromSubagent?: boolean
+  // When true, the `# Memory` section is omitted from the system prompt and
+  // long-term memory is injected per-turn into the user prompt instead (the
+  // memory plugin's vector `session.turn.start` path). Derived once at boot
+  // from `memory.vector.enabled`, which is restart-required — so the boot
+  // snapshot stays coherent with the per-turn injection decision.
+  suppressSystemMemory?: boolean
 }
 
 export type CreateSessionResult = {
@@ -270,6 +276,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
           ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
+          ...(options.suppressSystemMemory !== undefined ? { suppressSystemMemory: options.suppressSystemMemory } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -944,6 +951,12 @@ export type CreateResourceLoaderOptions = {
   // 'full' to force the heavy prompt even on an unattended origin (rarely
   // useful; mostly an escape hatch for ad-hoc debugging).
   mode?: SystemPromptMode
+  // When true, the `# Memory` section is omitted from the system prompt and
+  // long-term memory is injected per-turn into the user prompt instead (the
+  // memory plugin's vector `session.turn.start` path). Derived once at boot
+  // from `memory.vector.enabled` — vector is restart-required, so the boot
+  // snapshot is coherent with the per-turn injection decision.
+  suppressSystemMemory?: boolean
 }
 
 // Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
@@ -1099,12 +1112,19 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   // gather point.
   const selfPromise = loadSelf(agentDir)
   const gitNudgeSettled = mode === 'slim' ? Promise.resolve(ok('')) : settle(renderGitNudge(agentDir))
-  const memorySettled = settle(
-    loadMemory(agentDir, {
-      ...(options.origin !== undefined ? { origin: options.origin } : {}),
-      ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
-    }),
-  )
+  // Vector agents omit the `# Memory` section entirely: long-term memory is
+  // injected per-turn into the user prompt by the memory plugin's vector
+  // `session.turn.start` hook. Keeping both would double-inject and re-break the
+  // cache prefix this change exists to protect — the invariant is
+  // `suppressSystemMemory === memory.vector.enabled`.
+  const memorySettled = options.suppressSystemMemory
+    ? Promise.resolve(ok(''))
+    : settle(
+        loadMemory(agentDir, {
+          ...(options.origin !== undefined ? { origin: options.origin } : {}),
+          ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
+        }),
+      )
 
   let self = await selfPromise
 
