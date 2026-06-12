@@ -1,0 +1,114 @@
+---
+title: Memory
+description: The observe/dream/apply loop, topic shards, the strength model, and the citation-superset invariant
+icon: BrainCircuit
+---
+
+The bundled `memory` plugin is the self-improving loop: it watches sessions, distills them into long-term beliefs, and feeds those beliefs back into future prompts — no hand-written prompts, no human in the loop. This page is the contributor-facing companion to the [memory loop concept](/docs/concepts/memory-loop); for the exhaustive reference (config table, every hook, observability log lines) see [`src/bundled-plugins/memory/README.md`](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).
+
+The plugin is auto-loaded by every agent. There is no `plugins[]` entry to add and no opt-out — configure it via the `memory` block in `typeclaw.json`. All `memory.*` fields are **restart-required**: the plugin reads them once at boot.
+
+## Two surfaces, three subagents
+
+Memory is split across two on-disk surfaces and three subagents that move data between them.
+
+| Surface                           | Shape                                                            | Writer                                    |
+| --------------------------------- | ---------------------------------------------------------------- | ----------------------------------------- |
+| `memory/streams/yyyy-MM-dd.jsonl` | Append-only daily log of `fragment \| watermark \| legacy_prose` | `memory-logger` (runtime)                 |
+| `memory/topics/<slug>.md`         | Consolidated beliefs, one topic per file, with citations         | `dreaming` (body) + runtime (frontmatter) |
+
+| Subagent           | Cadence                                                   | Job                                                                     |
+| ------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `memory-logger`    | `session.idle` / `session.end`                            | Distills the transcript past a watermark into stream fragments.         |
+| `dreaming`         | cron (`memory.dreaming.schedule`, default `*/30 * * * *`) | Consolidates undreamed fragments into topic shards; rebalances the set. |
+| `memory-retrieval` | `session.turn.start` (index mode, vector off)             | Writes a focused retrieval cache for the over-budget non-vector case.   |
+
+The loop is **observe → dream → apply**: `memory-logger` observes, `dreaming` consolidates, and the next prompt applies the updated shards automatically.
+
+## Dreaming: the consolidation run
+
+`createDreamingSubagent` (`src/bundled-plugins/memory/dreaming.ts`) builds the subagent; the `handler` is the orchestrator. The order of operations is load-bearing — each step depends on the previous one's on-disk state.
+
+1. **Collect undreamed fragments.** Load `.dreaming-state.json` (per-day dreamed-id sets), scan every daily stream, subtract the dreamed ids. **If nothing is undreamed, skip entirely** — no LLM call, no cost.
+2. **Snapshot shards + build the strength table.** `captureShardSnapshot` records byte-exact copies of every shard — this is the rollback anchor. `loadTopicStrengths` builds the per-topic strength table fed to the subagent.
+3. **Run the LLM.** The subagent reads shards + the undreamed tail, consolidates, and writes only changed shards (`write` / `delete_topic_shard`).
+4. **Citation-superset check** (see below). On violation, revert and bail.
+5. **Recompute frontmatter.** The runtime — not the LLM — owns `cites` / `days` / `lastReinforced`, re-derived from the body's citations every run. The subagent is told not to bother getting them right.
+6. **Sync vectors.** `syncTopicVectorsFromSnapshotDiff` re-embeds only the changed shards into the vector store (snapshot diff = which files changed); failure is non-fatal ("index will be repaired on next startup").
+7. **Advance dreamed-ids.** Mark every fragment shown this run as dreamed and persist. This is what guarantees a fragment is never re-consolidated.
+8. **Compact streams + GC fragments** (see below).
+9. **Commit.** `commitMemorySnapshot` force-adds the gitignored `memory/` artifacts and commits with an auto-generated `dream: <summary> <emoji>` message, then sets `skip-worktree` so the human's `git status` stays clean.
+
+## The strength model: repetition strengthens, lack of repetition saturates
+
+The runtime feeds the subagent a strength table (`slug | heading | cites | days | last reinforced | age (d)`) at the top of its prompt. **`days` — distinct calendar days the citations span — is the load-bearing signal, not `cites`.** Five citations on one day is a single debugging session that repeated itself (transient burst); five citations across five days is a recurring fact the user keeps returning to (stable signal). A topic with `cites=12, days=1` is still "mentioned," not "consistent."
+
+The promotion ladder is encoded in the belief sentence's wording, never in a separate label:
+
+| `days` | Wording        | Confidence                                       |
+| ------ | -------------- | ------------------------------------------------ |
+| `1`    | "mentioned"    | tentative — one session                          |
+| `2`    | "observed"     | still tentative — could be coincidence           |
+| `>= 3` | "consistently" | confident; kept visible when budgets tighten     |
+| `>= 7` | "always"       | declarative; load-bearing, protected from merges |
+
+Demotion has no bucket: weak/old topics stay as their own shards but get terse, and the injection-time index/direct split keeps them out of the prompt when the budget is tight.
+
+## Supersession: handling contradictions without losing history
+
+When a new fragment overturns an existing belief (e.g. "uses bun" → "uses pnpm"), the dreaming subagent rewrites the belief sentence and **moves the old fragment id from `fragments:` into a `superseded:` list in the same shard**. Both lists keep the ids cited — so the citation-superset invariant holds and history is auditable — but `superseded:` ids are **excluded from vector retrieval** (`passages.ts` does not embed them). A stale "uses bun" fragment can never resurface as a retrieval hook against the current "uses pnpm" belief.
+
+`parseCitations` stays section-blind (GC and frontmatter recompute see both sections); `splitCitationsBySection` is the status-aware view the retrieval layer reads (`parent-link.ts`).
+
+## The citation-superset invariant: why memory can't silently lose evidence
+
+This is the safety net that makes the loop trustworthy. After the LLM rewrites shards, `checkCitationSupersetAcrossShards` verifies that **every fragment id cited before the run is still cited after** (in either `fragments:` or `superseded:`). On violation:
+
+1. `restoreShardSnapshot` restores every pre-run shard to byte-identical bytes **and deletes any new shards** created during the run.
+2. Daily-stream fragment GC is skipped for this run.
+3. **Dreamed-ids advance anyway** — the conscious anti-loop tradeoff. The undreamed fragments from this run are orphaned (they survive in the force-committed JSONL but won't be re-shown to a future dreaming run). The alternative — not advancing — would infinite-loop if the LLM keeps making the same mistake on the same input.
+4. The commit is skipped.
+
+If the revert itself fails (disk full, `EACCES`), `memory/topics` is in an unknown state: the run does not advance dreamed-ids, does not compact, and does not commit. Recovery is `git checkout -- memory/topics && typeclaw restart`.
+
+## Fragment GC is gated on a fresh citation judgment
+
+`compactDailyStreams` rewrites the touched stream files (atomic tmp+rename) under two GC rules:
+
+- **Watermark GC (always):** keep only the latest watermark per source. Nothing cites watermarks.
+- **Fragment GC (gated):** drop fragments that are `dreamed AND not cited` — they've been folded into a belief or consciously discarded, so the bytes are pure overhead in force-committed git.
+
+The gate is `applyFragmentGc = shardsRewrittenThisRun`. If shards weren't rewritten this run, the citation index reflects the **prior** run's judgment, not this run's — dropping fragments on stale citations would be "fragment-eating-disease," silently nuking a subagent's unpromoted fragments with no recovery path. GC only fires when this run produced a fresh citation judgment. Dropped fragments also lose their stream vectors via `deleteStreamVectorsForDroppedFragments`.
+
+## Muscle memory: three forms
+
+While reading streams, dreaming watches for **repeated multi-step procedures** and codifies them. Three forms, decided smallest-that-fits, top to bottom:
+
+1. **Plugin suggestion (Form C)** — the procedure needs a runtime hook, custom tool, cron job, or subagent. Recorded as a topic shard with `proposal: plugin packages/<name>`. The subagent can't write under `packages/` (outside its sandbox), so it only suggests; the main agent scaffolds when the user next asks.
+2. **CLI suggestion (Form B)** — the procedure boils down to "run this small script with these args." Recorded as a topic shard with `proposal: cli packages/<name>`. Same suggest-only rule as plugins.
+3. **Skill (Form A)** — the default. The procedure can be done with the tools the agent already has. Written directly to `memory/skills/<name>/SKILL.md` and auto-loaded as a first-class skill by the next session.
+
+Forms B and C are **passive recommendations** recorded as topic shards (exempt from the one-sentence belief rule — they keep a rationale paragraph plus the `proposal:` line). A shard alone never authorizes action; the main agent acts only when a current user request makes the suggestion relevant. The codifying bar is the same for all three: multi-step, recurred across ≥2 fragments (ideally across days), clearly statable trigger, and generalizable. No speculative skills — one the agent never reaches for is dead weight in the prompt budget.
+
+## Injection: where memory lands depends on `memory.vector.enabled`
+
+The same shard set is injected in one of two places, never both. The invariant `suppressSystemMemory === memory.vector.enabled` (derived once at boot in `src/run/index.ts`) is what prevents double-injection.
+
+- **Vector off (default): system prompt, once per session.** `loadMemory` renders the `# Memory` section into the cacheable prefix. Two-tier by `injectionBudgetBytes` (16 KB): **direct** mode injects all shard bodies verbatim under budget; **index** mode injects headings + metadata over budget, and the `memory-retrieval` subagent covers the over-budget case lag-by-one.
+- **Vector on: user prompt, per turn.** The `# Memory` section is suppressed from the system prompt entirely (keeping the cache prefix stable across the session). The `session.turn.start` hook renders memory into `event.retrievalContext.results`, which the turn-drivers append to the user message — all shards under budget, top-K `hybridSearch` over budget.
+
+**Channel-origin always uses index mode** regardless of shard size — a memory-bleed defense, since the agent can treat injected memory as instructions when channel users can see it.
+
+For the vector store, embedder, and parent-child hybrid-search internals, see the [memory README](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).
+
+## Safety properties
+
+Why a bad LLM run can't corrupt memory:
+
+- **Citation-superset invariant** — no cited evidence is ever silently lost; violations revert the whole run.
+- **Snapshot/restore** — byte-exact rollback anchor; a bad run leaves zero trace.
+- **Fragment-GC gating** — fragments are deleted only on a fresh citation judgment, never on stale citations.
+- **Dreamed-ids advance even on revert** — conscious anti-loop tradeoff; a repeatedly-failing LLM can't wedge the system.
+- **Runtime owns frontmatter** — the LLM can't corrupt the strength signals; they're re-derived from citations every run.
+- **Atomic writes** — tmp+rename for streams, byte-comparison for shards; crash-safe mid-loop.
+- **`inFlightKey: agentDir`** — per-agent coalescing collapses concurrent cron fires into one run.

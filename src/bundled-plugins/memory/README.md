@@ -87,6 +87,18 @@ The subagent uses these signals to:
 
 There is no `## Historical observations` bucket. Demoted topics live as their own shards; injection-time filtering (the index/direct split) handles the prompt-budget pressure.
 
+## Muscle memory (three forms)
+
+While reading streams, the dreaming subagent watches for **repeated multi-step procedures** the user has guided the main agent through, and codifies them. There are three forms, picked smallest-that-fits (top to bottom, stop at the first match):
+
+1. **Form C — plugin suggestion.** The procedure needs a runtime hook (`session.prompt` / `tool.before` / etc.), a custom tool, a cron job, or a subagent — things only a plugin can express. Recorded as a topic shard with a `proposal: plugin packages/<name>` line.
+2. **Form B — CLI suggestion.** The procedure boils down to "run this small script with these args." Recorded as a topic shard with a `proposal: cli packages/<name>` line.
+3. **Form A — skill.** The default, and where most procedures land. The procedure can be done with the tools the agent already has. Written directly to `memory/skills/<name>/SKILL.md` and auto-loaded as a first-class skill by the next session.
+
+The split exists because the forms have different write boundaries. The dreaming subagent can write skills directly (Form A) — `memory/skills/` is inside its sandbox — but it can only **suggest** CLIs and plugins (Forms B and C), because those live under `packages/`, outside its write sandbox. A suggestion is a passive recommendation: the topic shard sits in long-term memory, and the main agent scaffolds the package only when a current user request asks for the matching procedure. CLI/plugin proposal shards are the one exception to the one-sentence belief format (see [Memory saturation](#memory-saturation)) — they keep a rationale paragraph plus the `proposal:` line that names the form and package, and carry the same fragment citations as any other shard.
+
+The bar for codifying is identical across all three forms: the procedure is multi-step, has recurred (≥2 distinct fragments, ideally across different days), has a clearly statable trigger, and generalizes beyond the specific instances. No speculative skills or suggestions — anything the main agent never reaches for is dead weight in the prompt budget it reads on every prompt. A given CLI or plugin is suggested **once**; future dreaming runs leave the existing proposal shard alone unless new fragments show the procedure has shifted shape (e.g. a CLI that now needs a runtime hook, upgrading the proposal from `cli` to `plugin`).
+
 ## Citation-superset safety net
 
 `checkCitationSupersetAcrossShards` checks that the union of fragment ids cited in NEW shards is a superset of the union cited in OLD shards. Violation triggers:
@@ -103,7 +115,7 @@ A `[dreaming] citation-superset violation: …` warning logs the dropped ids and
 - **`memory/topics/<slug>.md`** — per-topic shards with YAML frontmatter (`heading`, `cites`, `days`, `lastReinforced`, `tags?`) + body markdown. Runtime owns the frontmatter (recomputed after every dreaming run from the body's citations); dreaming subagent writes body only. The body is a **compact belief record**: one belief sentence stating the current truth (subject + predicate + essential scope qualifier; the strength wording — "mentioned" / "consistently" / "always" — is calibrated from `days`), followed by the `fragments:` list (active evidence behind the belief) and an optional `superseded:` list (evidence overturned by a later contradiction — kept cited for GC/history but excluded from vector retrieval). One sentence (not a paragraph) keeps bodies small so more topics stay under the direct-injection budget; the citation lists are the only load-bearing part of the body, so the prose shape is free to be terse. Existing verbose shards are rewritten into this form by the next dreaming run (no migration).
 - **`memory/streams/yyyy-MM-dd.jsonl`** — daily fragment streams. One event per line, discriminated union of `fragment | watermark | legacy_prose`. Force-committed alongside the shards.
 - **`memory/MEMORY.md.pre-shard.bak`** — legacy pre-shard backup left by older TypeClaw versions. Safe to delete after verifying.
-- **`memory/skills/<name>/SKILL.md`** — muscle memory. Skills the dreaming subagent distills from repeated procedures. Auto-loaded as first-class skills.
+- **`memory/skills/<name>/SKILL.md`** — muscle memory (Form A). Skills the dreaming subagent distills from repeated procedures. Auto-loaded as first-class skills. CLI/plugin suggestions (Forms B and C) are recorded as topic shards instead — see [Muscle memory](#muscle-memory-three-forms).
 - **`memory/.dreaming-state.json`** — per-day dreamed-id sets.
 - **`memory/.retrieval-cache/<sessionId>.md`** — ephemeral retrieval summaries. Written by `memory-retrieval`, read by `loadMemory` on the next prompt of the same session, unlinked on `session.end`.
 
