@@ -72,6 +72,34 @@ describe('memorySearchTool', () => {
     await expect(call(agentDir, { query: 'absent' })).resolves.toEqual({ matches: [] })
   })
 
+  test('empty result carries a no-manual-dig note in the LLM text but not in details', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'daily-notes', 'Daily notes', 'A body about memory.\n')
+
+    const empty = await callRaw(agentDir, { query: 'absent' })
+    expect(empty.text).toContain('Do not fall back to grep')
+    expect(empty.details).toEqual({ matches: [] })
+    expect(JSON.parse(empty.text).note).toMatch(/Do not fall back/)
+  })
+
+  test('non-empty result text carries no dig note', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'daily-notes', 'Daily notes', 'A body about memory.\n')
+
+    const hit = await callRaw(agentDir, { query: 'memory' })
+    expect(hit.text).not.toContain('Do not fall back to grep')
+    expect(JSON.parse(hit.text).note).toBeUndefined()
+  })
+
+  test('empty topic lookup also carries the no-manual-dig note', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'present', 'Present', 'body\n')
+
+    const empty = await callRaw(agentDir, { topic: 'absent-slug' })
+    expect(empty.text).toContain('Do not fall back to grep')
+    expect(empty.details).toEqual({ matches: [] })
+  })
+
   test('topic lookup returns the one shard with its full body, no fuzzy search', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'kakaotalk-tone', 'KakaoTalk tone', 'Reply formally in this group.\nmore body.\n')
@@ -604,6 +632,14 @@ async function call(agentDir: string, input: unknown): Promise<SearchResult> {
   const args = memorySearchTool.parameters.parse(input)
   const result = await memorySearchTool.execute(args, ctx(agentDir))
   return result.details as SearchResult
+}
+
+async function callRaw(agentDir: string, input: unknown): Promise<{ text: string; details: unknown }> {
+  const args = memorySearchTool.parameters.parse(input)
+  const result = await memorySearchTool.execute(args, ctx(agentDir))
+  const part = result.content[0]
+  if (part === undefined || part.type !== 'text') throw new Error('expected a text content part')
+  return { text: part.text, details: result.details }
 }
 
 function ctx(agentDir: string): ToolContext {
