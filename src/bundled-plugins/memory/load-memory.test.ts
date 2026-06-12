@@ -399,10 +399,11 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     expect(section).toContain('github-channel-role-configuration')
   })
 
-  test('channel directive names the exact topic-lookup call', () => {
+  test('channel directive names both the topic-lookup and query-search calls', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
     expect(section).toContain('topic:')
+    expect(section).toContain('query:')
   })
 
   test('channel origin omits a slug hint for undreamed stream items (no shard to look up)', () => {
@@ -414,6 +415,17 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
 
     expect(section).toContain('## recent observation')
     expect(section).not.toContain('2026-06-12#frag1')
+  })
+
+  test('channel origin gives undreamed stream items a query-search recovery hint', () => {
+    const streamItems: RetrievedMemoryItem[] = [
+      { source: 'stream', key: '2026-06-12#frag1', heading: 'recent observation', excerpt: 'fresh body' },
+    ]
+
+    const section = renderRetrievedMemorySection(streamItems, { origin: channelOrigin })
+
+    expect(section).not.toContain('fresh body')
+    expect(section).toContain('memory_search({ query')
   })
 
   test('channel origin keeps the privilege boundary', () => {

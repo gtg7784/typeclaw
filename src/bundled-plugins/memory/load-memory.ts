@@ -97,13 +97,18 @@ export function renderRetrievedMemorySection(
       lines.push(item.excerpt.trimEnd(), '')
     } else if (item.source === 'topic') {
       lines.push(`slug: \`${item.key}\``, '')
+    } else {
+      lines.push(
+        'recent observation \u2014 not yet a topic shard; reach the full text via `memory_search({ query: ... })`.',
+        '',
+      )
     }
   }
   return lines.join('\n').trimEnd()
 }
 
 function retrievedIndexDirective(): string {
-  return 'Relevant topics shown as headings only in channels. Call `memory_search({ topic: "<slug>" })` with a slug below to read that topic\u2019s full body.'
+  return 'Relevant memory shown as headings only in channels. For a topic, call `memory_search({ topic: "<slug>" })` with a slug below to read its full body; for a recent observation (no slug), call `memory_search({ query: "..." })` to reach the full text.'
 }
 
 async function appendRetrievalCache(result: string, agentDir: string, options: LoadMemoryOptions): Promise<string> {
