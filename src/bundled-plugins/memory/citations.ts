@@ -54,3 +54,34 @@ export function parseCitations(text: string): Map<string, Set<string>> {
 export function isCitationLine(line: string): boolean {
   return CITATION_LINE.test(line)
 }
+
+// Superseded citations stay cited (so the citation-superset GC invariant never
+// drops them) but must be excluded from retrieval, so a superseded "uses bun"
+// fragment can't surface as a hook for the current "uses pnpm" belief.
+// `parseCitations` stays section-blind for GC; this is the status-aware view.
+// Citations before any heading count as active (legacy shards had no section).
+const SECTION_HEADING = /^[\s-]*(fragments|superseded)\s*:\s*$/i
+
+export type SectionedCitations = { active: Set<string>; superseded: Set<string> }
+
+export function splitCitationsBySection(body: string): SectionedCitations {
+  const active = new Set<string>()
+  const superseded = new Set<string>()
+  let current: 'active' | 'superseded' = 'active'
+
+  for (const line of body.split('\n')) {
+    const heading = SECTION_HEADING.exec(line)
+    if (heading !== null) {
+      current = heading[1]!.toLowerCase() === 'superseded' ? 'superseded' : 'active'
+      continue
+    }
+    const citation = CITATION_LINE.exec(line)
+    if (citation === null) continue
+    ;(current === 'superseded' ? superseded : active).add(citation[3]!)
+  }
+
+  // Re-affirmed fact (appears in both sections across edits): active wins.
+  for (const id of active) superseded.delete(id)
+
+  return { active, superseded }
+}

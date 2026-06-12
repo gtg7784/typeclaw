@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import { loadAllShards, type TopicShard } from '../load-shards'
+import { buildParentLinks } from '../parent-link'
 import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
 import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
@@ -37,12 +38,13 @@ export async function hybridSearch(
     embedFn([query], 'query'),
   ])
 
-  const index = buildContentIndex(shards, streamDays)
+  const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
+  const index = buildContentIndex(shards, streamDays, supersededFragmentIds)
   const vectorRows =
     queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2, EMBEDDING_MODEL_ID)
   const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
 
-  return fuseLanes(vectorRows, keywordMatches, index).slice(0, topK)
+  return fuseLanes(vectorRows, keywordMatches, index, parentSlugByFragmentId).slice(0, topK)
 }
 
 function keywordLane(
@@ -57,21 +59,29 @@ function keywordLane(
   return 'matches' in result ? result.matches : []
 }
 
+// Parent-child fusion. Each lane hit scores its node by RRF rank, then nodes
+// collapse to their parent topic via the citation link: a matched fragment
+// contributes to the topic that cites it, never as a standalone result. An
+// undreamed fragment (no citing topic yet) resolves to itself, preserving the
+// freshness window. Collapsed parents take the MAX of their members' scores,
+// not the sum — sum would over-rank often-revised topics purely for having more
+// historical citations to match (PARADE: max beats sum for concentrated relevance).
 function fuseLanes(
   vectorRows: VectorRow[],
   keywordMatches: MemorySearchMatch[],
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+  parentSlugByFragmentId: Map<string, string>,
 ): HybridSearchResult[] {
   const fused = new Map<string, HybridSearchResult>()
 
   for (let i = 0; i < vectorRows.length; i++) {
     const row = vectorRows[i]!
-    addScore(fused, index, laneKey(row.source, row.key), 1 / (RRF_K + i + 1))
+    addScore(fused, index, row.source, row.key, 1 / (RRF_K + i + 1), parentSlugByFragmentId)
   }
 
   for (let i = 0; i < keywordMatches.length; i++) {
     const match = keywordMatches[i]!
-    addScore(fused, index, laneKey(match.source, matchKey(match)), 1 / (RRF_K + i + 1))
+    addScore(fused, index, match.source, matchKey(match), 1 / (RRF_K + i + 1), parentSlugByFragmentId)
   }
 
   return [...fused.values()].sort((a, b) => b.rrfScore - a.rrfScore || a.key.localeCompare(b.key))
@@ -80,23 +90,57 @@ function fuseLanes(
 function addScore(
   fused: Map<string, HybridSearchResult>,
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
-  key: string,
+  source: 'topic' | 'stream',
+  nodeKey: string,
   score: number,
+  parentSlugByFragmentId: Map<string, string>,
 ): void {
-  const existing = fused.get(key)
+  const resolved = resolveToParent(source, nodeKey, index, parentSlugByFragmentId)
+  if (resolved === null) return
+  const { fusedKey, content } = resolved
+
+  const existing = fused.get(fusedKey)
   if (existing !== undefined) {
-    existing.rrfScore += score
+    existing.rrfScore = Math.max(existing.rrfScore, score)
     return
   }
-
-  const content = index.get(key)
-  if (content === undefined) return
-  fused.set(key, { ...content, rrfScore: score })
+  fused.set(fusedKey, { ...content, rrfScore: score })
 }
 
+function resolveToParent(
+  source: 'topic' | 'stream',
+  nodeKey: string,
+  index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+  parentSlugByFragmentId: Map<string, string>,
+): { fusedKey: string; content: Omit<HybridSearchResult, 'rrfScore'> } | null {
+  if (source === 'stream') {
+    const fragmentId = fragmentIdFromKey(nodeKey)
+    const parentSlug = fragmentId === null ? undefined : parentSlugByFragmentId.get(fragmentId)
+    if (parentSlug !== undefined) {
+      const topic = index.get(laneKey('topic', parentSlug))
+      if (topic !== undefined) return { fusedKey: laneKey('topic', parentSlug), content: topic }
+    }
+  }
+  const content = index.get(laneKey(source, nodeKey))
+  return content === undefined ? null : { fusedKey: laneKey(source, nodeKey), content }
+}
+
+function fragmentIdFromKey(streamKey: string): string | null {
+  const hashIndex = streamKey.indexOf('#')
+  if (hashIndex === -1) return null
+  const id = streamKey.slice(hashIndex + 1)
+  return id.startsWith('legacy-') ? null : id
+}
+
+// Superseded fragments are kept out of the content index entirely, so both
+// lanes drop them: the keyword lane can match a superseded body, but resolving
+// it finds no active parent link and then no `stream` fallback here, so the
+// stale fragment never surfaces as a standalone result (mirrors the passage-set
+// exclusion that keeps superseded fragments out of the vector lane).
 function buildContentIndex(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
+  supersededFragmentIds: Set<string>,
 ): Map<string, Omit<HybridSearchResult, 'rrfScore'>> {
   const index = new Map<string, Omit<HybridSearchResult, 'rrfScore'>>()
 
@@ -111,7 +155,7 @@ function buildContentIndex(
 
   for (const day of streamDays) {
     for (const event of day.events) {
-      const item = streamIndexItem(day, event)
+      const item = streamIndexItem(day, event, supersededFragmentIds)
       if (item !== null) index.set(laneKey('stream', item.key), item)
     }
   }
@@ -119,9 +163,14 @@ function buildContentIndex(
   return index
 }
 
-function streamIndexItem(day: UndreamedStreamDay, event: StreamEvent): Omit<HybridSearchResult, 'rrfScore'> | null {
+function streamIndexItem(
+  day: UndreamedStreamDay,
+  event: StreamEvent,
+  supersededFragmentIds: Set<string>,
+): Omit<HybridSearchResult, 'rrfScore'> | null {
   if (event.type === 'watermark') return null
   if (event.type === 'fragment') {
+    if (supersededFragmentIds.has(event.id)) return null
     return {
       source: 'stream',
       key: `${day.date}#${event.id}`,

@@ -34,7 +34,7 @@ describe('buildStartupVectorIndex', () => {
 
     const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
     try {
-      expect(result).toEqual({ built: true, count: 2 })
+      expect(result).toEqual({ built: true, pruned: 0, count: 2 })
       expect(embeddedTexts).toEqual([
         'Startup Topic\nThis topic is pre-warmed at boot.',
         'Recent Stream\nThis stream fragment is also indexed.',
@@ -60,7 +60,7 @@ describe('buildStartupVectorIndex', () => {
     await buildStartupVectorIndex(agentDir, embedFn)
     const result = await buildStartupVectorIndex(agentDir, embedFn)
 
-    expect(result).toEqual({ built: false, count: 0 })
+    expect(result).toEqual({ built: false, pruned: 0, count: 0 })
     expect(calls).toBe(1)
   })
 
@@ -79,7 +79,7 @@ describe('buildStartupVectorIndex', () => {
 
     const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
     try {
-      expect(result).toEqual({ built: true, count: 1 })
+      expect(result).toEqual({ built: true, pruned: 0, count: 1 })
       expect(embeddedTexts).toEqual(['Missing Topic\nNew content needs a vector.'])
       expect(store.getAll().map((stored) => stored.id)).toEqual(['topic:current-topic', 'topic:missing-topic'])
     } finally {
@@ -117,11 +117,62 @@ describe('buildStartupVectorIndex', () => {
     try {
       // then: the unchanged content is re-embedded under the new stamp, and the
       // stale fp32 row is gone (one row, current variant only)
-      expect(result).toEqual({ built: true, count: 1 })
+      expect(result).toEqual({ built: true, pruned: 0, count: 1 })
       expect(embeddedTexts).toEqual(['Carried Over\nContent unchanged across a dtype switch.'])
       const rows = store.getAll()
       expect(rows.map((stored) => stored.id)).toEqual(['topic:carried-over'])
       expect(rows[0]?.model).toBe(EMBEDDING_MODEL_ID)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('prunes superseded stream rows so they cannot crowd active candidates', async () => {
+    const agentDir = createAgentDir()
+    const activeId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+    const supersededId = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
+
+    // given: a topic whose belief switched, citing the new fragment as active and
+    // the old one as superseded; only the active fragment is on the live stream
+    writeTopic(
+      agentDir,
+      'package-manager',
+      'Package Manager',
+      [
+        'User uses pnpm.',
+        'fragments:',
+        `- streams/2026-06-11#${activeId}`,
+        'superseded:',
+        `- streams/2026-06-11#${supersededId}`,
+      ].join('\n'),
+    )
+    writeFragment(agentDir, '2026-06-11', activeId, 'pnpm', 'User installs with pnpm.')
+
+    // and: the superseded fragment already has a vector row from before it was overturned
+    const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+    const seed = VectorStore.open(dbPath)
+    seed.upsert({
+      id: `stream:2026-06-11#${supersededId}`,
+      source: 'stream',
+      key: `2026-06-11#${supersededId}`,
+      model: EMBEDDING_MODEL_ID,
+      dims: 8,
+      embedding: vector({ 0: 1 }),
+      contentHash: 'stale',
+    })
+    seed.close()
+
+    // when: startup runs
+    const result = await buildStartupVectorIndex(agentDir, async (texts) => texts.map(() => vector({ 1: 1 })))
+
+    // then: the stale superseded row is pruned; only the active passages remain
+    const store = VectorStore.open(dbPath)
+    try {
+      expect(result.pruned).toBe(1)
+      const ids = store.getAll().map((stored) => stored.id)
+      expect(ids).not.toContain(`stream:2026-06-11#${supersededId}`)
+      expect(ids).toContain(`stream:2026-06-11#${activeId}`)
+      expect(ids).toContain('topic:package-manager')
     } finally {
       store.close()
     }

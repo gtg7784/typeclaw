@@ -19,7 +19,7 @@ afterEach(() => {
 })
 
 describe('hybridSearch', () => {
-  it('QA 1.6: fuses exact-ID keyword hits and semantic vector hits via RRF', async () => {
+  it('QA 1.6: fuses exact-ID keyword hits and semantic vector hits via MAX-child RRF', async () => {
     const { agentDir, store } = createFixture()
     try {
       writeTopic(agentDir, 'pr-651', 'PR 651 Review', 'PR #651 fixed channel reload handling.')
@@ -36,7 +36,8 @@ describe('hybridSearch', () => {
       const exact = exactResults.find((result) => result.key === 'pr-651')
 
       expect(exactResults.slice(0, 3).map((result) => result.key)).toContain('pr-651')
-      expect(exact?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
+      // pr-651 is hit by both lanes; MAX fusion keeps the best lane score (1/61), not the sum.
+      expect(exact?.rrfScore).toBeCloseTo(1 / 61, 10)
 
       const semanticResults = await hybridSearch(
         'focused memory summary retrieval',
@@ -81,6 +82,113 @@ describe('hybridSearch', () => {
       store.close()
     }
   })
+
+  it('collapses a matched stream fragment to the topic that cites it', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a fragment cited by a topic, and a vector hit on that fragment
+      const fragmentId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      writeTopic(
+        agentDir,
+        'package-manager',
+        'Package Manager',
+        ['User uses pnpm.', 'fragments:', `- streams/2026-06-10#${fragmentId}`].join('\n'),
+      )
+      writeStreamFragment(agentDir, '2026-06-10', fragmentId, 'pnpm', 'User installs with pnpm.')
+      store.upsert(row(`stream:2026-06-10#${fragmentId}`, `2026-06-10#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+
+      // when the fragment matches by vector
+      const results = await hybridSearch('pnpm', store, agentDir, 5, embedFrom({ 0: 1 }))
+
+      // then the result is the parent topic, not the standalone fragment
+      const keys = results.map((result) => result.key)
+      expect(keys).toContain('package-manager')
+      expect(results.find((result) => result.source === 'stream')).toBeUndefined()
+    } finally {
+      store.close()
+    }
+  })
+
+  it('ranks a parent by the MAX of its children, not the sum', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a topic citing two fragments, both matched by the keyword lane
+      const idA = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      const idB = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
+      writeTopic(
+        agentDir,
+        'editor',
+        'Editor',
+        ['User uses neovim.', 'fragments:', `- streams/2026-06-10#${idA}`, `- streams/2026-06-10#${idB}`].join('\n'),
+      )
+      writeStreamFragment(agentDir, '2026-06-10', idA, 'neovim', 'neovim is the editor.')
+      writeStreamFragment(agentDir, '2026-06-10', idB, 'neovim', 'neovim config lives in lua.')
+
+      // when both fragments match the keyword lane (no vector hits)
+      const results = await hybridSearch('neovim', store, agentDir, 5, embedFrom({ 7: 1 }))
+      const editor = results.find((result) => result.key === 'editor')
+
+      // then the parent score is a single best-child RRF score, not the sum of both
+      expect(editor).toBeDefined()
+      expect(editor!.rrfScore).toBeLessThanOrEqual(1 / 61 + 1e-9)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never returns a superseded fragment as a standalone keyword/stream result', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a topic whose belief switched to pnpm, keeping the bun fragment superseded
+      const activeId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      const supersededId = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
+      writeTopic(
+        agentDir,
+        'package-manager',
+        'Package Manager',
+        [
+          'User uses pnpm.',
+          'fragments:',
+          `- streams/2026-06-10#${activeId}`,
+          'superseded:',
+          `- streams/2026-06-10#${supersededId}`,
+        ].join('\n'),
+      )
+      // both fragment bodies are on the live stream and both match the keyword "bun"
+      writeStreamFragments(agentDir, '2026-06-10', [
+        { id: activeId, topic: 'pnpm', body: 'User switched to pnpm from bun.' },
+        { id: supersededId, topic: 'bun', body: 'User uses bun as the package manager.' },
+      ])
+
+      // when the query matches the superseded body (no vector hits)
+      const results = await hybridSearch('bun', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the superseded fragment never appears as a standalone stream result
+      expect(results.some((result) => result.source === 'stream')).toBe(false)
+      expect(results.some((result) => result.key === `2026-06-10#${supersededId}`)).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps an undreamed fragment (no citing topic) as a stream result', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a fragment that no topic cites yet (freshness window)
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'deno', 'User is trying deno today.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+
+      // when it matches
+      const results = await hybridSearch('deno', store, agentDir, 5, embedFrom({ 0: 1 }))
+
+      // then it resolves to itself as a stream result
+      const hit = results.find((result) => result.source === 'stream')
+      expect(hit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
 })
 
 function createFixture(): { agentDir: string; store: VectorStore } {
@@ -98,10 +206,42 @@ function writeTopic(agentDir: string, slug: string, heading: string, body: strin
   )
 }
 
-function row(id: string, key: string, embedding: Float32Array): Omit<VectorRow, 'updatedAt'> {
+function writeStreamFragment(agentDir: string, date: string, id: string, topic: string, body: string): void {
+  writeStreamFragments(agentDir, date, [{ id, topic, body }])
+}
+
+function writeStreamFragments(
+  agentDir: string,
+  date: string,
+  fragments: Array<{ id: string; topic: string; body: string }>,
+): void {
+  const streamsDir = join(agentDir, 'memory', 'streams')
+  mkdirSync(streamsDir, { recursive: true })
+  const lines = fragments
+    .map(({ id, topic, body }) =>
+      JSON.stringify({
+        type: 'fragment',
+        id,
+        ts: `${date}T12:00:00.000Z`,
+        source: 'ses_test',
+        entry: 'e1',
+        topic,
+        body,
+      }),
+    )
+    .join('\n')
+  writeFileSync(join(streamsDir, `${date}.jsonl`), `${lines}\n`)
+}
+
+function row(
+  id: string,
+  key: string,
+  embedding: Float32Array,
+  source: 'topic' | 'stream' = 'topic',
+): Omit<VectorRow, 'updatedAt'> {
   return {
     id,
-    source: 'topic',
+    source,
     key,
     model: MODEL,
     dims: embedding.length,
