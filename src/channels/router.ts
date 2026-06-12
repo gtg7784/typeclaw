@@ -2170,7 +2170,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
-        const retrievalContext = await fireSessionTurnStart(live, text)
+        const retrievalContext = await fireSessionTurnStart(live, composeRetrievalQuery(batch))
         const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
         try {
           await live.session.prompt(promptText)
@@ -4307,6 +4307,21 @@ function composeTurnPrompt(
     }
   }
   return parts.join('\n')
+}
+
+// The per-turn memory hook must query on ONLY what the human typed this turn,
+// not the composeTurnPrompt envelope (time anchor, system reminders, and the
+// "## Recent context" block). That envelope dwarfs the actual message, so
+// embedding it lets recent-context drift dominate both retrieval lanes and the
+// injected memory tracks the scrollback topic instead of the current question.
+// Strip all framing — headings, author attribution, quote anchors — down to raw
+// text, one batch entry per line. A reminder-only drain yields '', which
+// hybridSearch no-ops: correct, since there is no new user message to match.
+function composeRetrievalQuery(batch: readonly QueuedInbound[]): string {
+  return batch
+    .map((b) => b.text.trim())
+    .filter((t) => t.length > 0)
+    .join('\n')
 }
 
 function formatAuthorLine(
