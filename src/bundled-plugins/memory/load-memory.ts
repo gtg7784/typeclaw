@@ -77,17 +77,29 @@ export type RetrievedMemoryItem = { heading: string; excerpt: string }
 // Over-budget vector turns inject the top-K relevant memories (not all shards).
 // Same `# Memory` framing + channel-bleed boundary as the direct path, so the
 // passive-context guarantees hold regardless of which branch ran.
+//
+// Channel origins get headings only (excerpt stripped, fetched on demand via
+// `memory_search`), mirroring `forceIndexForChannel`'s direct-path policy that
+// channels never carry bodies — a heading is a self-contained belief sentence,
+// so the body is dead weight until the model decides the topic is worth opening.
+// Non-channel origins keep the excerpt, where the extra round-trip isn't worth it.
 export function renderRetrievedMemorySection(
   items: RetrievedMemoryItem[],
   options: Pick<LoadMemoryOptions, 'origin'> = {},
 ): string {
   if (items.length === 0) return ''
+  const isChannel = options.origin?.kind === 'channel'
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
-  if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
+  if (isChannel) lines.push(...CHANNEL_MEMORY_BOUNDARY, '', retrievedIndexDirective(), '')
   for (const item of items) {
-    lines.push(`## ${item.heading}`, '', item.excerpt.trimEnd(), '')
+    lines.push(`## ${item.heading}`, '')
+    if (!isChannel) lines.push(item.excerpt.trimEnd(), '')
   }
   return lines.join('\n').trimEnd()
+}
+
+function retrievedIndexDirective(): string {
+  return 'Relevant topics shown as headings only in channels. Call `memory_search` to read the body of any topic you need.'
 }
 
 async function appendRetrievalCache(result: string, agentDir: string, options: LoadMemoryOptions): Promise<string> {
