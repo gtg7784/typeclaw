@@ -10,6 +10,10 @@ import { homeRoot } from '../../../hostd/paths'
 
 export const MODEL_NAME = 'Xenova/multilingual-e5-base'
 export const DIMS = 768
+// MUST match src/hostd/models.ts MODEL_DTYPE: the host downloads exactly this
+// variant, and this loader runs local_files_only, so a mismatch loads nothing.
+// q8 → onnx/model_quantized.onnx (~279 MB); the default would be fp32 (1.11 GB).
+export const MODEL_DTYPE = 'q8'
 
 export type EmbedType = 'query' | 'passage'
 
@@ -38,7 +42,7 @@ export class Embedder {
   static async load(): Promise<Embedder> {
     const { env, pipeline } = await loadTransformers()
     configureTransformers(env)
-    const extractor = await pipeline('feature-extraction', MODEL_NAME, { local_files_only: true })
+    const extractor = await pipeline('feature-extraction', MODEL_NAME, { local_files_only: true, dtype: MODEL_DTYPE })
     return new Embedder(extractor)
   }
 

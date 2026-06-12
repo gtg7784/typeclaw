@@ -11,7 +11,7 @@ export const vectorConfigSchema = z
 export type VectorConfig = z.infer<typeof vectorConfigSchema>
 
 // Fails closed to `false`: a config we can't read/parse is treated as opted out,
-// so the ~1.4 GB model download never fires for an agent we can't prove wants
+// so the ~280 MB model download never fires for an agent we can't prove wants
 // it. The container-side index build is the fail-loud gate if it's truly needed.
 export function agentUsesVector(cwd: string): boolean {
   try {
