@@ -68,7 +68,7 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
         onEvent: (event) => {
           input.onEvent(event)
           if (event.kind === 'port-forward-opened') tailscale.servePort(event.hostPort ?? event.port)
-          else if (event.kind === 'port-forward-closed') tailscale.stopPort(event.port)
+          else if (event.kind === 'port-forward-closed') tailscale.stopPort(event.hostPort ?? event.port)
         },
         onFatalAuthFailure: (reason) => {
           // The broker has already stopped itself. Drop it from the map so a

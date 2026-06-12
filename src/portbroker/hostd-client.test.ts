@@ -565,4 +565,36 @@ describe('createBroker', () => {
     expect(listeners.get(4848)?.stopped).toBe(false)
     await broker.stop()
   })
+
+  test('a port-listen-opened racing the in-flight reserved bind does not install a second forwarder', async () => {
+    const { broker, ws, listenCalls } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+
+    // Same-tick: the request claims the target synchronously, then the watcher
+    // reports the daemon's listen socket before the reserved bind resolves.
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848] })
+    ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
+    await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
+
+    expect(listenCalls.filter((call) => call.port === 4848)).toHaveLength(1)
+    await broker.stop()
+  })
+
+  test('port-forward-closed carries the reserved host port so Tailscale stops the right port', async () => {
+    const { broker, ws, listeners, events } = setup({ policy: { allow: '*' }, failPorts: new Set([4848]) })
+    broker.start()
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-forward-request', targetPort: 4848, hostCandidates: [4848, 4849] })
+    await waitFor(() => listeners.has(4849))
+
+    await broker.stop()
+
+    expect(events.find((e) => e.kind === 'port-forward-closed' && e.port === 4848)).toMatchObject({
+      port: 4848,
+      hostPort: 4849,
+    })
+  })
 })

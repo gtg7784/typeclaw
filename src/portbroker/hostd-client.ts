@@ -95,6 +95,11 @@ export function createBroker(opts: BrokerOptions): Broker {
 
   const forwarders = new Map<number, ForwarderState>()
   const reservedTargets = new Map<number, number>()
+  // Targets claimed by a reserved forward whose host bind is still in flight.
+  // Marked synchronously BEFORE awaiting listenHost() so a concurrent
+  // port-listen snapshot/opened for the same target cannot slip past the
+  // reserved guard and install a competing auto-forward during the await.
+  const pendingReservedTargets = new Set<number>()
   let ws: WsClient | null = null
   let nextStreamId: StreamId = 1
   let stopped = false
@@ -162,8 +167,11 @@ export function createBroker(opts: BrokerOptions): Broker {
     if (ws) ws.send({ type: 'relay-open', streamId, port: fwd.targetPort })
   }
 
+  const isReservedTarget = (targetPort: number): boolean =>
+    reservedTargets.has(targetPort) || pendingReservedTargets.has(targetPort)
+
   const installForwarder = async (targetPort: number, bindAddr: BindAddr): Promise<void> => {
-    if (reservedTargets.has(targetPort)) return
+    if (isReservedTarget(targetPort)) return
     if (forwarders.has(targetPort)) return
     if (!shouldForward({ policy: opts.policy, port: targetPort })) {
       // Policy excluded the port. Tell the container so consumers waiting on
@@ -211,6 +219,11 @@ export function createBroker(opts: BrokerOptions): Broker {
       return
     }
 
+    // Claim the target and evict any auto-forward that already won the race
+    // before the reserved bind below yields control to the event loop.
+    pendingReservedTargets.add(targetPort)
+    removeAutoForwarderForTarget(targetPort, 'container-released')
+
     let lastReason = 'no host candidates'
     for (const hostPort of hostCandidates) {
       try {
@@ -228,6 +241,7 @@ export function createBroker(opts: BrokerOptions): Broker {
           streams: new Map(),
         })
         reservedTargets.set(targetPort, listener.port)
+        pendingReservedTargets.delete(targetPort)
         emit({
           kind: 'port-forward-opened',
           containerName: opts.containerName,
@@ -242,6 +256,7 @@ export function createBroker(opts: BrokerOptions): Broker {
         log(`reserved forward bind ${hostPort} for ${targetPort}: ${lastReason}`)
       }
     }
+    pendingReservedTargets.delete(targetPort)
     emit({ kind: 'port-forward-failed', containerName: opts.containerName, port: targetPort, reason: lastReason })
     if (ws) ws.send({ type: 'port-forward-result', port: targetPort, ok: false, reason: lastReason })
   }
@@ -255,7 +270,13 @@ export function createBroker(opts: BrokerOptions): Broker {
       fwd.listener.stop()
     } catch {}
     for (const [streamId] of fwd.streams) closeStream(hostPort, streamId, false)
-    emit({ kind: 'port-forward-closed', containerName: opts.containerName, port: fwd.targetPort, reason })
+    emit({
+      kind: 'port-forward-closed',
+      containerName: opts.containerName,
+      port: fwd.targetPort,
+      hostPort: fwd.hostPort,
+      reason,
+    })
   }
 
   const removeAutoForwarderForTarget = (targetPort: number, reason: 'container-released' | 'host-error'): void => {
@@ -279,7 +300,13 @@ export function createBroker(opts: BrokerOptions): Broker {
           stream?.sock.end()
         } catch {}
       }
-      emit({ kind: 'port-forward-closed', containerName: opts.containerName, port: fwd.targetPort, reason })
+      emit({
+        kind: 'port-forward-closed',
+        containerName: opts.containerName,
+        port: fwd.targetPort,
+        hostPort: fwd.hostPort,
+        reason,
+      })
     }
   }
 
@@ -304,15 +331,15 @@ export function createBroker(opts: BrokerOptions): Broker {
         return
       case 'port-listen-snapshot':
         for (const { port, bindAddr } of msg.ports) {
-          if (!reservedTargets.has(port)) void installForwarder(port, bindAddr)
+          if (!isReservedTarget(port)) void installForwarder(port, bindAddr)
         }
         return
       case 'port-listen-opened':
-        if (reservedTargets.has(msg.port)) return
+        if (isReservedTarget(msg.port)) return
         void installForwarder(msg.port, msg.bindAddr)
         return
       case 'port-listen-closed':
-        if (reservedTargets.has(msg.port)) return
+        if (isReservedTarget(msg.port)) return
         removeAutoForwarderForTarget(msg.port, 'container-released')
         return
       case 'port-forward-request':

@@ -26,7 +26,13 @@ export type ContainerToHostd =
 
 export type PortForwardEvent =
   | { kind: 'port-forward-opened'; containerName: string; port: number; hostPort: number; bindAddr: BindAddr }
-  | { kind: 'port-forward-closed'; containerName: string; port: number; reason: PortForwardCloseReason }
+  | {
+      kind: 'port-forward-closed'
+      containerName: string
+      port: number
+      hostPort: number
+      reason: PortForwardCloseReason
+    }
   | { kind: 'port-forward-failed'; containerName: string; port: number; reason: string }
 
 export type PortForwardCloseReason = 'container-released' | 'host-error' | 'deregistered' | 'broker-stopped'
