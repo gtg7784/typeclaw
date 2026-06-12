@@ -1,6 +1,6 @@
 ---
 name: typeclaw-tunnels
-description: Use when the user mentions tunnel, ngrok, webhook URL, cloudflared, expose to internet, show my friend, public URL, GitHub webhook, port forward to public, reverse proxy, trycloudflare, or making a container-local service reachable from the internet. Read it before suggesting tunnel add/remove/status/logs or editing typeclaw.json tunnels[].
+description: Use when the user mentions tunnel, ngrok, webhook URL, cloudflared, expose to internet, show my friend, public URL, GitHub webhook, port forward to public, reverse proxy, trycloudflare, or making a container-local service reachable from the internet. Read it before suggesting tunnel add/remove/status/logs or editing typeclaw.json tunnels[]. Also read it the moment a tunnel "doesn't work": a Cloudflare tunnel with no public URL usually means `cloudflared` was never baked into the image — it is opt-in (`docker.file.cloudflared`, default false), so a hand-added tunnel needs it set explicitly. Diagnose root cause by reading typeclaw.json + checking `command -v cloudflared` rather than trusting a single error line; tell the user to set `docker.file.cloudflared: true` and `typeclaw restart`; never curl/vendor cloudflared yourself or report a cryptic error as if the tunnel were down.
 ---
 
 # typeclaw-tunnels
@@ -106,6 +106,24 @@ Unhealthy logs often show:
 - no URL emission before the process exits.
 
 Use `typeclaw tunnel logs <name> -f` while restarting the agent if you need to watch URL discovery live.
+
+## Diagnosing "the tunnel doesn't work" (you, the agent)
+
+When a tunnel has no public URL, **diagnose the root cause directly — don't stop at a single error line.** The most common cause by far is that `cloudflared` was never baked into the image (it's opt-in; see below), not a runtime outage. These checks always work from your shell inside the container:
+
+1. **Read `typeclaw.json`.** Look at `tunnels[]` (is the tunnel even configured? which `provider`?) and `docker.file.cloudflared` (is it `true`?).
+2. **Check the binary:** `command -v cloudflared`. If a `cloudflare-quick` / `cloudflare-named` tunnel is configured but this prints nothing, the cloudflared layer was never installed — that is the root cause (see "### `cloudflared` is not installed" below).
+3. **Check the upstream is alive:** the service the tunnel points at must be listening on its `upstreamPort` inside the container (e.g. `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:<upstreamPort>/`).
+
+Then tell the user honestly and offer the fix. For the common "hand-added tunnel, no `cloudflared`" case, send something like:
+
+> This agent has a `cloudflare-quick` tunnel configured, but `cloudflared` was never installed into the image — it's opt-in (`docker.file.cloudflared`, default `false`), and this tunnel was hand-added to `typeclaw.json` without enabling it. Want me to set `docker.file.cloudflared: true`? It's a boot setting, so after I edit it you'll run `typeclaw restart` from the host project directory, and the tunnel URL will come up.
+
+Only after the user agrees: edit `typeclaw.json` (use the `typeclaw-config` skill), ask them to `typeclaw restart` from the **host** stage, and confirm the URL once the rebuilt container is back. Never `curl`/vendor `cloudflared` yourself.
+
+### If `typeclaw tunnel status/list/logs` prints `✖ [object ErrorEvent]`
+
+On older containers the in-container CLI couldn't reach the agent websocket (it resolved the port/token via `docker`, which isn't on `$PATH` inside the container), so these commands failed at the handshake with the opaque line `✖ [object ErrorEvent]`. **That is a CLI-reachability quirk, not a tunnel outage** — do not report it to the user as "the tunnel is down" or "I can't get the URL." Fall back to the direct diagnosis above (read `typeclaw.json`, `command -v cloudflared`, probe the upstream). Current containers resolve the websocket from the in-container `TYPECLAW_*` env instead, so `tunnel status` works in-container and prints a real `detail` line; if you still see `[object ErrorEvent]`, the agent is running an older build and the direct checks are authoritative.
 
 ## Common failure modes
 
