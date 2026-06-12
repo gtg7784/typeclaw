@@ -76,6 +76,25 @@ describe('vector session.turn.start hook', () => {
     expect(retrievalContext.results).toContain('second body')
   })
 
+  test('zero-shard direct mode still logs the mode=direct topics=0 signal', async () => {
+    hybridSearchMock.mockClear()
+    const memoryPlugin = (await import('./index')).default
+    // given: a fresh agent with no topic shards → direct mode, zero shards
+    const infos: string[] = []
+    const exports = await bootVectorPlugin(memoryPlugin, 16384, capturingLogger(infos))
+
+    const retrievalContext = { results: '' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_vector', agentDir, userPrompt: 'anything', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    // then: nothing injected, hybrid search skipped, but the signal is still logged
+    expect(retrievalContext.results).toBe('')
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(infos).toContain('[vector-retrieval] mode=direct topics=0')
+  })
+
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
     const memoryPlugin = (await import('./index')).default
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
@@ -123,7 +142,11 @@ describe('vector session.turn.start hook', () => {
   })
 })
 
-async function bootVectorPlugin(memoryPlugin: typeof import('./index').default, injectionBudgetBytes: number) {
+async function bootVectorPlugin(
+  memoryPlugin: typeof import('./index').default,
+  injectionBudgetBytes: number,
+  logger = createPluginLogger('memory'),
+) {
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
@@ -131,12 +154,21 @@ async function bootVectorPlugin(memoryPlugin: typeof import('./index').default, 
     version: undefined,
     agentDir,
     config: parsed.data,
-    logger: createPluginLogger('memory'),
+    logger,
     permissions: noopPermissionService,
     spawnSubagent: async () => {},
     isBooted: () => true,
   })
   return memoryPlugin.plugin(ctx)
+}
+
+function capturingLogger(infos: string[]) {
+  return {
+    ...createPluginLogger('memory'),
+    info: (msg: string) => {
+      infos.push(msg)
+    },
+  }
 }
 
 async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {

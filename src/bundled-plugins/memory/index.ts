@@ -152,8 +152,8 @@ async function renderVectorTurnMemory(
 ): Promise<string> {
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   if (plan.mode === 'direct') {
-    if (plan.shards.length === 0) return ''
     logger?.info(`[vector-retrieval] mode=direct topics=${plan.shards.length}`)
+    if (plan.shards.length === 0) return ''
     return renderMemorySection(plan, { origin: event.origin })
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
