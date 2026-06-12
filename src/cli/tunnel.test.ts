@@ -724,6 +724,50 @@ describe('tunnel live commands', () => {
 
     await expect(pending).resolves.toEqual({ ok: true, value: undefined })
   })
+
+  test('a rejected handshake surfaces a readable reason, never [object ErrorEvent]', async () => {
+    const built = createServer({
+      port: 0,
+      createSession: async () => fakeSession(),
+      tunnelManager: makeTunnelManager(),
+      tuiToken: 'correct-token',
+    }).start()
+    server = built
+
+    // given a URL whose token is wrong, the server rejects the WS upgrade (401),
+    // which the client sees as an 'error' ErrorEvent — the regression source
+    const result = await tunnel.fetchTunnelList({
+      cwd: process.cwd(),
+      url: `ws://localhost:${built.port}/?token=wrong-token`,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected the rejected handshake to fail')
+    expect(result.reason).not.toContain('[object ErrorEvent]')
+    expect(result.reason.length).toBeGreaterThan(0)
+  })
+})
+
+describe('resolveInContainerWsUrl', () => {
+  test('returns null on the host stage (no TYPECLAW_CONTAINER_NAME)', () => {
+    expect(tunnel.resolveInContainerWsUrl({})).toBeNull()
+    expect(tunnel.resolveInContainerWsUrl({ TYPECLAW_TUI_TOKEN: 'tok' })).toBeNull()
+  })
+
+  test('dials CONTAINER_PORT with the token and pathname from env', () => {
+    const url = tunnel.resolveInContainerWsUrl(
+      { TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: 'tok' },
+      '/tunnel-logs',
+    )
+    expect(url).toBe('ws://127.0.0.1:8973/tunnel-logs?token=tok')
+  })
+
+  test('omits the token query when TYPECLAW_TUI_TOKEN is unset or empty', () => {
+    expect(tunnel.resolveInContainerWsUrl({ TYPECLAW_CONTAINER_NAME: 'agent' })).toBe('ws://127.0.0.1:8973/')
+    expect(tunnel.resolveInContainerWsUrl({ TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: '' })).toBe(
+      'ws://127.0.0.1:8973/',
+    )
+  })
 })
 
 async function makeAgentDir(config: Record<string, unknown>): Promise<string> {

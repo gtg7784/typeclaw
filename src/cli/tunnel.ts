@@ -5,7 +5,7 @@ import { select, text, password, isCancel, cancel, log } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { loadConfigSync, validateConfig } from '@/config'
-import { resolveHostPort, resolveTuiToken } from '@/container'
+import { CONTAINER_PORT, resolveHostPort, resolveTuiToken } from '@/container'
 import { appendOrReplaceEnvKey, findAgentDir, hasEnvKey, isInitialized } from '@/init'
 import type { ClientMessage, ServerMessage, TunnelLogsServerMessage, TunnelSnapshot } from '@/shared'
 import type { TunnelConfig, TunnelFor, TunnelProvider } from '@/tunnels'
@@ -921,18 +921,48 @@ async function withTuiSocket<T>(
   }
 }
 
-async function resolveWsUrl(cwd: string, input?: string, pathname = '/'): Promise<LiveResult<string>> {
+async function resolveWsUrl(
+  cwd: string,
+  input?: string,
+  pathname = '/',
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<LiveResult<string>> {
   try {
-    const url = input === undefined ? new URL(`ws://127.0.0.1:${await resolveHostPort({ cwd })}`) : new URL(input)
-    if (input === undefined) {
-      const token = await resolveTuiToken({ cwd })
-      if (token !== null) url.searchParams.set('token', token)
+    if (input !== undefined) {
+      const url = new URL(input)
+      url.pathname = pathname
+      return { ok: true, value: url.toString() }
     }
+    // In-container short-circuit: when the agent runs `typeclaw tunnel …` from
+    // inside its own container (the only way it CAN run it), `docker` is not on
+    // $PATH, so the host-side discovery below (resolveHostPort/resolveTuiToken,
+    // which both shell out to `docker`) fails and the websocket connect aborts
+    // with the opaque `[object ErrorEvent]`. typeclaw's `docker run` sets
+    // TYPECLAW_CONTAINER_NAME (always) and TYPECLAW_TUI_TOKEN (when configured),
+    // and the agent's WS server listens on CONTAINER_PORT on the container
+    // loopback — so we can dial directly without docker. Mirrors the same
+    // short-circuit in src/cron/bridge.ts (resolveInContainerUrl).
+    const inContainer = resolveInContainerWsUrl(env, pathname)
+    if (inContainer !== null) return { ok: true, value: inContainer }
+    const url = new URL(`ws://127.0.0.1:${await resolveHostPort({ cwd })}`)
+    const token = await resolveTuiToken({ cwd })
+    if (token !== null) url.searchParams.set('token', token)
     url.pathname = pathname
     return { ok: true, value: url.toString() }
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
+}
+
+// Returns null on the host stage (TYPECLAW_CONTAINER_NAME unset), where the
+// docker-based discovery in resolveWsUrl is the right path.
+export function resolveInContainerWsUrl(env: NodeJS.ProcessEnv, pathname = '/'): string | null {
+  if (env.TYPECLAW_CONTAINER_NAME === undefined) return null
+  const url = new URL(`ws://127.0.0.1:${CONTAINER_PORT}`)
+  const token = env.TYPECLAW_TUI_TOKEN
+  if (token !== undefined && token !== '') url.searchParams.set('token', token)
+  url.pathname = pathname
+  return url.toString()
 }
 
 function waitForOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
@@ -948,13 +978,28 @@ function waitForOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
     )
     ws.addEventListener(
       'error',
-      (err) => {
+      (event) => {
         clearTimeout(timer)
-        reject(err)
+        reject(new Error(describeWsErrorEvent(event)))
       },
       { once: true },
     )
   })
+}
+
+// A WebSocket 'error' listener fires with an ErrorEvent, NOT an Error. Passing
+// it straight to a catch site that does `String(err)` yields the useless
+// `[object ErrorEvent]`. Pull the real message out (`.message`, or the nested
+// `.error`) so failures read like `Expected 101 status code` / connection
+// refused instead.
+function describeWsErrorEvent(event: unknown): string {
+  if (event instanceof Error) return event.message
+  if (typeof event === 'object' && event !== null) {
+    const { message, error } = event as { message?: unknown; error?: unknown }
+    if (typeof message === 'string' && message !== '') return message
+    if (error instanceof Error && error.message !== '') return error.message
+  }
+  return 'websocket connection failed'
 }
 
 function waitForServerMessage(
