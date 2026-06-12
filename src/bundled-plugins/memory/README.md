@@ -53,6 +53,15 @@ Default budget is 16 KB. Direct mode when shard bytes sum ≤ budget: all shard 
 
 The invariant `suppressSystemMemory === memory.vector.enabled` is load-bearing: a session must never carry memory in both the system prompt and the user turn.
 
+### Vector retrieval is parent-child, not a flat pool
+
+When `memory.vector.enabled` is true, `hybridSearch` does **not** rank topic vectors and stream-fragment vectors together in one flat cosine pool. It uses a parent-child collapse so the result set is always topic-level current truth:
+
+- **Match surface.** The query matches against topic-belief vectors AND fragment vectors (both lanes, fused by RRF). Fragments are the fine-grained retrieval hooks; topics are the returned unit.
+- **Collapse to parent.** A matched fragment resolves to the topic that cites it (via the shard's `fragments:` list — the citation IS the parent foreign key) and contributes its score to that topic. It never appears as a standalone result. An **undreamed** fragment (no topic cites it yet) resolves to itself, preserving the ~30-min freshness window before dreaming consolidates it.
+- **MAX-child ranking.** A collapsed topic takes the **maximum** of its members' RRF scores, never the sum. Sum would over-rank often-revised topics purely for accumulating more citations to match (the PARADE result: max beats sum when relevance is concentrated).
+- **Superseded fragments are excluded from the match surface.** When dreaming overturns a belief on contradiction, the old fragment id moves from `fragments:` to a `superseded:` list (see below). Superseded ids stay cited — so the citation-superset GC invariant keeps the fragment alive and history is auditable — but `passages.ts` does not embed them, so a stale "uses bun" fragment can never resurface as a hook for the current "uses pnpm" belief. `parseCitations` stays section-blind so GC and frontmatter recompute still see both sections; `splitCitationsBySection` is the status-aware view the retrieval layer reads (`parent-link.ts`).
+
 **Undreamed daily-stream events are NOT injected into the system prompt.** They are reachable only via `memory_search`, which discriminates results by `source: "topic" | "stream"`. The agent now decides per-query whether recent observations are relevant, instead of carrying every undreamed fragment in the cached prompt prefix. Three reasons this is the right shape:
 
 1. PR #314 made `memory_search` cover the stream surface, so the duplicate copy in the system prompt no longer earns its bytes.
@@ -90,7 +99,7 @@ A `[dreaming] citation-superset violation: …` warning logs the dropped ids and
 
 ## Files on disk
 
-- **`memory/topics/<slug>.md`** — per-topic shards with YAML frontmatter (`heading`, `cites`, `days`, `lastReinforced`, `tags?`) + body markdown. Runtime owns the frontmatter (recomputed after every dreaming run from the body's citations); dreaming subagent writes body only.
+- **`memory/topics/<slug>.md`** — per-topic shards with YAML frontmatter (`heading`, `cites`, `days`, `lastReinforced`, `tags?`) + body markdown. Runtime owns the frontmatter (recomputed after every dreaming run from the body's citations); dreaming subagent writes body only. The body cites fragments under a `fragments:` list (active evidence behind the current belief) and an optional `superseded:` list (evidence overturned by a later contradiction — kept cited for GC/history but excluded from vector retrieval).
 - **`memory/streams/yyyy-MM-dd.jsonl`** — daily fragment streams. One event per line, discriminated union of `fragment | watermark | legacy_prose`. Force-committed alongside the shards.
 - **`memory/MEMORY.md.pre-shard.bak`** — legacy pre-shard backup left by older TypeClaw versions. Safe to delete after verifying.
 - **`memory/skills/<name>/SKILL.md`** — muscle memory. Skills the dreaming subagent distills from repeated procedures. Auto-loaded as first-class skills.
