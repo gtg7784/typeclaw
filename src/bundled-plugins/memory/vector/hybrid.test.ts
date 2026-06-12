@@ -5,10 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { renderShard } from '../frontmatter'
+import { EMBEDDING_MODEL_ID } from './embedder'
 import { hybridSearch, type EmbedFn } from './hybrid'
 import { VectorStore, type VectorRow } from './store'
 
-const MODEL = 'test-model'
+const MODEL = EMBEDDING_MODEL_ID
 const testDirs: string[] = []
 
 afterEach(() => {
