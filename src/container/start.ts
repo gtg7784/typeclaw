@@ -731,7 +731,11 @@ async function runImageBuild(args: {
 }): Promise<boolean> {
   const { exec, cwd, imageTag, buildContext, hasBuildx } = args
   if (hasBuildx) {
-    const buildx = await exec(['buildx', 'build', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
+    // `--load` puts the image in the local store so the subsequent `docker run`
+    // finds it. Non-default buildx drivers (docker-container, etc.) export to
+    // the build cache ONLY without it; on the default `docker` driver --load is
+    // already implied, so passing it unconditionally is a safe no-op there.
+    const buildx = await exec(['buildx', 'build', '--load', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
     if (buildx.exitCode === 0) return true
     // buildx failed — fall back to the legacy builder against a stripped
     // Dockerfile so a misconfigured-buildx host still ends up with an image.

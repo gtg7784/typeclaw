@@ -1393,6 +1393,9 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => isBuildCall(c.args))
     expect(buildCall?.args.slice(0, 2)).toEqual(['buildx', 'build'])
+    // --load puts the image in the local store so the later `docker run` finds
+    // it; non-default buildx drivers export to cache only without it.
+    expect(buildCall?.args).toContain('--load')
     expect(buildCall?.dockerfileSnapshot).toContain('# syntax=docker/dockerfile:1.7')
     expect(buildCall?.dockerfileSnapshot).toContain('--mount=type=cache')
   })
