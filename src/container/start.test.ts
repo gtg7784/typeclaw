@@ -94,6 +94,7 @@ type ScaffoldedConfig = {
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
   sandbox?: { realProc?: boolean; writablePaths?: string[]; symlinks?: Array<{ from: string; to: string }> }
+  memory?: { vector?: { enabled?: boolean } }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -105,6 +106,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     ...(overrides.git ? { git: overrides.git } : {}),
     ...(overrides.network ? { network: overrides.network } : {}),
     ...(overrides.sandbox ? { sandbox: overrides.sandbox } : {}),
+    ...(overrides.memory ? { memory: overrides.memory } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -494,19 +496,23 @@ describe('planStart mounts', () => {
 })
 
 describe('planStart model mount', () => {
-  test('adds shared model cache mount at /opt/models:ro', async () => {
+  const modelsMount = `${process.env.HOME}/.typeclaw/models:/opt/models:ro`
+
+  test('adds shared model cache mount at /opt/models:ro when memory.vector.enabled', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs).toContain('-v')
-    expect(plan.runArgs).toContain(`${process.env.HOME}/.typeclaw/models:/opt/models:ro`)
+    expect(plan.runArgs).toContain(modelsMount)
   })
 
-  test('sets TYPECLAW_MODEL_CACHE env var to /opt/models', async () => {
+  test('sets TYPECLAW_MODEL_CACHE env var to /opt/models when memory.vector.enabled', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
@@ -517,13 +523,46 @@ describe('planStart model mount', () => {
   test('model mount appears before imageTag (last positional arg)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
-    const mountIdx = plan.runArgs.indexOf(`${process.env.HOME}/.typeclaw/models:/opt/models:ro`)
+    const mountIdx = plan.runArgs.indexOf(modelsMount)
     expect(mountIdx).toBeGreaterThan(-1)
     expect(mountIdx).toBeLessThan(plan.runArgs.length - 1)
+  })
+
+  test('omits model cache mount and TYPECLAW_MODEL_CACHE when vector is opted out', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { memory: { vector: { enabled: false } } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
+  })
+
+  test('omits model cache mount when memory.vector block is absent (default opt-out)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
+  })
+
+  test('omits model cache mount when typeclaw.json is missing entirely', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 })
 
