@@ -55,6 +55,10 @@ export type CommandRunnerOptions = {
   // wire for the handler/command path.
   channelRouter: ChannelRouter | undefined
   mcpManager?: McpManager
+  // When true, prompt sessions spawned here omit the system-prompt `# Memory`
+  // section (vector agents inject memory per-turn). Forwarded to createSession
+  // so command/handler sessions stay coherent with the rest of the runtime.
+  suppressSystemMemory?: boolean
 }
 
 type CommandHandle = {
@@ -194,6 +198,7 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
               signal: abortController.signal,
               sessionFactory: opts.sessionFactory,
               channelRouter: opts.channelRouter,
+              ...(opts.suppressSystemMemory !== undefined ? { suppressSystemMemory: opts.suppressSystemMemory } : {}),
               ...(opts.mcpManager !== undefined ? { mcpManager: opts.mcpManager } : {}),
             }),
           subagent: (subName, payload) =>
@@ -380,6 +385,7 @@ export async function runPromptForCommand(args: {
   // so the spawned session exposes `channel_send`.
   channelRouter?: ChannelRouter
   mcpManager?: McpManager
+  suppressSystemMemory?: boolean
   // Test seam for the agent-session boundary. Production passes the real
   // `createSessionWithDispose`; tests inject a fake to verify wiring
   // (specifically: the sessionManager handed off must be persisted, not
@@ -409,6 +415,7 @@ export async function runPromptForCommand(args: {
     ...(args.mcpManager !== undefined ? { mcpManager: args.mcpManager } : {}),
     ...(args.runtimeVersion !== undefined ? { runtimeVersion: args.runtimeVersion } : {}),
     ...(args.containerName !== undefined ? { containerName: args.containerName } : {}),
+    ...(args.suppressSystemMemory !== undefined ? { suppressSystemMemory: args.suppressSystemMemory } : {}),
   })
   const detachAbort = bindSignalToSession(args.signal, session)
   try {
