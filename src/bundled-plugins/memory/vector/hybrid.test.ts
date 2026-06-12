@@ -38,6 +38,9 @@ describe('hybridSearch', () => {
       expect(exactResults.slice(0, 3).map((result) => result.key)).toContain('pr-651')
       expect(exact?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
 
+      // A natural-language prompt whose words ('focused', 'memory', 'retrieval')
+      // appear scattered in the body — never as the whole phrase. The token-OR
+      // keyword fallback corroborates the vector hit, so both lanes sum (2/61).
       const semanticResults = await hybridSearch(
         'focused memory summary retrieval',
         store,
@@ -48,7 +51,7 @@ describe('hybridSearch', () => {
       const semantic = semanticResults.find((result) => result.key === 'semantic-cache')
 
       expect(semanticResults.slice(0, 3).map((result) => result.key)).toContain('semantic-cache')
-      expect(semantic?.rrfScore).toBeCloseTo(1 / 61, 10)
+      expect(semantic?.rrfScore).toBeCloseTo(1 / 61 + 1 / 61, 10)
     } finally {
       store.close()
     }
@@ -244,6 +247,88 @@ describe('hybridSearch', () => {
       // then it resolves to itself as a stream result
       const hit = results.find((result) => result.source === 'stream')
       expect(hit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
+})
+
+describe('hybridSearch keyword lane', () => {
+  it('retrieves a shard via token-OR fallback for a full natural-language prompt', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given a shard whose terms all appear, but never as the whole prompt phrase
+      writeTopic(agentDir, 'channel-reload', 'Channel Reload', 'PR #651 fixed channel reload handling.')
+
+      // when the query is a full sentence that never appears verbatim (no vector hit)
+      const results = await hybridSearch(
+        'where did we discuss the channel reload handling change',
+        store,
+        agentDir,
+        5,
+        embedFrom({ 7: 1 }),
+      )
+
+      // then the keyword lane still finds it via OR-matched tokens
+      expect(results.map((r) => r.key)).toContain('channel-reload')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('ranks a multi-token match above an alphabetically-earlier single-token match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given an alphabetically-early shard hitting one token and a late shard hitting two
+      writeTopic(agentDir, 'aaa-single', 'AAA Single', 'Mentions only docker here.')
+      writeTopic(agentDir, 'zzz-double', 'ZZZ Double', 'Mentions docker and reload together.')
+
+      // when the prompt's tokens hit both (no vector hit, no verbatim phrase)
+      const results = await hybridSearch('how do docker and reload interact', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the richer (two-token) match outranks the alphabetically-earlier one-token match
+      const single = results.findIndex((r) => r.key === 'aaa-single')
+      const double = results.findIndex((r) => r.key === 'zzz-double')
+      expect(double).toBeGreaterThanOrEqual(0)
+      expect(single).toBeGreaterThanOrEqual(0)
+      expect(double).toBeLessThan(single)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('truncates the keyword lane after ranking, not alphabetically', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given many alphabetically-early one-token shards and one late two-token shard
+      for (let i = 0; i < 12; i++) {
+        writeTopic(agentDir, `aaa-${i}`, `Weak ${i}`, 'Only docker is mentioned here.')
+      }
+      writeTopic(agentDir, 'zzz-strong', 'Strong', 'Mentions docker and reload together.')
+
+      // when topK=1 forces the lane to keep a single best result (no vector hit)
+      const results = await hybridSearch('docker reload', store, agentDir, 1, embedFrom({ 7: 1 }))
+
+      // then the late two-token match survives instead of an alphabetically-early weak one
+      expect(results[0]?.key).toBe('zzz-strong')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps exact-phrase precision when the whole query appears verbatim', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given two shards both containing every token, but only one the exact phrase
+      writeTopic(agentDir, 'exact', 'Exact', 'The runbook says docker reload first.')
+      writeTopic(agentDir, 'scattered', 'Scattered', 'Docker is here; reload is mentioned far away.')
+
+      // when the query IS a verbatim phrase in one shard (no vector hit)
+      const results = await hybridSearch('docker reload', store, agentDir, 5, embedFrom({ 7: 1 }))
+
+      // then the phrase path returns the exact match and never widens to token-OR
+      expect(results.map((r) => r.key)).toContain('exact')
+      expect(results.map((r) => r.key)).not.toContain('scattered')
     } finally {
       store.close()
     }

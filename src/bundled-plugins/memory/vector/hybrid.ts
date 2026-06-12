@@ -2,7 +2,14 @@ import { createHash } from 'node:crypto'
 
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
-import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
+import {
+  buildMatcher,
+  distinctTokens,
+  searchAll,
+  searchAllRanked,
+  type MemorySearchMatch,
+  type StreamMatch,
+} from '../search-tool'
 import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
@@ -82,6 +89,11 @@ function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK:
   return [...keptTopics, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
 }
 
+// Phrase-first, then token-OR fallback (mirrors `memory_search`). `hybridSearch`'s
+// query is always the whole user prompt, which never appears verbatim in a shard,
+// so a phrase-only lane returns nothing every real turn and RRF degenerates to the
+// vector lane alone. The `searchAllRanked` fallback also gives RRF a
+// matched-token-count rank (truncated after ranking) instead of alphabetical order.
 function keywordLane(
   query: string,
   shards: TopicShard[],
@@ -90,8 +102,15 @@ function keywordLane(
 ): MemorySearchMatch[] {
   const matcher = buildMatcher(query, false)
   if (typeof matcher === 'string') return []
-  const result = searchAll(shards, streamDays, matcher, { full: false, maxResults })
-  return 'matches' in result ? result.matches : []
+  const phrase = searchAll(shards, streamDays, matcher, { full: false, maxResults })
+  const phraseMatches = 'matches' in phrase ? phrase.matches : []
+  if (phraseMatches.length > 0) return phraseMatches
+
+  const tokens = distinctTokens(query)
+  if (tokens.length === 0) return []
+  if (tokens.length === 1 && tokens[0] === query.trim().toLowerCase()) return []
+  const ranked = searchAllRanked(shards, streamDays, tokens, { full: false, maxResults })
+  return 'matches' in ranked ? ranked.matches : []
 }
 
 // Reciprocal Rank Fusion across two rankers (vector + keyword). Each lane is

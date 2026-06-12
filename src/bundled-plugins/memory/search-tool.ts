@@ -135,7 +135,7 @@ function tokenFallback(
   return searchAllRanked(shards, streamDays, tokens, options)
 }
 
-function distinctTokens(query: string): string[] {
+export function distinctTokens(query: string): string[] {
   return [
     ...new Set(
       query
