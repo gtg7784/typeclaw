@@ -47,28 +47,42 @@ export async function hybridSearch(
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
 }
 
-// The vector lane, gated by per-query relevance. The relevance gate reads the
-// full TOPIC score distribution (E5's no-match band is a topic-level property;
-// stream fragments are sparse and would skew the baseline) and decides how many
-// candidates clear this query's baseline — zero when nothing does, which empties
-// the vector lane. An empty vector lane composes with RRF exactly like a lane
-// that found nothing, so a genuine keyword hit still survives a cosine no-match.
+// The vector lane, gated by per-query relevance. Topic and stream rows are
+// gated SEPARATELY: only the topic partition is subject to the no-match veto.
 //
-// The gate only has a baseline to judge against when topic vectors are present.
-// Below the gate's own small-corpus floor (including the freshness-window case
-// where the only vectors are undreamed stream fragments and no topic is indexed
-// yet) there is no band to measure, so the lane falls back to the ungated
-// top-(topK*2) — suppressing here would drop a legitimate stream-only match.
+// The relevance gate reads the full TOPIC score distribution (E5's no-match
+// band is a topic-level property; stream fragments are sparse and would skew
+// the baseline) and decides how many topic candidates clear this query's
+// baseline — zero when nothing does. Stream rows are NEVER vetoed by that
+// topic-distribution verdict: a flat topic band means "no consolidated topic
+// matches," not "the relevant undreamed fragment doesn't match." Letting a
+// topic no-match drop stream candidates would silently break the freshness
+// window — the common case where the only relevant content for a query is a
+// stream fragment no topic cites yet. Stream rows keep the ungated top-(topK*2).
+//
+// When the topic partition is below the gate's small-corpus floor there is no
+// band to measure, so topics also pass ungated. An empty merged lane composes
+// with RRF exactly like a lane that found nothing, so a genuine keyword hit
+// still survives a full cosine no-match.
 const GATE_TOPIC_FLOOR = 6
 
 function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK: number): VectorRow[] {
   const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
-  const topicScores = scored.filter(({ row }) => row.source === 'topic').map(({ score }) => score)
-  if (topicScores.length < GATE_TOPIC_FLOOR) return scored.slice(0, topK * 2).map(({ row }) => row)
+  const topicRows = scored.filter(({ row }) => row.source === 'topic')
+  const streamRows = scored.filter(({ row }) => row.source === 'stream').slice(0, topK * 2)
 
-  const keep = gateRelevance(topicScores, topK * 2)
-  if (keep === 0) return []
-  return scored.slice(0, keep).map(({ row }) => row)
+  const keptTopics =
+    topicRows.length < GATE_TOPIC_FLOOR
+      ? topicRows.slice(0, topK * 2)
+      : topicRows.slice(
+          0,
+          gateRelevance(
+            topicRows.map(({ score }) => score),
+            topK * 2,
+          ),
+        )
+
+  return [...keptTopics, ...streamRows].sort((a, b) => b.score - a.score).map(({ row }) => row)
 }
 
 function keywordLane(

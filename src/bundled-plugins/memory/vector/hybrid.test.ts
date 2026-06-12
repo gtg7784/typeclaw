@@ -320,6 +320,30 @@ describe('hybridSearch relevance gate', () => {
       store.close()
     }
   })
+
+  it('keeps a stream-vector match even when the topic distribution is a flat no-match', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a full flat topic band (no topic clears the baseline) PLUS one
+      // undreamed stream fragment that the query semantically matches, and NO
+      // keyword hit — the freshness-window case. The topic no-match must not
+      // veto the relevant stream candidate.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.78 + (i % 3) * 0.001)))
+      }
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'fresh', 'A brand new undreamed observation.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, vector({ 0: 1 }), 'stream'))
+
+      const results = await hybridSearch('zxqw nonexistent gibberish token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      const streamHit = results.find((r) => r.source === 'stream')
+      expect(streamHit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
 })
 
 function createFixture(): { agentDir: string; store: VectorStore } {
