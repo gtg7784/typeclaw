@@ -72,6 +72,29 @@ export function renderMemorySection(plan: InjectionPlan, options: Pick<LoadMemor
   return renderSection(plan, options)
 }
 
+// Direct-mode render: `unchangedShards` had their body injected earlier this
+// session, so it is replaced by a one-line slug reference the agent can re-fetch
+// on demand; `fullShards` (new or changed) keep their full body. Non-channel only
+// — channel turns are force-indexed upstream, so no channel-bleed boundary here.
+export function renderDedupedMemorySection(fullShards: TopicShard[], unchangedShards: TopicShard[]): string {
+  if (fullShards.length === 0 && unchangedShards.length === 0) return ''
+  const lines = ['# Memory', '', MEMORY_FRAMING, '']
+  for (const shard of fullShards) {
+    const topic = topicEntryFromShard(shard)
+    lines.push(`## ${topic.name}`, '')
+    lines.push(renderBody(topic), '')
+  }
+  for (const shard of unchangedShards) {
+    lines.push(`## ${shard.frontmatter.heading}`, '')
+    lines.push(unchangedShardReference(shard.slug), '')
+  }
+  return lines.join('\n').trimEnd()
+}
+
+function unchangedShardReference(slug: string): string {
+  return `slug: \`${slug}\` — unchanged since earlier this session; call \`memory_search({ topic: "${slug}" })\` to re-read the full body.`
+}
+
 export type RetrievedMemoryItem = { source: 'topic' | 'stream'; key: string; heading: string; excerpt: string }
 
 // Over-budget vector turns inject the top-K relevant memories (not all shards).
