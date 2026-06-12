@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -428,6 +428,69 @@ describe('session.turn.start hook', () => {
     )
 
     expect(spawned).toHaveLength(0)
+  })
+
+  // Opt-out invariant guard for `suppressSystemMemory === memory.vector.enabled`:
+  // with vector OFF (default) memory lives only in the system prompt, so the
+  // non-vector hook branch must never write the per-turn `retrievalContext` bag.
+  // Writing it would double-inject (system prompt + user turn). The sentinel
+  // surviving proves the opt-out path leaves the bag untouched in BOTH plans.
+  //
+  // The non-vector retrieval runs DETACHED (`void runMemoryRetrieval`), so each
+  // test must wait for an observable completion point AFTER the plan decision
+  // before asserting — otherwise a future write inside the detached path (which
+  // awaits `loadAllShards` first) would race past the assertion unobserved.
+  test('leaves retrievalContext.results empty when vector is off (index-mode plan)', async () => {
+    // given: over-budget shards → index mode, whose detached path ends in a spawn
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    const retrievalContext = { results: 'SENTINEL' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_optout_index', agentDir, userPrompt: 'what do I know?', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+
+    // The spawn is the detached path's terminal step: once it lands, the hook has
+    // run past every line that could have touched the bag.
+    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
+    expect(retrievalContext.results).toBe('SENTINEL')
+  })
+
+  test('leaves retrievalContext.results empty when vector is off (direct-mode plan)', async () => {
+    // given: a small shard under budget → direct mode, which returns early with
+    // NO spawn and NO log. Its only observable is `loadAllShards` resolving, so
+    // wrap that module boundary as an observer (real impl preserved) and signal a
+    // barrier on the next macrotask — by then the plugin's microtask continuation
+    // (buildInjectionPlan + the direct-mode early return) has already run.
+    await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
+    const { loadAllShards: realLoadAllShards } = await import('./load-shards')
+    let signalDirectPathSettled: () => void = () => {}
+    const directPathSettled = new Promise<void>((resolve) => {
+      signalDirectPathSettled = resolve
+    })
+    mock.module('./load-shards', () => ({
+      loadAllShards: async (dir: string) => {
+        const shards = await realLoadAllShards(dir)
+        setImmediate(signalDirectPathSettled)
+        return shards
+      },
+    }))
+    try {
+      const { exports } = await bootMemoryPlugin(agentDir, {})
+
+      const retrievalContext = { results: 'SENTINEL' }
+      await exports.hooks!['session.turn.start']!(
+        { sessionId: 'ses_optout_direct', agentDir, userPrompt: 'small?', retrievalContext },
+        { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+      )
+
+      await directPathSettled
+      expect(retrievalContext.results).toBe('SENTINEL')
+    } finally {
+      mock.restore()
+    }
   })
 })
 
