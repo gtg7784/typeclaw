@@ -6,9 +6,10 @@ import { join } from 'node:path'
 
 import { withGitLock } from '@/git/mutex'
 
+import { EMBEDDING_MODEL_ID } from './embedder'
 import { VectorStore, type VectorRow } from './store'
 
-const MODEL = 'Xenova/multilingual-e5-base'
+const MODEL = EMBEDDING_MODEL_ID
 const testDirs: string[] = []
 
 afterEach(() => {
@@ -25,7 +26,7 @@ describe('VectorStore', () => {
       store.upsert(row('topic:b', embedding(768, { 0: -1, 1: -1 })))
       store.upsert(row('stream:c', embedding(768, { 2: 1 })))
 
-      const results = store.query(embedding(768, { 0: 1, 1: 1 }), 1)
+      const results = store.query(embedding(768, { 0: 1, 1: 1 }), 1, MODEL)
 
       expect(results).toHaveLength(1)
       expect(results[0]?.id).toBe('topic:a')
@@ -42,8 +43,39 @@ describe('VectorStore', () => {
       store.upsert(row('topic:a', embedding(768, { 0: 1 })))
       store.upsert(row('topic:b', embedding(768, { 1: 1 })))
 
-      expect(() => store.query(embedding(384, { 0: 1 }), 10)).not.toThrow()
-      expect(store.query(embedding(384, { 0: 1 }), 10)).toEqual([])
+      expect(() => store.query(embedding(384, { 0: 1 }), 10, MODEL)).not.toThrow()
+      expect(store.query(embedding(384, { 0: 1 }), 10, MODEL)).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('query excludes rows from a different model/dtype variant (same dims)', () => {
+    const store = openTestStore()
+    try {
+      // given: a stale fp32 row and a current q8 row, same id-space, same dims
+      store.upsert({ ...row('topic:stale', embedding(768, { 0: 1 })), model: 'Xenova/multilingual-e5-base@fp32' })
+      store.upsert(row('topic:current', embedding(768, { 0: 1 })))
+
+      // when: querying with the current variant id
+      const results = store.query(embedding(768, { 0: 1 }), 10, MODEL)
+
+      // then: only the current-variant row is scored; the fp32 row never appears
+      expect(results.map((r) => r.id)).toEqual(['topic:current'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('deleteOtherModels purges rows whose model != current, keeps current', () => {
+    const store = openTestStore()
+    try {
+      store.upsert({ ...row('topic:stale', embedding(768, { 0: 1 })), model: 'Xenova/multilingual-e5-base@fp32' })
+      store.upsert(row('topic:current', embedding(768, { 1: 1 })))
+
+      store.deleteOtherModels(MODEL)
+
+      expect(store.getAll().map((r) => r.id)).toEqual(['topic:current'])
     } finally {
       store.close()
     }

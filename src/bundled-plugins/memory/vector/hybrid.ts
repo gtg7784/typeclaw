@@ -5,7 +5,7 @@ import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildMatcher, searchAll, type MemorySearchMatch, type StreamMatch } from '../search-tool'
 import type { StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
-import { embed, MODEL_NAME, type EmbedType } from './embedder'
+import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import { VectorStore, type VectorRow } from './store'
 
 const RRF_K = 60
@@ -36,7 +36,8 @@ export async function hybridSearch(
   ])
 
   const index = buildContentIndex(shards, streamDays)
-  const vectorRows = queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2)
+  const vectorRows =
+    queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2, EMBEDDING_MODEL_ID)
   const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
 
   return fuseLanes(vectorRows, keywordMatches, index).slice(0, topK)
@@ -51,7 +52,7 @@ export function findMissingPassages(store: VectorStore, passages: Passage[]): Pa
   const existing = new Map(store.getAll().map((row) => [row.id, row]))
   return passages.filter((passage) => {
     const row = existing.get(passage.id)
-    return row === undefined || row.model !== MODEL_NAME || row.contentHash !== passage.contentHash
+    return row === undefined || row.model !== EMBEDDING_MODEL_ID || row.contentHash !== passage.contentHash
   })
 }
 

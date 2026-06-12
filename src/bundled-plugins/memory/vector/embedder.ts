@@ -15,6 +15,12 @@ export const DIMS = 768
 // q8 → onnx/model_quantized.onnx (~279 MB); the default would be fp32 (1.11 GB).
 export const MODEL_DTYPE = 'q8'
 
+// The index identity. dtype changes the embedding values (q8 ≠ fp32) while
+// MODEL_NAME and DIMS stay constant, so neither alone detects a variant switch.
+// Vectors are stamped with this and retrieval filters on it — rows from a
+// different variant are stale and never compared against a query of this one.
+export const EMBEDDING_MODEL_ID = `${MODEL_NAME}@${MODEL_DTYPE}`
+
 export type EmbedType = 'query' | 'passage'
 
 type TransformersEnv = typeof TransformersEnvValue

@@ -4,7 +4,9 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { fragmentContentHash } from '../fragment-parser'
 import { renderShard } from '../frontmatter'
+import { EMBEDDING_MODEL_ID } from './embedder'
 import type { EmbedFn } from './hybrid'
 import { buildStartupVectorIndex } from './startup'
 import { VectorStore } from './store'
@@ -80,6 +82,46 @@ describe('buildStartupVectorIndex', () => {
       expect(result).toEqual({ built: true, count: 1 })
       expect(embeddedTexts).toEqual(['Missing Topic\nNew content needs a vector.'])
       expect(store.getAll().map((stored) => stored.id)).toEqual(['topic:current-topic', 'topic:missing-topic'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('re-embeds and purges rows from a previous model/dtype variant', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(agentDir, 'carried-over', 'Carried Over', 'Content unchanged across a dtype switch.')
+
+    // given: an index built by a previous embedding variant (e.g. fp32), same
+    // content, stamped with a different model id
+    const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+    const seed = VectorStore.open(dbPath)
+    seed.upsert({
+      id: 'topic:carried-over',
+      source: 'topic',
+      key: 'carried-over',
+      model: 'Xenova/multilingual-e5-base@fp32',
+      dims: 8,
+      embedding: vector({ 0: 1 }),
+      contentHash: fragmentContentHash({ topic: 'Carried Over', body: 'Content unchanged across a dtype switch.' }),
+    })
+    seed.close()
+    const embeddedTexts: string[] = []
+
+    // when: the new variant builds the startup index
+    const result = await buildStartupVectorIndex(agentDir, async (texts) => {
+      embeddedTexts.push(...texts)
+      return texts.map(() => vector({ 1: 1 }))
+    })
+
+    const store = VectorStore.open(dbPath)
+    try {
+      // then: the unchanged content is re-embedded under the new stamp, and the
+      // stale fp32 row is gone (one row, current variant only)
+      expect(result).toEqual({ built: true, count: 1 })
+      expect(embeddedTexts).toEqual(['Carried Over\nContent unchanged across a dtype switch.'])
+      const rows = store.getAll()
+      expect(rows.map((stored) => stored.id)).toEqual(['topic:carried-over'])
+      expect(rows[0]?.model).toBe(EMBEDDING_MODEL_ID)
     } finally {
       store.close()
     }

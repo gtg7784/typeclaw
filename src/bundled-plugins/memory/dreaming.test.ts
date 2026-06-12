@@ -16,7 +16,7 @@ import {
 } from './dreaming'
 import { addDreamedIds, DREAMING_STATE_FILE, emptyState, getDreamedIds, loadDreamingState } from './dreaming-state'
 import { renderShard } from './frontmatter'
-import { MODEL_NAME } from './vector/embedder'
+import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
 import { VectorStore, type VectorRow } from './vector/store'
 
@@ -1046,7 +1046,7 @@ function vectorRow(
   embedding: Float32Array,
   contentHash: string,
 ): Omit<VectorRow, 'updatedAt'> {
-  return { id, source, key, model: MODEL_NAME, dims: embedding.length, embedding, contentHash }
+  return { id, source, key, model: EMBEDDING_MODEL_ID, dims: embedding.length, embedding, contentHash }
 }
 
 function embedRecording(texts: string[]): EmbedFn {
