@@ -72,7 +72,7 @@ export function renderMemorySection(plan: InjectionPlan, options: Pick<LoadMemor
   return renderSection(plan, options)
 }
 
-export type RetrievedMemoryItem = { heading: string; excerpt: string }
+export type RetrievedMemoryItem = { source: 'topic' | 'stream'; key: string; heading: string; excerpt: string }
 
 // Over-budget vector turns inject the top-K relevant memories (not all shards).
 // Same `# Memory` framing + channel-bleed boundary as the direct path, so the
@@ -93,13 +93,22 @@ export function renderRetrievedMemorySection(
   if (isChannel) lines.push(...CHANNEL_MEMORY_BOUNDARY, '', retrievedIndexDirective(), '')
   for (const item of items) {
     lines.push(`## ${item.heading}`, '')
-    if (!isChannel) lines.push(item.excerpt.trimEnd(), '')
+    if (!isChannel) {
+      lines.push(item.excerpt.trimEnd(), '')
+    } else if (item.source === 'topic') {
+      lines.push(`slug: \`${item.key}\``, '')
+    } else {
+      lines.push(
+        'recent observation \u2014 not yet a topic shard; reach the full text via `memory_search({ query: ... })`.',
+        '',
+      )
+    }
   }
   return lines.join('\n').trimEnd()
 }
 
 function retrievedIndexDirective(): string {
-  return 'Relevant topics shown as headings only in channels. Call `memory_search` to read the body of any topic you need.'
+  return 'Relevant memory shown as headings only in channels. For a topic, call `memory_search({ topic: "<slug>" })` with a slug below to read its full body; for a recent observation (no slug), call `memory_search({ query: "..." })` to reach the full text.'
 }
 
 async function appendRetrievalCache(result: string, agentDir: string, options: LoadMemoryOptions): Promise<string> {

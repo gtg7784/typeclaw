@@ -358,8 +358,18 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
   }
 
   const items: RetrievedMemoryItem[] = [
-    { heading: 'KakaoTalk reply conventions', excerpt: 'the-user-prefers-formal-speech body excerpt' },
-    { heading: 'GitHub channel role configuration', excerpt: 'roles-are-keyed-on-first-message body excerpt' },
+    {
+      source: 'topic',
+      key: 'kakaotalk-reply-conventions',
+      heading: 'KakaoTalk reply conventions',
+      excerpt: 'the-user-prefers-formal-speech body excerpt',
+    },
+    {
+      source: 'topic',
+      key: 'github-channel-role-configuration',
+      heading: 'GitHub channel role configuration',
+      excerpt: 'roles-are-keyed-on-first-message body excerpt',
+    },
   ]
 
   test('returns empty string when there are no retrieved items', () => {
@@ -380,6 +390,42 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
     expect(section).toContain('memory_search')
+  })
+
+  test('channel origin exposes each topic slug so the agent can look it up exactly', () => {
+    const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
+
+    expect(section).toContain('kakaotalk-reply-conventions')
+    expect(section).toContain('github-channel-role-configuration')
+  })
+
+  test('channel directive names both the topic-lookup and query-search calls', () => {
+    const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
+
+    expect(section).toContain('topic:')
+    expect(section).toContain('query:')
+  })
+
+  test('channel origin omits a slug hint for undreamed stream items (no shard to look up)', () => {
+    const streamItems: RetrievedMemoryItem[] = [
+      { source: 'stream', key: '2026-06-12#frag1', heading: 'recent observation', excerpt: 'fresh body' },
+    ]
+
+    const section = renderRetrievedMemorySection(streamItems, { origin: channelOrigin })
+
+    expect(section).toContain('## recent observation')
+    expect(section).not.toContain('2026-06-12#frag1')
+  })
+
+  test('channel origin gives undreamed stream items a query-search recovery hint', () => {
+    const streamItems: RetrievedMemoryItem[] = [
+      { source: 'stream', key: '2026-06-12#frag1', heading: 'recent observation', excerpt: 'fresh body' },
+    ]
+
+    const section = renderRetrievedMemorySection(streamItems, { origin: channelOrigin })
+
+    expect(section).not.toContain('fresh body')
+    expect(section).toContain('memory_search({ query')
   })
 
   test('channel origin keeps the privilege boundary', () => {

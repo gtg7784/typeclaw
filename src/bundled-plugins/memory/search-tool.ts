@@ -2,12 +2,13 @@ import { z } from 'zod'
 
 import { defineTool } from '@/plugin'
 
-import { loadAllShards, type TopicShard } from './load-shards'
+import { loadAllShards, loadShard, type TopicShard } from './load-shards'
 import type { FragmentEvent, LegacyProseEvent, StreamEvent } from './stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
 
 const DEFAULT_MAX_RESULTS = 10
 const EXCERPT_CONTEXT_LINES = 3
+const EXCERPT_HEAD_LINES = 7
 
 export type TopicMatch = {
   source: 'topic'
@@ -36,15 +37,24 @@ export type Matcher = (haystack: string) => boolean
 
 export const memorySearchTool = defineTool({
   description:
-    'Search the agent\'s long-term memory. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies. Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-first/stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
+    'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard with its full body — use it to read a topic whose slug you already have (e.g. a heading shown in injected memory). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-first/stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
   parameters: z.object({
-    query: z.string(),
+    query: z.string().optional(),
+    topic: z.string().optional(),
     asRegex: z.boolean().default(false),
     full: z.boolean().default(false),
     maxResults: z.number().int().min(0).default(DEFAULT_MAX_RESULTS),
   }),
-  async execute({ query, asRegex, full, maxResults }, ctx) {
-    const matcherOrError = buildMatcher(query, asRegex)
+  async execute({ query, topic, asRegex, full, maxResults }, ctx) {
+    if ((query === undefined) === (topic === undefined)) {
+      return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
+    }
+
+    if (topic !== undefined) {
+      return resultToToolResult(await lookupTopic(ctx.agentDir, topic, ctx.logger))
+    }
+
+    const matcherOrError = buildMatcher(query!, asRegex)
     if (typeof matcherOrError === 'string') {
       return resultToToolResult({ error: matcherOrError })
     }
@@ -59,12 +69,47 @@ export const memorySearchTool = defineTool({
 
     const result = searchAll(shards, streamDays, matcherOrError, { full, maxResults })
     if ('matches' in result && result.matches.length === 0) {
-      const fallback = tokenFallback(query, asRegex, shards, streamDays, { full, maxResults })
+      const fallback = tokenFallback(query!, asRegex, shards, streamDays, { full, maxResults })
       if (fallback !== null) return resultToToolResult(fallback)
     }
     return resultToToolResult(result)
   },
 })
+
+// Exact slug lookup, so the agent can read a topic whose slug the per-turn
+// injection already showed it without re-running a fuzzy search for a body the
+// retrieval layer already located. A traversal slug makes `topicShardPath` throw
+// inside `loadShard` — caught and returned as a structured error, not a crash.
+// A missing slug returns empty matches, the same shape as a search that hit nothing.
+async function lookupTopic(
+  agentDir: string,
+  slug: string,
+  logger?: { warn(message: string): void },
+): Promise<MemorySearchResult> {
+  let shard: TopicShard | null
+  try {
+    shard = await loadShard(agentDir, slug, logger === undefined ? {} : { logger })
+  } catch (err) {
+    return { error: `invalid topic slug: ${err instanceof Error ? err.message : String(err)}` }
+  }
+  if (shard === null) return { matches: [] }
+  return { matches: [topicMatchWithFullBody(shard)] }
+}
+
+function topicMatchWithFullBody(shard: TopicShard): TopicMatch {
+  return {
+    source: 'topic',
+    shardPath: shard.path,
+    slug: shard.slug,
+    heading: shard.frontmatter.heading,
+    excerpt: excerpt(shard.body),
+    fullBody: shard.body,
+  }
+}
+
+function excerpt(body: string): string {
+  return splitBodyLines(body).slice(0, EXCERPT_HEAD_LINES).join('\n')
+}
 
 // Phrase-first/token-fallback: the descriptive multi-word queries the
 // retrieval subagent issues rarely appear verbatim in any body, so a
