@@ -159,7 +159,9 @@ Each `memory-logger` spawn captures the line count of `memory/streams/<today>.js
 
 ## Tests
 
-Test files in this directory (kebab-case, `.test.ts` neighbors): `paths`, `slug`, `frontmatter`, `topics`, `shard-snapshot`, `delete-tool`, `citations`, `citation-superset`, `load-shards`, `load-memory`, `injection-plan`, `turn-dedup`, `search-tool`, `memory-retrieval`, `memory-logger`, `dreaming`, `index`, `index-vector`, `integration`. Plus guard policies in `../guard/policies/`: `memory-topics-delete`, `memory-topics-write`, `memory-retrieval-cache-write`.
+Test files in this directory (kebab-case, `.test.ts` neighbors): `paths`, `slug`, `frontmatter`, `topics`, `shard-snapshot`, `delete-tool`, `citations`, `citation-superset`, `load-shards`, `load-memory`, `injection-plan`, `turn-dedup`, `search-tool`, `memory-retrieval`, `memory-logger`, `dreaming`, `index`, `index-vector`, `index-vector-retrieval`, `integration`. Plus guard policies in `../guard/policies/`: `memory-topics-delete`, `memory-topics-write`, `memory-retrieval-cache-write`.
+
+`index-vector` mocks `hybridSearch` to cover the budget-gating, channel force-index, and cross-turn dedup branches of the `session.turn.start` hook. `index-vector-retrieval` is the complementary end-to-end test: it drives the REAL `hybridSearch` → `VectorStore.query` → relevance gate → RRF → `renderRetrievedMemorySection` pipeline through the same hook, seeding a real vector store and injecting a synthetic query embedder via `__setQueryEmbedFnForTests` (so the ~279 MB model never loads). Bodies share no word with the query, so a hit proves the vector lane ran rather than the substring `memory_search` lane.
 
 ## Notes from before the plugin existed
 

@@ -26,7 +26,8 @@ import { memorySearchTool } from './search-tool'
 import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
 import { runVectorIndexDoctor } from './vector/doctor'
-import { hybridSearch } from './vector/hybrid'
+import { embed } from './vector/embedder'
+import { hybridSearch, type EmbedFn } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
 import { VectorStore } from './vector/store'
 
@@ -147,6 +148,17 @@ const memoryConfigSchema = z
 
 const VECTOR_TURN_TOP_K = 10
 
+// Defaults to the real `embed`, which lazy-loads the ~279 MB HF model. The
+// override lets an end-to-end test exercise the real index-mode pipeline
+// (hybridSearch → VectorStore.query → RRF → render) through the turn hook with a
+// synthetic query embedding, instead of mocking hybridSearch away. Mirrors the
+// `__resetXForTests` seam used by `load-shards`/`stream-io`.
+let queryEmbedFn: EmbedFn = embed
+
+export function __setQueryEmbedFnForTests(fn: EmbedFn | undefined): void {
+  queryEmbedFn = fn ?? embed
+}
+
 // Builds the per-turn user-prompt memory block for a vector agent. Under budget
 // (direct mode) injects shard bodies, but de-duplicates across turns: a shard
 // whose body was already injected in full this session is rendered as a compact
@@ -178,7 +190,7 @@ async function renderVectorTurnMemory(
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
   try {
-    const results = await hybridSearch(event.userPrompt, store, event.agentDir, VECTOR_TURN_TOP_K)
+    const results = await hybridSearch(event.userPrompt, store, event.agentDir, VECTOR_TURN_TOP_K, queryEmbedFn)
     const topicHits = results.reduce((n, r) => (r.source === 'topic' ? n + 1 : n), 0)
     logger?.info(
       `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${results.length - topicHits}`,

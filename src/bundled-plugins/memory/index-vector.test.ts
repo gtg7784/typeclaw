@@ -47,7 +47,13 @@ describe('vector session.turn.start hook', () => {
       { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
     )
 
-    expect(hybridSearchMock).toHaveBeenCalledWith('second prompt', expect.anything(), agentDir, 10)
+    expect(hybridSearchMock).toHaveBeenCalledWith(
+      'second prompt',
+      expect.anything(),
+      agentDir,
+      10,
+      expect.any(Function),
+    )
     expect(retrievalContext.results).toContain('# Memory')
     expect(retrievalContext.results).toContain('## Second Topic')
     expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
