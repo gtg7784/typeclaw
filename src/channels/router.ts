@@ -555,6 +555,14 @@ type LiveSession = {
   // sends never poison the tracker. The fuzzy-match upgrade is intentionally
   // deferred — exact-match has zero false-positive risk by construction.
   lastSentText: Map<string, string>
+  // Session leaf-entry id captured at the moment the most recent successful
+  // channel send landed this turn. `validateChannelTurn` compares it to the
+  // turn-end leaf: a DIFFERENT assistant `stop` leaf means the model replied,
+  // kept working, then ended with FRESH final prose it forgot to deliver
+  // (the `continue: true` progress-reply bug) — recover it. A leaf that still
+  // matches is narration the model emitted BEFORE/with the reply that already
+  // landed, so it stays suppressed. Reset to null on every new prompt batch.
+  lastSendLeafId: string | null
   // Per-(chat:thread) ring of send timestamps (epoch ms) within the rolling
   // SEND_RATE_WINDOW_MS window. Append-on-send, prune-on-read. Lifecycle is
   // wall-clock (NOT cleared on new prompt batches) because rate is a
@@ -1540,6 +1548,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         lastSentText: new Map(),
+        lastSendLeafId: null,
         sendTimestamps: new Map(),
         successfulChannelSends: 0,
         turnSeq: 0,
@@ -2097,6 +2106,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           )
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+          live.lastSendLeafId = null
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
           // A real user batch starts a fresh logical turn → restore the full
           // empty-turn retry budget and drop any raised output-token budget left
@@ -2171,6 +2181,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+          live.lastSendLeafId = null
         } finally {
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
@@ -3172,6 +3183,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     if (live) {
       live.successfulChannelSends++
+      live.lastSendLeafId = live.session.sessionManager.getLeafEntry()?.id ?? null
       live.policyDeniedToolSendsThisTurn.delete(sendKey)
       // Don't stop the heartbeat here: the agent may still be mid-turn and
       // about to send another reply. drain()'s finally block owns turn-end
@@ -3257,9 +3269,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
+    // A send landed this turn, but the model may have posted a `continue: true`
+    // progress reply, kept working, then ENDED with its final answer as plain
+    // prose — never calling a channel tool again. The terminal-reply abort fires
+    // only for a `channel_reply` WITHOUT `continue: true`, so that `stopReason:
+    // 'stop'` text leaf is left undelivered and unguarded (the false-receipt
+    // guard is github-only). The discriminator is leaf IDENTITY: only when the
+    // turn-end `stop` leaf is a DIFFERENT entry than the one in place at the last
+    // send did the model produce fresh post-reply prose. A leaf unchanged since
+    // the send is narration the model emitted with/before the reply that already
+    // landed — suppress it, as before.
     if (live.successfulChannelSends > successfulSendsBeforePrompt) {
       maybeNudgeContinuationWillingness(live)
-      return
+      const trailing = recoverableAssistantText(live.session)
+      if (trailing === null || trailing.source !== 'leaf') return
+      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
     }
 
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
@@ -3470,6 +3494,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.warn(
         `[channels] ${live.keyId}: suppressed recovery (github review guard) reason=${JSON.stringify(recoveryBlock)} text_len=${assistantText.length}`,
       )
+      return
+    }
+
+    // Duplicate guard on the FINAL outbound body. Must run here, after the
+    // plain-text-tool-call extraction may have rewritten `assistantText` — a
+    // dedupe on the raw leaf would miss a fresh `channel_reply({"text":"X"})`
+    // leak leaf whose extracted body equals a reply already sent this turn. The
+    // recovery send is `source:'system'`, which bypasses send()'s own dup guard,
+    // so reject the byte-identical re-post here. No-op on the zero-send path:
+    // `lastSentText` is cleared at batch start and only filled by this turn's
+    // sends, so it never matches when nothing was sent.
+    const sendKey = consecutiveSendKey(live.key.chat, live.key.thread)
+    if (live.lastSentText.get(sendKey) === normalizeSendText(assistantText)) {
+      logger.info(`[channels] ${live.keyId}: suppressed recovery (duplicate of reply already sent this turn)`)
       return
     }
 

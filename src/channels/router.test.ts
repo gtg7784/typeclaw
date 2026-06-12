@@ -3655,6 +3655,134 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  test('leaf recovery: DOES fire when a progress reply landed but the final answer ended as plain prose', async () => {
+    // The production bug: a `continue: true` progress reply lands, the model
+    // keeps working, then ENDS the turn with its conclusion as plain assistant
+    // text (a `stopReason: 'stop'` leaf) and never calls a channel tool again.
+    // The conclusion must be recovered and delivered, not dropped.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'fix the tunnel' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'On it — checking now.' })
+      sessions[0]!.setAssistantText('Fixed — you will need a restart for it to take effect.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual([
+      'On it — checking now.',
+      'Fixed — you will need a restart for it to take effect.',
+    ])
+    expect(
+      logs.some((m) => m.includes('recovering assistant_text_without_channel_tool') && m.includes('source=leaf')),
+    ).toBe(true)
+  })
+
+  test('leaf recovery: does NOT re-post when the trailing leaf duplicates the reply already sent', async () => {
+    // The model called channel_reply (recorded in lastSentText) and the same
+    // text is the `stop` leaf. Recovery must not echo a byte-identical re-post,
+    // even though the `source:'system'` recovery send bypasses send()'s dup guard.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'status?' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'All good, nothing to do.' })
+      sessions[0]!.setAssistantText('All good, nothing to do.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual(['All good, nothing to do.'])
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('leaf recovery after a send: still honors NO_REPLY on the trailing leaf', async () => {
+    // The recovered leaf flows through the shared guards: a NO_REPLY conclusion
+    // after a real progress reply must stay silent, not get posted.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'anything else?' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'Done.' })
+      sessions[0]!.setAssistantText('Nothing more to add. NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual(['Done.'])
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+  })
+
+  test('leaf recovery: does NOT re-post when a leaked tool-call leaf EXTRACTS to the reply already sent', async () => {
+    // The dedupe must run on the FINAL outbound body, after plain-text-tool-call
+    // extraction. A turn sends `Done.`, then ends with a fresh leaked
+    // `channel_reply({"text":"Done."})` leaf: the raw leaf differs from `Done.`,
+    // but its extracted body equals the reply already sent — must not re-post.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'status?' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'Done.' })
+      sessions[0]!.setAssistantText('channel_reply({"text":"Done."})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual(['Done.'])
+    expect(logs.some((m) => m.includes('suppressed recovery (duplicate'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('leaf recovery: DOES recover a leaked tool-call leaf whose extracted body is NOT a duplicate', async () => {
+    // Guard against over-suppression: a leaked `channel_reply({...})` leaf whose
+    // extracted body differs from the sent reply is a real undelivered answer.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'status?' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'Checking now.' })
+      sessions[0]!.setAssistantText('channel_reply({"text":"All fixed — restart needed."})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent.map((s) => s.text)).toEqual(['Checking now.', 'All fixed — restart needed.'])
+    expect(logs.some((m) => m.includes('recovered plain_text_channel_tool_call kind=reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+  })
+
   test('logs recovery send failures without crashing the drain loop', async () => {
     const dir = await tempDir()
     const logs: string[] = []
