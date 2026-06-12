@@ -55,6 +55,10 @@ export type CommandRunnerOptions = {
   // wire for the handler/command path.
   channelRouter: ChannelRouter | undefined
   mcpManager?: McpManager
+  // When true, prompt sessions spawned here omit the system-prompt `# Memory`
+  // section (vector agents inject memory per-turn). Forwarded to createSession
+  // so command/handler sessions stay coherent with the rest of the runtime.
+  suppressSystemMemory?: boolean
 }
 
 type CommandHandle = {
@@ -194,6 +198,7 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
               signal: abortController.signal,
               sessionFactory: opts.sessionFactory,
               channelRouter: opts.channelRouter,
+              ...(opts.suppressSystemMemory !== undefined ? { suppressSystemMemory: opts.suppressSystemMemory } : {}),
               ...(opts.mcpManager !== undefined ? { mcpManager: opts.mcpManager } : {}),
             }),
           subagent: (subName, payload) =>
@@ -380,6 +385,7 @@ export async function runPromptForCommand(args: {
   // so the spawned session exposes `channel_send`.
   channelRouter?: ChannelRouter
   mcpManager?: McpManager
+  suppressSystemMemory?: boolean
   // Test seam for the agent-session boundary. Production passes the real
   // `createSessionWithDispose`; tests inject a fake to verify wiring
   // (specifically: the sessionManager handed off must be persisted, not
@@ -409,10 +415,27 @@ export async function runPromptForCommand(args: {
     ...(args.mcpManager !== undefined ? { mcpManager: args.mcpManager } : {}),
     ...(args.runtimeVersion !== undefined ? { runtimeVersion: args.runtimeVersion } : {}),
     ...(args.containerName !== undefined ? { containerName: args.containerName } : {}),
+    ...(args.suppressSystemMemory !== undefined ? { suppressSystemMemory: args.suppressSystemMemory } : {}),
   })
   const detachAbort = bindSignalToSession(args.signal, session)
+  // Mirror the other turn drivers (TUI/channel/cron/subagent): fire
+  // session.turn.start with a retrievalContext so a vector agent — whose
+  // system-prompt `# Memory` section is suppressed — gets its long-term memory
+  // injected per-turn into the user prompt here too. Without this, command and
+  // handler prompt sessions would have no memory at all under vector mode.
+  const turnEvent = { sessionId, agentDir: args.agentDir, origin: args.origin }
+  const retrievalContext = { results: '' }
   try {
-    await session.prompt(`${renderTurnTimeAnchor()}\n\n${args.text}`)
+    await snapshot.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: args.text, retrievalContext })
+    const turnText =
+      retrievalContext.results.length > 0
+        ? `${renderTurnTimeAnchor()}\n\n${args.text}\n\n${retrievalContext.results}`
+        : `${renderTurnTimeAnchor()}\n\n${args.text}`
+    try {
+      await session.prompt(turnText)
+    } finally {
+      await snapshot.hooks.runSessionTurnEnd(turnEvent)
+    }
     return session.getLastAssistantText() ?? ''
   } finally {
     detachAbort()

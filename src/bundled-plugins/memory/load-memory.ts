@@ -48,18 +48,46 @@ type TopicEntry = {
 }
 
 export async function loadMemory(agentDir: string, options: LoadMemoryOptions = {}): Promise<string> {
+  const effectivePlan = forceIndexForChannel(await loadMemoryInjectionPlan(agentDir, options), options)
+  return appendRetrievalCache(renderSection(effectivePlan, options), agentDir, options)
+}
+
+// Returns the raw direct/index plan WITHOUT `forceIndexForChannel`, so a vector
+// agent's per-turn "all shards under budget" really means all shards. Callers
+// that need the channel-bleed defense re-apply it via `renderMemorySection`.
+export async function loadMemoryInjectionPlan(
+  agentDir: string,
+  options: Pick<LoadMemoryOptions, 'injectionBudgetBytes'> = {},
+): Promise<InjectionPlan> {
   const rootMemory = await readEntry(agentDir, 'MEMORY.md')
   const hasTopicsDir = await pathExists(topicsDir(agentDir))
   if (rootMemory.content !== null && !hasTopicsDir) {
-    const plan = buildInjectionPlan([rootFallbackEntry(rootMemory)], { budgetBytes: options.injectionBudgetBytes })
-    const effectivePlan = forceIndexForChannel(plan, options)
-    return appendRetrievalCache(renderSection(effectivePlan, options), agentDir, options)
+    return buildInjectionPlan([rootFallbackEntry(rootMemory)], { budgetBytes: options.injectionBudgetBytes })
   }
-
   const shards = await loadAllShards(agentDir)
-  const plan = buildInjectionPlan(shards, { budgetBytes: options.injectionBudgetBytes })
-  const effectivePlan = forceIndexForChannel(plan, options)
-  return appendRetrievalCache(renderSection(effectivePlan, options), agentDir, options)
+  return buildInjectionPlan(shards, { budgetBytes: options.injectionBudgetBytes })
+}
+
+export function renderMemorySection(plan: InjectionPlan, options: Pick<LoadMemoryOptions, 'origin'> = {}): string {
+  return renderSection(plan, options)
+}
+
+export type RetrievedMemoryItem = { heading: string; excerpt: string }
+
+// Over-budget vector turns inject the top-K relevant memories (not all shards).
+// Same `# Memory` framing + channel-bleed boundary as the direct path, so the
+// passive-context guarantees hold regardless of which branch ran.
+export function renderRetrievedMemorySection(
+  items: RetrievedMemoryItem[],
+  options: Pick<LoadMemoryOptions, 'origin'> = {},
+): string {
+  if (items.length === 0) return ''
+  const lines = ['# Memory', '', MEMORY_FRAMING, '']
+  if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
+  for (const item of items) {
+    lines.push(`## ${item.heading}`, '', item.excerpt.trimEnd(), '')
+  }
+  return lines.join('\n').trimEnd()
 }
 
 async function appendRetrievalCache(result: string, agentDir: string, options: LoadMemoryOptions): Promise<string> {

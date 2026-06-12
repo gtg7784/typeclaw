@@ -262,15 +262,24 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
         ? { sessionId, agentDir, ...(origin !== undefined ? { origin } : {}) }
         : undefined
     const userPromptForTurn = override?.userPrompt ?? options.userPrompt
+    // Per-turn memory injection for vector agents: subagents have no
+    // system-prompt `# Memory` section (their prompt is a systemPromptOverride),
+    // so the turn-start hook renders memory into `retrievalContext.results`,
+    // appended to the user turn below. Empty for non-vector agents.
+    const retrievalContext = { results: '' }
     try {
       if (hooks && turnEvent !== undefined) {
-        await hooks.runSessionTurnStart({ ...turnEvent, userPrompt: userPromptForTurn })
+        await hooks.runSessionTurnStart({ ...turnEvent, userPrompt: userPromptForTurn, retrievalContext })
       }
       if (backgroundDrain !== undefined) {
         drainWatch = beginSubagentDrainWatch(backgroundDrain)
       }
       try {
-        await session.prompt(`${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`)
+        const turnText =
+          retrievalContext.results.length > 0
+            ? `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}\n\n${retrievalContext.results}`
+            : `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`
+        await session.prompt(turnText)
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)

@@ -11,6 +11,7 @@ import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
+import { loadMemoryInjectionPlan, renderMemorySection, renderRetrievedMemorySection } from './load-memory'
 import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
@@ -136,6 +137,31 @@ const memoryConfigSchema = z
     retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
     vector: { enabled: false },
   })
+
+const VECTOR_TURN_TOP_K = 10
+
+// Builds the per-turn user-prompt memory block for a vector agent. Under budget
+// (direct mode) injects ALL shards verbatim so nothing the agent "always had"
+// vanishes on an off-topic turn; over budget falls back to top-K hybrid search.
+// Both branches share `renderMemorySection`, so the channel-bleed boundary is
+// applied identically to the old system-prompt path.
+async function renderVectorTurnMemory(
+  event: { agentDir: string; userPrompt: string; origin?: SessionOrigin },
+  injectionBudgetBytes: number,
+): Promise<string> {
+  const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
+  if (plan.mode === 'direct') {
+    if (plan.shards.length === 0) return ''
+    return renderMemorySection(plan, { origin: event.origin })
+  }
+  const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
+  try {
+    const results = await hybridSearch(event.userPrompt, store, event.agentDir, VECTOR_TURN_TOP_K)
+    return renderRetrievedMemorySection(results, { origin: event.origin })
+  } finally {
+    store.close()
+  }
+}
 
 export default definePlugin({
   configSchema: memoryConfigSchema,
@@ -393,31 +419,27 @@ export default definePlugin({
         // session is about to receive.
         //
         'session.turn.start': async (event) => {
-          if (event.origin?.kind === 'subagent') return
           if (ctx.config.vector.enabled) {
+            // Vector agents inject long-term memory PER-TURN into the user
+            // prompt (the system-prompt `# Memory` section is suppressed at
+            // session creation). This runs for every origin that supplies a
+            // retrievalContext bag — including subagents, which no longer get
+            // memory via the system prompt either.
             if (event.retrievalContext === undefined) return
-            const shards = await loadAllShards(event.agentDir)
-            const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
-            if (plan.mode === 'direct') return
-            const dbPath = join(event.agentDir, 'memory', '.vectors', 'index.db')
-            const store = VectorStore.open(dbPath)
             try {
-              const results = await hybridSearch(event.userPrompt, store, event.agentDir, 10)
-              if (results.length > 0) {
-                event.retrievalContext.results = `## Retrieved memory\n\n${results
-                  .map((result) => `### ${result.heading}\n\n${result.excerpt}`)
-                  .join('\n\n')}`
-              }
+              event.retrievalContext.results = await renderVectorTurnMemory(event, ctx.config.injectionBudgetBytes)
             } catch (err) {
               ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
-            } finally {
-              store.close()
             }
-          } else {
-            void runMemoryRetrieval(event).catch((err) => {
-              ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
-            })
+            return
           }
+          // Non-vector agents keep memory in the system prompt. The index-mode
+          // retrieval subagent must NOT fire for subagent-origin turns (it would
+          // recurse: the subagent it spawns triggers another turn.start).
+          if (event.origin?.kind === 'subagent') return
+          void runMemoryRetrieval(event).catch((err) => {
+            ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
+          })
         },
         // The memory-logger spawn is intentionally detached (`void`) instead
         // of awaited. The channel router calls `tearDownLive` synchronously

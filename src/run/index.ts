@@ -18,6 +18,7 @@ import {
   type SubagentShared,
 } from '@/agent/subagents'
 import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
+import { vectorEnabledFromMemoryConfig } from '@/bundled-plugins/memory/vector/config'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
@@ -158,6 +159,10 @@ export async function startAgent({
   const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
+  // Vector agents omit the system-prompt `# Memory` section and inject memory
+  // per-turn instead. Derived once here: `memory.vector.enabled` is
+  // restart-required, so a single boot read is coherent for the process.
+  const suppressSystemMemory = vectorEnabledFromMemoryConfig(pluginConfigsByName.memory)
   const cwdConfig = loadConfigSync(cwd)
   const githubTokenBridge = createGithubTokenBridge()
   const mcpManager =
@@ -216,7 +221,7 @@ export async function startAgent({
   // v2-only parser rejects the file and hydrate below sees no channels. Runs
   // exactly once per folder; a folder already at v2 is a no-op.
   runStartupMigrations(cwd)
-  if (isStartupVectorIndexEnabled(pluginConfigsByName.memory)) {
+  if (suppressSystemMemory) {
     await buildStartupVectorIndex(cwd).catch((err) => {
       console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
     })
@@ -286,6 +291,7 @@ export async function startAgent({
       stream,
       reloadRegistry,
       pluginRuntime,
+      suppressSystemMemory,
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
@@ -491,6 +497,7 @@ export async function startAgent({
             containerName: containerNameOpt.containerName,
             sessionFactory,
             channelRouter: channelManager.router,
+            suppressSystemMemory,
             ...mcpManagerOpt,
           }),
         subagent: (subName: string, payload?: unknown) =>
@@ -531,6 +538,7 @@ export async function startAgent({
         channelRouter: channelManager.router,
         origin: cronOrigin,
         permissions: pluginsLoaded.permissions,
+        suppressSystemMemory,
         ...(refOverride !== undefined ? { refOverride } : {}),
         ...(snap.hasAnyPluginContent
           ? {
@@ -755,6 +763,7 @@ export async function startAgent({
       outbound,
       sessionFactory,
       channelRouter: channelManager.router,
+      suppressSystemMemory,
       ...mcpManagerOpt,
     })
 
@@ -839,12 +848,6 @@ export async function startAgent({
     channelManager,
     stop,
   }
-}
-
-function isStartupVectorIndexEnabled(config: unknown): boolean {
-  if (typeof config !== 'object' || config === null || !('vector' in config)) return false
-  const vector = (config as { vector?: unknown }).vector
-  return typeof vector === 'object' && vector !== null && (vector as { enabled?: unknown }).enabled === true
 }
 
 function buildLocalTuiUrl(port: number, token: string | null): string {
