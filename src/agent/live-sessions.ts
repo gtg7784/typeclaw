@@ -1,8 +1,16 @@
 import type { AgentSession } from './index'
+import type { MinimalSessionOrigin } from './session-meta'
 
 export type LiveAgentSession = {
   sessionId: string
   session: Pick<AgentSession, 'subscribe'>
+  // Surfaced by the inspect picker for sessions not yet on disk: pi-coding-agent
+  // defers the first .jsonl write until the first assistant message, so without
+  // these a mid-reply session is invisible. Optional so subscribe-only test
+  // harnesses can still register `{ sessionId, session }`; live-listing skips
+  // entries lacking an origin.
+  origin?: MinimalSessionOrigin
+  registeredAtMs?: number
 }
 
 export class LiveSessionRegistry {
@@ -22,6 +30,10 @@ export class LiveSessionRegistry {
 
   has(sessionId: string): boolean {
     return this.entries.has(sessionId)
+  }
+
+  listLive(): LiveAgentSession[] {
+    return [...this.entries.values()].filter((e) => e.origin !== undefined)
   }
 
   size(): number {

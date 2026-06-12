@@ -5,6 +5,7 @@ import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff } from '@/agent/restart-handoff'
+import { sessionMetaPayload } from '@/agent/session-meta'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
   awaitWithSubagentTimeout,
@@ -406,7 +407,12 @@ export async function startAgent({
         ...(entry.pluginSubagent.bashPolicy !== undefined ? { bashPolicy: entry.pluginSubagent.bashPolicy } : {}),
         ...runtimeVersionOpt,
       })
-      liveSessionRegistry.register({ sessionId, session: created.session })
+      liveSessionRegistry.register({
+        sessionId,
+        session: created.session,
+        origin: sessionMetaPayload(origin).origin,
+        registeredAtMs: Date.now(),
+      })
       const originalDispose = created.dispose
       return {
         ...created,
@@ -557,7 +563,12 @@ export async function startAgent({
         ...runtimeVersionOpt,
         ...mcpManagerOpt,
       })
-      liveSessionRegistry.register({ sessionId, session })
+      liveSessionRegistry.register({
+        sessionId,
+        session,
+        origin: sessionMetaPayload(cronOrigin).origin,
+        registeredAtMs: Date.now(),
+      })
       return {
         prompt: (text) => session.prompt(text),
         dispose: () => {

@@ -3,6 +3,7 @@ import { defineCommand } from 'citty'
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
 import {
+  fetchLiveSessions,
   listViewerItems,
   openViewerItem,
   parseDuration,
@@ -150,7 +151,8 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
 
   const interactive = Boolean(process.stdin.isTTY)
   const liveHint = interactive ? escHintLine(color) : undefined
-  const liveSource = containerRunning ? await buildLiveSource(cwd) : undefined
+  const inspectUrl = containerRunning ? await resolveInspectUrl(cwd) : undefined
+  const liveSource = inspectUrl !== undefined ? buildLiveSource(inspectUrl) : undefined
 
   const stdout = (line: string): void => {
     process.stdout.write(`${line}\n`)
@@ -186,6 +188,7 @@ export async function runInspectViewer(opts: RunInspectViewerOptions): Promise<n
         onWarn: stderr,
       }
       if (sinceMs !== undefined) listOpts.sinceMs = sinceMs
+      if (inspectUrl !== undefined) listOpts.liveSessions = await fetchLiveSessions({ url: inspectUrl })
       return (await listViewerItems(listOpts)).items
     },
     keyOf: (item) => (item.kind === 'logs' ? 'logs' : item.summary.sessionId),
@@ -223,12 +226,15 @@ async function resolveTuiUrl(cwd: string): Promise<string> {
   return url.toString()
 }
 
-async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefined> {
+async function resolveInspectUrl(cwd: string): Promise<string> {
   const port = await resolveHostPort({ cwd })
   const token = await resolveTuiToken({ cwd })
   const baseUrl = new URL(`ws://127.0.0.1:${port}/inspect`)
   if (token !== null) baseUrl.searchParams.set('token', token)
-  const url = baseUrl.toString()
+  return baseUrl.toString()
+}
+
+function buildLiveSource(url: string): LiveSourceFactory {
   return ({ sessionId, sinceMs, signal, onSubscribed }) =>
     streamLive({
       url,
@@ -325,8 +331,8 @@ function itemHint(item: ViewerItem): { hint: string } {
 function sessionRowLabel(s: SessionSummary): string {
   const id = shortSessionId(s.sessionId)
   const label = s.origin === null ? '(unknown origin)' : originLabel(s.origin)
-  const when = formatRelative(s.mtimeMs)
-  return `${c.cyan(id)}  ${label}  ${c.dim(when)}`
+  const when = s.live === true ? c.green('live · replying') : c.dim(formatRelative(s.mtimeMs))
+  return `${c.cyan(id)}  ${label}  ${when}`
 }
 
 function formatRelative(ms: number): string {

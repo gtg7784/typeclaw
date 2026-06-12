@@ -42,4 +42,25 @@ describe('LiveSessionRegistry', () => {
     reg.clear()
     expect(reg.size()).toBe(0)
   })
+
+  test('listLive returns only entries that carry an origin', () => {
+    // given a registry with one origin-bearing and one subscribe-only entry
+    const reg = new LiveSessionRegistry()
+    reg.register({ sessionId: 'ses_disk', session: fakeSession })
+    reg.register({
+      sessionId: 'ses_live',
+      session: fakeSession,
+      origin: { kind: 'tui' },
+      registeredAtMs: 123,
+    })
+
+    // when listing live sessions
+    const live = reg.listLive()
+
+    // then the subscribe-only entry is excluded
+    expect(live).toHaveLength(1)
+    expect(live[0]?.sessionId).toBe('ses_live')
+    expect(live[0]?.origin).toEqual({ kind: 'tui' })
+    expect(live[0]?.registeredAtMs).toBe(123)
+  })
 })

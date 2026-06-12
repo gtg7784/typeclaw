@@ -2,6 +2,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { MinimalSessionOrigin } from '@/agent/session-meta'
+import type { LiveSessionPayload } from '@/shared'
 
 import { previewForHint } from './preview'
 import { replayJsonl } from './replay'
@@ -13,6 +14,11 @@ export type SessionSummary = {
   mtimeMs: number
   origin: MinimalSessionOrigin | null
   firstPrompt: string | null
+  // True only for a registry-derived session with no .jsonl on disk yet (a
+  // reply is in flight). Disk sessions leave this undefined. Selecting one tails
+  // live-only: streamSessionEvents replays an empty file, then the WS delivers
+  // events as they happen.
+  live?: boolean
 }
 
 export type ListSessionsOptions = {
@@ -63,6 +69,29 @@ export async function listSessions(opts: ListSessionsOptions): Promise<SessionSu
       }
     }),
   )
+}
+
+// Overlay container-registry sessions onto the disk listing. A live session
+// already flushed to disk (post-reply) is dropped from the overlay — the disk
+// summary wins, carrying its real mtime and prompt preview. Only sessions with
+// no .jsonl yet become synthetic live rows, sorted to the top by registration
+// time so an in-flight reply surfaces above settled history.
+export function mergeLiveSessions(disk: SessionSummary[], live: LiveSessionPayload[]): SessionSummary[] {
+  const onDisk = new Set(disk.map((s) => s.sessionId))
+  const liveOnly = live
+    .filter((l) => !onDisk.has(l.sessionId))
+    .map(
+      (l): SessionSummary => ({
+        sessionId: l.sessionId,
+        sessionFile: '',
+        basename: '',
+        mtimeMs: l.registeredAtMs,
+        origin: l.origin,
+        firstPrompt: null,
+        live: true,
+      }),
+    )
+  return [...liveOnly, ...disk].sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
 export type ResolveResult =

@@ -15,6 +15,7 @@ import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { detectProviderError } from '@/agent/provider-error'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
+import { sessionMetaPayload } from '@/agent/session-meta'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import type { CreateSessionForSubagent } from '@/agent/subagents'
@@ -541,7 +542,12 @@ export function createServer({
               state.unsubTurnOutcome = subscribeTurnOutcome(session, agentDir, origin, sessionFileId, logger)
             }
 
-            liveSessionRegistry?.register({ sessionId: sessionFileId, session })
+            liveSessionRegistry?.register({
+              sessionId: sessionFileId,
+              session,
+              origin: sessionMetaPayload(origin).origin,
+              registeredAtMs: Date.now(),
+            })
             forwardSessionEvents(ws, state, logger, sessionFileId)
 
             if (stream) {
@@ -1286,6 +1292,15 @@ function handleInspectMessage(
   }
   if (msg.type === 'ping') {
     sendInspect(ws, { type: 'pong', id: msg.id })
+    return
+  }
+  if (msg.type === 'list_live') {
+    const sessions = (liveSessionRegistry?.listLive() ?? []).map((e) => ({
+      sessionId: e.sessionId,
+      origin: e.origin!,
+      registeredAtMs: e.registeredAtMs ?? 0,
+    }))
+    sendInspect(ws, { type: 'live_sessions', sessions })
     return
   }
   if (msg.type !== 'subscribe' || typeof msg.sessionId !== 'string' || msg.sessionId === '') {

@@ -3,7 +3,8 @@ import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { listSessions, resolveSession } from './session-list'
+import type { SessionSummary } from './session-list'
+import { listSessions, mergeLiveSessions, resolveSession } from './session-list'
 
 let dir: string
 
@@ -268,5 +269,58 @@ describe('resolveSession', () => {
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toBe('not-found')
+  })
+})
+
+describe('mergeLiveSessions', () => {
+  const diskSummary = (sessionId: string, mtimeMs: number): SessionSummary => ({
+    sessionId,
+    sessionFile: `/tmp/${sessionId}.jsonl`,
+    basename: `${sessionId}.jsonl`,
+    mtimeMs,
+    origin: { kind: 'tui' },
+    firstPrompt: 'hi',
+  })
+
+  test('synthesizes a live-only row for a registry session with no disk file', () => {
+    // given one disk session and one registry-only session
+    const disk = [diskSummary('ses_disk', 5000)]
+    const merged = mergeLiveSessions(disk, [{ sessionId: 'ses_live', origin: { kind: 'tui' }, registeredAtMs: 9000 }])
+
+    // then the live session is added with an empty file path and live flag
+    const live = merged.find((s) => s.sessionId === 'ses_live')
+    expect(live).toMatchObject({ sessionFile: '', basename: '', live: true, mtimeMs: 9000, firstPrompt: null })
+    expect(live?.origin).toEqual({ kind: 'tui' })
+  })
+
+  test('a live session already on disk is not duplicated (disk summary wins)', () => {
+    // given the same id present on disk and in the registry
+    const disk = [diskSummary('ses_shared', 5000)]
+    const merged = mergeLiveSessions(disk, [{ sessionId: 'ses_shared', origin: { kind: 'tui' }, registeredAtMs: 9000 }])
+
+    // then only the disk summary survives, keeping its real mtime and prompt
+    expect(merged).toHaveLength(1)
+    expect(merged[0]).toMatchObject({ sessionId: 'ses_shared', mtimeMs: 5000, firstPrompt: 'hi' })
+    expect(merged[0]?.live).toBeUndefined()
+  })
+
+  test('result is sorted by mtime desc, surfacing an in-flight reply above older history', () => {
+    // given an old disk session and a freshly-registered live session
+    const disk = [diskSummary('ses_old', 1000)]
+    const merged = mergeLiveSessions(disk, [
+      {
+        sessionId: 'ses_live',
+        origin: { kind: 'channel', adapter: 'slack', workspace: 'w', chat: 'c', thread: null },
+        registeredAtMs: 8000,
+      },
+    ])
+
+    // then the live row sorts first
+    expect(merged.map((s) => s.sessionId)).toEqual(['ses_live', 'ses_old'])
+  })
+
+  test('empty live list returns the disk sessions (sorted mtime desc)', () => {
+    const disk = [diskSummary('ses_a', 1000), diskSummary('ses_b', 2000)]
+    expect(mergeLiveSessions(disk, []).map((s) => s.sessionId)).toEqual(['ses_b', 'ses_a'])
   })
 })

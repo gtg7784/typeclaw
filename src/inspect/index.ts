@@ -14,6 +14,8 @@ export { originLabel, shortSessionId } from './label'
 export { renderEvent } from './render'
 export { replayJsonl } from './replay'
 export { streamLive } from './live'
+export { fetchLiveSessions } from './live-list'
+export type { FetchLiveSessionsOptions } from './live-list'
 export { parseDuration, parseFilter } from './types'
 export type { InspectCategory, InspectEvent, InspectFilter } from './types'
 export { runInspectLoop, runViewerLoop } from './loop'
@@ -219,12 +221,17 @@ export async function streamSessionEvents(opts: StreamSessionEventsOptions): Pro
     opts.onEvent(event)
   }
 
-  for await (const event of replayJsonl(
-    opts.summary.sessionFile,
-    opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {},
-  )) {
-    if (aborted()) return { escToPicker: true }
-    deliver(event)
+  // A live-only session (registry-derived, no .jsonl yet) has an empty
+  // sessionFile: skip replay and go straight to the live tail. Replaying ''
+  // would just emit a spurious "file does not exist" warning.
+  if (opts.summary.sessionFile !== '') {
+    for await (const event of replayJsonl(
+      opts.summary.sessionFile,
+      opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {},
+    )) {
+      if (aborted()) return { escToPicker: true }
+      deliver(event)
+    }
   }
   opts.onPhase?.({ phase: 'replay-end' })
 
