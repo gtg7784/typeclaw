@@ -33,21 +33,26 @@ describe('buildParentLinks', () => {
     ]
 
     // when
-    const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
+    const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
 
     // then
-    expect(parentSlugByFragmentId.get(ID_PNPM)).toBe('package-manager')
-    expect(parentSlugByFragmentId.has(ID_BUN)).toBe(false)
+    expect(parentSlugsByFragmentId.get(ID_PNPM)).toEqual(new Set(['package-manager']))
+    expect(parentSlugsByFragmentId.has(ID_BUN)).toBe(false)
     expect(supersededFragmentIds).toEqual(new Set([ID_BUN]))
   })
 
-  test('first active citation wins when two shards cite the same fragment', () => {
+  test('collects ALL citing topics when a fragment is cited by more than one', () => {
+    // given one fragment cited by two distinct topics (it backs both beliefs)
     const shards = [
-      shard('a-topic', ['A.', 'fragments:', `- streams/2026-05-20#${ID_OTHER}`].join('\n')),
-      shard('b-topic', ['B.', 'fragments:', `- streams/2026-05-20#${ID_OTHER}`].join('\n')),
+      shard('package-manager', ['Uses pnpm.', 'fragments:', `- streams/2026-05-20#${ID_OTHER}`].join('\n')),
+      shard('docker-preferences', ['Minimal images.', 'fragments:', `- streams/2026-05-20#${ID_OTHER}`].join('\n')),
     ]
 
-    expect(buildParentLinks(shards).parentSlugByFragmentId.get(ID_OTHER)).toBe('a-topic')
+    // when
+    const { parentSlugsByFragmentId } = buildParentLinks(shards)
+
+    // then both parents are kept, not just the first
+    expect(parentSlugsByFragmentId.get(ID_OTHER)).toEqual(new Set(['package-manager', 'docker-preferences']))
   })
 
   test('active in one shard outranks superseded in another', () => {
@@ -56,16 +61,16 @@ describe('buildParentLinks', () => {
       shard('history', ['History.', 'superseded:', `- streams/2026-05-21#${ID_PNPM}`].join('\n')),
     ]
 
-    const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
+    const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
 
-    expect(parentSlugByFragmentId.get(ID_PNPM)).toBe('current')
+    expect(parentSlugsByFragmentId.get(ID_PNPM)).toEqual(new Set(['current']))
     expect(supersededFragmentIds.has(ID_PNPM)).toBe(false)
   })
 
   test('empty shards yield empty links', () => {
-    const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks([])
+    const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks([])
 
-    expect(parentSlugByFragmentId.size).toBe(0)
+    expect(parentSlugsByFragmentId.size).toBe(0)
     expect(supersededFragmentIds.size).toBe(0)
   })
 })

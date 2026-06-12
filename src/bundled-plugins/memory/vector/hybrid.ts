@@ -38,13 +38,13 @@ export async function hybridSearch(
     embedFn([query], 'query'),
   ])
 
-  const { parentSlugByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
+  const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
   const index = buildContentIndex(shards, streamDays, supersededFragmentIds)
   const vectorRows =
     queryEmbeddings[0] === undefined ? [] : store.query(queryEmbeddings[0], topK * 2, EMBEDDING_MODEL_ID)
   const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
 
-  return fuseLanes(vectorRows, keywordMatches, index, parentSlugByFragmentId).slice(0, topK)
+  return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
 }
 
 function keywordLane(
@@ -70,18 +70,18 @@ function fuseLanes(
   vectorRows: VectorRow[],
   keywordMatches: MemorySearchMatch[],
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
-  parentSlugByFragmentId: Map<string, string>,
+  parentSlugsByFragmentId: Map<string, Set<string>>,
 ): HybridSearchResult[] {
   const fused = new Map<string, HybridSearchResult>()
 
   for (let i = 0; i < vectorRows.length; i++) {
     const row = vectorRows[i]!
-    addScore(fused, index, row.source, row.key, 1 / (RRF_K + i + 1), parentSlugByFragmentId)
+    addScore(fused, index, row.source, row.key, 1 / (RRF_K + i + 1), parentSlugsByFragmentId)
   }
 
   for (let i = 0; i < keywordMatches.length; i++) {
     const match = keywordMatches[i]!
-    addScore(fused, index, match.source, matchKey(match), 1 / (RRF_K + i + 1), parentSlugByFragmentId)
+    addScore(fused, index, match.source, matchKey(match), 1 / (RRF_K + i + 1), parentSlugsByFragmentId)
   }
 
   return [...fused.values()].sort((a, b) => b.rrfScore - a.rrfScore || a.key.localeCompare(b.key))
@@ -93,36 +93,38 @@ function addScore(
   source: 'topic' | 'stream',
   nodeKey: string,
   score: number,
-  parentSlugByFragmentId: Map<string, string>,
+  parentSlugsByFragmentId: Map<string, Set<string>>,
 ): void {
-  const resolved = resolveToParent(source, nodeKey, index, parentSlugByFragmentId)
-  if (resolved === null) return
-  const { fusedKey, content } = resolved
-
-  const existing = fused.get(fusedKey)
-  if (existing !== undefined) {
-    existing.rrfScore = Math.max(existing.rrfScore, score)
-    return
+  for (const { fusedKey, content } of resolveToParents(source, nodeKey, index, parentSlugsByFragmentId)) {
+    const existing = fused.get(fusedKey)
+    if (existing !== undefined) existing.rrfScore = Math.max(existing.rrfScore, score)
+    else fused.set(fusedKey, { ...content, rrfScore: score })
   }
-  fused.set(fusedKey, { ...content, rrfScore: score })
 }
 
-function resolveToParent(
+// A matched fragment collapses to EVERY topic that cites it (a fragment can back
+// more than one belief), so it contributes its score to each parent. An
+// undreamed fragment with no citing topic resolves to itself.
+function resolveToParents(
   source: 'topic' | 'stream',
   nodeKey: string,
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
-  parentSlugByFragmentId: Map<string, string>,
-): { fusedKey: string; content: Omit<HybridSearchResult, 'rrfScore'> } | null {
+  parentSlugsByFragmentId: Map<string, Set<string>>,
+): Array<{ fusedKey: string; content: Omit<HybridSearchResult, 'rrfScore'> }> {
   if (source === 'stream') {
     const fragmentId = fragmentIdFromKey(nodeKey)
-    const parentSlug = fragmentId === null ? undefined : parentSlugByFragmentId.get(fragmentId)
-    if (parentSlug !== undefined) {
-      const topic = index.get(laneKey('topic', parentSlug))
-      if (topic !== undefined) return { fusedKey: laneKey('topic', parentSlug), content: topic }
+    const parentSlugs = fragmentId === null ? undefined : parentSlugsByFragmentId.get(fragmentId)
+    if (parentSlugs !== undefined && parentSlugs.size > 0) {
+      const parents: Array<{ fusedKey: string; content: Omit<HybridSearchResult, 'rrfScore'> }> = []
+      for (const parentSlug of parentSlugs) {
+        const topic = index.get(laneKey('topic', parentSlug))
+        if (topic !== undefined) parents.push({ fusedKey: laneKey('topic', parentSlug), content: topic })
+      }
+      if (parents.length > 0) return parents
     }
   }
   const content = index.get(laneKey(source, nodeKey))
-  return content === undefined ? null : { fusedKey: laneKey(source, nodeKey), content }
+  return content === undefined ? [] : [{ fusedKey: laneKey(source, nodeKey), content }]
 }
 
 function fragmentIdFromKey(streamKey: string): string | null {
