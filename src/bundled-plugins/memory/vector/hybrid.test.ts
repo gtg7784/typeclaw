@@ -259,7 +259,7 @@ describe('hybridSearch', () => {
       writeReference(agentDir, 'ref-a', 'Reference A', 'The reference body mentions a sardonyx deployment runbook.')
       store.upsert(row('reference:ref-a#0', 'ref-a', vector({ 0: 1 }), 'reference'))
 
-      const results = await hybridSearch('sardonyx deployment', store, agentDir, 5, embedFrom({ 0: 1 }))
+      const results = await hybridSearch('sardonyx deployment', store, agentDir, 5, embedFrom({ 0: 1 }), true)
 
       expect(results).toContainEqual(expect.objectContaining({ source: 'reference', key: 'ref-a' }))
       expect(results.map((result) => result.key)).not.toContain('ref-a#0')

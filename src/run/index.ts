@@ -20,6 +20,7 @@ import {
 } from '@/agent/subagents'
 import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
 import { vectorEnabledFromMemoryConfig } from '@/bundled-plugins/memory/vector/config'
+import { embed } from '@/bundled-plugins/memory/vector/embedder'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
@@ -223,7 +224,9 @@ export async function startAgent({
   // exactly once per folder; a folder already at v2 is a no-op.
   runStartupMigrations(cwd)
   if (suppressSystemMemory) {
-    await buildStartupVectorIndex(cwd).catch((err) => {
+    const memoryConfig = pluginConfigsByName.memory as { references?: { enabled?: boolean } } | undefined
+    const referencesEnabled = memoryConfig?.references?.enabled ?? false
+    await buildStartupVectorIndex(cwd, embed, referencesEnabled).catch((err) => {
       console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }

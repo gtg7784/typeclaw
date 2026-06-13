@@ -7,10 +7,11 @@ import { VectorStore } from './store'
 export async function buildStartupVectorIndex(
   agentDir: string,
   embedFn: EmbedFn = embed,
+  referencesEnabled = false,
 ): Promise<{ built: boolean; pruned: number; count: number }> {
   const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
   try {
-    const wanted = await collectPassages(agentDir)
+    const wanted = await collectPassages(agentDir, referencesEnabled)
 
     // Prune current-model rows whose id left the desired passage set (deleted
     // topics, dreamed-then-GC'd fragments, and — load-bearing here — fragments

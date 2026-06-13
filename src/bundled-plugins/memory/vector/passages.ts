@@ -28,11 +28,11 @@ export function topicPassage(slug: string, heading: string, body: string): Passa
   return { id: `topic:${slug}`, source: 'topic', key: slug, text, contentHash: hashContent(text) }
 }
 
-export async function collectPassages(agentDir: string): Promise<Passage[]> {
+export async function collectPassages(agentDir: string, referencesEnabled = false): Promise<Passage[]> {
   const [shards, streamDays, references] = await Promise.all([
     loadAllShards(agentDir),
     readAllUndreamedStreamDays(agentDir),
-    referencePassages(agentDir),
+    referencesEnabled ? referencePassages(agentDir) : Promise.resolve([]),
   ])
   return [...buildPassages(shards, streamDays), ...references]
 }

@@ -39,13 +39,14 @@ export async function hybridSearch(
   agentDir: string,
   topK: number,
   embedFn: EmbedFn = embed,
+  referencesEnabled = false,
 ): Promise<HybridSearchResult[]> {
   if (topK <= 0) return []
 
   const [shards, streamDays, references, queryEmbeddings] = await Promise.all([
     loadAllShards(agentDir),
     readAllUndreamedStreamDays(agentDir),
-    loadAllReferences(agentDir),
+    referencesEnabled ? loadAllReferences(agentDir) : Promise.resolve([]),
     embedFn([query], 'query'),
   ])
 

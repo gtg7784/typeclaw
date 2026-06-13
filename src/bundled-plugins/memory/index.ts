@@ -186,6 +186,7 @@ async function renderVectorTurnMemory(
   injectedState: InjectedShardState,
   deps: MemoryPluginDeps,
   logger?: { info: (msg: string) => void },
+  referencesEnabled = false,
 ): Promise<string> {
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   const isChannel = event.origin?.kind === 'channel'
@@ -207,6 +208,7 @@ async function renderVectorTurnMemory(
       event.agentDir,
       VECTOR_TURN_TOP_K,
       deps.queryEmbedFn,
+      referencesEnabled,
     )
     const topicHits = results.reduce((n, r) => (r.source === 'topic' ? n + 1 : n), 0)
     logger?.info(
@@ -402,6 +404,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           'memory-retrieval': createMemoryRetrievalSubagent({
             logger: subagentLogger,
             timeoutMs: retrievalSpawnTimeoutMs,
+            referencesEnabled: ctx.config.references.enabled,
           }),
           dreaming: createDreamingSubagent({
             logger: subagentLogger,
@@ -502,6 +505,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
                   injectedState,
                   deps,
                   ctx.logger,
+                  ctx.config.references.enabled,
                 )
               } catch (err) {
                 ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -665,10 +669,11 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           'vector-index': {
             description: 'vector index is consistent with memory (only when memory.vector is enabled)',
             run: async (dctx) => {
-              if (!vectorEnabled(dctx.config)) {
+              const config = dctx.config as typeof ctx.config
+              if (!vectorEnabled(config)) {
                 return { status: 'ok', message: 'vector memory not enabled; skipping index health check' }
               }
-              return runVectorIndexDoctor(dctx.agentDir)
+              return runVectorIndexDoctor(dctx.agentDir, config.references?.enabled ?? false)
             },
           },
         },
