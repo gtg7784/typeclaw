@@ -13,20 +13,22 @@ Auto-loaded by every TypeClaw agent. No `plugins[]` entry to add and no opt-out.
     "bufferBytes": 500000,
     "injectionBudgetBytes": 16384,
     "minIdleDeltaLines": 3,
-    "dreaming": { "schedule": "*/30 * * * *" }
+    "dreaming": { "schedule": "*/30 * * * *" },
+    "vector": { "enabled": false }
   }
 }
 ```
 
-| Field                         | Default          | Effect                                                                                                                                                                                                                                         |
-| ----------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory.idleMs`               | `60000`          | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                                                                        |
-| `memory.bufferBytes`          | `500000`         | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run. `0` disables. Minimum `10000` when non-zero.                                                                                       |
-| `memory.injectionBudgetBytes` | `16384`          | Total shard-body budget for direct-mode memory injection. Above this, `loadMemory` switches to index-mode (headings + metadata only) and the agent must call `memory_search` to fetch specific topics or recent stream events. Minimum `4096`. |
-| `memory.minIdleDeltaLines`    | `3`              | Minimum JSONL line growth since the last `memory-logger` run required to fire an idle spawn. Below this, the idle timer ticks but no spawn fires. `0` disables (legacy always-fire-on-idle behavior). Independent of `bufferBytes`.            |
-| `memory.dreaming.schedule`    | `"*/30 * * * *"` | Five-field cron expression for the dreaming subagent.                                                                                                                                                                                          |
+| Field                         | Default          | Effect                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.idleMs`               | `60000`          | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                                                                                                                                                                                                               |
+| `memory.bufferBytes`          | `500000`         | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run. `0` disables. Minimum `10000` when non-zero.                                                                                                                                                                                                                              |
+| `memory.injectionBudgetBytes` | `16384`          | Total shard-body budget for direct-mode memory injection. Above this, `loadMemory` switches to index-mode (headings + metadata only) and the agent must call `memory_search` to fetch specific topics or recent stream events. Minimum `4096`.                                                                                                                                        |
+| `memory.minIdleDeltaLines`    | `3`              | Minimum JSONL line growth since the last `memory-logger` run required to fire an idle spawn. Below this, the idle timer ticks but no spawn fires. `0` disables (legacy always-fire-on-idle behavior). Independent of `bufferBytes`.                                                                                                                                                   |
+| `memory.dreaming.schedule`    | `"*/30 * * * *"` | Five-field cron expression for the dreaming subagent.                                                                                                                                                                                                                                                                                                                                 |
+| `memory.vector.enabled`       | `false`          | Master switch for per-turn vector memory. When `true`, the `# Memory` system-prompt section is suppressed and memory is injected per turn into the user prompt via `hybridSearch` (over budget) or direct shards (under budget); the host downloads the embedding model and mounts it into the container. When `false`, memory lives in the system prompt and no model is downloaded. |
 
-All fields are **restart-required** — the plugin reads them once at boot.
+All fields are **restart-required** — the plugin reads them once at boot. The `memory` block is plugin-owned config that passes through core's schema (`.catchall`), so it is **outside the core `FIELD_EFFECTS` reload fence**: changing any `memory.*` field and running `typeclaw reload` silently no-ops with no "restart-required" warning. Restart the container to apply.
 
 ## What it contributes
 
