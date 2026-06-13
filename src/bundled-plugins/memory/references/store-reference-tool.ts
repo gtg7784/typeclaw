@@ -9,9 +9,11 @@ import { headingToSlug } from '../slug'
 import { renderReference } from './frontmatter'
 import { listReferenceSlugs } from './load-references'
 
+export type ReferenceStoredHook = (context: { slug: string; body: string }) => Promise<void>
+
 export const storeReferenceTool = createStoreReferenceTool()
 
-export function createStoreReferenceTool() {
+export function createStoreReferenceTool(onReferenceStored?: ReferenceStoredHook) {
   return defineTool({
     description:
       'store_reference: Store a verbatim reference artifact under memory/references/ and return its slug. Use this for user-provided SQL, code blocks, runbooks, pasted specs, or other content explicitly meant to be remembered byte-for-byte. This tool does not write memory stream fragments.',
@@ -45,6 +47,8 @@ export function createStoreReferenceTool() {
         ),
         'utf8',
       )
+
+      if (onReferenceStored !== undefined) await onReferenceStored({ slug, body })
 
       return {
         content: [{ type: 'text' as const, text: `Stored reference as ${slug}` }],

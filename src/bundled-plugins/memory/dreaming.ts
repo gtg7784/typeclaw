@@ -323,6 +323,7 @@ async function runReferenceSaturationPass(agentDir: string, logger: DreamingLogg
   const references = await loadAllReferences(agentDir, { logger })
   const nowMs = Date.now()
   const evictedSlugs: string[] = []
+  const demotedSlugs: string[] = []
   let referencesDemoted = 0
   let referencesEvicted = 0
 
@@ -338,8 +339,19 @@ async function runReferenceSaturationPass(agentDir: string, logger: DreamingLogg
 
     if (!ref.frontmatter.demoted && referenceScore(ref, nowMs) < REFERENCE_DEMOTE_SCORE_THRESHOLD) {
       await writeFile(ref.path, renderReference({ ...ref.frontmatter, demoted: true }, ref.body))
+      demotedSlugs.push(ref.slug)
       referencesDemoted += 1
     }
+  }
+
+  // Demotion excludes a reference from the embed surface (passages.ts skips
+  // demoted refs at startup), but the on-write hook indexed it while it was
+  // demoted:false. Demoting the file alone leaves those reference:<slug>#* rows
+  // live, so a demoted reference stays vector-retrievable until the next restart
+  // rebuilds the index. Prune them now so demotion takes effect immediately,
+  // mirroring the eviction path's deletion.
+  if (demotedSlugs.length > 0) {
+    deleteReferenceVectors(agentDir, demotedSlugs)
   }
 
   if (evictedSlugs.length > 0) {
