@@ -64,6 +64,14 @@ export async function loadAllReferences(agentDir: string, options: { logger?: Lo
   return references
 }
 
+export async function loadReference(
+  agentDir: string,
+  slug: string,
+  options: { logger?: Logger } = {},
+): Promise<Reference | null> {
+  return readAndParseReference(referenceFilePath(agentDir, slug), slug, options)
+}
+
 export function __resetReferenceCacheForTests(): void {
   referenceCache.clear()
 }
