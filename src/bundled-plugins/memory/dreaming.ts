@@ -1326,7 +1326,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
-      const referenceHashesBefore = await captureReferenceHashes(ctx.payload.agentDir)
+      const referenceHashesBefore = referencesEnabled
+        ? await captureReferenceHashes(ctx.payload.agentDir)
+        : new Map<string, string>()
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       // Over-budget compaction candidates only matter when the vector index
@@ -1347,7 +1349,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       }
 
       const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
-      await warnOnReferenceContentChanges(ctx.payload.agentDir, referenceHashesBefore, logger)
+      if (referencesEnabled) {
+        await warnOnReferenceContentChanges(ctx.payload.agentDir, referenceHashesBefore, logger)
+      }
       let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
       let revertedCitationViolation = false
 

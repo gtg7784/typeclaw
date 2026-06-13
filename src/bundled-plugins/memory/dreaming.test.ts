@@ -653,7 +653,7 @@ describe('dreaming subagent (compaction wiring)', () => {
       await writeFile(referenceFile('ref-a'), 'mutated reference bytes\n')
     }
 
-    await invokeDreaming(agentDir, { runSession, logger })
+    await invokeDreaming(agentDir, { runSession, logger, referencesEnabled: true })
 
     expect(warnings).toContain(
       '[dreaming] reference content modified: ref-a — this violates the verbatim invariant; reference content must never be rewritten',
