@@ -39,16 +39,26 @@ export async function collectPassages(agentDir: string): Promise<Passage[]> {
 
 export async function referencePassages(agentDir: string): Promise<Passage[]> {
   const references = await loadAllReferences(agentDir)
-  return references.flatMap((reference): Passage[] => {
-    if (reference.frontmatter.demoted) return []
-    return chunkReferenceBody(reference.body).map((chunk, chunkIdx) => ({
-      id: `reference:${reference.slug}#${chunkIdx}`,
-      source: 'reference',
-      key: reference.slug,
-      text: chunk,
-      contentHash: hashContent(chunk),
-    }))
-  })
+  return references.flatMap((reference): Passage[] =>
+    referencePassagesForOne(reference.slug, reference.body, reference.frontmatter.demoted),
+  )
+}
+
+// Passages for a single reference, used by the on-write hook so a freshly stored
+// reference is embedded immediately instead of waiting for the next startup index
+// build. Must derive ids/chunks/hashes identically to `referencePassages` so the
+// on-write rows and a later startup rebuild agree (no churn, no stale duplicates).
+// A demoted reference yields no passages — the same exclusion `referencePassages`
+// applies at startup.
+export function referencePassagesForOne(slug: string, body: string, demoted = false): Passage[] {
+  if (demoted) return []
+  return chunkReferenceBody(body).map((chunk, chunkIdx) => ({
+    id: `reference:${slug}#${chunkIdx}`,
+    source: 'reference',
+    key: slug,
+    text: chunk,
+    contentHash: hashContent(chunk),
+  }))
 }
 
 export function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
