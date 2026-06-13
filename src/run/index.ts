@@ -20,7 +20,7 @@ import {
 } from '@/agent/subagents'
 import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
 import { vectorEnabledFromMemoryConfig } from '@/bundled-plugins/memory/vector/config'
-import { embed } from '@/bundled-plugins/memory/vector/embedder'
+import { embed, warmEmbedder } from '@/bundled-plugins/memory/vector/embedder'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
@@ -226,6 +226,14 @@ export async function startAgent({
   if (suppressSystemMemory) {
     await buildStartupVectorIndex(cwd, embed).catch((err) => {
       console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+
+    // Warm the embedder now (even when the index needed no rebuild above, which
+    // skips embed() entirely) so the first channel turn's query embed doesn't
+    // pay the one-time ONNX init on its critical path. Non-fatal: a failure here
+    // degrades to the per-turn lazy load, same as before this step existed.
+    await warmEmbedder().catch((err) => {
+      console.warn(`[vector] embedder warm-up failed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
 

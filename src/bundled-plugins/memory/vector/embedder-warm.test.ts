@@ -1,0 +1,69 @@
+import { beforeEach, describe, expect, mock, test } from 'bun:test'
+
+// A controllable transformers fake whose pipeline load can be made to fail on
+// demand, so we can prove getEmbedder/warmEmbedder recover from a transient
+// load failure instead of caching the rejection forever. Kept in its own file
+// (separate from embedder-lazy-load.test.ts) because the embedder memoizes a
+// module-level singleton across a file's tests — a failable mock here must not
+// perturb the lazy-load regression guard there.
+let pipelineCalls = 0
+let failNextPipeline = false
+
+mock.module('@huggingface/transformers', () => ({
+  env: {},
+  pipeline: async () => {
+    pipelineCalls += 1
+    if (failNextPipeline) throw new Error('local_files_only: model weights missing')
+    return () => ({ data: new Float32Array(768) })
+  },
+}))
+
+beforeEach(() => {
+  pipelineCalls = 0
+  failNextPipeline = false
+})
+
+describe('embedder warm-up and retry-safe memoization', () => {
+  test('warmEmbedder loads the embedder so a later call reuses the singleton', async () => {
+    const { warmEmbedder, getEmbedder } = await freshEmbedderModule()
+
+    await warmEmbedder()
+    await getEmbedder()
+
+    expect(pipelineCalls).toBe(1)
+  })
+
+  test('a rejected load is not cached: the next call retries instead of replaying the rejection', async () => {
+    const { getEmbedder } = await freshEmbedderModule()
+
+    // given: the first load fails
+    failNextPipeline = true
+    await expect(getEmbedder()).rejects.toThrow('model weights missing')
+
+    // when: the underlying cause clears and the caller retries
+    failNextPipeline = false
+    await getEmbedder()
+
+    // then: the second attempt actually re-ran the load (rejection wasn't memoized)
+    expect(pipelineCalls).toBe(2)
+  })
+
+  test('warmEmbedder failure degrades to a working per-turn load on retry', async () => {
+    const { warmEmbedder, embed } = await freshEmbedderModule()
+
+    failNextPipeline = true
+    await expect(warmEmbedder()).rejects.toThrow('model weights missing')
+
+    failNextPipeline = false
+    const embeddings = await embed(['hello'], 'query')
+
+    expect(embeddings).toHaveLength(1)
+  })
+})
+
+// Bun's module registry memoizes embedder.ts across tests, so its singleton
+// would leak between the cases above. A cache-busting query string forces a
+// fresh module instance (and thus a fresh embedderInstance) per test.
+async function freshEmbedderModule(): Promise<typeof import('./embedder')> {
+  return import(`./embedder?warm=${crypto.randomUUID()}`)
+}
