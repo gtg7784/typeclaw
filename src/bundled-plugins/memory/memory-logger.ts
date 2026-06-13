@@ -7,7 +7,7 @@ import { formatLocalDate } from '@/shared'
 import { advanceWatermarkTool, createAppendTool, type FragmentsAppendedHook } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { streamFilePath, streamsDir } from './paths'
-import { createStoreReferenceTool } from './references/store-reference-tool'
+import { createStoreReferenceTool, type ReferenceStoredHook } from './references/store-reference-tool'
 import { readEvents } from './stream-io'
 import { readLatestWatermark } from './watermark'
 
@@ -312,6 +312,7 @@ const consoleLogger: MemoryLoggerLogger = {
 export type CreateMemoryLoggerSubagentOptions = {
   logger?: MemoryLoggerLogger
   onFragmentsAppended?: FragmentsAppendedHook
+  onReferenceStored?: ReferenceStoredHook
 }
 
 export function createMemoryLoggerSubagent(
@@ -319,7 +320,7 @@ export function createMemoryLoggerSubagent(
 ): Subagent<MemoryLoggerPayload> {
   const logger = options.logger ?? consoleLogger
   const appendTool = createAppendTool(options.onFragmentsAppended)
-  const storeReferenceTool = createStoreReferenceTool()
+  const storeReferenceTool = createStoreReferenceTool(options.onReferenceStored)
   const customTools = [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool]
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,

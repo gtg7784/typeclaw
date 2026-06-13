@@ -29,6 +29,7 @@ import { runVectorIndexDoctor } from './vector/doctor'
 import { embed } from './vector/embedder'
 import { hybridSearch, type EmbedFn } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
+import { makeReferenceStoredHook } from './vector/reference-index-on-write'
 import { VectorStore } from './vector/store'
 
 const DEFAULT_IDLE_MS = 60_000
@@ -388,7 +389,12 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         subagents: {
           'memory-logger': createMemoryLoggerSubagent({
             logger: subagentLogger,
-            ...(appendVectorStore !== undefined ? { onFragmentsAppended: makeAppendHook(appendVectorStore) } : {}),
+            ...(appendVectorStore !== undefined
+              ? {
+                  onFragmentsAppended: makeAppendHook(appendVectorStore),
+                  onReferenceStored: makeReferenceStoredHook(appendVectorStore),
+                }
+              : {}),
           }),
           'memory-retrieval': createMemoryRetrievalSubagent({
             logger: subagentLogger,
