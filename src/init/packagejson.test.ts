@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { buildBaseDockerfile } from './dockerfile'
+import { AGENT_BROWSER_VERSION } from './index'
 import { refreshPackageJson } from './packagejson'
 
 let root: string
@@ -72,7 +74,7 @@ describe('refreshPackageJson', () => {
       scripts: { test: 'bun test' },
       dependencies: {
         typeclaw: 'file:../typeclaw',
-        'agent-browser': '^0.26.0',
+        'agent-browser': '^0.27.0',
         'typeclaw-gws-multi-account': '^0.3.4',
       },
       devDependencies: { '@types/bun': 'latest' },
@@ -88,7 +90,7 @@ describe('refreshPackageJson', () => {
     expect(pkg.scripts).toEqual({ test: 'bun test' })
     expect(pkg.dependencies).toEqual({
       typeclaw: 'file:../typeclaw',
-      'agent-browser': '^0.26.0',
+      'agent-browser': '^0.27.0',
       'typeclaw-gws-multi-account': '^0.3.4',
     })
     expect(pkg.devDependencies).toEqual({ '@types/bun': 'latest' })
@@ -165,5 +167,14 @@ describe('refreshPackageJson', () => {
 
     expect(result.files).not.toContain('packages/.gitkeep')
     expect(await readFile(join(root, 'packages', '.gitkeep'), 'utf8')).toBe(customContent)
+  })
+})
+
+describe('agent-browser version lockstep', () => {
+  test('scaffolded agent-runtime dep matches the Dockerfile Layer 4 global install', () => {
+    const dockerfile = buildBaseDockerfile()
+    const match = dockerfile.match(/bun install -g agent-browser@(\S+)/)
+
+    expect(match?.[1]).toBe(AGENT_BROWSER_VERSION)
   })
 })

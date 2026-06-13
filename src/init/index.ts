@@ -583,7 +583,11 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
 // skills get core` at runtime, so the CLI must be installed for the skill
 // to function. The Dockerfile pre-downloads Chromium too, so the agent
 // can drive a browser without any first-run setup.
-const AGENT_BROWSER_VERSION = '^0.26.0'
+//
+// Must match the Dockerfile Layer 4 global install (dockerfile.ts); they are
+// two installs of the same CLI and a skew is silent. Enforced by a guard test
+// in packagejson.test.ts.
+export const AGENT_BROWSER_VERSION = '^0.27.0'
 function buildPackageJson(root: string, name: string): Record<string, unknown> {
   return {
     name,
