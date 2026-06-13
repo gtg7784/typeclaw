@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
 import { z } from 'zod'
@@ -24,6 +24,8 @@ import {
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
 import { listShardSlugs, loadAllShards, loadShard, type TopicShard } from './load-shards'
 import { referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { renderReference } from './references/frontmatter'
+import { loadAllReferences, type Reference } from './references/load-references'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
@@ -34,6 +36,10 @@ import { VectorStore } from './vector/store'
 import { estimateTokens, TEXT_TOKEN_BUDGET } from './vector/truncation'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
+const REFERENCE_HALF_LIFE_DAYS = 14
+const REFERENCE_DEMOTE_SCORE_THRESHOLD = 0.1
+const REFERENCE_DELETE_DORMANCY_DAYS = 30
+const MS_PER_DAY = 86_400_000
 
 export const dreamingPayloadSchema = z.object({
   agentDir: z.string().min(1),
@@ -306,6 +312,146 @@ function deleteStreamVectorsForDroppedFragments(agentDir: string, droppedFragmen
   } finally {
     store.close()
   }
+}
+
+type ReferenceSaturationStats = {
+  referencesDemoted: number
+  referencesEvicted: number
+}
+
+async function runReferenceSaturationPass(agentDir: string, logger: DreamingLogger): Promise<ReferenceSaturationStats> {
+  const references = await loadAllReferences(agentDir, { logger })
+  const nowMs = Date.now()
+  const evictedSlugs: string[] = []
+  let referencesDemoted = 0
+  let referencesEvicted = 0
+
+  for (const ref of references) {
+    if (isReferenceDecayExempt(ref)) continue
+
+    if (ref.frontmatter.demoted && referenceDormancyDays(ref, nowMs) > REFERENCE_DELETE_DORMANCY_DAYS) {
+      await unlink(ref.path)
+      evictedSlugs.push(ref.slug)
+      referencesEvicted += 1
+      continue
+    }
+
+    if (!ref.frontmatter.demoted && referenceScore(ref, nowMs) < REFERENCE_DEMOTE_SCORE_THRESHOLD) {
+      await writeFile(ref.path, renderReference({ ...ref.frontmatter, demoted: true }, ref.body))
+      referencesDemoted += 1
+    }
+  }
+
+  if (evictedSlugs.length > 0) {
+    deleteReferenceVectors(agentDir, evictedSlugs)
+    await pruneReferenceCitations(agentDir, new Set(evictedSlugs), logger)
+  }
+
+  return { referencesDemoted, referencesEvicted }
+}
+
+function isReferenceDecayExempt(ref: Reference): boolean {
+  return ref.frontmatter.pinned || ref.frontmatter.origin === 'curated' || ref.frontmatter.origin === 'external'
+}
+
+function referenceScore(ref: Reference, nowMs: number): number {
+  const recencyDays = referenceDormancyDays(ref, nowMs)
+  return (ref.frontmatter.accessCount + 1) * Math.exp(-recencyDays / REFERENCE_HALF_LIFE_DAYS)
+}
+
+function referenceDormancyDays(ref: Reference, nowMs: number): number {
+  const lastAccessedMs = new Date(ref.frontmatter.lastAccessed).getTime()
+  if (!Number.isFinite(lastAccessedMs)) return Number.POSITIVE_INFINITY
+  return Math.max(0, (nowMs - lastAccessedMs) / MS_PER_DAY)
+}
+
+function deleteReferenceVectors(agentDir: string, slugs: readonly string[]): void {
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  if (!existsSync(dbPath)) return
+
+  const prefixes = slugs.map((slug) => `reference:${slug}#`)
+  const store = VectorStore.open(dbPath)
+  try {
+    const ids = store
+      .getAllMeta()
+      .flatMap((row) => (prefixes.some((prefix) => row.id.startsWith(prefix)) ? [row.id] : []))
+    if (ids.length > 0) store.deleteMany(ids)
+  } finally {
+    store.close()
+  }
+}
+
+async function pruneReferenceCitations(
+  agentDir: string,
+  evictedSlugs: ReadonlySet<string>,
+  logger: DreamingLogger,
+): Promise<void> {
+  const slugs = await listShardSlugs(agentDir)
+  for (const slug of slugs) {
+    const path = topicShardPath(agentDir, slug)
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (err) {
+      if (isEnoent(err)) continue
+      throw err
+    }
+
+    const parsed = parseShardTolerantly(raw, slug, logger)
+    const prunedBody = pruneReferenceSection(parsed.body, evictedSlugs)
+    if (prunedBody === parsed.body) continue
+    await writeFile(path, renderShard(parsed.frontmatter, prunedBody))
+  }
+}
+
+function pruneReferenceSection(body: string, evictedSlugs: ReadonlySet<string>): string {
+  const lines = body.split('\n')
+  const out: string[] = []
+  let referencesHeadingIndex: number | null = null
+  let referencesKept = 0
+  let inReferences = false
+
+  const flushEmptyReferencesHeading = (): void => {
+    if (referencesHeadingIndex !== null && referencesKept === 0) {
+      out.splice(referencesHeadingIndex, out.length - referencesHeadingIndex)
+    }
+    referencesHeadingIndex = null
+    referencesKept = 0
+  }
+
+  for (const line of lines) {
+    if (/^references\s*:\s*$/i.test(line.trim())) {
+      flushEmptyReferencesHeading()
+      inReferences = true
+      referencesHeadingIndex = out.length
+      referencesKept = 0
+      out.push(line)
+      continue
+    }
+
+    if (inReferences && isMarkdownSectionHeading(line)) {
+      flushEmptyReferencesHeading()
+      inReferences = false
+    }
+
+    if (inReferences) {
+      const referenceSlug = /^\s*-\s+(.+?)\s*$/.exec(line)?.[1]
+      if (referenceSlug !== undefined) {
+        if (evictedSlugs.has(referenceSlug)) continue
+        referencesKept += 1
+      }
+    }
+
+    out.push(line)
+  }
+
+  flushEmptyReferencesHeading()
+  return out.join('\n')
+}
+
+function isMarkdownSectionHeading(line: string): boolean {
+  const trimmed = line.trim()
+  return /^(fragments|references|superseded|proposal)\s*:/i.test(trimmed) || /^#{1,6}\s+/.test(trimmed)
 }
 
 // A dreamed-AND-cited fragment's `stream:*` row is redundant: hybridSearch
@@ -1249,6 +1395,8 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         })
       }
 
+      const { referencesDemoted, referencesEvicted } = await runReferenceSaturationPass(ctx.payload.agentDir, logger)
+
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
       logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
@@ -1274,7 +1422,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       try {
         await commit(ctx.payload.agentDir)
         logger.info(
-          `[dreaming] done topics_created=${metrics.topicsCreated} topics_removed=${metrics.topicsRemoved} superseded_new=${metrics.supersededDelta} fragments_dropped=${compaction.fragmentsDropped} over_budget=${overBudget.length} elapsed_ms=${Date.now() - start}`,
+          `[dreaming] done topics_created=${metrics.topicsCreated} topics_removed=${metrics.topicsRemoved} superseded_new=${metrics.supersededDelta} fragments_dropped=${compaction.fragmentsDropped} over_budget=${overBudget.length} references_demoted=${referencesDemoted} references_evicted=${referencesEvicted} elapsed_ms=${Date.now() - start}`,
         )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

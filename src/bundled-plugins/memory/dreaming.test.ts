@@ -18,8 +18,10 @@ import {
 } from './dreaming'
 import { addDreamedIds, DREAMING_STATE_FILE, emptyState, getDreamedIds, loadDreamingState } from './dreaming-state'
 import { renderShard } from './frontmatter'
+import { parseReference, renderReference, type ReferenceFrontmatter } from './references/frontmatter'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
+import { referencePassages } from './vector/passages'
 import { VectorStore, type VectorRow } from './vector/store'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -64,6 +66,27 @@ async function writeTopicShard(slug: string, text: string): Promise<void> {
 async function writeReference(slug: string, text: string): Promise<void> {
   await mkdir(join(agentDir, 'memory', 'references'), { recursive: true })
   await writeFile(referenceFile(slug), text)
+}
+
+function referenceText(overrides: Partial<ReferenceFrontmatter> = {}, body = 'reference body'): string {
+  const created = overrides.created ?? isoDaysAgo(1)
+  return renderReference(
+    {
+      title: overrides.title ?? 'Reference',
+      origin: overrides.origin ?? 'episode',
+      created,
+      lastAccessed: overrides.lastAccessed ?? created,
+      accessCount: overrides.accessCount ?? 0,
+      pinned: overrides.pinned ?? false,
+      demoted: overrides.demoted ?? false,
+      tags: overrides.tags ?? [],
+    },
+    body,
+  )
+}
+
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString()
 }
 
 async function fileSha256(path: string): Promise<string> {
@@ -635,6 +658,111 @@ describe('dreaming subagent (compaction wiring)', () => {
     )
   })
 
+  test('demotes stale episode references before deleting them and removes chunks from reference passages', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+
+    await invokeDreaming(agentDir)
+
+    const raw = await readFile(referenceFile('stale-ref'), 'utf8')
+    expect(parseReference(raw).frontmatter.demoted).toBe(true)
+    expect(await referencePassages(agentDir)).toEqual([])
+  })
+
+  test('deletes demoted references only after the extended dormancy window', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('first'))
+    await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+
+    await invokeDreaming(agentDir)
+    expect(parseReference(await readFile(referenceFile('stale-ref'), 'utf8')).frontmatter.demoted).toBe(true)
+
+    await writeFile(streamFile('2026-04-28'), fragmentLine('second'))
+    await invokeDreaming(agentDir)
+
+    await expect(readFile(referenceFile('stale-ref'), 'utf8')).rejects.toThrow()
+  })
+
+  test('exempts pinned, curated, and external references from automatic decay', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'pinned-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), pinned: true }),
+    )
+    await writeReference(
+      'curated-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), origin: 'curated' }),
+    )
+    await writeReference(
+      'external-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), origin: 'external' }),
+    )
+
+    await invokeDreaming(agentDir)
+
+    expect(parseReference(await readFile(referenceFile('pinned-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+    expect(parseReference(await readFile(referenceFile('curated-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+    expect(parseReference(await readFile(referenceFile('external-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+  })
+
+  test('recent access keeps an old episode reference above the decay threshold', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'recent-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: new Date().toISOString() }),
+    )
+
+    await invokeDreaming(agentDir)
+
+    expect(parseReference(await readFile(referenceFile('recent-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+  })
+
+  test('eviction removes reference files, vectors, and upward topic citations', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'ref-x',
+      referenceText({ created: isoDaysAgo(60), lastAccessed: isoDaysAgo(60), demoted: true }),
+    )
+    await writeTopicShard(
+      'with-ref',
+      shardText(
+        'With ref',
+        ['Conclusion.', '', 'references:', '- ref-x', '', 'fragments:', '- streams/2026-04-27#f-tick'].join('\n'),
+      ),
+    )
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('reference:ref-x#0', 'reference', 'ref-x', vector({ 0: 1 }), 'ref-hash'))
+    store.close()
+
+    await invokeDreaming(agentDir)
+
+    await expect(readFile(referenceFile('ref-x'), 'utf8')).rejects.toThrow()
+    const topic = await readFile(topicShard('with-ref'), 'utf8')
+    expect(topic).not.toContain('ref-x')
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['reference:ref-x#0'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('includes reference demotion and eviction counts in the done metrics line', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference('demote-me', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+    await writeReference(
+      'evict-me',
+      referenceText({ created: isoDaysAgo(60), lastAccessed: isoDaysAgo(60), demoted: true }),
+    )
+    const infos: string[] = []
+    const logger: DreamingLogger = { info: (m) => infos.push(m), warn: () => {}, error: () => {} }
+
+    await invokeDreaming(agentDir, { logger })
+
+    const done = infos.find((m) => m.startsWith('[dreaming] done'))
+    expect(done).toContain('references_demoted=1')
+    expect(done).toContain('references_evicted=1')
+  })
+
   test('revert preserves byte-identical shard content for unchanged shards and deletes net-new shards', async () => {
     await writeFile(streamFile('2026-04-27'), [fragmentLine('keep'), fragmentLine('drop')].join(''))
     const stable = shardText('Stable', ['Stable.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n'), {
@@ -1168,7 +1296,7 @@ describe('dreaming subagent (orchestration)', () => {
 
 function vectorRow(
   id: string,
-  source: 'topic' | 'stream',
+  source: 'topic' | 'stream' | 'reference',
   key: string,
   embedding: Float32Array,
   contentHash: string,

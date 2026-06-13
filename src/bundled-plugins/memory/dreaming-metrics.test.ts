@@ -19,6 +19,8 @@ describe('computeDreamingMetrics', () => {
       topicsCreated: 1,
       topicsRemoved: 1,
       supersededDelta: 0,
+      referencesDemoted: 0,
+      referencesEvicted: 0,
     })
   })
 
@@ -43,6 +45,8 @@ describe('computeDreamingMetrics', () => {
       topicsCreated: 0,
       topicsRemoved: 0,
       supersededDelta: 0,
+      referencesDemoted: 0,
+      referencesEvicted: 0,
     })
   })
 })
