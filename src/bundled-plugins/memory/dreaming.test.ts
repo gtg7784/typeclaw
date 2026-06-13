@@ -644,19 +644,29 @@ describe('dreaming subagent (compaction wiring)', () => {
     expect(await fileSha256(referenceFile('ref-a'))).toBe(before)
   })
 
-  test('warns if a dreaming run rewrites reference file bytes', async () => {
+  test('restores reference bytes and skips commit if a dreaming run rewrites them', async () => {
     await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
     await writeReference('ref-a', 'verbatim reference bytes\n')
     const warnings: string[] = []
+    let committed = false
     const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
     const runSession: RunSession = async () => {
       await writeFile(referenceFile('ref-a'), 'mutated reference bytes\n')
     }
 
-    await invokeDreaming(agentDir, { runSession, logger, referencesEnabled: true })
+    await invokeDreaming(agentDir, {
+      runSession,
+      logger,
+      referencesEnabled: true,
+      commitMemory: async () => {
+        committed = true
+      },
+    })
 
+    expect(await readFile(referenceFile('ref-a'), 'utf8')).toBe('verbatim reference bytes\n')
+    expect(committed).toBe(false)
     expect(warnings).toContain(
-      '[dreaming] reference content modified: ref-a — this violates the verbatim invariant; reference content must never be rewritten',
+      '[dreaming] reference content modified: ref-a — restored original bytes and aborted the dreaming commit to preserve the verbatim invariant',
     )
   })
 

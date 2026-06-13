@@ -510,13 +510,18 @@ async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, Reado
   return out
 }
 
-async function captureReferenceHashes(agentDir: string): Promise<Map<string, string>> {
-  const hashes = new Map<string, string>()
+type ReferenceSnapshotEntry = {
+  bytes: Buffer
+  hash: string
+}
+
+async function captureReferenceSnapshot(agentDir: string): Promise<Map<string, ReferenceSnapshotEntry>> {
+  const snapshot = new Map<string, ReferenceSnapshotEntry>()
   let names: string[]
   try {
     names = await readdir(referencesDir(agentDir))
   } catch (err) {
-    if (isEnoent(err)) return hashes
+    if (isEnoent(err)) return snapshot
     throw err
   }
 
@@ -524,25 +529,30 @@ async function captureReferenceHashes(agentDir: string): Promise<Map<string, str
     if (!name.endsWith('.md')) continue
     const slug = basename(name, '.md')
     const bytes = await readFile(join(referencesDir(agentDir), name))
-    hashes.set(slug, createHash('sha256').update(bytes).digest('hex'))
+    snapshot.set(slug, { bytes, hash: createHash('sha256').update(bytes).digest('hex') })
   }
-  return hashes
+  return snapshot
 }
 
-async function warnOnReferenceContentChanges(
+async function restoreChangedReferences(
   agentDir: string,
-  before: ReadonlyMap<string, string>,
+  before: ReadonlyMap<string, ReferenceSnapshotEntry>,
   logger: DreamingLogger,
-): Promise<void> {
-  if (before.size === 0) return
-  const after = await captureReferenceHashes(agentDir)
-  for (const [slug, hash] of before) {
-    const nextHash = after.get(slug)
-    if (nextHash === undefined || nextHash === hash) continue
+): Promise<boolean> {
+  if (before.size === 0) return false
+  const after = await captureReferenceSnapshot(agentDir)
+  let restored = false
+  for (const [slug, entry] of before) {
+    const next = after.get(slug)
+    if (next?.hash === entry.hash) continue
+    await mkdir(referencesDir(agentDir), { recursive: true })
+    await writeFile(join(referencesDir(agentDir), `${slug}.md`), entry.bytes)
+    restored = true
     logger.warn(
-      `[dreaming] reference content modified: ${slug} — this violates the verbatim invariant; reference content must never be rewritten`,
+      `[dreaming] reference content modified: ${slug} — restored original bytes and aborted the dreaming commit to preserve the verbatim invariant`,
     )
   }
+  return restored
 }
 
 function mergeCitationIndex(target: Map<string, Set<string>>, source: ReadonlyMap<string, ReadonlySet<string>>): void {
@@ -1326,9 +1336,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
-      const referenceHashesBefore = referencesEnabled
-        ? await captureReferenceHashes(ctx.payload.agentDir)
-        : new Map<string, string>()
+      const referenceSnapshotBefore = referencesEnabled
+        ? await captureReferenceSnapshot(ctx.payload.agentDir)
+        : new Map<string, ReferenceSnapshotEntry>()
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       // Over-budget compaction candidates only matter when the vector index
@@ -1350,7 +1360,8 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
 
       const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
       if (referencesEnabled) {
-        await warnOnReferenceContentChanges(ctx.payload.agentDir, referenceHashesBefore, logger)
+        const restoredReferences = await restoreChangedReferences(ctx.payload.agentDir, referenceSnapshotBefore, logger)
+        if (restoredReferences) return
       }
       let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
       let revertedCitationViolation = false
