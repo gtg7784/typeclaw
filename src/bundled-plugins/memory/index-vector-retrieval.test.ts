@@ -51,7 +51,12 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
     // real vector pipeline rendered the topic's heading and body under the
     // `# Memory` framing — reached only by hybridSearch matching the seeded
     // vector, since the query token appears nowhere in the corpus or the output.
-    expect(infos.some((msg) => msg.startsWith('[vector-retrieval] mode=index '))).toBe(true)
+    const retrievalLog = infos.find((msg) => msg.startsWith('[vector-retrieval] mode=index '))
+    expect(retrievalLog).toBeDefined()
+    expect(retrievalLog).toContain('topic_results=1')
+    expect(retrievalLog).toContain('stream_results=0')
+    expect(retrievalLog).toContain('reference_results=0')
+    expect(retrievalLog).toMatch(/elapsed_ms=\d+/)
     expect(retrievalContext.results).toContain('# Memory')
     expect(retrievalContext.results).toContain('## Orbital Mechanics')
     expect(retrievalContext.results).toContain('Satellites remain in orbit')

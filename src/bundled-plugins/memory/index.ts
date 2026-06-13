@@ -193,6 +193,7 @@ async function renderVectorTurnMemory(
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
   try {
+    const startedAt = Date.now()
     const results = await deps.hybridSearch(
       event.userPrompt,
       store,
@@ -200,9 +201,20 @@ async function renderVectorTurnMemory(
       VECTOR_TURN_TOP_K,
       deps.queryEmbedFn,
     )
-    const topicHits = results.reduce((n, r) => (r.source === 'topic' ? n + 1 : n), 0)
+    const elapsedMs = Date.now() - startedAt
+    let topicHits = 0
+    let referenceHits = 0
+    for (const result of results) {
+      if (result.source === 'topic') topicHits += 1
+      else if (result.source === 'reference') referenceHits += 1
+    }
+    const streamHits = results.length - topicHits - referenceHits
+    // results.length === 0 on a non-empty query means the relevance gate suppressed
+    // every candidate (or nothing matched) — an empty memory block, indistinguishable
+    // from "no memory" without this explicit signal.
+    const suppressed = results.length === 0 ? ' suppressed=1' : ''
     logger?.info(
-      `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${results.length - topicHits}`,
+      `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${streamHits} reference_results=${referenceHits} elapsed_ms=${elapsedMs}${suppressed}`,
     )
     return renderRetrievedMemorySection(results, { origin: event.origin })
   } finally {
