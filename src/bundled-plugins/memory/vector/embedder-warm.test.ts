@@ -1,11 +1,11 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 
 // A controllable transformers fake whose pipeline load can be made to fail on
 // demand, so we can prove getEmbedder/warmEmbedder recover from a transient
-// load failure instead of caching the rejection forever. Kept in its own file
-// (separate from embedder-lazy-load.test.ts) because the embedder memoizes a
-// module-level singleton across a file's tests — a failable mock here must not
-// perturb the lazy-load regression guard there.
+// pipeline failure instead of caching the rejection forever. Kept in its own
+// file (separate from embedder-lazy-load.test.ts) because the embedder memoizes
+// a module-level singleton across a file's tests — a failable mock here must
+// not perturb the lazy-load regression guard there.
 let pipelineCalls = 0
 let failNextPipeline = false
 
@@ -18,14 +18,10 @@ mock.module('@huggingface/transformers', () => ({
   },
 }))
 
-beforeEach(() => {
-  pipelineCalls = 0
-  failNextPipeline = false
-})
-
 describe('embedder warm-up and retry-safe memoization', () => {
   test('warmEmbedder loads the embedder so a later call reuses the singleton', async () => {
     const { warmEmbedder, getEmbedder } = await freshEmbedderModule()
+    pipelineCalls = 0
 
     await warmEmbedder()
     await getEmbedder()
@@ -35,6 +31,7 @@ describe('embedder warm-up and retry-safe memoization', () => {
 
   test('a rejected load is not cached: the next call retries instead of replaying the rejection', async () => {
     const { getEmbedder } = await freshEmbedderModule()
+    pipelineCalls = 0
 
     // given: the first load fails
     failNextPipeline = true
@@ -58,6 +55,27 @@ describe('embedder warm-up and retry-safe memoization', () => {
     const embeddings = await embed(['hello'], 'query')
 
     expect(embeddings).toHaveLength(1)
+  })
+
+  test('a rejected transformers module load is not cached: the next call reloads', async () => {
+    const { getEmbedder, __setTransformersImporterForTests } = await freshEmbedderModule()
+
+    // given: the dynamic import / native module load itself fails the first time
+    // then succeeds — driven through the importer seam because Bun snapshots a
+    // mock.module namespace at registration and can't toggle import failure later
+    let importCalls = 0
+    __setTransformersImporterForTests(async () => {
+      importCalls += 1
+      if (importCalls === 1) throw new Error('Cannot find module: sharp platform binary missing')
+      return { env: {} as never, pipeline: (async () => () => ({ data: new Float32Array(768) })) as never }
+    })
+
+    // when: the first load fails and the caller retries after recovery
+    await expect(getEmbedder()).rejects.toThrow('sharp platform binary missing')
+    await getEmbedder()
+
+    // then: transformersModulePromise wasn't memoized as rejected — it reloaded
+    expect(importCalls).toBe(2)
   })
 })
 

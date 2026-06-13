@@ -41,13 +41,34 @@ type FeatureExtractor = Awaited<ReturnType<typeof TransformersPipeline<'feature-
 // drag the heavy native stack onto every container boot — and crash it when
 // sharp can't resolve its platform binary. Memoized so the module evaluates
 // at most once.
-let transformersModulePromise: Promise<{ env: TransformersEnv; pipeline: typeof TransformersPipeline }> | undefined
+type TransformersModule = { env: TransformersEnv; pipeline: typeof TransformersPipeline }
 
-function loadTransformers(): Promise<{ env: TransformersEnv; pipeline: typeof TransformersPipeline }> {
-  transformersModulePromise ??= import('@huggingface/transformers').then((mod) => ({
-    env: mod.env,
-    pipeline: mod.pipeline,
-  }))
+let transformersModulePromise: Promise<TransformersModule> | undefined
+
+const realTransformersImport = (): Promise<TransformersModule> =>
+  import('@huggingface/transformers').then((mod) => ({ env: mod.env, pipeline: mod.pipeline }))
+
+// Injectable importer seam. Defaults to the real dynamic import; a test can
+// swap it to drive the module-load layer (e.g. fail once, then succeed) without
+// fighting Bun's mock.module namespace snapshotting. Bun freezes the mocked
+// namespace at registration, so a runtime-toggled failure can't be expressed
+// through mock.module — this seam is the supported way to exercise it.
+let importTransformers: () => Promise<TransformersModule> = realTransformersImport
+
+export function __setTransformersImporterForTests(importer: (() => Promise<TransformersModule>) | undefined): void {
+  importTransformers = importer ?? realTransformersImport
+  transformersModulePromise = undefined
+}
+
+function loadTransformers(): Promise<TransformersModule> {
+  // Clear the memo on rejection (mirroring getEmbedder) so a transient failure
+  // of the dynamic import / native module load doesn't cache the rejected
+  // promise — otherwise every later getEmbedder() awaits the same dead promise
+  // and per-turn embedding stays poisoned for the life of the process.
+  transformersModulePromise ??= importTransformers().catch((err) => {
+    transformersModulePromise = undefined
+    throw err
+  })
   return transformersModulePromise
 }
 
