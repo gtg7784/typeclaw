@@ -224,9 +224,7 @@ export async function startAgent({
   // exactly once per folder; a folder already at v2 is a no-op.
   runStartupMigrations(cwd)
   if (suppressSystemMemory) {
-    const memoryConfig = pluginConfigsByName.memory as { references?: { enabled?: boolean } } | undefined
-    const referencesEnabled = memoryConfig?.references?.enabled ?? false
-    await buildStartupVectorIndex(cwd, embed, referencesEnabled).catch((err) => {
+    await buildStartupVectorIndex(cwd, embed).catch((err) => {
       console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }

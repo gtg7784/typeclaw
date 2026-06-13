@@ -1302,14 +1302,12 @@ export type CreateDreamingSubagentOptions = {
   commitMemory?: (cwd: string) => Promise<void>
   logger?: DreamingLogger
   vectorEmbedFn?: EmbedFn
-  referencesEnabled?: boolean
 }
 
 export function createDreamingSubagent(options: CreateDreamingSubagentOptions = {}): Subagent<DreamingPayload> {
   const commit = options.commitMemory ?? commitMemorySnapshot
   const logger = options.logger ?? consoleLogger
   const vectorEmbedFn = options.vectorEmbedFn ?? embed
-  const referencesEnabled = options.referencesEnabled ?? false
 
   return {
     systemPrompt: DREAMING_SYSTEM_PROMPT,
@@ -1336,9 +1334,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
-      const referenceSnapshotBefore = referencesEnabled
-        ? await captureReferenceSnapshot(ctx.payload.agentDir)
-        : new Map<string, ReferenceSnapshotEntry>()
+      const referenceSnapshotBefore = await captureReferenceSnapshot(ctx.payload.agentDir)
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       // Over-budget compaction candidates only matter when the vector index
@@ -1359,10 +1355,8 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       }
 
       const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
-      if (referencesEnabled) {
-        const restoredReferences = await restoreChangedReferences(ctx.payload.agentDir, referenceSnapshotBefore, logger)
-        if (restoredReferences) return
-      }
+      const restoredReferences = await restoreChangedReferences(ctx.payload.agentDir, referenceSnapshotBefore, logger)
+      if (restoredReferences) return
       let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
       let revertedCitationViolation = false
 
@@ -1419,9 +1413,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         })
       }
 
-      const { referencesDemoted, referencesEvicted } = referencesEnabled
-        ? await runReferenceSaturationPass(ctx.payload.agentDir, logger)
-        : { referencesDemoted: 0, referencesEvicted: 0 }
+      const { referencesDemoted, referencesEvicted } = await runReferenceSaturationPass(ctx.payload.agentDir, logger)
 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)

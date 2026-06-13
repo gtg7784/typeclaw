@@ -27,10 +27,9 @@ export type MemoryRetrievalLogger = {
 export type CreateMemoryRetrievalSubagentOptions = {
   logger?: MemoryRetrievalLogger
   timeoutMs?: number
-  referencesEnabled?: boolean
 }
 
-export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
+export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant across topic shards in \`memory/topics/\` (consolidated long-term memory), references in \`memory/references/\` (verbatim artifacts), AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query all three surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
 
 Search discipline: issue ALL your \`memory_search\` queries in a SINGLE response as parallel tool calls (up to 3 at once), then wait for every result before deciding what to do next. Different angles in parallel, NEVER one search per turn — sequential searches waste a full LLM round-trip per query (~3s each) on file I/O that takes milliseconds. Pick queries that match the user's literal phrasing — not framing vocabulary, not metadata (session ids, dates), not words from your own system prompt. If the parallel batch turns up nothing relevant, write the empty-context note and stop.`
 
@@ -56,7 +55,6 @@ export function createMemoryRetrievalSubagent(
   options: CreateMemoryRetrievalSubagentOptions = {},
 ): Subagent<MemoryRetrievalPayload> {
   const logger = options.logger ?? consoleLogger
-  const referencesEnabled = options.referencesEnabled ?? false
   return {
     systemPrompt: MEMORY_RETRIEVAL_SYSTEM_PROMPT,
     // Retrieval is "4 keyword searches + 1 write" — no reasoning required.
@@ -64,7 +62,7 @@ export function createMemoryRetrievalSubagent(
     // operator hasn't configured it, so this is safe by construction.
     profile: 'fast',
     tools: [readTool, writeTool, lsTool],
-    customTools: [createMemorySearchTool(referencesEnabled)],
+    customTools: [createMemorySearchTool()],
     payloadSchema: memoryRetrievalPayloadSchema,
     inFlightKey: (payload) => payload.parentSessionId,
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),

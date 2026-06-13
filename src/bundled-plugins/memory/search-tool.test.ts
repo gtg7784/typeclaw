@@ -339,18 +339,6 @@ describe('memorySearchTool', () => {
       new Date('2026-06-12T00:00:00Z').getTime(),
     )
   })
-
-  test('when referencesEnabled is false, reference matches are excluded even if files exist', async () => {
-    const agentDir = await makeAgentDir()
-    await writeShard(agentDir, 'topic-shard', 'Topic shard', 'needle in topic.\n')
-    await writeReference(agentDir, 'ref-a', 'Reference A', 'needle in reference.\n', {
-      created: '2026-06-12T00:00:00Z',
-    })
-
-    const result = await call(agentDir, { query: 'needle' }, false)
-
-    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['topic:topic-shard'])
-  })
 })
 
 describe('memorySearchTool — stream events', () => {
@@ -685,19 +673,15 @@ async function makeAgentDir(): Promise<string> {
   return dir
 }
 
-async function call(agentDir: string, input: unknown, referencesEnabled: boolean = true): Promise<SearchResult> {
-  const tool = createMemorySearchTool(referencesEnabled)
+async function call(agentDir: string, input: unknown): Promise<SearchResult> {
+  const tool = createMemorySearchTool()
   const args = tool.parameters.parse(input)
   const result = await tool.execute(args, ctx(agentDir))
   return result.details as SearchResult
 }
 
-async function callRaw(
-  agentDir: string,
-  input: unknown,
-  referencesEnabled: boolean = true,
-): Promise<{ text: string; details: unknown }> {
-  const tool = createMemorySearchTool(referencesEnabled)
+async function callRaw(agentDir: string, input: unknown): Promise<{ text: string; details: unknown }> {
+  const tool = createMemorySearchTool()
   const args = tool.parameters.parse(input)
   const result = await tool.execute(args, ctx(agentDir))
   const part = result.content[0]
