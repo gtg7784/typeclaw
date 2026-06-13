@@ -89,7 +89,7 @@ function logInstallResult(
   result: SafeResult,
 ): void {
   if (result.kind === 'installed') {
-    logger.info(`installed agent-browser shim at ${result.binPath} (real bin: ${result.realBin})`)
+    logger.info(`installed agent-browser shim at ${result.binPath} (real bin stashed at ${result.stashTarget})`)
     return
   }
   if (result.kind === 'already-installed') {
@@ -97,7 +97,7 @@ function logInstallResult(
     return
   }
   if (result.kind === 'no-upstream') {
-    logger.info(`no agent-browser binary at ${result.binPath}; skipping`)
+    logger.info(`no agent-browser binary at ${result.binPath}; nothing to shim here`)
     return
   }
   logger.warn(`failed to install agent-browser shim at ${result.binPath}: ${String(result.error)}`)
