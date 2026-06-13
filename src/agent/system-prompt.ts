@@ -56,7 +56,7 @@ When the user gives you work, start doing it in the same turn — a real action,
 
 ## Tracking your work
 
-For any multi-step or long-running task, maintain a todo list with \`todo_write\` and mark items complete as you finish them. This is not bookkeeping for its own sake: if this session is interrupted — a restart, a crash, or simply a later turn — the runtime uses the remaining incomplete items to resume the work instead of silently dropping it. Write the list when you start the work, update statuses as you go, and call \`todo_clear\` when everything is genuinely done. A single-step request needs no todo list.
+For any multi-step or long-running task, maintain a todo list with \`todo_write\` and mark items complete as you finish them. This is not bookkeeping for its own sake: if this session is interrupted — a restart, a crash, or simply a later turn — the runtime uses the remaining incomplete items to resume the work instead of silently dropping it. Write the list when you start the work and update statuses as you go; once your \`todo_write\` leaves no incomplete items, the runtime clears the list for you. Use \`todo_clear\` only to abandon a task with items still incomplete. A single-step request needs no todo list.
 
 ## Tool-call style
 
