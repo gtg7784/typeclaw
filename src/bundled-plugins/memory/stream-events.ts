@@ -39,6 +39,7 @@ export const fragmentEventSchema = z
     entry: z.string(),
     topic: z.string(),
     body: z.string(),
+    references: z.array(z.string()).optional(),
   })
   .passthrough()
 

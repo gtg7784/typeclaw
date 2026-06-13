@@ -25,8 +25,9 @@ export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
       source: z.string().min(1),
       entry: z.string().min(1),
       latestEntryId: z.string().min(1),
+      references: z.array(z.string()).optional(),
     }),
-    async execute({ topic, body, source, entry, latestEntryId }, ctx) {
+    async execute({ topic, body, source, entry, latestEntryId, references }, ctx) {
       const streamPath = dailyStreamPath(ctx.agentDir)
       assertNoSecrets(`${topic}\n${body}`)
 
@@ -53,6 +54,9 @@ export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
         entry,
         topic,
         body,
+      }
+      if (references !== undefined && references.length > 0) {
+        fragment.references = references
       }
       const watermark: WatermarkEvent = {
         type: 'watermark',
