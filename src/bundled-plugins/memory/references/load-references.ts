@@ -103,7 +103,7 @@ async function resolveReference(
   return { kind: 'read', slug, reference, entry }
 }
 
-async function listReferenceSlugs(agentDir: string): Promise<string[]> {
+export async function listReferenceSlugs(agentDir: string): Promise<string[]> {
   let names: string[]
   try {
     names = await readdir(referencesDir(agentDir))
