@@ -68,6 +68,14 @@ export class Embedder {
     const results = texts.map((text) => boundEmbeddableText(text))
     warnIfBounded(results, type)
 
+    // The whole array is embedded in ONE onnxruntime pass — peak memory scales
+    // with batch size, and a large startup index build (thousands of passages)
+    // can OOM-kill the container mid-pass. Log the size first so that, if the
+    // process dies here, the last line names the batch that did it rather than
+    // leaving the embed call as a silent point of death. Warn above a threshold
+    // where the single-pass cost is the likely culprit for a missing agent.
+    logEmbedBatch(texts.length, type)
+
     const output = await this.extractor(
       prefixTexts(
         results.map((r) => r.text),
@@ -105,6 +113,21 @@ function warnIfBounded(results: readonly BoundedText[], type: EmbedType): void {
     `[memory] vector embedding: bounded ${trimmed.length}/${results.length} ${type} input(s) to the ` +
       `${MAX_MODEL_TOKENS}-token model limit (worst ~${worst} est. tokens); their tail is not embedded`,
   )
+}
+
+// Above this single-pass batch size, the embed is the prime suspect for a
+// container that boots, logs, then dies without an error — the onnxruntime
+// activation tensors for a batch this large are the memory spike that trips
+// the OOM killer.
+const LARGE_EMBED_BATCH = 256
+
+function logEmbedBatch(count: number, type: EmbedType): void {
+  const line = `[memory] vector embedding: ${count} ${type} input(s) in a single pass`
+  if (count >= LARGE_EMBED_BATCH) {
+    console.warn(`${line} — large batch, peak memory scales with this; an OOM kill here aborts the boot`)
+  } else {
+    console.info(line)
+  }
 }
 
 function configureTransformers(env: TransformersEnv): void {

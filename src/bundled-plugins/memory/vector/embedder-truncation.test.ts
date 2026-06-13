@@ -74,23 +74,70 @@ describe('embedder bounding observability', () => {
     console.warn = originalWarn
   })
 
-  test('emits a content-free warning naming the type and count when an input is bounded', async () => {
+  test('warns content-free with the type and count when an input is bounded', async () => {
     const { embed } = await import('./embedder')
 
     await embed(['in budget', overBudgetText], 'query')
 
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('[memory]')
-    expect(warnings[0]).toContain('query')
-    expect(warnings[0]).toContain('1/2')
-    expect(warnings[0]).not.toContain('word')
+    const bounded = warnings.filter((w) => w.includes('bounded'))
+    expect(bounded).toHaveLength(1)
+    expect(bounded[0]).toContain('[memory]')
+    expect(bounded[0]).toContain('query')
+    expect(bounded[0]).toContain('1/2')
+    expect(bounded[0]).not.toContain('word')
   })
 
-  test('does not warn when every input is within budget', async () => {
+  test('does not warn about bounding when every input is within budget', async () => {
     const { embed } = await import('./embedder')
 
     await embed(['short a', 'short b'], 'passage')
 
-    expect(warnings).toHaveLength(0)
+    expect(warnings.filter((w) => w.includes('bounded'))).toHaveLength(0)
+  })
+})
+
+describe('embedder batch-size observability', () => {
+  let warnings: string[]
+  let notices: string[]
+  const originalWarn = console.warn
+  const originalInfo = console.info
+
+  beforeEach(() => {
+    warnings = []
+    notices = []
+    console.warn = (message?: unknown) => {
+      warnings.push(String(message))
+    }
+    console.info = (message?: unknown) => {
+      notices.push(String(message))
+    }
+  })
+
+  afterEach(() => {
+    console.warn = originalWarn
+    console.info = originalInfo
+  })
+
+  test('logs the single-pass batch size at info for a small batch', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(['short a', 'short b'], 'passage')
+
+    const batchLine = notices.find((n) => n.includes('in a single pass'))
+    expect(batchLine).toContain('2 passage input(s)')
+    expect(warnings.some((w) => w.includes('in a single pass'))).toBe(false)
+  })
+
+  test('warns when the single-pass batch is large enough to risk an OOM-killed boot', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(
+      Array.from({ length: 256 }, (_, i) => `passage ${i}`),
+      'passage',
+    )
+
+    const batchWarn = warnings.find((w) => w.includes('in a single pass'))
+    expect(batchWarn).toContain('256 passage input(s)')
+    expect(batchWarn).toContain('OOM')
   })
 })
