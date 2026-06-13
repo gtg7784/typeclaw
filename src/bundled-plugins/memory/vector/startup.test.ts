@@ -152,6 +152,24 @@ describe('buildStartupVectorIndex', () => {
     expect(embeddedTexts).toEqual(['Package Manager\nThe user consistently uses pnpm.'])
   })
 
+  it('propagates a rejecting embedFn so the boot-time caller can log and continue', async () => {
+    const agentDir = createAgentDir()
+    writeTopic(agentDir, 'startup-topic', 'Startup Topic', 'This topic needs a vector at boot.')
+
+    const failing: EmbedFn = async () => {
+      throw new Error('model load failed: local_files_only missing weights')
+    }
+
+    await expect(buildStartupVectorIndex(agentDir, failing)).rejects.toThrow('model load failed')
+
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(store.getAll()).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+
   it('prunes superseded stream rows so they cannot crowd active candidates', async () => {
     const agentDir = createAgentDir()
     const activeId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
