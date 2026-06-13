@@ -6,7 +6,7 @@ import { defineTool } from '@/plugin'
 
 import { loadAllShards, loadShard, type TopicShard } from './load-shards'
 import { renderReference } from './references/frontmatter'
-import { loadAllReferences, type Reference } from './references/load-references'
+import { loadAllReferences, loadReference, type Reference } from './references/load-references'
 import type { FragmentEvent, LegacyProseEvent, StreamEvent } from './stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
 
@@ -51,7 +51,7 @@ export type Matcher = (haystack: string) => boolean
 export function createMemorySearchTool() {
   return defineTool({
     description:
-      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers topic shards under memory/topics/ (consolidated facts), references under memory/references/ (verbatim artifacts), and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard with its full body — use it to read a topic whose slug you already have (e.g. a heading shown in injected memory). Returns matches discriminated by `source: "topic" | "reference" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then reference matches, then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-then-reference-then-stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
+      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers topic shards under memory/topics/ (consolidated facts), references under memory/references/ (verbatim artifacts), and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard (or reference) with its full body — use it to read a topic OR reference whose slug you already have (e.g. a heading shown in injected memory); it resolves the topic shard first and falls back to a reference of the same slug. Returns matches discriminated by `source: "topic" | "reference" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then reference matches, then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-then-reference-then-stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
     parameters: z.object({
       query: z.string().optional(),
       topic: z.string().optional(),
@@ -101,24 +101,33 @@ export function createMemorySearchTool() {
 
 export const memorySearchTool = createMemorySearchTool()
 
-// Exact slug lookup, so the agent can read a topic whose slug the per-turn
-// injection already showed it without re-running a fuzzy search for a body the
-// retrieval layer already located. A traversal slug makes `topicShardPath` throw
-// inside `loadShard` — caught and returned as a structured error, not a crash.
-// A missing slug returns empty matches, the same shape as a search that hit nothing.
+// Exact slug lookup, so the agent can read a topic OR reference whose slug the
+// per-turn injection already showed it without re-running a fuzzy search for a
+// body the retrieval layer already located. The injected memory block renders
+// both topic and reference entries with a `slug:` line and a single recovery
+// hint (`memory_search({ topic: "<slug>" })`), so this lookup must resolve both:
+// it tries the topic shard first, then falls back to a reference of the same
+// slug. A traversal slug makes the path builder throw inside the loader — caught
+// and returned as a structured error, not a crash. A slug that matches neither
+// returns empty matches, the same shape as a search that hit nothing.
 async function lookupTopic(
   agentDir: string,
   slug: string,
   logger?: { warn(message: string): void },
 ): Promise<MemorySearchResult> {
+  const loaderOptions = logger === undefined ? {} : { logger }
   let shard: TopicShard | null
   try {
-    shard = await loadShard(agentDir, slug, logger === undefined ? {} : { logger })
+    shard = await loadShard(agentDir, slug, loaderOptions)
   } catch (err) {
     return { error: `invalid topic slug: ${err instanceof Error ? err.message : String(err)}` }
   }
-  if (shard === null) return { matches: [] }
-  return { matches: [topicMatchWithFullBody(shard)] }
+  if (shard !== null) return { matches: [topicMatchWithFullBody(shard)] }
+
+  const reference = await loadReference(agentDir, slug, loaderOptions)
+  if (reference !== null) return { matches: [referenceMatchWithFullBody(reference)] }
+
+  return { matches: [] }
 }
 
 function topicMatchWithFullBody(shard: TopicShard): TopicMatch {
@@ -129,6 +138,17 @@ function topicMatchWithFullBody(shard: TopicShard): TopicMatch {
     heading: shard.frontmatter.heading,
     excerpt: excerpt(shard.body),
     fullBody: shard.body,
+  }
+}
+
+function referenceMatchWithFullBody(reference: Reference): ReferenceMatch {
+  return {
+    source: 'reference',
+    slug: reference.slug,
+    title: reference.frontmatter.title,
+    excerpt: excerpt(reference.body),
+    created: reference.frontmatter.created,
+    fullBody: reference.body,
   }
 }
 

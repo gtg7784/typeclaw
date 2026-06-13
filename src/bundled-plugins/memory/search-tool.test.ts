@@ -149,6 +149,36 @@ describe('memorySearchTool', () => {
     expect('error' in result).toBe(true)
   })
 
+  test('topic lookup falls back to a reference of the same slug when no topic shard exists', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'wrenchamel-query', 'Wrenchamel query', 'SELECT 1;\nFROM ledger;\n')
+
+    const result = await call(agentDir, { topic: 'wrenchamel-query' })
+
+    expect(result).toEqual({
+      matches: [
+        {
+          source: 'reference',
+          slug: 'wrenchamel-query',
+          title: 'Wrenchamel query',
+          excerpt: 'SELECT 1;\nFROM ledger;',
+          created: '2026-06-12T00:00:00Z',
+          fullBody: 'SELECT 1;\nFROM ledger;\n',
+        },
+      ],
+    })
+  })
+
+  test('topic lookup prefers the topic shard over a same-slug reference', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'shared-slug', 'Topic wins', 'topic body\n')
+    await writeReference(agentDir, 'shared-slug', 'Reference loses', 'reference body\n')
+
+    const result = await call(agentDir, { topic: 'shared-slug' })
+
+    expect('matches' in result && result.matches[0]?.source).toBe('topic')
+  })
+
   test('rejects calls that supply neither query nor topic', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'present', 'Present', 'body\n')
