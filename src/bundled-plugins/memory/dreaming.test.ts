@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,6 +32,10 @@ function watermarkLine(entry: string): string {
   return `${JSON.stringify({ type: 'watermark', id: `w-${entry}`, ts: '2026-05-16T12:00:00.000Z', source: 'ses_test', entry })}\n`
 }
 
+function fragmentLineWithReferences(entry: string, references: string[]): string {
+  return `${JSON.stringify({ type: 'fragment', id: `f-${entry}`, ts: '2026-05-16T12:00:00.000Z', source: 'ses_test', entry, topic: `topic-${entry}`, body: `body ${entry}`, references })}\n`
+}
+
 function legacyProseLine(body = 'legacy prose'): string {
   return `${JSON.stringify({ type: 'legacy_prose', id: 'legacy-1', ts: '2026-05-16T12:00:00.000Z', body })}\n`
 }
@@ -47,9 +52,24 @@ function legacyStreamFile(date: string): string {
   return join(agentDir, 'memory', `${date}.jsonl`)
 }
 
+function referenceFile(slug: string): string {
+  return join(agentDir, 'memory', 'references', `${slug}.md`)
+}
+
 async function writeTopicShard(slug: string, text: string): Promise<void> {
   await mkdir(join(agentDir, 'memory', 'topics'), { recursive: true })
   await writeFile(topicShard(slug), text)
+}
+
+async function writeReference(slug: string, text: string): Promise<void> {
+  await mkdir(join(agentDir, 'memory', 'references'), { recursive: true })
+  await writeFile(referenceFile(slug), text)
+}
+
+async function fileSha256(path: string): Promise<string> {
+  return createHash('sha256')
+    .update(await readFile(path))
+    .digest('hex')
 }
 
 function shardText(
@@ -228,6 +248,14 @@ describe('dreaming subagent declarations', () => {
     expect(prompt).toContain('union')
     expect(prompt).toContain('Citation-superset invariant')
     expect(prompt.toLowerCase()).toContain('reverts')
+  })
+
+  test('teaches reference citations are promoted by slug and reference content stays verbatim', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('References are verbatim artifacts')
+    expect(prompt).toContain('references:')
+    expect(prompt).toContain('- <reference-slug>')
+    expect(prompt).toContain('MUST NOT read, rewrite, or distill their content')
   })
 
   test('teaches the promotion ladder gated on distinct days (1/3/7), not raw citation count', () => {
@@ -548,6 +576,63 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     expect(await readFile(topicShard('first'), 'utf8')).toBe(newText)
     expect(warnings.some((m) => m.includes('citation-superset'))).toBe(false)
+  })
+
+  test('promotes fragment reference slugs into the resulting topic shard body', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const body = [
+      'Conclusion.',
+      '',
+      'fragments:',
+      '- streams/2026-04-27#f-with-ref',
+      '',
+      'references:',
+      '- ref-a',
+    ].join('\n')
+    const runSession: RunSession = async () => {
+      await writeTopicShard('with-ref', shardText('With ref', body))
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    const topic = await readFile(topicShard('with-ref'), 'utf8')
+    expect(topic).toContain('references:\n- ref-a')
+  })
+
+  test('leaves reference file bytes unchanged after a normal dreaming run', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const before = await fileSha256(referenceFile('ref-a'))
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'with-ref',
+        shardText(
+          'With ref',
+          ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-with-ref', '', 'references:', '- ref-a'].join('\n'),
+        ),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await fileSha256(referenceFile('ref-a'))).toBe(before)
+  })
+
+  test('warns if a dreaming run rewrites reference file bytes', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const runSession: RunSession = async () => {
+      await writeFile(referenceFile('ref-a'), 'mutated reference bytes\n')
+    }
+
+    await invokeDreaming(agentDir, { runSession, logger })
+
+    expect(warnings).toContain(
+      '[dreaming] reference content modified: ref-a — this violates the verbatim invariant; reference content must never be rewritten',
+    )
   })
 
   test('revert preserves byte-identical shard content for unchanged shards and deletes net-new shards', async () => {

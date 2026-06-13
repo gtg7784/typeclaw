@@ -99,6 +99,17 @@ describe('checkCitationSuperset', () => {
     expect(verdict.ok).toBe(false)
     if (!verdict.ok) expect(verdict.missing).toEqual([{ date: '2026-05-16', fragmentId: ID_A }])
   })
+
+  test('reference citations (references/<slug>) are excluded from the superset check', () => {
+    const oldText = [`- streams/2026-05-16#${ID_A}`, 'references:', '- references/ref-a'].join('\n')
+    const newText = `- streams/2026-05-16#${ID_A}`
+
+    expect(checkCitationSuperset(oldText, newText)).toEqual({ ok: true })
+
+    const verdict = checkCitationSuperset(oldText, 'references:\n- references/ref-a')
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.missing).toEqual([{ date: '2026-05-16', fragmentId: ID_A }])
+  })
 })
 
 describe('checkCitationSupersetAcrossShards', () => {

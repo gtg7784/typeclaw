@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
@@ -22,7 +23,7 @@ import {
 } from './dreaming-state'
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
 import { listShardSlugs, loadAllShards, loadShard, type TopicShard } from './load-shards'
-import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
@@ -354,6 +355,41 @@ async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, Reado
     mergeCitationIndex(out, parseCitations(shard.body))
   }
   return out
+}
+
+async function captureReferenceHashes(agentDir: string): Promise<Map<string, string>> {
+  const hashes = new Map<string, string>()
+  let names: string[]
+  try {
+    names = await readdir(referencesDir(agentDir))
+  } catch (err) {
+    if (isEnoent(err)) return hashes
+    throw err
+  }
+
+  for (const name of names.sort()) {
+    if (!name.endsWith('.md')) continue
+    const slug = basename(name, '.md')
+    const bytes = await readFile(join(referencesDir(agentDir), name))
+    hashes.set(slug, createHash('sha256').update(bytes).digest('hex'))
+  }
+  return hashes
+}
+
+async function warnOnReferenceContentChanges(
+  agentDir: string,
+  before: ReadonlyMap<string, string>,
+  logger: DreamingLogger,
+): Promise<void> {
+  if (before.size === 0) return
+  const after = await captureReferenceHashes(agentDir)
+  for (const [slug, hash] of before) {
+    const nextHash = after.get(slug)
+    if (nextHash === undefined || nextHash === hash) continue
+    logger.warn(
+      `[dreaming] reference content modified: ${slug} — this violates the verbatim invariant; reference content must never be rewritten`,
+    )
+  }
 }
 
 function mergeCitationIndex(target: Map<string, Set<string>>, source: ReadonlyMap<string, ReadonlySet<string>>): void {
@@ -792,6 +828,15 @@ A fragment with no useful content (a watermark-only marker, a near-duplicate, a 
 
 **8. Compact the over-budget shards the run flags.** If the user prompt includes an "Over the embedding budget" table, those shards are too long for the embedding model: their tail is truncated and never contributes to semantic retrieval. Rewrite each flagged shard's body into the compact one-belief-sentence form (rule 6) so the whole shard fits. **This is a prose-tightening task, never a citation-dropping one:** keep every \`fragments:\` and \`superseded:\` id exactly as-is — shrink only the explanatory prose around them. If one shard genuinely holds two distinct beliefs, split it into two shards and carry each fragment id to the shard whose belief it supports (the union of the two shards' citations must still cover every original id — the citation-superset invariant reverts the whole run otherwise, and a reverted shard stays over budget). Never drop a citation to save tokens; the deterministic embed-time bound already prevents silent loss, so a flagged shard losing a citation would be strictly worse than leaving it long.
 
+**9. References are verbatim artifacts — never edit their content.** When a fragment you consolidate carries a \`references:\` field listing reference slugs, carry those slugs up into the topic shard's body under a \`references:\` section (union semantics, same as \`fragments:\`). Use this format:
+
+\`\`\`
+references:
+- <slug>
+\`\`\`
+
+The reference files under \`memory/references/\` are verbatim artifacts. You MUST NOT read, rewrite, or distill their content. You may only cite them by slug. On eviction (Phase 4), citations are pruned — but that is a separate pass, not your concern here.
+
 # What a topic shard looks like
 
 \`\`\`
@@ -808,11 +853,14 @@ tags: []
 fragments:
 - streams/yyyy-MM-dd#<fragment-id>
 
+references:
+- <reference-slug>
+
 superseded:
 - streams/yyyy-MM-dd#<overturned-fragment-id>
 \`\`\`
 
-The \`superseded:\` list is OPTIONAL — include it only when a later fragment overturned earlier evidence (see rule 5). Ids under it stay cited (GC keeps them alive) but are excluded from retrieval, so a superseded "uses bun" fragment never resurfaces against the current "uses pnpm" belief. The file shape is YAML frontmatter plus body. The runtime owns frontmatter: do not spend effort making \`cites\`, \`days\`, or \`lastReinforced\` correct. To create a new topic, \`write memory/topics/<slug>.md\` with frontmatter containing \`heading\`, \`cites: 0\`, \`days: 0\`, \`lastReinforced\` (placeholder), optional \`tags\`, plus body; or omit frontmatter entirely — the runtime synthesizes it. If existing frontmatter is present, leave its semantics alone; the runtime will replace it with computed values.
+The \`references:\` list is OPTIONAL — include it only when a consolidated fragment carried reference slugs (see rule 9). The \`superseded:\` list is OPTIONAL — include it only when a later fragment overturned earlier evidence (see rule 5). Ids under it stay cited (GC keeps them alive) but are excluded from retrieval, so a superseded "uses bun" fragment never resurfaces against the current "uses pnpm" belief. The file shape is YAML frontmatter plus body. The runtime owns frontmatter: do not spend effort making \`cites\`, \`days\`, or \`lastReinforced\` correct. To create a new topic, \`write memory/topics/<slug>.md\` with frontmatter containing \`heading\`, \`cites: 0\`, \`days: 0\`, \`lastReinforced\` (placeholder), optional \`tags\`, plus body; or omit frontmatter entirely — the runtime synthesizes it. If existing frontmatter is present, leave its semantics alone; the runtime will replace it with computed values.
 
 # Topic shard operations
 
@@ -1123,6 +1171,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+      const referenceHashesBefore = await captureReferenceHashes(ctx.payload.agentDir)
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       // Over-budget compaction candidates only matter when the vector index
@@ -1143,6 +1192,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       }
 
       const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+      await warnOnReferenceContentChanges(ctx.payload.agentDir, referenceHashesBefore, logger)
       let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
       let revertedCitationViolation = false
 
