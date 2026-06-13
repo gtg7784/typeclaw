@@ -104,6 +104,12 @@ const dreamingConfigSchema = z.object({
     .optional(),
 })
 
+const referencesConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .default({ enabled: false })
+
 // `bufferBytes` is a size-based ceiling on top of the `idleMs` debounce. In
 // busy channel sessions the agent rarely goes idle long enough to trip the
 // timer, so memory-logger needs a second trigger that responds to accumulated
@@ -134,6 +140,7 @@ const memoryConfigSchema = z
     // in milliseconds instead of the production 30s.
     retrievalSpawnTimeoutMs: z.number().int().min(1).default(RETRIEVAL_SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
+    references: referencesConfigSchema,
     vector: vectorConfigSchema,
   })
   .default({
@@ -143,6 +150,7 @@ const memoryConfigSchema = z
     minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
     retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
+    references: { enabled: false },
     vector: { enabled: false },
   })
 
