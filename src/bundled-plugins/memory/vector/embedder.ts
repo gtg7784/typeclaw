@@ -6,21 +6,24 @@ import { join } from 'node:path'
 // values are pulled lazily via `loadTransformers()` below.
 import type { env as TransformersEnvValue, pipeline as TransformersPipeline } from '@huggingface/transformers'
 
+import {
+  assertModelCacheCompatible,
+  EMBEDDING_DIMS,
+  EMBEDDING_MODEL_DTYPE,
+  EMBEDDING_MODEL_ID,
+  EMBEDDING_MODEL_NAME,
+} from '@/models/embedding-model'
+import { getResolvedTransformersVersion } from '@/models/transformers-version'
+
 import { homeRoot } from '../../../hostd/paths'
 import { type BoundedText, boundEmbeddableText, MAX_MODEL_TOKENS } from './truncation'
 
-export const MODEL_NAME = 'Xenova/multilingual-e5-base'
-export const DIMS = 768
-// MUST match src/hostd/models.ts MODEL_DTYPE: the host downloads exactly this
-// variant, and this loader runs local_files_only, so a mismatch loads nothing.
-// q8 → onnx/model_quantized.onnx (~279 MB); the default would be fp32 (1.11 GB).
-export const MODEL_DTYPE = 'q8'
-
-// The index identity. dtype changes the embedding values (q8 ≠ fp32) while
-// MODEL_NAME and DIMS stay constant, so neither alone detects a variant switch.
-// Vectors are stamped with this and retrieval filters on it — rows from a
-// different variant are stale and never compared against a query of this one.
-export const EMBEDDING_MODEL_ID = `${MODEL_NAME}@${MODEL_DTYPE}`
+// Re-exported for the vector subsystem's existing imports. The canonical
+// definitions live in @/models/embedding-model (shared host + container).
+export const MODEL_NAME = EMBEDDING_MODEL_NAME
+export const DIMS = EMBEDDING_DIMS
+export const MODEL_DTYPE = EMBEDDING_MODEL_DTYPE
+export { EMBEDDING_MODEL_ID }
 
 export type EmbedType = 'query' | 'passage'
 
@@ -60,6 +63,21 @@ export function __setTransformersImporterForTests(importer: (() => Promise<Trans
   transformersModulePromise = undefined
 }
 
+// Injectable cache-compatibility check, mirroring the importer seam above. In
+// production it asserts the host-stamped sentinel matches this container before
+// the local_files_only load. The embedder's own mechanics tests (batching,
+// lazy-load, warm-up) mock transformers and run against the default cache path
+// with no sentinel, so they swap in a no-op — the sentinel guard has its own
+// dedicated coverage in embedding-model.test.ts.
+const realModelCacheCheck = (): Promise<void> =>
+  assertModelCacheCompatible(modelCachePath(), { transformers: getResolvedTransformersVersion() })
+
+let verifyModelCache: () => Promise<void> = realModelCacheCheck
+
+export function __setModelCacheCheckForTests(check: (() => Promise<void>) | undefined): void {
+  verifyModelCache = check ?? realModelCacheCheck
+}
+
 function loadTransformers(): Promise<TransformersModule> {
   // Clear the memo on rejection (mirroring getEmbedder) so a transient failure
   // of the dynamic import / native module load doesn't cache the rejected
@@ -77,6 +95,10 @@ export class Embedder {
 
   static async load(): Promise<Embedder> {
     const { env, pipeline } = await loadTransformers()
+    // Guard the cache BEFORE local_files_only load: a host/container transformers
+    // drift (or a hand-copied cache) otherwise surfaces as a cryptic missing-file
+    // miss, or silently loads a stale variant. Fails loudly with a refresh hint.
+    await verifyModelCache()
     configureTransformers(env)
     const extractor = await pipeline('feature-extraction', MODEL_NAME, { local_files_only: true, dtype: MODEL_DTYPE })
     return new Embedder(extractor)

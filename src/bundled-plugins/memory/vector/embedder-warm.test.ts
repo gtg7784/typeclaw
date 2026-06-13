@@ -83,5 +83,7 @@ describe('embedder warm-up and retry-safe memoization', () => {
 // would leak between the cases above. A cache-busting query string forces a
 // fresh module instance (and thus a fresh embedderInstance) per test.
 async function freshEmbedderModule(): Promise<typeof import('./embedder')> {
-  return import(`./embedder?warm=${crypto.randomUUID()}`)
+  const mod = await import(`./embedder?warm=${crypto.randomUUID()}`)
+  mod.__setModelCacheCheckForTests(() => Promise.resolve())
+  return mod
 }

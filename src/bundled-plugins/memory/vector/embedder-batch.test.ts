@@ -1,6 +1,6 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { beforeAll, describe, expect, mock, test } from 'bun:test'
 
-import { DIMS } from './embedder'
+import { __setModelCacheCheckForTests, DIMS } from './embedder'
 
 // Records the size of every onnxruntime forward pass so the test can prove the
 // embed is chunked (bounding peak memory) rather than run as one giant batch.
@@ -23,6 +23,10 @@ mock.module('@huggingface/transformers', () => ({
 }))
 
 describe('embedder batching', () => {
+  beforeAll(() => {
+    __setModelCacheCheckForTests(() => Promise.resolve())
+  })
+
   test('splits a large input set into bounded forward passes and preserves order', async () => {
     const { embed } = await import('./embedder')
     const inputs = Array.from({ length: 150 }, (_, i) => `passage ${i}`)
