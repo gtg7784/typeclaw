@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
 import { z } from 'zod'
@@ -22,7 +23,9 @@ import {
 } from './dreaming-state'
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
 import { listShardSlugs, loadAllShards, loadShard, type TopicShard } from './load-shards'
-import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { renderReference } from './references/frontmatter'
+import { loadAllReferences, type Reference } from './references/load-references'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
@@ -33,6 +36,10 @@ import { VectorStore } from './vector/store'
 import { estimateTokens, TEXT_TOKEN_BUDGET } from './vector/truncation'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
+const REFERENCE_HALF_LIFE_DAYS = 14
+const REFERENCE_DEMOTE_SCORE_THRESHOLD = 0.1
+const REFERENCE_DELETE_DORMANCY_DAYS = 30
+const MS_PER_DAY = 86_400_000
 
 export const dreamingPayloadSchema = z.object({
   agentDir: z.string().min(1),
@@ -307,6 +314,153 @@ function deleteStreamVectorsForDroppedFragments(agentDir: string, droppedFragmen
   }
 }
 
+type ReferenceSaturationStats = {
+  referencesDemoted: number
+  referencesEvicted: number
+}
+
+async function runReferenceSaturationPass(agentDir: string, logger: DreamingLogger): Promise<ReferenceSaturationStats> {
+  const references = await loadAllReferences(agentDir, { logger })
+  const nowMs = Date.now()
+  const evictedSlugs: string[] = []
+  let referencesDemoted = 0
+  let referencesEvicted = 0
+
+  for (const ref of references) {
+    if (isReferenceDecayExempt(ref)) continue
+
+    if (ref.frontmatter.demoted && referenceDormancyDays(ref, nowMs) > REFERENCE_DELETE_DORMANCY_DAYS) {
+      await unlink(ref.path)
+      evictedSlugs.push(ref.slug)
+      referencesEvicted += 1
+      continue
+    }
+
+    if (!ref.frontmatter.demoted && referenceScore(ref, nowMs) < REFERENCE_DEMOTE_SCORE_THRESHOLD) {
+      await writeFile(ref.path, renderReference({ ...ref.frontmatter, demoted: true }, ref.body))
+      referencesDemoted += 1
+    }
+  }
+
+  if (evictedSlugs.length > 0) {
+    deleteReferenceVectors(agentDir, evictedSlugs)
+    await pruneReferenceCitations(agentDir, new Set(evictedSlugs), logger)
+  }
+
+  return { referencesDemoted, referencesEvicted }
+}
+
+function isReferenceDecayExempt(ref: Reference): boolean {
+  return ref.frontmatter.pinned || ref.frontmatter.origin === 'curated' || ref.frontmatter.origin === 'external'
+}
+
+function referenceScore(ref: Reference, nowMs: number): number {
+  const recencyDays = referenceDormancyDays(ref, nowMs)
+  const ageDays = Math.max(0, (nowMs - new Date(ref.frontmatter.created).getTime()) / MS_PER_DAY)
+  // Combined decay: access-recency dominates, age provides a floor decay
+  // score = (accessCount + 1) * exp(-recencyDays / halfLife) * exp(-ageDays / (halfLife * 4))
+  return (
+    (ref.frontmatter.accessCount + 1) *
+    Math.exp(-recencyDays / REFERENCE_HALF_LIFE_DAYS) *
+    Math.exp(-ageDays / (REFERENCE_HALF_LIFE_DAYS * 4))
+  )
+}
+
+function referenceDormancyDays(ref: Reference, nowMs: number): number {
+  const lastAccessedMs = new Date(ref.frontmatter.lastAccessed).getTime()
+  if (!Number.isFinite(lastAccessedMs)) return Number.POSITIVE_INFINITY
+  return Math.max(0, (nowMs - lastAccessedMs) / MS_PER_DAY)
+}
+
+function deleteReferenceVectors(agentDir: string, slugs: readonly string[]): void {
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  if (!existsSync(dbPath)) return
+
+  const prefixes = slugs.map((slug) => `reference:${slug}#`)
+  const store = VectorStore.open(dbPath)
+  try {
+    const ids = store
+      .getAllMeta()
+      .flatMap((row) => (prefixes.some((prefix) => row.id.startsWith(prefix)) ? [row.id] : []))
+    if (ids.length > 0) store.deleteMany(ids)
+  } finally {
+    store.close()
+  }
+}
+
+async function pruneReferenceCitations(
+  agentDir: string,
+  evictedSlugs: ReadonlySet<string>,
+  logger: DreamingLogger,
+): Promise<void> {
+  const slugs = await listShardSlugs(agentDir)
+  for (const slug of slugs) {
+    const path = topicShardPath(agentDir, slug)
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (err) {
+      if (isEnoent(err)) continue
+      throw err
+    }
+
+    const parsed = parseShardTolerantly(raw, slug, logger)
+    const prunedBody = pruneReferenceSection(parsed.body, evictedSlugs)
+    if (prunedBody === parsed.body) continue
+    await writeFile(path, renderShard(parsed.frontmatter, prunedBody))
+  }
+}
+
+function pruneReferenceSection(body: string, evictedSlugs: ReadonlySet<string>): string {
+  const lines = body.split('\n')
+  const out: string[] = []
+  let referencesHeadingIndex: number | null = null
+  let referencesKept = 0
+  let inReferences = false
+
+  const flushEmptyReferencesHeading = (): void => {
+    if (referencesHeadingIndex !== null && referencesKept === 0) {
+      out.splice(referencesHeadingIndex, out.length - referencesHeadingIndex)
+    }
+    referencesHeadingIndex = null
+    referencesKept = 0
+  }
+
+  for (const line of lines) {
+    if (/^references\s*:\s*$/i.test(line.trim())) {
+      flushEmptyReferencesHeading()
+      inReferences = true
+      referencesHeadingIndex = out.length
+      referencesKept = 0
+      out.push(line)
+      continue
+    }
+
+    if (inReferences && isMarkdownSectionHeading(line)) {
+      flushEmptyReferencesHeading()
+      inReferences = false
+    }
+
+    if (inReferences) {
+      const referenceSlug = /^\s*-\s+(.+?)\s*$/.exec(line)?.[1]
+      if (referenceSlug !== undefined) {
+        if (evictedSlugs.has(referenceSlug)) continue
+        referencesKept += 1
+      }
+    }
+
+    out.push(line)
+  }
+
+  flushEmptyReferencesHeading()
+  return out.join('\n')
+}
+
+function isMarkdownSectionHeading(line: string): boolean {
+  const trimmed = line.trim()
+  return /^(fragments|references|superseded|proposal)\s*:/i.test(trimmed) || /^#{1,6}\s+/.test(trimmed)
+}
+
 // A dreamed-AND-cited fragment's `stream:*` row is redundant: hybridSearch
 // collapses any match on it to the citing topic, whose `topic:*` row is already
 // a candidate. It surfaces no new result, yet still consumes one of
@@ -354,6 +508,51 @@ async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, Reado
     mergeCitationIndex(out, parseCitations(shard.body))
   }
   return out
+}
+
+type ReferenceSnapshotEntry = {
+  bytes: Buffer
+  hash: string
+}
+
+async function captureReferenceSnapshot(agentDir: string): Promise<Map<string, ReferenceSnapshotEntry>> {
+  const snapshot = new Map<string, ReferenceSnapshotEntry>()
+  let names: string[]
+  try {
+    names = await readdir(referencesDir(agentDir))
+  } catch (err) {
+    if (isEnoent(err)) return snapshot
+    throw err
+  }
+
+  for (const name of names.sort()) {
+    if (!name.endsWith('.md')) continue
+    const slug = basename(name, '.md')
+    const bytes = await readFile(join(referencesDir(agentDir), name))
+    snapshot.set(slug, { bytes, hash: createHash('sha256').update(bytes).digest('hex') })
+  }
+  return snapshot
+}
+
+async function restoreChangedReferences(
+  agentDir: string,
+  before: ReadonlyMap<string, ReferenceSnapshotEntry>,
+  logger: DreamingLogger,
+): Promise<boolean> {
+  if (before.size === 0) return false
+  const after = await captureReferenceSnapshot(agentDir)
+  let restored = false
+  for (const [slug, entry] of before) {
+    const next = after.get(slug)
+    if (next?.hash === entry.hash) continue
+    await mkdir(referencesDir(agentDir), { recursive: true })
+    await writeFile(join(referencesDir(agentDir), `${slug}.md`), entry.bytes)
+    restored = true
+    logger.warn(
+      `[dreaming] reference content modified: ${slug} — restored original bytes and aborted the dreaming commit to preserve the verbatim invariant`,
+    )
+  }
+  return restored
 }
 
 function mergeCitationIndex(target: Map<string, Set<string>>, source: ReadonlyMap<string, ReadonlySet<string>>): void {
@@ -792,6 +991,15 @@ A fragment with no useful content (a watermark-only marker, a near-duplicate, a 
 
 **8. Compact the over-budget shards the run flags.** If the user prompt includes an "Over the embedding budget" table, those shards are too long for the embedding model: their tail is truncated and never contributes to semantic retrieval. Rewrite each flagged shard's body into the compact one-belief-sentence form (rule 6) so the whole shard fits. **This is a prose-tightening task, never a citation-dropping one:** keep every \`fragments:\` and \`superseded:\` id exactly as-is — shrink only the explanatory prose around them. If one shard genuinely holds two distinct beliefs, split it into two shards and carry each fragment id to the shard whose belief it supports (the union of the two shards' citations must still cover every original id — the citation-superset invariant reverts the whole run otherwise, and a reverted shard stays over budget). Never drop a citation to save tokens; the deterministic embed-time bound already prevents silent loss, so a flagged shard losing a citation would be strictly worse than leaving it long.
 
+**9. References are verbatim artifacts — never edit their content.** When a fragment you consolidate carries a \`references:\` field listing reference slugs, carry those slugs up into the topic shard's body under a \`references:\` section (union semantics, same as \`fragments:\`). Use this format:
+
+\`\`\`
+references:
+- <slug>
+\`\`\`
+
+The reference files under \`memory/references/\` are verbatim artifacts. You MUST NOT read, rewrite, or distill their content. You may only cite them by slug. On eviction (Phase 4), citations are pruned — but that is a separate pass, not your concern here.
+
 # What a topic shard looks like
 
 \`\`\`
@@ -808,11 +1016,14 @@ tags: []
 fragments:
 - streams/yyyy-MM-dd#<fragment-id>
 
+references:
+- <reference-slug>
+
 superseded:
 - streams/yyyy-MM-dd#<overturned-fragment-id>
 \`\`\`
 
-The \`superseded:\` list is OPTIONAL — include it only when a later fragment overturned earlier evidence (see rule 5). Ids under it stay cited (GC keeps them alive) but are excluded from retrieval, so a superseded "uses bun" fragment never resurfaces against the current "uses pnpm" belief. The file shape is YAML frontmatter plus body. The runtime owns frontmatter: do not spend effort making \`cites\`, \`days\`, or \`lastReinforced\` correct. To create a new topic, \`write memory/topics/<slug>.md\` with frontmatter containing \`heading\`, \`cites: 0\`, \`days: 0\`, \`lastReinforced\` (placeholder), optional \`tags\`, plus body; or omit frontmatter entirely — the runtime synthesizes it. If existing frontmatter is present, leave its semantics alone; the runtime will replace it with computed values.
+The \`references:\` list is OPTIONAL — include it only when a consolidated fragment carried reference slugs (see rule 9). The \`superseded:\` list is OPTIONAL — include it only when a later fragment overturned earlier evidence (see rule 5). Ids under it stay cited (GC keeps them alive) but are excluded from retrieval, so a superseded "uses bun" fragment never resurfaces against the current "uses pnpm" belief. The file shape is YAML frontmatter plus body. The runtime owns frontmatter: do not spend effort making \`cites\`, \`days\`, or \`lastReinforced\` correct. To create a new topic, \`write memory/topics/<slug>.md\` with frontmatter containing \`heading\`, \`cites: 0\`, \`days: 0\`, \`lastReinforced\` (placeholder), optional \`tags\`, plus body; or omit frontmatter entirely — the runtime synthesizes it. If existing frontmatter is present, leave its semantics alone; the runtime will replace it with computed values.
 
 # Topic shard operations
 
@@ -1091,12 +1302,14 @@ export type CreateDreamingSubagentOptions = {
   commitMemory?: (cwd: string) => Promise<void>
   logger?: DreamingLogger
   vectorEmbedFn?: EmbedFn
+  referencesEnabled?: boolean
 }
 
 export function createDreamingSubagent(options: CreateDreamingSubagentOptions = {}): Subagent<DreamingPayload> {
   const commit = options.commitMemory ?? commitMemorySnapshot
   const logger = options.logger ?? consoleLogger
   const vectorEmbedFn = options.vectorEmbedFn ?? embed
+  const referencesEnabled = options.referencesEnabled ?? false
 
   return {
     systemPrompt: DREAMING_SYSTEM_PROMPT,
@@ -1123,6 +1336,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+      const referenceSnapshotBefore = referencesEnabled
+        ? await captureReferenceSnapshot(ctx.payload.agentDir)
+        : new Map<string, ReferenceSnapshotEntry>()
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       // Over-budget compaction candidates only matter when the vector index
@@ -1143,6 +1359,10 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       }
 
       const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+      if (referencesEnabled) {
+        const restoredReferences = await restoreChangedReferences(ctx.payload.agentDir, referenceSnapshotBefore, logger)
+        if (restoredReferences) return
+      }
       let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
       let revertedCitationViolation = false
 
@@ -1199,6 +1419,10 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         })
       }
 
+      const { referencesDemoted, referencesEvicted } = referencesEnabled
+        ? await runReferenceSaturationPass(ctx.payload.agentDir, logger)
+        : { referencesDemoted: 0, referencesEvicted: 0 }
+
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
       logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
@@ -1224,7 +1448,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       try {
         await commit(ctx.payload.agentDir)
         logger.info(
-          `[dreaming] done topics_created=${metrics.topicsCreated} topics_removed=${metrics.topicsRemoved} superseded_new=${metrics.supersededDelta} fragments_dropped=${compaction.fragmentsDropped} over_budget=${overBudget.length} elapsed_ms=${Date.now() - start}`,
+          `[dreaming] done topics_created=${metrics.topicsCreated} topics_removed=${metrics.topicsRemoved} superseded_new=${metrics.supersededDelta} fragments_dropped=${compaction.fragmentsDropped} over_budget=${overBudget.length} references_demoted=${referencesDemoted} references_evicted=${referencesEvicted} elapsed_ms=${Date.now() - start}`,
         )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

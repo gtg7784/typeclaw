@@ -22,7 +22,7 @@ import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
-import { memorySearchTool } from './search-tool'
+import { createMemorySearchTool } from './search-tool'
 import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
 import { runVectorIndexDoctor } from './vector/doctor'
@@ -104,6 +104,12 @@ const dreamingConfigSchema = z.object({
     .optional(),
 })
 
+const referencesConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .default({ enabled: false })
+
 // `bufferBytes` is a size-based ceiling on top of the `idleMs` debounce. In
 // busy channel sessions the agent rarely goes idle long enough to trip the
 // timer, so memory-logger needs a second trigger that responds to accumulated
@@ -134,6 +140,7 @@ const memoryConfigSchema = z
     // in milliseconds instead of the production 30s.
     retrievalSpawnTimeoutMs: z.number().int().min(1).default(RETRIEVAL_SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
+    references: referencesConfigSchema,
     vector: vectorConfigSchema,
   })
   .default({
@@ -143,6 +150,7 @@ const memoryConfigSchema = z
     minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
     retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
+    references: { enabled: false },
     vector: { enabled: false },
   })
 
@@ -178,6 +186,7 @@ async function renderVectorTurnMemory(
   injectedState: InjectedShardState,
   deps: MemoryPluginDeps,
   logger?: { info: (msg: string) => void },
+  referencesEnabled = false,
 ): Promise<string> {
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   const isChannel = event.origin?.kind === 'channel'
@@ -199,6 +208,7 @@ async function renderVectorTurnMemory(
       event.agentDir,
       VECTOR_TURN_TOP_K,
       deps.queryEmbedFn,
+      referencesEnabled,
     )
     const topicHits = results.reduce((n, r) => (r.source === 'topic' ? n + 1 : n), 0)
     logger?.info(
@@ -388,16 +398,21 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         subagents: {
           'memory-logger': createMemoryLoggerSubagent({
             logger: subagentLogger,
+            referencesEnabled: ctx.config.references.enabled,
             ...(appendVectorStore !== undefined ? { onFragmentsAppended: makeAppendHook(appendVectorStore) } : {}),
           }),
           'memory-retrieval': createMemoryRetrievalSubagent({
             logger: subagentLogger,
             timeoutMs: retrievalSpawnTimeoutMs,
+            referencesEnabled: ctx.config.references.enabled,
           }),
-          dreaming: createDreamingSubagent({ logger: subagentLogger }),
+          dreaming: createDreamingSubagent({
+            logger: subagentLogger,
+            referencesEnabled: ctx.config.references.enabled,
+          }),
         },
         tools: {
-          memory_search: memorySearchTool,
+          memory_search: createMemorySearchTool(ctx.config.references.enabled),
         },
         cronJobs: {
           dreaming: {
@@ -490,6 +505,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
                   injectedState,
                   deps,
                   ctx.logger,
+                  ctx.config.references.enabled,
                 )
               } catch (err) {
                 ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -653,10 +669,11 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           'vector-index': {
             description: 'vector index is consistent with memory (only when memory.vector is enabled)',
             run: async (dctx) => {
-              if (!vectorEnabled(dctx.config)) {
+              const config = dctx.config as typeof ctx.config
+              if (!vectorEnabled(config)) {
                 return { status: 'ok', message: 'vector memory not enabled; skipping index health check' }
               }
-              return runVectorIndexDoctor(dctx.agentDir)
+              return runVectorIndexDoctor(dctx.agentDir, config.references?.enabled ?? false)
             },
           },
         },

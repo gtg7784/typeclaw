@@ -20,6 +20,10 @@
 // to honor that — especially across hundreds of runs over months — so the
 // mechanical check is the safety floor.
 //
+// Reference citations (`references/<slug>`) use a different format and are
+// intentionally excluded from this check — they are not fragment ids and are
+// not subject to the citation-superset GC invariant.
+//
 // Detection only. The handler decides what to do with the verdict (revert
 // memory/topics/ to its pre-run bytes, skip daily-stream compaction, still
 // advance the dreamed-id set so we do not loop on the same fragments).

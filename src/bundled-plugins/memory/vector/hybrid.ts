@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
+import { loadAllReferences, type Reference } from '../references/load-references'
 import {
   buildMatcher,
   distinctTokens,
@@ -23,7 +24,7 @@ export { collectPassages, findMissingPassages, type Passage } from './passages'
 const RRF_K = 60
 
 export type HybridSearchResult = {
-  source: 'topic' | 'stream'
+  source: 'topic' | 'stream' | 'reference'
   key: string
   heading: string
   excerpt: string
@@ -38,19 +39,21 @@ export async function hybridSearch(
   agentDir: string,
   topK: number,
   embedFn: EmbedFn = embed,
+  referencesEnabled = false,
 ): Promise<HybridSearchResult[]> {
   if (topK <= 0) return []
 
-  const [shards, streamDays, queryEmbeddings] = await Promise.all([
+  const [shards, streamDays, references, queryEmbeddings] = await Promise.all([
     loadAllShards(agentDir),
     readAllUndreamedStreamDays(agentDir),
+    referencesEnabled ? loadAllReferences(agentDir) : Promise.resolve([]),
     embedFn([query], 'query'),
   ])
 
   const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
-  const index = buildContentIndex(shards, streamDays, supersededFragmentIds)
+  const index = buildContentIndex(shards, streamDays, references, supersededFragmentIds)
   const vectorRows = queryEmbeddings[0] === undefined ? [] : gatedVectorLane(queryEmbeddings[0], store, topK)
-  const keywordMatches = keywordLane(query, shards, streamDays, topK * 2)
+  const keywordMatches = keywordLane(query, shards, streamDays, references, topK * 2)
 
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
 }
@@ -79,15 +82,15 @@ export async function hybridSearch(
 // lane that found nothing, so a genuine keyword hit survives a full no-match.
 function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK: number): VectorRow[] {
   const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
-  const topicRows = scored.filter(({ row }) => row.source === 'topic')
+  const bandDefiningRows = scored.filter(({ row }) => row.source === 'topic' || row.source === 'reference')
   const streamRows = scored.filter(({ row }) => row.source === 'stream')
 
-  const topicScores = topicRows.map(({ score }) => score)
-  const keptTopics = topicRows.slice(0, gateRelevance(topicScores, topK * 2))
-  const streamBaseline = streamAdmissionBaseline(topicScores)
+  const bandScores = bandDefiningRows.map(({ score }) => score)
+  const keptBandDefiningRows = bandDefiningRows.slice(0, gateRelevance(bandScores, topK * 2))
+  const streamBaseline = streamAdmissionBaseline(bandScores)
   const keptStreams = streamRows.filter(({ score }) => clearsBaseline(score, streamBaseline)).slice(0, topK * 2)
 
-  return [...keptTopics, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
+  return [...keptBandDefiningRows, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
 }
 
 // Phrase-first, then token-OR fallback (mirrors `memory_search`). `hybridSearch`'s
@@ -99,11 +102,12 @@ function keywordLane(
   query: string,
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
+  references: Reference[],
   maxResults: number,
 ): MemorySearchMatch[] {
   const matcher = buildMatcher(query, false)
   if (typeof matcher === 'string') return []
-  const phrase = searchAll(shards, streamDays, matcher, { full: false, maxResults })
+  const phrase = searchAll(shards, streamDays, matcher, { full: false, maxResults, references })
   const phraseMatches = 'matches' in phrase ? phrase.matches : []
   if (phraseMatches.length > 0) return phraseMatches
 
@@ -113,6 +117,7 @@ function keywordLane(
   const ranked = searchAllRanked(shards, streamDays, tokens, {
     full: false,
     maxResults,
+    references,
     tokenMatchMode: 'ascii-boundary',
   })
   return 'matches' in ranked ? ranked.matches : []
@@ -281,7 +286,7 @@ function fuseLanes(
   return [...fused.values()].sort((a, b) => b.rrfScore - a.rrfScore || a.key.localeCompare(b.key))
 }
 
-type LaneHit = { source: 'topic' | 'stream'; key: string; score: number }
+type LaneHit = { source: 'topic' | 'stream' | 'reference'; key: string; score: number }
 type LaneEntry = { content: Omit<HybridSearchResult, 'rrfScore'>; score: number }
 
 // Returns one lane's per-parent scores so the caller can SUM across lanes;
@@ -306,11 +311,16 @@ function collapseLane(
 // more than one belief), so it contributes its score to each parent. An
 // undreamed fragment with no citing topic resolves to itself.
 function resolveToParents(
-  source: 'topic' | 'stream',
+  source: 'topic' | 'stream' | 'reference',
   nodeKey: string,
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
   parentSlugsByFragmentId: Map<string, Set<string>>,
 ): Array<{ fusedKey: string; content: Omit<HybridSearchResult, 'rrfScore'> }> {
+  if (source === 'reference') {
+    const slug = referenceSlugFromKey(nodeKey)
+    const content = index.get(laneKey('reference', slug))
+    return content === undefined ? [] : [{ fusedKey: laneKey('reference', slug), content }]
+  }
   if (source === 'stream') {
     const fragmentId = fragmentIdFromKey(nodeKey)
     const parentSlugs = fragmentId === null ? undefined : parentSlugsByFragmentId.get(fragmentId)
@@ -325,6 +335,11 @@ function resolveToParents(
   }
   const content = index.get(laneKey(source, nodeKey))
   return content === undefined ? [] : [{ fusedKey: laneKey(source, nodeKey), content }]
+}
+
+function referenceSlugFromKey(referenceKey: string): string {
+  const hashIndex = referenceKey.indexOf('#')
+  return hashIndex === -1 ? referenceKey : referenceKey.slice(0, hashIndex)
 }
 
 function fragmentIdFromKey(streamKey: string): string | null {
@@ -342,6 +357,7 @@ function fragmentIdFromKey(streamKey: string): string | null {
 function buildContentIndex(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
+  references: Reference[],
   supersededFragmentIds: Set<string>,
 ): Map<string, Omit<HybridSearchResult, 'rrfScore'>> {
   const index = new Map<string, Omit<HybridSearchResult, 'rrfScore'>>()
@@ -360,6 +376,16 @@ function buildContentIndex(
       const item = streamIndexItem(day, event, supersededFragmentIds)
       if (item !== null) index.set(laneKey('stream', item.key), item)
     }
+  }
+
+  for (const reference of references) {
+    if (reference.frontmatter.demoted) continue
+    index.set(laneKey('reference', reference.slug), {
+      source: 'reference',
+      key: reference.slug,
+      heading: reference.frontmatter.title,
+      excerpt: excerpt(reference.body, reference.frontmatter.title),
+    })
   }
 
   return index
@@ -390,6 +416,7 @@ function streamIndexItem(
 
 function matchKey(match: MemorySearchMatch): string {
   if (match.source === 'topic') return match.slug
+  if (match.source === 'reference') return match.slug
   return streamMatchKey(match)
 }
 
@@ -398,7 +425,7 @@ function streamMatchKey(match: StreamMatch): string {
   return `${match.date}#legacy-${hashContent(match.excerpt).slice(0, 12)}`
 }
 
-function laneKey(source: 'topic' | 'stream', key: string): string {
+function laneKey(source: 'topic' | 'stream' | 'reference', key: string): string {
   return `${source}:${key}`
 }
 

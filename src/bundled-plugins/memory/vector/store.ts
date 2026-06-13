@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 
 export type VectorRow = {
   id: string
-  source: 'topic' | 'stream'
+  source: 'topic' | 'stream' | 'reference'
   key: string
   model: string
   dims: number
@@ -19,7 +19,7 @@ export type ScoredVectorRow = { row: VectorRow; score: number }
 
 type StoredVectorRow = {
   id: string
-  source: 'topic' | 'stream'
+  source: 'topic' | 'stream' | 'reference'
   key: string
   model: string
   dims: number

@@ -4,6 +4,8 @@ export type DreamingMetrics = {
   topicsCreated: number
   topicsRemoved: number
   supersededDelta: number
+  referencesDemoted: number
+  referencesEvicted: number
 }
 
 // Snapshots are keyed by absolute shard path → file bytes (captureShardSnapshot).
@@ -18,7 +20,7 @@ export function computeDreamingMetrics(before: Map<string, Buffer>, after: Map<s
 
   const supersededDelta = countSuperseded(after) - countSuperseded(before)
 
-  return { topicsCreated, topicsRemoved, supersededDelta }
+  return { topicsCreated, topicsRemoved, supersededDelta, referencesDemoted: 0, referencesEvicted: 0 }
 }
 
 function countSuperseded(snapshot: Map<string, Buffer>): number {

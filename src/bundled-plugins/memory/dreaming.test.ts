@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,8 +18,10 @@ import {
 } from './dreaming'
 import { addDreamedIds, DREAMING_STATE_FILE, emptyState, getDreamedIds, loadDreamingState } from './dreaming-state'
 import { renderShard } from './frontmatter'
+import { parseReference, renderReference, type ReferenceFrontmatter } from './references/frontmatter'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
+import { referencePassages } from './vector/passages'
 import { VectorStore, type VectorRow } from './vector/store'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -29,6 +32,10 @@ function fragmentLine(entry: string, topic = `topic-${entry}`, body = `body ${en
 
 function watermarkLine(entry: string): string {
   return `${JSON.stringify({ type: 'watermark', id: `w-${entry}`, ts: '2026-05-16T12:00:00.000Z', source: 'ses_test', entry })}\n`
+}
+
+function fragmentLineWithReferences(entry: string, references: string[]): string {
+  return `${JSON.stringify({ type: 'fragment', id: `f-${entry}`, ts: '2026-05-16T12:00:00.000Z', source: 'ses_test', entry, topic: `topic-${entry}`, body: `body ${entry}`, references })}\n`
 }
 
 function legacyProseLine(body = 'legacy prose'): string {
@@ -47,9 +54,45 @@ function legacyStreamFile(date: string): string {
   return join(agentDir, 'memory', `${date}.jsonl`)
 }
 
+function referenceFile(slug: string): string {
+  return join(agentDir, 'memory', 'references', `${slug}.md`)
+}
+
 async function writeTopicShard(slug: string, text: string): Promise<void> {
   await mkdir(join(agentDir, 'memory', 'topics'), { recursive: true })
   await writeFile(topicShard(slug), text)
+}
+
+async function writeReference(slug: string, text: string): Promise<void> {
+  await mkdir(join(agentDir, 'memory', 'references'), { recursive: true })
+  await writeFile(referenceFile(slug), text)
+}
+
+function referenceText(overrides: Partial<ReferenceFrontmatter> = {}, body = 'reference body'): string {
+  const created = overrides.created ?? isoDaysAgo(1)
+  return renderReference(
+    {
+      title: overrides.title ?? 'Reference',
+      origin: overrides.origin ?? 'episode',
+      created,
+      lastAccessed: overrides.lastAccessed ?? created,
+      accessCount: overrides.accessCount ?? 0,
+      pinned: overrides.pinned ?? false,
+      demoted: overrides.demoted ?? false,
+      tags: overrides.tags ?? [],
+    },
+    body,
+  )
+}
+
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString()
+}
+
+async function fileSha256(path: string): Promise<string> {
+  return createHash('sha256')
+    .update(await readFile(path))
+    .digest('hex')
 }
 
 function shardText(
@@ -101,12 +144,14 @@ async function invokeDreaming(
     runSession?: RunSession
     throwOnRunSession?: boolean
     vectorEmbedFn?: EmbedFn
+    referencesEnabled?: boolean
   } = {},
 ): Promise<{ prompts: string[] }> {
   const subagent = createDreamingSubagent({
     commitMemory: options.commitMemory ?? (async () => {}),
     logger: options.logger ?? silentLogger,
     ...(options.vectorEmbedFn !== undefined ? { vectorEmbedFn: options.vectorEmbedFn } : {}),
+    ...(options.referencesEnabled !== undefined ? { referencesEnabled: options.referencesEnabled } : {}),
   })
   const captured = captureRunSession()
   const runSession = options.throwOnRunSession
@@ -228,6 +273,14 @@ describe('dreaming subagent declarations', () => {
     expect(prompt).toContain('union')
     expect(prompt).toContain('Citation-superset invariant')
     expect(prompt.toLowerCase()).toContain('reverts')
+  })
+
+  test('teaches reference citations are promoted by slug and reference content stays verbatim', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('References are verbatim artifacts')
+    expect(prompt).toContain('references:')
+    expect(prompt).toContain('- <reference-slug>')
+    expect(prompt).toContain('MUST NOT read, rewrite, or distill their content')
   })
 
   test('teaches the promotion ladder gated on distinct days (1/3/7), not raw citation count', () => {
@@ -548,6 +601,178 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     expect(await readFile(topicShard('first'), 'utf8')).toBe(newText)
     expect(warnings.some((m) => m.includes('citation-superset'))).toBe(false)
+  })
+
+  test('promotes fragment reference slugs into the resulting topic shard body', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const body = [
+      'Conclusion.',
+      '',
+      'fragments:',
+      '- streams/2026-04-27#f-with-ref',
+      '',
+      'references:',
+      '- ref-a',
+    ].join('\n')
+    const runSession: RunSession = async () => {
+      await writeTopicShard('with-ref', shardText('With ref', body))
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    const topic = await readFile(topicShard('with-ref'), 'utf8')
+    expect(topic).toContain('references:\n- ref-a')
+  })
+
+  test('leaves reference file bytes unchanged after a normal dreaming run', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const before = await fileSha256(referenceFile('ref-a'))
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'with-ref',
+        shardText(
+          'With ref',
+          ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-with-ref', '', 'references:', '- ref-a'].join('\n'),
+        ),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await fileSha256(referenceFile('ref-a'))).toBe(before)
+  })
+
+  test('restores reference bytes and skips commit if a dreaming run rewrites them', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLineWithReferences('with-ref', ['ref-a']))
+    await writeReference('ref-a', 'verbatim reference bytes\n')
+    const warnings: string[] = []
+    let committed = false
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const runSession: RunSession = async () => {
+      await writeFile(referenceFile('ref-a'), 'mutated reference bytes\n')
+    }
+
+    await invokeDreaming(agentDir, {
+      runSession,
+      logger,
+      referencesEnabled: true,
+      commitMemory: async () => {
+        committed = true
+      },
+    })
+
+    expect(await readFile(referenceFile('ref-a'), 'utf8')).toBe('verbatim reference bytes\n')
+    expect(committed).toBe(false)
+    expect(warnings).toContain(
+      '[dreaming] reference content modified: ref-a — restored original bytes and aborted the dreaming commit to preserve the verbatim invariant',
+    )
+  })
+
+  test('demotes stale episode references before deleting them and removes chunks from reference passages', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+
+    await invokeDreaming(agentDir, { referencesEnabled: true })
+
+    const raw = await readFile(referenceFile('stale-ref'), 'utf8')
+    expect(parseReference(raw).frontmatter.demoted).toBe(true)
+    expect(await referencePassages(agentDir)).toEqual([])
+  })
+
+  test('deletes demoted references only after the extended dormancy window', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('first'))
+    await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+
+    await invokeDreaming(agentDir, { referencesEnabled: true })
+    expect(parseReference(await readFile(referenceFile('stale-ref'), 'utf8')).frontmatter.demoted).toBe(true)
+
+    await writeFile(streamFile('2026-04-28'), fragmentLine('second'))
+    await invokeDreaming(agentDir, { referencesEnabled: true })
+
+    await expect(readFile(referenceFile('stale-ref'), 'utf8')).rejects.toThrow()
+  })
+
+  test('exempts pinned, curated, and external references from automatic decay', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'pinned-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), pinned: true }),
+    )
+    await writeReference(
+      'curated-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), origin: 'curated' }),
+    )
+    await writeReference(
+      'external-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: isoDaysAgo(90), origin: 'external' }),
+    )
+
+    await invokeDreaming(agentDir)
+
+    expect(parseReference(await readFile(referenceFile('pinned-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+    expect(parseReference(await readFile(referenceFile('curated-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+    expect(parseReference(await readFile(referenceFile('external-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+  })
+
+  test('recent access keeps an old episode reference above the decay threshold', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'recent-ref',
+      referenceText({ created: isoDaysAgo(90), lastAccessed: new Date().toISOString() }),
+    )
+
+    await invokeDreaming(agentDir)
+
+    expect(parseReference(await readFile(referenceFile('recent-ref'), 'utf8')).frontmatter.demoted).toBe(false)
+  })
+
+  test('eviction removes reference files, vectors, and upward topic citations', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference(
+      'ref-x',
+      referenceText({ created: isoDaysAgo(60), lastAccessed: isoDaysAgo(60), demoted: true }),
+    )
+    await writeTopicShard(
+      'with-ref',
+      shardText(
+        'With ref',
+        ['Conclusion.', '', 'references:', '- ref-x', '', 'fragments:', '- streams/2026-04-27#f-tick'].join('\n'),
+      ),
+    )
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('reference:ref-x#0', 'reference', 'ref-x', vector({ 0: 1 }), 'ref-hash'))
+    store.close()
+
+    await invokeDreaming(agentDir, { referencesEnabled: true })
+
+    await expect(readFile(referenceFile('ref-x'), 'utf8')).rejects.toThrow()
+    const topic = await readFile(topicShard('with-ref'), 'utf8')
+    expect(topic).not.toContain('ref-x')
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['reference:ref-x#0'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
+  test('includes reference demotion and eviction counts in the done metrics line', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference('demote-me', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+    await writeReference(
+      'evict-me',
+      referenceText({ created: isoDaysAgo(60), lastAccessed: isoDaysAgo(60), demoted: true }),
+    )
+    const infos: string[] = []
+    const logger: DreamingLogger = { info: (m) => infos.push(m), warn: () => {}, error: () => {} }
+
+    await invokeDreaming(agentDir, { logger, referencesEnabled: true })
+
+    const done = infos.find((m) => m.startsWith('[dreaming] done'))
+    expect(done).toContain('references_demoted=1')
+    expect(done).toContain('references_evicted=1')
   })
 
   test('revert preserves byte-identical shard content for unchanged shards and deletes net-new shards', async () => {
@@ -1083,7 +1308,7 @@ describe('dreaming subagent (orchestration)', () => {
 
 function vectorRow(
   id: string,
-  source: 'topic' | 'stream',
+  source: 'topic' | 'stream' | 'reference',
   key: string,
   embedding: Float32Array,
   contentHash: string,

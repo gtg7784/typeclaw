@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 
-import { memorySearchTool } from './search-tool'
+import { createMemorySearchTool } from './search-tool'
 
 export const memoryRetrievalPayloadSchema = z.object({
   parentSessionId: z.string().min(1),
@@ -27,6 +27,7 @@ export type MemoryRetrievalLogger = {
 export type CreateMemoryRetrievalSubagentOptions = {
   logger?: MemoryRetrievalLogger
   timeoutMs?: number
+  referencesEnabled?: boolean
 }
 
 export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
@@ -55,6 +56,7 @@ export function createMemoryRetrievalSubagent(
   options: CreateMemoryRetrievalSubagentOptions = {},
 ): Subagent<MemoryRetrievalPayload> {
   const logger = options.logger ?? consoleLogger
+  const referencesEnabled = options.referencesEnabled ?? false
   return {
     systemPrompt: MEMORY_RETRIEVAL_SYSTEM_PROMPT,
     // Retrieval is "4 keyword searches + 1 write" — no reasoning required.
@@ -62,7 +64,7 @@ export function createMemoryRetrievalSubagent(
     // operator hasn't configured it, so this is safe by construction.
     profile: 'fast',
     tools: [readTool, writeTool, lsTool],
-    customTools: [memorySearchTool],
+    customTools: [createMemorySearchTool(referencesEnabled)],
     payloadSchema: memoryRetrievalPayloadSchema,
     inFlightKey: (payload) => payload.parentSessionId,
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
