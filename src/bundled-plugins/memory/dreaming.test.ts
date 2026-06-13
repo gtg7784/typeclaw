@@ -678,6 +678,25 @@ describe('dreaming subagent (compaction wiring)', () => {
     expect(await referencePassages(agentDir)).toEqual([])
   })
 
+  test('demotion prunes the reference vector rows so a demoted reference is not vector-retrievable', async () => {
+    await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
+    await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
+    // The on-write hook indexes a reference while it is demoted:false; seed that row.
+    const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    store.upsert(vectorRow('reference:stale-ref#0', 'reference', 'stale-ref', vector({ 0: 1 }), 'stale-hash'))
+    store.close()
+
+    await invokeDreaming(agentDir)
+
+    expect(parseReference(await readFile(referenceFile('stale-ref'), 'utf8')).frontmatter.demoted).toBe(true)
+    const afterStore = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+    try {
+      expect(afterStore.getByIds(['reference:stale-ref#0'])).toEqual([])
+    } finally {
+      afterStore.close()
+    }
+  })
+
   test('deletes demoted references only after the extended dormancy window', async () => {
     await writeFile(streamFile('2026-04-27'), fragmentLine('first'))
     await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
