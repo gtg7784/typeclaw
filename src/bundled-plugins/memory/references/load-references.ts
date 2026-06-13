@@ -1,7 +1,7 @@
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 
 import { referenceFilePath, referencesDir } from '../paths'
-import { parseReference, type ReferenceFrontmatter } from './frontmatter'
+import { parseReference, renderReference, type ReferenceFrontmatter } from './frontmatter'
 
 export type Reference = {
   path: string
@@ -70,6 +70,40 @@ export async function loadReference(
   options: { logger?: Logger } = {},
 ): Promise<Reference | null> {
   return readAndParseReference(referenceFilePath(agentDir, slug), slug, options)
+}
+
+// Records an access against the given reference slugs: bumps accessCount and
+// stamps lastAccessed. Used by both the memory_search hit path and the vector
+// retrieval path so a reference surfaced by either counts toward the dreaming
+// saturation model — otherwise a reference repeatedly injected by vector
+// retrieval (but never explicitly searched) decays on time alone and gets
+// evicted despite being actively useful. Best-effort: a missing or malformed
+// slug is skipped, never thrown, so a caller can fire-and-forget off the turn
+// critical path.
+export async function bumpReferenceAccess(
+  agentDir: string,
+  slugs: Iterable<string>,
+  options: { logger?: Logger } = {},
+): Promise<void> {
+  const unique = [...new Set(slugs)]
+  await Promise.all(
+    unique.map(async (slug) => {
+      const reference = await readAndParseReference(referenceFilePath(agentDir, slug), slug, options)
+      if (reference === null) return
+      await writeFile(
+        reference.path,
+        renderReference(
+          {
+            ...reference.frontmatter,
+            lastAccessed: new Date().toISOString(),
+            accessCount: reference.frontmatter.accessCount + 1,
+          },
+          reference.body,
+        ),
+        'utf8',
+      )
+    }),
+  )
 }
 
 export function __resetReferenceCacheForTests(): void {

@@ -22,6 +22,7 @@ import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
+import { bumpReferenceAccess } from './references/load-references'
 import { createMemorySearchTool } from './search-tool'
 import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
@@ -217,6 +218,16 @@ async function renderVectorTurnMemory(
     logger?.info(
       `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${streamHits} reference_results=${referenceHits} elapsed_ms=${elapsedMs}${suppressed}`,
     )
+    // Count a vector-surfaced reference as an access so it survives dreaming's
+    // time-decay the same way a memory_search hit does. Fire-and-forget: the
+    // bump only feeds the 30-min dreaming saturation pass, so it must not add a
+    // frontmatter write to the per-turn response critical path.
+    const referenceSlugs = results.flatMap((r) => (r.source === 'reference' ? [r.key] : []))
+    if (referenceSlugs.length > 0) {
+      void bumpReferenceAccess(event.agentDir, referenceSlugs).catch((err) => {
+        logger?.info(`[vector-retrieval] reference access bump failed: ${err instanceof Error ? err.message : err}`)
+      })
+    }
     return renderRetrievedMemorySection(results, { origin: event.origin })
   } finally {
     store.close()
