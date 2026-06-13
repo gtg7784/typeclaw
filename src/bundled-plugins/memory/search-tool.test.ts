@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -7,7 +7,8 @@ import type { ToolContext } from '@/plugin'
 
 import { saveDreamingState } from './dreaming-state'
 import { renderShard, type ShardFrontmatter } from './frontmatter'
-import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { referenceFilePath, referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { parseReference, renderReference } from './references/frontmatter'
 import { memorySearchTool } from './search-tool'
 import type { FragmentEvent, LegacyProseEvent, WatermarkEvent } from './stream-events'
 import { appendEvents } from './stream-io'
@@ -33,7 +34,18 @@ type StreamMatch = {
   fullBody?: string
 }
 
-type SearchResult = { matches: Array<TopicMatch | StreamMatch>; truncatedAt?: number } | { error: string }
+type ReferenceMatch = {
+  source: 'reference'
+  slug: string
+  title: string
+  excerpt: string
+  created: string
+  fullBody?: string
+}
+
+type SearchResult =
+  | { matches: Array<TopicMatch | StreamMatch | ReferenceMatch>; truncatedAt?: number }
+  | { error: string }
 
 afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
@@ -294,6 +306,38 @@ describe('memorySearchTool', () => {
     await mkdir(topicsDir(agentDir), { recursive: true })
 
     await expect(call(agentDir, { query: 'anything' })).resolves.toEqual({ matches: [], truncatedAt: 0 })
+  })
+
+  test('datetime filter limits reference candidates by created time', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'ref-a', 'Fresh Reference', 'test keyword in fresh reference.\n', {
+      created: '2026-06-12T00:00:00Z',
+    })
+    await writeReference(agentDir, 'ref-b', 'Old Reference', 'test keyword in old reference.\n', {
+      created: '2026-06-10T00:00:00Z',
+    })
+
+    const result = await call(agentDir, { query: 'test', since: '2026-06-12T00:00:00Z' })
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['reference:ref-a'])
+  })
+
+  test('reference retrieval advances lastAccessed and increments accessCount', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'ref-a', 'Reference A', 'access bump needle.\n', {
+      created: '2026-06-12T00:00:00Z',
+      lastAccessed: '2026-06-12T00:00:00Z',
+      accessCount: 2,
+    })
+
+    const result = await call(agentDir, { query: 'needle' })
+    const updated = parseReference(await readFile(referenceFilePath(agentDir, 'ref-a'), 'utf8'))
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['reference:ref-a'])
+    expect(updated.frontmatter.accessCount).toBe(3)
+    expect(new Date(updated.frontmatter.lastAccessed).getTime()).toBeGreaterThan(
+      new Date('2026-06-12T00:00:00Z').getTime(),
+    )
   })
 })
 
@@ -582,12 +626,13 @@ describe('memorySearchTool — multi-word token fallback', () => {
   })
 })
 
-function topicSlug(m: TopicMatch | StreamMatch): string | undefined {
+function topicSlug(m: TopicMatch | StreamMatch | ReferenceMatch): string | undefined {
   return m.source === 'topic' ? m.slug : undefined
 }
 
-function matchKey(m: TopicMatch | StreamMatch): string {
+function matchKey(m: TopicMatch | StreamMatch | ReferenceMatch): string {
   if (m.source === 'topic') return `topic:${m.slug}`
+  if (m.source === 'reference') return `reference:${m.slug}`
   return `stream:${m.eventId ?? `${m.date}#legacy`}`
 }
 
@@ -660,6 +705,34 @@ async function writeShard(
 ): Promise<void> {
   await mkdir(topicsDir(agentDir), { recursive: true })
   await writeFile(topicShardPath(agentDir, slug), shardText(heading, body, patch), 'utf8')
+}
+
+async function writeReference(
+  agentDir: string,
+  slug: string,
+  title: string,
+  body: string,
+  patch: Partial<Parameters<typeof renderReference>[0]> = {},
+): Promise<void> {
+  await mkdir(referencesDir(agentDir), { recursive: true })
+  await writeFile(
+    referenceFilePath(agentDir, slug),
+    renderReference(
+      {
+        title,
+        origin: 'episode',
+        created: '2026-06-12T00:00:00Z',
+        lastAccessed: '2026-06-12T00:00:00Z',
+        accessCount: 0,
+        pinned: false,
+        demoted: false,
+        tags: [],
+        ...patch,
+      },
+      body,
+    ),
+    'utf8',
+  )
 }
 
 function shardText(heading: string, body: string, patch: Partial<ShardFrontmatter>): string {

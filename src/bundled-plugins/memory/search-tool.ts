@@ -1,8 +1,12 @@
+import { writeFile } from 'node:fs/promises'
+
 import { z } from 'zod'
 
 import { defineTool } from '@/plugin'
 
 import { loadAllShards, loadShard, type TopicShard } from './load-shards'
+import { renderReference } from './references/frontmatter'
+import { loadAllReferences, type Reference } from './references/load-references'
 import type { FragmentEvent, LegacyProseEvent, StreamEvent } from './stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
 
@@ -29,7 +33,16 @@ export type StreamMatch = {
   fullBody?: string
 }
 
-export type MemorySearchMatch = TopicMatch | StreamMatch
+export type ReferenceMatch = {
+  source: 'reference'
+  slug: string
+  title: string
+  excerpt: string
+  created: string
+  fullBody?: string
+}
+
+export type MemorySearchMatch = TopicMatch | StreamMatch | ReferenceMatch
 
 export type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: number } | { error: string }
 
@@ -44,8 +57,10 @@ export const memorySearchTool = defineTool({
     asRegex: z.boolean().default(false),
     full: z.boolean().default(false),
     maxResults: z.number().int().min(0).default(DEFAULT_MAX_RESULTS),
+    since: z.string().optional(),
+    before: z.string().optional(),
   }),
-  async execute({ query, topic, asRegex, full, maxResults }, ctx) {
+  async execute({ query, topic, asRegex, full, maxResults, since, before }, ctx) {
     if ((query === undefined) === (topic === undefined)) {
       return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
     }
@@ -59,19 +74,25 @@ export const memorySearchTool = defineTool({
       return resultToToolResult({ error: matcherOrError })
     }
 
-    const [shards, streamDays] = await Promise.all([
+    const [shards, streamDays, allReferences] = await Promise.all([
       loadAllShards(ctx.agentDir, { logger: ctx.logger }),
       readAllUndreamedStreamDays(ctx.agentDir),
+      loadAllReferences(ctx.agentDir, { logger: ctx.logger }),
     ])
-    if (shards.length === 0 && streamDays.length === 0) {
+    const dateFilter = parseReferenceDateFilter(since, before)
+    if ('error' in dateFilter) return resultToToolResult(dateFilter)
+
+    const references = allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
+    if (shards.length === 0 && streamDays.length === 0 && references.length === 0) {
       return resultToToolResult({ matches: [], truncatedAt: 0 })
     }
 
-    const result = searchAll(shards, streamDays, matcherOrError, { full, maxResults })
+    let result = searchAll(shards, streamDays, matcherOrError, { full, maxResults, references })
     if ('matches' in result && result.matches.length === 0) {
-      const fallback = tokenFallback(query!, asRegex, shards, streamDays, { full, maxResults })
-      if (fallback !== null) return resultToToolResult(fallback)
+      const fallback = tokenFallback(query!, asRegex, shards, streamDays, references, { full, maxResults })
+      if (fallback !== null) result = fallback
     }
+    if ('matches' in result) await bumpReturnedReferences(allReferences, result.matches)
     return resultToToolResult(result)
   },
 })
@@ -126,13 +147,14 @@ function tokenFallback(
   asRegex: boolean,
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
+  references: Reference[],
   options: { full: boolean; maxResults: number },
 ): MemorySearchResult | null {
   if (asRegex) return null
   const tokens = distinctTokens(query)
   if (tokens.length === 0) return null
   if (tokens.length === 1 && tokens[0] === query.trim().toLowerCase()) return null
-  return searchAllRanked(shards, streamDays, tokens, options)
+  return searchAllRanked(shards, streamDays, tokens, { ...options, references })
 }
 
 export function distinctTokens(query: string): string[] {
@@ -171,7 +193,7 @@ export function searchAll(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   matcher: Matcher,
-  options: { full: boolean; maxResults: number },
+  options: { full: boolean; maxResults: number; references?: Reference[] },
 ): MemorySearchResult {
   const matches: MemorySearchMatch[] = []
   let truncatedAt: number | undefined
@@ -187,6 +209,12 @@ export function searchAll(
 
   for (const shard of shards) {
     const match = matchShard(shard, matcher, options.full)
+    if (match === null) continue
+    if (!push(match)) return { matches, truncatedAt: truncatedAt! }
+  }
+
+  for (const reference of options.references ?? []) {
+    const match = matchReference(reference, matcher, options.full)
     if (match === null) continue
     if (!push(match)) return { matches, truncatedAt: truncatedAt! }
   }
@@ -221,7 +249,12 @@ export function searchAllRanked(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   tokens: string[],
-  options: { full: boolean; maxResults: number; tokenMatchMode?: 'substring' | 'ascii-boundary' },
+  options: {
+    full: boolean
+    maxResults: number
+    references?: Reference[]
+    tokenMatchMode?: 'substring' | 'ascii-boundary'
+  },
 ): MemorySearchResult {
   const tokenMatchers = tokens.map((t) => buildTokenMatcher(t, options.tokenMatchMode ?? 'substring'))
   const anyToken: Matcher = (haystack) => {
@@ -240,6 +273,12 @@ export function searchAllRanked(
     const match = matchShard(shard, anyToken, options.full)
     if (match === null) continue
     scored.push({ match, score: scoreOf(shardSearchText(shard)), order: order++ })
+  }
+
+  for (const reference of options.references ?? []) {
+    const match = matchReference(reference, anyToken, options.full)
+    if (match === null) continue
+    scored.push({ match, score: scoreOf(referenceSearchText(reference)), order: order++ })
   }
 
   for (let i = streamDays.length - 1; i >= 0; i--) {
@@ -290,6 +329,10 @@ function eventSearchText(event: StreamEvent): string {
   return ''
 }
 
+function referenceSearchText(reference: Reference): string {
+  return [reference.slug, reference.frontmatter.title, ...reference.frontmatter.tags, reference.body].join('\n')
+}
+
 function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMatch | null {
   const bodyLines = splitBodyLines(shard.body)
   const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
@@ -310,6 +353,30 @@ function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMa
       firstBodyLineIndex === -1 ? fallbackExcerpt(shard, matcher) : excerptForLine(bodyLines, firstBodyLineIndex),
   }
   if (full) match.fullBody = shard.body
+  return match
+}
+
+function matchReference(reference: Reference, matcher: Matcher, full: boolean): ReferenceMatch | null {
+  const bodyLines = splitBodyLines(reference.body)
+  const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
+  const matched =
+    matcher(reference.slug) ||
+    matcher(reference.frontmatter.title) ||
+    reference.frontmatter.tags.some((tag) => matcher(tag)) ||
+    firstBodyLineIndex !== -1
+  if (!matched) return null
+
+  const match: ReferenceMatch = {
+    source: 'reference',
+    slug: reference.slug,
+    title: reference.frontmatter.title,
+    excerpt:
+      firstBodyLineIndex === -1
+        ? fallbackReferenceExcerpt(reference, matcher)
+        : excerptForLine(bodyLines, firstBodyLineIndex),
+    created: reference.frontmatter.created,
+  }
+  if (full) match.fullBody = reference.body
   return match
 }
 
@@ -387,6 +454,63 @@ function fallbackExcerpt(shard: TopicShard, matcher: Matcher): string {
   if (matcher(shard.slug)) return shard.slug
   const matchedTag = shard.frontmatter.tags?.find((tag) => matcher(tag))
   return matchedTag ?? shard.frontmatter.heading
+}
+
+function fallbackReferenceExcerpt(reference: Reference, matcher: Matcher): string {
+  if (matcher(reference.frontmatter.title)) return reference.frontmatter.title
+  if (matcher(reference.slug)) return reference.slug
+  const matchedTag = reference.frontmatter.tags.find((tag) => matcher(tag))
+  return matchedTag ?? reference.frontmatter.title
+}
+
+type ReferenceDateFilter = { since?: Date; before?: Date }
+
+function parseReferenceDateFilter(
+  since: string | undefined,
+  before: string | undefined,
+): ReferenceDateFilter | { error: string } {
+  const sinceDate = since === undefined ? undefined : parseDateParam('since', since)
+  if (typeof sinceDate === 'string') return { error: sinceDate }
+  const beforeDate = before === undefined ? undefined : parseDateParam('before', before)
+  if (typeof beforeDate === 'string') return { error: beforeDate }
+  return { since: sinceDate, before: beforeDate }
+}
+
+function parseDateParam(name: string, value: string): Date | string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return `invalid ${name}: expected ISO 8601 datetime string`
+  return date
+}
+
+function referenceCandidateAllowed(reference: Reference, filter: ReferenceDateFilter): boolean {
+  if (reference.frontmatter.demoted) return false
+  const created = new Date(reference.frontmatter.created)
+  if (filter.since !== undefined && created < filter.since) return false
+  if (filter.before !== undefined && created >= filter.before) return false
+  return true
+}
+
+async function bumpReturnedReferences(references: Reference[], matches: MemorySearchMatch[]): Promise<void> {
+  const returnedSlugs = new Set(matches.filter((match) => match.source === 'reference').map((match) => match.slug))
+  if (returnedSlugs.size === 0) return
+  await Promise.all(
+    references
+      .filter((reference) => returnedSlugs.has(reference.slug))
+      .map((reference) =>
+        writeFile(
+          reference.path,
+          renderReference(
+            {
+              ...reference.frontmatter,
+              lastAccessed: new Date().toISOString(),
+              accessCount: reference.frontmatter.accessCount + 1,
+            },
+            reference.body,
+          ),
+          'utf8',
+        ),
+      ),
+  )
 }
 
 function excerptForLine(lines: string[], matchIndex: number): string {
