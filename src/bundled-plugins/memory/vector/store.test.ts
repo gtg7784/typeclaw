@@ -37,6 +37,25 @@ describe('VectorStore', () => {
     }
   })
 
+  it('scores exact cosine values (magnitude hoist preserves the math)', () => {
+    const store = openTestStore()
+    try {
+      // query [1,1,0,...] vs row [1,0,0,...]: cosine = 1 / (sqrt(2) * 1) ≈ 0.7071
+      store.upsert(row('topic:aligned', embedding(768, { 0: 1 })))
+      // query vs row [0,0,1,...]: orthogonal, cosine = 0
+      store.upsert(row('topic:orthogonal', embedding(768, { 2: 1 })))
+
+      const scored = store.queryScored(embedding(768, { 0: 1, 1: 1 }), MODEL)
+
+      const aligned = scored.find((s) => s.row.id === 'topic:aligned')
+      const orthogonal = scored.find((s) => s.row.id === 'topic:orthogonal')
+      expect(aligned?.score).toBeCloseTo(Math.SQRT1_2, 6)
+      expect(orthogonal?.score).toBeCloseTo(0, 6)
+    } finally {
+      store.close()
+    }
+  })
+
   it('QA 1.5: skips mismatched dimensions without attempting cross-dim cosine', () => {
     const store = openTestStore()
     try {
