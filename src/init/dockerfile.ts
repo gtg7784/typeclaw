@@ -610,21 +610,35 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // so the linux binary resolves. WORKDIR is restored to /agent afterwards so
 // later layers and the runtime CWD are unchanged.
 //
-// Versions are pinned to what @huggingface/transformers@^4.2.0 resolves today.
-// A future transformers bump that moves sharp must bump `sharp@`,
-// `@img/sharp-linux-*`, and `@img/sharp-libvips-linux-*` together — mismatched
-// sharp/libvips platform packages are a known failure mode. `$TARGETARCH` is
-// `arm64` or `amd64`; an empty value (bare `docker build` without buildx) falls
-// back to x64 for determinism.
+// EXACT transformers version this image installs. Must stay in lockstep with
+// `@huggingface/transformers` in the repo package.json (a guard test in
+// dockerfile.test.ts asserts the two agree). The pin is EXACT — not a caret —
+// because this layer's `bun add` runs at `WORKDIR /` with NO project lockfile,
+// so the repo `bun.lock` does NOT constrain it. A bare `@huggingface/
+// transformers` (no version) would resolve npm `latest` at BUILD time: the day
+// a newer transformers ships, the container would install it while the
+// sharp/libvips pins below stay fixed, and the mismatched sharp platform
+// packages crash at container import ("Could not load the sharp module using
+// the linux-<arch> runtime"). Pinning the version closes that drift.
+export const TRANSFORMERS_VERSION = '4.2.0'
+
+// sharp + libvips versions are pinned to what @huggingface/transformers@4.2.0
+// resolves. A future transformers bump that moves sharp must bump
+// TRANSFORMERS_VERSION, `sharp@`, `@img/sharp-linux-*`, and
+// `@img/sharp-libvips-linux-*` together — mismatched sharp/libvips platform
+// packages are a known failure mode. `$TARGETARCH` is `arm64` or `amd64`; an
+// empty value (bare `docker build` without buildx) falls back to x64 for
+// determinism.
 const LAYER_TRANSFORMERS_INSTALL = `# Layer 7: install @huggingface/transformers with its linux-native binaries.
 # Installs the linux onnxruntime-node addon AND sharp's linux platform packages
 # (@img/sharp-linux-*) into the image's /node_modules so they survive the
 # runtime /agent bind mount and still win Node/Bun resolution from
-# /agent/node_modules/sharp. See src/init/dockerfile.ts for the rationale.
+# /agent/node_modules/sharp. The transformers version is pinned EXACT (this
+# bun add has no lockfile) — see src/init/dockerfile.ts for the rationale.
 WORKDIR /
 RUN SHARP_ARCH="$(if [ "\${TARGETARCH:-amd64}" = "arm64" ]; then echo arm64; else echo x64; fi)" \\
  && bun add \\
-      @huggingface/transformers \\
+      @huggingface/transformers@${TRANSFORMERS_VERSION} \\
       sharp@0.34.5 \\
       "@img/sharp-linux-\${SHARP_ARCH}@0.34.5" \\
       "@img/sharp-libvips-linux-\${SHARP_ARCH}@1.2.4"

@@ -20,6 +20,7 @@ import {
   CURL_IMPERSONATE_VERSION,
   NETWORK_BLOCK_IPV4_NETS,
   NETWORK_BLOCK_IPV6_NETS,
+  TRANSFORMERS_VERSION,
   TYPECLAW_ENTRYPOINT_PATH,
 } from './dockerfile'
 
@@ -976,12 +977,38 @@ describe('transformers native-deps layer (sharp + onnxruntime linux binaries)', 
     expect(out).toContain('"@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4"')
   })
 
-  test('sharp and its libvips platform package are pinned to the same versions @huggingface/transformers@^4.2.0 resolves (0.34.5 / 1.2.4) — mismatched sharp/libvips platform packages are a known load-time failure mode', () => {
+  test('sharp and its libvips platform package are pinned to the same versions @huggingface/transformers@4.2.0 resolves (0.34.5 / 1.2.4) — mismatched sharp/libvips platform packages are a known load-time failure mode', () => {
     const out = buildDockerfile()
     const sharpVersions = out.match(/@img\/sharp-linux-\$\{SHARP_ARCH\}@(\S+?)"/)
     const libvipsVersions = out.match(/@img\/sharp-libvips-linux-\$\{SHARP_ARCH\}@(\S+?)"/)
     expect(sharpVersions?.[1]).toBe('0.34.5')
     expect(libvipsVersions?.[1]).toBe('1.2.4')
+  })
+
+  // The Layer 7 `bun add` runs at WORKDIR / with no project lockfile, so the
+  // repo bun.lock does NOT constrain it. A bare `@huggingface/transformers`
+  // (no version) resolves npm `latest` at build time and would drift past the
+  // hard-pinned sharp/libvips below — the day a newer transformers ships, the
+  // container installs it against the fixed sharp pins and crashes at import.
+  // These guards fail if the version is ever dropped back to a caret/bare name.
+  for (const [label, render] of [
+    ['inline (dev)', () => buildDockerfile()],
+    ['versioned (base-image)', () => buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })],
+    ['base', () => buildBaseDockerfile()],
+  ] as const) {
+    test(`${label} form pins @huggingface/transformers to an EXACT version (not a caret/bare name) so the lockfile-free Layer 7 install can't drift past the sharp pins`, () => {
+      const out = render()
+      expect(out).toContain(`@huggingface/transformers@${TRANSFORMERS_VERSION}`)
+      expect(out).not.toContain('@huggingface/transformers \\')
+      expect(out).not.toContain('@huggingface/transformers@^')
+    })
+  }
+
+  test('TRANSFORMERS_VERSION matches the @huggingface/transformers pin in package.json — host download (models.ts) and container install (Layer 7) must resolve the same library, and the package.json pin is exact (no caret) so the repo install agrees', () => {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, '..', '..', 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies['@huggingface/transformers']).toBe(TRANSFORMERS_VERSION)
   })
 
   // Regression guard for the bind-mount masking failure. `typeclaw start`
