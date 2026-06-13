@@ -179,6 +179,17 @@ describe('memorySearchTool', () => {
     expect('matches' in result && result.matches[0]?.source).toBe('topic')
   })
 
+  test('topic lookup of a reference slug records an access (accessCount + lastAccessed)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'wrenchamel-query', 'Wrenchamel query', 'SELECT 1;\n')
+
+    await call(agentDir, { topic: 'wrenchamel-query' })
+
+    const updated = parseReference(await readFile(referenceFilePath(agentDir, 'wrenchamel-query'), 'utf8'))
+    expect(updated.frontmatter.accessCount).toBe(1)
+    expect(updated.frontmatter.lastAccessed).not.toBe('2026-06-12T00:00:00Z')
+  })
+
   test('rejects calls that supply neither query nor topic', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'present', 'Present', 'body\n')

@@ -125,7 +125,14 @@ async function lookupTopic(
   if (shard !== null) return { matches: [topicMatchWithFullBody(shard)] }
 
   const reference = await loadReference(agentDir, slug, loaderOptions)
-  if (reference !== null) return { matches: [referenceMatchWithFullBody(reference)] }
+  if (reference !== null) {
+    const match = referenceMatchWithFullBody(reference)
+    // A reference reached via topic-slug lookup is a real access — record it so
+    // it advances accessCount/lastAccessed the same as a query hit, otherwise the
+    // injected-slug use case this fallback unlocks would still decay as unused.
+    await bumpReturnedReferences([reference], [match])
+    return { matches: [match] }
+  }
 
   return { matches: [] }
 }
@@ -544,7 +551,7 @@ function excerptForLine(lines: string[], matchIndex: number): string {
 }
 
 const EMPTY_RESULT_GUIDANCE =
-  'No matching memory. This is the authoritative result — memory_search already covers both topic shards and undreamed stream events. Do not fall back to grep/find/bash or manually reading memory/topics, memory/streams, or sessions; accept that no relevant memory exists and proceed.'
+  'No matching memory. This is the authoritative result — memory_search already covers topic shards, references, and undreamed stream events. Do not fall back to grep/find/bash or manually reading memory/topics, memory/references, memory/streams, or sessions; accept that no relevant memory exists and proceed.'
 
 // The empty-set note rides in the LLM-facing `text` ONLY. `details` stays the
 // pure struct: `keywordLane` reads `searchAll` directly (never this layer) and
