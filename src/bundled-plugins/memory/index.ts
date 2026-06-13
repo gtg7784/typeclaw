@@ -22,7 +22,7 @@ import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
-import { memorySearchTool } from './search-tool'
+import { createMemorySearchTool } from './search-tool'
 import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
 import { runVectorIndexDoctor } from './vector/doctor'
@@ -409,7 +409,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           }),
         },
         tools: {
-          memory_search: memorySearchTool,
+          memory_search: createMemorySearchTool(ctx.config.references.enabled),
         },
         cronJobs: {
           dreaming: {

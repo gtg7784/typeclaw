@@ -48,54 +48,61 @@ export type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: n
 
 export type Matcher = (haystack: string) => boolean
 
-export const memorySearchTool = defineTool({
-  description:
-    'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard with its full body — use it to read a topic whose slug you already have (e.g. a heading shown in injected memory). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-first/stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
-  parameters: z.object({
-    query: z.string().optional(),
-    topic: z.string().optional(),
-    asRegex: z.boolean().default(false),
-    full: z.boolean().default(false),
-    maxResults: z.number().int().min(0).default(DEFAULT_MAX_RESULTS),
-    since: z.string().optional(),
-    before: z.string().optional(),
-  }),
-  async execute({ query, topic, asRegex, full, maxResults, since, before }, ctx) {
-    if ((query === undefined) === (topic === undefined)) {
-      return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
-    }
+export function createMemorySearchTool(referencesEnabled: boolean) {
+  return defineTool({
+    description:
+      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard with its full body — use it to read a topic whose slug you already have (e.g. a heading shown in injected memory). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-first/stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
+    parameters: z.object({
+      query: z.string().optional(),
+      topic: z.string().optional(),
+      asRegex: z.boolean().default(false),
+      full: z.boolean().default(false),
+      maxResults: z.number().int().min(0).default(DEFAULT_MAX_RESULTS),
+      since: z.string().optional(),
+      before: z.string().optional(),
+    }),
+    async execute({ query, topic, asRegex, full, maxResults, since, before }, ctx) {
+      if ((query === undefined) === (topic === undefined)) {
+        return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
+      }
 
-    if (topic !== undefined) {
-      return resultToToolResult(await lookupTopic(ctx.agentDir, topic, ctx.logger))
-    }
+      if (topic !== undefined) {
+        return resultToToolResult(await lookupTopic(ctx.agentDir, topic, ctx.logger))
+      }
 
-    const matcherOrError = buildMatcher(query!, asRegex)
-    if (typeof matcherOrError === 'string') {
-      return resultToToolResult({ error: matcherOrError })
-    }
+      const matcherOrError = buildMatcher(query!, asRegex)
+      if (typeof matcherOrError === 'string') {
+        return resultToToolResult({ error: matcherOrError })
+      }
 
-    const [shards, streamDays, allReferences] = await Promise.all([
-      loadAllShards(ctx.agentDir, { logger: ctx.logger }),
-      readAllUndreamedStreamDays(ctx.agentDir),
-      loadAllReferences(ctx.agentDir, { logger: ctx.logger }),
-    ])
-    const dateFilter = parseReferenceDateFilter(since, before)
-    if ('error' in dateFilter) return resultToToolResult(dateFilter)
+      const [shards, streamDays, allReferences] = await Promise.all([
+        loadAllShards(ctx.agentDir, { logger: ctx.logger }),
+        readAllUndreamedStreamDays(ctx.agentDir),
+        referencesEnabled ? loadAllReferences(ctx.agentDir, { logger: ctx.logger }) : Promise.resolve([]),
+      ])
+      const dateFilter = parseReferenceDateFilter(since, before)
+      if ('error' in dateFilter) return resultToToolResult(dateFilter)
 
-    const references = allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
-    if (shards.length === 0 && streamDays.length === 0 && references.length === 0) {
-      return resultToToolResult({ matches: [], truncatedAt: 0 })
-    }
+      const references = referencesEnabled
+        ? allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
+        : []
+      if (shards.length === 0 && streamDays.length === 0 && references.length === 0) {
+        return resultToToolResult({ matches: [], truncatedAt: 0 })
+      }
 
-    let result = searchAll(shards, streamDays, matcherOrError, { full, maxResults, references })
-    if ('matches' in result && result.matches.length === 0) {
-      const fallback = tokenFallback(query!, asRegex, shards, streamDays, references, { full, maxResults })
-      if (fallback !== null) result = fallback
-    }
-    if ('matches' in result) await bumpReturnedReferences(allReferences, result.matches)
-    return resultToToolResult(result)
-  },
-})
+      let result = searchAll(shards, streamDays, matcherOrError, { full, maxResults, references })
+      if ('matches' in result && result.matches.length === 0) {
+        const fallback = tokenFallback(query!, asRegex, shards, streamDays, references, { full, maxResults })
+        if (fallback !== null) result = fallback
+      }
+      if ('matches' in result && referencesEnabled) await bumpReturnedReferences(allReferences, result.matches)
+      return resultToToolResult(result)
+    },
+  })
+}
+
+// Backward compatibility: default to references enabled
+export const memorySearchTool = createMemorySearchTool(true)
 
 // Exact slug lookup, so the agent can read a topic whose slug the per-turn
 // injection already showed it without re-running a fuzzy search for a body the

@@ -9,7 +9,7 @@ import { saveDreamingState } from './dreaming-state'
 import { renderShard, type ShardFrontmatter } from './frontmatter'
 import { referenceFilePath, referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { parseReference, renderReference } from './references/frontmatter'
-import { memorySearchTool } from './search-tool'
+import { createMemorySearchTool } from './search-tool'
 import type { FragmentEvent, LegacyProseEvent, WatermarkEvent } from './stream-events'
 import { appendEvents } from './stream-io'
 
@@ -338,6 +338,18 @@ describe('memorySearchTool', () => {
     expect(new Date(updated.frontmatter.lastAccessed).getTime()).toBeGreaterThan(
       new Date('2026-06-12T00:00:00Z').getTime(),
     )
+  })
+
+  test('when referencesEnabled is false, reference matches are excluded even if files exist', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'topic-shard', 'Topic shard', 'needle in topic.\n')
+    await writeReference(agentDir, 'ref-a', 'Reference A', 'needle in reference.\n', {
+      created: '2026-06-12T00:00:00Z',
+    })
+
+    const result = await call(agentDir, { query: 'needle' }, false)
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['topic:topic-shard'])
   })
 })
 
@@ -673,15 +685,21 @@ async function makeAgentDir(): Promise<string> {
   return dir
 }
 
-async function call(agentDir: string, input: unknown): Promise<SearchResult> {
-  const args = memorySearchTool.parameters.parse(input)
-  const result = await memorySearchTool.execute(args, ctx(agentDir))
+async function call(agentDir: string, input: unknown, referencesEnabled: boolean = true): Promise<SearchResult> {
+  const tool = createMemorySearchTool(referencesEnabled)
+  const args = tool.parameters.parse(input)
+  const result = await tool.execute(args, ctx(agentDir))
   return result.details as SearchResult
 }
 
-async function callRaw(agentDir: string, input: unknown): Promise<{ text: string; details: unknown }> {
-  const args = memorySearchTool.parameters.parse(input)
-  const result = await memorySearchTool.execute(args, ctx(agentDir))
+async function callRaw(
+  agentDir: string,
+  input: unknown,
+  referencesEnabled: boolean = true,
+): Promise<{ text: string; details: unknown }> {
+  const tool = createMemorySearchTool(referencesEnabled)
+  const args = tool.parameters.parse(input)
+  const result = await tool.execute(args, ctx(agentDir))
   const part = result.content[0]
   if (part === undefined || part.type !== 'text') throw new Error('expected a text content part')
   return { text: part.text, details: result.details }
