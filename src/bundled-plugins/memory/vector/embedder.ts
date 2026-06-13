@@ -24,6 +24,14 @@ export const EMBEDDING_MODEL_ID = `${MODEL_NAME}@${MODEL_DTYPE}`
 
 export type EmbedType = 'query' | 'passage'
 
+// Passages per onnxruntime forward pass. The whole-array embed (a startup index
+// build over thousands of shards+fragments) otherwise allocates activation
+// tensors for every input at once, and that single spike OOM-kills the
+// container mid-build — the agent boots, then dies with only a SIGKILL. Chunking
+// caps peak memory at one batch's worth regardless of corpus size; the model is
+// loaded once and reused across chunks, so the only cost is sequential passes.
+const EMBED_BATCH_SIZE = 64
+
 type TransformersEnv = typeof TransformersEnvValue
 type FeatureExtractor = Awaited<ReturnType<typeof TransformersPipeline<'feature-extraction'>>>
 
@@ -68,25 +76,25 @@ export class Embedder {
     const results = texts.map((text) => boundEmbeddableText(text))
     warnIfBounded(results, type)
 
-    // The whole array is embedded in ONE onnxruntime pass — peak memory scales
-    // with batch size, and a large startup index build (thousands of passages)
-    // can OOM-kill the container mid-pass. Log the size first so that, if the
-    // process dies here, the last line names the batch that did it rather than
-    // leaving the embed call as a silent point of death. Warn above a threshold
-    // where the single-pass cost is the likely culprit for a missing agent.
+    // Log the total embed size up front so a process that dies mid-build still
+    // leaves a line naming how much it was embedding. The work is chunked below
+    // (EMBED_BATCH_SIZE per onnxruntime pass) so peak memory no longer scales
+    // with this total — but the count remains the useful breadcrumb for a slow
+    // or wedged build.
     logEmbedBatch(texts.length, type)
 
-    const output = await this.extractor(
-      prefixTexts(
-        results.map((r) => r.text),
-        type,
-      ),
-      {
-        pooling: 'mean',
-        normalize: true,
-      },
+    const prefixed = prefixTexts(
+      results.map((r) => r.text),
+      type,
     )
-    return toEmbeddings(output.data, texts.length)
+
+    const embeddings: Float32Array[] = []
+    for (let start = 0; start < prefixed.length; start += EMBED_BATCH_SIZE) {
+      const batch = prefixed.slice(start, start + EMBED_BATCH_SIZE)
+      const output = await this.extractor(batch, { pooling: 'mean', normalize: true })
+      embeddings.push(...toEmbeddings(output.data, batch.length))
+    }
+    return embeddings
   }
 }
 
@@ -115,16 +123,18 @@ function warnIfBounded(results: readonly BoundedText[], type: EmbedType): void {
   )
 }
 
-// Above this single-pass batch size, the embed is the prime suspect for a
-// container that boots, logs, then dies without an error — the onnxruntime
-// activation tensors for a batch this large are the memory spike that trips
-// the OOM killer.
-const LARGE_EMBED_BATCH = 256
+// A large embed (a startup index build over thousands of passages) used to be
+// the prime suspect for a container that boots, logs, then dies without an
+// error — the onnxruntime activation tensors spiked the OOM killer. The embed
+// is now chunked at EMBED_BATCH_SIZE, so this is no longer a fatal threshold;
+// it just marks where a build is large enough that its duration is worth noting
+// up front (the count remains the breadcrumb if the build wedges or is slow).
+const LARGE_EMBED = 256
 
 function logEmbedBatch(count: number, type: EmbedType): void {
-  const line = `[memory] vector embedding: ${count} ${type} input(s) in a single pass`
-  if (count >= LARGE_EMBED_BATCH) {
-    console.warn(`${line} — large batch, peak memory scales with this; an OOM kill here aborts the boot`)
+  const line = `[memory] vector embedding: ${count} ${type} input(s) (chunked at ${EMBED_BATCH_SIZE}/pass)`
+  if (count >= LARGE_EMBED) {
+    console.info(`${line} — large build, this may take a while`)
   } else {
     console.info(line)
   }
