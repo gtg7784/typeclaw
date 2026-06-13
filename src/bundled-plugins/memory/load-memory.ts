@@ -81,11 +81,11 @@ export function renderDedupedMemorySection(fullShards: TopicShard[], unchangedSh
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   for (const shard of fullShards) {
     const topic = topicEntryFromShard(shard)
-    lines.push(`## ${topic.name}`, '')
+    lines.push(`## ${topic.name}`)
     lines.push(renderBody(topic), '')
   }
   for (const shard of unchangedShards) {
-    lines.push(`## ${shard.frontmatter.heading}`, '')
+    lines.push(`## ${shard.frontmatter.heading}`)
     lines.push(unchangedShardReference(shard.slug), '')
   }
   return lines.join('\n').trimEnd()
@@ -120,7 +120,7 @@ export function renderRetrievedMemorySection(
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   if (isChannel) lines.push(...CHANNEL_MEMORY_BOUNDARY, '', retrievedIndexDirective(), '')
   for (const item of items) {
-    lines.push(`## ${item.heading}`, '')
+    lines.push(`## ${item.heading}`)
     if (!isChannel) {
       lines.push(item.excerpt.trimEnd(), '')
     } else if (item.source === 'topic' || item.source === 'reference') {
@@ -209,12 +209,12 @@ function renderSection(plan: InjectionPlan, options: LoadMemoryOptions): string 
   } else if (plan.mode === 'index') {
     lines.push(indexDirective(options), '')
     for (const shard of plan.shards) {
-      lines.push(`## ${shard.frontmatter.heading}`, '')
+      lines.push(`## ${shard.frontmatter.heading}`)
       lines.push(renderShardMetadata(shard), '')
     }
   } else {
     for (const topic of plan.shards.map(topicEntryFromShard)) {
-      lines.push(`## ${topic.name}`, '')
+      lines.push(`## ${topic.name}`)
       lines.push(renderBody(topic), '')
     }
   }
