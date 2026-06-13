@@ -21,6 +21,7 @@ import { AnimatedTerminal } from './_components/animated-terminal'
 import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
 import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
+import { Reveal } from './_components/reveal'
 import { ThemeToggle } from './_components/theme-toggle'
 import { UseCaseTabs } from './_components/use-case-tabs'
 
@@ -279,7 +280,7 @@ function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps)
     <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-2 lg:gap-16">
       <div className={reverse ? 'lg:order-2' : ''}>
         <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">{eyebrow}</p>
-        <h3 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">{title}</h3>
+        <h3 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">{title}</h3>
         <p className="mt-4 max-w-md text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
       </div>
       <div className={reverse ? 'lg:order-1' : ''}>{visual}</div>
@@ -366,7 +367,7 @@ export default function Home() {
       <main>
         <section className="relative overflow-hidden">
           <DotGrid />
-          <div className="relative z-10 mx-auto max-w-4xl px-6 pt-24 pb-20 text-center sm:pt-32">
+          <div className="relative z-10 mx-auto max-w-4xl px-6 pt-16 pb-32 text-center sm:pt-24">
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
               <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
               {VERSION} · TypeScript agent runtime
@@ -381,7 +382,7 @@ export default function Home() {
                 priority
                 className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
               />
-              <h1 className="text-balance text-5xl font-semibold tracking-tight sm:text-6xl lg:text-7xl">
+              <h1 className="text-balance text-6xl font-semibold tracking-tight sm:text-7xl lg:text-8xl">
                 The agent that
                 <br />
                 <span className="bg-gradient-to-br from-brand-700 to-brand-500 bg-clip-text text-transparent dark:from-brand-200 dark:to-brand-400">
@@ -417,92 +418,108 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="border-y border-zinc-100 bg-zinc-50/50 py-12 dark:border-white/[0.04] dark:bg-white/[0.01]">
-          <ChannelTrust />
+        <section className="border-y border-zinc-100 bg-zinc-50/50 py-16 dark:border-white/[0.04] dark:bg-white/[0.01]">
+          <Reveal>
+            <ChannelTrust />
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 py-28">
-          <div className="text-center">
+        <section className="mx-auto max-w-6xl px-6 py-36">
+          <Reveal className="text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               Self-improving
             </p>
-            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+            <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
               It remembers. It learns. It gets sharper while you sleep.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
               Every conversation, every command, every insight — your agent watches its own work, then a dreaming
               subagent distills it into long-term memory and reusable skills. No prompts to write. It just gets better.
             </p>
-          </div>
-          <div className="mx-auto mt-12 max-w-lg">
+          </Reveal>
+          <Reveal className="mx-auto mt-12 max-w-lg" delay={120}>
             <div className="rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-8 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
               <MemoryLoopVertical />
             </div>
-          </div>
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl space-y-24 px-6 py-24">
-          <FeatureRow
-            eyebrow="Just a folder"
-            title="One folder. One agent. No mess."
-            blurb="Drop it in any folder. One command, and it's alive. Its own .env, its own memory, its own channels. When you're done, delete the folder — it's gone. No global install, no residue."
-            visual={<SandboxDiagram />}
-          />
-          <FeatureRow
-            eyebrow="Safe by design"
-            title="You're in control. Always."
-            blurb="Owner, trusted, member, guest — role-based permissions gate every action. A Slack stranger can't tell your agent to push to main. You can. The agent knows who's in the room and what they can do."
-            reverse
-            visual={<PermissionsVisual />}
-          />
-          <FeatureRow
-            eyebrow="Plugins as imports"
-            title="Teach it something new? Just write TypeScript."
-            blurb="No IPC, no FFI, no weird config files. Plain .ts files that contribute tools, skills, channels, and commands — all in the language you already write."
-            visual={<PluginCode />}
-          />
+        <section className="mx-auto max-w-6xl space-y-36 px-6 py-36">
+          <Reveal>
+            <FeatureRow
+              eyebrow="Just a folder"
+              title="One folder. One agent. No mess."
+              blurb="Drop it in any folder. One command, and it's alive. Its own .env, its own memory, its own channels. When you're done, delete the folder — it's gone. No global install, no residue."
+              visual={<SandboxDiagram />}
+            />
+          </Reveal>
+          <Reveal>
+            <FeatureRow
+              eyebrow="Safe by design"
+              title="You're in control. Always."
+              blurb="Owner, trusted, member, guest — role-based permissions gate every action. A Slack stranger can't tell your agent to push to main. You can. The agent knows who's in the room and what they can do."
+              reverse
+              visual={<PermissionsVisual />}
+            />
+          </Reveal>
+          <Reveal>
+            <FeatureRow
+              eyebrow="Plugins as imports"
+              title="Teach it something new? Just write TypeScript."
+              blurb="No IPC, no FFI, no weird config files. Plain .ts files that contribute tools, skills, channels, and commands — all in the language you already write."
+              visual={<PluginCode />}
+            />
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-3xl px-6 pb-28">
-          <div className="mb-10 text-center">
+        <section className="mx-auto max-w-3xl px-6 pb-36">
+          <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               one minute, end to end
             </p>
-            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+            <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
               Four commands. It&apos;s live.
             </h2>
-          </div>
-          <AnimatedTerminal variant="glow" />
+          </Reveal>
+          <Reveal delay={120}>
+            <AnimatedTerminal variant="glow" />
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-28">
-          <div className="mb-10 text-center">
+        <section className="mx-auto max-w-6xl px-6 pb-36">
+          <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">Use cases</p>
-            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">For every workflow</h2>
-          </div>
-          <UseCaseTabs />
+            <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">For every workflow</h2>
+          </Reveal>
+          <Reveal delay={120}>
+            <UseCaseTabs />
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-28">
-          <Testimonial />
+        <section className="mx-auto max-w-6xl px-6 pb-36">
+          <Reveal>
+            <Testimonial />
+          </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-28">
-          <div className="mb-10 text-center">
+        <section className="mx-auto max-w-6xl px-6 pb-36">
+          <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               how it compares
             </p>
-            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+            <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
               There are great agents. None had the right shape.
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-base text-zinc-600 dark:text-zinc-400">
               If you live in TypeScript and want plugins that are just imports, here&apos;s the honest landscape.
             </p>
-          </div>
-          <MarketingTable />
+          </Reveal>
+          <Reveal delay={120}>
+            <MarketingTable />
+          </Reveal>
         </section>
 
-        <section className="relative overflow-hidden border-y border-brand-100 bg-gradient-to-br from-brand-50 via-white to-brand-50 py-24 dark:border-brand-900/40 dark:from-brand-950/40 dark:via-zinc-950 dark:to-brand-950/40">
+        <section className="relative overflow-hidden border-y border-brand-100 bg-gradient-to-br from-brand-50 via-white to-brand-50 py-32 dark:border-brand-900/40 dark:from-brand-950/40 dark:via-zinc-950 dark:to-brand-950/40">
           <div
             aria-hidden
             className="absolute inset-0 opacity-40 dark:opacity-20"
@@ -511,9 +528,9 @@ export default function Home() {
               backgroundSize: '24px 24px',
             }}
           />
-          <div className="relative mx-auto max-w-3xl px-6 text-center">
+          <Reveal className="relative mx-auto max-w-3xl px-6 text-center">
             <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
-            <h2 className="mt-4 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">Ready to try it?</h2>
+            <h2 className="mt-4 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">Ready to try it?</h2>
             <p className="mx-auto mt-4 max-w-lg text-balance text-base text-zinc-600 dark:text-zinc-400">
               One command, one folder, one container. Trying it costs nothing.
             </p>
@@ -535,7 +552,7 @@ export default function Home() {
                 Star on GitHub
               </a>
             </div>
-          </div>
+          </Reveal>
         </section>
       </main>
 
