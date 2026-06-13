@@ -53,6 +53,31 @@ describe('version control dependency changes', () => {
   })
 })
 
+describe('agent folder vs project repo', () => {
+  // Guards the confusion where the agent treats its own backup repo as the
+  // project under development — tries to push it as a PR, or claims it has no
+  // remote so it "can't open the PR". Both prompts must keep the distinction:
+  // the agent folder is a private, remote-less backup repo; project work and PRs
+  // happen in a separate clone (e.g. /tmp/<repo>).
+  test.each([
+    ['default prompt', DEFAULT_SYSTEM_PROMPT],
+    ['slim prompt', SLIM_SYSTEM_PROMPT],
+  ])('states the agent folder is a backup repo, not a project checkout, in the %s', (_name, prompt) => {
+    expect(prompt).toMatch(/no (github )?remote/i)
+    expect(prompt).toMatch(/clone[\s\S]*?\/tmp/i)
+    expect(prompt).toMatch(/not a (software )?project (checkout|you develop)|not a checkout of any project/i)
+  })
+
+  test('the default prompt explicitly tells the agent where project work and PRs happen', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('it is your own private backup repo')
+    expect(start).toBeGreaterThan(-1)
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 900)
+    expect(section).toMatch(/not\*{0,2} a checkout of any project/i)
+    expect(section).toMatch(/open the PR from that clone/i)
+    expect(section).toMatch(/ask the user where it lives/i)
+  })
+})
+
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
     const now = new Date('2026-01-15T12:00:00+09:00')
