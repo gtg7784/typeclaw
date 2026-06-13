@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { renderShard } from '../frontmatter'
+import { renderReference } from '../references/frontmatter'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import { hybridSearch, type EmbedFn } from './hybrid'
 import { VectorStore, type VectorRow } from './store'
@@ -247,6 +248,21 @@ describe('hybridSearch', () => {
       // then it resolves to itself as a stream result
       const hit = results.find((result) => result.source === 'stream')
       expect(hit?.key).toBe(`2026-06-11#${fragmentId}`)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('collapses a matched reference chunk to its parent reference', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeReference(agentDir, 'ref-a', 'Reference A', 'The reference body mentions a sardonyx deployment runbook.')
+      store.upsert(row('reference:ref-a#0', 'ref-a', vector({ 0: 1 }), 'reference'))
+
+      const results = await hybridSearch('sardonyx deployment', store, agentDir, 5, embedFrom({ 0: 1 }))
+
+      expect(results).toContainEqual(expect.objectContaining({ source: 'reference', key: 'ref-a' }))
+      expect(results.map((result) => result.key)).not.toContain('ref-a#0')
     } finally {
       store.close()
     }
@@ -597,6 +613,7 @@ function createFixture(): { agentDir: string; store: VectorStore } {
   const agentDir = join(tmpdir(), `typeclaw-hybrid-${randomUUID()}`)
   testDirs.push(agentDir)
   mkdirSync(join(agentDir, 'memory', 'topics'), { recursive: true })
+  mkdirSync(join(agentDir, 'memory', 'references'), { recursive: true })
   const store = VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
   return { agentDir, store }
 }
@@ -605,6 +622,25 @@ function writeTopic(agentDir: string, slug: string, heading: string, body: strin
   writeFileSync(
     join(agentDir, 'memory', 'topics', `${slug}.md`),
     renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-06-11' }, body),
+  )
+}
+
+function writeReference(agentDir: string, slug: string, title: string, body: string): void {
+  writeFileSync(
+    join(agentDir, 'memory', 'references', `${slug}.md`),
+    renderReference(
+      {
+        title,
+        origin: 'episode',
+        created: '2026-06-10T00:00:00Z',
+        lastAccessed: '2026-06-10T00:00:00Z',
+        accessCount: 0,
+        pinned: false,
+        demoted: false,
+        tags: [],
+      },
+      body,
+    ),
   )
 }
 
@@ -639,7 +675,7 @@ function row(
   id: string,
   key: string,
   embedding: Float32Array,
-  source: 'topic' | 'stream' = 'topic',
+  source: 'topic' | 'stream' | 'reference' = 'topic',
 ): Omit<VectorRow, 'updatedAt'> {
   return {
     id,

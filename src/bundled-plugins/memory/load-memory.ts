@@ -95,7 +95,12 @@ function unchangedShardReference(slug: string): string {
   return `slug: \`${slug}\` — unchanged since earlier this session; call \`memory_search({ topic: "${slug}" })\` to re-read the full body.`
 }
 
-export type RetrievedMemoryItem = { source: 'topic' | 'stream'; key: string; heading: string; excerpt: string }
+export type RetrievedMemoryItem = {
+  source: 'topic' | 'stream' | 'reference'
+  key: string
+  heading: string
+  excerpt: string
+}
 
 // Over-budget vector turns inject the top-K relevant memories (not all shards).
 // Same `# Memory` framing + channel-bleed boundary as the direct path, so the
@@ -118,7 +123,7 @@ export function renderRetrievedMemorySection(
     lines.push(`## ${item.heading}`, '')
     if (!isChannel) {
       lines.push(item.excerpt.trimEnd(), '')
-    } else if (item.source === 'topic') {
+    } else if (item.source === 'topic' || item.source === 'reference') {
       lines.push(`slug: \`${item.key}\``, '')
     } else {
       lines.push(
