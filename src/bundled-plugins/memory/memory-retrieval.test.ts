@@ -99,6 +99,25 @@ describe('memoryRetrievalSubagent', () => {
     expect(await Bun.file(path.join(agentDir, payload.cacheFilePath)).text()).toContain('Deploy summary')
   })
 
+  test('a wedged run rejection is logged and re-propagated so the coalescing key releases', async () => {
+    const agentDir = await makeAgentDir()
+    const warnings: string[] = []
+    const logger: MemoryRetrievalLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const subagent = createMemoryRetrievalSubagent({ logger, timeoutMs: 30_000 })
+    const payload: MemoryRetrievalPayload = {
+      parentSessionId: 's1',
+      agentDir,
+      recentPrompt: 'What do we know about deploys?',
+      cacheFilePath: 'memory/.retrieval-cache/s1.md',
+    }
+    const timedOut: RunSession = async () => {
+      throw new Error('subagent run timed out after 30000ms')
+    }
+
+    await expect(subagent.handler!(context(agentDir, payload), timedOut)).rejects.toThrow('timed out')
+    expect(warnings.some((line) => line.includes('run threw') && line.includes('timed out'))).toBe(true)
+  })
+
   test('guard permits only the retrieval cache file, not other memory paths', async () => {
     const agentDir = await makeAgentDir()
     const origin = { kind: 'subagent' as const, subagent: 'memory-retrieval', parentSessionId: 's1' }

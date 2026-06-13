@@ -210,6 +210,33 @@ describe('vector session.turn.start hook', () => {
     expect(hybridSearchMock).not.toHaveBeenCalled()
   })
 
+  test('a failing hybrid search is caught: the turn yields empty memory instead of throwing', async () => {
+    // given: two over-budget shards (index mode) and a hybridSearch that rejects,
+    // simulating a runtime embed/store failure (OOM, corrupt DB, model crash)
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'b'.repeat(3000))
+    const errors: string[] = []
+    const failingSearch = mock(async () => {
+      throw new Error('embed failed: onnxruntime OOM')
+    })
+    const exports = await bootVectorPluginWith(failingSearch, 4096, errorCapturingLogger(errors))
+
+    // when: a turn runs over budget so the index path calls the failing search
+    const retrievalContext = { results: 'sentinel' }
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+
+    // then: the hook resolves (does not throw) and the turn is not crashed
+    await expect(
+      hook({ sessionId: 'ses_fail', agentDir, userPrompt: 'q', retrievalContext }, ctx),
+    ).resolves.toBeUndefined()
+    expect(failingSearch).toHaveBeenCalled()
+    // the pre-existing sentinel is left untouched (results was never reassigned),
+    // and the failure is logged through the plugin logger, not propagated
+    expect(retrievalContext.results).toBe('sentinel')
+    expect(errors.some((line) => line.includes('vector-retrieval failed'))).toBe(true)
+  })
+
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
     const memoryPlugin = createMemoryPluginForTests()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
@@ -274,11 +301,41 @@ async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPlu
   return memoryPlugin.plugin(ctx)
 }
 
+async function bootVectorPluginWith(
+  hybridSearch: typeof hybridSearchMock,
+  injectionBudgetBytes: number,
+  logger = createPluginLogger('memory'),
+) {
+  const memoryPlugin = createMemoryPluginForTests({ hybridSearch })
+  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
+  if (!parsed.success) throw new Error(parsed.error.message)
+  const ctx = createPluginContext({
+    name: 'memory',
+    version: undefined,
+    agentDir,
+    config: parsed.data,
+    logger,
+    permissions: noopPermissionService,
+    spawnSubagent: async () => {},
+    isBooted: () => true,
+  })
+  return memoryPlugin.plugin(ctx)
+}
+
 function capturingLogger(infos: string[]) {
   return {
     ...createPluginLogger('memory'),
     info: (msg: string) => {
       infos.push(msg)
+    },
+  }
+}
+
+function errorCapturingLogger(errors: string[]) {
+  return {
+    ...createPluginLogger('memory'),
+    error: (msg: string) => {
+      errors.push(msg)
     },
   }
 }

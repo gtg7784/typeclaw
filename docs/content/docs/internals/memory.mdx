@@ -6,7 +6,7 @@ icon: BrainCircuit
 
 The bundled `memory` plugin is the self-improving loop: it watches sessions, distills them into long-term beliefs, and feeds those beliefs back into future prompts — no hand-written prompts, no human in the loop. This page is the contributor-facing companion to the [memory loop concept](/docs/concepts/memory-loop); for the exhaustive reference (config table, every hook, observability log lines) see [`src/bundled-plugins/memory/README.md`](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).
 
-The plugin is auto-loaded by every agent. There is no `plugins[]` entry to add and no opt-out — configure it via the `memory` block in `typeclaw.json`. All `memory.*` fields are **restart-required**: the plugin reads them once at boot.
+The plugin is auto-loaded by every agent. There is no `plugins[]` entry to add and no opt-out — configure it via the `memory` block in `typeclaw.json` (see the [config table in the memory README](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md#config) for every field and default, including `memory.vector.enabled`, default `false`). All `memory.*` fields are **restart-required**: the plugin reads them once at boot. The `memory` block is plugin-owned config that passes through core's schema (`.catchall`), so it sits **outside the core `FIELD_EFFECTS` reload fence** — changing a `memory.*` field and running `typeclaw reload` silently no-ops with no "restart-required" warning. Restart the container to apply.
 
 ## Two surfaces, three subagents
 

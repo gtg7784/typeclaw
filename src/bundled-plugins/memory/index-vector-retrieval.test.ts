@@ -11,6 +11,7 @@ import { createMemoryPluginForTests } from './index'
 import { topicShardPath, topicsDir } from './paths'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
+import { buildStartupVectorIndex } from './vector/startup'
 import { VectorStore, type VectorRow } from './vector/store'
 
 const DIMS = 8
@@ -62,6 +63,33 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
     expect(retrievalContext.results).toContain('Satellites remain in orbit')
     expect(retrievalContext.results).not.toContain(QUERY)
     expect(retrievalContext.results).not.toContain('## Retrieved memory')
+  })
+
+  test('enabling vector on an agent with pre-existing topics builds the index at boot and retrieves on the first turn', async () => {
+    // given: an agent that ran with vector OFF — topic shards exist on disk but
+    // there is no `.vectors/index.db` yet (the migration entry condition)
+    await writeTopic(agentDir, 'orbital-mechanics', 'Orbital Mechanics', `Satellites remain in orbit. ${pad(5000)}`)
+
+    // when: the boot-time startup build runs (as src/run/index.ts does once vector
+    // is enabled), embedding every existing passage into a fresh index
+    const built = await buildStartupVectorIndex(agentDir, queryAligned())
+    expect(built).toEqual({ built: true, pruned: 0, count: 1 })
+
+    const infos: string[] = []
+    const exports = await bootVectorPlugin(4096, capturingLogger(infos))
+    const retrievalContext = { results: '' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_migrate', agentDir, userPrompt: QUERY, retrievalContext },
+      hookCtx(),
+    )
+
+    // then: the first turn retrieves the migrated topic through the real pipeline —
+    // no manual seedVector, the index came entirely from the startup build
+    const retrievalLog = infos.find((msg) => msg.startsWith('[vector-retrieval] mode=index '))
+    expect(retrievalLog).toContain('topic_results=1')
+    expect(retrievalContext.results).toContain('## Orbital Mechanics')
+    expect(retrievalContext.results).toContain('Satellites remain in orbit')
+    expect(retrievalContext.results).not.toContain(QUERY)
   })
 })
 
