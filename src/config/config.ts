@@ -801,7 +801,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   network: 'restart-required',
   sandbox: 'restart-required',
   tunnels: 'restart-required',
-  'memory.references.enabled': 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
   // Split: `match` lists are reload-safe (typeclaw role claim, hand-edits

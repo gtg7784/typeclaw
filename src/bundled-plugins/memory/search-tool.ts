@@ -48,7 +48,7 @@ export type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: n
 
 export type Matcher = (haystack: string) => boolean
 
-export function createMemorySearchTool(referencesEnabled: boolean) {
+export function createMemorySearchTool() {
   return defineTool({
     description:
       'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard with its full body — use it to read a topic whose slug you already have (e.g. a heading shown in injected memory). Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-first/stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
@@ -78,14 +78,12 @@ export function createMemorySearchTool(referencesEnabled: boolean) {
       const [shards, streamDays, allReferences] = await Promise.all([
         loadAllShards(ctx.agentDir, { logger: ctx.logger }),
         readAllUndreamedStreamDays(ctx.agentDir),
-        referencesEnabled ? loadAllReferences(ctx.agentDir, { logger: ctx.logger }) : Promise.resolve([]),
+        loadAllReferences(ctx.agentDir, { logger: ctx.logger }),
       ])
       const dateFilter = parseReferenceDateFilter(since, before)
       if ('error' in dateFilter) return resultToToolResult(dateFilter)
 
-      const references = referencesEnabled
-        ? allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
-        : []
+      const references = allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
       if (shards.length === 0 && streamDays.length === 0 && references.length === 0) {
         return resultToToolResult({ matches: [], truncatedAt: 0 })
       }
@@ -95,14 +93,13 @@ export function createMemorySearchTool(referencesEnabled: boolean) {
         const fallback = tokenFallback(query!, asRegex, shards, streamDays, references, { full, maxResults })
         if (fallback !== null) result = fallback
       }
-      if ('matches' in result && referencesEnabled) await bumpReturnedReferences(allReferences, result.matches)
+      if ('matches' in result) await bumpReturnedReferences(allReferences, result.matches)
       return resultToToolResult(result)
     },
   })
 }
 
-// Backward compatibility: default to references enabled
-export const memorySearchTool = createMemorySearchTool(true)
+export const memorySearchTool = createMemorySearchTool()
 
 // Exact slug lookup, so the agent can read a topic whose slug the per-turn
 // injection already showed it without re-running a fuzzy search for a body the

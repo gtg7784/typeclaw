@@ -10,7 +10,7 @@ import { VectorStore } from './store'
 
 export const VECTOR_INDEX_REL_PATH = join('memory', '.vectors', 'index.db')
 
-export async function runVectorIndexDoctor(agentDir: string, referencesEnabled = false): Promise<PluginCheckResult> {
+export async function runVectorIndexDoctor(agentDir: string): Promise<PluginCheckResult> {
   const dbPath = join(agentDir, VECTOR_INDEX_REL_PATH)
 
   if (!existsSync(dbPath)) {
@@ -26,7 +26,7 @@ export async function runVectorIndexDoctor(agentDir: string, referencesEnabled =
     return corruptionResult(dbPath, finding)
   }
 
-  const passages = await collectPassages(agentDir, referencesEnabled)
+  const passages = await collectPassages(agentDir)
   const wantedIds = new Set(passages.map((passage) => passage.id))
   const orphans = finding.rowIds.filter((id) => !wantedIds.has(id))
   const backfillCount = countBackfill(dbPath, passages)

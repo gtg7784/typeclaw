@@ -53,7 +53,6 @@ describe('vector session.turn.start hook', () => {
       agentDir,
       10,
       expect.any(Function),
-      false,
     )
     expect(retrievalContext.results).toContain('# Memory')
     expect(retrievalContext.results).toContain('## Second Topic')
