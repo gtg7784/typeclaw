@@ -58,6 +58,44 @@ describe('todo tools', () => {
     expect(res.details).toMatchObject({ ok: true, total: 2, remaining: 1 })
   })
 
+  test('todo_write auto-clears a list with no incomplete items left', async () => {
+    const { write } = toolsFor(TUI)
+    const res = await write.execute(
+      'c1',
+      {
+        todos: [
+          { content: 'a', status: 'completed' },
+          { content: 'b', status: 'cancelled' },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(res.details).toMatchObject({ ok: true, total: 2, remaining: 0 })
+    expect(await readTodos(agentDir, resolveTodoScope(TUI)!)).toEqual([])
+  })
+
+  test('todo_write persists a list that still has incomplete items', async () => {
+    const { write } = toolsFor(TUI)
+    await write.execute(
+      'c1',
+      {
+        todos: [
+          { content: 'a', status: 'completed' },
+          { content: 'b', status: 'pending' },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(await readTodos(agentDir, resolveTodoScope(TUI)!)).toEqual([
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'pending' },
+    ])
+  })
+
   test('channel and tui origins write to different scope files', async () => {
     await toolsFor(TUI).write.execute(
       'c1',

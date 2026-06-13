@@ -50,7 +50,8 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
       '(restart, crash, or a later turn), you can resume the remaining work instead of silently ' +
       'dropping it. Mark items `completed` (or `cancelled`) as you finish them by writing the full ' +
       'list again with updated statuses. This is a full replace, not a merge: include every item ' +
-      'you still care about on each call.',
+      'you still care about on each call. When the list you write has no incomplete items left, ' +
+      'the runtime clears it for you — no separate cleanup call is needed.',
     parameters: Type.Object({
       todos: Type.Array(TODO_ITEM, { description: 'The complete todo list. Replaces any prior list.' }),
     }),
@@ -61,8 +62,28 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
         return { content: [{ type: 'text' as const, text: NO_SCOPE_NOTICE }], details }
       }
       const todos = params.todos as Todo[]
-      await writeTodos(agentDir, scope, todos)
       const remaining = incompleteTodos(todos).length
+
+      // Collapse a fully-resolved list to empty in the SAME write that
+      // completed it, rather than relying on a follow-up todo_clear. That
+      // follow-up can be lost to an abort landing on the next turn, leaving a
+      // resolved list on disk (harmless to continuation, but it never gets
+      // cleaned up). Clearing here makes the cleanup race-free by construction.
+      if (remaining === 0 && todos.length > 0) {
+        await writeTodos(agentDir, scope, [])
+        const details: TodoToolDetails = { ok: true, total: todos.length, remaining: 0 }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `All ${todos.length} todo(s) done; list cleared.`,
+            },
+          ],
+          details,
+        }
+      }
+
+      await writeTodos(agentDir, scope, todos)
       const details: TodoToolDetails = { ok: true, total: todos.length, remaining }
       return {
         content: [
@@ -100,8 +121,10 @@ export function createTodoTools({ agentDir, getOrigin }: CreateTodoToolsOptions)
     name: 'todo_clear',
     label: 'Clear Todos',
     description:
-      'Empty your todo list for this session. Call this when all work is genuinely done or the ' +
-      'task was abandoned, so the runtime stops tracking pending work.',
+      'Empty your todo list for this session. Use this only to abandon a task with items still ' +
+      'incomplete, so the runtime stops tracking pending work. A list with no incomplete items ' +
+      'left is cleared automatically by `todo_write`, so you do not need to call this after ' +
+      'finishing everything.',
     parameters: Type.Object({}),
     async execute() {
       const scope = scopeForOrigin(getOrigin)
