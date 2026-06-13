@@ -6,6 +6,7 @@ export const MEMORY_DIR = 'memory'
 export const TOPICS_SUBDIR = 'topics'
 export const STREAMS_SUBDIR = 'streams'
 export const SKILLS_SUBDIR = 'skills'
+export const REFERENCES_SUBDIR = 'references'
 export const PRE_SHARD_BACKUP_FILENAME = 'MEMORY.md.pre-shard.bak'
 export const MIGRATING_TMPDIR = 'memory/.migrating'
 
@@ -13,6 +14,10 @@ const STREAM_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 export function topicsDir(agentDir: string): string {
   return join(agentDir, MEMORY_DIR, TOPICS_SUBDIR)
+}
+
+export function referencesDir(agentDir: string): string {
+  return join(agentDir, MEMORY_DIR, REFERENCES_SUBDIR)
 }
 
 export function streamsDir(agentDir: string): string {
@@ -24,6 +29,13 @@ export function topicShardPath(agentDir: string, slug: string): string {
     throw new Error(`invalid topic slug: ${JSON.stringify(slug)}`)
   }
   return join(agentDir, MEMORY_DIR, TOPICS_SUBDIR, `${slug}.md`)
+}
+
+export function referenceFilePath(agentDir: string, slug: string): string {
+  if (slug.includes('..') || slug.includes('/') || slug.includes('\\') || slug.startsWith('.')) {
+    throw new Error(`invalid reference slug: ${JSON.stringify(slug)}`)
+  }
+  return join(agentDir, MEMORY_DIR, REFERENCES_SUBDIR, `${slug}.md`)
 }
 
 export function streamFilePath(agentDir: string, date: string): string {
