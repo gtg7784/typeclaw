@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { referenceFilePath, referencesDir } from '../paths'
-import { __resetReferenceCacheForTests, loadAllReferences } from './load-references'
+import { parseReference } from './frontmatter'
+import { __resetReferenceCacheForTests, bumpReferenceAccess, loadAllReferences } from './load-references'
 
 const tmpRoots: string[] = []
 
@@ -45,6 +46,36 @@ describe('loadAllReferences', () => {
 
     expect(second).toBe(first)
     expect(second[0]).toBe(first[0])
+  })
+})
+
+describe('bumpReferenceAccess', () => {
+  test('increments accessCount and advances lastAccessed while preserving the body', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'sql-query', 'SQL query', 'SELECT 1;\n')
+
+    await bumpReferenceAccess(agentDir, ['sql-query'])
+
+    const updated = parseReference(await readFile(referenceFilePath(agentDir, 'sql-query'), 'utf8'))
+    expect(updated.frontmatter.accessCount).toBe(4)
+    expect(updated.frontmatter.lastAccessed).not.toBe('2026-06-13T09:10:00+09:00')
+    expect(updated.body).toBe('SELECT 1;\n')
+  })
+
+  test('skips a missing slug without throwing', async () => {
+    const agentDir = await makeAgentDir()
+
+    await expect(bumpReferenceAccess(agentDir, ['does-not-exist'])).resolves.toBeUndefined()
+  })
+
+  test('deduplicates repeated slugs so accessCount advances by one', async () => {
+    const agentDir = await makeAgentDir()
+    await writeReference(agentDir, 'dup', 'Dup', 'body\n')
+
+    await bumpReferenceAccess(agentDir, ['dup', 'dup', 'dup'])
+
+    const updated = parseReference(await readFile(referenceFilePath(agentDir, 'dup'), 'utf8'))
+    expect(updated.frontmatter.accessCount).toBe(4)
   })
 })
 
