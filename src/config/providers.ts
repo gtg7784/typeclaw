@@ -723,14 +723,15 @@ export const KNOWN_PROVIDERS = {
   //
   // Model lineup mirrors the OpenAI-compatible model list on platform.kimi.ai
   // as of 2026-06-14: kimi-k2.7-code (flagship coding model, always-on thinking,
-  // text+image), kimi-k2.6 (general flagship, text+image), kimi-k2.5 (general,
-  // text+image), and kimi-k2-thinking (deep-reasoning specialist, text-only).
-  // The legacy moonshot-v1-* and the soon-discontinued k2-0905/turbo previews
-  // are intentionally omitted in favor of the current K2 generation. Costs are
-  // USD per 1M tokens from platform.kimi.ai pricing; Moonshot publishes no
-  // cache-write surcharge, so cacheWrite is 0. (pi-ai's `input` array only
-  // models text/image — Moonshot's video input on the K2.x models can't be
-  // expressed here, so it is omitted.)
+  // text+image), kimi-k2.6 (general flagship, text+image), and kimi-k2.5
+  // (general, text+image). All three fold reasoning in via the `thinking`
+  // request parameter, so no separate "thinking" model id is needed. The whole
+  // legacy kimi-k2 series (kimi-k2-thinking, k2-0905/0711/turbo previews) was
+  // officially discontinued on 2026-05-25 and is intentionally omitted, as are
+  // the legacy moonshot-v1-* models. Costs are USD per 1M tokens from
+  // platform.kimi.ai pricing; Moonshot publishes no cache-write surcharge, so
+  // cacheWrite is 0. (pi-ai's `input` array only models text/image — Moonshot's
+  // video input on the K2.x models can't be expressed here, so it is omitted.)
   moonshot: {
     id: 'moonshot',
     name: 'Moonshot (Kimi)',
@@ -771,18 +772,6 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.moonshot.ai/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 0.6, output: 2.5, cacheRead: 0.15, cacheWrite: 0 },
-        contextWindow: 256000,
-        maxTokens: 64000,
-      },
-      'kimi-k2-thinking': {
-        id: 'kimi-k2-thinking',
-        name: 'Kimi K2 Thinking',
-        api: 'openai-completions',
-        provider: 'moonshot',
-        baseUrl: 'https://api.moonshot.ai/v1',
-        reasoning: true,
-        input: ['text'],
         cost: { input: 0.6, output: 2.5, cacheRead: 0.15, cacheWrite: 0 },
         contextWindow: 256000,
         maxTokens: 64000,

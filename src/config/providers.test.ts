@@ -215,15 +215,19 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
-  test('moonshot ships the current K2 generation; only kimi-k2-thinking is text-only', () => {
+  test('moonshot ships the current multimodal K2 generation (deprecated k2 series omitted)', () => {
     const modelIds = Object.keys(KNOWN_PROVIDERS.moonshot.models)
-    expect(modelIds).toEqual(['kimi-k2.7-code', 'kimi-k2.6', 'kimi-k2.5', 'kimi-k2-thinking'])
+    expect(modelIds).toEqual(['kimi-k2.7-code', 'kimi-k2.6', 'kimi-k2.5'])
     for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.moonshot.models)) {
-      const expectsImage = modelId !== 'kimi-k2-thinking'
-      expect((model.input as ReadonlyArray<string>).includes('image'), `moonshot/${modelId} vision drift`).toBe(
-        expectsImage,
-      )
+      expect((model.input as ReadonlyArray<string>).includes('image'), `moonshot/${modelId} vision drift`).toBe(true)
     }
+  })
+
+  test('moonshot omits the kimi-k2 series discontinued on 2026-05-25', () => {
+    const modelIds = Object.keys(KNOWN_PROVIDERS.moonshot.models)
+    expect(modelIds).not.toContain('kimi-k2-thinking')
+    expect(modelIds).not.toContain('kimi-k2-0905-preview')
+    expect(modelIds).not.toContain('kimi-k2-turbo-preview')
   })
 
   test('moonshot-coding ships only the kimi-for-coding alias billed at zero per-token', () => {
@@ -373,7 +377,7 @@ describe('listKnownModelRefs', () => {
   test('includes both moonshot and moonshot-coding model refs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('moonshot/kimi-k2.7-code')
-    expect(refs).toContain('moonshot/kimi-k2-thinking')
+    expect(refs).toContain('moonshot/kimi-k2.5')
     expect(refs).toContain('moonshot-coding/kimi-for-coding')
   })
 
@@ -441,6 +445,7 @@ describe('defaultThinkingLevelForRef', () => {
     expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-flash')).toBeUndefined()
     expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-pro')).toBeUndefined()
     expect(defaultThinkingLevelForRef('moonshot/kimi-k2.7-code')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('moonshot/kimi-k2.5')).toBeUndefined()
     expect(defaultThinkingLevelForRef('moonshot-coding/kimi-for-coding')).toBeUndefined()
   })
 
