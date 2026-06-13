@@ -118,17 +118,17 @@ describe('embedder batch-size observability', () => {
     console.info = originalInfo
   })
 
-  test('logs the single-pass batch size at info for a small batch', async () => {
+  test('logs the total embed size and chunk width at info for a small build', async () => {
     const { embed } = await import('./embedder')
 
     await embed(['short a', 'short b'], 'passage')
 
-    const batchLine = notices.find((n) => n.includes('in a single pass'))
+    const batchLine = notices.find((n) => n.includes('vector embedding'))
     expect(batchLine).toContain('2 passage input(s)')
-    expect(warnings.some((w) => w.includes('in a single pass'))).toBe(false)
+    expect(batchLine).toContain('chunked at')
   })
 
-  test('warns when the single-pass batch is large enough to risk an OOM-killed boot', async () => {
+  test('notes a large build is slow but does not warn — chunking removed the OOM risk', async () => {
     const { embed } = await import('./embedder')
 
     await embed(
@@ -136,8 +136,8 @@ describe('embedder batch-size observability', () => {
       'passage',
     )
 
-    const batchWarn = warnings.find((w) => w.includes('in a single pass'))
-    expect(batchWarn).toContain('256 passage input(s)')
-    expect(batchWarn).toContain('OOM')
+    const batchLine = notices.find((n) => n.includes('256 passage input(s)'))
+    expect(batchLine).toContain('may take a while')
+    expect(warnings.some((w) => w.includes('vector embedding'))).toBe(false)
   })
 })
