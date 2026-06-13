@@ -4,14 +4,15 @@ import { stripCitationLines } from '../citations'
 import { fragmentContentHash } from '../fragment-parser'
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
+import { loadAllReferences } from '../references/load-references'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import type { VectorStore } from './store'
-import { fragmentEmbeddableText } from './truncation'
+import { boundEmbeddableText, fragmentEmbeddableText } from './truncation'
 
 export type Passage = {
   id: string
-  source: 'topic' | 'stream'
+  source: 'topic' | 'stream' | 'reference'
   key: string
   text: string
   contentHash: string
@@ -28,8 +29,26 @@ export function topicPassage(slug: string, heading: string, body: string): Passa
 }
 
 export async function collectPassages(agentDir: string): Promise<Passage[]> {
-  const [shards, streamDays] = await Promise.all([loadAllShards(agentDir), readAllUndreamedStreamDays(agentDir)])
-  return buildPassages(shards, streamDays)
+  const [shards, streamDays, references] = await Promise.all([
+    loadAllShards(agentDir),
+    readAllUndreamedStreamDays(agentDir),
+    referencePassages(agentDir),
+  ])
+  return [...buildPassages(shards, streamDays), ...references]
+}
+
+export async function referencePassages(agentDir: string): Promise<Passage[]> {
+  const references = await loadAllReferences(agentDir)
+  return references.flatMap((reference): Passage[] => {
+    if (reference.frontmatter.demoted) return []
+    return chunkReferenceBody(reference.body).map((chunk, chunkIdx) => ({
+      id: `reference:${reference.slug}#${chunkIdx}`,
+      source: 'reference',
+      key: reference.slug,
+      text: chunk,
+      contentHash: hashContent(chunk),
+    }))
+  })
 }
 
 export function findMissingPassages(store: VectorStore, passages: Passage[]): Passage[] {
@@ -67,6 +86,28 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
       }),
     ),
   ]
+}
+
+function chunkReferenceBody(body: string): string[] {
+  if (body.length === 0) return ['']
+
+  const chunks: string[] = []
+  let remaining = body
+  while (remaining.length > 0) {
+    const bounded = boundEmbeddableText(remaining)
+    if (!bounded.bounded) {
+      chunks.push(bounded.text)
+      break
+    }
+    if (bounded.text.length === 0) {
+      chunks.push(remaining[0]!)
+      remaining = remaining.slice(1)
+      continue
+    }
+    chunks.push(bounded.text)
+    remaining = remaining.slice(bounded.text.length)
+  }
+  return chunks
 }
 
 function hashContent(content: string): string {
