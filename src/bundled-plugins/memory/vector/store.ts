@@ -100,11 +100,16 @@ export class VectorStore {
   // partial re-embed (mixed variants mid-rebuild) at reduced recall, never
   // wrong scores.
   queryScored(embedding: Float32Array, modelId: string): ScoredVectorRow[] {
+    // The query vector's magnitude is identical for every row in this scan, so
+    // hoist it out of the per-row cosine instead of recomputing N times (each
+    // recompute is 768 multiply-adds + a sqrt). Behavior is unchanged — same
+    // cosine values, fewer operations on the brute-force hot path.
+    const queryMagnitude = magnitude(embedding)
     return this.db
       .query<StoredVectorRow, [string, number]>('SELECT * FROM vectors WHERE model = ? AND dims = ?')
       .all(modelId, embedding.length)
       .map(toVectorRow)
-      .map((row) => ({ row, score: cosineSimilarity(embedding, row.embedding) }))
+      .map((row) => ({ row, score: cosineSimilarity(embedding, queryMagnitude, row.embedding) }))
       .sort((a, b) => b.score - a.score)
   }
 
@@ -172,19 +177,27 @@ function blobToFloat32Array(blob: Uint8Array): Float32Array {
   return new Float32Array(buffer)
 }
 
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+function magnitude(v: Float32Array): number {
+  let sumSquares = 0
+  for (let i = 0; i < v.length; i++) {
+    const value = v[i] ?? 0
+    sumSquares += value * value
+  }
+  return Math.sqrt(sumSquares)
+}
+
+function cosineSimilarity(a: Float32Array, aMagnitude: number, b: Float32Array): number {
   let dot = 0
-  let aMagnitude = 0
-  let bMagnitude = 0
+  let bSumSquares = 0
 
   for (let i = 0; i < a.length; i++) {
     const aValue = a[i] ?? 0
     const bValue = b[i] ?? 0
     dot += aValue * bValue
-    aMagnitude += aValue * aValue
-    bMagnitude += bValue * bValue
+    bSumSquares += bValue * bValue
   }
 
+  const bMagnitude = Math.sqrt(bSumSquares)
   if (aMagnitude === 0 || bMagnitude === 0) return 0
-  return dot / (Math.sqrt(aMagnitude) * Math.sqrt(bMagnitude))
+  return dot / (aMagnitude * bMagnitude)
 }
