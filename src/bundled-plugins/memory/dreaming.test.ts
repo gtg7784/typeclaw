@@ -144,12 +144,14 @@ async function invokeDreaming(
     runSession?: RunSession
     throwOnRunSession?: boolean
     vectorEmbedFn?: EmbedFn
+    referencesEnabled?: boolean
   } = {},
 ): Promise<{ prompts: string[] }> {
   const subagent = createDreamingSubagent({
     commitMemory: options.commitMemory ?? (async () => {}),
     logger: options.logger ?? silentLogger,
     ...(options.vectorEmbedFn !== undefined ? { vectorEmbedFn: options.vectorEmbedFn } : {}),
+    ...(options.referencesEnabled !== undefined ? { referencesEnabled: options.referencesEnabled } : {}),
   })
   const captured = captureRunSession()
   const runSession = options.throwOnRunSession
@@ -662,7 +664,7 @@ describe('dreaming subagent (compaction wiring)', () => {
     await writeFile(streamFile('2026-04-27'), fragmentLine('tick'))
     await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
 
-    await invokeDreaming(agentDir)
+    await invokeDreaming(agentDir, { referencesEnabled: true })
 
     const raw = await readFile(referenceFile('stale-ref'), 'utf8')
     expect(parseReference(raw).frontmatter.demoted).toBe(true)
@@ -673,11 +675,11 @@ describe('dreaming subagent (compaction wiring)', () => {
     await writeFile(streamFile('2026-04-27'), fragmentLine('first'))
     await writeReference('stale-ref', referenceText({ created: isoDaysAgo(40), lastAccessed: isoDaysAgo(40) }))
 
-    await invokeDreaming(agentDir)
+    await invokeDreaming(agentDir, { referencesEnabled: true })
     expect(parseReference(await readFile(referenceFile('stale-ref'), 'utf8')).frontmatter.demoted).toBe(true)
 
     await writeFile(streamFile('2026-04-28'), fragmentLine('second'))
-    await invokeDreaming(agentDir)
+    await invokeDreaming(agentDir, { referencesEnabled: true })
 
     await expect(readFile(referenceFile('stale-ref'), 'utf8')).rejects.toThrow()
   })
@@ -733,7 +735,7 @@ describe('dreaming subagent (compaction wiring)', () => {
     store.upsert(vectorRow('reference:ref-x#0', 'reference', 'ref-x', vector({ 0: 1 }), 'ref-hash'))
     store.close()
 
-    await invokeDreaming(agentDir)
+    await invokeDreaming(agentDir, { referencesEnabled: true })
 
     await expect(readFile(referenceFile('ref-x'), 'utf8')).rejects.toThrow()
     const topic = await readFile(topicShard('with-ref'), 'utf8')
@@ -756,7 +758,7 @@ describe('dreaming subagent (compaction wiring)', () => {
     const infos: string[] = []
     const logger: DreamingLogger = { info: (m) => infos.push(m), warn: () => {}, error: () => {} }
 
-    await invokeDreaming(agentDir, { logger })
+    await invokeDreaming(agentDir, { logger, referencesEnabled: true })
 
     const done = infos.find((m) => m.startsWith('[dreaming] done'))
     expect(done).toContain('references_demoted=1')

@@ -356,7 +356,14 @@ function isReferenceDecayExempt(ref: Reference): boolean {
 
 function referenceScore(ref: Reference, nowMs: number): number {
   const recencyDays = referenceDormancyDays(ref, nowMs)
-  return (ref.frontmatter.accessCount + 1) * Math.exp(-recencyDays / REFERENCE_HALF_LIFE_DAYS)
+  const ageDays = Math.max(0, (nowMs - new Date(ref.frontmatter.created).getTime()) / MS_PER_DAY)
+  // Combined decay: access-recency dominates, age provides a floor decay
+  // score = (accessCount + 1) * exp(-recencyDays / halfLife) * exp(-ageDays / (halfLife * 4))
+  return (
+    (ref.frontmatter.accessCount + 1) *
+    Math.exp(-recencyDays / REFERENCE_HALF_LIFE_DAYS) *
+    Math.exp(-ageDays / (REFERENCE_HALF_LIFE_DAYS * 4))
+  )
 }
 
 function referenceDormancyDays(ref: Reference, nowMs: number): number {
@@ -1285,12 +1292,14 @@ export type CreateDreamingSubagentOptions = {
   commitMemory?: (cwd: string) => Promise<void>
   logger?: DreamingLogger
   vectorEmbedFn?: EmbedFn
+  referencesEnabled?: boolean
 }
 
 export function createDreamingSubagent(options: CreateDreamingSubagentOptions = {}): Subagent<DreamingPayload> {
   const commit = options.commitMemory ?? commitMemorySnapshot
   const logger = options.logger ?? consoleLogger
   const vectorEmbedFn = options.vectorEmbedFn ?? embed
+  const referencesEnabled = options.referencesEnabled ?? false
 
   return {
     systemPrompt: DREAMING_SYSTEM_PROMPT,
@@ -1395,7 +1404,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         })
       }
 
-      const { referencesDemoted, referencesEvicted } = await runReferenceSaturationPass(ctx.payload.agentDir, logger)
+      const { referencesDemoted, referencesEvicted } = referencesEnabled
+        ? await runReferenceSaturationPass(ctx.payload.agentDir, logger)
+        : { referencesDemoted: 0, referencesEvicted: 0 }
 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)

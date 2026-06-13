@@ -256,16 +256,23 @@ describe('memoryLoggerSubagent', () => {
     expect(memoryLoggerSubagent.systemPrompt).toBe(MEMORY_LOGGER_SYSTEM_PROMPT)
   })
 
-  test('declares one built-in tool (read) and four custom tools (find_entry, append, store_reference, watermark advance)', () => {
+  test('declares one built-in tool (read) and three custom tools by default (find_entry, append, watermark advance)', () => {
     expect(memoryLoggerSubagent.tools).toBeDefined()
     expect(memoryLoggerSubagent.tools!.length).toBe(1)
     expect(memoryLoggerSubagent.customTools).toBeDefined()
-    expect(memoryLoggerSubagent.customTools!.length).toBe(4)
+    expect(memoryLoggerSubagent.customTools!.length).toBe(3)
     const descriptions = memoryLoggerSubagent.customTools!.map((t) => t.description)
     expect(descriptions.some((d) => d.includes('Locate a session-transcript entry'))).toBe(true)
     expect(descriptions.some((d) => d.includes('Append a memory fragment'))).toBe(true)
-    expect(descriptions.some((d) => d.includes('store_reference'))).toBe(true)
     expect(descriptions.some((d) => d.includes('Advance the daily-stream watermark'))).toBe(true)
+  })
+
+  test('includes store_reference tool when referencesEnabled is true', () => {
+    const subagentWithReferences = createMemoryLoggerSubagent({ referencesEnabled: true })
+    expect(subagentWithReferences.customTools).toBeDefined()
+    expect(subagentWithReferences.customTools!.length).toBe(4)
+    const descriptions = subagentWithReferences.customTools!.map((t) => t.description)
+    expect(descriptions.some((d) => d.includes('store_reference'))).toBe(true)
   })
 
   test('declares a defensive tool-result byte budget on the read tool so a malfunctioning find_entry cannot cause unbounded chunked reads', () => {

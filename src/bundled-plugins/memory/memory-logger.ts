@@ -312,6 +312,7 @@ const consoleLogger: MemoryLoggerLogger = {
 export type CreateMemoryLoggerSubagentOptions = {
   logger?: MemoryLoggerLogger
   onFragmentsAppended?: FragmentsAppendedHook
+  referencesEnabled?: boolean
 }
 
 export function createMemoryLoggerSubagent(
@@ -320,6 +321,10 @@ export function createMemoryLoggerSubagent(
   const logger = options.logger ?? consoleLogger
   const appendTool = createAppendTool(options.onFragmentsAppended)
   const storeReferenceTool = createStoreReferenceTool()
+  const customTools =
+    options.referencesEnabled === true
+      ? [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool]
+      : [findEntryTool, appendTool, advanceWatermarkTool]
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
     // Logging is "read transcript past the watermark, decide 0-N fragments,
@@ -330,7 +335,7 @@ export function createMemoryLoggerSubagent(
     // falls back to `default` with a one-time warning when unconfigured.
     profile: 'fast',
     tools: [readTool],
-    customTools: [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool],
+    customTools,
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     // 768 KB read budget. Sized to cover one full buffer-trip cycle:

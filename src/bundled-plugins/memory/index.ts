@@ -396,13 +396,17 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         subagents: {
           'memory-logger': createMemoryLoggerSubagent({
             logger: subagentLogger,
+            referencesEnabled: ctx.config.references.enabled,
             ...(appendVectorStore !== undefined ? { onFragmentsAppended: makeAppendHook(appendVectorStore) } : {}),
           }),
           'memory-retrieval': createMemoryRetrievalSubagent({
             logger: subagentLogger,
             timeoutMs: retrievalSpawnTimeoutMs,
           }),
-          dreaming: createDreamingSubagent({ logger: subagentLogger }),
+          dreaming: createDreamingSubagent({
+            logger: subagentLogger,
+            referencesEnabled: ctx.config.references.enabled,
+          }),
         },
         tools: {
           memory_search: memorySearchTool,
