@@ -7,6 +7,7 @@ import { formatLocalDate } from '@/shared'
 import { advanceWatermarkTool, createAppendTool, type FragmentsAppendedHook } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { streamFilePath, streamsDir } from './paths'
+import { createStoreReferenceTool } from './references/store-reference-tool'
 import { readEvents } from './stream-io'
 import { readLatestWatermark } from './watermark'
 
@@ -71,7 +72,7 @@ A separate \`dreaming\` subagent runs later. It consolidates your fragments into
 
 **You do not read \`memory/topics/\`.** Cross-shard contradictions, violations of prior commitments, and semantic dedup against long-term memory are dreaming's job — dreaming has the global view and the authoritative pipeline position to resolve them; you do not. Your input is the parent transcript past your watermark, plus (optionally) today's daily stream for local dedup. That is enough. If a fragment you would write happens to recur a fact already in topics, dreaming will consolidate it — recurrence across distinct days is the signal dreaming uses to promote tentative facts to confident ones, so writing the recurrence is the correct behavior, not a duplicate.
 
-You have exactly four tools: \`read\`, \`find_entry\`, \`append\`, and the watermark-advance tool. You cannot run shell commands, overwrite files, or edit existing content.
+You have exactly five tools: \`read\`, \`find_entry\`, \`append\`, \`store_reference\`, and the watermark-advance tool. You cannot run shell commands, overwrite files, or edit existing content.
 
 # Reading the transcript past the watermark
 
@@ -102,6 +103,16 @@ Apply the bar this way: if a fact clearly fails it, skip. If it clearly passes, 
 Two failures matter: over-writing noise, and under-writing durable one-time facts. Over-writing is the more common mistake, so keep the bar high — but once the bar is met, don't second-guess a real fact into a skip.
 
 **Explicit user teaching is not a separate tie-breaker — it is durability evidence.** A clear request to teach, train, remember, or internalize specific content is itself proof that the content is durable, so it satisfies the bar; evaluate it under the "Content the user explicitly taught the agent" category below. It satisfies durability only — it does not bypass the scope, source, safety, or passive-context limits stated there.
+
+# Verbatim references (store_reference tool)
+
+When the user explicitly asks to remember something verbatim — a SQL query, a code block, a runbook, a pasted spec — use \`store_reference\` to capture it as-is. This is separate from the fragment capture bar: references are for verbatim artifacts, not distilled facts.
+
+Call \`store_reference({ title, body, origin: 'episode', tags: [] })\` with the verbatim content. The tool returns a slug. Then, when you write the fragment for this session event (if any), include the slug in the \`references\` field of \`append\`: \`append({ ..., references: ['<slug>'] })\`.
+
+If you store a reference but have no other durable fact to fragment, you still MUST write a fragment that cites the reference — use topic "verbatim reference stored" and a one-sentence body naming what was stored. This ensures the reference is linked into the stream.
+
+Do NOT distill or summarize the reference body. Store it byte-for-byte as the user provided it.
 
 # What to capture
 
@@ -176,7 +187,7 @@ Recurrence is not duplication. If the transcript shows the same durable preferen
 
 # Fragment format
 
-Call \`append\` with \`{topic, body, source, entry, latestEntryId}\`. The runtime serializes your call into a JSON line in the daily stream — you never write raw JSON. \`source\` is the parent session id from the user message. \`entry\` is the specific transcript-entry-id this fragment anchors to. \`latestEntryId\` is the latest transcript-entry-id you evaluated in this run; it advances the watermark and may equal \`entry\` or be later.
+Call \`append\` with \`{topic, body, source, entry, latestEntryId}\` or \`{topic, body, source, entry, latestEntryId, references}\` when citing stored references. The runtime serializes your call into a JSON line in the daily stream — you never write raw JSON. \`source\` is the parent session id from the user message. \`entry\` is the specific transcript-entry-id this fragment anchors to. \`latestEntryId\` is the latest transcript-entry-id you evaluated in this run; it advances the watermark and may equal \`entry\` or be later. \`references\` is an optional array of reference slugs returned by \`store_reference\`.
 
 - \`entry\` is the stable id of the **specific** transcript entry that anchors this fragment's evidence. Each fragment carries its own entry id — do not stamp every fragment with the same "latest evaluated" id. The provenance is per-fragment.
 - \`topic\` is a short noun phrase naming what the fragment is about.
@@ -308,6 +319,7 @@ export function createMemoryLoggerSubagent(
 ): Subagent<MemoryLoggerPayload> {
   const logger = options.logger ?? consoleLogger
   const appendTool = createAppendTool(options.onFragmentsAppended)
+  const storeReferenceTool = createStoreReferenceTool()
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
     // Logging is "read transcript past the watermark, decide 0-N fragments,
@@ -318,7 +330,7 @@ export function createMemoryLoggerSubagent(
     // falls back to `default` with a one-time warning when unconfigured.
     profile: 'fast',
     tools: [readTool],
-    customTools: [findEntryTool, appendTool, advanceWatermarkTool],
+    customTools: [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool],
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     // 768 KB read budget. Sized to cover one full buffer-trip cycle:

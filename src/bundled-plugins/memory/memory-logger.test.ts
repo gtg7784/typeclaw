@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,10 @@ import {
   memoryLoggerSubagent,
   type MemoryLoggerPayload,
 } from './memory-logger'
+import { streamFilePath } from './paths'
+import { parseReference } from './references/frontmatter'
+import { storeReferenceTool } from './references/store-reference-tool'
+import { readEvents } from './stream-io'
 
 const silentLogger: MemoryLoggerLogger = { info: () => {}, warn: () => {}, error: () => {} }
 const silentSubagent = createMemoryLoggerSubagent({ logger: silentLogger })
@@ -252,14 +256,15 @@ describe('memoryLoggerSubagent', () => {
     expect(memoryLoggerSubagent.systemPrompt).toBe(MEMORY_LOGGER_SYSTEM_PROMPT)
   })
 
-  test('declares one built-in tool (read) and three custom tools (find_entry, append, watermark advance)', () => {
+  test('declares one built-in tool (read) and four custom tools (find_entry, append, store_reference, watermark advance)', () => {
     expect(memoryLoggerSubagent.tools).toBeDefined()
     expect(memoryLoggerSubagent.tools!.length).toBe(1)
     expect(memoryLoggerSubagent.customTools).toBeDefined()
-    expect(memoryLoggerSubagent.customTools!.length).toBe(3)
+    expect(memoryLoggerSubagent.customTools!.length).toBe(4)
     const descriptions = memoryLoggerSubagent.customTools!.map((t) => t.description)
     expect(descriptions.some((d) => d.includes('Locate a session-transcript entry'))).toBe(true)
     expect(descriptions.some((d) => d.includes('Append a memory fragment'))).toBe(true)
+    expect(descriptions.some((d) => d.includes('store_reference'))).toBe(true)
     expect(descriptions.some((d) => d.includes('Advance the daily-stream watermark'))).toBe(true)
   })
 
@@ -591,7 +596,63 @@ describe('memoryLoggerSubagent', () => {
     expect(existsSync(join(agentDir, 'memory', 'streams', `${today}.jsonl`))).toBe(true)
   })
 
+  test('run can store a verbatim reference and append a fragment citing it', async () => {
+    const agentDir = makeAgentDir()
+    const sql = 'SELECT * FROM users WHERE id = 1'
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(
+      transcript,
+      `${JSON.stringify({ id: 'entry_sql', role: 'user', text: `remember this query verbatim: ${sql}` })}\n`,
+    )
+
+    const runSession: RunSession = async () => {
+      const stored = await storeReferenceTool.execute(
+        { title: 'User lookup query', body: sql, origin: 'episode', tags: [] },
+        toolCtx(agentDir),
+      )
+      const slug = (stored.details as { slug: string }).slug
+      await appendTool.execute(
+        {
+          topic: 'verbatim reference stored',
+          body: 'The user explicitly asked to remember the user lookup SQL query verbatim.',
+          source: 'ses_abc',
+          entry: 'entry_sql',
+          latestEntryId: 'entry_sql',
+          references: [slug],
+        },
+        toolCtx(agentDir),
+      )
+    }
+    const ctx: SubagentContext<MemoryLoggerPayload> = {
+      userPrompt: '',
+      agentDir,
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    }
+
+    await silentSubagent.handler!(ctx, runSession)
+
+    const referenceText = readFileSync(join(agentDir, 'memory', 'references', 'user-lookup-query.md'), 'utf8')
+    expect(parseReference(referenceText).body).toBe(sql)
+    const events = await readEvents(streamFilePath(agentDir, formatLocalDate()))
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'fragment',
+        topic: 'verbatim reference stored',
+        references: ['user-lookup-query'],
+      }),
+    )
+  })
+
   test('the default exported memoryLoggerSubagent still has a handler (back-compat)', () => {
     expect(memoryLoggerSubagent.handler).toBeDefined()
   })
 })
+
+function toolCtx(agentDir: string) {
+  return {
+    signal: undefined,
+    sessionId: 'test',
+    agentDir,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }
+}
