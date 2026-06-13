@@ -88,11 +88,18 @@ export class Embedder {
       type,
     )
 
+    // Gate per-chunk progress on the same LARGE_EMBED threshold as the up-front
+    // line: only the startup index migration runs long enough for "wedged or
+    // just slow?" to be a real question. Smaller embeds (queries, per-write
+    // upserts) finish in a pass or two and would only spam the logs.
+    const reportProgress = prefixed.length >= LARGE_EMBED
+
     const embeddings: Float32Array[] = []
     for (let start = 0; start < prefixed.length; start += EMBED_BATCH_SIZE) {
       const batch = prefixed.slice(start, start + EMBED_BATCH_SIZE)
       const output = await this.extractor(batch, { pooling: 'mean', normalize: true })
       embeddings.push(...toEmbeddings(output.data, batch.length))
+      if (reportProgress) logEmbedProgress(embeddings.length, prefixed.length, type)
     }
     return embeddings
   }
@@ -138,6 +145,11 @@ function logEmbedBatch(count: number, type: EmbedType): void {
   } else {
     console.info(line)
   }
+}
+
+function logEmbedProgress(done: number, total: number, type: EmbedType): void {
+  const pct = Math.floor((done / total) * 100)
+  console.info(`[memory] vector embedding: ${done}/${total} ${type} input(s) embedded (${pct}%)`)
 }
 
 function configureTransformers(env: TransformersEnv): void {

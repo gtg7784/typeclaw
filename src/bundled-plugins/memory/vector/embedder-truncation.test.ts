@@ -141,3 +141,42 @@ describe('embedder batch-size observability', () => {
     expect(warnings.some((w) => w.includes('vector embedding'))).toBe(false)
   })
 })
+
+describe('embedder progress observability', () => {
+  let notices: string[]
+  const originalInfo = console.info
+
+  beforeEach(() => {
+    notices = []
+    console.info = (message?: unknown) => {
+      notices.push(String(message))
+    }
+  })
+
+  afterEach(() => {
+    console.info = originalInfo
+  })
+
+  test('reports per-chunk progress for a large build, ending at 100%', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(
+      Array.from({ length: 256 }, (_, i) => `passage ${i}`),
+      'passage',
+    )
+
+    const progress = notices.filter((n) => n.includes('embedded'))
+    // 256 inputs at 64/pass → 4 chunks → 4 progress lines.
+    expect(progress).toHaveLength(4)
+    expect(progress[0]).toContain('[memory]')
+    expect(progress.at(-1)).toContain('256/256 passage input(s) embedded (100%)')
+  })
+
+  test('does not report per-chunk progress for a small build', async () => {
+    const { embed } = await import('./embedder')
+
+    await embed(['short a', 'short b'], 'passage')
+
+    expect(notices.filter((n) => n.includes('embedded'))).toHaveLength(0)
+  })
+})
