@@ -50,11 +50,7 @@
       rgba(111, 126, 184, 0.06) 45%,
       rgba(111, 126, 184, 0) 100%
     ),
-    radial-gradient(
-      80% 60% at 50% -10%,
-      rgba(195, 202, 230, 0.35) 0%,
-      rgba(195, 202, 230, 0) 70%
-    );
+    radial-gradient(80% 60% at 50% -10%, rgba(195, 202, 230, 0.35) 0%, rgba(195, 202, 230, 0) 70%);
   transition: background 240ms ease-out;
 }
 
@@ -66,11 +62,7 @@
       rgba(77, 93, 158, 0.06) 50%,
       rgba(13, 23, 54, 0) 100%
     ),
-    radial-gradient(
-      90% 60% at 50% -10%,
-      rgba(54, 72, 132, 0.28) 0%,
-      rgba(13, 23, 54, 0) 70%
-    );
+    radial-gradient(90% 60% at 50% -10%, rgba(54, 72, 132, 0.28) 0%, rgba(13, 23, 54, 0) 70%);
 }
 
 /* Lit headline: the gradient origin tracks the pointer so "perfectionists"
