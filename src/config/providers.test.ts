@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   defaultThinkingLevelForRef,
+  isKnownModelRef,
+  isModelRef,
   KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
   type KnownProviderId,
@@ -352,6 +354,25 @@ describe('providerForModelRef', () => {
   test('distinguishes moonshot from moonshot-coding by the slash-prefixed match (not substring)', () => {
     expect(providerForModelRef('moonshot-coding/kimi-for-coding')).toBe('moonshot-coding')
     expect(providerForModelRef('moonshot/kimi-k2.6')).toBe('moonshot')
+  })
+})
+
+describe('model ref predicates', () => {
+  test('isKnownModelRef accepts curated refs only', () => {
+    expect(isKnownModelRef('openai/gpt-5.4-nano')).toBe(true)
+    expect(isKnownModelRef('openai/gpt-6-live')).toBe(false)
+  })
+
+  test('isModelRef accepts custom refs for known providers', () => {
+    expect(isModelRef('openai/gpt-6-live')).toBe(true)
+    expect(isModelRef('fireworks/accounts/fireworks/models/qwen3-next')).toBe(true)
+  })
+
+  test('isModelRef rejects unknown providers and malformed refs', () => {
+    expect(isModelRef('unknown/gpt-6-live')).toBe(false)
+    expect(isModelRef('openai/')).toBe(false)
+    expect(isModelRef('OpenAI/gpt-6-live')).toBe(false)
+    expect(isModelRef('openai/gpt 6')).toBe(false)
   })
 })
 
