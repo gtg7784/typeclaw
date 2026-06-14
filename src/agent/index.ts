@@ -15,7 +15,7 @@ import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
-import { defaultThinkingLevelForRef, providerForModelRef, type KnownModelRef } from '@/config/providers'
+import { defaultThinkingLevelForRef, providerForModelRef, type ModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
 import { createMcpDispatcherTools, MCP_DISPATCHER_TOOL_NAMES } from '@/mcp/tools'
@@ -196,7 +196,7 @@ export type CreateSessionOptions = {
   // pinned to the next ref in the chain after the previous one failed. When
   // set, `profile` is still recorded for the fallback-warning bookkeeping;
   // the profile→refs resolution is skipped.
-  refOverride?: KnownModelRef
+  refOverride?: ModelRef
   // Defensive ceiling on cumulative bytes of tool-result text per session,
   // applied to the named tools only. See `src/agent/tool-result-budget.ts`
   // for the rationale. Intended for subagents that read large files
@@ -247,7 +247,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // exactly what they're doing.
   // `refOverride` lets the model-fallback helper pin a specific entry from
   // the chain when it recreates a session after the previous ref failed.
-  const activeRef: KnownModelRef = options.refOverride ?? resolved.ref
+  const activeRef: ModelRef = options.refOverride ?? resolved.ref
   const { authStorage, modelRegistry } = getAuthFor(providerForModelRef(activeRef))
 
   const materializedSkills =

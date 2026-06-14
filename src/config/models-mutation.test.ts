@@ -36,6 +36,12 @@ async function readModels(): Promise<Record<string, string>> {
   return parsed.models ?? {}
 }
 
+async function readCustomModels(): Promise<Record<string, unknown>> {
+  const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
+  const parsed = JSON.parse(raw) as { customModels?: Record<string, unknown> }
+  return parsed.customModels ?? {}
+}
+
 describe('listAvailableModelRefs', () => {
   test('returns all KNOWN_PROVIDERS model refs', () => {
     const refs = listAvailableModelRefs()
@@ -134,6 +140,40 @@ describe('setProfile', () => {
     expect(result.ok).toBe(true)
   })
 
+  test('accepts a custom model ref for a known provider without metadata', async () => {
+    const env: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-from-env' }
+    const result = setProfile(root, 'default', 'openai/gpt-6-live', { env })
+    expect(result.ok).toBe(true)
+    expect((await readModels()).default).toBe('openai/gpt-6-live')
+    expect(await readCustomModels()).toEqual({})
+  })
+
+  test('writes customModels metadata for a custom model ref in the same mutation', async () => {
+    const ref = 'fireworks/accounts/fireworks/models/qwen3-next'
+    const result = setProfile(root, 'default', ref, {
+      meta: {
+        name: 'Qwen3 Next',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: 262144,
+        maxTokens: 32768,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect((await readModels()).default).toBe(ref)
+    expect(await readCustomModels()).toEqual({
+      [ref]: {
+        name: 'Qwen3 Next',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: 262144,
+        maxTokens: 32768,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    })
+  })
+
   test('force=true writes even without credentials', () => {
     const env: NodeJS.ProcessEnv = {}
     const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', { env, force: true })
@@ -227,8 +267,11 @@ describe('listModelProfiles', () => {
     const env: NodeJS.ProcessEnv = {}
     const entries = listModelProfiles(root, env)
     const dflt = entries.find((e) => e.profile === 'default')
-    expect(dflt?.ref).toBe('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
-    expect(dflt?.refs).toEqual(['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', 'openai/gpt-5.4-nano'])
+    expect(String(dflt?.ref)).toBe('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    expect(dflt?.refs.map(String)).toEqual([
+      'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      'openai/gpt-5.4-nano',
+    ])
     expect(dflt?.credentialStatus).toBe('missing-credentials')
     expect(dflt?.missingProviders).toEqual(['openai'])
   })

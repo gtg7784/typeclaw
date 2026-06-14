@@ -4,14 +4,14 @@ import {
   KNOWN_PROVIDERS,
   providerForModelRef,
   supportsOAuth,
-  type KnownModelRef,
   type KnownProviderId,
+  type ModelRef,
 } from '@/config/providers'
 import { createSecretsStoreForAgent } from '@/secrets'
 
 export type OAuthLoginResult = { ok: true } | { ok: false; reason: string }
 
-export type OAuthLoginRunner = (options: { cwd: string; model: KnownModelRef }) => Promise<OAuthLoginResult>
+export type OAuthLoginRunner = (options: { cwd: string; model: ModelRef | string }) => Promise<OAuthLoginResult>
 
 // Wrap pi-ai's OAuth callbacks so the CLI doesn't have to know about the
 // upstream callback shape. The CLI sees four lifecycle events:
@@ -76,7 +76,7 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
 // params" without spinning up a real secrets store / browser callback server.
 export type FakeOAuthLoginRunnerOptions = {
   result?: OAuthLoginResult
-  onCalled?: (options: { cwd: string; model: KnownModelRef; providerId: KnownProviderId }) => void
+  onCalled?: (options: { cwd: string; model: ModelRef | string; providerId: KnownProviderId }) => void
 }
 
 export function makeFakeOAuthLoginRunner(options: FakeOAuthLoginRunnerOptions = {}): OAuthLoginRunner {

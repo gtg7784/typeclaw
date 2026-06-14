@@ -6,6 +6,7 @@ import { defineCommand } from 'citty'
 import {
   KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
+  isKnownModelRef,
   listKnownProviderVendorIds,
   providerIdsForVendor,
   supportsApiKey as providerSupportsApiKey,
@@ -43,7 +44,7 @@ import {
   type WizardCheckpointStore,
 } from '@/init/checkpoint'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
-import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
+import { customModelMetaFromOption, fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 import { detectInitProgress } from '@/init/progress'
 import {
@@ -198,6 +199,8 @@ export const init = defineCommand({
       kakaotalkPassword,
       github: githubCredentials,
     } = channelSecrets
+    const modelMeta = customModelMetaFromOption(model)
+    const visionModelMeta = vision !== undefined ? customModelMetaFromOption(vision.model) : undefined
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
@@ -222,7 +225,14 @@ export const init = defineCommand({
         cwd,
         llmAuth,
         model: model.ref,
-        ...(vision !== undefined ? { visionModel: vision.model.ref, visionAuth: vision.llmAuth } : {}),
+        ...(modelMeta !== undefined ? { modelMeta } : {}),
+        ...(vision !== undefined
+          ? {
+              visionModel: vision.model.ref,
+              ...(visionModelMeta !== undefined ? { visionModelMeta } : {}),
+              visionAuth: vision.llmAuth,
+            }
+          : {}),
         cliEntry: process.argv[1],
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
@@ -393,7 +403,7 @@ export interface WizardPrompts {
   pickModel: (
     options: ModelOption[],
     providerId: KnownProviderId,
-    initial: KnownModelRef | undefined,
+    initial: string | undefined,
   ) => Promise<StepResult<ModelOption>>
   pickAuthMethod: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
@@ -413,7 +423,7 @@ export interface WizardPrompts {
   pickVisionModel: (
     options: ModelOption[],
     providerId: KnownProviderId,
-    initial: KnownModelRef | undefined,
+    initial: string | undefined,
   ) => Promise<StepResult<ModelOption>>
   pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
   hasExistingChannelSecrets: (cwd: string, channel: Exclude<ChannelChoice, 'none'>) => Promise<boolean>
@@ -421,7 +431,7 @@ export interface WizardPrompts {
   runOAuthLogin: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
     cwd: string,
-    model: KnownModelRef,
+    model: string,
   ) => Promise<OAuthLoginResult>
   askOAuthFailureRecovery: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
@@ -904,7 +914,7 @@ async function runOAuthLoginSafely(
   prompts: WizardPrompts,
   provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
   cwd: string,
-  model: KnownModelRef,
+  model: string,
 ): Promise<OAuthLoginResult> {
   try {
     return await prompts.runOAuthLogin(provider, cwd, model)
@@ -972,7 +982,7 @@ function seedWizardState(state: WizardState, checkpoint: WizardAnswerCheckpointV
   state.channelChoice = checkpoint.channelChoice
 }
 
-function resolveModelOption(catalog: WizardState['catalog'], ref: KnownModelRef | undefined): ModelOption | undefined {
+function resolveModelOption(catalog: WizardState['catalog'], ref: string | undefined): ModelOption | undefined {
   if (catalog === undefined || ref === undefined) return undefined
   return catalog.options.find((option) => option.ref === ref)
 }
@@ -1111,7 +1121,7 @@ async function pickProviderVariant(
 async function pickModelForProvider(
   options: ModelOption[],
   providerId: KnownProviderId,
-  initial: KnownModelRef | undefined,
+  initial: string | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
   // select<string>, not select<KnownModelRef>: clack's Option<Value> is a
@@ -1190,7 +1200,7 @@ async function pickVisionProviderVariant(
 async function pickVisionModel(
   options: ModelOption[],
   providerId: KnownProviderId,
-  initial: KnownModelRef | undefined,
+  initial: string | undefined,
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
   // select<string> for the same distributive-Option reason as pickModelForProvider.
@@ -1818,12 +1828,12 @@ const RECOMMENDED_MODEL_REFS: ReadonlySet<KnownModelRef> = new Set<KnownModelRef
 ])
 
 export function formatModelLabel(o: ModelOption): string {
-  return RECOMMENDED_MODEL_REFS.has(o.ref) ? `${o.modelName} (Recommended)` : o.modelName
+  return isKnownModelRef(o.ref) && RECOMMENDED_MODEL_REFS.has(o.ref) ? `${o.modelName} (Recommended)` : o.modelName
 }
 
 export function sortRecommendedFirst(options: ModelOption[]): ModelOption[] {
-  const recommended = options.filter((o) => RECOMMENDED_MODEL_REFS.has(o.ref))
-  const rest = options.filter((o) => !RECOMMENDED_MODEL_REFS.has(o.ref))
+  const recommended = options.filter((o) => isKnownModelRef(o.ref) && RECOMMENDED_MODEL_REFS.has(o.ref))
+  const rest = options.filter((o) => !isKnownModelRef(o.ref) || !RECOMMENDED_MODEL_REFS.has(o.ref))
   return [...recommended, ...rest]
 }
 

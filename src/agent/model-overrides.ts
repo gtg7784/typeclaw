@@ -1,6 +1,6 @@
 import type { Api, Model } from '@mariozechner/pi-ai'
 
-import { providerForModelRef, type KnownModelRef, type KnownProviderId } from '@/config/providers'
+import { providerForModelRef, type KnownModelRef, type KnownProviderId, type ModelRef } from '@/config/providers'
 
 // Providers whose base URL can be swapped to an upstream-compatible gateway at
 // runtime. Each env var mirrors the upstream SDK's own name so a credential /
@@ -26,7 +26,7 @@ type OverridableProviderId = keyof typeof PROVIDER_BASE_URL_ENV
 // data that must never be mutated.
 export function applyModelRuntimeOverrides<TApi extends Api>(
   model: Model<TApi>,
-  ref: KnownModelRef,
+  ref: KnownModelRef | ModelRef | string,
   env: NodeJS.ProcessEnv = process.env,
 ): Model<TApi> {
   const providerId = providerForModelRef(ref)

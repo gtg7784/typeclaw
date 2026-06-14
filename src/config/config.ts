@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, readFileSync, statSync, writeFile
 import { homedir } from 'node:os'
 import { isAbsolute, join, posix, resolve } from 'node:path'
 
-import type { Model } from '@mariozechner/pi-ai'
+import type { KnownApi, Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
 import { channelsSchema, SEEDED_GITHUB_EVENT_ALLOWLISTS } from '@/channels/schema'
@@ -13,9 +13,12 @@ import { secretFieldSchema } from '@/secrets/resolve'
 import {
   DEFAULT_MODEL_REF,
   KNOWN_PROVIDERS,
+  isKnownModelRef,
+  isModelRef,
   listKnownModelRefs,
   type KnownModelRef,
-  type KnownProviderId,
+  type ModelRef,
+  providerForModelRef,
 } from './providers'
 
 const CONFIG_FILE = 'typeclaw.json'
@@ -574,16 +577,55 @@ const tunnelsArraySchema = z
     }
   })
 
-// `models` maps a profile name to one or more curated model refs. The
+const customModelCostSchema = z
+  .object({
+    input: z.number().optional(),
+    output: z.number().optional(),
+    cacheRead: z.number().optional(),
+    cacheWrite: z.number().optional(),
+  })
+  .catchall(z.unknown())
+
+export const customModelMetaSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    reasoning: z.boolean().optional(),
+    input: z.array(z.string().min(1)).optional(),
+    contextWindow: z.number().optional(),
+    maxTokens: z.number().optional(),
+    cost: customModelCostSchema.optional(),
+  })
+  .catchall(z.unknown())
+
+export type CustomModelMeta = z.infer<typeof customModelMetaSchema>
+
+export const customModelsSchema = z.record(z.string().min(1), customModelMetaSchema).default({})
+
+export type CustomModels = z.infer<typeof customModelsSchema>
+
+const customModelRefSchema = z.string().refine((ref) => isModelRef(ref), {
+  message: 'model ref must be "<known-provider>/<model-id>" with a known provider',
+})
+
+const singleModelRef = z.union([z.enum(knownModelRefs), customModelRefSchema])
+
+function asModelRef(value: string): ModelRef {
+  if (isModelRef(value)) return value
+  throw new Error(`Invalid model ref: ${value}`)
+}
+
+// `models` maps a profile name to one or more model refs. Curated refs keep
+// editor autocomplete through the enum branch, while custom refs are allowed
+// when they target a known provider.
 // `default` profile is mandatory; every other profile is optional and falls
 // back to `default` at resolution time (see `resolveProfile`).
 //
-// Each value is either a single `KnownModelRef` or a non-empty array of refs
+// Each value is either a single model ref or a non-empty array of refs
 // forming a fallback chain: when a turn against the first ref fails (hard
 // throw or a soft provider error), the runtime disposes the failed session
 // and replays the same prompt against the next ref. Schema accepts both
 // shapes for ergonomics; the parsed value is always normalised to a
-// non-empty array so downstream consumers read a uniform `KnownModelRef[]`.
+// non-empty array so downstream consumers read a uniform `ModelRef[]`.
 //
 // Profile names are open strings; the runtime recognizes a handful of
 // well-known names by convention (`default`, `fast`, `deep`, `vision`) but
@@ -596,9 +638,9 @@ const tunnelsArraySchema = z
 // `persistMigratedConfig`), so every downstream consumer sees the new shape.
 const modelRefOrChainSchema = z
   .union([
-    z.enum(knownModelRefs),
+    singleModelRef,
     z
-      .array(z.enum(knownModelRefs))
+      .array(singleModelRef)
       .min(1)
       // Reject exact duplicates in a chain — retrying the same ref after the
       // same class of failure is almost certainly a config typo, and silently
@@ -609,7 +651,7 @@ const modelRefOrChainSchema = z
         message: 'models chain must not contain duplicate refs',
       }),
   ])
-  .transform((value) => (Array.isArray(value) ? value : [value]))
+  .transform((value) => (Array.isArray(value) ? value : [value]).map((ref) => asModelRef(ref)))
 export const modelsSchema = z
   .record(z.string().min(1), modelRefOrChainSchema)
   .refine((m) => 'default' in m, { message: 'models.default is required' })
@@ -617,7 +659,7 @@ export const modelsSchema = z
 // Zod's `z.record(..., refine)` doesn't refine the inferred type. The
 // `default` key is schema-enforced, so we narrow it here to spare every
 // consumer the `T | undefined` assertion noise.
-export type Models = Record<string, KnownModelRef[]> & { default: KnownModelRef[] }
+export type Models = Record<string, ModelRef[]> & { default: ModelRef[] }
 
 export const configSchema = z
   .object({
@@ -626,9 +668,10 @@ export const configSchema = z
     // `default(() => ...)` ensures every parsed config has at least
     // `models.default`. Direct `.default({ default: ... })` would short-circuit
     // the refinement, so we lean on the lazy thunk form. The default value is
-    // shaped to match the post-transform output (always `KnownModelRef[]`),
+    // shaped to match the post-transform output (always `ModelRef[]`),
     // not the user-facing input shape.
-    models: modelsSchema.default(() => ({ default: [DEFAULT_MODEL_REF] })) as unknown as z.ZodType<Models>,
+    models: modelsSchema.default(() => ({ default: [asModelRef(DEFAULT_MODEL_REF)] })) as unknown as z.ZodType<Models>,
+    customModels: customModelsSchema,
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -656,12 +699,58 @@ export const configSchema = z
 
 export type Config = z.infer<typeof configSchema>
 
-export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> | Model<'openai-responses'> {
-  // Model IDs can contain '/', so split only on the first separator.
-  const slash = ref.indexOf('/')
-  const providerId = ref.slice(0, slash) as KnownProviderId
-  const modelId = ref.slice(slash + 1)
-  return KNOWN_PROVIDERS[providerId].models[modelId as never]
+export function resolveModel(ref: KnownModelRef | ModelRef | string): Model<KnownApi> {
+  const providerId = providerForModelRef(ref)
+  const modelId = ref.slice(providerId.length + 1)
+  const provider = KNOWN_PROVIDERS[providerId]
+  if (isKnownModelRef(ref)) {
+    const model = (provider.models as Record<string, Model<KnownApi>>)[modelId]
+    if (model !== undefined) return model
+  }
+
+  if (!isModelRef(ref)) {
+    throw new Error(`Invalid model ref "${ref}". Expected "<known-provider>/<model-id>".`)
+  }
+
+  const templateModelId = Object.keys(provider.models)[0]
+  if (templateModelId === undefined) {
+    throw new Error(`Provider ${providerId} has no curated models to use as a transport template`)
+  }
+  const template = (provider.models as Record<string, Model<KnownApi>>)[templateModelId]
+  if (template === undefined) {
+    throw new Error(`Provider ${providerId} has no curated models to use as a transport template`)
+  }
+
+  const meta = getConfig().customModels[ref]
+  return {
+    id: modelId,
+    provider: providerId,
+    baseUrl: provider.baseUrl ?? template.baseUrl,
+    api: template.api,
+    name: meta?.name ?? modelId,
+    reasoning: meta?.reasoning ?? false,
+    input: resolveCustomModelInput(meta?.input),
+    contextWindow: meta?.contextWindow ?? template.contextWindow,
+    maxTokens: meta?.maxTokens ?? template.maxTokens,
+    cost: resolveCustomModelCost(meta?.cost),
+  }
+}
+
+function resolveCustomModelInput(input: readonly string[] | undefined): Model<KnownApi>['input'] {
+  if (input === undefined) return ['text']
+  const supported = input.filter(
+    (value): value is Model<KnownApi>['input'][number] => value === 'text' || value === 'image',
+  )
+  return supported.length > 0 ? supported : ['text']
+}
+
+function resolveCustomModelCost(cost: CustomModelMeta['cost']): Model<KnownApi>['cost'] {
+  return {
+    input: cost?.input ?? 0,
+    output: cost?.output ?? 0,
+    cacheRead: cost?.cacheRead ?? 0,
+    cacheWrite: cost?.cacheWrite ?? 0,
+  }
 }
 
 // Resolves a profile name (e.g. `fast`, `deep`, `vision`) to its fallback
@@ -672,8 +761,8 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> | 
 // session is created with first. Callers that don't implement fallback can
 // keep reading `ref`; fallback-aware callers iterate `refs`.
 export type ResolvedProfile = {
-  ref: KnownModelRef
-  refs: KnownModelRef[]
+  ref: ModelRef
+  refs: ModelRef[]
   profile: string
   fellBackToDefault: boolean
 }
@@ -790,6 +879,7 @@ export type FieldEffect = 'applied' | 'restart-required' | 'ignored'
 export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   $schema: 'ignored',
   models: 'applied',
+  customModels: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
   mcpServers: 'restart-required',
@@ -885,6 +975,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     '$schema',
     'port',
     'models',
+    'customModels',
     'mounts',
     'plugins',
     'alias',

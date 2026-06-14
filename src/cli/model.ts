@@ -1,6 +1,7 @@
 import { cancel, intro, isCancel, log, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
+import type { CustomModelMeta } from '@/config'
 import {
   addProfile,
   listModelProfiles,
@@ -9,18 +10,24 @@ import {
   setProfile,
 } from '@/config/models-mutation'
 import {
+  isKnownModelRef,
   KNOWN_PROVIDERS,
-  listKnownModelRefs,
   providerForModelRef,
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
 import { findAgentDir, isInitialized } from '@/init'
+import { customModelMetaFromOption, fetchModelOptions, type ModelOption } from '@/init/models-dev'
 
 import { runProviderAddFlow } from './provider'
 import { c, done, errorLine } from './ui'
 
 const ADD_PROVIDER_SENTINEL = '__add-provider__'
+
+type PickedModelRef = {
+  ref: string
+  meta?: CustomModelMeta
+}
 
 const setSub = defineCommand({
   meta: {
@@ -47,18 +54,21 @@ const setSub = defineCommand({
   async run({ args }) {
     const cwd = ensureAgentDir()
     const profile = args.profile ?? (await pickProfileName())
-    const ref = args.ref ?? (await pickModelRef(cwd))
+    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
 
-    intro(`Setting model profile: ${profile} → ${ref}`)
+    intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
-    const result = setProfile(cwd, profile, ref, { force: args.force === true })
+    const result = setProfile(cwd, profile, picked.ref, {
+      force: args.force === true,
+      ...(picked.meta !== undefined ? { meta: picked.meta } : {}),
+    })
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
     }
     done({
       title: c.green(`Profile "${profile}" set.`),
-      details: `${profile} → ${ref}`,
+      details: `${profile} → ${picked.ref}`,
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
@@ -88,18 +98,21 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const ref = args.ref ?? (await pickModelRef(cwd))
+    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
 
-    intro(`Adding model profile: ${args.profile} → ${ref}`)
+    intro(`Adding model profile: ${args.profile} → ${picked.ref}`)
 
-    const result = addProfile(cwd, args.profile, ref, { force: args.force === true })
+    const result = addProfile(cwd, args.profile, picked.ref, {
+      force: args.force === true,
+      ...(picked.meta !== undefined ? { meta: picked.meta } : {}),
+    })
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
     }
     done({
       title: c.green(`Profile "${args.profile}" added.`),
-      details: `${args.profile} → ${ref}`,
+      details: `${args.profile} → ${picked.ref}`,
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
@@ -146,7 +159,7 @@ const listSub = defineCommand({
   },
   async run({ args }) {
     if (args.available === true) {
-      printAvailableRefs()
+      await printAvailableRefs()
       return
     }
     const cwd = ensureAgentDir()
@@ -218,7 +231,7 @@ async function pickProfileName(): Promise<string> {
   return choice
 }
 
-async function pickModelRef(cwd: string): Promise<string> {
+async function pickModelRef(cwd: string): Promise<PickedModelRef> {
   while (true) {
     const refs = listRegisteredModelRefs(cwd)
     if (refs.length === 0) {
@@ -234,13 +247,14 @@ async function pickModelRef(cwd: string): Promise<string> {
     // distributive conditional type and a large ref union breaks `value: ref`
     // assignability. Values are ref strings (+ the sentinel) and stay correct
     // at runtime — the sentinel check and `return choice` below are unaffected.
+    const modelOptions = await listCredentialedModelOptions(refs)
     const choice = await select<string>({
       message: 'Pick a model',
       options: [
-        ...refs.map((ref) => ({
-          value: ref,
-          label: describeRef(ref),
-          hint: ref,
+        ...modelOptions.map((option) => ({
+          value: option.ref,
+          label: describeRef(option.ref),
+          hint: option.ref,
         })),
         {
           value: ADD_PROVIDER_SENTINEL,
@@ -248,13 +262,18 @@ async function pickModelRef(cwd: string): Promise<string> {
           hint: 'configure a new provider',
         },
       ],
-      initialValue: refs[0],
+      initialValue: modelOptions[0]?.ref ?? refs[0],
     })
     if (isCancel(choice)) {
       cancel('Aborted.')
       process.exit(0)
     }
-    if (choice !== ADD_PROVIDER_SENTINEL) return choice
+    if (choice !== ADD_PROVIDER_SENTINEL) {
+      const option = modelOptions.find((candidate) => candidate.ref === choice)
+      if (option === undefined) return { ref: choice }
+      const meta = customModelMetaFromOption(option)
+      return { ref: option.ref, ...(meta !== undefined ? { meta } : {}) }
+    }
     const added = await runProviderAddFlow(cwd, {})
     if (!added.ok) {
       console.error(errorLine(added.reason))
@@ -263,29 +282,88 @@ async function pickModelRef(cwd: string): Promise<string> {
   }
 }
 
-function describeRef(ref: KnownModelRef): string {
-  const providerId = providerForModelRef(ref)
-  const modelId = ref.slice(providerId.length + 1)
-  const provider = KNOWN_PROVIDERS[providerId]
-  const model = (provider.models as Record<string, { name: string }>)[modelId]
-  return model ? `${provider.name} · ${model.name}` : ref
+// Non-interactive `<ref>` path. Curated refs resolve from KNOWN_PROVIDERS, so
+// they need no metadata. Non-curated refs are looked up in the live catalog so
+// `customModels[ref]` carries the same metadata the interactive picker would
+// persist; without it `resolveModel` silently falls back to defaults. A
+// catalog miss (offline / unknown id) still writes the ref, but warns first.
+export async function resolveExplicitRef(
+  ref: string,
+  loadCatalog: () => Promise<{ options: ModelOption[] }> = fetchModelOptions,
+): Promise<PickedModelRef> {
+  if (isKnownModelRef(ref)) return { ref }
+  const { options } = await loadCatalog()
+  const option = options.find((candidate) => candidate.ref === ref)
+  if (option === undefined) {
+    log.warn(
+      `"${ref}" isn't in the live catalog; saving the ref without metadata. ` +
+        `The agent will use fallback defaults (reasoning off, text-only input, zero cost, provider-default context).`,
+    )
+    return { ref }
+  }
+  const meta = customModelMetaFromOption(option)
+  return { ref, ...(meta !== undefined ? { meta } : {}) }
 }
 
-function printAvailableRefs(): void {
-  const refs = listKnownModelRefs()
-  if (refs.length === 0) {
+export type { PickedModelRef }
+
+async function listCredentialedModelOptions(refs: KnownModelRef[]): Promise<ModelOption[]> {
+  const credentialedProviders = new Set<KnownProviderId>(refs.map((ref) => providerForModelRef(ref)))
+  const catalog = await fetchModelOptions()
+  const options = catalog.options.filter((option) => credentialedProviders.has(option.providerId))
+  if (options.length > 0) return options
+  return refs.map((ref) => {
+    const providerId = providerForModelRef(ref)
+    const modelId = ref.slice(providerId.length + 1)
+    const model = (
+      KNOWN_PROVIDERS[providerId].models as Record<
+        string,
+        { name: string; reasoning?: boolean; contextWindow?: number; input?: ReadonlyArray<string> }
+      >
+    )[modelId]
+    return {
+      ref,
+      providerId,
+      providerName: KNOWN_PROVIDERS[providerId].name,
+      modelId,
+      modelName: model?.name ?? modelId,
+      reasoning: model?.reasoning ?? false,
+      contextWindow: model?.contextWindow ?? null,
+      curated: true,
+      supportsVision: model?.input?.includes('image') ?? false,
+    }
+  })
+}
+
+function describeRef(ref: string): string {
+  try {
+    const providerId = providerForModelRef(ref)
+    const modelId = ref.slice(providerId.length + 1)
+    const provider = KNOWN_PROVIDERS[providerId]
+    const model = (provider.models as Record<string, { name: string }>)[modelId]
+    return `${provider.name} · ${model?.name ?? modelId}`
+  } catch {
+    return ref
+  }
+}
+
+async function printAvailableRefs(): Promise<void> {
+  const { options, source, warning } = await fetchModelOptions()
+  if (options.length === 0) {
     console.log(c.dim('No models registered.'))
     return
   }
   console.log(c.dim('Use `typeclaw model set <profile> <ref>` to apply.'))
-  let lastProvider: KnownProviderId | null = null
-  for (const ref of refs) {
-    const providerId = providerForModelRef(ref)
-    if (providerId !== lastProvider) {
-      console.log('')
-      console.log(c.cyan(KNOWN_PROVIDERS[providerId].name))
-      lastProvider = providerId
+  if (source === 'curated' && warning !== undefined) {
+    console.log(c.dim(`Using built-in catalog (models.dev unavailable: ${warning}).`))
+  }
+  for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
+    const providerOptions = options.filter((option) => option.providerId === providerId)
+    if (providerOptions.length === 0) continue
+    console.log('')
+    console.log(c.cyan(KNOWN_PROVIDERS[providerId].name))
+    for (const option of providerOptions) {
+      console.log(`  ${option.ref}`)
     }
-    console.log(`  ${ref}`)
   }
 }

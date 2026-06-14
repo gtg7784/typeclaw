@@ -2,7 +2,7 @@ import type { AgentSession } from '@/agent'
 import { promptWithFallback, resolveFallbackChain } from '@/agent/model-fallback'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { getConfig } from '@/config'
-import type { KnownModelRef } from '@/config/providers'
+import type { ModelRef } from '@/config/providers'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
@@ -48,7 +48,7 @@ export type CreateCronConsumerOptions = {
   // each attempt to the specified model. Factories that don't honor the
   // override silently lose fallback semantics, so production wiring threads
   // it through to `createSession({ refOverride })`.
-  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>
+  createSessionForCron: (job: PromptJob, refOverride?: ModelRef) => Promise<CronSession>
   // Builds the `CronHandlerContext` for the job and awaits its `handler`.
   // Wired by `src/run/index.ts` to reuse `runPromptForCommand` /
   // `runExecForCommand` from the command runner so plugin cron handlers and
@@ -161,7 +161,7 @@ export function createCronConsumer({
 
 async function runPrompt(
   job: PromptJob,
-  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>,
+  createSessionForCron: (job: PromptJob, refOverride?: ModelRef) => Promise<CronSession>,
   stream: Stream,
   logger: CronConsumerLogger,
 ): Promise<void> {
@@ -198,8 +198,8 @@ async function runPrompt(
 
 async function runPromptOnce(
   job: PromptJob,
-  refs: KnownModelRef[],
-  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>,
+  refs: ModelRef[],
+  createSessionForCron: (job: PromptJob, refOverride?: ModelRef) => Promise<CronSession>,
   logger: CronConsumerLogger,
 ): Promise<void> {
   // Per-attempt lifecycle: every session we create gets full

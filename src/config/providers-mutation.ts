@@ -5,7 +5,7 @@ import { providerKeyDefaultEnv } from '@/secrets/defaults'
 import type { ProviderCredential, Providers } from '@/secrets/schema'
 
 import { type Models, loadConfigSync } from './config'
-import { KNOWN_PROVIDERS, type KnownModelRef, type KnownProviderId, providerForModelRef } from './providers'
+import { KNOWN_PROVIDERS, type KnownProviderId, type ModelRef, providerForModelRef } from './providers'
 
 // Where a configured credential resolves from at runtime. Reported by
 // `typeclaw provider list` so users can tell whether their key is coming from
@@ -230,7 +230,7 @@ function refTargetsProvider(ref: string, providerId: string): boolean {
   return ref.startsWith(`${providerId}/`)
 }
 
-function safeProviderForRef(ref: KnownModelRef): KnownProviderId | null {
+function safeProviderForRef(ref: ModelRef): KnownProviderId | null {
   try {
     return providerForModelRef(ref)
   } catch {

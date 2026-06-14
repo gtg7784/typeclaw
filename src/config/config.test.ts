@@ -8,6 +8,7 @@ import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 
 import {
   buildConfigMigrationCommitMessage,
+  __resetConfigForTesting,
   configSchema,
   extractPluginConfigs,
   expandMountPath,
@@ -18,51 +19,77 @@ import {
   migrateLegacyConfigShape,
   mcpServerSchema,
   mountSchema,
+  reloadConfig,
+  resolveModel,
   resolveProfile,
   validateConfig,
   validateMount,
   withDefaultPlugins,
   type Models,
 } from './config'
+import { isModelRef, type ModelRef } from './providers'
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 const VALID_MODEL_2 = 'openai/gpt-5.4-nano'
 
+function parseModels(models: Record<string, string | string[]>): Models {
+  return configSchema.parse({ models }).models
+}
+
+function modelRef(value: string): ModelRef {
+  if (isModelRef(value)) return value
+  throw new Error(`expected valid model ref in test: ${value}`)
+}
+
+function modelRefList(...values: string[]): ModelRef[] {
+  return values.map(modelRef)
+}
+
 describe('configSchema models field', () => {
   test('defaults to { default: [<DEFAULT_MODEL_REF>] } when omitted', () => {
     const parsed = configSchema.parse({})
-    expect(parsed.models).toEqual({ default: ['openai/gpt-5.4-nano'] })
+    expect(parsed.models).toEqual({ default: modelRefList('openai/gpt-5.4-nano') })
   })
 
   test('normalises a single-ref string input to a one-element array', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.models).toEqual({ default: [VALID_MODEL] })
+    expect(parsed.models).toEqual({ default: modelRefList(VALID_MODEL) })
   })
 
   test('accepts multiple profiles in either shape and normalises both', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL, fast: [VALID_MODEL_2], deep: VALID_MODEL, vision: VALID_MODEL_2 },
     })
-    expect(parsed.models.default).toEqual([VALID_MODEL])
-    expect(parsed.models.fast).toEqual([VALID_MODEL_2])
-    expect(parsed.models.deep).toEqual([VALID_MODEL])
-    expect(parsed.models.vision).toEqual([VALID_MODEL_2])
+    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL))
+    expect(parsed.models.fast).toEqual(modelRefList(VALID_MODEL_2))
+    expect(parsed.models.deep).toEqual(modelRefList(VALID_MODEL))
+    expect(parsed.models.vision).toEqual(modelRefList(VALID_MODEL_2))
   })
 
   test('accepts a fallback chain as an array', () => {
     const parsed = configSchema.parse({
       models: { default: [VALID_MODEL, VALID_MODEL_2] },
     })
-    expect(parsed.models.default).toEqual([VALID_MODEL, VALID_MODEL_2])
+    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL, VALID_MODEL_2))
   })
 
   test('accepts user-defined profile names alongside well-known ones', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL, 'cheap-batch': VALID_MODEL_2 },
     })
-    expect(parsed.models['cheap-batch']).toEqual([VALID_MODEL_2])
+    expect(parsed.models['cheap-batch']).toEqual(modelRefList(VALID_MODEL_2))
+  })
+
+  test('accepts custom model refs for known providers', () => {
+    const parsed = configSchema.parse({ models: { default: 'openai/gpt-6-live' } })
+    expect(parsed.models.default).toEqual(modelRefList('openai/gpt-6-live'))
+  })
+
+  test('accepts custom model refs inside fallback chains', () => {
+    const parsed = configSchema.parse({ models: { default: [VALID_MODEL_2, 'openai/gpt-6-live'] } })
+    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL_2, 'openai/gpt-6-live'))
   })
 
   test('rejects models map without default', () => {
@@ -75,6 +102,10 @@ describe('configSchema models field', () => {
 
   test('rejects unknown model refs inside a chain', () => {
     expect(() => configSchema.parse({ models: { default: [VALID_MODEL, 'not-a-real-model'] } })).toThrow()
+  })
+
+  test('rejects custom model refs for unknown providers', () => {
+    expect(() => configSchema.parse({ models: { default: 'mystery/gpt-6-live' } })).toThrow(/known provider/i)
   })
 
   test('rejects empty arrays', () => {
@@ -93,56 +124,145 @@ describe('configSchema models field', () => {
     const parsed = configSchema.parse({
       models: { default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'] },
     })
-    expect(parsed.models.default).toEqual(['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'])
+    expect(parsed.models.default).toEqual(modelRefList('openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'))
+  })
+})
+
+describe('customModels field', () => {
+  test('defaults to an empty map', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.customModels).toEqual({})
+  })
+
+  test('accepts compact metadata keyed by model ref', () => {
+    const parsed = configSchema.parse({
+      models: { default: 'openai/gpt-6-live' },
+      customModels: {
+        'openai/gpt-6-live': {
+          name: 'GPT-6 Live',
+          reasoning: true,
+          input: ['text', 'image'],
+          contextWindow: 500000,
+          maxTokens: 128000,
+          cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+        },
+      },
+    })
+    expect(parsed.customModels['openai/gpt-6-live']?.name).toBe('GPT-6 Live')
+    expect(parsed.customModels['openai/gpt-6-live']?.input).toEqual(['text', 'image'])
+  })
+})
+
+describe('resolveModel', () => {
+  afterEach(() => {
+    __resetConfigForTesting()
+  })
+
+  test('returns curated model literals unchanged', () => {
+    const model = resolveModel('openai/gpt-5.4-nano')
+    expect(model.id).toBe('gpt-5.4-nano')
+    expect(model.cost.input).toBeGreaterThan(0)
+  })
+
+  test('synthesizes a custom model from the provider transport with safe defaults', () => {
+    const model = resolveModel('openai/gpt-6-live')
+    expect(model).toMatchObject({
+      id: 'gpt-6-live',
+      name: 'gpt-6-live',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      api: 'openai-responses',
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    })
+    expect(model.contextWindow).toBe(400000)
+    expect(model.maxTokens).toBe(128000)
+  })
+
+  test('uses customModels metadata when synthesizing a custom model', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-resolve-model-'))
+    try {
+      await writeFile(
+        join(cwd, 'typeclaw.json'),
+        JSON.stringify({
+          models: { default: 'openai/gpt-6-live' },
+          customModels: {
+            'openai/gpt-6-live': {
+              name: 'GPT-6 Live',
+              reasoning: true,
+              input: ['text', 'image'],
+              contextWindow: 123456,
+              maxTokens: 6543,
+              cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0.5 },
+            },
+          },
+        }),
+      )
+      reloadConfig(cwd)
+
+      const model = resolveModel('openai/gpt-6-live')
+
+      expect(model).toMatchObject({
+        name: 'GPT-6 Live',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: 123456,
+        maxTokens: 6543,
+        cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0.5 },
+      })
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 })
 
 describe('resolveProfile', () => {
-  const models: Models = { default: [VALID_MODEL], fast: [VALID_MODEL_2] }
+  const models = parseModels({ default: VALID_MODEL, fast: VALID_MODEL_2 })
 
   test('returns the requested profile when present', () => {
     const result = resolveProfile(models, 'fast')
-    expect(result.ref).toBe(VALID_MODEL_2)
-    expect(result.refs).toEqual([VALID_MODEL_2])
+    expect(result.ref).toBe(modelRef(VALID_MODEL_2))
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL_2))
     expect(result.profile).toBe('fast')
     expect(result.fellBackToDefault).toBe(false)
   })
 
   test('returns default when name is undefined', () => {
     const result = resolveProfile(models, undefined)
-    expect(result.ref).toBe(VALID_MODEL)
-    expect(result.refs).toEqual([VALID_MODEL])
+    expect(result.ref).toBe(modelRef(VALID_MODEL))
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL))
     expect(result.profile).toBe('default')
     expect(result.fellBackToDefault).toBe(false)
   })
 
   test('returns default when name is "default"', () => {
     const result = resolveProfile(models, 'default')
-    expect(result.ref).toBe(VALID_MODEL)
-    expect(result.refs).toEqual([VALID_MODEL])
+    expect(result.ref).toBe(modelRef(VALID_MODEL))
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL))
     expect(result.profile).toBe('default')
     expect(result.fellBackToDefault).toBe(false)
   })
 
   test('falls back to default when requested profile is missing, flagging the fallback', () => {
     const result = resolveProfile(models, 'deep')
-    expect(result.ref).toBe(VALID_MODEL)
-    expect(result.refs).toEqual([VALID_MODEL])
+    expect(result.ref).toBe(modelRef(VALID_MODEL))
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL))
     expect(result.profile).toBe('default')
     expect(result.fellBackToDefault).toBe(true)
   })
 
   test('exposes the full chain when the profile is a multi-ref fallback', () => {
-    const chain: Models = { default: [VALID_MODEL, VALID_MODEL_2] }
+    const chain = parseModels({ default: [VALID_MODEL, VALID_MODEL_2] })
     const result = resolveProfile(chain, 'default')
-    expect(result.ref).toBe(VALID_MODEL)
-    expect(result.refs).toEqual([VALID_MODEL, VALID_MODEL_2])
+    expect(result.ref).toBe(modelRef(VALID_MODEL))
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL, VALID_MODEL_2))
   })
 
   test('inherits the default chain when falling back, preserving every fallback ref', () => {
-    const chain: Models = { default: [VALID_MODEL, VALID_MODEL_2] }
+    const chain = parseModels({ default: [VALID_MODEL, VALID_MODEL_2] })
     const result = resolveProfile(chain, 'deep')
-    expect(result.refs).toEqual([VALID_MODEL, VALID_MODEL_2])
+    expect(result.refs).toEqual(modelRefList(VALID_MODEL, VALID_MODEL_2))
     expect(result.fellBackToDefault).toBe(true)
   })
 })

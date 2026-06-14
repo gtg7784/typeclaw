@@ -1,4 +1,4 @@
-import type { Api, Model } from '@mariozechner/pi-ai'
+import type { KnownApi, Model } from '@mariozechner/pi-ai'
 
 // Authentication mechanism a provider supports. `api-key` reads a static key
 // from .env (the original path); `oauth` runs a browser flow at init time and
@@ -18,16 +18,13 @@ type KnownProvider = {
   auth: ReadonlyArray<AuthMethod>
   apiKeyEnv: string | null
   oauthProviderId: string | null
-  models: Record<string, Model<Api>>
+  models: Record<string, Model<KnownApi>>
 }
 
-// Curated allowlist of providers + models that are wired into the agent
-// runtime. The values here back the Zod enum on every entry in
-// `configSchema.models`, so any model the user can put in `typeclaw.json`
-// (under any profile name) MUST appear here verbatim. The
-// init-time picker may surface additional models from models.dev, but it
-// resolves them through this list before scaffolding (anything missing falls
-// back to a curated default).
+// Curated provider + model table. Provider ids remain the allowlist for
+// `typeclaw.json` refs, while the model entries are the tested defaults and
+// JSON-schema autocomplete set. The init/model pickers may surface additional
+// models from models.dev as long as the provider prefix is one of these ids.
 //
 // Adding a new model: append it to the matching provider's `models` map. Each
 // model object is the literal `Model<...>` that pi-ai consumes — keep it
@@ -941,6 +938,8 @@ export type KnownModelRef = {
   [P in KnownProviderId]: `${P}/${Extract<keyof (typeof KNOWN_PROVIDERS)[P]['models'], string>}`
 }[KnownProviderId]
 
+export type ModelRef = string & { readonly __modelRef: unique symbol }
+
 export function listKnownModelRefs(): KnownModelRef[] {
   const refs: string[] = []
   for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
@@ -951,19 +950,33 @@ export function listKnownModelRefs(): KnownModelRef[] {
   return refs as KnownModelRef[]
 }
 
+export function isKnownModelRef(value: string): value is KnownModelRef {
+  return (listKnownModelRefs() as ReadonlyArray<string>).includes(value)
+}
+
+export function isModelRef(value: string): value is ModelRef {
+  return /^[a-z0-9][a-z0-9-]*\/[^\s/][^\s]*$/.test(value) && knownProviderForModelRef(value) !== null
+}
+
 // The default we hand to scaffolded `typeclaw.json` and the schema's
 // `model.default`. Lives here (next to the provider table) so adding a model
 // can't drift from the field default — both come from the same module.
 export const DEFAULT_MODEL_REF: KnownModelRef = 'openai/gpt-5.4-nano'
 
-export function providerForModelRef(ref: KnownModelRef): KnownProviderId {
+export function providerForModelRef(ref: KnownModelRef | ModelRef | string): KnownProviderId {
   // KnownModelRef is `${provider}/${modelId}`, but provider IDs themselves can
   // contain '-' and model IDs can contain '/' (Fireworks). We split on the
   // first slash that follows a registered provider id.
+  const providerId = knownProviderForModelRef(ref)
+  if (providerId !== null) return providerId
+  throw new Error(`Unknown provider in model ref: ${ref}`)
+}
+
+function knownProviderForModelRef(ref: string): KnownProviderId | null {
   for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
     if (ref.startsWith(`${providerId}/`)) return providerId
   }
-  throw new Error(`Unknown provider in model ref: ${ref}`)
+  return null
 }
 
 // Per-provider default for pi-coding-agent's `thinkingLevel` knob. Returning
@@ -978,7 +991,7 @@ export function providerForModelRef(ref: KnownModelRef): KnownProviderId {
 //
 // Anthropic, GLM, and Kimi don't share the padding behavior, so they keep the
 // SDK default.
-export function defaultThinkingLevelForRef(ref: KnownModelRef): 'low' | undefined {
+export function defaultThinkingLevelForRef(ref: KnownModelRef | ModelRef | string): 'low' | undefined {
   const providerId = providerForModelRef(ref)
   if (providerId === 'openai' || providerId === 'openai-codex') return 'low'
   return undefined

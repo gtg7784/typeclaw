@@ -230,6 +230,32 @@ describe('createConfigReloadable', () => {
     expect(diff.ignored.map((c) => c.path)).toEqual(['$schema'])
   })
 
+  test('field fence: customModels changes land in `applied`', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-6-live' } }))
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: 'openai/gpt-6-live' },
+        customModels: { 'openai/gpt-6-live': { name: 'GPT-6 Live', reasoning: true } },
+      }),
+    )
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const diff = result.details as {
+      applied: { path: string }[]
+      restartRequired: unknown[]
+      ignored: unknown[]
+    }
+    expect(diff.applied.map((c) => c.path)).toEqual(['customModels'])
+    expect(diff.restartRequired).toHaveLength(0)
+    expect(diff.ignored).toHaveLength(0)
+  })
+
   test('summary string reports counts in each bucket', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),

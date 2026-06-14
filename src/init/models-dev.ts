@@ -1,4 +1,13 @@
-import { KNOWN_PROVIDERS, type KnownModelRef, type KnownProviderId, listKnownModelRefs } from '@/config/providers'
+import type { CustomModelMeta } from '@/config'
+import {
+  KNOWN_PROVIDERS,
+  isKnownModelRef,
+  isModelRef,
+  listKnownModelRefs,
+  providerForModelRef,
+  type KnownProviderId,
+  type ModelRef,
+} from '@/config/providers'
 
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const REQUEST_TIMEOUT_MS = 10_000
@@ -32,13 +41,15 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
 }
 
 export type ModelOption = {
-  ref: KnownModelRef
+  ref: ModelRef | string
   providerId: KnownProviderId
   providerName: string
   modelId: string
   modelName: string
   reasoning: boolean
   contextWindow: number | null
+  maxTokens?: number | null
+  cost?: ModelOptionCost | null
   curated: boolean
   // True iff the model accepts image input. Sourced from the curated
   // `Model.input` array (which is the source of truth — pi-ai consumes it
@@ -49,6 +60,13 @@ export type ModelOption = {
   supportsVision: boolean
 }
 
+export type ModelOptionCost = {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
 type ModelsDevModel = {
   id?: string
   name?: string
@@ -57,7 +75,15 @@ type ModelsDevModel = {
   status?: string
   release_date?: string
   modalities?: { input?: string[]; output?: string[] }
-  limit?: { context?: number }
+  limit?: { context?: number; output?: number }
+  cost?: {
+    input?: number
+    output?: number
+    cacheRead?: number
+    cacheWrite?: number
+    cache_read?: number
+    cache_write?: number
+  }
 }
 
 type ModelsDevProvider = {
@@ -105,22 +131,47 @@ export function curatedOptions(): ModelOption[] {
   return refs.map((ref) => buildOption(ref, { curated: true }))
 }
 
-// `data` is the parsed models.dev JSON. We walk only the providers we care
-// about (openai, fireworks-ai) and only emit options for models that are
-// also in our curated allowlist — anything outside the allowlist would fail
-// schema validation when written to typeclaw.json. Curated entries that
-// models.dev doesn't list (e.g. kimi-k2p6-turbo) are still surfaced so the
-// user can pick them.
+export function customModelMetaFromOption(option: ModelOption): CustomModelMeta | undefined {
+  if (isKnownModelRef(option.ref)) return undefined
+  if (!isModelRef(option.ref)) return undefined
+  return {
+    name: option.modelName,
+    reasoning: option.reasoning,
+    input: option.supportsVision ? ['text', 'image'] : ['text'],
+    ...(option.contextWindow !== null ? { contextWindow: option.contextWindow } : {}),
+    ...(option.maxTokens !== undefined && option.maxTokens !== null ? { maxTokens: option.maxTokens } : {}),
+    ...(option.cost !== undefined && option.cost !== null ? { cost: option.cost } : {}),
+  }
+}
+
+// `data` is the parsed models.dev JSON. We keep every curated entry first
+// (including provider-specific aliases models.dev does not list), then append
+// live upstream models whose refs validate against a known TypeClaw provider.
 function mergeWithCurated(data: Record<string, ModelsDevProvider>): ModelOption[] {
   const out: ModelOption[] = []
+  const seen = new Set<string>()
   for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
     const known = KNOWN_PROVIDERS[providerId]
     const upstream = data[PROVIDER_TO_MODELS_DEV[providerId]]
     const upstreamModels = upstream?.models ?? {}
     for (const modelId of Object.keys(known.models)) {
       const upstreamModel = upstreamModels[modelId]
-      const ref = `${providerId}/${modelId}` as KnownModelRef
+      const ref = `${providerId}/${modelId}`
       out.push(buildOption(ref, { curated: true, upstream: upstreamModel }))
+      seen.add(ref)
+    }
+  }
+
+  for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
+    const upstream = data[PROVIDER_TO_MODELS_DEV[providerId]]
+    const upstreamModels = upstream?.models ?? {}
+    for (const [fallbackModelId, upstreamModel] of Object.entries(upstreamModels)) {
+      const modelId = upstreamModel.id ?? fallbackModelId
+      if (modelId.trim().length === 0) continue
+      const ref = `${providerId}/${modelId}`
+      if (seen.has(ref) || !isModelRef(ref)) continue
+      out.push(buildOption(ref, { curated: isKnownModelRef(ref), upstream: upstreamModel }))
+      seen.add(ref)
     }
   }
   return out
@@ -131,17 +182,23 @@ type BuildOptionOpts = {
   upstream?: ModelsDevModel
 }
 
-function buildOption(ref: KnownModelRef, opts: BuildOptionOpts): ModelOption {
-  const slash = ref.indexOf('/')
-  const providerId = ref.slice(0, slash) as KnownProviderId
-  const modelId = ref.slice(slash + 1)
+function buildOption(ref: ModelRef | string, opts: BuildOptionOpts): ModelOption {
+  const providerId = providerForModelRef(ref)
+  const modelId = ref.slice(providerId.length + 1)
   const provider = KNOWN_PROVIDERS[providerId]
   const curatedModel = (
     provider.models as Record<
       string,
-      { name: string; contextWindow?: number; reasoning?: boolean; input?: ReadonlyArray<string> }
+      {
+        name: string
+        contextWindow?: number
+        maxTokens?: number
+        reasoning?: boolean
+        input?: ReadonlyArray<string>
+      }
     >
   )[modelId]
+  const input = resolveInput(curatedModel?.input, opts.upstream?.modalities?.input)
   return {
     ref,
     providerId,
@@ -150,16 +207,28 @@ function buildOption(ref: KnownModelRef, opts: BuildOptionOpts): ModelOption {
     modelName: opts.upstream?.name ?? curatedModel?.name ?? modelId,
     reasoning: opts.upstream?.reasoning ?? curatedModel?.reasoning ?? false,
     contextWindow: opts.upstream?.limit?.context ?? curatedModel?.contextWindow ?? null,
+    maxTokens: opts.upstream?.limit?.output ?? curatedModel?.maxTokens ?? null,
+    cost: resolveCost(opts.upstream?.cost),
     curated: opts.curated,
-    supportsVision: resolveSupportsVision(curatedModel?.input, opts.upstream?.modalities?.input),
+    supportsVision: input.includes('image'),
   }
 }
 
-function resolveSupportsVision(
+function resolveInput(
   curatedInput: ReadonlyArray<string> | undefined,
   upstreamInput: ReadonlyArray<string> | undefined,
-): boolean {
-  if (curatedInput !== undefined) return curatedInput.includes('image')
-  if (upstreamInput !== undefined) return upstreamInput.includes('image')
-  return false
+): string[] {
+  if (curatedInput !== undefined) return [...curatedInput]
+  if (upstreamInput !== undefined && upstreamInput.length > 0) return [...upstreamInput]
+  return ['text']
+}
+
+function resolveCost(cost: ModelsDevModel['cost']): ModelOptionCost | null {
+  if (cost === undefined) return null
+  return {
+    input: cost.input ?? 0,
+    output: cost.output ?? 0,
+    cacheRead: cost.cacheRead ?? cost.cache_read ?? 0,
+    cacheWrite: cost.cacheWrite ?? cost.cache_write ?? 0,
+  }
 }
