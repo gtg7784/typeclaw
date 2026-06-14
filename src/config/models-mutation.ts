@@ -3,13 +3,16 @@ import { join } from 'node:path'
 
 import { commitSystemFileSync } from '@/git/system-commit'
 
-import { configSchema, loadConfigSyncOrDefaults, validateConfig } from './config'
+import { configSchema, loadConfigSyncOrDefaults, validateConfig, type CustomModelMeta } from './config'
 import {
   KNOWN_PROVIDERS,
+  isKnownModelRef,
+  isModelRef,
   listKnownModelRefs,
   providerForModelRef,
   type KnownModelRef,
   type KnownProviderId,
+  type ModelRef,
 } from './providers'
 import { isProviderConfigured, listConfiguredProviders } from './providers-mutation'
 
@@ -20,8 +23,8 @@ export type ModelProfileEntry = {
   // Head of the fallback chain. Kept under the legacy `ref` name so callers
   // that only care about the active model (the common case) don't need to
   // dereference `refs[0]`. The chain itself is exposed as `refs`.
-  ref: KnownModelRef
-  refs: KnownModelRef[]
+  ref: ModelRef
+  refs: ModelRef[]
   providerId: KnownProviderId
   // Credential status for every provider referenced by the chain. The chain's
   // overall status is `available` only when every entry resolves; otherwise
@@ -67,7 +70,7 @@ export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.
   return out
 }
 
-function uniqueProviders(refs: ReadonlyArray<KnownModelRef>): KnownProviderId[] {
+function uniqueProviders(refs: ReadonlyArray<ModelRef>): KnownProviderId[] {
   const seen = new Set<KnownProviderId>()
   const out: KnownProviderId[] = []
   for (const r of refs) {
@@ -103,9 +106,7 @@ export function listRegisteredModelRefs(cwd: string, env: NodeJS.ProcessEnv = pr
   return listKnownModelRefs().filter((ref) => registered.has(providerForModelRef(ref)))
 }
 
-export function isKnownModelRef(value: string): value is KnownModelRef {
-  return (listKnownModelRefs() as ReadonlyArray<string>).includes(value)
-}
+export { isKnownModelRef }
 
 // `set` is the canonical mutation for both creating a new profile and updating
 // an existing one (mirrors how `models.<profile>` works in the schema).
@@ -115,6 +116,7 @@ export function isKnownModelRef(value: string): value is KnownModelRef {
 export type SetProfileOptions = {
   force?: boolean
   env?: NodeJS.ProcessEnv
+  meta?: CustomModelMeta
 }
 
 export function setProfile(
@@ -127,7 +129,7 @@ export function setProfile(
   if (trimmed.length === 0) {
     return { ok: false, reason: 'Profile name cannot be empty.' }
   }
-  if (!isKnownModelRef(ref)) {
+  if (!isModelRef(ref)) {
     return {
       ok: false,
       reason: `Unknown model "${ref}". Run \`typeclaw model list --available\` to see valid options.`,
@@ -143,7 +145,8 @@ export function setProfile(
 
   const existingBefore = readModelsRaw(cwd)
   const verb = existingBefore !== null && trimmed in existingBefore ? 'set' : 'add'
-  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`)
+  const customModel = !isKnownModelRef(ref) && options.meta !== undefined ? { ref, meta: options.meta } : undefined
+  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`, customModel)
 }
 
 // `add` is just `set` with a uniqueness guard; users who want "update" should
@@ -189,19 +192,26 @@ export function removeProfile(cwd: string, profile: string): ModelMutationResult
   return writeModels(cwd, next, `model: remove ${profile}`)
 }
 
-function writeProfile(cwd: string, profile: string, ref: KnownModelRef, message: string): ModelMutationResult {
+function writeProfile(
+  cwd: string,
+  profile: string,
+  ref: ModelRef,
+  message: string,
+  customModel?: { ref: ModelRef; meta: CustomModelMeta },
+): ModelMutationResult {
   const existing = readModelsRaw(cwd)
   const next: Record<string, string | string[]> = existing === null ? { default: ref } : { ...existing, [profile]: ref }
   if (existing === null && profile !== 'default') {
     next.default = ref
   }
-  return writeModels(cwd, next, message)
+  return writeModels(cwd, next, message, customModel)
 }
 
 function writeModels(
   cwd: string,
   models: Record<string, string | string[]>,
   commitMessage: string,
+  customModel?: { ref: ModelRef; meta: CustomModelMeta },
 ): ModelMutationResult {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
@@ -215,6 +225,10 @@ function writeModels(
     return { ok: false, reason: `Failed to read ${CONFIG_FILE}: ${(error as Error).message}` }
   }
   parsed.models = models
+  if (customModel !== undefined) {
+    const existingCustomModels = isObjectRecord(parsed.customModels) ? parsed.customModels : {}
+    parsed.customModels = { ...existingCustomModels, [customModel.ref]: customModel.meta }
+  }
   const check = configSchema.safeParse(parsed)
   if (!check.success) {
     return {
@@ -242,6 +256,10 @@ function writeModels(
   // Bun, and clean files, so callers outside a git repo pay zero cost.
   commitSystemFileSync(cwd, CONFIG_FILE, commitMessage)
   return { ok: true }
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 // Returns the raw `models` block from disk in its on-disk shape: each value
