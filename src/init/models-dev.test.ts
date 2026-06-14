@@ -53,8 +53,8 @@ describe('fetchModelOptions', () => {
     expect(result.warning).toContain('502')
   })
 
-  test('merges live data with curated allowlist when fetch succeeds', async () => {
-    // given: a stub response with a richer name for one curated model.
+  test('merges live data with curated entries when fetch succeeds', async () => {
+    // given: a stub response with a richer name for one curated model and a new upstream model.
     const stub = {
       openai: {
         id: 'openai',
@@ -64,7 +64,19 @@ describe('fetchModelOptions', () => {
             id: 'gpt-5.4-nano',
             name: 'GPT-5.4 nano (live)',
             reasoning: true,
-            limit: { context: 400000 },
+            limit: { context: 400000, output: 128000 },
+          },
+          'gpt-6-live': {
+            id: 'gpt-6-live',
+            name: 'GPT-6 Live',
+            reasoning: true,
+            modalities: { input: ['text', 'image'], output: ['text'] },
+            limit: { context: 500000, output: 64000 },
+            cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 0.2 },
+          },
+          invalid: {
+            id: '',
+            name: 'Invalid',
           },
         },
       },
@@ -85,6 +97,18 @@ describe('fetchModelOptions', () => {
     expect(result.source).toBe('models.dev')
     const nano = result.options.find((o) => o.ref === 'openai/gpt-5.4-nano')
     expect(nano?.modelName).toBe('GPT-5.4 nano (live)')
+    const live = result.options.find((o) => o.ref === 'openai/gpt-6-live')
+    expect(live).toMatchObject({
+      modelName: 'GPT-6 Live',
+      providerId: 'openai',
+      curated: false,
+      reasoning: true,
+      supportsVision: true,
+      contextWindow: 500000,
+      maxTokens: 64000,
+      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+    })
+    expect(result.options.some((o) => o.modelName === 'Invalid')).toBe(false)
     // kimi-k2p6-turbo is curated-only; must still appear even though models.dev didn't list it.
     expect(result.options.some((o) => o.modelId === 'accounts/fireworks/routers/kimi-k2p6-turbo')).toBe(true)
   })
