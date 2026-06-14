@@ -1,4 +1,4 @@
-import { cancel, intro, isCancel, log, select } from '@clack/prompts'
+import { autocomplete, cancel, intro, isCancel, log, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import type { CustomModelMeta } from '@/config'
@@ -248,8 +248,9 @@ async function pickModelRef(cwd: string): Promise<PickedModelRef> {
     // assignability. Values are ref strings (+ the sentinel) and stay correct
     // at runtime — the sentinel check and `return choice` below are unaffected.
     const modelOptions = await listCredentialedModelOptions(refs)
-    const choice = await select<string>({
+    const choice = await autocomplete<string>({
       message: 'Pick a model',
+      placeholder: 'Type to search…',
       options: [
         ...modelOptions.map((option) => ({
           value: option.ref,

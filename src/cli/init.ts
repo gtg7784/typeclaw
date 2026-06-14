@@ -1,6 +1,18 @@
 import { randomBytes } from 'node:crypto'
 
-import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
+import {
+  autocomplete,
+  cancel,
+  confirm,
+  intro,
+  isCancel,
+  log,
+  note,
+  password,
+  select,
+  spinner,
+  text,
+} from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import {
@@ -1083,8 +1095,9 @@ async function pickVendor(
   initial: KnownProviderVendorId | undefined,
 ): Promise<StepResult<KnownProviderVendorId>> {
   const vendors = uniqueVendors(options)
-  const choice = await select({
+  const choice = await autocomplete({
     message: 'Pick an LLM provider',
+    placeholder: 'Type to search…',
     options: vendors.map((id) => ({
       value: id,
       label: KNOWN_PROVIDER_VENDORS[id].name,
@@ -1104,8 +1117,9 @@ async function pickProviderVariant(
   const variants = providersForVendorInCatalog(vendorId, options)
   if (variants.length === 0) throw new Error(`Internal error: vendor ${vendorId} has no providers in the catalog`)
   if (variants.length === 1) return autoValue(variants[0]!)
-  const choice = await select<KnownProviderId>({
+  const choice = await autocomplete<KnownProviderId>({
     message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
+    placeholder: 'Type to search…',
     options: variants.map((id) => {
       const hint = variantHint(vendorId, id)
       return hint !== undefined
@@ -1128,8 +1142,9 @@ async function pickModelForProvider(
   // distributive conditional type, so a large KnownModelRef union explodes into
   // a per-literal option union that no longer accepts `value: ref`. The runtime
   // value is the ref string and is re-narrowed via `candidates.find` below.
-  const choice = await select<string>({
+  const choice = await autocomplete<string>({
     message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
+    placeholder: 'Type to search…',
     options: candidates.map((o) => ({
       value: o.ref,
       label: formatModelLabel(o),
@@ -1173,8 +1188,9 @@ async function pickVisionVendor(
     log.warn('No vision-capable models available; skipping vision profile.')
     return autoValue('skip')
   }
-  const choice = await select<KnownProviderVendorId | 'skip'>({
+  const choice = await autocomplete<KnownProviderVendorId | 'skip'>({
     message: 'Your model is text-only. Pick a provider for the `vision` profile (used for image input)',
+    placeholder: 'Type to search…',
     options: [
       ...vendors.map((id) => ({
         value: id as KnownProviderVendorId | 'skip',
@@ -1204,8 +1220,9 @@ async function pickVisionModel(
 ): Promise<StepResult<ModelOption>> {
   const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
   // select<string> for the same distributive-Option reason as pickModelForProvider.
-  const choice = await select<string>({
+  const choice = await autocomplete<string>({
     message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
+    placeholder: 'Type to search…',
     options: candidates.map((o) => ({
       value: o.ref,
       label: formatModelLabel(o),
