@@ -1,6 +1,6 @@
 import { resolveProfile } from '@/config'
 import type { Models } from '@/config/config'
-import type { KnownModelRef } from '@/config/providers'
+import type { KnownModelRef, ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
@@ -15,18 +15,20 @@ import { renderTurnTimeAnchor } from './system-prompt'
 //   the final entry, on full-chain failure). Callers that need to keep using
 //   the session for subsequent turns store these in their state; callers that
 //   tear down per-turn (cron) just call `dispose()` and discard.
-export type FallbackPromptResult = {
+type FallbackModelRef = KnownModelRef | ModelRef
+
+export type FallbackPromptResult<TRef extends FallbackModelRef = ModelRef> = {
   success: boolean
-  refUsed: KnownModelRef
-  attempts: FallbackAttempt[]
+  refUsed: TRef
+  attempts: FallbackAttempt<TRef>[]
   session: AgentSession
   dispose: () => Promise<void>
   // When `success === false`, this is the error from the final attempt.
   lastError?: Error
 }
 
-export type FallbackAttempt = {
-  ref: KnownModelRef
+export type FallbackAttempt<TRef extends FallbackModelRef = ModelRef> = {
+  ref: TRef
   // 'hard' = session.prompt() threw. 'soft' = pi-coding-agent surfaced an
   // upstream error via stopReason: 'error' on the final assistant message.
   // 'success' = the turn finished cleanly.
@@ -40,7 +42,7 @@ export type FallbackAttempt = {
 //
 // Exported so callers can introspect the chain (e.g. logs, telemetry) before
 // firing the prompt — useful for `[cron] ${jobId}: trying chain a → b → c`.
-export function resolveFallbackChain(models: Models, profile: string | undefined): KnownModelRef[] {
+export function resolveFallbackChain(models: Models, profile: string | undefined): ModelRef[] {
   return resolveProfile(models, profile).refs
 }
 
@@ -62,18 +64,18 @@ export function resolveFallbackChain(models: Models, profile: string | undefined
 // (console.error in the server drain, channel reaction in the router,
 // cron-job status). This keeps the helper composable with the existing
 // error-handling code at each call site.
-export async function promptWithFallback(opts: {
-  refs: KnownModelRef[]
+export async function promptWithFallback<TRef extends FallbackModelRef>(opts: {
+  refs: TRef[]
   text: string
-  createSessionForRef: (ref: KnownModelRef) => Promise<{ session: AgentSession; dispose: () => Promise<void> }>
+  createSessionForRef: (ref: TRef) => Promise<{ session: AgentSession; dispose: () => Promise<void> }>
   // Called after each non-final attempt so callers can log the per-attempt
   // failure with their own context (sessionId, channel key, job id, ...).
-  onAttemptFailed?: (attempt: FallbackAttempt) => void
-}): Promise<FallbackPromptResult> {
+  onAttemptFailed?: (attempt: FallbackAttempt<TRef>) => void
+}): Promise<FallbackPromptResult<TRef>> {
   if (opts.refs.length === 0) {
     throw new Error('promptWithFallback: refs[] must be non-empty')
   }
-  const attempts: FallbackAttempt[] = []
+  const attempts: FallbackAttempt<TRef>[] = []
   let lastError: Error | undefined
   for (let i = 0; i < opts.refs.length; i++) {
     const ref = opts.refs[i]!
@@ -92,7 +94,7 @@ export async function promptWithFallback(opts: {
         await session.prompt(`${renderTurnTimeAnchor()}\n\n${opts.text}`)
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err))
-        const attempt: FallbackAttempt = { ref, outcome: 'hard', errorMessage: error.message }
+        const attempt: FallbackAttempt<TRef> = { ref, outcome: 'hard', errorMessage: error.message }
         attempts.push(attempt)
         lastError = error
         if (!isLast) opts.onAttemptFailed?.(attempt)
@@ -104,7 +106,7 @@ export async function promptWithFallback(opts: {
         continue
       }
       if (softError !== undefined) {
-        const attempt: FallbackAttempt = { ref, outcome: 'soft', errorMessage: softError.message }
+        const attempt: FallbackAttempt<TRef> = { ref, outcome: 'soft', errorMessage: softError.message }
         attempts.push(attempt)
         lastError = softError
         if (!isLast) opts.onAttemptFailed?.(attempt)

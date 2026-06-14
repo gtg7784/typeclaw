@@ -2,6 +2,8 @@ export {
   buildConfigMigrationCommitMessage,
   config,
   configSchema,
+  customModelMetaSchema,
+  customModelsSchema,
   DEFAULT_PLUGINS,
   dockerSchema,
   dockerfileSchema,
@@ -29,6 +31,8 @@ export {
   type Config,
   type ConfigChange,
   type ConfigReloadDiff,
+  type CustomModelMeta,
+  type CustomModels,
   type DockerConfig,
   type DockerfileConfig,
   type GitConfig,
@@ -43,5 +47,5 @@ export {
   type ResolvedProfile,
   type ValidateConfigResult,
 } from './config'
-export { type KnownModelRef, type KnownProviderId } from './providers'
+export { type KnownModelRef, type KnownProviderId, type ModelRef } from './providers'
 export { createConfigReloadable, type CreateConfigReloadableOptions } from './reloadable'

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { Models } from '@/config/config'
+import { configSchema, type Models } from '@/config/config'
 import type { KnownModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
@@ -9,6 +9,10 @@ import { promptWithFallback, resolveFallbackChain } from './model-fallback'
 const REF_A = 'openai/gpt-5.4-nano' as KnownModelRef
 const REF_B = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' as KnownModelRef
 const REF_C = 'zai/glm-4.6' as KnownModelRef
+
+function parseModels(models: Record<string, string | string[]>): Models {
+  return configSchema.parse({ models }).models
+}
 
 type SessionFake = {
   ref: KnownModelRef
@@ -67,24 +71,24 @@ function fakeSession(opts: {
 
 describe('resolveFallbackChain', () => {
   test('returns single-element chain for single-ref profile', () => {
-    const models: Models = { default: [REF_A] }
-    expect(resolveFallbackChain(models, undefined)).toEqual([REF_A])
-    expect(resolveFallbackChain(models, 'default')).toEqual([REF_A])
+    const models = parseModels({ default: REF_A })
+    expect(resolveFallbackChain(models, undefined).map(String)).toEqual([REF_A])
+    expect(resolveFallbackChain(models, 'default').map(String)).toEqual([REF_A])
   })
 
   test('returns multi-element chain for multi-ref profile', () => {
-    const models: Models = { default: [REF_A, REF_B, REF_C] }
-    expect(resolveFallbackChain(models, undefined)).toEqual([REF_A, REF_B, REF_C])
+    const models = parseModels({ default: [REF_A, REF_B, REF_C] })
+    expect(resolveFallbackChain(models, undefined).map(String)).toEqual([REF_A, REF_B, REF_C])
   })
 
   test('falls back to default chain for unknown profile', () => {
-    const models: Models = { default: [REF_A, REF_B] }
-    expect(resolveFallbackChain(models, 'nonexistent')).toEqual([REF_A, REF_B])
+    const models = parseModels({ default: [REF_A, REF_B] })
+    expect(resolveFallbackChain(models, 'nonexistent').map(String)).toEqual([REF_A, REF_B])
   })
 
   test('returns the named profile chain when defined', () => {
-    const models: Models = { default: [REF_A], fast: [REF_B, REF_C] }
-    expect(resolveFallbackChain(models, 'fast')).toEqual([REF_B, REF_C])
+    const models = parseModels({ default: REF_A, fast: [REF_B, REF_C] })
+    expect(resolveFallbackChain(models, 'fast').map(String)).toEqual([REF_B, REF_C])
   })
 })
 
