@@ -184,7 +184,7 @@ describe('runDoctor', () => {
   test('integrates plugin fix results into the commit', async () => {
     const cwd = makeTmpAgentDir()
     await initGitRepo(cwd)
-    await mkdir(join(cwd, 'memory'), { recursive: true })
+    await mkdir(join(cwd, 'memory/streams'), { recursive: true })
     await writeFile(join(cwd, 'memory/.placeholder'), '')
 
     const result = await runDoctor({
@@ -207,7 +207,7 @@ describe('runDoctor', () => {
         ],
       }),
       fetchPluginFix: async () => {
-        const rel = 'memory/2026-05-12.md'
+        const rel = 'memory/streams/2026-05-12.jsonl'
         writeFileSync(join(cwd, rel), '', 'utf8')
         return {
           kind: 'ok',
@@ -220,7 +220,7 @@ describe('runDoctor', () => {
     expect(result.fixAttempts?.some((a) => a.source === 'plugin' && a.ok)).toBe(true)
 
     const show = await run(['git', 'log', '-1', '--name-only', '--format='], cwd)
-    expect(show.stdout).toContain('memory/2026-05-12.md')
+    expect(show.stdout).toContain('memory/streams/2026-05-12.jsonl')
   })
 
   test('rejects plugin fix changedPaths that escape agentDir', async () => {
@@ -276,7 +276,7 @@ test('buildCommitMessage formats subject + bullets', async () => {
       name: 'memory.daily-stream-current',
       source: 'plugin',
       ok: true,
-      summary: 'created memory/2026-05-12.md',
+      summary: 'created memory/streams/2026-05-12.jsonl',
       changedPaths: [],
     },
     { name: 'foo', source: 'plugin', ok: false, reason: 'broke' },
@@ -284,7 +284,7 @@ test('buildCommitMessage formats subject + bullets', async () => {
   const lines = msg.split('\n')
   expect(lines[0]).toBe('typeclaw doctor: auto-fix 2 issues')
   expect(msg).toContain('- [static] agent-folder.dockerfile-managed: refreshed Dockerfile from template')
-  expect(msg).toContain('- [plugin] memory.daily-stream-current: created memory/2026-05-12.md')
+  expect(msg).toContain('- [plugin] memory.daily-stream-current: created memory/streams/2026-05-12.jsonl')
 })
 
 test('readme example: report.entries preserves source distinction', async () => {
