@@ -32,8 +32,10 @@ import {
   OUTBOUND_FLOOD_ERROR,
   SEND_RATE_WARN_THRESHOLD,
   SEND_RATE_WINDOW_MS,
+  isGraceWorthReusing,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
+  SESSION_GRACE_HARD_TTL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
   StaleLiveSessionError,
@@ -236,6 +238,7 @@ function makeRouter(
     origins?: SessionOrigin[]
     factoryCalls?: SessionFactoryArgs[]
     transcriptPathFor?: (sessionId: string) => string | undefined
+    measureTranscriptBytes?: (path: string) => number
     configuredAliases?: () => readonly string[]
     ensureLiveTimeoutMs?: number
     permissions?: PermissionService
@@ -253,6 +256,7 @@ function makeRouter(
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
+    ...(options.measureTranscriptBytes !== undefined ? { measureTranscriptBytes: options.measureTranscriptBytes } : {}),
     ...(options.claimHandler !== undefined ? { claimHandler: options.claimHandler } : {}),
     ...(options.onReload !== undefined ? { onReload: options.onReload } : {}),
     ...(options.onRestart !== undefined ? { onRestart: options.onRestart } : {}),
@@ -602,6 +606,96 @@ describe('ChannelRouter session lifecycle', () => {
 
     expect(events).toContain('end:ses_fake_1')
     expect(sessions[0]!.disposed).toBe(1)
+    expect(sessions).toHaveLength(2)
+  })
+
+  test('grace reuse: in soft→hard band, large base + small transcript reuses the live session', async () => {
+    // given: a session whose base context (10KB) dwarfs its transcript growth
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const bytesFor = new Map<string, number>()
+    const { router, sessions } = makeRouter(dir, {
+      nowRef,
+      transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl`,
+      measureTranscriptBytes: (path) => bytesFor.get(path) ?? 0,
+    })
+    bytesFor.set('/fake/ses_fake_1.jsonl', 10_000) // base context at cold-start
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    bytesFor.set('/fake/ses_fake_1.jsonl', 11_000) // +1KB transcript < 10KB base
+
+    // when: a follow-up lands just inside the grace band (soft TTL + 1ms)
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'still there?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the live session is reused, not rolled over
+    expect(sessions).toHaveLength(1)
+    expect(router.liveCount()).toBe(1)
+  })
+
+  test('grace decline: in soft→hard band, transcript exceeding base rolls over', async () => {
+    // given: a session whose transcript growth (15KB) now exceeds its base (10KB)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const bytesFor = new Map<string, number>()
+    const { router, sessions } = makeRouter(dir, {
+      nowRef,
+      transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl`,
+      measureTranscriptBytes: (path) => bytesFor.get(path) ?? 0,
+    })
+    bytesFor.set('/fake/ses_fake_1.jsonl', 10_000)
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    bytesFor.set('/fake/ses_fake_1.jsonl', 25_000) // delta 15KB > 10KB base
+
+    // when: a follow-up lands in the grace band
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'long convo' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the bloated transcript makes rebuild cheaper, so it rolls over
+    expect(sessions).toHaveLength(2)
+  })
+
+  test('grace is bounded: past the hard cap, a large base still rolls over', async () => {
+    // given: a large base that would otherwise win the grace comparison
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const bytesFor = new Map<string, number>()
+    const { router, sessions } = makeRouter(dir, {
+      nowRef,
+      transcriptPathFor: (sessionId) => `/fake/${sessionId}.jsonl`,
+      measureTranscriptBytes: (path) => bytesFor.get(path) ?? 0,
+    })
+    bytesFor.set('/fake/ses_fake_1.jsonl', 10_000)
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    bytesFor.set('/fake/ses_fake_1.jsonl', 10_100) // tiny delta — grace would apply
+
+    // when: the follow-up lands PAST the hard cap
+    nowRef.value = 1000 + SESSION_GRACE_HARD_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'much later' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the hard cap forces rollover regardless of base vs delta
+    expect(sessions).toHaveLength(2)
+  })
+
+  test('grace fails closed: no transcript path (baseContextBytes=0) rolls over at soft TTL', async () => {
+    // given: a router with no transcript path (the prior default behavior)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when: a follow-up lands in what would be the grace band
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'no base measured' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: with baseContextBytes=0, grace is disabled and it rolls over
     expect(sessions).toHaveLength(2)
   })
 
@@ -6727,6 +6821,22 @@ function historyMessage(over: Partial<ChannelHistoryMessage> = {}): ChannelHisto
     ...over,
   }
 }
+
+describe('isGraceWorthReusing', () => {
+  test('reuses when base context exceeds transcript delta', () => {
+    expect(isGraceWorthReusing(10_000, 1_000)).toBe(true)
+  })
+
+  test('rolls over when transcript delta meets or exceeds base context', () => {
+    expect(isGraceWorthReusing(10_000, 10_000)).toBe(false)
+    expect(isGraceWorthReusing(10_000, 15_000)).toBe(false)
+  })
+
+  test('fails closed when base context is unknown (0 or negative)', () => {
+    expect(isGraceWorthReusing(0, 0)).toBe(false)
+    expect(isGraceWorthReusing(-1, 0)).toBe(false)
+  })
+})
 
 describe('sliceHeadTail', () => {
   const m = (id: string): ChannelHistoryMessage => historyMessage({ externalMessageId: id, text: id })
