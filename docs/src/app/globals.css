@@ -30,3 +30,77 @@
 .dark {
   --color-fd-primary: var(--color-brand-300);
 }
+
+/* Mouse-follow spotlight for the hero. --mx / --my are set by HeroSpotlight; the
+   defaults render a static top-center glow on SSR and for reduced-motion users. */
+.hero-spotlight {
+  position: relative;
+  isolation: isolate;
+}
+
+.hero-spotlight-glow {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(
+      28% 22% at var(--mx) var(--my),
+      rgba(111, 126, 184, 0.16) 0%,
+      rgba(111, 126, 184, 0.06) 45%,
+      rgba(111, 126, 184, 0) 100%
+    ),
+    radial-gradient(
+      80% 60% at 50% -10%,
+      rgba(195, 202, 230, 0.35) 0%,
+      rgba(195, 202, 230, 0) 70%
+    );
+  transition: background 240ms ease-out;
+}
+
+.dark .hero-spotlight-glow {
+  background:
+    radial-gradient(
+      26% 20% at var(--mx) var(--my),
+      rgba(157, 167, 210, 0.14) 0%,
+      rgba(77, 93, 158, 0.06) 50%,
+      rgba(13, 23, 54, 0) 100%
+    ),
+    radial-gradient(
+      90% 60% at 50% -10%,
+      rgba(54, 72, 132, 0.28) 0%,
+      rgba(13, 23, 54, 0) 70%
+    );
+}
+
+/* Lit headline: the gradient origin tracks the pointer so "perfectionists"
+   appears to catch a moving highlight. No outer glow — a uniform drop-shadow
+   would halo even the unlit side of the word, contradicting the gradient. */
+.hero-lit-text {
+  background-image: radial-gradient(
+    70% 120% at var(--mx) var(--my),
+    var(--color-brand-300) 0%,
+    var(--color-brand-500) 35%,
+    var(--color-brand-700) 70%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.dark .hero-lit-text {
+  background-image: radial-gradient(
+    70% 120% at var(--mx) var(--my),
+    #eef1fb 0%,
+    var(--color-brand-200) 30%,
+    var(--color-brand-400) 65%,
+    var(--color-brand-600) 100%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-spotlight-glow {
+    transition: none;
+  }
+}
