@@ -10,13 +10,15 @@ import {
   GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
   migrateLegacyConfigShape,
   type Config,
+  type CustomModelMeta,
 } from '@/config'
 import {
   DEFAULT_MODEL_REF,
   KNOWN_PROVIDERS,
+  isKnownModelRef,
   providerForModelRef,
-  type KnownModelRef,
   type KnownProviderId,
+  type ModelRef,
 } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { commitSystemFile } from '@/git/system-commit'
@@ -171,7 +173,8 @@ export type InitOptions = {
   cwd: string
   // Selected `provider/model` ref written into typeclaw.json. Defaults to
   // DEFAULT_MODEL_REF when callers (or older test fixtures) omit it.
-  model?: KnownModelRef
+  model?: ModelRef | string
+  modelMeta?: CustomModelMeta
   // How the agent will authenticate to the LLM provider. When omitted,
   // defaults to the api-key path with `apiKey` (legacy field, still
   // supported for backwards compat with the old `runInit` signature).
@@ -181,7 +184,8 @@ export type InitOptions = {
   // when both refer to the same provider; the wizard enforces this
   // pairing rule, so by the time we get here `visionAuth` is either
   // (a) absent, or (b) the right auth for `visionModel`'s provider.
-  visionModel?: KnownModelRef
+  visionModel?: ModelRef | string
+  visionModelMeta?: CustomModelMeta
   visionAuth?: LLMAuth
   apiKey?: string
   discordBotToken?: string
@@ -224,7 +228,9 @@ export async function runInit({
   apiKey,
   llmAuth,
   model = DEFAULT_MODEL_REF,
+  modelMeta,
   visionModel,
+  visionModelMeta,
   visionAuth,
   discordBotToken,
   slackBotToken,
@@ -304,7 +310,9 @@ export async function runInit({
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     model,
+    ...(modelMeta !== undefined ? { modelMeta } : {}),
     ...(visionModel !== undefined ? { visionModel } : {}),
+    ...(visionModelMeta !== undefined ? { visionModelMeta } : {}),
     withDiscord: wantsDiscord,
     withSlack: wantsSlack,
     withTelegram: wantsTelegram,
@@ -520,8 +528,10 @@ export async function isHatched(dir: string): Promise<boolean> {
 }
 
 export type ScaffoldOptions = {
-  model?: KnownModelRef
-  visionModel?: KnownModelRef
+  model?: ModelRef | string
+  modelMeta?: CustomModelMeta
+  visionModel?: ModelRef | string
+  visionModelMeta?: CustomModelMeta
   withDiscord?: boolean
   withSlack?: boolean
   withTelegram?: boolean
@@ -545,12 +555,14 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // `memory.*`) is omitted to keep the scaffold minimal — duplicating defaults
   // here would mean every schema change has to be mirrored in two places, and
   // users would feel obligated to maintain values they never set.
-  const models: Record<string, KnownModelRef> = { default: options.model ?? DEFAULT_MODEL_REF }
+  const models: Record<string, string> = { default: options.model ?? DEFAULT_MODEL_REF }
   if (options.visionModel !== undefined) models.vision = options.visionModel
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     models,
   }
+  const customModels = collectCustomModels(options)
+  if (Object.keys(customModels).length > 0) config.customModels = customModels
   const channels: Record<string, Record<string, never>> = {}
   if (options.withDiscord) channels['discord-bot'] = {}
   if (options.withSlack) channels['slack-bot'] = {}
@@ -576,6 +588,22 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   await Promise.all(MARKDOWN_FILES.map((file) => writeFile(join(root, file), '', { flag: 'wx' }).catch(ignoreExists)))
 
   await writeFile(join(root, GITIGNORE_FILE), buildGitignore(), { flag: 'wx' }).catch(ignoreExists)
+}
+
+function collectCustomModels(options: ScaffoldOptions): Record<string, CustomModelMeta> {
+  const customModels: Record<string, CustomModelMeta> = {}
+  addCustomModel(customModels, options.model ?? DEFAULT_MODEL_REF, options.modelMeta)
+  if (options.visionModel !== undefined) addCustomModel(customModels, options.visionModel, options.visionModelMeta)
+  return customModels
+}
+
+function addCustomModel(
+  customModels: Record<string, CustomModelMeta>,
+  ref: string,
+  meta: CustomModelMeta | undefined,
+): void {
+  if (isKnownModelRef(ref)) return
+  customModels[ref] = meta ?? {}
 }
 
 // agent-browser ships in every agent: the bundled SKILL.md (src/skills/
@@ -742,10 +770,10 @@ export async function writeSecrets(
     slackAppToken,
     telegramBotToken,
   }: {
-    model?: KnownModelRef
+    model?: ModelRef | string
     // Omitted on the OAuth path — credentials live in secrets.json via the OAuth runner.
     apiKey?: string
-    visionModel?: KnownModelRef
+    visionModel?: ModelRef | string
     visionApiKey?: string
     discordBotToken?: string
     slackBotToken?: string

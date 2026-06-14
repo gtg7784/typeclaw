@@ -801,6 +801,28 @@ describe('scaffold', () => {
     expect(cfg.models).toEqual({ default: 'zai/glm-4.6', vision: 'openai/gpt-5.4-nano' })
   })
 
+  test('writes customModels metadata for non-curated scaffolded models', async () => {
+    await scaffold(root, {
+      model: 'openai/gpt-6-live',
+      modelMeta: { name: 'GPT-6 Live', reasoning: true, input: ['text'], contextWindow: 500000 },
+      visionModel: 'fireworks/accounts/fireworks/models/qwen3-vl-live',
+      visionModelMeta: { name: 'Qwen3 VL Live', input: ['text', 'image'] },
+    })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      models: Record<string, string>
+      customModels: Record<string, unknown>
+    }
+    expect(cfg.models).toEqual({
+      default: 'openai/gpt-6-live',
+      vision: 'fireworks/accounts/fireworks/models/qwen3-vl-live',
+    })
+    expect(cfg.customModels).toEqual({
+      'openai/gpt-6-live': { name: 'GPT-6 Live', reasoning: true, input: ['text'], contextWindow: 500000 },
+      'fireworks/accounts/fireworks/models/qwen3-vl-live': { name: 'Qwen3 VL Live', input: ['text', 'image'] },
+    })
+  })
+
   test('omits every field whose default is already provided by configSchema or a bundled plugin', async () => {
     await scaffold(root)
 

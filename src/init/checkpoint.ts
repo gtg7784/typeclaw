@@ -6,9 +6,9 @@ import {
   listKnownModelRefs,
   listKnownProviderVendorIds,
   providerIdsForVendor,
-  type KnownModelRef,
   type KnownProviderId,
   type KnownProviderVendorId,
+  type ModelRef,
 } from '@/config/providers'
 
 // In-folder scratch for an in-progress `typeclaw init`, co-located with the
@@ -35,11 +35,11 @@ export interface WizardAnswerCheckpointV1 {
   updatedAt: string
   vendorId?: KnownProviderVendorId
   providerId?: KnownProviderId
-  modelRef?: KnownModelRef
+  modelRef?: ModelRef | string
   authMethod?: AuthMethod
   visionVendorId?: KnownProviderVendorId
   visionProviderId?: KnownProviderId
-  visionModelRef?: KnownModelRef
+  visionModelRef?: ModelRef | string
   visionAuthMethod?: AuthMethod
   channelChoice?: WizardChannelChoice
 }
@@ -57,11 +57,11 @@ export interface WizardCheckpointSelections {
   cwd: string
   vendorId?: KnownProviderVendorId
   providerId?: KnownProviderId
-  modelRef?: KnownModelRef
+  modelRef?: ModelRef | string
   authMethod?: AuthMethod
   visionVendorId?: KnownProviderVendorId
   visionProviderId?: KnownProviderId
-  visionModelRef?: KnownModelRef
+  visionModelRef?: ModelRef | string
   visionAuthMethod?: AuthMethod
   channelChoice?: WizardChannelChoice
 }
@@ -89,7 +89,7 @@ export function checkpointFromSelections(selections: WizardCheckpointSelections)
 // exists. Returns a sanitized copy; never throws on drift.
 export function sanitizeCheckpointAgainstCatalog(
   checkpoint: WizardAnswerCheckpointV1,
-  validModelRefs: ReadonlySet<KnownModelRef> = new Set(listKnownModelRefs()),
+  validModelRefs: ReadonlySet<string> = new Set(listKnownModelRefs()),
 ): WizardAnswerCheckpointV1 {
   const sanitized: WizardAnswerCheckpointV1 = {
     version: WIZARD_CHECKPOINT_VERSION,
