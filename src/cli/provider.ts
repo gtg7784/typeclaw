@@ -1,4 +1,4 @@
-import { cancel, intro, isCancel, log, password, select } from '@clack/prompts'
+import { autocomplete, cancel, intro, isCancel, log, password, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import {
@@ -282,8 +282,9 @@ async function resolveProviderForAdd(input: string | undefined): Promise<KnownPr
 
 async function pickVendorToAdd(): Promise<KnownProviderVendorId> {
   const vendorIds = listKnownProviderVendorIds()
-  const choice = await select<KnownProviderVendorId>({
+  const choice = await autocomplete<KnownProviderVendorId>({
     message: 'Pick a provider to add',
+    placeholder: 'Type to search…',
     options: vendorIds.map((id) => ({
       value: id,
       label: KNOWN_PROVIDER_VENDORS[id].name,
@@ -301,8 +302,9 @@ async function pickVendorToAdd(): Promise<KnownProviderVendorId> {
 async function pickVariantToAdd(vendorId: KnownProviderVendorId): Promise<KnownProviderId> {
   const variants = providerIdsForVendor(vendorId)
   if (variants.length === 1) return variants[0]!
-  const choice = await select<KnownProviderId>({
+  const choice = await autocomplete<KnownProviderId>({
     message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
+    placeholder: 'Type to search…',
     options: variants.map((id) => {
       const hint = variantHint(vendorId, id)
       return hint !== undefined
