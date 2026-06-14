@@ -4,7 +4,7 @@
   <img src="./docs/public/typeclaw.png" alt="TypeClaw logo" width="240" />
 </p>
 
-> A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
+> The agent for perfectionists — crafted in every detail. It behaves in your team's chat and gets sharper the longer it runs. Sandboxed and self-managing.
 
 ## Why?
 

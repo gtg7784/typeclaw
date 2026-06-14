@@ -4,26 +4,6 @@ export const INSTALL_COMMAND = 'bun add -g typeclaw'
 
 export const VERSION = `v${TYPECLAW_VERSION}`
 
-export interface Feature {
-  title: string
-  detail: string
-}
-
-export const FEATURES: Feature[] = [
-  { title: 'Sandboxed by default', detail: 'every agent runs in its own Docker container' },
-  { title: 'TypeScript end to end', detail: 'core, plugins, channels, CLI, TUI' },
-  { title: 'Plugins as TS modules', detail: 'plain .ts files; no IPC, no FFI' },
-  { title: 'Multi-channel', detail: 'Slack, Discord, Telegram, KakaoTalk, GitHub — plus a websocket TUI' },
-  { title: 'Cron', detail: 'scheduled prompts and shell commands, with coalescing' },
-  { title: 'Self-improving memory', detail: 'observes its own work and writes its own skills' },
-  { title: 'Hot reload', detail: 'most config reloads live; boot-only fields ask for a restart' },
-  { title: 'Auto port-forward', detail: 'dev servers in the container appear on localhost' },
-  { title: 'Public tunnels', detail: 'Cloudflare Quick or your own URL — built in' },
-  { title: 'Skills on demand', detail: 'markdown procedures with zero token cost until used' },
-  { title: 'Group-chat aware', detail: 'knows who is in the room and when to reply' },
-  { title: 'Roles and permissions', detail: 'platform-aware match rules gate every action' },
-]
-
 export interface DocLink {
   href: string
   title: string
@@ -62,8 +42,8 @@ export interface Competitor {
 export const COMPETITORS: Competitor[] = [
   {
     name: 'OpenClaw',
-    strength: 'Feature-rich',
-    tradeoff: 'Heavy',
+    strength: 'Biggest ecosystem',
+    tradeoff: 'a platform to learn, not a codebase to read',
     lang: 'TypeScript',
     dockerFirst: true,
     selfImproving: 'partial',
@@ -74,8 +54,8 @@ export const COMPETITORS: Competitor[] = [
   },
   {
     name: 'NanoClaw',
-    strength: 'Simple',
-    tradeoff: 'No plugin system',
+    strength: 'Minimal',
+    tradeoff: 'no real plugin system',
     lang: 'TypeScript',
     dockerFirst: false,
     selfImproving: false,
@@ -86,8 +66,8 @@ export const COMPETITORS: Competitor[] = [
   },
   {
     name: 'PicoClaw',
-    strength: 'Fast',
-    tradeoff: 'Plugins live outside the runtime',
+    strength: 'Ultralight',
+    tradeoff: 'plugins live outside the runtime',
     lang: 'Go',
     dockerFirst: false,
     selfImproving: false,
@@ -98,8 +78,8 @@ export const COMPETITORS: Competitor[] = [
   },
   {
     name: 'ZeroClaw',
-    strength: 'Light',
-    tradeoff: 'Plugins live outside the runtime',
+    strength: 'Single binary',
+    tradeoff: 'plugins live outside the runtime',
     lang: 'Rust',
     dockerFirst: false,
     selfImproving: false,
@@ -110,8 +90,8 @@ export const COMPETITORS: Competitor[] = [
   },
   {
     name: 'Hermes Agent',
-    strength: 'Awesome',
-    tradeoff: 'Python',
+    strength: 'Mature, self-improving',
+    tradeoff: 'Python — a boundary if your stack is TS',
     lang: 'Python',
     dockerFirst: 'partial',
     selfImproving: true,
@@ -122,8 +102,8 @@ export const COMPETITORS: Competitor[] = [
   },
   {
     name: 'TypeClaw',
-    strength: 'TypeScript end to end',
-    tradeoff: 'the answer',
+    strength: 'One TS codebase, plugins as imports',
+    tradeoff: 'younger, smaller ecosystem',
     lang: 'TypeScript',
     dockerFirst: true,
     selfImproving: true,
