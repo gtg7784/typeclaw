@@ -1,6 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { stripEmptyOptionalFollowupFiller } from '@/agent/empty-optional-followup-guard'
 import { checkFalseReceipt } from '@/channels/github-false-receipt'
 import { evaluateRereviewGuard } from '@/channels/github-rereview-guard'
 import {
@@ -98,7 +99,7 @@ export function createChannelReplyTool({
     }),
 
     async execute(_toolCallId, params) {
-      const text = params.text
+      const text = params.text !== undefined ? stripEmptyOptionalFollowupFiller(params.text) : undefined
       const attachments = params.attachments
       const keepTurnAlive = params.continue === true
       if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
