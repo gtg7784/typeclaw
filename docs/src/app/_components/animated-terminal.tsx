@@ -89,7 +89,7 @@ export function AnimatedTerminal({ variant = 'default', title = 'my-agent', clas
         <span className="size-2.5" />
       </div>
       <pre
-        className="overflow-x-auto p-5 font-mono text-[13px] leading-relaxed"
+        className="overflow-x-auto p-4 font-mono text-xs leading-relaxed sm:p-5 sm:text-[13px]"
         aria-label="Animated terminal demo: typeclaw init, start, channel add, then git log"
       >
         <code>

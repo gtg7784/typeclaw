@@ -41,11 +41,11 @@ function HeroInstall() {
         aria-hidden
         className="absolute -inset-px rounded-2xl bg-gradient-to-r from-brand-400/30 via-brand-200/40 to-brand-400/30 opacity-70 blur-md transition-opacity group-hover:opacity-100 dark:from-brand-700/40 dark:via-brand-500/30 dark:to-brand-700/40"
       />
-      <div className="relative flex items-center justify-between gap-2 rounded-2xl border border-zinc-200 bg-white py-3 pr-2 pl-5 font-mono text-sm text-zinc-800 shadow-lg dark:border-white/[0.1] dark:bg-zinc-950 dark:text-zinc-100">
+      <div className="relative flex items-center justify-between gap-2 rounded-2xl border border-zinc-200 bg-white py-3 pr-2 pl-4 font-mono text-xs sm:pl-5 sm:text-sm text-zinc-800 shadow-lg dark:border-white/[0.1] dark:bg-zinc-950 dark:text-zinc-100">
         <span className="text-zinc-400 dark:text-zinc-600" aria-hidden>
           $
         </span>
-        <span className="flex-1 truncate">{INSTALL_COMMAND}</span>
+        <span className="min-w-0 flex-1 truncate">{INSTALL_COMMAND}</span>
         <CopyButton text={INSTALL_COMMAND} />
       </div>
     </div>
@@ -101,7 +101,7 @@ function ChannelTrust() {
 
 function SandboxDiagram() {
   return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
       <div className="relative flex h-full items-center justify-center">
         <div className="relative w-full max-w-xs">
           <div className="absolute -inset-4 rounded-2xl border-2 border-dashed border-zinc-300 dark:border-white/[0.1]" />
@@ -139,7 +139,7 @@ function PluginCode() {
         <span className="font-mono text-xs text-zinc-400 dark:text-zinc-600">plugins/pr-review.ts</span>
         <span className="size-2.5" />
       </div>
-      <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+      <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed text-zinc-700 sm:p-5 sm:text-[13px] dark:text-zinc-300">
         <code>{PLUGIN_CODE}</code>
       </pre>
     </div>
@@ -304,19 +304,19 @@ interface FeatureRowProps {
 function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps) {
   return (
     <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-2 lg:gap-16">
-      <div className={reverse ? 'lg:order-2' : ''}>
+      <div className={reverse ? 'min-w-0 lg:order-2' : 'min-w-0'}>
         <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">{eyebrow}</p>
         <h3 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">{title}</h3>
         <p className="mt-4 max-w-md text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
       </div>
-      <div className={reverse ? 'lg:order-1' : ''}>{visual}</div>
+      <div className={reverse ? 'min-w-0 lg:order-1' : 'min-w-0'}>{visual}</div>
     </div>
   )
 }
 
 function PermissionsVisual() {
   return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
       <div className="flex h-full flex-col items-center justify-center gap-4">
         <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-white px-5 py-3 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
           <Shield className="size-5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} />
@@ -371,7 +371,7 @@ function LiveProof() {
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="min-h-screen overflow-x-clip bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <nav className="sticky top-0 z-50 border-b border-zinc-100 bg-white/85 backdrop-blur-md dark:border-white/[0.06] dark:bg-zinc-950/85">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5 sm:px-8">
           <Link href="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
@@ -411,7 +411,7 @@ export default function Home() {
         <section className="relative overflow-hidden">
           <DotGrid />
           <HeroSpotlight>
-            <div className="relative z-10 mx-auto max-w-4xl px-6 pt-16 pb-32 text-center sm:pt-24">
+            <div className="relative z-10 mx-auto max-w-4xl px-5 pt-16 pb-24 sm:px-6 sm:pb-32 text-center sm:pt-24">
               <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
                 <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
                 {VERSION} · crafted in every detail
@@ -426,7 +426,7 @@ export default function Home() {
                   priority
                   className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
                 />
-                <h1 className="text-balance text-6xl font-semibold tracking-tight sm:text-7xl lg:text-8xl">
+                <h1 className="text-balance text-5xl font-semibold tracking-tight min-[380px]:text-6xl sm:text-7xl lg:text-8xl">
                   The agent for
                   <br />
                   <span className="hero-lit-text">perfectionists.</span>
@@ -439,10 +439,10 @@ export default function Home() {
               <div className="mt-10">
                 <HeroInstall />
               </div>
-              <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <div className="mt-6 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
                 <Link
                   href="/docs/guides/quickstart"
-                  className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
                 >
                   Start in 5 minutes
                   <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
@@ -451,7 +451,7 @@ export default function Home() {
                   href="https://github.com/typeclaw/typeclaw"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-5 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-5 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
                 >
                   <Star className="size-4" strokeWidth={2.4} aria-hidden />
                   Star on GitHub
@@ -467,7 +467,7 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 py-36">
+        <section className="mx-auto max-w-6xl px-5 py-24 sm:px-6 sm:py-36">
           <Reveal className="mb-12 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               everything it does
@@ -485,7 +485,7 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 py-36">
+        <section className="mx-auto max-w-6xl px-5 py-24 sm:px-6 sm:py-36">
           <Reveal className="text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               Memory you can read
@@ -506,7 +506,7 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl space-y-36 px-6 py-36">
+        <section className="mx-auto max-w-6xl space-y-24 px-5 py-24 sm:space-y-36 sm:px-6 sm:py-36">
           <Reveal>
             <FeatureRow
               eyebrow="Plugins are just imports"
@@ -534,7 +534,7 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-3xl px-6 pb-36">
+        <section className="mx-auto max-w-3xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               one minute, end to end
@@ -548,7 +548,7 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-36">
+        <section className="mx-auto max-w-6xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">Use cases</p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">For every workflow</h2>
@@ -558,13 +558,13 @@ export default function Home() {
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-36">
+        <section className="mx-auto max-w-6xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal>
             <LiveProof />
           </Reveal>
         </section>
 
-        <section className="mx-auto max-w-6xl px-6 pb-36">
+        <section className="mx-auto max-w-6xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               how it compares
@@ -599,17 +599,17 @@ export default function Home() {
               backgroundSize: '24px 24px',
             }}
           />
-          <Reveal className="relative mx-auto max-w-3xl px-6 text-center">
+          <Reveal className="relative mx-auto max-w-3xl px-5 text-center sm:px-6">
             <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
             <h2 className="mt-4 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">Make it yours.</h2>
             <p className="mx-auto mt-4 max-w-lg text-balance text-base text-zinc-600 dark:text-zinc-400">
               One folder, one container, one language you already know. Spin one up, read the whole thing, fork it if
               you like. Trying it costs nothing.
             </p>
-            <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <div className="mt-8 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
               <Link
                 href="/docs/guides/quickstart"
-                className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-700 px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
               >
                 <BookOpen className="size-4" strokeWidth={2.4} aria-hidden />
                 Start in 5 minutes
@@ -618,7 +618,7 @@ export default function Home() {
                 href="https://github.com/typeclaw/typeclaw"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-6 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-6 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
               >
                 <Github className="size-4" strokeWidth={2.4} aria-hidden />
                 Star on GitHub
@@ -629,16 +629,16 @@ export default function Home() {
       </main>
 
       <footer className="border-t border-zinc-100 bg-white dark:border-white/[0.04] dark:bg-zinc-950">
-        <div className="mx-auto grid max-w-6xl grid-cols-2 gap-10 px-6 py-16 sm:grid-cols-5">
+        <div className="mx-auto grid max-w-6xl grid-cols-1 gap-10 px-5 py-14 sm:grid-cols-2 sm:px-6 sm:py-16 lg:grid-cols-5">
           <div className="col-span-2">
             <div className="flex items-center gap-2">
               <Image src="/typeclaw.png" alt="TypeClaw" width={24} height={24} className="rounded-md" />
-              <span className="text-sm font-semibold tracking-tight">typeclaw</span>
+              <span className="text-sm font-semibold tracking-tight">TypeClaw</span>
             </div>
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-zinc-500 dark:text-zinc-500">
-              The agent runtime you can own — one TypeScript codebase, plugins as imports, memory you can read.
+              Crafted in every detail — it behaves in your team&apos;s chat and gets sharper the longer it runs.
             </p>
-            <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">© {new Date().getFullYear()} typeclaw · MIT</p>
+            <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">© {new Date().getFullYear()} TypeClaw · MIT</p>
           </div>
           <div>
             <p className="text-xs font-medium tracking-wider text-zinc-400 uppercase dark:text-zinc-500">Product</p>
@@ -668,10 +668,10 @@ export default function Home() {
             <ul className="mt-3 space-y-2 text-sm">
               <li>
                 <Link
-                  href="/docs/guides/getting-started"
+                  href="/docs/guides/quickstart"
                   className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
                 >
-                  Getting started
+                  Quickstart
                 </Link>
               </li>
               <li>
@@ -695,7 +695,7 @@ export default function Home() {
                   href="/docs/reference/typeclaw-json"
                   className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
                 >
-                  Reference
+                  Configuration
                 </Link>
               </li>
             </ul>

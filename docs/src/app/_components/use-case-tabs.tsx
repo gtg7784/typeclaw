@@ -30,7 +30,7 @@ export function UseCaseTabs() {
 
   return (
     <div className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-white/[0.08] dark:bg-zinc-900">
+      <div className="flex flex-wrap items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-white/[0.08] dark:bg-zinc-900">
         {USE_CASES.map((c) => {
           const Icon = c.icon
           const isActive = active === c.id
@@ -38,7 +38,7 @@ export function UseCaseTabs() {
             <button
               key={c.id}
               onClick={() => setActive(c.id)}
-              className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
+              className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition-all min-[420px]:flex-none sm:px-4 ${
                 isActive
                   ? 'bg-brand-50 text-brand-700 shadow-sm dark:bg-brand-950/60 dark:text-brand-300'
                   : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-200'
