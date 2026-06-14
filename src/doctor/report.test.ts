@@ -23,7 +23,7 @@ function makeReport(): DoctorReport {
         source: 'plugin',
         pluginName: 'memory',
         status: 'warning',
-        message: 'memory/today.md missing',
+        message: 'memory/streams/today.jsonl missing',
         fix: { description: 'create the file', canAutoFix: true },
       },
     ],
