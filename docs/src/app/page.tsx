@@ -1,11 +1,12 @@
-import { ArrowRight, BookOpen, Check, Container, Github, Lock, Shield, Sparkles, Star, X } from 'lucide-react'
+import { ArrowRight, BookOpen, Check, Container, Github, Lock, Minus, Shield, Sparkles, Star, X } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 
 import { AnimatedTerminal } from './_components/animated-terminal'
 import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
-import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
+import { COMPARISON_FEATURES, COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
+import { FEATURE_CATEGORIES } from './_components/features-data'
 import { HeroSpotlight } from './_components/hero-spotlight'
 import { Reveal } from './_components/reveal'
 import { ThemeToggle } from './_components/theme-toggle'
@@ -145,6 +146,25 @@ function PluginCode() {
   )
 }
 
+function CapabilityGrid() {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {FEATURE_CATEGORIES.filter((c) => c.featured).map(({ id, icon: Icon, title, summary }) => (
+        <div
+          key={id}
+          className="group rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition-all hover:translate-y-[-2px] hover:border-brand-200 hover:shadow-md dark:border-white/[0.08] dark:bg-white/[0.02] dark:hover:border-brand-800/60"
+        >
+          <div className="inline-flex size-10 items-center justify-center rounded-xl bg-brand-50 text-brand-700 transition-colors group-hover:bg-brand-100 dark:bg-brand-950/60 dark:text-brand-300 dark:group-hover:bg-brand-900/60">
+            <Icon className="size-5" strokeWidth={2.2} aria-hidden />
+          </div>
+          <h3 className="mt-4 text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{title}</h3>
+          <p className="mt-2 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{summary}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function MemoryLoopVertical() {
   return (
     <div className="relative">
@@ -178,84 +198,95 @@ function MemoryLoopVertical() {
 function CheckCell({ value }: { value: boolean | 'partial' }) {
   if (value === 'partial') {
     return (
-      <div className="inline-flex size-7 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-        <span className="font-mono text-xs">~</span>
-      </div>
+      <span className="inline-flex items-center justify-center text-zinc-400 dark:text-zinc-600">
+        <Minus className="size-4" strokeWidth={2.5} aria-hidden />
+        <span className="sr-only">Partial</span>
+      </span>
     )
   }
   return value ? (
-    <div className="inline-flex size-7 items-center justify-center rounded-full bg-brand-100 text-brand-700 dark:bg-brand-900/50 dark:text-brand-300">
-      <Check className="size-4" strokeWidth={2.5} aria-hidden />
-    </div>
+    <span className="inline-flex items-center justify-center text-brand-600 dark:text-brand-400">
+      <Check className="size-[18px]" strokeWidth={2.75} aria-hidden />
+      <span className="sr-only">Yes</span>
+    </span>
   ) : (
-    <div className="inline-flex size-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-400 dark:bg-white/[0.04] dark:text-zinc-600">
-      <X className="size-4" strokeWidth={2.5} aria-hidden />
-    </div>
+    <span className="inline-flex items-center justify-center text-zinc-300 dark:text-zinc-700">
+      <X className="size-4" strokeWidth={2.25} aria-hidden />
+      <span className="sr-only">No</span>
+    </span>
   )
 }
 
 function MarketingTable() {
+  const lastFeatureIndex = COMPARISON_FEATURES.length - 1
   return (
-    <div className="-mx-2 overflow-x-auto sm:mx-0">
-      <table className="w-full min-w-[940px] text-left text-sm">
+    <div className="overflow-x-auto rounded-2xl border border-zinc-200 dark:border-white/[0.08]">
+      <table className="w-full min-w-[680px] border-separate border-spacing-0 text-left text-sm">
         <thead>
-          <tr className="border-b border-zinc-200 text-xs tracking-wider text-zinc-500 uppercase dark:border-white/[0.06] dark:text-zinc-500">
-            <th className="px-4 py-4 font-medium">Runtime</th>
-            <th className="px-4 py-4 text-center font-medium">Docker-first</th>
-            <th className="px-4 py-4 text-center font-medium">Self-improving</th>
-            <th className="px-4 py-4 text-center font-medium">Multi-channel</th>
-            <th className="px-4 py-4 text-center font-medium">Full-featured plugins</th>
-            <th className="px-4 py-4 text-center font-medium">Auto-commit &amp; push</th>
-            <th className="px-4 py-4 text-center font-medium">Permission system</th>
-            <th className="px-4 py-4 font-medium">Notes</th>
+          <tr>
+            <th className="sticky left-0 z-10 border-b border-zinc-200 bg-white px-5 pt-6 pb-5 align-bottom font-mono text-[11px] font-medium tracking-[0.14em] text-zinc-400 uppercase dark:border-white/[0.08] dark:bg-zinc-950">
+              Feature
+            </th>
+            {COMPETITORS.map((r) => (
+              <th
+                key={r.name}
+                className={`border-b px-4 pt-6 pb-5 text-center align-top ${
+                  r.highlight
+                    ? 'border-brand-200 bg-brand-50/50 dark:border-brand-900/50 dark:bg-brand-950/30'
+                    : 'border-zinc-200 dark:border-white/[0.08]'
+                }`}
+              >
+                <div className="flex items-center justify-center gap-2">
+                  <span
+                    className={
+                      r.highlight
+                        ? 'text-base font-semibold tracking-tight text-brand-700 dark:text-brand-200'
+                        : 'text-base font-semibold tracking-tight text-zinc-800 dark:text-zinc-200'
+                    }
+                  >
+                    {r.name}
+                  </span>
+                  {r.highlight && (
+                    <span className="rounded-full bg-brand-600 px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wider text-white uppercase dark:bg-brand-500">
+                      you are here
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1.5 font-mono text-[11px] font-normal tracking-normal text-zinc-400 normal-case dark:text-zinc-500">
+                  {r.lang}
+                </div>
+                <p className="mx-auto mt-2 max-w-[13rem] text-xs font-normal leading-snug tracking-normal text-zinc-500 normal-case dark:text-zinc-500">
+                  {r.strength} · {r.tradeoff}
+                </p>
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {COMPETITORS.map((r) => (
-            <tr
-              key={r.name}
-              className={
-                r.highlight
-                  ? 'border-b border-brand-200/60 bg-brand-50/70 dark:border-brand-800/40 dark:bg-brand-950/30'
-                  : 'border-b border-zinc-100 dark:border-white/[0.04]'
-              }
-            >
-              <td className="px-4 py-5">
-                <div
-                  className={
-                    r.highlight
-                      ? 'font-semibold text-brand-800 dark:text-brand-100'
-                      : 'font-medium text-zinc-800 dark:text-zinc-200'
-                  }
+          {COMPARISON_FEATURES.map((feature, i) => {
+            const lastRow = i === lastFeatureIndex
+            const border = lastRow ? '' : 'border-b border-zinc-100 dark:border-white/[0.06]'
+            return (
+              <tr key={feature.key}>
+                <th
+                  scope="row"
+                  className={`sticky left-0 z-10 bg-white px-5 py-4 text-left text-[13px] font-medium whitespace-nowrap text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300 ${border}`}
                 >
-                  {r.name}
-                </div>
-                <div className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-500">{r.lang}</div>
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.dockerFirst} />
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.selfImproving} />
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.multiChannel} />
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.fullFeaturedPlugins} />
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.gitNative} />
-              </td>
-              <td className="px-4 py-5 text-center">
-                <CheckCell value={r.permissionSystem} />
-              </td>
-              <td className="px-4 py-5 text-zinc-600 dark:text-zinc-400">
-                <span className="font-medium text-zinc-700 dark:text-zinc-300">{r.strength}</span>
-                <span className="text-zinc-400 dark:text-zinc-600"> · {r.tradeoff}</span>
-              </td>
-            </tr>
-          ))}
+                  {feature.label}
+                </th>
+                {COMPETITORS.map((r) => (
+                  <td
+                    key={r.name}
+                    className={`px-4 py-4 text-center align-middle ${border} ${
+                      r.highlight ? 'bg-brand-50/50 dark:bg-brand-950/30' : ''
+                    }`}
+                  >
+                    <CheckCell value={r[feature.key]} />
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -437,6 +468,24 @@ export default function Home() {
         </section>
 
         <section className="mx-auto max-w-6xl px-6 py-36">
+          <Reveal className="mb-12 text-center">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+              everything it does
+            </p>
+            <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
+              Features crafted for perfectionists.
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
+              From a self-improving memory loop to a sandbox per agent, here is the whole surface — one capability per
+              card.
+            </p>
+          </Reveal>
+          <Reveal delay={120}>
+            <CapabilityGrid />
+          </Reveal>
+        </section>
+
+        <section className="mx-auto max-w-6xl px-6 py-36">
           <Reveal className="text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
               Memory you can read
@@ -521,16 +570,23 @@ export default function Home() {
               how it compares
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              OpenClaw is the platform. TypeClaw is the codebase.
+              Where TypeClaw is the right choice.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base text-zinc-600 dark:text-zinc-400">
               These are all good — genuinely. Reach for OpenClaw when you want the biggest ecosystem, Hermes when Python
-              is your stack, the lighter runtimes when you want a single binary. Reach for TypeClaw when you want a
-              runtime you can read end to end, extend with an import, and keep as your own.
+              is your stack. Reach for TypeClaw when you want a runtime you can read end to end, extend with an import,
+              and keep as your own.
             </p>
           </Reveal>
           <Reveal delay={120}>
             <MarketingTable />
+          </Reveal>
+          <Reveal delay={180}>
+            <p className="mx-auto mt-8 max-w-2xl text-center text-sm leading-relaxed text-zinc-500 dark:text-zinc-500">
+              These are all capable runtimes. OpenClaw is the broad platform; Hermes is the mature Python agent.
+              TypeClaw&apos;s edge is the combination: one readable TypeScript codebase you own — memory you can diff in
+              its own git repo, isolated per agent, and extended with a plain import.
+            </p>
           </Reveal>
         </section>
 

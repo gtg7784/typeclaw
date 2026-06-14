@@ -30,12 +30,14 @@ export interface Competitor {
   strength: string
   tradeoff: string
   lang: string
-  dockerFirst: CompetitorScore
-  selfImproving: CompetitorScore
-  multiChannel: CompetitorScore
-  fullFeaturedPlugins: CompetitorScore
-  gitNative: CompetitorScore
-  permissionSystem: CompetitorScore
+  readableMemory: CompetitorScore
+  knowsWhenToTalk: CompetitorScore
+  perAgentIsolation: CompetitorScore
+  pluginsAsImports: CompetitorScore
+  permissionsGuards: CompetitorScore
+  perAgentGitRepo: CompetitorScore
+  selfManaging: CompetitorScore
+  channels: CompetitorScore
   highlight?: boolean
 }
 
@@ -45,74 +47,64 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Biggest ecosystem',
     tradeoff: 'a platform to learn, not a codebase to read',
     lang: 'TypeScript',
-    dockerFirst: true,
-    selfImproving: 'partial',
-    multiChannel: true,
-    fullFeaturedPlugins: true,
-    gitNative: false,
-    permissionSystem: true,
-  },
-  {
-    name: 'NanoClaw',
-    strength: 'Minimal',
-    tradeoff: 'no real plugin system',
-    lang: 'TypeScript',
-    dockerFirst: false,
-    selfImproving: false,
-    multiChannel: false,
-    fullFeaturedPlugins: false,
-    gitNative: false,
-    permissionSystem: true,
-  },
-  {
-    name: 'PicoClaw',
-    strength: 'Ultralight',
-    tradeoff: 'plugins live outside the runtime',
-    lang: 'Go',
-    dockerFirst: false,
-    selfImproving: false,
-    multiChannel: 'partial',
-    fullFeaturedPlugins: 'partial',
-    gitNative: false,
-    permissionSystem: false,
-  },
-  {
-    name: 'ZeroClaw',
-    strength: 'Single binary',
-    tradeoff: 'plugins live outside the runtime',
-    lang: 'Rust',
-    dockerFirst: false,
-    selfImproving: false,
-    multiChannel: 'partial',
-    fullFeaturedPlugins: 'partial',
-    gitNative: false,
-    permissionSystem: true,
+    readableMemory: 'partial',
+    knowsWhenToTalk: true,
+    perAgentIsolation: true,
+    pluginsAsImports: true,
+    permissionsGuards: true,
+    perAgentGitRepo: 'partial',
+    selfManaging: true,
+    channels: true,
   },
   {
     name: 'Hermes Agent',
     strength: 'Mature, self-improving',
     tradeoff: 'Python — a boundary if your stack is TS',
     lang: 'Python',
-    dockerFirst: 'partial',
-    selfImproving: true,
-    multiChannel: true,
-    fullFeaturedPlugins: true,
-    gitNative: 'partial',
-    permissionSystem: false,
+    readableMemory: true,
+    knowsWhenToTalk: 'partial',
+    perAgentIsolation: 'partial',
+    pluginsAsImports: false,
+    permissionsGuards: true,
+    perAgentGitRepo: true,
+    selfManaging: true,
+    channels: true,
   },
   {
     name: 'TypeClaw',
     strength: 'One TS codebase, plugins as imports',
     tradeoff: 'younger, smaller ecosystem',
     lang: 'TypeScript',
-    dockerFirst: true,
-    selfImproving: true,
-    multiChannel: true,
-    fullFeaturedPlugins: true,
-    gitNative: true,
-    permissionSystem: true,
+    readableMemory: true,
+    knowsWhenToTalk: true,
+    perAgentIsolation: true,
+    pluginsAsImports: true,
+    permissionsGuards: true,
+    perAgentGitRepo: true,
+    selfManaging: true,
+    channels: true,
     highlight: true,
   },
+]
+
+type ScoreKey = {
+  [K in keyof Competitor]-?: Competitor[K] extends CompetitorScore ? K : never
+}[keyof Competitor]
+
+export interface ComparisonFeature {
+  key: ScoreKey
+  label: string
+}
+
+export const COMPARISON_FEATURES: ComparisonFeature[] = [
+  { key: 'readableMemory', label: 'Memory you can read' },
+  { key: 'knowsWhenToTalk', label: 'Knows when not to talk' },
+  { key: 'perAgentIsolation', label: 'Per-agent isolation' },
+  { key: 'pluginsAsImports', label: 'Plugins as imports' },
+  { key: 'permissionsGuards', label: 'Permissions & guards' },
+  { key: 'perAgentGitRepo', label: 'Per-agent git repo' },
+  { key: 'selfManaging', label: 'Self-managing' },
+  { key: 'channels', label: 'Channels' },
 ]
 
 export interface MemoryStage {
