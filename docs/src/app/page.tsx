@@ -6,6 +6,7 @@ import { AnimatedTerminal } from './_components/animated-terminal'
 import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
 import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
+import { HeroSpotlight } from './_components/hero-spotlight'
 import { Reveal } from './_components/reveal'
 import { ThemeToggle } from './_components/theme-toggle'
 import { UseCaseTabs } from './_components/use-case-tabs'
@@ -378,55 +379,55 @@ export default function Home() {
       <main>
         <section className="relative overflow-hidden">
           <DotGrid />
-          <div className="relative z-10 mx-auto max-w-4xl px-6 pt-16 pb-32 text-center sm:pt-24">
-            <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
-              <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
-              {VERSION} · crafted in every detail
+          <HeroSpotlight>
+            <div className="relative z-10 mx-auto max-w-4xl px-6 pt-16 pb-32 text-center sm:pt-24">
+              <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
+                <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+                {VERSION} · crafted in every detail
+              </div>
+              <div className="relative mt-8">
+                <Image
+                  src="/typeey-cutout.png"
+                  alt=""
+                  width={895}
+                  height={858}
+                  aria-hidden
+                  priority
+                  className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
+                />
+                <h1 className="text-balance text-6xl font-semibold tracking-tight sm:text-7xl lg:text-8xl">
+                  The agent for
+                  <br />
+                  <span className="hero-lit-text">perfectionists.</span>
+                </h1>
+              </div>
+              <p className="mx-auto mt-7 max-w-xl text-balance text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
+                Crafted in every detail — it behaves in your team&apos;s chat and gets sharper the longer it runs.
+                Sandboxed and self-managing.
+              </p>
+              <div className="mt-10">
+                <HeroInstall />
+              </div>
+              <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+                <Link
+                  href="/docs/guides/quickstart"
+                  className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+                >
+                  Start in 5 minutes
+                  <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
+                </Link>
+                <a
+                  href="https://github.com/typeclaw/typeclaw"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-5 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
+                >
+                  <Star className="size-4" strokeWidth={2.4} aria-hidden />
+                  Star on GitHub
+                </a>
+              </div>
             </div>
-            <div className="relative mt-8">
-              <Image
-                src="/typeey-cutout.png"
-                alt=""
-                width={895}
-                height={858}
-                aria-hidden
-                priority
-                className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
-              />
-              <h1 className="text-balance text-6xl font-semibold tracking-tight sm:text-7xl lg:text-8xl">
-                The agent for
-                <br />
-                <span className="bg-gradient-to-br from-brand-700 to-brand-500 bg-clip-text text-transparent dark:from-brand-200 dark:to-brand-400">
-                  perfectionists.
-                </span>
-              </h1>
-            </div>
-            <p className="mx-auto mt-7 max-w-xl text-balance text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Crafted in every detail — it behaves in your team&apos;s chat and gets sharper the longer it runs.
-              Sandboxed and self-managing.
-            </p>
-            <div className="mt-10">
-              <HeroInstall />
-            </div>
-            <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
-              <Link
-                href="/docs/guides/quickstart"
-                className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
-              >
-                Start in 5 minutes
-                <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
-              </Link>
-              <a
-                href="https://github.com/typeclaw/typeclaw"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-5 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
-              >
-                <Star className="size-4" strokeWidth={2.4} aria-hidden />
-                Star on GitHub
-              </a>
-            </div>
-          </div>
+          </HeroSpotlight>
         </section>
 
         <section className="border-y border-zinc-100 bg-zinc-50/50 py-16 dark:border-white/[0.04] dark:bg-white/[0.01]">
