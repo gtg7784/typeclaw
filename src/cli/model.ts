@@ -254,7 +254,7 @@ async function pickModelRef(cwd: string): Promise<PickedModelRef> {
         ...modelOptions.map((option) => ({
           value: option.ref,
           label: describeRef(option.ref),
-          hint: option.curated ? option.ref : `${option.ref} ${c.dim('(live)')}`,
+          hint: option.ref,
         })),
         {
           value: ADD_PROVIDER_SENTINEL,
@@ -363,8 +363,7 @@ async function printAvailableRefs(): Promise<void> {
     console.log('')
     console.log(c.cyan(KNOWN_PROVIDERS[providerId].name))
     for (const option of providerOptions) {
-      const marker = option.curated ? '' : ` ${c.dim('(live)')}`
-      console.log(`  ${option.ref}${marker}`)
+      console.log(`  ${option.ref}`)
     }
   }
 }
