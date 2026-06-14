@@ -1,14 +1,16 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import { z } from 'zod'
 
-import type { HookBus } from '@/plugin'
+import type { HookBus, PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
 
-import type { AgentSession } from './index'
+import * as agentIndex from './index'
+import type { AgentSession, PluginSessionWiring } from './index'
 import { LiveSubagentRegistry } from './live-subagents'
 import {
   createSubagentConsumer,
+  defaultCreateSessionForSubagent,
   invokeSubagent,
   startSubagent,
   type Subagent,
@@ -1283,5 +1285,47 @@ describe('invokeSubagent — background drain lifecycle', () => {
     // then: exactly one prompt, no drain.
     expect(calls.prompt.length).toBe(1)
     expect(calls.disposed).toBe(1)
+  })
+})
+
+describe('defaultCreateSessionForSubagent — plugin hook wiring', () => {
+  const subagent: Subagent<unknown> = { systemPrompt: 'X', payloadSchema: z.unknown() }
+
+  function fakePluginWiring(): PluginSessionWiring {
+    return {
+      registry: { skills: [] } as unknown as PluginRegistry,
+      hooks: makeFakeHookBus([]),
+      sessionId: 'ses_sub',
+      agentDir: '/agent',
+    }
+  }
+
+  test('forwards plugins wiring into createSession so the subagent runs tool hooks', async () => {
+    // given: a built-in subagent created WITH plugin wiring
+    const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
+    const plugins = fakePluginWiring()
+    try {
+      // when
+      await defaultCreateSessionForSubagent(subagent, { name: 'explore', plugins })
+
+      // then: createSession receives the same plugin wiring (so its builtin bash
+      // is wrapped with tool.before — security guards + github-cli-auth token).
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.plugins).toBe(plugins)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('omits plugins when none supplied (standalone/test callers stay unwrapped)', async () => {
+    const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
+    try {
+      await defaultCreateSessionForSubagent(subagent, { name: 'explore' })
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.plugins).toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
