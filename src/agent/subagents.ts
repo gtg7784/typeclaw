@@ -1,6 +1,7 @@
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { z } from 'zod'
 
+import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
@@ -152,6 +153,12 @@ export type CreateSessionForSubagentOptions = {
   // task-spawned subagent's `git push`/`gh` gets a minted token instead of
   // failing with "could not read Username".
   plugins?: PluginSessionWiring
+  // The role/permission service that drives builtin-bash sandboxing. It MUST be
+  // forwarded alongside `plugins`: buildBuiltinPiToolOverrides only applies
+  // applyBashSandbox / applyTmpPathRedirect when `permissions` is present, so
+  // wiring hooks without permissions would inject the GitHub token yet leave the
+  // sandbox OFF — strictly weaker than the plugin-subagent branch this matches.
+  permissions?: PermissionService
 }
 export type CreateSessionForSubagent = (
   subagent: Subagent<any>,
@@ -171,6 +178,7 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
     ...(options?.plugins !== undefined ? { plugins: options.plugins } : {}),
+    ...(options?.permissions !== undefined ? { permissions: options.permissions } : {}),
     ...(subagent.profile !== undefined ? { profile: subagent.profile } : {}),
     ...(subagent.toolResultBudget !== undefined ? { toolResultBudget: subagent.toolResultBudget } : {}),
     ...(subagent.bashPolicy !== undefined ? { bashPolicy: subagent.bashPolicy } : {}),

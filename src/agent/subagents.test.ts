@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from 'bun:test'
 
 import { z } from 'zod'
 
+import { noopPermissionService } from '@/permissions'
 import type { HookBus, PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
 
@@ -1300,30 +1301,35 @@ describe('defaultCreateSessionForSubagent — plugin hook wiring', () => {
     }
   }
 
-  test('forwards plugins wiring into createSession so the subagent runs tool hooks', async () => {
-    // given: a built-in subagent created WITH plugin wiring
+  test('forwards plugins AND permissions into createSession so the subagent runs tool hooks WITH sandboxing', async () => {
+    // given: a built-in subagent created WITH plugin wiring + the permission service
     const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
     const plugins = fakePluginWiring()
+    const permissions = noopPermissionService
     try {
       // when
-      await defaultCreateSessionForSubagent(subagent, { name: 'explore', plugins })
+      await defaultCreateSessionForSubagent(subagent, { name: 'explore', plugins, permissions })
 
-      // then: createSession receives the same plugin wiring (so its builtin bash
-      // is wrapped with tool.before — security guards + github-cli-auth token).
+      // then: createSession receives BOTH. plugins wraps builtin bash with
+      // tool.before (token + guards); permissions is what makes that wrapper
+      // apply applyBashSandbox/applyTmpPathRedirect — both are required or the
+      // subagent gets the token with the sandbox off.
       expect(spy).toHaveBeenCalledTimes(1)
       expect(spy.mock.calls[0]?.[0]?.plugins).toBe(plugins)
+      expect(spy.mock.calls[0]?.[0]?.permissions).toBe(permissions)
     } finally {
       spy.mockRestore()
     }
   })
 
-  test('omits plugins when none supplied (standalone/test callers stay unwrapped)', async () => {
+  test('omits plugins and permissions when none supplied (standalone/test callers stay unwrapped)', async () => {
     const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
     try {
       await defaultCreateSessionForSubagent(subagent, { name: 'explore' })
 
       expect(spy).toHaveBeenCalledTimes(1)
       expect(spy.mock.calls[0]?.[0]?.plugins).toBeUndefined()
+      expect(spy.mock.calls[0]?.[0]?.permissions).toBeUndefined()
     } finally {
       spy.mockRestore()
     }

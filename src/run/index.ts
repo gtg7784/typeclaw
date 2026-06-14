@@ -457,6 +457,11 @@ export async function startAgent({
         sessionId: sessionManager.getSessionId(),
         agentDir: cwd,
       },
+      // Pass permissions alongside plugins (same as the plugin-subagent branch
+      // at line 384): without it the builtin-bash sandbox (applyBashSandbox /
+      // applyTmpPathRedirect) stays off and the subagent would get the injected
+      // token but no role-derived sandboxing.
+      permissions: pluginsLoaded.permissions,
     })
   }
 
