@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs'
 import { basename } from 'node:path'
 
 import type { AssistantMessage } from '@mariozechner/pi-ai'
@@ -291,16 +292,69 @@ export const SEND_RATE_WARN_THRESHOLD = 3
 export const OUTBOUND_FLOOD_ERROR = 'outbound message denied: content looks like a repeated-character flood'
 
 /**
- * Maximum age of the last engaged inbound before the next inbound triggers a fresh session.
- * Set to the LLM provider's KV-cache TTL (5 min) so the new session's system prompt is
- * guaranteed to be a cache hit on the provider side.
+ * Soft freshness boundary: the age of the last engaged inbound past which the
+ * provider's server-side KV prompt-cache for this session's prefix is assumed
+ * cold. Set to the LLM provider's KV-cache TTL (5 min) so a session reused
+ * WITHIN this window is guaranteed a cache hit on the provider side.
  *
- * Unlike SESSION_IDLE_MS (which evicts the in-memory entry without rollover), this constant
- * triggers a full tearDownLive + recreate on the next engaged inbound. The old session's
- * transcript is preserved on disk; only the in-memory live entry and sessions.json pointer
- * are replaced.
+ * Reaching this boundary no longer forces an immediate rollover. Between the
+ * soft boundary and SESSION_GRACE_HARD_TTL_MS, the live path defers to a
+ * cost-aware grace decision (see `isGraceWorthReusing`): a session whose fixed
+ * base context (rendered system prompt + injected memory + prefetched channel
+ * context) still costs more to rebuild than its accumulated transcript is
+ * reused for one more turn rather than torn down. This targets the common
+ * channel shape — a human replying a few minutes past the cache TTL — where a
+ * full cold-start rebuild of a large memory/index-mode base context dominates
+ * the cost of carrying a modest transcript forward.
+ *
+ * Unlike SESSION_IDLE_MS (which evicts the in-memory entry without rollover), a
+ * rollover triggers a full tearDownLive + recreate on the next engaged inbound.
+ * The old session's transcript is preserved on disk; only the in-memory live
+ * entry and sessions.json pointer are replaced.
  */
 export const SESSION_FRESHNESS_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Hard ceiling on the cost-aware grace window. Past this age the live session is
+ * rolled over unconditionally regardless of base-vs-transcript cost: the grace
+ * decision only defers rollover, it never makes the session immortal. Bounding
+ * grace at 2x the soft TTL keeps a never-quite-idle session from accumulating an
+ * ever-growing, fully-uncached prefix (every turn past the soft boundary re-sends
+ * the whole prefix at no provider-cache discount) and prevents grace from
+ * silently becoming an unbounded TTL increase.
+ */
+export const SESSION_GRACE_HARD_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Cost-aware grace decision for the soft→hard TTL band. Returns true when reusing
+ * the (now cache-cold) live session is cheaper than a fresh cold-start.
+ *
+ * After the soft TTL the provider prefix is cold either way, so the choice is:
+ *   - rollover: pay to rebuild the fixed base context (system prompt + memory +
+ *     prefetched context) plus a fresh first model call, OR
+ *   - reuse: re-send the cold base context PLUS the accumulated transcript.
+ *
+ * Rollover only wins once the transcript a reused session would carry forward
+ * exceeds the base context a rollover would rebuild. We approximate both with the
+ * session transcript file: `baseContextBytes` is its size captured right after
+ * cold-start (the rendered prompt before any user turn), and the live delta is
+ * the growth since. While `baseContextBytes > transcriptDeltaBytes`, the fixed
+ * rebuild is the larger cost and grace is worth it. A `baseContextBytes` of 0
+ * (no transcript path available) disables grace — fail closed to the prior
+ * roll-over-at-soft-TTL behavior.
+ */
+export function isGraceWorthReusing(baseContextBytes: number, transcriptDeltaBytes: number): boolean {
+  if (baseContextBytes <= 0) return false
+  return baseContextBytes > transcriptDeltaBytes
+}
+
+function defaultMeasureTranscriptBytes(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
 
 // Watchdog ceiling for ensureLive's full async chain (resolve names →
 // fetch membership → open session manager → persist mapping → prefetch
@@ -500,6 +554,12 @@ type LiveSession = {
   typingTimedOut: boolean
   typingStopPromise: Promise<void> | null
   lastInboundAt: number
+  // Transcript-file size (bytes) captured immediately after cold-start, before
+  // any user turn — a proxy for the fixed base-context rebuild cost (rendered
+  // system prompt + injected memory + prefetched channel context). Read by the
+  // soft-TTL grace decision against the current transcript size to weigh reuse
+  // vs rollover. 0 when no transcript path is available, which disables grace.
+  baseContextBytes: number
   firstUnprocessedAt: number
   currentTurnAuthorId: string | null
   currentTurnAuthorIds: Set<string>
@@ -969,6 +1029,10 @@ export type CreateChannelRouterOptions = {
   logger?: RouterLogger
   // Test seam: clock for sticky/debounce/participants. Defaults to Date.now.
   now?: () => number
+  // Test seam: measure a transcript file's byte size for the soft-TTL grace
+  // decision. Defaults to a stat()-based reader returning 0 for a missing or
+  // unreadable file (grace then fails closed to roll-over-at-soft-TTL).
+  measureTranscriptBytes?: (path: string) => number
   // Test seam: override the ensureLive watchdog ceiling so the timeout path
   // is exercisable in <100ms instead of the 30s production default.
   ensureLiveTimeoutMs?: number
@@ -1067,6 +1131,7 @@ const GRANT_ALL_PERMISSIONS: PermissionService = {
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
   const logger = options.logger ?? consoleLogger
   const now = options.now ?? Date.now
+  const measureTranscriptBytes = options.measureTranscriptBytes ?? defaultMeasureTranscriptBytes
   const ensureLiveTimeoutMs = options.ensureLiveTimeoutMs ?? ENSURE_LIVE_TIMEOUT_MS
   const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
   const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
@@ -1315,6 +1380,31 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return membership
   }
 
+  const shouldRolloverLive = (live: LiveSession, idleMs: number): boolean => {
+    // A session mid-prompt looks idle by lastInboundAt (only bumped on engaged
+    // inbounds) while session.prompt() is still in flight; rolling it over aborts
+    // that work. The runIdleGc path skips draining sessions for the same reason.
+    if (live.draining) return false
+    if (idleMs <= SESSION_FRESHNESS_TTL_MS) return false
+    if (idleMs > SESSION_GRACE_HARD_TTL_MS) {
+      logger.info(`[channels] ${live.keyId}: stale-rollover (live: ${idleMs}ms idle, past grace cap)`)
+      return true
+    }
+    const transcriptPath = live.getTranscriptPath?.()
+    const transcriptBytes = transcriptPath !== undefined ? measureTranscriptBytes(transcriptPath) : 0
+    const transcriptDeltaBytes = Math.max(0, transcriptBytes - live.baseContextBytes)
+    if (isGraceWorthReusing(live.baseContextBytes, transcriptDeltaBytes)) {
+      logger.info(
+        `[channels] ${live.keyId}: grace-reuse (live: ${idleMs}ms idle, base=${live.baseContextBytes}B delta=${transcriptDeltaBytes}B)`,
+      )
+      return false
+    }
+    logger.info(
+      `[channels] ${live.keyId}: stale-rollover (live: ${idleMs}ms idle, base=${live.baseContextBytes}B delta=${transcriptDeltaBytes}B)`,
+    )
+    return true
+  }
+
   const ensureLive = async (
     key: ChannelKey,
     triggeringMessageId?: string,
@@ -1333,22 +1423,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // A resume that finds the key already live is a no-op for reopening: the
       // session is up, so just hand it back and let the caller enqueue the wake.
       if (resumeTarget !== undefined) return existing
+      // Rollover decision (soft TTL → cost-aware grace → hard cap) lives in
+      // shouldRolloverLive, which also skips draining sessions so a mid-prompt
+      // turn is never aborted by a follow-up's idle check (PR #359 incident).
       const idleMs = now() - existing.lastInboundAt
-      // `lastInboundAt` is only bumped on engaged inbounds (see route()),
-      // so a session whose drain loop has been compiling a slow reply for
-      // 5+ minutes off a single inbound looks "idle" by this clock even
-      // though `session.prompt()` is mid-flight. Aborting that prompt to
-      // re-cold-start on the next user message wipes the in-flight work
-      // (observed against `openai-codex/gpt-5.5` in PR #359's incident:
-      // a 285s + 227s turn pair lost the second turn entirely to
-      // `tearDownLive` → `session.abort()` triggered by the user's
-      // follow-up at 5min idle). The `runIdleGc` path already skips
-      // draining sessions for the same reason; rollover must match.
-      // The skip is bounded: when the in-flight prompt completes or its
-      // own provider/transport timeout fires, `draining` clears and the
-      // next inbound's idle check picks up rollover normally.
-      if (idleMs > SESSION_FRESHNESS_TTL_MS && !existing.draining) {
-        logger.info(`[channels] ${keyId}: stale-rollover (live: ${idleMs}ms idle)`)
+      if (shouldRolloverLive(existing, idleMs)) {
         await tearDownLive(existing)
         liveSessions.delete(keyId)
         if (mappings) {
@@ -1527,6 +1606,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingTimedOut: false,
         typingStopPromise: null,
         lastInboundAt: now(),
+        baseContextBytes: 0,
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
@@ -1620,6 +1700,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
           logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
         }
+      }
+
+      // Snapshot the rendered base context size now, after prefetch and before
+      // any user turn, so the soft-TTL grace decision can later compare it
+      // against transcript growth. Only meaningful on cold-start (a rehydrated
+      // session's file already holds prior conversation, not a clean base).
+      const transcriptPathForBase = live.getTranscriptPath?.()
+      if (isColdStart && transcriptPathForBase !== undefined) {
+        live.baseContextBytes = measureTranscriptBytes(transcriptPathForBase)
       }
 
       logger.info(`[channels] ${keyId}: ensureLive done (${phase})`)
