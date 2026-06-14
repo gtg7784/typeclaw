@@ -1,7 +1,40 @@
-const ENGLISH_OPTIONAL_FOLLOWUP_START =
-  /^\s*(?:[-*]\s*)?(?:if\s+you\s+(?:want|would\s+like|need)|if\s+you'd\s+like|if\s+helpful|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like|need))\b/i
-const KOREAN_OPTIONAL_FOLLOWUP_START =
-  /^\s*(?:[-*]\s*)?(?:(?:원하시면|원하면|필요하면|필요하시면)|(?:더\s*)?필요(?:한|하신)\s*(?:게|것이)\s*있(?:으면|으시면))/
+type OptionalFollowupPattern = {
+  start: RegExp
+  requiresActionWord?: boolean
+}
+
+const OPTIONAL_FOLLOWUP_PATTERNS: OptionalFollowupPattern[] = [
+  // English
+  {
+    start:
+      /^\s*(?:[-*]\s*)?(?:if\s+you\s+(?:want|would\s+like|need)|if\s+you'd\s+like|if\s+helpful|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like|need))\b/i,
+    requiresActionWord: true,
+  },
+  // Korean
+  {
+    start:
+      /^\s*(?:[-*]\s*)?(?:(?:원하시면|원하면|필요하면|필요하시면)|(?:더\s*)?필요(?:한|하신)\s*(?:게|것이)\s*있(?:으면|으시면))/,
+  },
+  // Japanese
+  { start: /^\s*(?:[-*]\s*)?(?:必要(?:でし)?たら|ご希望(?:でし)?たら|よろしければ|もし必要(?:でし)?たら)/ },
+  // Chinese (Simplified/Traditional)
+  { start: /^\s*(?:[-*]\s*)?(?:如果(?:你|您)?(?:需要|想要|愿意|願意)|如(?:需|果需要)|需要的话|需要的話)/ },
+  // Spanish
+  {
+    start:
+      /^\s*(?:[-*]\s*)?(?:si\s+(?:quieres|quiere|necesitas|necesita|te\s+sirve|le\s+sirve)|si\s+te\s+resulta\s+útil)/i,
+  },
+  // French
+  {
+    start:
+      /^\s*(?:[-*]\s*)?(?:si\s+(?:tu\s+veux|vous\s+voulez|tu\s+as\s+besoin|vous\s+avez\s+besoin|besoin)|si\s+c['’]est\s+utile)/i,
+  },
+  // German
+  {
+    start:
+      /^\s*(?:[-*]\s*)?(?:wenn\s+du\s+(?:möchtest|willst|brauchst)|wenn\s+sie\s+(?:möchten|wollen|brauchen)|falls\s+(?:du|sie)\s+(?:möchtest|möchten|brauchst|brauchen))/i,
+  },
+]
 
 const ACTION_WORDS = [
   'can',
@@ -24,14 +57,22 @@ const ACTION_WORDS = [
 ]
 
 /**
- * Removes empty optional follow-up filler from the tail of a user-visible reply.
+ * Removes empty optional follow-up filler from the tail of a GPT/OpenAI-family
+ * user-visible reply.
+ *
+ * GPT-only instruction/guard metadata: this is a provider-scoped cleanup for
+ * GPT/OpenAI-family models (`openai`, `openai-codex`) that tend to append empty
+ * "if you want, I can also ..." offers. Non-GPT providers must leave this guard
+ * disabled so their channel text is not rewritten by GPT-specific heuristics.
  *
  * The guard is intentionally tail-only and CTA-shaped: it strips standalone
- * sentences/paragraphs such as "If you want, I can also ..." and "원하면 ...".
- * It does not remove ordinary conditionals in substantive content, especially
- * non-tail sentences like "If the webhook is disabled, restart is required."
+ * sentences/paragraphs such as "If you want, I can also ...", "원하면 ...",
+ * "必要でしたら ...", and "如果需要 ...". It does not remove ordinary
+ * conditionals in substantive content, especially non-tail sentences like
+ * "If the webhook is disabled, restart is required."
  */
-export function stripEmptyOptionalFollowupFiller(text: string): string {
+export function stripEmptyOptionalFollowupFiller(text: string, enabled = true): string {
+  if (!enabled) return text
   let body = trimTrailingWhitespace(text)
   let changed = false
 
@@ -66,12 +107,8 @@ function trailingSentenceOrParagraph(text: string): { before: string; text: stri
 function findPreviousSentenceBoundary(text: string): number {
   for (let i = text.length - 2; i >= 0; i--) {
     const ch = text[i]
-    if (
-      (ch === '.' || ch === '!' || ch === '?' || ch === '。' || ch === '！' || ch === '？') &&
-      /\s/.test(text[i + 1] ?? '')
-    ) {
-      return i
-    }
+    if (ch === '。' || ch === '！' || ch === '？') return i
+    if ((ch === '.' || ch === '!' || ch === '?') && /\s/.test(text[i + 1] ?? '')) return i
   }
   return -1
 }
@@ -79,7 +116,14 @@ function findPreviousSentenceBoundary(text: string): number {
 function isEmptyOptionalFollowup(sentence: string): boolean {
   const normalized = sentence.trim()
   if (normalized.length === 0) return false
-  if (KOREAN_OPTIONAL_FOLLOWUP_START.test(normalized)) return true
-  if (!ENGLISH_OPTIONAL_FOLLOWUP_START.test(normalized)) return false
-  return ACTION_WORDS.some((word) => new RegExp(`\\b${word}\\b`, 'i').test(normalized))
+  for (const pattern of OPTIONAL_FOLLOWUP_PATTERNS) {
+    if (!pattern.start.test(normalized)) continue
+    if (pattern.requiresActionWord === true && !hasEnglishActionWord(normalized)) continue
+    return true
+  }
+  return false
+}
+
+function hasEnglishActionWord(text: string): boolean {
+  return ACTION_WORDS.some((word) => new RegExp(`\\b${word}\\b`, 'i').test(text))
 }

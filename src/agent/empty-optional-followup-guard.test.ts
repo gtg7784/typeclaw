@@ -9,9 +9,18 @@ describe('stripEmptyOptionalFollowupFiller', () => {
     )
   })
 
-  test('removes a standalone Korean optional follow-up sentence at the end', () => {
+  test('removes standalone multilingual optional follow-up sentences at the end', () => {
     expect(stripEmptyOptionalFollowupFiller('설정 업데이트를 완료했습니다. 원하면 테스트도 추가해드릴게요.')).toBe(
       '설정 업데이트를 완료했습니다.',
+    )
+    expect(stripEmptyOptionalFollowupFiller('設定を更新しました。必要でしたらテストも追加できます。')).toBe(
+      '設定を更新しました。',
+    )
+    expect(stripEmptyOptionalFollowupFiller('配置已更新。如果需要，我也可以添加测试。')).toBe('配置已更新。')
+    expect(stripEmptyOptionalFollowupFiller('Listo. Si quieres, también puedo añadir pruebas.')).toBe('Listo.')
+    expect(stripEmptyOptionalFollowupFiller('Terminé. Si tu veux, je peux aussi ajouter des tests.')).toBe('Terminé.')
+    expect(stripEmptyOptionalFollowupFiller('Fertig. Wenn du möchtest, kann ich auch Tests hinzufügen.')).toBe(
+      'Fertig.',
     )
   })
 
@@ -19,6 +28,11 @@ describe('stripEmptyOptionalFollowupFiller', () => {
     expect(stripEmptyOptionalFollowupFiller('The PR is ready.\n\nIf you want, I can prepare a shorter summary.')).toBe(
       'The PR is ready.',
     )
+  })
+
+  test('can be disabled for non-GPT providers', () => {
+    const text = 'Done — I updated the config. If you want, I can also add tests.'
+    expect(stripEmptyOptionalFollowupFiller(text, false)).toBe(text)
   })
 
   test('preserves legitimate conditionals in substantive content', () => {

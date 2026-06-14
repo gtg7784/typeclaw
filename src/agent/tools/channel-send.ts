@@ -37,6 +37,7 @@ export type CreateChannelSendToolOptions = {
   // finds no recorded action and falls back to its safe default.
   sessionId?: string
   logger?: ChannelToolLogger
+  stripGptEmptyOptionalFollowupFiller?: boolean
 }
 
 export function createChannelSendTool({
@@ -44,6 +45,7 @@ export function createChannelSendTool({
   origin,
   sessionId = '',
   logger = consoleChannelLogger,
+  stripGptEmptyOptionalFollowupFiller = false,
 }: CreateChannelSendToolOptions) {
   return defineTool({
     name: 'channel_send',
@@ -119,7 +121,10 @@ export function createChannelSendTool({
 
     async execute(_toolCallId, params) {
       const adapter = params.adapter as AdapterId
-      const bodyText = params.text !== undefined ? stripEmptyOptionalFollowupFiller(params.text) : undefined
+      const bodyText =
+        params.text !== undefined
+          ? stripEmptyOptionalFollowupFiller(params.text, stripGptEmptyOptionalFollowupFiller)
+          : undefined
       const attachments = params.attachments
       if ((bodyText === undefined || bodyText === '') && (attachments === undefined || attachments.length === 0)) {
         logger.warn(formatChannelToolFailure('channel_send', 'missing text and attachments'))

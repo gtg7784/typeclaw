@@ -382,7 +382,13 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId(), getOrigin),
+            ...buildChannelTools(
+              options.channelRouter,
+              options.origin,
+              sessionManager.getSessionId(),
+              getOrigin,
+              isGptOpenAiFamilyRef(activeRef),
+            ),
             ...(options.containerName
               ? [
                   createRestartTool({
@@ -658,6 +664,7 @@ export function buildChannelTools(
   origin: SessionOrigin | undefined,
   sessionId?: string,
   getOrigin?: () => SessionOrigin | undefined,
+  stripGptEmptyOptionalFollowupFiller = false,
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
@@ -673,6 +680,7 @@ export function buildChannelTools(
         router: channelRouter,
         origin: channelOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
+        stripGptEmptyOptionalFollowupFiller,
       }),
     )
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
@@ -681,6 +689,7 @@ export function buildChannelTools(
         router: channelRouter,
         origin: channelOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
+        stripGptEmptyOptionalFollowupFiller,
       }),
     )
     // Read the live turn origin, falling back to the static snapshot when no
@@ -709,9 +718,14 @@ export function buildChannelTools(
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }
   } else {
-    tools.push(createChannelSendTool({ router: channelRouter }))
+    tools.push(createChannelSendTool({ router: channelRouter, stripGptEmptyOptionalFollowupFiller }))
   }
   return tools
+}
+
+function isGptOpenAiFamilyRef(ref: ModelRef): boolean {
+  const providerId = providerForModelRef(ref)
+  return providerId === 'openai' || providerId === 'openai-codex'
 }
 
 export function buildMcpDispatcherToolDefinitions(manager: McpManager): ToolDefinition[] {
