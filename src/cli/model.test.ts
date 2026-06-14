@@ -3,8 +3,57 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import type { ModelOption } from '@/init/models-dev'
+
+import { resolveExplicitRef } from './model'
+
 const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
+
+describe('resolveExplicitRef carries catalog metadata for non-interactive set/add', () => {
+  function catalogWith(option: ModelOption): () => Promise<{ options: ModelOption[] }> {
+    return async () => ({ options: [option] })
+  }
+
+  const liveOption: ModelOption = {
+    ref: 'fireworks/brand-new-model',
+    providerId: 'fireworks',
+    providerName: 'Fireworks',
+    modelId: 'brand-new-model',
+    modelName: 'Brand New Model',
+    reasoning: true,
+    contextWindow: 256000,
+    maxTokens: 32000,
+    cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+    curated: false,
+    supportsVision: true,
+  }
+
+  test('curated ref persists no custom metadata (resolves from KNOWN_PROVIDERS)', async () => {
+    const picked = await resolveExplicitRef('openai/gpt-5.4-nano', catalogWith(liveOption))
+    expect(picked.ref).toBe('openai/gpt-5.4-nano')
+    expect(picked.meta).toBeUndefined()
+  })
+
+  test('non-curated ref found in the catalog carries its metadata', async () => {
+    const picked = await resolveExplicitRef('fireworks/brand-new-model', catalogWith(liveOption))
+    expect(picked.ref).toBe('fireworks/brand-new-model')
+    expect(picked.meta).toEqual({
+      name: 'Brand New Model',
+      reasoning: true,
+      input: ['text', 'image'],
+      contextWindow: 256000,
+      maxTokens: 32000,
+      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+    })
+  })
+
+  test('non-curated ref missing from the catalog persists the ref without metadata', async () => {
+    const picked = await resolveExplicitRef('fireworks/unknown-model', catalogWith(liveOption))
+    expect(picked.ref).toBe('fireworks/unknown-model')
+    expect(picked.meta).toBeUndefined()
+  })
+})
 
 describe('typeclaw model list survives broken typeclaw.json', () => {
   let cwd: string

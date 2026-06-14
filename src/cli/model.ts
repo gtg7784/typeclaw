@@ -9,7 +9,13 @@ import {
   removeProfile,
   setProfile,
 } from '@/config/models-mutation'
-import { KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef, type KnownProviderId } from '@/config/providers'
+import {
+  isKnownModelRef,
+  KNOWN_PROVIDERS,
+  providerForModelRef,
+  type KnownModelRef,
+  type KnownProviderId,
+} from '@/config/providers'
 import { findAgentDir, isInitialized } from '@/init'
 import { customModelMetaFromOption, fetchModelOptions, type ModelOption } from '@/init/models-dev'
 
@@ -48,7 +54,7 @@ const setSub = defineCommand({
   async run({ args }) {
     const cwd = ensureAgentDir()
     const profile = args.profile ?? (await pickProfileName())
-    const picked = args.ref !== undefined ? { ref: args.ref } : await pickModelRef(cwd)
+    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
@@ -92,7 +98,7 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const picked = args.ref !== undefined ? { ref: args.ref } : await pickModelRef(cwd)
+    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
 
     intro(`Adding model profile: ${args.profile} → ${picked.ref}`)
 
@@ -275,6 +281,31 @@ async function pickModelRef(cwd: string): Promise<PickedModelRef> {
     }
   }
 }
+
+// Non-interactive `<ref>` path. Curated refs resolve from KNOWN_PROVIDERS, so
+// they need no metadata. Non-curated refs are looked up in the live catalog so
+// `customModels[ref]` carries the same metadata the interactive picker would
+// persist; without it `resolveModel` silently falls back to defaults. A
+// catalog miss (offline / unknown id) still writes the ref, but warns first.
+export async function resolveExplicitRef(
+  ref: string,
+  loadCatalog: () => Promise<{ options: ModelOption[] }> = fetchModelOptions,
+): Promise<PickedModelRef> {
+  if (isKnownModelRef(ref)) return { ref }
+  const { options } = await loadCatalog()
+  const option = options.find((candidate) => candidate.ref === ref)
+  if (option === undefined) {
+    log.warn(
+      `"${ref}" isn't in the live catalog; saving the ref without metadata. ` +
+        `The agent will use fallback defaults (reasoning off, text-only input, zero cost, provider-default context).`,
+    )
+    return { ref }
+  }
+  const meta = customModelMetaFromOption(option)
+  return { ref, ...(meta !== undefined ? { meta } : {}) }
+}
+
+export type { PickedModelRef }
 
 async function listCredentialedModelOptions(refs: KnownModelRef[]): Promise<ModelOption[]> {
   const credentialedProviders = new Set<KnownProviderId>(refs.map((ref) => providerForModelRef(ref)))
