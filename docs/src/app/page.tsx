@@ -14,15 +14,17 @@ const PLUGIN_CODE = `import { definePlugin } from 'typeclaw/plugin'
 import { z } from 'zod'
 
 export default definePlugin({
+  configSchema: z.object({ webhook: z.string().url() }),
   async plugin(ctx) {
+    const { webhook } = ctx.config
     return {
       tools: {
-        triage: {
-          description: 'Summarize a pull request diff',
-          parameters: z.object({ pr: z.number() }),
-          async execute({ pr }) {
-            const diff = await ctx.gh.getDiff(pr)
-            return { content: [{ type: 'text', text: summarize(diff) }] }
+        notify: {
+          description: 'Post a short notification',
+          parameters: z.object({ text: z.string() }),
+          async execute({ text }) {
+            await fetch(webhook, { method: 'POST', body: text })
+            return { content: [{ type: 'text', text: 'sent' }] }
           },
         },
       },
