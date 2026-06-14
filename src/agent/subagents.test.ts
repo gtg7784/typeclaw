@@ -1,14 +1,17 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import { z } from 'zod'
 
-import type { HookBus } from '@/plugin'
+import { noopPermissionService } from '@/permissions'
+import type { HookBus, PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
 
-import type { AgentSession } from './index'
+import * as agentIndex from './index'
+import type { AgentSession, PluginSessionWiring } from './index'
 import { LiveSubagentRegistry } from './live-subagents'
 import {
   createSubagentConsumer,
+  defaultCreateSessionForSubagent,
   invokeSubagent,
   startSubagent,
   type Subagent,
@@ -1283,5 +1286,52 @@ describe('invokeSubagent — background drain lifecycle', () => {
     // then: exactly one prompt, no drain.
     expect(calls.prompt.length).toBe(1)
     expect(calls.disposed).toBe(1)
+  })
+})
+
+describe('defaultCreateSessionForSubagent — plugin hook wiring', () => {
+  const subagent: Subagent<unknown> = { systemPrompt: 'X', payloadSchema: z.unknown() }
+
+  function fakePluginWiring(): PluginSessionWiring {
+    return {
+      registry: { skills: [] } as unknown as PluginRegistry,
+      hooks: makeFakeHookBus([]),
+      sessionId: 'ses_sub',
+      agentDir: '/agent',
+    }
+  }
+
+  test('forwards plugins AND permissions into createSession so the subagent runs tool hooks WITH sandboxing', async () => {
+    // given: a built-in subagent created WITH plugin wiring + the permission service
+    const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
+    const plugins = fakePluginWiring()
+    const permissions = noopPermissionService
+    try {
+      // when
+      await defaultCreateSessionForSubagent(subagent, { name: 'explore', plugins, permissions })
+
+      // then: createSession receives BOTH. plugins wraps builtin bash with
+      // tool.before (token + guards); permissions is what makes that wrapper
+      // apply applyBashSandbox/applyTmpPathRedirect — both are required or the
+      // subagent gets the token with the sandbox off.
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.plugins).toBe(plugins)
+      expect(spy.mock.calls[0]?.[0]?.permissions).toBe(permissions)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('omits plugins and permissions when none supplied (standalone/test callers stay unwrapped)', async () => {
+    const spy = spyOn(agentIndex, 'createSession').mockResolvedValue(fakeSession().session)
+    try {
+      await defaultCreateSessionForSubagent(subagent, { name: 'explore' })
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.plugins).toBeUndefined()
+      expect(spy.mock.calls[0]?.[0]?.permissions).toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

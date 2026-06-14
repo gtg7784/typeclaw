@@ -439,7 +439,30 @@ export async function startAgent({
           : {}),
       }
     }
-    return defaultCreateSessionForSubagent(subagent, subagentOptions)
+    // Non-plugin (built-in) subagents — general/explore/scout/memory-logger/
+    // dreaming and anything spawned through the generic task path. They used to
+    // run with NO plugin tool.before/tool.after coverage, so their bash skipped
+    // the security guards AND the github-cli-auth GitHub-token injection — a
+    // generic subagent's `git push` got no minted token and died with "could
+    // not read Username" even when a GitHub App was configured. Thread the same
+    // hook bus the plugin-subagent branch uses, against a freshly allocated
+    // subagent session id (never the parent's, so hooks/audit/permission
+    // attribution stay per-session).
+    const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
+    return defaultCreateSessionForSubagent(subagent, {
+      ...subagentOptions,
+      plugins: {
+        registry: snap.registry,
+        hooks: snap.hooks,
+        sessionId: sessionManager.getSessionId(),
+        agentDir: cwd,
+      },
+      // Pass permissions alongside plugins (same as the plugin-subagent branch
+      // at line 384): without it the builtin-bash sandbox (applyBashSandbox /
+      // applyTmpPathRedirect) stays off and the subagent would get the injected
+      // token but no role-derived sandboxing.
+      permissions: pluginsLoaded.permissions,
+    })
   }
 
   const subagentConsumer = createSubagentConsumer({
