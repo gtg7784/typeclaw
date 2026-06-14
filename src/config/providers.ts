@@ -703,6 +703,118 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // Moonshot AI (Kimi) — Open Platform pay-as-you-go API. The platform exposes
+  // an OpenAI-compatible surface at api.moonshot.ai/v1 (Bearer auth +
+  // /chat/completions shape), so models go through pi-ai's `openai-completions`
+  // adapter with a custom baseUrl — same trick as Fireworks, Z.AI, MiniMax, and
+  // DeepSeek. api-key only; the platform ships no OAuth flow.
+  //
+  // Moonshot also offers an Anthropic-compatible route (api.moonshot.ai/anthropic)
+  // on the same key, but it rescales temperature (real = requested × 0.6) and
+  // would be the FIRST `anthropic-messages` transport pointed at a non-Anthropic
+  // baseUrl in this codebase. We deliberately stay on the proven OpenAI-compatible
+  // path so behavior matches every other paygo provider.
+  //
+  // The split with `moonshot-coding` below mirrors `zai` / `zai-coding`: same
+  // upstream vendor, two distinct billing surfaces (Open Platform paygo vs the
+  // Kimi Code subscription) on two distinct base URLs with two distinct env
+  // vars, so a user can hold both keys at once. The Open Platform key does NOT
+  // work against the Kimi Code endpoint, and vice versa.
+  //
+  // Model lineup mirrors the OpenAI-compatible model list on platform.kimi.ai
+  // as of 2026-06-14: kimi-k2.7-code (flagship coding model, always-on thinking,
+  // text+image), kimi-k2.6 (general flagship, text+image), and kimi-k2.5
+  // (general, text+image). All three fold reasoning in via the `thinking`
+  // request parameter, so no separate "thinking" model id is needed. The whole
+  // legacy kimi-k2 series (kimi-k2-thinking, k2-0905/0711/turbo previews) was
+  // officially discontinued on 2026-05-25 and is intentionally omitted, as are
+  // the legacy moonshot-v1-* models. Costs are USD per 1M tokens from
+  // platform.kimi.ai pricing; Moonshot publishes no cache-write surcharge, so
+  // cacheWrite is 0. (pi-ai's `input` array only models text/image — Moonshot's
+  // video input on the K2.x models can't be expressed here, so it is omitted.)
+  moonshot: {
+    id: 'moonshot',
+    name: 'Moonshot (Kimi)',
+    baseUrl: 'https://api.moonshot.ai/v1',
+    auth: ['api-key'],
+    apiKeyEnv: 'MOONSHOT_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'kimi-k2.7-code': {
+        id: 'kimi-k2.7-code',
+        name: 'Kimi K2.7 Code',
+        api: 'openai-completions',
+        provider: 'moonshot',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.6, output: 2.5, cacheRead: 0.15, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+      'kimi-k2.6': {
+        id: 'kimi-k2.6',
+        name: 'Kimi K2.6',
+        api: 'openai-completions',
+        provider: 'moonshot',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.6, output: 2.5, cacheRead: 0.15, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+      'kimi-k2.5': {
+        id: 'kimi-k2.5',
+        name: 'Kimi K2.5',
+        api: 'openai-completions',
+        provider: 'moonshot',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.6, output: 2.5, cacheRead: 0.15, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+    },
+  },
+  // Moonshot AI Kimi Code — the Coding Plan subscription product. Distinct from
+  // the Open Platform above: a separate domain (api.kimi.com/coding/v1), a
+  // separate subscription key created at kimi.com/code/console, and a separate
+  // env var (`MOONSHOT_CODING_API_KEY`) so a user can hold both an Open Platform
+  // paygo key and a Coding Plan key without collisions. Kimi Code exposes an
+  // OpenAI-compatible route (Bearer auth + /chat/completions) alongside its
+  // Anthropic-compatible one; we use the OpenAI-compatible route so it threads
+  // through the same `openai-completions` adapter as every other paygo provider.
+  //
+  // Single model alias: `kimi-for-coding` is a STABLE ALIAS that the Coding Plan
+  // backend routes to the latest underlying model (currently the K2.6 family).
+  // Version-pinned ids are NOT accepted on this endpoint and fail silently, so
+  // the alias is the only id listed. Costs are 0 because the Coding Plan bills a
+  // flat subscription quota, not per-token — there is no per-token price to
+  // attribute (same convention as the Fireworks Fire Pass router above).
+  'moonshot-coding': {
+    id: 'moonshot-coding',
+    name: 'Moonshot (Kimi Coding Plan)',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    auth: ['api-key'],
+    apiKeyEnv: 'MOONSHOT_CODING_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'kimi-for-coding': {
+        id: 'kimi-for-coding',
+        name: 'Kimi for Coding',
+        api: 'openai-completions',
+        provider: 'moonshot-coding',
+        baseUrl: 'https://api.kimi.com/coding/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 64000,
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
@@ -775,6 +887,15 @@ export const KNOWN_PROVIDER_VENDORS = {
     id: 'deepseek',
     name: 'DeepSeek',
     providers: ['deepseek'],
+  },
+  moonshot: {
+    id: 'moonshot',
+    name: 'Moonshot (Kimi)',
+    providers: ['moonshot', 'moonshot-coding'],
+    variants: {
+      moonshot: { label: 'Pay-as-you-go', hint: 'Moonshot Open Platform API billing' },
+      'moonshot-coding': { label: 'Coding Plan', hint: 'Kimi Code subscription' },
+    },
   },
 } as const satisfies Record<string, KnownProviderVendor>
 

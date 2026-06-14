@@ -182,6 +182,62 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
+  test('moonshot (Open Platform paygo) is api-key only on the OpenAI-compatible endpoint', () => {
+    const moonshot = KNOWN_PROVIDERS.moonshot
+    expect(moonshot.baseUrl).toBe('https://api.moonshot.ai/v1')
+    expect(moonshot.apiKeyEnv).toBe('MOONSHOT_API_KEY')
+    expect(supportsApiKey(moonshot)).toBe(true)
+    expect(supportsOAuth(moonshot)).toBe(false)
+  })
+
+  test('moonshot-coding (Kimi Code subscription) is api-key only on the Kimi Code endpoint', () => {
+    const coding = KNOWN_PROVIDERS['moonshot-coding']
+    expect(coding.baseUrl).toBe('https://api.kimi.com/coding/v1')
+    expect(coding.apiKeyEnv).toBe('MOONSHOT_CODING_API_KEY')
+    expect(supportsApiKey(coding)).toBe(true)
+    expect(supportsOAuth(coding)).toBe(false)
+  })
+
+  test('moonshot and moonshot-coding use distinct env vars so users can hold both keys', () => {
+    expect(KNOWN_PROVIDERS.moonshot.apiKeyEnv).not.toBe(KNOWN_PROVIDERS['moonshot-coding'].apiKeyEnv)
+  })
+
+  test('moonshot and moonshot-coding use distinct base URLs so paygo keys cannot hit the coding endpoint', () => {
+    expect(KNOWN_PROVIDERS.moonshot.baseUrl).not.toBe(KNOWN_PROVIDERS['moonshot-coding'].baseUrl)
+  })
+
+  test('every moonshot model uses the openai-completions api so pi-ai routes correctly', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.moonshot.models)) {
+      expect(model.api, `moonshot/${modelId} api drift`).toBe('openai-completions')
+    }
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS['moonshot-coding'].models)) {
+      expect(model.api, `moonshot-coding/${modelId} api drift`).toBe('openai-completions')
+    }
+  })
+
+  test('moonshot ships the current multimodal K2 generation (deprecated k2 series omitted)', () => {
+    const modelIds = Object.keys(KNOWN_PROVIDERS.moonshot.models)
+    expect(modelIds).toEqual(['kimi-k2.7-code', 'kimi-k2.6', 'kimi-k2.5'])
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.moonshot.models)) {
+      expect((model.input as ReadonlyArray<string>).includes('image'), `moonshot/${modelId} vision drift`).toBe(true)
+    }
+  })
+
+  test('moonshot omits the kimi-k2 series discontinued on 2026-05-25', () => {
+    const modelIds = Object.keys(KNOWN_PROVIDERS.moonshot.models)
+    expect(modelIds).not.toContain('kimi-k2-thinking')
+    expect(modelIds).not.toContain('kimi-k2-0905-preview')
+    expect(modelIds).not.toContain('kimi-k2-turbo-preview')
+  })
+
+  test('moonshot-coding ships only the kimi-for-coding alias billed at zero per-token', () => {
+    const models = KNOWN_PROVIDERS['moonshot-coding'].models
+    expect(Object.keys(models)).toEqual(['kimi-for-coding'])
+    const cost = models['kimi-for-coding']!.cost as { input: number; output: number }
+    expect(cost.input).toBe(0)
+    expect(cost.output).toBe(0)
+  })
+
   test('xai supports both api-key and oauth against the native x.ai endpoint', () => {
     const xai = KNOWN_PROVIDERS.xai
     expect(xai.baseUrl).toBe('https://api.x.ai/v1')
@@ -271,6 +327,12 @@ describe('KNOWN_PROVIDER_VENDORS', () => {
     expect(providerIdsForVendor('deepseek')).toEqual(['deepseek'])
     expect(vendorForProviderId('deepseek')).toBe('deepseek')
   })
+
+  test('Moonshot vendor splits paygo (moonshot) from Coding Plan (moonshot-coding)', () => {
+    expect(providerIdsForVendor('moonshot')).toEqual(['moonshot', 'moonshot-coding'])
+    expect(variantLabel('moonshot', 'moonshot')).toBe('Pay-as-you-go')
+    expect(variantLabel('moonshot', 'moonshot-coding')).toBe('Coding Plan')
+  })
 })
 
 describe('providerForModelRef', () => {
@@ -285,6 +347,11 @@ describe('providerForModelRef', () => {
   test('distinguishes zai from zai-coding by the slash-prefixed match (not substring)', () => {
     expect(providerForModelRef('zai-coding/glm-5')).toBe('zai-coding')
     expect(providerForModelRef('zai/glm-4.6')).toBe('zai')
+  })
+
+  test('distinguishes moonshot from moonshot-coding by the slash-prefixed match (not substring)', () => {
+    expect(providerForModelRef('moonshot-coding/kimi-for-coding')).toBe('moonshot-coding')
+    expect(providerForModelRef('moonshot/kimi-k2.6')).toBe('moonshot')
   })
 })
 
@@ -305,6 +372,13 @@ describe('listKnownModelRefs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('deepseek/deepseek-v4-flash')
     expect(refs).toContain('deepseek/deepseek-v4-pro')
+  })
+
+  test('includes both moonshot and moonshot-coding model refs', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('moonshot/kimi-k2.7-code')
+    expect(refs).toContain('moonshot/kimi-k2.5')
+    expect(refs).toContain('moonshot-coding/kimi-for-coding')
   })
 
   test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8)', () => {
@@ -370,6 +444,9 @@ describe('defaultThinkingLevelForRef', () => {
     expect(defaultThinkingLevelForRef('minimax/MiniMax-M3')).toBeUndefined()
     expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-flash')).toBeUndefined()
     expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-pro')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('moonshot/kimi-k2.7-code')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('moonshot/kimi-k2.5')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('moonshot-coding/kimi-for-coding')).toBeUndefined()
   })
 
   test('every known model ref is classified (no provider falls through unhandled)', () => {

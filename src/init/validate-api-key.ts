@@ -10,6 +10,8 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   xai: { url: 'https://api.x.ai/v1/models', authHeader: 'bearer' },
   minimax: { url: 'https://api.minimax.io/v1/models', authHeader: 'bearer' },
   deepseek: { url: 'https://api.deepseek.com/models', authHeader: 'bearer' },
+  moonshot: { url: 'https://api.moonshot.ai/v1/models', authHeader: 'bearer' },
+  'moonshot-coding': { url: 'https://api.kimi.com/coding/v1/models', authHeader: 'bearer' },
 }
 
 // When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
@@ -165,6 +167,8 @@ export const API_KEY_DASHBOARD_URL: Partial<Record<KnownProviderId, string>> = {
   xai: 'https://console.x.ai',
   minimax: 'https://platform.minimax.io/user-center/basic-information/interface-key',
   deepseek: 'https://platform.deepseek.com/api_keys',
+  moonshot: 'https://platform.moonshot.ai/console/api-keys',
+  'moonshot-coding': 'https://www.kimi.com/code/console',
 }
 
 // MiniMax sells the same `minimax` provider under two billing surfaces that

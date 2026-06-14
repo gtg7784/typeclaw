@@ -23,6 +23,12 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   xai: 'xai',
   minimax: 'minimax',
   deepseek: 'deepseek',
+  moonshot: 'moonshot',
+  // moonshot-coding (Kimi Code subscription) is a billing surface, not a
+  // separate model catalog. models.dev tracks the underlying Kimi model
+  // metadata under `moonshot`, so we route lookups there; the curated
+  // `kimi-for-coding` alias is surfaced regardless of upstream membership.
+  'moonshot-coding': 'moonshot',
 }
 
 export type ModelOption = {
