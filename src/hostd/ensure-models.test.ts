@@ -53,6 +53,17 @@ describe('ensureModels', () => {
     expect(pipelineCalls[0]?.options?.dtype).toBe('q8')
   })
 
+  test('stamps a model-cache sentinel after the download so the container can verify producer/consumer compatibility', async () => {
+    const { modelsDir } = await import('./paths')
+    const { readModelSentinel } = await import('@/models/embedding-model')
+
+    const sentinel = await readModelSentinel(modelsDir())
+    expect(sentinel).not.toBeNull()
+    expect(sentinel?.model).toBe('Xenova/multilingual-e5-base')
+    expect(sentinel?.dtype).toBe('q8')
+    expect(sentinel?.transformers).toMatch(/^\d+\.\d+\.\d+/)
+  })
+
   test('modelsDir points under TYPECLAW_HOME', async () => {
     const { modelsDir } = await import('./paths')
 

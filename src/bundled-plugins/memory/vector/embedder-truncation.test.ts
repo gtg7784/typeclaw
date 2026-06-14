@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
-import { DIMS } from './embedder'
+import { __setModelCacheCheckForTests, DIMS } from './embedder'
 import { estimateTokens, TEXT_TOKEN_BUDGET } from './truncation'
+
+__setModelCacheCheckForTests(() => Promise.resolve())
 
 let lastExtractorInput: string[] | undefined
 let lastExtractorOptions: Record<string, unknown> | undefined

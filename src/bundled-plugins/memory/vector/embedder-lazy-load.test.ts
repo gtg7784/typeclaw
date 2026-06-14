@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { beforeAll, describe, expect, mock, test } from 'bun:test'
 
 // Regression guard for the container-boot crash: `@huggingface/transformers`
 // eagerly `import sharp`s at module-evaluation time, and the memory plugin
@@ -24,6 +24,14 @@ mock.module('@huggingface/transformers', () => {
 })
 
 describe('embedder lazy transformers load', () => {
+  // Importing the module to set the seam does NOT evaluate transformers (that is
+  // exactly what the first test asserts) — the cache check is a separate concern
+  // with its own coverage, so a no-op keeps these tests off a real model cache.
+  beforeAll(async () => {
+    const mod = await import('./embedder')
+    mod.__setModelCacheCheckForTests(() => Promise.resolve())
+  })
+
   test('importing the embedder module does NOT evaluate @huggingface/transformers', async () => {
     await import('./embedder')
     expect(transformersEvaluated).toBe(false)
