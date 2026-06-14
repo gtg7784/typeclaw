@@ -291,11 +291,15 @@ sleep 30
 
   it('subscribers receive future stderr lines without replay', async () => {
     const scratchDir = createScratchDir()
+    // Gate `after` on subscription, not a wall-clock sleep: under load a fixed
+    // delay can elapse before the subscriber registers, leaving `after` with
+    // zero subscribers so the late one never sees it (the 30s-timeout flake).
+    const gateFile = join(scratchDir, 'emit-after')
     const binary = installFakeCloudflared(
       scratchDir,
       `
 echo before >&2
-sleep 0.05
+while [ ! -f '${gateFile}' ]; do sleep 0.01; done
 echo after >&2
 trap 'exit 0' TERM
 sleep 30
@@ -314,6 +318,7 @@ sleep 30
       await waitFor(() => provider.tail().includes('before'), { description: 'first log line' })
       const received: string[] = []
       provider.subscribeToLogs((line) => received.push(line))
+      writeFileSync(gateFile, '')
       await waitFor(() => received.includes('after'), { description: 'future log line' })
 
       expect(received).toEqual(['after'])
