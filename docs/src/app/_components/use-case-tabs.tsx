@@ -8,19 +8,19 @@ const USE_CASES = [
     id: 'personal',
     label: 'Personal',
     icon: User,
-    text: 'Track your reading list, summarize newsletters, manage your calendar, remember your preferences — one agent that learns how you work.',
+    text: 'Summarize newsletters, manage your calendar, remember how you like things done — and open memory/ in git to see exactly what it learned about you. Your assistant, your data, your folder.',
   },
   {
     id: 'team',
     label: 'Team',
     icon: Users,
-    text: 'Review code, triage issues, deploy with confidence, keep the standup notes — your agent knows your codebase and your team.',
+    text: 'Review PRs, triage issues, keep the standup notes. Add the one tool your team needs in a .ts file you actually own — no waiting on a marketplace, no plugin language to learn.',
   },
   {
     id: 'creator',
     label: 'Creator',
     icon: PenTool,
-    text: 'Pipeline content, cross-post to channels, reply to audience, track analytics — an agent that grows with your brand.',
+    text: 'Pipeline content, cross-post to channels, reply to your audience. As it learns your voice, that memory is plain files you can read and edit — never a black box you have to trust.',
   },
 ]
 

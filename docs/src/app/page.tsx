@@ -1,19 +1,4 @@
-import {
-  ArrowRight,
-  BookOpen,
-  Check,
-  Container,
-  Github,
-  Lock,
-  PenTool,
-  Quote,
-  Shield,
-  Sparkles,
-  Star,
-  User,
-  Users,
-  X,
-} from 'lucide-react'
+import { ArrowRight, BookOpen, Check, Container, Github, Lock, Shield, Sparkles, Star, X } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 
@@ -25,17 +10,26 @@ import { Reveal } from './_components/reveal'
 import { ThemeToggle } from './_components/theme-toggle'
 import { UseCaseTabs } from './_components/use-case-tabs'
 
-const PLUGIN_CODE = `import { definePlugin } from 'typeclaw'
+const PLUGIN_CODE = `import { definePlugin } from 'typeclaw/plugin'
+import { z } from 'zod'
 
 export default definePlugin({
-  name: 'pr-review',
-  tools: {
-    triage: async ({ pr }) => {
-      const diff = await gh.getDiff(pr)
-      return summarize(diff)
-    },
+  configSchema: z.object({ webhook: z.string().url() }),
+  async plugin(ctx) {
+    const { webhook } = ctx.config
+    return {
+      tools: {
+        notify: {
+          description: 'Post a short notification',
+          parameters: z.object({ text: z.string() }),
+          async execute({ text }) {
+            await fetch(webhook, { method: 'POST', body: text })
+            return { content: [{ type: 'text', text: 'sent' }] }
+          },
+        },
+      },
+    }
   },
-  skills: ['skills/pr-review.md'],
 })`
 
 function HeroInstall() {
@@ -210,7 +204,7 @@ function MarketingTable() {
             <th className="px-4 py-4 text-center font-medium">Self-improving</th>
             <th className="px-4 py-4 text-center font-medium">Multi-channel</th>
             <th className="px-4 py-4 text-center font-medium">Full-featured plugins</th>
-            <th className="px-4 py-4 text-center font-medium">Git-native</th>
+            <th className="px-4 py-4 text-center font-medium">Auto-commit &amp; push</th>
             <th className="px-4 py-4 text-center font-medium">Permission system</th>
             <th className="px-4 py-4 font-medium">Notes</th>
           </tr>
@@ -305,22 +299,39 @@ function PermissionsVisual() {
   )
 }
 
-function Testimonial() {
+function LiveProof() {
   return (
     <div className="mx-auto max-w-3xl">
-      <div className="relative rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-10 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
-        <Quote
-          className="absolute top-6 left-6 size-8 text-brand-200 dark:text-brand-800"
-          strokeWidth={2.4}
-          aria-hidden
-        />
-        <blockquote className="relative pt-8 text-center">
-          <p className="text-xl font-medium leading-relaxed text-zinc-800 dark:text-zinc-100 sm:text-2xl">
-            &ldquo;Last week I told my agent I prefer kebab-case for filenames. Yesterday it suggested a rename without
-            me asking.&rdquo;
-          </p>
-          <footer className="mt-6 text-sm text-zinc-500 dark:text-zinc-500">— A TypeClaw user</footer>
-        </blockquote>
+      <div className="relative overflow-hidden rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-10 text-center dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 font-mono text-[11px] font-medium tracking-wider text-emerald-700 uppercase dark:bg-emerald-900/30 dark:text-emerald-300">
+          <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+          Live right now
+        </span>
+        <p className="mx-auto mt-6 max-w-xl text-balance text-xl font-medium leading-relaxed text-zinc-800 dark:text-zinc-100 sm:text-2xl">
+          This page&apos;s mascot reviews real pull requests on TypeClaw&apos;s own repo — unprompted, line by line.
+        </p>
+        <p className="mx-auto mt-4 max-w-lg text-balance text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+          Request{' '}
+          <a
+            href="https://github.com/typeey"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-brand-700 underline-offset-2 hover:underline dark:text-brand-300"
+          >
+            @typeey
+          </a>{' '}
+          as a reviewer and it reads the diff, thinks it through, and posts a formal review back. No human pressing a
+          button. The whole setup is one recipe you can copy.
+        </p>
+        <div className="mt-7">
+          <Link
+            href="/docs/recipes/code-reviewer"
+            className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-white px-5 py-2.5 text-sm font-medium text-brand-800 shadow-sm transition-all hover:translate-y-[-1px] hover:shadow-md dark:border-brand-800/60 dark:bg-zinc-900 dark:text-brand-200"
+          >
+            See how it&apos;s wired
+            <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
+          </Link>
+        </div>
       </div>
     </div>
   )
@@ -370,7 +381,7 @@ export default function Home() {
           <div className="relative z-10 mx-auto max-w-4xl px-6 pt-16 pb-32 text-center sm:pt-24">
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
               <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
-              {VERSION} · TypeScript agent runtime
+              {VERSION} · crafted in every detail
             </div>
             <div className="relative mt-8">
               <Image
@@ -383,26 +394,26 @@ export default function Home() {
                 className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
               />
               <h1 className="text-balance text-6xl font-semibold tracking-tight sm:text-7xl lg:text-8xl">
-                The agent that
+                The agent for
                 <br />
                 <span className="bg-gradient-to-br from-brand-700 to-brand-500 bg-clip-text text-transparent dark:from-brand-200 dark:to-brand-400">
-                  keeps its nest tidy.
+                  perfectionists.
                 </span>
               </h1>
             </div>
             <p className="mx-auto mt-7 max-w-xl text-balance text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
-              A TypeScript agent that lives in one folder, distills its own work into long-term memory, and gets sharper
-              the longer it runs.
+              Crafted in every detail — it behaves in your team&apos;s chat and gets sharper the longer it runs.
+              Sandboxed and self-managing.
             </p>
             <div className="mt-10">
               <HeroInstall />
             </div>
             <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/docs/guides/getting-started"
+                href="/docs/guides/quickstart"
                 className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
               >
-                Read the docs
+                Start in 5 minutes
                 <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
               </Link>
               <a
@@ -427,14 +438,15 @@ export default function Home() {
         <section className="mx-auto max-w-6xl px-6 py-36">
           <Reveal className="text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
-              Self-improving
+              Memory you can read
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              It remembers. It learns. It gets sharper while you sleep.
+              It gets sharper while you sleep — and you can read every word it learned.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Every conversation, every command, every insight — your agent watches its own work, then a dreaming
-              subagent distills it into long-term memory and reusable skills. No prompts to write. It just gets better.
+              A dreaming subagent distills each day&apos;s work into long-term memory and reusable skills. It all lands
+              as plain files, committed to git — so you can review what it picked up, revert what it got wrong, and own
+              its memory like the rest of your code. Self-improving, never a black box.
             </p>
           </Reveal>
           <Reveal className="mx-auto mt-12 max-w-lg" delay={120}>
@@ -447,27 +459,27 @@ export default function Home() {
         <section className="mx-auto max-w-6xl space-y-36 px-6 py-36">
           <Reveal>
             <FeatureRow
-              eyebrow="Just a folder"
-              title="One folder. One agent. No mess."
-              blurb="Drop it in any folder. One command, and it's alive. Its own .env, its own memory, its own channels. When you're done, delete the folder — it's gone. No global install, no residue."
+              eyebrow="Plugins are just imports"
+              title="Extend it from inside the language you already use."
+              blurb="No plugin DSL, no IPC, no FFI, no sidecar process. A plugin is a plain .ts file that imports the runtime and adds tools, skills, channels, and commands. The same TypeScript, all the way down — nothing to bolt on."
+              visual={<PluginCode />}
+            />
+          </Reveal>
+          <Reveal>
+            <FeatureRow
+              eyebrow="One folder, one container"
+              title="A whole agent you can hold in your head."
+              blurb="It lives in a single folder and runs in its own container — its own .env, its own memory, its own channels. The container is the trust boundary; nothing it does reaches the rest of your machine. Done with it? Delete the folder. It's gone, no residue."
+              reverse
               visual={<SandboxDiagram />}
             />
           </Reveal>
           <Reveal>
             <FeatureRow
-              eyebrow="Safe by design"
-              title="You're in control. Always."
-              blurb="Owner, trusted, member, guest — role-based permissions gate every action. A Slack stranger can't tell your agent to push to main. You can. The agent knows who's in the room and what they can do."
-              reverse
+              eyebrow="You hold the keys"
+              title="A stranger in Slack can't push to main. You can."
+              blurb="Owner, trusted, member, guest — role-based permissions gate every action, per channel. The agent knows who's in the room and exactly what they're allowed to ask for. Powerful in your hands, harmless in everyone else's."
               visual={<PermissionsVisual />}
-            />
-          </Reveal>
-          <Reveal>
-            <FeatureRow
-              eyebrow="Plugins as imports"
-              title="Teach it something new? Just write TypeScript."
-              blurb="No IPC, no FFI, no weird config files. Plain .ts files that contribute tools, skills, channels, and commands — all in the language you already write."
-              visual={<PluginCode />}
             />
           </Reveal>
         </section>
@@ -478,7 +490,7 @@ export default function Home() {
               one minute, end to end
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              Four commands. It&apos;s live.
+              Three commands in. It&apos;s already learning.
             </h2>
           </Reveal>
           <Reveal delay={120}>
@@ -498,7 +510,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-6 pb-36">
           <Reveal>
-            <Testimonial />
+            <LiveProof />
           </Reveal>
         </section>
 
@@ -508,10 +520,12 @@ export default function Home() {
               how it compares
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              There are great agents. None had the right shape.
+              OpenClaw is the platform. TypeClaw is the codebase.
             </h2>
-            <p className="mx-auto mt-4 max-w-xl text-base text-zinc-600 dark:text-zinc-400">
-              If you live in TypeScript and want plugins that are just imports, here&apos;s the honest landscape.
+            <p className="mx-auto mt-4 max-w-2xl text-base text-zinc-600 dark:text-zinc-400">
+              These are all good — genuinely. Reach for OpenClaw when you want the biggest ecosystem, Hermes when Python
+              is your stack, the lighter runtimes when you want a single binary. Reach for TypeClaw when you want a
+              runtime you can read end to end, extend with an import, and keep as your own.
             </p>
           </Reveal>
           <Reveal delay={120}>
@@ -530,17 +544,18 @@ export default function Home() {
           />
           <Reveal className="relative mx-auto max-w-3xl px-6 text-center">
             <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
-            <h2 className="mt-4 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">Ready to try it?</h2>
+            <h2 className="mt-4 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">Make it yours.</h2>
             <p className="mx-auto mt-4 max-w-lg text-balance text-base text-zinc-600 dark:text-zinc-400">
-              One command, one folder, one container. Trying it costs nothing.
+              One folder, one container, one language you already know. Spin one up, read the whole thing, fork it if
+              you like. Trying it costs nothing.
             </p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/docs/guides/getting-started"
+                href="/docs/guides/quickstart"
                 className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
               >
                 <BookOpen className="size-4" strokeWidth={2.4} aria-hidden />
-                Read the docs
+                Start in 5 minutes
               </Link>
               <a
                 href="https://github.com/typeclaw/typeclaw"
@@ -564,7 +579,7 @@ export default function Home() {
               <span className="text-sm font-semibold tracking-tight">typeclaw</span>
             </div>
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-zinc-500 dark:text-zinc-500">
-              A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
+              The agent runtime you can own — one TypeScript codebase, plugins as imports, memory you can read.
             </p>
             <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">© {new Date().getFullYear()} typeclaw · MIT</p>
           </div>
