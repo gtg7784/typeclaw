@@ -1037,8 +1037,8 @@ export type SystemPromptComposition = {
 //    memory/ after every turn, so the dirty-files list is empty most of
 //    the time.
 // 3. memorySection — volatile: MEMORY.md grows on every dream cycle and
-//    memory/yyyy-MM-dd.md grows after every channel turn that triggers
-//    memory-logger.
+//    memory/streams/yyyy-MM-dd.jsonl grows after every channel turn that
+//    triggers memory-logger.
 //
 // The wall-clock anchor that used to live here as `## Now` moved out
 // entirely. It is now injected into the user turn at each `session.prompt`
