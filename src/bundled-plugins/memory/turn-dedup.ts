@@ -1,39 +1,46 @@
-import type { TopicShard } from './load-shards'
+import type { RetrievedMemoryItem } from './load-memory'
 
-export type InjectedShardState = Map<string, string>
+export type InjectedMemoryState = Map<string, string>
 
-export type DirectShardPartition = {
-  full: TopicShard[]
-  unchanged: TopicShard[]
+export type RetrievedMemoryPartition = {
+  fresh: RetrievedMemoryItem[]
+  unchanged: RetrievedMemoryItem[]
 }
 
-// Preserves the "nothing the agent always had vanishes on an off-topic turn"
-// guarantee by AVAILABILITY, not literal presence: an unchanged shard is still
-// named (heading + slug) and its body is recoverable via memory_search, while a
-// changed shard always re-injects in full so the agent never reads a stale body.
-// `state` is the session-scoped record the caller owns and clears on session.end.
-export function partitionDirectShards(shards: TopicShard[], state: InjectedShardState): DirectShardPartition {
-  const full: TopicShard[] = []
-  const unchanged: TopicShard[] = []
-  for (const shard of shards) {
-    const hash = hashBody(shard.body)
-    if (state.get(shard.slug) === hash) {
-      unchanged.push(shard)
+// Preserves the cross-turn dedup intent after vector turns moved to top-K
+// retrieval: an unchanged retrieved excerpt is still named and recoverable via
+// memory_search, while changed retrieved content re-injects so the model never
+// reasons over a stale excerpt.
+export function partitionRetrievedMemoryItems(
+  items: RetrievedMemoryItem[],
+  state: InjectedMemoryState,
+): RetrievedMemoryPartition {
+  const fresh: RetrievedMemoryItem[] = []
+  const unchanged: RetrievedMemoryItem[] = []
+  for (const item of items) {
+    const stateKey = `${item.source}:${item.key}`
+    const hash = hashItem(item)
+    if (state.get(stateKey) === hash) {
+      unchanged.push(item)
     } else {
-      full.push(shard)
-      state.set(shard.slug, hash)
+      fresh.push(item)
+      state.set(stateKey, hash)
     }
   }
-  return { full, unchanged }
+  return { fresh, unchanged }
 }
 
-// FNV-1a over the body. A hash collision only suppresses a body the agent can
-// still re-fetch by slug, so collision-tolerance buys a cheap one-string-per-slug
-// state map instead of retaining full bodies per session.
-function hashBody(body: string): string {
+function hashItem(item: RetrievedMemoryItem): string {
+  return hashContent(`${item.heading}\0${item.excerpt}`)
+}
+
+// FNV-1a over rendered retrieval content. A hash collision only suppresses an
+// excerpt the agent can still re-fetch, so collision-tolerance buys a cheap
+// one-string-per-result state map instead of retaining excerpts per session.
+function hashContent(content: string): string {
   let hash = 0x811c9dc5
-  for (let i = 0; i < body.length; i++) {
-    hash ^= body.charCodeAt(i)
+  for (let i = 0; i < content.length; i++) {
+    hash ^= content.charCodeAt(i)
     hash = Math.imul(hash, 0x01000193)
   }
   return (hash >>> 0).toString(16)

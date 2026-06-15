@@ -60,9 +60,9 @@ describe('vector session.turn.start hook', () => {
     expect(retrievalContext.results).not.toContain('## Retrieved memory')
   })
 
-  test('under-budget turn injects ALL shard bodies without hybrid search (direct mode)', async () => {
+  test('under-budget turn runs hybrid search instead of dumping all shard bodies', async () => {
     hybridSearchMock.mockClear()
-    // given: two small shards well under the budget → direct mode
+    // given: two small shards well under the budget
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'first body')
     await writeTopic(agentDir, 'second-topic', 'Second Topic', 'second body')
     const exports = await bootVectorPlugin(16384)
@@ -73,19 +73,20 @@ describe('vector session.turn.start hook', () => {
       { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
     )
 
-    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(hybridSearchMock).toHaveBeenCalledWith('anything', expect.anything(), agentDir, 10, expect.any(Function))
     expect(retrievalContext.results).toContain('# Memory')
-    expect(retrievalContext.results).toContain('## First Topic')
-    expect(retrievalContext.results).toContain('first body')
     expect(retrievalContext.results).toContain('## Second Topic')
-    expect(retrievalContext.results).toContain('second body')
+    expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
+    expect(retrievalContext.results).not.toContain('first body')
+    expect(retrievalContext.results).not.toContain('second body')
   })
 
-  test('zero-shard direct mode still logs the mode=direct topics=0 signal', async () => {
-    hybridSearchMock.mockClear()
-    // given: a fresh agent with no topic shards → direct mode, zero shards
+  test('under-budget turn falls back to all headings when hybrid search returns nothing', async () => {
+    const emptySearch = mock(async () => [])
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'private first body')
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'private second body')
     const infos: string[] = []
-    const exports = await bootVectorPlugin(16384, capturingLogger(infos))
+    const exports = await bootVectorPluginWith(emptySearch, 16384, capturingLogger(infos))
 
     const retrievalContext = { results: '' }
     await exports.hooks!['session.turn.start']!(
@@ -93,58 +94,76 @@ describe('vector session.turn.start hook', () => {
       { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
     )
 
-    // then: nothing injected, hybrid search skipped, but the signal is still logged
-    expect(retrievalContext.results).toBe('')
-    expect(hybridSearchMock).not.toHaveBeenCalled()
-    expect(infos).toContain('[vector-retrieval] mode=direct topics=0 full=0')
+    expect(emptySearch).toHaveBeenCalledWith('anything', expect.anything(), agentDir, 10, expect.any(Function))
+    expect(retrievalContext.results).toContain('# Memory')
+    expect(retrievalContext.results).toContain('## First Topic')
+    expect(retrievalContext.results).toContain('slug: `first-topic`')
+    expect(retrievalContext.results).toContain('## Second Topic')
+    expect(retrievalContext.results).toContain('slug: `second-topic`')
+    expect(retrievalContext.results).not.toContain('private first body')
+    expect(retrievalContext.results).not.toContain('private second body')
+    expect(infos.some((line) => line.includes('suppressed=1') && line.includes('fallback=topic-index'))).toBe(true)
   })
 
-  test('second direct-mode turn dedups unchanged bodies to slug references', async () => {
+  test('zero-shard turn still logs suppression without falling back to an empty index', async () => {
+    const emptySearch = mock(async () => [])
+    const infos: string[] = []
+    const exports = await bootVectorPluginWith(emptySearch, 16384, capturingLogger(infos))
+
+    const retrievalContext = { results: '' }
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_vector', agentDir, userPrompt: 'anything', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(retrievalContext.results).toBe('')
+    expect(emptySearch).toHaveBeenCalled()
+    expect(infos.some((line) => line.includes('suppressed=1') && !line.includes('fallback=topic-index'))).toBe(true)
+  })
+
+  test('second retrieval turn dedups unchanged excerpts to slug references', async () => {
     hybridSearchMock.mockClear()
-    await writeTopic(agentDir, 'first-topic', 'First Topic', 'first body')
     const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
-    // given: turn one injected the full body
+    // given: turn one injected the retrieved excerpt
     const first = { results: '' }
     await hook({ sessionId: 'ses_dedup', agentDir, userPrompt: 'turn one', retrievalContext: first }, ctx)
-    expect(first.results).toContain('first body')
+    expect(first.results).toContain('Second topic excerpt from vector retrieval.')
 
     // when: a second turn runs for the same session with the shard unchanged
     const second = { results: '' }
     await hook({ sessionId: 'ses_dedup', agentDir, userPrompt: 'turn two', retrievalContext: second }, ctx)
 
-    // then: the body is replaced by a recoverable slug reference, not re-sent
-    expect(second.results).toContain('## First Topic')
-    expect(second.results).not.toContain('first body')
-    expect(second.results).toContain('slug: `first-topic`')
-    expect(second.results).toContain('memory_search({ topic: "first-topic" })')
+    // then: the excerpt is replaced by a recoverable slug reference, not re-sent
+    expect(second.results).toContain('## Second Topic')
+    expect(second.results).not.toContain('Second topic excerpt from vector retrieval.')
+    expect(second.results).toContain('slug: `second-topic`')
+    expect(second.results).toContain('memory_search({ topic: "second-topic" })')
   })
 
-  test('a changed shard body re-injects in full on the next turn', async () => {
-    hybridSearchMock.mockClear()
-    await writeTopic(agentDir, 'topic', 'Topic', 'original body')
-    const exports = await bootVectorPlugin(16384)
+  test('a changed retrieved excerpt re-injects on the next turn', async () => {
+    const retrieved = mock(async () => [retrievedTopic('topic', 'Topic', 'original excerpt')])
+    const exports = await bootVectorPluginWith(retrieved, 16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
 
     const first = { results: '' }
     await hook({ sessionId: 'ses_change', agentDir, userPrompt: 'turn one', retrievalContext: first }, ctx)
 
-    // when: the shard body changes (a dreaming pass rewrote it) before turn two
-    await writeTopic(agentDir, 'topic', 'Topic', 'rewritten body')
+    // when: retrieval returns changed content (a dreaming pass rewrote the shard)
+    retrieved.mockImplementation(async () => [retrievedTopic('topic', 'Topic', 'rewritten excerpt')])
     const second = { results: '' }
     await hook({ sessionId: 'ses_change', agentDir, userPrompt: 'turn two', retrievalContext: second }, ctx)
 
-    // then: the fresh body is injected in full, not a stale reference
-    expect(second.results).toContain('rewritten body')
+    // then: the fresh excerpt is injected, not a stale reference
+    expect(second.results).toContain('rewritten excerpt')
     expect(second.results).not.toContain('slug: `topic`')
   })
 
-  test('dedup state is per-session: a different session still gets the full body', async () => {
+  test('dedup state is per-session: a different session still gets the excerpt', async () => {
     hybridSearchMock.mockClear()
-    await writeTopic(agentDir, 'topic', 'Topic', 'shared body')
     const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
@@ -157,13 +176,12 @@ describe('vector session.turn.start hook', () => {
     const b = { results: '' }
     await hook({ sessionId: 'ses_b', agentDir, userPrompt: 'b1', retrievalContext: b }, ctx)
 
-    // then: it gets the full body — dedup state does not bleed across sessions
-    expect(b.results).toContain('shared body')
+    // then: it gets the excerpt — dedup state does not bleed across sessions
+    expect(b.results).toContain('Second topic excerpt from vector retrieval.')
   })
 
-  test('session.end clears dedup state so a resurrected session re-injects in full', async () => {
+  test('session.end clears dedup state so a resurrected session re-injects the excerpt', async () => {
     hybridSearchMock.mockClear()
-    await writeTopic(agentDir, 'topic', 'Topic', 'durable body')
     const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
@@ -175,9 +193,9 @@ describe('vector session.turn.start hook', () => {
     const after = { results: '' }
     await hook({ sessionId: 'ses_res', agentDir, userPrompt: 'turn two', retrievalContext: after }, ctx)
 
-    // then: the body is injected in full again — no dangling reference to a
-    // body the resurrected model context no longer holds
-    expect(after.results).toContain('durable body')
+    // then: the excerpt is injected again — no dangling reference to content the
+    // resurrected model context no longer holds
+    expect(after.results).toContain('Second topic excerpt from vector retrieval.')
   })
 
   test('channel direct-mode turn force-indexes every shard heading without hybrid search', async () => {
@@ -346,4 +364,8 @@ async function writeTopic(dir: string, slug: string, heading: string, body: stri
     topicShardPath(dir, slug),
     renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-06-11' }, body),
   )
+}
+
+function retrievedTopic(key: string, heading: string, excerpt: string) {
+  return { source: 'topic' as const, key, heading, excerpt, rrfScore: 1 }
 }

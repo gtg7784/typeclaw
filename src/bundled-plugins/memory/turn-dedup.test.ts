@@ -1,77 +1,89 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { TopicShard } from './load-shards'
-import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
+import type { RetrievedMemoryItem } from './load-memory'
+import { type InjectedMemoryState, partitionRetrievedMemoryItems } from './turn-dedup'
 
-function shard(slug: string, body: string): TopicShard {
+function item(key: string, excerpt: string): RetrievedMemoryItem {
   return {
-    path: `/tmp/agent/memory/topics/${slug}.md`,
-    slug,
-    frontmatter: { heading: slug, cites: 1, days: 1, lastReinforced: '2026-06-11' },
-    body,
+    source: 'topic',
+    key,
+    heading: key,
+    excerpt,
   }
 }
 
-describe('partitionDirectShards', () => {
-  test('first turn renders every shard in full and records them', () => {
-    const state: InjectedShardState = new Map()
-    const shards = [shard('a', 'body a'), shard('b', 'body b')]
+describe('partitionRetrievedMemoryItems', () => {
+  test('first turn renders every retrieved item and records it', () => {
+    const state: InjectedMemoryState = new Map()
+    const items = [item('a', 'excerpt a'), item('b', 'excerpt b')]
 
-    const { full, unchanged } = partitionDirectShards(shards, state)
+    const { fresh, unchanged } = partitionRetrievedMemoryItems(items, state)
 
-    expect(full.map((s) => s.slug)).toEqual(['a', 'b'])
+    expect(fresh.map((s) => s.key)).toEqual(['a', 'b'])
     expect(unchanged).toHaveLength(0)
     expect(state.size).toBe(2)
   })
 
-  test('second turn with unchanged bodies dedups all shards to references', () => {
-    const state: InjectedShardState = new Map()
-    const shards = [shard('a', 'body a'), shard('b', 'body b')]
-    partitionDirectShards(shards, state)
+  test('second turn with unchanged excerpts dedups all items to references', () => {
+    const state: InjectedMemoryState = new Map()
+    const items = [item('a', 'excerpt a'), item('b', 'excerpt b')]
+    partitionRetrievedMemoryItems(items, state)
 
-    const { full, unchanged } = partitionDirectShards(shards, state)
+    const { fresh, unchanged } = partitionRetrievedMemoryItems(items, state)
 
-    expect(full).toHaveLength(0)
-    expect(unchanged.map((s) => s.slug)).toEqual(['a', 'b'])
+    expect(fresh).toHaveLength(0)
+    expect(unchanged.map((s) => s.key)).toEqual(['a', 'b'])
   })
 
-  test('a shard whose body changed re-injects in full while siblings stay deduped', () => {
-    const state: InjectedShardState = new Map()
-    partitionDirectShards([shard('a', 'body a'), shard('b', 'body b')], state)
+  test('an item whose excerpt changed re-injects while siblings stay deduped', () => {
+    const state: InjectedMemoryState = new Map()
+    partitionRetrievedMemoryItems([item('a', 'excerpt a'), item('b', 'excerpt b')], state)
 
-    const { full, unchanged } = partitionDirectShards([shard('a', 'body a v2'), shard('b', 'body b')], state)
+    const { fresh, unchanged } = partitionRetrievedMemoryItems(
+      [item('a', 'excerpt a v2'), item('b', 'excerpt b')],
+      state,
+    )
 
-    expect(full.map((s) => s.slug)).toEqual(['a'])
-    expect(unchanged.map((s) => s.slug)).toEqual(['b'])
+    expect(fresh.map((s) => s.key)).toEqual(['a'])
+    expect(unchanged.map((s) => s.key)).toEqual(['b'])
   })
 
-  test('a never-seen shard appearing on a later turn injects in full', () => {
-    const state: InjectedShardState = new Map()
-    partitionDirectShards([shard('a', 'body a')], state)
+  test('a never-seen item appearing on a later turn injects', () => {
+    const state: InjectedMemoryState = new Map()
+    partitionRetrievedMemoryItems([item('a', 'excerpt a')], state)
 
-    const { full, unchanged } = partitionDirectShards([shard('a', 'body a'), shard('c', 'body c')], state)
+    const { fresh, unchanged } = partitionRetrievedMemoryItems([item('a', 'excerpt a'), item('c', 'excerpt c')], state)
 
-    expect(full.map((s) => s.slug)).toEqual(['c'])
-    expect(unchanged.map((s) => s.slug)).toEqual(['a'])
+    expect(fresh.map((s) => s.key)).toEqual(['c'])
+    expect(unchanged.map((s) => s.key)).toEqual(['a'])
   })
 
-  test('a changed-then-reverted body re-injects in full after the change turn', () => {
-    const state: InjectedShardState = new Map()
-    partitionDirectShards([shard('a', 'v1')], state)
-    partitionDirectShards([shard('a', 'v2')], state)
+  test('a changed-then-stable excerpt dedups after the change turn', () => {
+    const state: InjectedMemoryState = new Map()
+    partitionRetrievedMemoryItems([item('a', 'v1')], state)
+    partitionRetrievedMemoryItems([item('a', 'v2')], state)
 
-    const { full, unchanged } = partitionDirectShards([shard('a', 'v2')], state)
+    const { fresh, unchanged } = partitionRetrievedMemoryItems([item('a', 'v2')], state)
 
-    expect(full).toHaveLength(0)
-    expect(unchanged.map((s) => s.slug)).toEqual(['a'])
+    expect(fresh).toHaveLength(0)
+    expect(unchanged.map((s) => s.key)).toEqual(['a'])
   })
 
-  test('distinct bodies do not collide', () => {
-    const state: InjectedShardState = new Map()
-    partitionDirectShards([shard('a', 'alpha'), shard('b', 'beta')], state)
+  test('distinct excerpts do not collide', () => {
+    const state: InjectedMemoryState = new Map()
+    partitionRetrievedMemoryItems([item('a', 'alpha'), item('b', 'beta')], state)
 
-    const { unchanged } = partitionDirectShards([shard('a', 'alpha'), shard('b', 'beta')], state)
+    const { unchanged } = partitionRetrievedMemoryItems([item('a', 'alpha'), item('b', 'beta')], state)
 
-    expect(unchanged.map((s) => s.slug)).toEqual(['a', 'b'])
+    expect(unchanged.map((s) => s.key)).toEqual(['a', 'b'])
+  })
+
+  test('same key with a changed heading re-injects', () => {
+    const state: InjectedMemoryState = new Map()
+    partitionRetrievedMemoryItems([item('a', 'alpha')], state)
+
+    const { fresh } = partitionRetrievedMemoryItems([{ ...item('a', 'alpha'), heading: 'renamed' }], state)
+
+    expect(fresh.map((s) => s.key)).toEqual(['a'])
   })
 })

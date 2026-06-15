@@ -14,9 +14,10 @@ import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGE
 import {
   forceIndexForChannel,
   loadMemoryInjectionPlan,
-  renderDedupedMemorySection,
+  renderDedupedRetrievedMemorySection,
   renderMemorySection,
   renderRetrievedMemorySection,
+  renderTopicIndexMemorySection,
 } from './load-memory'
 import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
@@ -24,7 +25,7 @@ import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './me
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { bumpReferenceAccess } from './references/load-references'
 import { createMemorySearchTool } from './search-tool'
-import { type InjectedShardState, partitionDirectShards } from './turn-dedup'
+import { type InjectedMemoryState, partitionRetrievedMemoryItems } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
 import { runVectorIndexDoctor } from './vector/doctor'
 import { embed } from './vector/embedder'
@@ -163,21 +164,20 @@ type MemoryPluginDeps = {
 
 const defaultDeps: MemoryPluginDeps = { hybridSearch, queryEmbedFn: embed }
 
-// Builds the per-turn user-prompt memory block for a vector agent. Under budget
-// (direct mode) injects shard bodies, but de-duplicates across turns: a shard
-// whose body was already injected in full this session is rendered as a compact
-// slug reference (see `partitionDirectShards`) so a long conversation stops
-// re-sending identical bodies every turn while keeping every topic named and
-// recoverable. Over budget falls back to top-K hybrid search.
+// Builds the per-turn user-prompt memory block for a vector agent. Non-channel
+// turns always use top-K hybrid search, regardless of total shard size. Repeated
+// retrieved excerpts de-duplicate across turns, and an empty retrieval falls back
+// to an all-topic headings index so tiny memory sets are never silently hidden by
+// a relevance gate or stale vector index.
 //
 // Channel origins never carry bodies (memory-bleed defense). A channel direct-mode
-// turn is force-indexed to a headings/slugs-only section over EVERY shard, not run
+// turn is force-indexed to a headings-only section over EVERY shard, not run
 // through hybridSearch: hybrid is relevance-filtered top-K, so an off-topic turn or
 // stale vector index could silently drop headings that direct mode always had.
 async function renderVectorTurnMemory(
   event: { agentDir: string; userPrompt: string; origin?: SessionOrigin },
   injectionBudgetBytes: number,
-  injectedState: InjectedShardState,
+  injectedState: InjectedMemoryState,
   deps: MemoryPluginDeps,
   logger?: { info: (msg: string) => void },
 ): Promise<string> {
@@ -187,11 +187,6 @@ async function renderVectorTurnMemory(
     const indexed = forceIndexForChannel(plan, { origin: event.origin, injectionBudgetBytes })
     logger?.info(`[vector-retrieval] mode=index topics=${plan.shards.length} channel=forced`)
     return renderMemorySection(indexed, { origin: event.origin })
-  }
-  if (plan.mode === 'direct') {
-    const { full, unchanged } = partitionDirectShards(plan.shards, injectedState)
-    logger?.info(`[vector-retrieval] mode=direct topics=${plan.shards.length} full=${full.length}`)
-    return renderDedupedMemorySection(full, unchanged)
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
   try {
@@ -214,9 +209,11 @@ async function renderVectorTurnMemory(
     // results.length === 0 on a non-empty query means the relevance gate suppressed
     // every candidate (or nothing matched) — an empty memory block, indistinguishable
     // from "no memory" without this explicit signal.
+    const shouldFallbackToTopicIndex = !isChannel && results.length === 0 && plan.shards.length > 0
     const suppressed = results.length === 0 ? ' suppressed=1' : ''
+    const fallback = shouldFallbackToTopicIndex ? ' fallback=topic-index' : ''
     logger?.info(
-      `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${streamHits} reference_results=${referenceHits} elapsed_ms=${elapsedMs}${suppressed}`,
+      `[vector-retrieval] mode=index topic_results=${topicHits} stream_results=${streamHits} reference_results=${referenceHits} elapsed_ms=${elapsedMs}${suppressed}${fallback}`,
     )
     // Count a vector-surfaced reference as an access so it survives dreaming's
     // time-decay the same way a memory_search hit does. Fire-and-forget: the
@@ -228,7 +225,10 @@ async function renderVectorTurnMemory(
         logger?.info(`[vector-retrieval] reference access bump failed: ${err instanceof Error ? err.message : err}`)
       })
     }
-    return renderRetrievedMemorySection(results, { origin: event.origin })
+    if (shouldFallbackToTopicIndex) return renderTopicIndexMemorySection(plan.shards, { origin: event.origin })
+    if (isChannel) return renderRetrievedMemorySection(results, { origin: event.origin })
+    const { fresh, unchanged } = partitionRetrievedMemoryItems(results, injectedState)
+    return renderDedupedRetrievedMemorySection(fresh, unchanged)
   } finally {
     store.close()
   }
@@ -255,10 +255,10 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
       // only when `date` matches today's date — yesterday's cursor points
       // into yesterday's file and the spawn's payload omits it.
       const streamCursorAtLastRun = new Map<string, { date: string; lineCount: number }>()
-      // Per-session record of shard bodies already injected in full this session,
-      // so direct-mode vector turns can de-duplicate unchanged bodies across turns.
+      // Per-session record of retrieved memory already injected this session,
+      // so vector turns can de-duplicate unchanged excerpts across turns.
       // Cleared on session.end alongside the other per-session bookkeeping below.
-      const injectedShards = new Map<string, InjectedShardState>()
+      const injectedMemory = new Map<string, InjectedMemoryState>()
 
       // memory-logger is coalesced per agentDir (not per parentSessionId) so that
       // two concurrent channel sessions for the same agent never write to the same
@@ -510,10 +510,10 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
               // memory via the system prompt either.
               if (event.retrievalContext === undefined) return
               try {
-                let injectedState = injectedShards.get(event.sessionId)
+                let injectedState = injectedMemory.get(event.sessionId)
                 if (injectedState === undefined) {
                   injectedState = new Map()
-                  injectedShards.set(event.sessionId, injectedState)
+                  injectedMemory.set(event.sessionId, injectedState)
                 }
                 event.retrievalContext.results = await renderVectorTurnMemory(
                   event,
@@ -563,7 +563,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           'session.end': (event) => {
             // Dedup state is populated for every vector turn (subagents included),
             // so it must be cleared before the subagent-origin early-return below.
-            injectedShards.delete(event.sessionId)
+            injectedMemory.delete(event.sessionId)
             if (event.origin?.kind === 'subagent') return
             cancelTimer(event.sessionId)
             const sessionId = event.sessionId
