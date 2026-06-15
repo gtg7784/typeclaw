@@ -15,7 +15,7 @@ import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
-import { defaultThinkingLevelForRef, providerForModelRef, type ModelRef } from '@/config/providers'
+import { defaultThinkingLevelForRef, isOpenAiFamilyRef, providerForModelRef, type ModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
 import { createMcpDispatcherTools, MCP_DISPATCHER_TOOL_NAMES } from '@/mcp/tools'
@@ -47,6 +47,7 @@ import {
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
+import { PROACTIVE_NEXT_STEP_NUDGE } from './proactive-next-step-nudge'
 import { createReloadTool } from './reload-tool'
 import type { RestartHandoffOrigin } from './restart-handoff'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
@@ -277,6 +278,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
           ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
           ...(options.suppressSystemMemory !== undefined ? { suppressSystemMemory: options.suppressSystemMemory } : {}),
+          ...(isOpenAiFamilyRef(activeRef) ? { proactiveNextStepNudge: true } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -957,6 +959,7 @@ export type CreateResourceLoaderOptions = {
   // from `memory.vector.enabled` — vector is restart-required, so the boot
   // snapshot is coherent with the per-turn injection decision.
   suppressSystemMemory?: boolean
+  proactiveNextStepNudge?: boolean
 }
 
 // Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
@@ -1020,6 +1023,7 @@ export type SystemPromptComposition = {
   roleContext?: SessionRoleContext
   mcpCatalog?: string
   gitNudge: string
+  proactiveNextStepNudge?: string
   memorySection: string
 }
 
@@ -1064,6 +1068,9 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   }
   if (parts.gitNudge !== '') {
     prompt = `${prompt}\n\n${parts.gitNudge}`
+  }
+  if (parts.proactiveNextStepNudge !== undefined && parts.proactiveNextStepNudge !== '') {
+    prompt = `${prompt}\n\n${parts.proactiveNextStepNudge}`
   }
   if (parts.memorySection !== '') {
     prompt = `${prompt}\n\n${parts.memorySection}`
@@ -1164,6 +1171,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
       ? { mcpCatalog: renderMcpCatalog(options.mcpManager.listServers()) }
       : {}),
     gitNudge,
+    ...(options.proactiveNextStepNudge === true ? { proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE } : {}),
     memorySection,
   })
 

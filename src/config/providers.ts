@@ -991,9 +991,12 @@ function knownProviderForModelRef(ref: string): KnownProviderId | null {
 //
 // Anthropic, GLM, and Kimi don't share the padding behavior, so they keep the
 // SDK default.
+export function isOpenAiFamilyRef(ref: KnownModelRef | ModelRef | string): boolean {
+  return vendorForProviderId(providerForModelRef(ref)) === 'openai'
+}
+
 export function defaultThinkingLevelForRef(ref: KnownModelRef | ModelRef | string): 'low' | undefined {
-  const providerId = providerForModelRef(ref)
-  if (providerId === 'openai' || providerId === 'openai-codex') return 'low'
+  if (isOpenAiFamilyRef(ref)) return 'low'
   return undefined
 }
 

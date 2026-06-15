@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   defaultThinkingLevelForRef,
   isKnownModelRef,
+  isOpenAiFamilyRef,
   isModelRef,
   KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
@@ -437,6 +438,14 @@ describe('providerForModelRef anthropic', () => {
 
   test('routes claude-opus-4-8 to anthropic', () => {
     expect(providerForModelRef('anthropic/claude-opus-4-8')).toBe('anthropic')
+  })
+})
+
+describe('isOpenAiFamilyRef', () => {
+  test('tracks every provider in the OpenAI vendor family', () => {
+    expect(isOpenAiFamilyRef('openai/gpt-5.4-nano')).toBe(true)
+    expect(isOpenAiFamilyRef('openai-codex/gpt-5.5')).toBe(true)
+    expect(isOpenAiFamilyRef('anthropic/claude-opus-4-7')).toBe(false)
   })
 })
 
