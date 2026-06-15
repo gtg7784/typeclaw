@@ -205,6 +205,32 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/skip_response/)
   })
 
+  test('discord channel origin tells the bot to emit bare pipe tables, not fenced ones', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '111',
+      chat: '222',
+      thread: null,
+    })
+    // guards the real failure: agent fences its table, which disables the
+    // adapter's auto-conversion, so Discord renders ragged literal pipes
+    expect(out).toMatch(/bare `\| a \| b \|` blocks/i)
+    expect(out).toMatch(/never inside a code\s+fence/i)
+    expect(out).toMatch(/auto-reformats/i)
+  })
+
+  test('non-discord channel origin does not get the bare-table guidance', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).not.toContain('auto-reformats')
+  })
+
   test('non-github channel origin keeps the "On it." text ack', () => {
     const out = renderSessionOrigin({
       kind: 'channel',

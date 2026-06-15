@@ -384,6 +384,27 @@ function renderChannelOrigin(
     )
   }
 
+  // Discord renders no GFM tables — a raw `| a | b |` block shows as literal
+  // pipes. The discord-bot adapter rewrites BARE pipe tables into aligned
+  // inline-code rows for readability, but it skips any table inside a ``` /
+  // ~~~ fence (a fenced table is literal text by CommonMark). Models that have
+  // "learned" Discord mangles tables defensively wrap them in a fence, which is
+  // exactly what disables the auto-conversion — so the table renders ragged
+  // anyway. Tell the model to emit tables bare and let the adapter format them.
+  if (origin.adapter === 'discord-bot') {
+    lines.push(
+      '',
+      '**Emit Markdown tables as bare `| a | b |` blocks — never inside a code',
+      'fence.** Discord does not render Markdown tables, so this session',
+      'auto-reformats a bare pipe table (a `|`-row followed by a `|---|`',
+      'alignment row) into aligned, readable columns before it sends. That',
+      'reformatting only fires on raw Markdown: the moment you wrap the table in',
+      'a ``` or ~~~ fence it is treated as literal text and lands as ragged pipes.',
+      'So write the table directly in your reply with no surrounding fence. Use',
+      'fences only for actual code or output you want shown verbatim.',
+    )
+  }
+
   const conversationLine = renderConversationLine(origin)
   if (conversationLine !== null) lines.push('', conversationLine)
 
