@@ -40,6 +40,14 @@ describe('stripEmptyOptionalFollowupFiller', () => {
     expect(stripEmptyOptionalFollowupFiller(text)).toBe(text)
   })
 
+  test('preserves substantive English conditionals that start with if you want', () => {
+    const standalone = 'If you want the command to overwrite local changes, pass --force.'
+    expect(stripEmptyOptionalFollowupFiller(standalone)).toBe(standalone)
+
+    const tail = 'The safe default is no overwrite. If you want the command to overwrite local changes, pass --force.'
+    expect(stripEmptyOptionalFollowupFiller(tail)).toBe(tail)
+  })
+
   test('preserves non-tail legitimate conditionals', () => {
     const text = 'If the webhook is disabled, restart is required. I verified the setting.'
     expect(stripEmptyOptionalFollowupFiller(text)).toBe(text)

@@ -1,6 +1,6 @@
 type OptionalFollowupPattern = {
   start: RegExp
-  requiresActionWord?: boolean
+  requiresAssistantOffer?: boolean
 }
 
 const OPTIONAL_FOLLOWUP_PATTERNS: OptionalFollowupPattern[] = [
@@ -8,7 +8,7 @@ const OPTIONAL_FOLLOWUP_PATTERNS: OptionalFollowupPattern[] = [
   {
     start:
       /^\s*(?:[-*]\s*)?(?:if\s+you\s+(?:want|would\s+like|need)|if\s+you'd\s+like|if\s+helpful|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like|need))\b/i,
-    requiresActionWord: true,
+    requiresAssistantOffer: true,
   },
   // Korean
   {
@@ -36,25 +36,8 @@ const OPTIONAL_FOLLOWUP_PATTERNS: OptionalFollowupPattern[] = [
   },
 ]
 
-const ACTION_WORDS = [
-  'can',
-  'could',
-  'want',
-  'would',
-  'need',
-  'like',
-  'share',
-  'send',
-  'draft',
-  'add',
-  'make',
-  'help',
-  'walk',
-  'explain',
-  'summarize',
-  'provide',
-  'show',
-]
+const ENGLISH_ASSISTANT_OFFER =
+  /\b(?:i\s+(?:can|could|will|(?:'|’)ll)|i(?:'|’)m\s+happy\s+to|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like|need)\s+me\s+to)\b/i
 
 /**
  * Removes empty optional follow-up filler from the tail of a GPT/OpenAI-family
@@ -118,12 +101,12 @@ function isEmptyOptionalFollowup(sentence: string): boolean {
   if (normalized.length === 0) return false
   for (const pattern of OPTIONAL_FOLLOWUP_PATTERNS) {
     if (!pattern.start.test(normalized)) continue
-    if (pattern.requiresActionWord === true && !hasEnglishActionWord(normalized)) continue
+    if (pattern.requiresAssistantOffer === true && !hasEnglishAssistantOffer(normalized)) continue
     return true
   }
   return false
 }
 
-function hasEnglishActionWord(text: string): boolean {
-  return ACTION_WORDS.some((word) => new RegExp(`\\b${word}\\b`, 'i').test(text))
+function hasEnglishAssistantOffer(text: string): boolean {
+  return ENGLISH_ASSISTANT_OFFER.test(text)
 }
