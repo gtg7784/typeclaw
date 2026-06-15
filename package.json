@@ -37,6 +37,7 @@
     "format:check": "oxfmt --check .",
     "check": "bun run typecheck && bun run lint && bun run format:check",
     "test": "bun test --parallel",
+    "dev:docs": "cd docs && bun run dev",
     "generate:schema": "bun run scripts/generate-schema.ts",
     "debug:prompt": "bun run scripts/dump-system-prompt.ts",
     "postinstall": "bun run scripts/generate-schema.ts"

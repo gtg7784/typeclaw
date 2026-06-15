@@ -91,8 +91,129 @@
   );
 }
 
+/* Memory tiers: a subtle highlight travels tier-to-tier (streams → topics →
+   skills), then the loop-back pill fires and the cycle restarts. Each element
+   is offset by its tier index (--mem-i) across a shared cycle so the highlight
+   appears to flow. The cycle is split into four slots: three tiers plus the
+   loop-back. */
+.mem-loop {
+  --mem-cycle: 7s;
+  --mem-slot: calc(var(--mem-cycle) / 4);
+}
+
+.mem-tier {
+  animation: mem-tier-glow var(--mem-cycle) ease-in-out infinite;
+  animation-delay: calc(var(--mem-i) * var(--mem-slot));
+  will-change: transform, box-shadow;
+}
+
+.mem-flow {
+  animation: mem-flow-pulse var(--mem-cycle) ease-in-out infinite;
+  animation-delay: calc((var(--mem-i) + 0.5) * var(--mem-slot));
+}
+
+.mem-loopback {
+  animation: mem-loopback-pulse var(--mem-cycle) ease-in-out infinite;
+}
+
+@keyframes mem-tier-glow {
+  0%,
+  18%,
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 0 rgba(54, 72, 132, 0);
+  }
+  8% {
+    transform: translateY(-3px);
+    box-shadow: 0 0 0 4px rgba(54, 72, 132, 0.12);
+  }
+}
+
+.dark .mem-tier {
+  animation-name: mem-tier-glow-dark;
+}
+
+@keyframes mem-tier-glow-dark {
+  0%,
+  18%,
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 0 rgba(157, 167, 210, 0);
+  }
+  8% {
+    transform: translateY(-3px);
+    box-shadow: 0 0 0 4px rgba(157, 167, 210, 0.16);
+  }
+}
+
+@keyframes mem-flow-pulse {
+  0%,
+  18%,
+  100% {
+    opacity: 0.45;
+  }
+  8% {
+    opacity: 1;
+  }
+}
+
+@keyframes mem-loopback-pulse {
+  0%,
+  72%,
+  100% {
+    transform: scale(1);
+    background-color: var(--color-brand-50);
+  }
+  82% {
+    transform: scale(1.04);
+    background-color: var(--color-brand-100);
+  }
+}
+
+.dark .mem-loopback {
+  animation-name: mem-loopback-pulse-dark;
+}
+
+@keyframes mem-loopback-pulse-dark {
+  0%,
+  72%,
+  100% {
+    transform: scale(1);
+    background-color: color-mix(in srgb, var(--color-brand-950) 60%, transparent);
+  }
+  82% {
+    transform: scale(1.04);
+    background-color: color-mix(in srgb, var(--color-brand-900) 60%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-spotlight-glow {
     transition: none;
   }
+
+  .mem-tier,
+  .dark .mem-tier,
+  .mem-flow,
+  .mem-loopback,
+  .dark .mem-loopback {
+    animation: none;
+  }
+}
+
+/* Shiki dual-theme (defaultColor: false): tokens carry only --shiki-light and
+   --shiki-dark vars with no inline base color, so each theme is selected purely
+   by CSS. The card div owns the background, so the pre stays transparent. */
+.mem-code {
+  background-color: transparent;
+}
+
+.mem-code,
+.mem-code span {
+  color: var(--shiki-light);
+}
+
+.dark .mem-code,
+.dark .mem-code span {
+  color: var(--shiki-dark);
 }
