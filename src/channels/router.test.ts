@@ -4358,6 +4358,78 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
   })
 
+  test('continue-reply guard: posts the fallback when every retry re-strands until the budget is exhausted', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    const strandOnUnansweredToolUse = (seq: number): void => {
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: `t${seq}`, name: 'stream_snapshot', arguments: {} },
+        ] as AssistantMessage['content'],
+        api: 'openai-completions',
+        provider: 'openai',
+        model: 'gpt-5.5',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'toolUse',
+        timestamp: 1000,
+      }
+      const assistantEntry: SessionEntry = {
+        type: 'message',
+        id: `assistant-strand-${seq}`,
+        parentId: null,
+        timestamp: '2026-06-15T06:23:45.000Z',
+        message: assistantMsg,
+      }
+      const toolResultEntry: SessionEntry = {
+        type: 'message',
+        id: `tool-result-strand-${seq}`,
+        parentId: `assistant-strand-${seq}`,
+        timestamp: '2026-06-15T06:23:45.500Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: `t${seq}`,
+          toolName: 'stream_snapshot',
+          content: [{ type: 'text', text: 'x' }],
+          isError: false,
+          timestamp: 1000,
+        },
+      }
+      sessions[0]!.entriesById.set(assistantEntry.id, assistantEntry)
+      sessions[0]!.entriesById.set(toolResultEntry.id, toolResultEntry)
+      sessions[0]!.leafEntry = toolResultEntry
+    }
+
+    await router.route(inbound({ text: '반영했어?' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      // Each retry posts a DISTINCT status (a duplicate would be send-deduped
+      // and not count as a fresh send), then re-strands on the no-prose toolUse.
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `확인 중… (${attempt})` })
+      strandOnUnansweredToolUse(attempt)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_EMPTY_TURN_RETRIES)
+    expect(sent.filter((s) => s.text === EMPTY_TURN_FALLBACK_TEXT)).toHaveLength(1)
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=stranded_toolUse_retries_exhausted'))).toBe(true)
+  })
+
   test('silent-leaf observability: logs explicit reason instead of bailing silently', async () => {
     const dir = await tempDir()
     const logs: string[] = []

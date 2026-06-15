@@ -3358,6 +3358,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
+    const postEmptyTurnFallback = async (cause: string): Promise<void> => {
+      logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
+      const result = await send(
+        {
+          adapter: live.key.adapter,
+          workspace: live.key.workspace,
+          chat: live.key.chat,
+          thread: live.key.thread,
+          text: EMPTY_TURN_FALLBACK_TEXT,
+        },
+        { source: 'system' },
+      )
+      if (!result.ok) {
+        logger.warn(`[channels] ${live.keyId}: empty-turn fallback send failed: ${result.error}`)
+      }
+    }
+
     // A send landed this turn, but the model may have posted a `continue: true`
     // progress reply, kept working, then ENDED with its final answer as plain
     // prose — never calling a channel tool again. The terminal-reply abort fires
@@ -3378,42 +3395,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // work never finished, so the user is left with a bare "checking now…"
         // and nothing after it. Re-prompt the same logical turn so the model
         // completes its investigation and actually replies, instead of ending
-        // in silence. Bounded by MAX_EMPTY_TURN_RETRIES; on exhaustion the turn
-        // falls through to the normal recovery path below (which posts the
-        // fallback). Any postable pre-tool/mid-turn prose is still recovered by
-        // that path — this only adds a retry for the no-prose strand.
-        if (
-          leafIsStrandedToolUse(live.session) &&
-          live.currentTurnAuthorId !== null &&
-          live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES
-        ) {
-          live.emptyTurnRetries++
-          logger.warn(
-            `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
-              `cause=stranded_toolUse_after_send`,
-          )
-          live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+        // in silence. On retry-exhaustion post the fallback rather than
+        // returning silently — a retry turn that re-sends a status and re-strands
+        // on the same no-prose shape must not deadair the user. Any postable
+        // pre-tool/mid-turn prose is suppressed here as before (it was narration
+        // that accompanied the already-landed reply); only the no-prose strand
+        // gets a retry-or-fallback.
+        if (leafIsStrandedToolUse(live.session) && live.currentTurnAuthorId !== null) {
+          if (live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
+            live.emptyTurnRetries++
+            logger.warn(
+              `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+                `cause=stranded_toolUse_after_send`,
+            )
+            live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+          } else {
+            await postEmptyTurnFallback('stranded_toolUse_retries_exhausted')
+          }
         }
         return
       }
       if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
-    }
-
-    const postEmptyTurnFallback = async (cause: string): Promise<void> => {
-      logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
-      const result = await send(
-        {
-          adapter: live.key.adapter,
-          workspace: live.key.workspace,
-          chat: live.key.chat,
-          thread: live.key.thread,
-          text: EMPTY_TURN_FALLBACK_TEXT,
-        },
-        { source: 'system' },
-      )
-      if (!result.ok) {
-        logger.warn(`[channels] ${live.keyId}: empty-turn fallback send failed: ${result.error}`)
-      }
     }
 
     let candidate = recoverableAssistantText(live.session)
