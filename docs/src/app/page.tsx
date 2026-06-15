@@ -630,7 +630,7 @@ export default function Home() {
 
       <footer className="border-t border-zinc-100 bg-white dark:border-white/[0.04] dark:bg-zinc-950">
         <div className="mx-auto grid max-w-6xl grid-cols-1 gap-10 px-5 py-14 sm:grid-cols-2 sm:px-6 sm:py-16 lg:grid-cols-5">
-          <div className="col-span-2">
+          <div className="lg:col-span-2">
             <div className="flex items-center gap-2">
               <Image src="/typeclaw.png" alt="TypeClaw" width={24} height={24} className="rounded-md" />
               <span className="text-sm font-semibold tracking-tight">TypeClaw</span>
