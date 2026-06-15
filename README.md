@@ -1,12 +1,11 @@
-# TypeClaw
-
 <p align="center">
   <img src="./docs/public/typeclaw-transparent.png" alt="TypeClaw logo" width="240" />
 </p>
 
-<h3 align="center">The agent for perfectionists</h3>
+<h3 align="center">TypeClaw: The agent for perfectionists</h3>
 <p align="center">Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</p>
 
+<br />
 <br />
 
 ## Self-improving — a learning loop, not a black box
