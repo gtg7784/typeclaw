@@ -3358,23 +3358,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skip_contested_by_send recovering reply`)
     }
-    // A send landed this turn, but the model may have posted a `continue: true`
-    // progress reply, kept working, then ENDED with its final answer as plain
-    // prose — never calling a channel tool again. The terminal-reply abort fires
-    // only for a `channel_reply` WITHOUT `continue: true`, so that `stopReason:
-    // 'stop'` text leaf is left undelivered and unguarded (the false-receipt
-    // guard is github-only). The discriminator is leaf IDENTITY: only when the
-    // turn-end `stop` leaf is a DIFFERENT entry than the one in place at the last
-    // send did the model produce fresh post-reply prose. A leaf unchanged since
-    // the send is narration the model emitted with/before the reply that already
-    // landed — suppress it, as before.
-    if (live.successfulChannelSends > successfulSendsBeforePrompt) {
-      maybeNudgeContinuationWillingness(live)
-      const trailing = recoverableAssistantText(live.session)
-      if (trailing === null || trailing.source !== 'leaf') return
-      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
-    }
-
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
       logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
       const result = await send(
@@ -3390,6 +3373,49 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (!result.ok) {
         logger.warn(`[channels] ${live.keyId}: empty-turn fallback send failed: ${result.error}`)
       }
+    }
+
+    // A send landed this turn, but the model may have posted a `continue: true`
+    // progress reply, kept working, then ENDED with its final answer as plain
+    // prose — never calling a channel tool again. The terminal-reply abort fires
+    // only for a `channel_reply` WITHOUT `continue: true`, so that `stopReason:
+    // 'stop'` text leaf is left undelivered and unguarded (the false-receipt
+    // guard is github-only). The discriminator is leaf IDENTITY: only when the
+    // turn-end `stop` leaf is a DIFFERENT entry than the one in place at the last
+    // send did the model produce fresh post-reply prose. A leaf unchanged since
+    // the send is narration the model emitted with/before the reply that already
+    // landed — suppress it, as before.
+    if (live.successfulChannelSends > successfulSendsBeforePrompt) {
+      maybeNudgeContinuationWillingness(live)
+      const trailing = recoverableAssistantText(live.session)
+      if (trailing === null || trailing.source !== 'leaf') {
+        // A `continue: true` status reply landed, then the turn stranded on an
+        // unanswered `toolUse` (the post-tool follow-up never produced an
+        // assistant message — aborted loop / cancelled stream). The promised
+        // work never finished, so the user is left with a bare "checking now…"
+        // and nothing after it. Re-prompt the same logical turn so the model
+        // completes its investigation and actually replies, instead of ending
+        // in silence. On retry-exhaustion post the fallback rather than
+        // returning silently — a retry turn that re-sends a status and re-strands
+        // on the same no-prose shape must not deadair the user. Any postable
+        // pre-tool/mid-turn prose is suppressed here as before (it was narration
+        // that accompanied the already-landed reply); only the no-prose strand
+        // gets a retry-or-fallback.
+        if (leafIsStrandedToolUse(live.session) && live.currentTurnAuthorId !== null) {
+          if (live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
+            live.emptyTurnRetries++
+            logger.warn(
+              `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+                `cause=stranded_toolUse_after_send`,
+            )
+            live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+          } else {
+            await postEmptyTurnFallback('stranded_toolUse_retries_exhausted')
+          }
+        }
+        return
+      }
+      if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
     }
 
     let candidate = recoverableAssistantText(live.session)
@@ -4959,6 +4985,40 @@ function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'a
   const stop = leaf.message.stopReason
   if (stop === 'length' || stop === 'error' || stop === 'aborted') return stop
   return undefined
+}
+
+// True when the branch ends on an UNANSWERED `toolUse` that left NO postable
+// prose — the model called a tool and the upstream pi-agent-core post-tool
+// follow-up never produced an assistant message (the loop was aborted, or the
+// follow-up stream cancelled). Two leaf shapes carry this signature: the leaf
+// IS a `toolUse` assistant, or the leaf is a `toolResult` whose nearest
+// assistant ancestor (reached before any user message) is `toolUse`. The
+// no-prose requirement is the discriminator from a model that narrated a reply
+// alongside its tool call and DID land a real send this turn (that trailing
+// `toolUse` is delivered narration, not a stranded promise — leave it alone).
+// Keys on the model having INTENDED to keep working with nothing yet said; used
+// to re-prompt a turn that strands mid-work after a `continue: true` status
+// reply instead of ending in silence.
+function leafIsStrandedToolUse(session: AgentSession): boolean {
+  const leaf = session.sessionManager.getLeafEntry()
+  if (!leaf || leaf.type !== 'message') return false
+  if (leaf.message.role === 'assistant') {
+    return leaf.message.stopReason === 'toolUse' && visibleAssistantText(leaf.message).trim() === ''
+  }
+  if (leaf.message.role !== 'toolResult') return false
+  let cursor: { parentId: string | null } | undefined = leaf
+  for (let depth = 0; depth < 32 && cursor?.parentId; depth++) {
+    const parent = session.sessionManager.getEntry(cursor.parentId)
+    if (!parent) return false
+    if (parent.type === 'message') {
+      if (parent.message.role === 'assistant') {
+        return parent.message.stopReason === 'toolUse' && visibleAssistantText(parent.message).trim() === ''
+      }
+      if (parent.message.role === 'user') return false
+    }
+    cursor = parent
+  }
+  return false
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
