@@ -7,6 +7,8 @@
 <h3 align="center">The agent for perfectionists</h3>
 <p align="center">Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</p>
 
+<br />
+
 ## Self-improving — a learning loop, not a black box
 
 - 🌱 **Memory** — logs its own work to a daily stream as it goes
