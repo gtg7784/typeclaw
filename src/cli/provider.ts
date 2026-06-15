@@ -23,6 +23,7 @@ import {
 import { findAgentDir, isInitialized } from '@/init'
 import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
+import { fuzzyMatch } from './fuzzy-filter'
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine } from './ui'
 
@@ -285,6 +286,7 @@ async function pickVendorToAdd(): Promise<KnownProviderVendorId> {
   const choice = await autocomplete<KnownProviderVendorId>({
     message: 'Pick a provider to add',
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: vendorIds.map((id) => ({
       value: id,
       label: KNOWN_PROVIDER_VENDORS[id].name,
@@ -305,6 +307,7 @@ async function pickVariantToAdd(vendorId: KnownProviderVendorId): Promise<KnownP
   const choice = await autocomplete<KnownProviderId>({
     message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: variants.map((id) => {
       const hint = variantHint(vendorId, id)
       return hint !== undefined

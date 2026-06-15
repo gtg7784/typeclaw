@@ -66,6 +66,7 @@ import {
   type KeyValidationResult,
 } from '@/init/validate-api-key'
 
+import { fuzzyMatch } from './fuzzy-filter'
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import {
@@ -1098,6 +1099,7 @@ async function pickVendor(
   const choice = await autocomplete({
     message: 'Pick an LLM provider',
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: vendors.map((id) => ({
       value: id,
       label: KNOWN_PROVIDER_VENDORS[id].name,
@@ -1120,6 +1122,7 @@ async function pickProviderVariant(
   const choice = await autocomplete<KnownProviderId>({
     message: `Pick a ${KNOWN_PROVIDER_VENDORS[vendorId].name} option`,
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: variants.map((id) => {
       const hint = variantHint(vendorId, id)
       return hint !== undefined
@@ -1145,6 +1148,7 @@ async function pickModelForProvider(
   const choice = await autocomplete<string>({
     message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: candidates.map((o) => ({
       value: o.ref,
       label: formatModelLabel(o),
@@ -1191,6 +1195,7 @@ async function pickVisionVendor(
   const choice = await autocomplete<KnownProviderVendorId | 'skip'>({
     message: 'Your model is text-only. Pick a provider for the `vision` profile (used for image input)',
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: [
       ...vendors.map((id) => ({
         value: id as KnownProviderVendorId | 'skip',
@@ -1223,6 +1228,7 @@ async function pickVisionModel(
   const choice = await autocomplete<string>({
     message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
     placeholder: 'Type to search…',
+    filter: fuzzyMatch,
     options: candidates.map((o) => ({
       value: o.ref,
       label: formatModelLabel(o),
