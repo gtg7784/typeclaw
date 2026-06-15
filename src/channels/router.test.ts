@@ -9566,6 +9566,34 @@ describe('ChannelRouter channel_send willingness nudge', () => {
       true,
     )
   })
+
+  test('does NOT nudge when a real user inbound is already queued for the next drain', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '확인 좀' }))
+    sessions[0]!.onPrompt = async () => {
+      // given: the ack lands and the turn degenerates to an empty stop, but a new
+      // user message arrived during the prompt and is waiting in promptQueue.
+      // drain() would splice a pushed reminder into that live batch, so the nudge
+      // must be suppressed (the queued inbound supersedes this turn's recovery).
+      if (sessions[0]!.prompts.length === 1) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '확인해볼게요.' })
+        endWithFreshEmptyStop(sessions[0]!, 1)
+        await router.route(inbound({ text: 'actually here is more context', externalMessageId: 'm2' }))
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+    expect(sent.some((s) => s === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+  })
 })
 
 describe('ChannelRouter output-token cap', () => {

@@ -3425,7 +3425,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // post-ack work, not an ack-then-await-user stop). Bounded by
       // MAX_WILLINGNESS_NUDGES (shared with the reply path); on exhaustion post the
       // fallback rather than going silent, mirroring the stranded-toolUse path.
-      if (live.currentTurnAuthorId !== null && isEmptyStopAfterWillingnessAck(live)) {
+      // Gated on an empty `promptQueue` (like maybeNudgeContinuationWillingness): a
+      // real inbound that coalesced into the just-finished prompt will be answered
+      // by the next drain pass, and drain() splices pending reminders into that
+      // batch — so injecting a stale recovery nudge would prepend it to a live user
+      // message. Skip the nudge AND the fallback in that case and let the trailing
+      // recovery below run; the queued inbound supersedes this turn's silence.
+      if (live.promptQueue.length === 0 && live.currentTurnAuthorId !== null && isEmptyStopAfterWillingnessAck(live)) {
         if (live.willingnessNudges < MAX_WILLINGNESS_NUDGES) {
           live.willingnessNudges++
           logger.warn(
