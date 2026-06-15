@@ -163,17 +163,17 @@ function GroupChatVisual() {
           <div className="min-w-0">
             <p className="font-mono text-[11px] text-zinc-400 dark:text-zinc-600">sam</p>
             <div className="mt-1 rounded-2xl rounded-tl-sm border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-700 dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-300">
-              <span className="font-medium text-brand-700 dark:text-brand-300">@typeey</span> draft the changelog?
+              <span className="font-medium text-brand-accent dark:text-brand-300">@typeey</span> draft the changelog?
             </div>
           </div>
         </div>
 
         <div className="flex items-start gap-2.5">
-          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white dark:bg-brand-500">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-accent text-white dark:bg-brand-500">
             <Sparkles className="size-3.5" strokeWidth={2.4} aria-hidden />
           </div>
           <div className="min-w-0">
-            <p className="font-mono text-[11px] text-brand-600 dark:text-brand-300">typeey</p>
+            <p className="font-mono text-[11px] text-brand-accent dark:text-brand-300">typeey</p>
             <div className="mt-1 rounded-2xl rounded-tl-sm border border-brand-200 bg-brand-50 px-3.5 py-2 text-sm text-brand-900 shadow-sm dark:border-brand-800/60 dark:bg-brand-950/50 dark:text-brand-100">
               On it — drafting the changelog now.
             </div>
@@ -194,7 +194,7 @@ function SubagentVisual() {
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
       <div className="flex h-full flex-col items-center justify-center">
         <div className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-white px-4 py-2.5 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
-          <Network className="size-4 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+          <Network className="size-4 text-brand-accent dark:text-brand-300" strokeWidth={2.4} aria-hidden />
           <span className="text-sm font-medium text-zinc-800 dark:text-zinc-100">main session</span>
         </div>
         <div
@@ -211,7 +211,7 @@ function SubagentVisual() {
               key={label}
               className="flex flex-col items-center gap-2 rounded-xl border border-zinc-200 bg-white px-2 py-3 text-center shadow-sm dark:border-white/[0.08] dark:bg-zinc-900"
             >
-              <span className="inline-flex size-8 items-center justify-center rounded-lg bg-brand-50 text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+              <span className="inline-flex size-8 items-center justify-center rounded-lg bg-brand-50 text-brand-accent dark:bg-brand-950/60 dark:text-brand-300">
                 <Icon className="size-4" strokeWidth={2.2} aria-hidden />
               </span>
               <span className="font-mono text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
@@ -244,7 +244,7 @@ function SecurityVisual() {
               aria-hidden
             />
             <div className="flex w-full items-center gap-3 rounded-xl border border-brand-200 bg-white px-4 py-2.5 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
-              <Icon className="size-4 shrink-0 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+              <Icon className="size-4 shrink-0 text-brand-accent dark:text-brand-300" strokeWidth={2.4} aria-hidden />
               <div className="min-w-0">
                 <span className="text-sm font-medium text-zinc-800 dark:text-zinc-100">{label}</span>
                 <span className="ml-2 text-xs text-zinc-400 dark:text-zinc-600">{detail}</span>
@@ -278,7 +278,7 @@ function SelfManagingVisual() {
     <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg dark:border-white/[0.08] dark:bg-zinc-950">
       <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4 py-2.5 dark:border-white/[0.04] dark:bg-white/[0.02]">
         <div className="flex items-center gap-2">
-          <FileText className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.2} aria-hidden />
+          <FileText className="size-3.5 text-brand-accent dark:text-brand-300" strokeWidth={2.2} aria-hidden />
           <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">typeclaw.json</span>
         </div>
         <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider uppercase">
@@ -350,7 +350,7 @@ async function SelfExtendVisual() {
 
         <div className="overflow-hidden rounded-xl border border-brand-200 bg-white shadow-sm dark:border-brand-800/60 dark:bg-zinc-950">
           <div className="flex items-center justify-between gap-2 border-b border-zinc-100 bg-zinc-50 px-3.5 py-2 dark:border-white/[0.04] dark:bg-white/[0.02]">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 font-mono text-[10px] font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 font-mono text-[10px] font-medium text-brand-accent dark:bg-brand-950/60 dark:text-brand-300">
               <Sparkles className="size-3" strokeWidth={2.4} aria-hidden />
               written by my-agent
             </span>
@@ -368,14 +368,14 @@ async function SelfExtendVisual() {
         />
 
         <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-3 shadow-sm dark:border-brand-800/60 dark:bg-brand-950/50">
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white dark:bg-brand-500">
+          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-brand-accent text-white dark:bg-brand-500">
             <Check className="size-4" strokeWidth={2.6} aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-mono text-sm font-medium text-brand-900 dark:text-brand-100">postReview</p>
-            <p className="text-[11px] text-brand-700/70 dark:text-brand-300/70">now in its toolset</p>
+            <p className="text-[11px] text-brand-accent dark:text-brand-300/70">now in its toolset</p>
           </div>
-          <span className="shrink-0 rounded-full bg-brand-600 px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white uppercase dark:bg-brand-500">
+          <span className="shrink-0 rounded-full bg-brand-accent px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white uppercase dark:bg-brand-500">
             ready
           </span>
         </div>
@@ -392,7 +392,7 @@ function CapabilityGrid() {
           key={id}
           className="group rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition-all hover:translate-y-[-2px] hover:border-brand-200 hover:shadow-md dark:border-white/[0.08] dark:bg-white/[0.02] dark:hover:border-brand-800/60"
         >
-          <div className="inline-flex size-10 items-center justify-center rounded-xl bg-brand-50 text-brand-700 transition-colors group-hover:bg-brand-100 dark:bg-brand-950/60 dark:text-brand-300 dark:group-hover:bg-brand-900/60">
+          <div className="inline-flex size-10 items-center justify-center rounded-xl bg-brand-50 text-brand-accent transition-colors group-hover:bg-brand-100 dark:bg-brand-950/60 dark:text-brand-300 dark:group-hover:bg-brand-900/60">
             <Icon className="size-5" strokeWidth={2.2} aria-hidden />
           </div>
           <h3 className="mt-4 text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{title}</h3>
@@ -439,7 +439,7 @@ function MemoryTiers() {
             {i > 0 && (
               <div aria-hidden className="flex items-center justify-center py-1 sm:py-0">
                 <ArrowRight
-                  className="mem-flow size-5 rotate-90 text-brand-400 sm:rotate-0 dark:text-brand-500"
+                  className="mem-flow size-5 rotate-90 text-brand-accent sm:rotate-0 dark:text-brand-500"
                   strokeWidth={2.4}
                   style={{ '--mem-i': i - 1 } as React.CSSProperties}
                 />
@@ -457,8 +457,8 @@ function MemoryTiers() {
                 <span
                   className={`inline-flex size-10 items-center justify-center rounded-xl ${
                     peak
-                      ? 'bg-brand-600 text-white dark:bg-brand-500'
-                      : 'bg-brand-50 text-brand-700 dark:bg-brand-950/60 dark:text-brand-300'
+                      ? 'bg-brand-accent text-white dark:bg-brand-500'
+                      : 'bg-brand-50 text-brand-accent dark:bg-brand-950/60 dark:text-brand-300'
                   }`}
                 >
                   <Icon className="size-5" strokeWidth={2.2} aria-hidden />
@@ -467,7 +467,7 @@ function MemoryTiers() {
                   0{i + 1}
                 </span>
               </div>
-              <p className="mt-4 font-mono text-[11px] tracking-[0.14em] text-brand-700 uppercase dark:text-brand-300">
+              <p className="mt-4 font-mono text-[11px] tracking-[0.14em] text-brand-accent uppercase dark:text-brand-300">
                 {kind}
               </p>
               <p className="mt-1 text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{label}</p>
@@ -479,7 +479,7 @@ function MemoryTiers() {
       </div>
       <div className="mt-5 flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-500">
         <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-transparent to-brand-200 dark:to-brand-800/60" />
-        <span className="mem-loopback inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-3 py-1 font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+        <span className="mem-loopback inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-3 py-1 font-medium text-brand-accent dark:bg-brand-950/60 dark:text-brand-300">
           <RefreshCw className="size-3.5" strokeWidth={2.4} aria-hidden />
           what it learns loops back into the next session
         </span>
@@ -499,7 +499,7 @@ function CheckCell({ value }: { value: boolean | 'partial' }) {
     )
   }
   return value ? (
-    <span className="inline-flex items-center justify-center text-brand-600 dark:text-brand-400">
+    <span className="inline-flex items-center justify-center text-brand-accent dark:text-brand-400">
       <Check className="size-[18px]" strokeWidth={2.75} aria-hidden />
       <span className="sr-only">Yes</span>
     </span>
@@ -534,14 +534,14 @@ function MarketingTable() {
                   <span
                     className={
                       r.highlight
-                        ? 'text-base font-semibold tracking-tight text-brand-700 dark:text-brand-200'
+                        ? 'text-base font-semibold tracking-tight text-brand-accent dark:text-brand-200'
                         : 'text-base font-semibold tracking-tight text-zinc-800 dark:text-zinc-200'
                     }
                   >
                     {r.name}
                   </span>
                   {r.highlight && (
-                    <span className="rounded-full bg-brand-600 px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wider text-white uppercase dark:bg-brand-500">
+                    <span className="rounded-full bg-brand-accent px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wider text-white uppercase dark:bg-brand-500">
                       you are here
                     </span>
                   )}
@@ -551,7 +551,7 @@ function MarketingTable() {
                 </div>
                 <p
                   className={`mx-auto mt-3 max-w-[12rem] text-[13px] font-semibold leading-snug tracking-normal normal-case ${
-                    r.highlight ? 'text-brand-700 dark:text-brand-300' : 'text-zinc-700 dark:text-zinc-200'
+                    r.highlight ? 'text-brand-accent dark:text-brand-300' : 'text-zinc-700 dark:text-zinc-200'
                   }`}
                 >
                   {r.strength}
@@ -606,7 +606,7 @@ function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps)
   return (
     <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-2 lg:gap-16">
       <div className={reverse ? 'min-w-0 lg:order-2' : 'min-w-0'}>
-        <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">{eyebrow}</p>
+        <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">{eyebrow}</p>
         <h3 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">{title}</h3>
         <p className="mt-4 max-w-md text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
       </div>
@@ -632,7 +632,7 @@ function LiveProof() {
             href="https://github.com/typeey"
             target="_blank"
             rel="noopener noreferrer"
-            className="font-medium text-brand-700 underline-offset-2 hover:underline dark:text-brand-300"
+            className="font-medium text-brand-accent underline-offset-2 hover:underline dark:text-brand-300"
           >
             @typeey
           </a>{' '}
@@ -642,7 +642,7 @@ function LiveProof() {
         <div className="mt-7">
           <Link
             href="/docs/recipes/code-reviewer"
-            className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-white px-5 py-2.5 text-sm font-medium text-brand-800 shadow-sm transition-all hover:translate-y-[-1px] hover:shadow-md dark:border-brand-800/60 dark:bg-zinc-900 dark:text-brand-200"
+            className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-white px-5 py-2.5 text-sm font-medium text-brand-accent shadow-sm transition-all hover:translate-y-[-1px] hover:shadow-md dark:border-brand-800/60 dark:bg-zinc-900 dark:text-brand-200"
           >
             See how it&apos;s wired
             <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
@@ -697,18 +697,18 @@ export default function Home() {
           <HeroSpotlight>
             <div className="relative z-10 mx-auto max-w-4xl px-5 pt-16 pb-24 sm:px-6 sm:pb-32 text-center sm:pt-24">
               <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
-                <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+                <Sparkles className="size-3.5 text-brand-accent dark:text-brand-300" strokeWidth={2.4} aria-hidden />
                 {VERSION} · crafted in every detail
               </div>
               <div className="relative mt-8">
                 <Image
                   src="/typeey-cutout.png"
                   alt=""
-                  width={895}
-                  height={858}
+                  width={1310}
+                  height={1310}
                   aria-hidden
                   priority
-                  className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
+                  className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-56 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-100px] xl:w-64"
                 />
                 <h1 className="text-balance text-5xl font-semibold tracking-tight min-[380px]:text-6xl sm:text-7xl lg:text-8xl">
                   The agent for
@@ -726,7 +726,7 @@ export default function Home() {
               <div className="mt-6 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
                 <Link
                   href="/docs/guides/quickstart"
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-accent px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-700 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
                 >
                   Start in 5 minutes
                   <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
@@ -753,7 +753,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-5 py-24 sm:px-6 sm:py-36">
           <Reveal className="mb-12 text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
               everything it does
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
@@ -771,7 +771,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-5 py-24 sm:px-6 sm:py-36">
           <Reveal className="text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
               Memory you can read
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
@@ -836,7 +836,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-3xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
               one command to hatch
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
@@ -850,7 +850,9 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">Use cases</p>
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
+              Use cases
+            </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">For every workflow</h2>
           </Reveal>
           <Reveal delay={120}>
@@ -866,7 +868,7 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
               how it compares
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
@@ -901,7 +903,7 @@ export default function Home() {
           />
           <Reveal className="relative mx-auto max-w-3xl px-5 text-center sm:px-6">
             <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-accent uppercase dark:text-brand-300">
               built for people like you
             </p>
             <h2 className="mt-3 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">
@@ -915,7 +917,7 @@ export default function Home() {
             <div className="mt-8 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
               <Link
                 href="/docs/guides/quickstart"
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-700 px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-accent px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-700 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
               >
                 <BookOpen className="size-4" strokeWidth={2.4} aria-hidden />
                 Start in 5 minutes
@@ -955,7 +957,7 @@ export default function Home() {
               <li>
                 <Link
                   href="/"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Overview
                 </Link>
@@ -965,7 +967,7 @@ export default function Home() {
                   href="https://www.npmjs.com/package/typeclaw"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   npm
                 </a>
@@ -978,7 +980,7 @@ export default function Home() {
               <li>
                 <Link
                   href="/docs/guides/quickstart"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Quickstart
                 </Link>
@@ -986,7 +988,7 @@ export default function Home() {
               <li>
                 <Link
                   href="/docs/guides/write-a-plugin"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Write a plugin
                 </Link>
@@ -994,7 +996,7 @@ export default function Home() {
               <li>
                 <Link
                   href="/docs/concepts/architecture"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Architecture
                 </Link>
@@ -1002,7 +1004,7 @@ export default function Home() {
               <li>
                 <Link
                   href="/docs/reference/typeclaw-json"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Configuration
                 </Link>
@@ -1017,7 +1019,7 @@ export default function Home() {
                   href="https://github.com/typeclaw/typeclaw"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   GitHub
                 </a>
@@ -1027,7 +1029,7 @@ export default function Home() {
                   href="https://github.com/typeclaw/typeclaw/discussions"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   Discussions
                 </a>
@@ -1037,7 +1039,7 @@ export default function Home() {
                   href="https://github.com/typeclaw/typeclaw/blob/main/LICENSE"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                  className="text-zinc-600 hover:text-brand-accent dark:text-zinc-400 dark:hover:text-brand-300"
                 >
                   MIT License
                 </a>

@@ -22,9 +22,24 @@
   --color-brand-950: #0d1736;
 }
 
-/* Dark mode lifts the primary to brand-300 so links stay legible on dark bg. */
+/* Vivid royal-indigo accent for light mode. The brand-* scale is intentionally
+   muted (greyish-navy) for calm tints and the deep-navy logo anchor; used as a
+   light-mode foreground/fill accent it reads as heavy grey, not brand color. This
+   saturated sibling (5.35:1 on white and white-on-it both clear WCAG AA) gives
+   eyebrows, icon glyphs, and CTAs real chromatic lift. Dark mode keeps brand-300.
+   Declared in a non-inline @theme so it registers a :root var that bg-/text- utilities
+   resolve through var() — an inline literal here resolves to nothing (transparent). */
+@theme {
+  --color-brand-accent: #4f5ed7;
+}
+
+/* The primary accent must read as an accent against each background. The brand
+   scale is intentionally muted (greyish-navy), which reads as heavy/dark text
+   rather than an accent on white, so light mode uses a saturated sibling of the
+   same hue (#5466d8, 4.92:1 on white — clears WCAG AA for link text) that lifts
+   away from near-black body text; dark mode uses brand-300 to stay legible on dark. */
 :root {
-  --color-fd-primary: var(--color-brand-700);
+  --color-fd-primary: #5466d8;
 }
 
 .dark {
