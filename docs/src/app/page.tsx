@@ -268,9 +268,9 @@ function SecurityVisual() {
 
 function SelfManagingVisual() {
   const fields = [
-    { line: '"model": "gpt-5.5"', state: 'live' as const },
-    { line: '"cron": [ … ]', state: 'live' as const },
+    { line: '"models": { … }', state: 'live' as const },
     { line: '"channels": { … }', state: 'live' as const },
+    { line: '"alias": { … }', state: 'live' as const },
     { line: '"sandbox": "proc-bind"', state: 'restart' as const },
     { line: '"port": 8973', state: 'restart' as const },
   ]
@@ -837,7 +837,7 @@ export default function Home() {
         <section className="mx-auto max-w-3xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
-              one command to alive
+              one command to hatch
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
               One <code className="font-mono text-3xl sm:text-4xl">init</code> — wired, hatched, already learning.
