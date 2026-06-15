@@ -58,7 +58,7 @@ describe('tool-result-cap plugin', () => {
     expect(parsed).toEqual({
       enabled: true,
       imageMaxBytes: 262_144,
-      textMaxBytes: 65_536,
+      textMaxBytes: 32_768,
       exemptTools: [],
     })
   })
@@ -165,7 +165,7 @@ describe('resolveCapOptionsFromConfig', () => {
     const opts = resolveCapOptionsFromConfig(undefined)
     expect(opts).not.toBeNull()
     expect(opts!.imageMaxBytes).toBe(262_144)
-    expect(opts!.textMaxBytes).toBe(65_536)
+    expect(opts!.textMaxBytes).toBe(32_768)
     expect(opts!.exemptTools?.size).toBe(0)
   })
 
