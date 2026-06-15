@@ -313,8 +313,9 @@ describe('runInit', () => {
     expect(gitDone.result.skipped).toBe(false)
   })
 
-  test('skips git init when .git already exists', async () => {
-    await mkdir(join(root, '.git'))
+  test('skips git init when .git already has a commit', async () => {
+    await scaffold(root)
+    await initGitRepo(root)
     const events: InitStepEvent[] = []
 
     await runInit({
@@ -333,23 +334,48 @@ describe('runInit', () => {
     expect(gitDone.result.skipped).toBe(true)
   })
 
-  test('step failure is reported via event, not thrown, and later steps still run', async () => {
+  test('install failure is reported via event and aborts later steps', async () => {
+    const events: InitStepEvent[] = []
+
+    await expect(
+      runInit({
+        cwd: root,
+        apiKey: 'fw_test_key',
+        runHatching: okHatch,
+        runBunInstall: async () => ({ ok: false, reason: 'registry unavailable' }),
+        dockerExec: okDocker,
+        onProgress: (e) => events.push(e),
+      }),
+    ).rejects.toThrow('Dependency install failed: registry unavailable')
+
+    const installDone = events.find((e) => e.step === 'install' && e.phase === 'done')
+    if (!(installDone && installDone.step === 'install' && installDone.phase === 'done')) {
+      throw new Error('expected install:done')
+    }
+    expect(installDone.result).toEqual({ ok: false, reason: 'registry unavailable' })
+    expect(events.map((e) => `${e.step}:${e.phase}`)).not.toContain('dockerfile:start')
+    expect(events.map((e) => `${e.step}:${e.phase}`)).not.toContain('hatching:start')
+  })
+
+  test('dockerfile failure is reported via event and aborts later steps', async () => {
     // given: invalid package.json so writeDockerAssets fails to parse it.
     // scaffold preserves existing package.json, so this sticks through the pipeline.
     await writeFile(join(root, 'package.json'), '{ not valid json')
     const events: InitStepEvent[] = []
 
     // when
-    await runInit({
-      cwd: root,
-      apiKey: 'fw_test_key',
-      runHatching: okHatch,
-      runBunInstall: okInstall,
-      dockerExec: okDocker,
-      onProgress: (e) => events.push(e),
-    })
+    await expect(
+      runInit({
+        cwd: root,
+        apiKey: 'fw_test_key',
+        runHatching: okHatch,
+        runBunInstall: okInstall,
+        dockerExec: okDocker,
+        onProgress: (e) => events.push(e),
+      }),
+    ).rejects.toThrow(/Dockerfile generation failed:/)
 
-    // then: dockerfile failed softly, git and hatching still ran
+    // then: dockerfile failure is fatal, so git and hatching do not run
     const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
     if (!(dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done')) {
       throw new Error('expected dockerfile:done')
@@ -357,10 +383,8 @@ describe('runInit', () => {
     expect(dockerDone.result.ok).toBe(false)
 
     const steps = events.map((e) => `${e.step}:${e.phase}`)
-    expect(steps).toContain('git:start')
-    expect(steps).toContain('git:done')
-    expect(steps).toContain('hatching:start')
-    expect(steps).toContain('hatching:done')
+    expect(steps).not.toContain('git:start')
+    expect(steps).not.toContain('hatching:start')
   })
 
   test('works without onProgress callback', async () => {
@@ -1099,13 +1123,24 @@ describe('initGitRepo', () => {
     expect(tracked.split('\n')).not.toContain('.env')
   })
 
-  test('skips when .git already exists', async () => {
+  test('skips when .git already has a commit', async () => {
     await scaffold(root)
-    await mkdir(join(root, '.git'))
+    await initGitRepo(root)
 
     const result = await initGitRepo(root)
 
     expect(result).toEqual({ ok: true, skipped: true })
+  })
+
+  test('commits scaffolded files when prior git init has no commit', async () => {
+    await scaffold(root)
+    await runGit(root, ['init', '-b', 'main'])
+
+    const result = await initGitRepo(root)
+
+    expect(result).toEqual({ ok: true, skipped: false })
+    expect(await runGit(root, ['rev-parse', '--verify', 'HEAD'])).not.toBe('')
+    expect(await runGit(root, ['log', '--oneline'])).toContain('Initial commit 🥚')
   })
 })
 
@@ -2046,6 +2081,7 @@ describe('defaultRunHatching', () => {
 
   test('propagates start() failure as a hatching failure', async () => {
     const failingStart: typeof import('@/container').start = async () => ({ ok: false, reason: 'docker not running' })
+    const stopCalls: Array<{ cwd: string }> = []
 
     const result = await defaultRunHatching({
       cwd: '/agent',
@@ -2054,9 +2090,56 @@ describe('defaultRunHatching', () => {
       startContainer: failingStart,
       tui: fakeTui,
       waitForAgent: fakeWaitForAgent,
+      stopContainer: async (options) => {
+        stopCalls.push(options)
+        return { ok: true, containerName: 'fake', running: true }
+      },
     })
 
     expect(result).toEqual({ ok: false, reason: 'docker not running' })
+    expect(stopCalls).toEqual([])
+  })
+
+  test('stops the launched container when a post-start step fails', async () => {
+    const { fn: startFn } = fakeStart()
+    const stopCalls: Array<{ cwd: string }> = []
+
+    const result = await defaultRunHatching({
+      cwd: '/agent',
+      port: 8973,
+      startContainer: startFn,
+      waitForAgent: async () => {
+        throw new Error('agent never came up')
+      },
+      tui: fakeTui,
+      stopContainer: async (options) => {
+        stopCalls.push(options)
+        return { ok: true, containerName: 'fake', running: true }
+      },
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'agent never came up' })
+    expect(stopCalls).toEqual([{ cwd: '/agent' }])
+  })
+
+  test('does not stop the container on successful hatching', async () => {
+    const { fn: startFn } = fakeStart()
+    const stopCalls: Array<{ cwd: string }> = []
+
+    const result = await defaultRunHatching({
+      cwd: '/agent',
+      port: 8973,
+      startContainer: startFn,
+      waitForAgent: fakeWaitForAgent,
+      tui: fakeTui,
+      stopContainer: async (options) => {
+        stopCalls.push(options)
+        return { ok: true, containerName: 'fake', running: true }
+      },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(stopCalls).toEqual([])
   })
 
   function capturingTui(): {

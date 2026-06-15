@@ -39,6 +39,7 @@ import {
   hasExistingOAuthCredentials,
   isDirectoryNonEmpty,
   isHatched,
+  isInitialized,
   readExistingProviderApiKey,
   runInit,
   type GithubInitCredentials,
@@ -139,18 +140,22 @@ export const init = defineCommand({
     if (existingAgent !== null && existingAgent !== cwd) {
       console.error(
         errorLine(
-          `Refusing to init: a TypeClaw agent already exists at ${existingAgent}. Nested agents are not supported.`,
+          `Refusing to init: a TypeClaw agent already exists at ${existingAgent}. Nested agents are not supported. Run init from a directory that is not inside an existing agent.`,
         ),
       )
       process.exit(1)
     }
 
     if (await isHatched(cwd)) {
-      console.error(errorLine(`TypeClaw has already hatched in ${cwd}.`))
+      console.error(
+        errorLine(
+          `TypeClaw has already hatched in ${cwd}. Use \`typeclaw tui\` to attach or \`typeclaw start\` to run it; init in a different directory to create another agent.`,
+        ),
+      )
       process.exit(1)
     }
 
-    if (isDirectoryNonEmpty(cwd)) {
+    if (shouldConfirmNonEmptyDirectory(cwd)) {
       const proceed = await confirm({
         message: `You're at ${cwd}. The directory is not empty. Do you want to proceed?`,
         initialValue: false,
@@ -192,7 +197,7 @@ export const init = defineCommand({
             [
               'OAuth credentials were saved to `secrets.json` before you aborted.',
               'Re-run `typeclaw init` here to pick up where you left off (the credentials',
-              'will be reused), or delete `secrets.json` if you want a clean restart.',
+              'will be reused), or run `typeclaw init --reset` to start fresh.',
             ].join('\n'),
             'Saved OAuth credentials',
           )
@@ -288,11 +293,32 @@ export const init = defineCommand({
       })
     } catch (error) {
       console.error(errorLine(error instanceof Error ? error.message : String(error)))
+      note(
+        [
+          'Your answers are saved.',
+          'Re-run `typeclaw init` here to resume, or `typeclaw init --reset` to start fresh.',
+          'Run `typeclaw doctor` to diagnose host/Docker issues.',
+        ].join('\n'),
+        'init failed',
+      )
       process.exit(1)
     }
 
     if (preflightFailure !== null) {
       note(preflightFailureGuidance(preflightFailure).join('\n'), 'Docker check failed')
+      process.exit(1)
+    }
+
+    if (!hatchingOk) {
+      note(
+        [
+          'The container was built but the agent did not come up.',
+          'Check logs: `typeclaw logs`',
+          'Diagnose: `typeclaw doctor`',
+          'Retry once fixed: `typeclaw start` (your setup is saved).',
+        ].join('\n'),
+        'Hatching failed',
+      )
       process.exit(1)
     }
 
@@ -334,6 +360,10 @@ export const init = defineCommand({
     }
   },
 })
+
+export function shouldConfirmNonEmptyDirectory(cwd: string): boolean {
+  return isDirectoryNonEmpty(cwd) && !isInitialized(cwd)
+}
 
 interface WizardState {
   catalog?: { options: ModelOption[]; source: 'models.dev' | 'curated'; warning?: string }
@@ -1750,20 +1780,24 @@ function reportProgress(
         s.stop(event.result.ok ? 'Logged in.' : `OAuth login failed: ${event.result.reason}`)
         break
       case 'install':
-        s.stop(event.result.ok ? 'Dependencies installed.' : `Skipped bun install: ${event.result.reason}`)
+        if (event.result.ok) {
+          s.stop('Dependencies installed.')
+        } else {
+          s.error(`Dependency install failed: ${event.result.reason}`)
+        }
         break
       case 'dockerfile':
         if (event.result.ok) {
           s.stop(event.result.devMode ? 'Dockerfile written (dev mode).' : 'Dockerfile written.')
         } else {
-          s.stop(`Skipped Dockerfile: ${event.result.reason}`)
+          s.error(`Dockerfile generation failed: ${event.result.reason}`)
         }
         break
       case 'git':
         if (event.result.ok) {
           s.stop(event.result.skipped ? 'Git repository already exists.' : 'Git repository initialized.')
         } else {
-          s.stop(`Skipped git init: ${event.result.reason}`)
+          s.error(`git init failed — continuing without a repo: ${event.result.reason}`)
         }
         break
     }

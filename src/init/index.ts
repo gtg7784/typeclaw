@@ -20,7 +20,14 @@ import {
   type KnownProviderId,
   type ModelRef,
 } from '@/config/providers'
-import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
+import {
+  checkDockerAvailable,
+  type DockerAvailability,
+  type DockerExec,
+  start,
+  type StartResult,
+  stop,
+} from '@/container'
 import { commitSystemFile } from '@/git/system-commit'
 import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
@@ -376,10 +383,12 @@ export async function runInit({
   emit({ step: 'install', phase: 'start' })
   const install = await installRunner(cwd)
   emit({ step: 'install', phase: 'done', result: install })
+  if (!install.ok) throw new Error(`Dependency install failed: ${install.reason}`)
 
   emit({ step: 'dockerfile', phase: 'start' })
   const docker = await writeDockerAssets(cwd)
   emit({ step: 'dockerfile', phase: 'done', result: docker })
+  if (!docker.ok) throw new Error(`Dockerfile generation failed: ${docker.reason}`)
 
   emit({ step: 'git', phase: 'start' })
   const git = await initGitRepo(cwd)
@@ -417,6 +426,7 @@ export async function defaultRunHatching({
   tui: tuiFactory = createTui,
   waitForAgent: waitForAgentFn = waitForAgent,
   runClaim = defaultRunClaim,
+  stopContainer = stop,
 }: {
   cwd: string
   port: number
@@ -426,14 +436,17 @@ export async function defaultRunHatching({
   tui?: typeof createTui
   waitForAgent?: typeof waitForAgent
   runClaim?: ClaimRunner
+  stopContainer?: typeof stop
 }): Promise<HatchingResult> {
+  let launch: Extract<StartResult, { ok: true }> | null = null
   try {
-    const launch = await startContainer({
+    const startResult = await startContainer({
       cwd,
       preferredHostPort: port,
       ...(cliEntry !== undefined ? { cliEntry } : {}),
     })
-    if (!launch.ok) return { ok: false, reason: launch.reason }
+    if (!startResult.ok) return { ok: false, reason: startResult.reason }
+    launch = startResult
 
     // start() may have allocated a different host port (the preferred one was
     // bound). Use the actually-published port for the TUI handshake instead of
@@ -455,6 +468,9 @@ export async function defaultRunHatching({
     await tui.run()
     return { ok: true }
   } catch (error) {
+    if (launch !== null && !launch.alreadyRunning) {
+      await stopContainer({ cwd }).catch(() => {})
+    }
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
@@ -709,7 +725,7 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
 
-  if (existsSync(join(cwd, '.git'))) return { ok: true, skipped: true }
+  const hasGit = existsSync(join(cwd, '.git'))
 
   // Author the initial commit as TypeClaw itself. The agent is still unnamed
   // (IDENTITY.md is empty and hatching hasn't run), so the agent identity will
@@ -724,10 +740,21 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 
   try {
-    const init = bun.spawn({ cmd: ['git', 'init', '-b', 'main'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
-    if ((await init.exited) !== 0) {
-      const stderr = await new Response(init.stderr).text()
-      return { ok: false, reason: `git init failed: ${stderr.trim() || 'no stderr'}` }
+    if (hasGit) {
+      const head = bun.spawn({
+        cmd: ['git', 'rev-parse', '--verify', 'HEAD'],
+        cwd,
+        env,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      if ((await head.exited) === 0) return { ok: true, skipped: true }
+    } else {
+      const init = bun.spawn({ cmd: ['git', 'init', '-b', 'main'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+      if ((await init.exited) !== 0) {
+        const stderr = await new Response(init.stderr).text()
+        return { ok: false, reason: `git init failed: ${stderr.trim() || 'no stderr'}` }
+      }
     }
 
     const add = bun.spawn({ cmd: ['git', 'add', '.'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
