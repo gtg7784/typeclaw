@@ -1,6 +1,14 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { wslDriveMount, type WslDriveMountDeps } from './checks'
+import { loadConfigSync } from '@/config'
+import { resolveBaseImageVersion } from '@/init/cli-version'
+import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
+import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
+
+import { buildStaticChecks, wslDriveMount, type WslDriveMountDeps } from './checks'
 import type { CheckContext } from './types'
 
 const agentCtx: CheckContext = { cwd: '/mnt/c/work/agent', hasAgentFolder: true }
@@ -48,6 +56,42 @@ describe('wslDriveMount', () => {
   test('does not inspect the agent folder when there is none', async () => {
     const check = wslDriveMount(deps())
     const result = await check.run({ cwd: '/mnt/c/work/agent', hasAgentFolder: false })
+    expect(result.status).toBe('ok')
+  })
+})
+
+describe('managed-template checks tolerate CRLF line endings', () => {
+  function findCheck(name: string) {
+    const check = buildStaticChecks().find((c) => c.name === name)
+    if (!check) throw new Error(`missing check ${name}`)
+    return check
+  }
+
+  function makeAgentDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'typeclaw-crlf-test-'))
+    writeFileSync(join(dir, 'typeclaw.json'), JSON.stringify({}), 'utf8')
+    return dir
+  }
+
+  const ctx = (cwd: string): CheckContext => ({ cwd, hasAgentFolder: true })
+
+  test('.gitignore with CRLF is not reported as divergent', async () => {
+    const cwd = makeAgentDir()
+    const lf = buildGitignore({ append: [] })
+    writeFileSync(join(cwd, GITIGNORE_FILE), lf.replace(/\n/g, '\r\n'), 'utf8')
+
+    const result = await findCheck('agent-folder.gitignore-managed').run(ctx(cwd))
+    expect(result.status).toBe('ok')
+  })
+
+  test('Dockerfile with CRLF is not reported as divergent', async () => {
+    const cwd = makeAgentDir()
+    const lf = buildDockerfile(loadConfigSync(cwd).docker.file, {
+      baseImageVersion: resolveBaseImageVersion(cwd),
+    })
+    writeFileSync(join(cwd, DOCKERFILE), lf.replace(/\n/g, '\r\n'), 'utf8')
+
+    const result = await findCheck('agent-folder.dockerfile-managed').run(ctx(cwd))
     expect(result.status).toBe('ok')
   })
 })
