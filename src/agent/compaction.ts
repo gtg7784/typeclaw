@@ -1,27 +1,36 @@
 import type { KnownApi, Model } from '@mariozechner/pi-ai'
 import { SettingsManager } from '@mariozechner/pi-coding-agent'
 
-// Compaction trigger threshold expressed as a percentage of the model's
-// context window. pi-coding-agent's auto-compaction fires when
-// `contextTokens > contextWindow - reserveTokens`. To honor a percentage-
-// based intent across models with very different window sizes (200K Claude
-// vs. 1M Gemini vs. 256K Kimi), we derive `reserveTokens` per-model from
-// the model's `contextWindow`. SDK defaults (16384 reserve) are a fixed
-// number of tokens that drift in relative terms across models — at 256K
-// that's ~6% headroom (94% trigger), at 1M it's ~1.6% (98% trigger). A
-// percentage-derived reserve trips at the same fraction regardless of
-// model, which is what we actually want.
+// Compaction trigger expressed as a fraction of the model's context window.
+// pi-coding-agent auto-compaction fires when `contextTokens > contextWindow -
+// reserveTokens`; deriving `reserveTokens` from the window keeps the trigger at
+// the same fraction across models with very different windows (200K Claude vs.
+// 1M Gemini vs. 256K Kimi) instead of the SDK's fixed 16384 reserve, which
+// drifts to ~94% on a 256K window and ~98% on 1M.
 export const COMPACTION_TRIGGER_PERCENT = 0.8
 
+// Absolute ceiling on the compaction trigger, independent of window size. The
+// window-relative trigger alone optimizes for overflow avoidance, not token
+// cost: at 80% of a large window a session accumulates ~160K (200K window) to
+// ~800K (1M window) tokens of history that get re-shipped as `cacheRead` every
+// turn before compaction ever fires. Capping the trigger bounds that
+// steady-state re-read on big-window models; `min()` keeps the 80% behavior on
+// small ones. 64K is 3x keepRecent (invariant asserted in the test), leaving
+// growth room after a compaction so it does not retrigger immediately.
+export const COMPACTION_ABSOLUTE_TRIGGER_TOKENS = 64_000
+
 // Tokens to keep in the recent window after compaction. Fixed (not a
-// percentage) because "recent context" is a property of conversation
-// shape, not model capacity — the same recent ~20K is roughly the right
-// amount of history regardless of whether the model has 200K or 1M total.
-// Mirrors pi's DEFAULT_COMPACTION_SETTINGS.keepRecentTokens.
+// percentage) because "recent context" is a property of conversation shape, not
+// model capacity. Mirrors pi's DEFAULT_COMPACTION_SETTINGS.keepRecentTokens.
 export const COMPACTION_KEEP_RECENT_TOKENS = 20_000
 
+export function compactionTriggerTokens<TApi extends KnownApi>(model: Model<TApi>): number {
+  const windowRelative = Math.round(model.contextWindow * COMPACTION_TRIGGER_PERCENT)
+  return Math.min(windowRelative, COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
+}
+
 export function reserveTokensForModel<TApi extends KnownApi>(model: Model<TApi>): number {
-  return Math.max(1, Math.round(model.contextWindow * (1 - COMPACTION_TRIGGER_PERCENT)))
+  return Math.max(1, model.contextWindow - compactionTriggerTokens(model))
 }
 
 export function createCompactionSettingsManager<TApi extends KnownApi>(model: Model<TApi>): SettingsManager {

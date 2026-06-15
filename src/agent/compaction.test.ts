@@ -3,8 +3,10 @@ import { describe, expect, test } from 'bun:test'
 import type { Model } from '@mariozechner/pi-ai'
 
 import {
+  COMPACTION_ABSOLUTE_TRIGGER_TOKENS,
   COMPACTION_KEEP_RECENT_TOKENS,
   COMPACTION_TRIGGER_PERCENT,
+  compactionTriggerTokens,
   createCompactionSettingsManager,
   reserveTokensForModel,
 } from './compaction'
@@ -24,32 +26,53 @@ function fakeModel(contextWindow: number): Model<'openai-completions'> {
   } as unknown as Model<'openai-completions'>
 }
 
-describe('reserveTokensForModel', () => {
-  test('reserves the (1 - COMPACTION_TRIGGER_PERCENT) fraction of the window', () => {
-    // given
-    const window = 256_000
+describe('compactionTriggerTokens', () => {
+  test('small windows keep the 80% window-relative trigger', () => {
+    // given: a window whose 80% sits below the absolute cap
+    const window = 64_000
     const model = fakeModel(window)
+
+    // when
+    const trigger = compactionTriggerTokens(model)
+
+    // then
+    expect(trigger).toBe(Math.round(window * COMPACTION_TRIGGER_PERCENT))
+    expect(trigger).toBe(51_200)
+  })
+
+  test('large windows cap the trigger at the absolute budget instead of 80%', () => {
+    // given: 80% of 256K (204_800) is well above the absolute cap
+    const model = fakeModel(256_000)
+
+    // when
+    const trigger = compactionTriggerTokens(model)
+
+    // then
+    expect(trigger).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
+  })
+
+  test('very large windows still cap at the same absolute trigger', () => {
+    // given
+    const a = fakeModel(256_000)
+    const b = fakeModel(1_000_000)
+
+    // then: trigger does not scale with the window once past the crossover
+    expect(compactionTriggerTokens(a)).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
+    expect(compactionTriggerTokens(b)).toBe(COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
+  })
+})
+
+describe('reserveTokensForModel', () => {
+  test('derives reserve as window minus the (capped) trigger', () => {
+    // given
+    const model = fakeModel(256_000)
 
     // when
     const reserve = reserveTokensForModel(model)
 
-    // then
-    expect(reserve).toBe(Math.round(window * (1 - COMPACTION_TRIGGER_PERCENT)))
-    expect(reserve).toBe(51_200)
-  })
-
-  test('scales with the model context window so trigger fraction stays constant', () => {
-    // given
-    const small = fakeModel(200_000)
-    const large = fakeModel(1_000_000)
-
-    // when
-    const triggerSmall = small.contextWindow - reserveTokensForModel(small)
-    const triggerLarge = large.contextWindow - reserveTokensForModel(large)
-
-    // then: both trip at ~80% of their own window
-    expect(triggerSmall / small.contextWindow).toBeCloseTo(COMPACTION_TRIGGER_PERCENT, 3)
-    expect(triggerLarge / large.contextWindow).toBeCloseTo(COMPACTION_TRIGGER_PERCENT, 3)
+    // then: 256K - 64K cap = 192K reserved, so compaction fires at 64K not 80%
+    expect(reserve).toBe(256_000 - COMPACTION_ABSOLUTE_TRIGGER_TOKENS)
+    expect(reserve).toBe(192_000)
   })
 
   test('clamps to at least 1 so a degenerate zero-window model never produces a non-positive reserve', () => {
@@ -64,14 +87,21 @@ describe('reserveTokensForModel', () => {
   })
 })
 
+describe('compaction budget invariant', () => {
+  test('absolute trigger stays >=3x the recent-window floor to avoid thrashing', () => {
+    // a trigger too close to keepRecent would re-compact almost immediately
+    // after each compaction; keep headroom so a compacted session can grow
+    expect(COMPACTION_ABSOLUTE_TRIGGER_TOKENS).toBeGreaterThanOrEqual(COMPACTION_KEEP_RECENT_TOKENS * 3)
+  })
+})
+
 describe('createCompactionSettingsManager', () => {
   test('produces a SettingsManager whose getCompactionSettings() reflects our chosen values', () => {
     // given
     const model = fakeModel(256_000)
 
     // when
-    const sm = createCompactionSettingsManager(model)
-    const settings = sm.getCompactionSettings()
+    const settings = createCompactionSettingsManager(model).getCompactionSettings()
 
     // then
     expect(settings.enabled).toBe(true)
@@ -79,7 +109,7 @@ describe('createCompactionSettingsManager', () => {
     expect(settings.keepRecentTokens).toBe(COMPACTION_KEEP_RECENT_TOKENS)
   })
 
-  test('different models produce different reserveTokens but the same keepRecentTokens', () => {
+  test('different-window models reserve different amounts but keep the same recent window', () => {
     // given
     const a = fakeModel(200_000)
     const b = fakeModel(1_000_000)
