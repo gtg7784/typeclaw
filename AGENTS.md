@@ -60,6 +60,18 @@ The workflow is the only supported release path. The GHCR-first-then-npm orderin
 
 "channel" — or `channel_*` tool/code references — means **`src/channels/`**, this repo's channels subsystem (router, manager, persistence, Slack/Discord adapters). NOT Channel Talk, NOT abstract Slack channels, NOT the agent-messenger `agent-channeltalk*` skills. Only branch out when the user explicitly names a different platform.
 
+## Multi-language
+
+TypeClaw is a **multi-language project**: the agent lives in users' chats and reads messages in Korean, Japanese, Chinese, Arabic, Russian, every Latin-script language, and more — not just English. Any code that does **natural-language pattern matching over user/agent text** MUST work across languages, not just hardcoded English words or ASCII-only regex. This applies whenever you add or audit keyword detection, mention/alias matching, intent or engagement heuristics, suppressors, trigger-word lists, or verdict/sentiment classifiers.
+
+Rules when writing or auditing NLP-style matching:
+
+- **Never ship an English-only keyword list for user-facing heuristics.** If you match "I'll check", you must also cover "확인해볼게요", "voy a revisar", "je vais vérifier", etc. The existing model is `src/channels/continuation-willingness.ts` — a 15-language phrase table (EN/KO/ES/FR/IT/PT/DE/RU/ZH/JA/AR/HI/TR/VI/ID) matched case-insensitively. Extend that table; don't fork a new English-only one.
+- **`\b` word boundaries in JS regex are ASCII-only.** A `\b` will not fire after accented Latin (`é`), and the concept doesn't apply to CJK/Arabic/Hindi where there are no spaces between words. `src/channels/github-review-claim.ts` is the worked example: it documents the `\b` trap, drops boundaries for non-Latin scripts, and uses Unicode-escape patterns per language. Follow that pattern instead of assuming Latin tokenization.
+- **Normalize before matching.** Lowercase with `toLocaleLowerCase()` and match with `includes()` for substring heuristics (see `matchesAnyAlias()` / `textTargetsAnyPeerBot()` in `src/channels/engagement.ts`), which is script-agnostic — rather than reaching for ASCII-biased regex.
+- **Protocol tokens are the one exception.** Fixed control signals that the agent emits to itself stay English by design — e.g. `NO_REPLY` detection in `src/channels/router.ts` (`isNoReplySignal` / `endsWithNoReplySignal`), and platform-constrained identifiers like GitHub `@login` matching (ASCII by GitHub's own rules) in `src/channels/adapters/github/inbound.ts`. These are not natural language; don't "multilingualize" them. The line is: matching _what a human typed_ → multi-language; matching _a token the system defined_ → English literal is fine.
+- **Tests must cover non-English input.** A pattern-matching change isn't done until at least one non-Latin-script case (Korean or CJK is the cheapest) is asserted alongside the English case.
+
 ## Stages
 
 TypeClaw runs code in three stages with different filesystems, process owners, and invocation paths. Confusing them is the most common bug source. Name the stage explicitly when discussing any command, path, or mount.
