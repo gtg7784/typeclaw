@@ -4,8 +4,8 @@
   <img src="./docs/public/typeclaw-transparent.png" alt="TypeClaw logo" width="240" />
 </p>
 
-<center><h3>The agent for perfectionists</h3></center>
-<center><blockquote>Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</blockquote></center>
+<h3 align="center">The agent for perfectionists</h3>
+<p align="center">Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</p>
 
 ## Why?
 
