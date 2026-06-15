@@ -27,3 +27,5 @@ export {
 } from './protocol'
 
 export { formatLocalDate, formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from './local-time'
+
+export { detectWsl, isWindowsDriveMount, type WslInfo, type WslVersion } from './wsl'

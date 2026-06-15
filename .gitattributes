@@ -1,0 +1,22 @@
+# Normalize line endings to LF so checkouts under Git for Windows
+# (core.autocrlf=true) don't rewrite source or runtime-managed template files
+# to CRLF. typeclaw emits Dockerfile/.gitignore with LF and compares them
+# byte-exactly in `typeclaw doctor`; a CRLF checkout would report false drift.
+* text=auto eol=lf
+
+# Binary assets must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.mp4 binary
+*.webm binary
+*.gz binary
+*.zip binary

@@ -15,11 +15,12 @@ import {
   resolveHostPort,
   type DockerExec,
 } from '@/container'
-import { isDaemonReachable, send } from '@/hostd'
+import { homeRoot, isDaemonReachable, send } from '@/hostd'
 import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { detectMissingDeps } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
+import { detectWsl, isWindowsDriveMount, type WslInfo } from '@/shared'
 
 import { buildChannelChecks } from './channel-checks'
 import type { DoctorCheck } from './types'
@@ -37,6 +38,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     agentFolderGitRepo(),
     configValid(),
     hostdHomeWritable(),
+    wslDriveMount(),
     hostdReachable(),
     hostdRegistration(),
     containerState(dockerExec),
@@ -237,6 +239,53 @@ function hostdHomeWritable(): DoctorCheck {
   }
 }
 
+export type WslDriveMountDeps = {
+  detect: () => WslInfo
+  isWindowsDriveMount: (path: string) => boolean
+  typeclawHome: () => string
+}
+
+// Under WSL, files on a Windows-drive mount (/mnt/c/...) don't enforce Unix
+// permissions, so the 0600 chmod that protects secrets.json and the encryption
+// keys is silently ignored — they become readable by every local user. Warn
+// when either the agent folder or ~/.typeclaw lives on such a mount.
+export function wslDriveMount(deps: Partial<WslDriveMountDeps> = {}): DoctorCheck {
+  const detect = deps.detect ?? detectWsl
+  const onWindowsDrive = deps.isWindowsDriveMount ?? isWindowsDriveMount
+  const typeclawHome = deps.typeclawHome ?? homeRoot
+
+  return {
+    name: 'hostd.wsl-drive-mount',
+    category: 'hostd',
+    description: 'agent state is not on a Windows-drive mount under WSL',
+    async run(ctx) {
+      if (!detect().isWsl) return { status: 'ok', message: 'not running under WSL' }
+
+      const offenders: string[] = []
+      if (ctx.hasAgentFolder && onWindowsDrive(ctx.cwd)) offenders.push(`agent folder: ${ctx.cwd}`)
+      const home = typeclawHome()
+      if (onWindowsDrive(home)) offenders.push(`hostd home: ${home}`)
+
+      if (offenders.length === 0) {
+        return { status: 'ok', message: 'agent state is on the Linux filesystem' }
+      }
+
+      return {
+        status: 'warning',
+        message: 'agent state is on a Windows-drive mount; file permissions are not enforced',
+        details: [
+          ...offenders,
+          'chmod is a no-op on /mnt/<drive> (DrvFs/9p), so secrets.json and encryption keys become world-readable.',
+        ],
+        fix: {
+          description:
+            'Move the agent folder to the WSL Linux filesystem (e.g. ~/my-agent) and, if needed, set TYPECLAW_HOME to a Linux path.',
+        },
+      }
+    },
+  }
+}
+
 function hostdReachable(): DoctorCheck {
   return {
     name: 'hostd.reachable',
@@ -362,9 +411,12 @@ function loadConfigStrictForTemplate(
   return { dockerfile: cfg.docker.file, gitignore: cfg.git.ignore }
 }
 
+// Normalizes CRLF to LF: the managed templates are emitted with `\n`, but a
+// checkout under Git for Windows (core.autocrlf=true) rewrites them to `\r\n`,
+// which would make the byte-exact template comparison report a false divergence.
 async function safeRead(path: string): Promise<string | null> {
   try {
-    return await readFile(path, 'utf8')
+    return (await readFile(path, 'utf8')).replace(/\r\n/g, '\n')
   } catch {
     return null
   }
