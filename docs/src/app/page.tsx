@@ -373,7 +373,7 @@ async function SelfExtendVisual() {
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-mono text-sm font-medium text-brand-900 dark:text-brand-100">postReview</p>
-            <p className="text-[11px] text-brand-accent/70 dark:text-brand-300/70">now in its toolset</p>
+            <p className="text-[11px] text-brand-accent dark:text-brand-300/70">now in its toolset</p>
           </div>
           <span className="shrink-0 rounded-full bg-brand-accent px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white uppercase dark:bg-brand-500">
             ready
