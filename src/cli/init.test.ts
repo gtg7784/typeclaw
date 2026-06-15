@@ -1,4 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   KNOWN_PROVIDERS,
@@ -13,10 +16,35 @@ import type { ModelOption } from '@/init/models-dev'
 import {
   collectWizardInputs,
   formatModelLabel,
+  shouldConfirmNonEmptyDirectory,
   sortRecommendedFirst,
   WizardAbortedError,
   type WizardPrompts,
 } from './init'
+
+describe('init pre-wizard guards', () => {
+  test('confirms for foreign non-empty directories', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-guard-'))
+    try {
+      await writeFile(join(cwd, 'README.md'), '# existing project\n')
+
+      expect(shouldConfirmNonEmptyDirectory(cwd)).toBe(true)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('skips non-empty confirmation for partial TypeClaw init dirs', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-guard-'))
+    try {
+      await writeFile(join(cwd, 'typeclaw.json'), '{}\n')
+
+      expect(shouldConfirmNonEmptyDirectory(cwd)).toBe(false)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('collectWizardInputs back-aware flow', () => {
   const fireworksModel: ModelOption = {
