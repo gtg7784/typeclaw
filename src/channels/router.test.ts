@@ -29,9 +29,11 @@ import {
   MAX_EMPTY_TURN_RETRIES,
   MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
+  MAX_WILLINGNESS_NUDGES,
   OUTBOUND_FLOOD_ERROR,
   SEND_RATE_WARN_THRESHOLD,
   SEND_RATE_WINDOW_MS,
+  SEND_WILLINGNESS_NUDGE,
   isGraceWorthReusing,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
@@ -9424,6 +9426,173 @@ describe('ChannelRouter continuation willingness nudge', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(sessions[0]!.prompts).toHaveLength(2)
+  })
+})
+
+describe('ChannelRouter channel_send willingness nudge', () => {
+  // Set the turn-end leaf to a FRESH empty `stop` (distinct entry id) so the
+  // detector's `leaf.id !== lastSendLeafId` check sees post-ack work. Mirrors the
+  // production shape: ack via channel_send, tool work, then a clean empty stop.
+  function endWithFreshEmptyStop(session: FakeSession, seq: number): void {
+    const entry: SessionEntry = {
+      type: 'message',
+      id: `empty-stop-${seq}`,
+      parentId: null,
+      timestamp: '2026-06-15T08:27:40.000Z',
+      message: {
+        ...assistantMessage(''),
+        content: [{ type: 'text', text: '' }],
+        stopReason: 'stop',
+      },
+    }
+    session.entriesById.set(entry.id, entry)
+    session.leafEntry = entry
+  }
+
+  test('nudges when a channel_send ack promised to continue then the turn ended on an empty stop', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '이 화면 타입 뭐로 해야 해?' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      if (attempt === 1) {
+        // given: a channel_send ack that trips continuation-willingness, then
+        // post-ack work that degenerates into an empty stop leaf
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '확인해볼게요. 먼저 볼게요.' })
+        endWithFreshEmptyStop(sessions[0]!, attempt)
+        return
+      }
+      // then: the nudge arrives as a reminder-only re-prompt; deliver the answer
+      expect(text).toContain(SEND_WILLINGNESS_NUDGE)
+      await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: '크레딧 하향 조정으로 하시면 돼요.',
+      })
+      sessions[0]!.setAssistantText('')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent).toEqual(['확인해볼게요. 먼저 볼게요.', '크레딧 하향 조정으로 하시면 돼요.'])
+    expect(logs.some((m) => m.includes('send_willingness_nudge attempt=1'))).toBe(true)
+  })
+
+  test('does NOT nudge when the channel_send delivered a substantive answer before the empty stop', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: '결과 알려줘' }))
+    sessions[0]!.onPrompt = async () => {
+      // A real answer (no continuation-willingness phrase) followed by the normal
+      // terminal empty stop must stay on the historical no_reply path.
+      await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: '결과는 이래요. 실패했고 인증이 없었어요.',
+      })
+      endWithFreshEmptyStop(sessions[0]!, 1)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+  })
+
+  test('does NOT nudge when the ack leaf is unchanged since the send (ack-then-await-user)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: '확인 좀' }))
+    sessions[0]!.onPrompt = async () => {
+      // Set the leaf BEFORE the send so lastSendLeafId === the turn-end leaf id:
+      // the model acked and stopped to await the user, not a degenerated turn.
+      const entry: SessionEntry = {
+        type: 'message',
+        id: 'ack-leaf',
+        parentId: null,
+        timestamp: '2026-06-15T08:27:40.000Z',
+        message: { ...assistantMessage(''), content: [{ type: 'text', text: '' }], stopReason: 'stop' },
+      }
+      sessions[0]!.entriesById.set(entry.id, entry)
+      sessions[0]!.leafEntry = entry
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '확인해볼게요.' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+  })
+
+  test('posts the fallback instead of looping when the nudge re-degenerates', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '확인해줘' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      // Each turn re-acks (distinct text so it isn't send-deduped) and re-ends on
+      // an empty stop. Bound = MAX_WILLINGNESS_NUDGES (1): one nudge, then fallback.
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `확인해볼게요 (${attempt})` })
+      endWithFreshEmptyStop(sessions[0]!, attempt)
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_WILLINGNESS_NUDGES)
+    expect(sent.filter((s) => s === EMPTY_TURN_FALLBACK_TEXT)).toHaveLength(1)
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=empty_stop_after_send_ack_nudges_exhausted'))).toBe(
+      true,
+    )
+  })
+
+  test('does NOT nudge when a real user inbound is already queued for the next drain', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '확인 좀' }))
+    sessions[0]!.onPrompt = async () => {
+      // given: the ack lands and the turn degenerates to an empty stop, but a new
+      // user message arrived during the prompt and is waiting in promptQueue.
+      // drain() would splice a pushed reminder into that live batch, so the nudge
+      // must be suppressed (the queued inbound supersedes this turn's recovery).
+      if (sessions[0]!.prompts.length === 1) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '확인해볼게요.' })
+        endWithFreshEmptyStop(sessions[0]!, 1)
+        await router.route(inbound({ text: 'actually here is more context', externalMessageId: 'm2' }))
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+    expect(sent.some((s) => s === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
   })
 })
 

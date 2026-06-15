@@ -279,6 +279,27 @@ export const WILLINGNESS_NUDGE = [
   '',
   '---',
 ].join('\n')
+// Injected when a `channel_send` ack tripped continuation-willingness, the model
+// did fresh work after it, then ended on an EMPTY `stop` leaf — the answer was
+// computed but never sent (the Kimi/Fireworks empty-completion flake). Distinct
+// from WILLINGNESS_NUDGE: that path is a `channel_reply` that ended the turn and
+// needs `continue: true`; this path is a `channel_send` (which never ends the
+// turn) whose follow-up degenerated, so the model just needs to emit the reply it
+// already worked out. Shares MAX_WILLINGNESS_NUDGES so a turn can't double-nudge.
+export const SEND_WILLINGNESS_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'You said you would keep working this turn and did the work, but the turn ended',
+  'without sending the result — nothing reached the channel after your last',
+  'message. This is an automated signal from the channel router, not a message',
+  'from anyone in the chat. **Do not acknowledge or reply to this notice itself.**',
+  '',
+  'Send the answer you just worked out now via your channel send tool. If you',
+  'genuinely have nothing to report, reply with `NO_REPLY`.',
+  '',
+  '---',
+].join('\n')
 // Rolling window for outbound send-rate telemetry. 5s matches Discord's
 // rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
 // 1 msg/s sustained. The window is observational; exceeding the burst
@@ -3387,6 +3408,43 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // landed — suppress it, as before.
     if (live.successfulChannelSends > successfulSendsBeforePrompt) {
       maybeNudgeContinuationWillingness(live)
+
+      // A `channel_send` ack that promised to keep working, fresh post-ack work,
+      // then an EMPTY `stop` leaf: the model computed the answer in its reasoning
+      // / tool results but never sent it (the Kimi/Fireworks empty-completion
+      // flake). `maybeNudgeContinuationWillingness` above can't catch this — it
+      // reads `lastTerminalReplyAbort`, which only a `channel_reply` sets;
+      // `channel_send` keeps the turn alive and stamps nothing. And the
+      // stranded-toolUse retry below requires `source !== 'leaf'`, but an empty
+      // `stop` leaf recovers as `source: 'leaf'`, so this shape would otherwise
+      // fall straight through to the `endsWithNoReplySignal('')` → `no_reply`
+      // classification. Discriminator (all on existing state, zero false positives
+      // measured across the session corpus): a send landed AND the just-sent text
+      // trips the precision-tuned willingness detector AND the turn-end leaf is a
+      // FRESH empty `stop` (different entry than the ack's leaf — so the model did
+      // post-ack work, not an ack-then-await-user stop). Bounded by
+      // MAX_WILLINGNESS_NUDGES (shared with the reply path); on exhaustion post the
+      // fallback rather than going silent, mirroring the stranded-toolUse path.
+      // Gated on an empty `promptQueue` (like maybeNudgeContinuationWillingness): a
+      // real inbound that coalesced into the just-finished prompt will be answered
+      // by the next drain pass, and drain() splices pending reminders into that
+      // batch — so injecting a stale recovery nudge would prepend it to a live user
+      // message. Skip the nudge AND the fallback in that case and let the trailing
+      // recovery below run; the queued inbound supersedes this turn's silence.
+      if (live.promptQueue.length === 0 && live.currentTurnAuthorId !== null && isEmptyStopAfterWillingnessAck(live)) {
+        if (live.willingnessNudges < MAX_WILLINGNESS_NUDGES) {
+          live.willingnessNudges++
+          logger.warn(
+            `[channels] ${live.keyId} send_willingness_nudge attempt=${live.willingnessNudges}/${MAX_WILLINGNESS_NUDGES} ` +
+              `cause=empty_stop_after_send_ack`,
+          )
+          live.pendingSystemReminders.push(SEND_WILLINGNESS_NUDGE)
+        } else {
+          await postEmptyTurnFallback('empty_stop_after_send_ack_nudges_exhausted')
+        }
+        return
+      }
+
       const trailing = recoverableAssistantText(live.session)
       if (trailing === null || trailing.source !== 'leaf') {
         // A `continue: true` status reply landed, then the turn stranded on an
@@ -5019,6 +5077,24 @@ function leafIsStrandedToolUse(session: AgentSession): boolean {
     cursor = parent
   }
   return false
+}
+
+// True when the turn-end leaf is a FRESH empty `stop` (no text, no tool call,
+// distinct from the leaf in place at the last successful send) AND the most
+// recent send to this target was a continuation-willingness ack. This is the
+// `channel_send` analogue of the `channel_reply` willingness path: the model
+// acked "I'll check…", did post-ack work, then the follow-up came back as a
+// clean empty completion that would otherwise be read as a deliberate `NO_REPLY`.
+// The fresh-leaf check (`!== lastSendLeafId`) is what separates this degeneration
+// from a legitimate ack-then-stop where the model meant to wait for the user.
+function isEmptyStopAfterWillingnessAck(live: LiveSession): boolean {
+  const leaf = live.session.sessionManager.getLeafEntry()
+  if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
+  if (leaf.message.stopReason !== 'stop') return false
+  if (hasToolCall(leaf.message) || visibleAssistantText(leaf.message).trim() !== '') return false
+  if (leaf.id === live.lastSendLeafId) return false
+  const ackText = live.lastSentText.get(consecutiveSendKey(live.key.chat, live.key.thread))
+  return ackText !== undefined && detectContinuationWillingness(ackText)
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
