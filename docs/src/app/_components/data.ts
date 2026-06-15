@@ -30,14 +30,12 @@ export interface Competitor {
   strength: string
   tradeoff: string
   lang: string
-  readableMemory: CompetitorScore
   knowsWhenToTalk: CompetitorScore
   perAgentIsolation: CompetitorScore
   pluginsAsImports: CompetitorScore
   permissionsGuards: CompetitorScore
   perAgentGitRepo: CompetitorScore
   selfManaging: CompetitorScore
-  channels: CompetitorScore
   highlight?: boolean
 }
 
@@ -47,42 +45,36 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Biggest ecosystem',
     tradeoff: 'a platform to learn, not a codebase to read',
     lang: 'TypeScript',
-    readableMemory: 'partial',
     knowsWhenToTalk: true,
     perAgentIsolation: true,
     pluginsAsImports: true,
     permissionsGuards: true,
     perAgentGitRepo: 'partial',
-    selfManaging: true,
-    channels: true,
+    selfManaging: 'partial',
   },
   {
     name: 'Hermes Agent',
     strength: 'Mature, self-improving',
     tradeoff: 'Python — a boundary if your stack is TS',
     lang: 'Python',
-    readableMemory: true,
     knowsWhenToTalk: 'partial',
     perAgentIsolation: 'partial',
     pluginsAsImports: false,
     permissionsGuards: true,
     perAgentGitRepo: true,
     selfManaging: true,
-    channels: true,
   },
   {
     name: 'TypeClaw',
     strength: 'One TS codebase, plugins as imports',
     tradeoff: 'younger, smaller ecosystem',
     lang: 'TypeScript',
-    readableMemory: true,
     knowsWhenToTalk: true,
     perAgentIsolation: true,
     pluginsAsImports: true,
     permissionsGuards: true,
     perAgentGitRepo: true,
     selfManaging: true,
-    channels: true,
     highlight: true,
   },
 ]
@@ -97,14 +89,12 @@ export interface ComparisonFeature {
 }
 
 export const COMPARISON_FEATURES: ComparisonFeature[] = [
-  { key: 'readableMemory', label: 'Memory you can read' },
   { key: 'knowsWhenToTalk', label: 'Knows when not to talk' },
   { key: 'perAgentIsolation', label: 'Per-agent isolation' },
   { key: 'pluginsAsImports', label: 'Plugins as imports' },
   { key: 'permissionsGuards', label: 'Permissions & guards' },
   { key: 'perAgentGitRepo', label: 'Per-agent git repo' },
   { key: 'selfManaging', label: 'Self-managing' },
-  { key: 'channels', label: 'Channels' },
 ]
 
 export interface MemoryStage {

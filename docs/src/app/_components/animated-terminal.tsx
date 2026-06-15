@@ -11,20 +11,17 @@ const SCRIPT: Segment[] = [
   { text: '$ ', className: 'text-zinc-400 dark:text-zinc-600' },
   { text: 'typeclaw init', className: 'text-zinc-800 dark:text-zinc-100' },
   { text: '\n', className: '' },
-  { text: 'Egg laid. 🥚', className: 'text-zinc-600 dark:text-zinc-400' },
-  { text: '\n\n', className: '' },
-
-  { text: '$ ', className: 'text-zinc-400 dark:text-zinc-600' },
-  { text: 'typeclaw start', className: 'text-zinc-800 dark:text-zinc-100' },
+  { text: '? ', className: 'text-brand-700 dark:text-brand-300' },
+  { text: 'Provider  ', className: 'text-zinc-600 dark:text-zinc-400' },
+  { text: 'openai · gpt-5.5', className: 'text-zinc-500 dark:text-zinc-500' },
   { text: '\n', className: '' },
+  { text: '? ', className: 'text-brand-700 dark:text-brand-300' },
+  { text: 'Channel   ', className: 'text-zinc-600 dark:text-zinc-400' },
+  { text: 'slack-bot ✓ connected', className: 'text-zinc-500 dark:text-zinc-500' },
+  { text: '\n', className: '' },
+  { text: 'Egg laid. 🥚 ', className: 'text-zinc-600 dark:text-zinc-400' },
   { text: '●', className: 'text-brand-700 dark:text-brand-300' },
-  { text: ' my-agent started on host port 8973', className: 'text-zinc-600 dark:text-zinc-400' },
-  { text: '\n\n', className: '' },
-
-  { text: '$ ', className: 'text-zinc-400 dark:text-zinc-600' },
-  { text: 'typeclaw channel add slack-bot', className: 'text-zinc-800 dark:text-zinc-100' },
-  { text: '\n', className: '' },
-  { text: 'Slack channel added.', className: 'text-zinc-600 dark:text-zinc-400' },
+  { text: ' my-agent hatched on host port 8973', className: 'text-zinc-600 dark:text-zinc-400' },
   { text: '\n\n', className: '' },
 
   { text: '$ ', className: 'text-zinc-400 dark:text-zinc-600' },
@@ -90,7 +87,7 @@ export function AnimatedTerminal({ variant = 'default', title = 'my-agent', clas
       </div>
       <pre
         className="overflow-x-auto p-4 font-mono text-xs leading-relaxed sm:p-5 sm:text-[13px]"
-        aria-label="Animated terminal demo: typeclaw init, start, channel add, then git log"
+        aria-label="Animated terminal demo: typeclaw init wires a provider and channel and hatches the agent, then git log shows it already dreaming"
       >
         <code>
           {rendered.map((seg) => (

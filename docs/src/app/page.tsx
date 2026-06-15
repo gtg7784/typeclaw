@@ -1,37 +1,57 @@
-import { ArrowRight, BookOpen, Check, Container, Github, Lock, Minus, Shield, Sparkles, Star, X } from 'lucide-react'
+import { highlight } from 'fumadocs-core/highlight'
+import {
+  ArrowRight,
+  BookOpen,
+  Bot,
+  Check,
+  CheckCheck,
+  CircleDashed,
+  EyeOff,
+  FileText,
+  Github,
+  KeyRound,
+  Layers,
+  Lock,
+  Minus,
+  Network,
+  RefreshCw,
+  Search,
+  Shield,
+  Sparkles,
+  Star,
+  Terminal,
+  User,
+  Waves,
+  X,
+  Zap,
+} from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
+import { Fragment } from 'react'
 
 import { AnimatedTerminal } from './_components/animated-terminal'
 import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
-import { COMPARISON_FEATURES, COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP, VERSION } from './_components/data'
+import { COMPARISON_FEATURES, COMPETITORS, INSTALL_COMMAND, VERSION } from './_components/data'
 import { FEATURE_CATEGORIES } from './_components/features-data'
 import { HeroSpotlight } from './_components/hero-spotlight'
 import { Reveal } from './_components/reveal'
 import { ThemeToggle } from './_components/theme-toggle'
 import { UseCaseTabs } from './_components/use-case-tabs'
 
-const PLUGIN_CODE = `import { definePlugin } from 'typeclaw/plugin'
-import { z } from 'zod'
+const SELF_EXTEND_CODE = `import { definePlugin } from 'typeclaw/plugin'
 
 export default definePlugin({
-  configSchema: z.object({ webhook: z.string().url() }),
-  async plugin(ctx) {
-    const { webhook } = ctx.config
-    return {
-      tools: {
-        notify: {
-          description: 'Post a short notification',
-          parameters: z.object({ text: z.string() }),
-          async execute({ text }) {
-            await fetch(webhook, { method: 'POST', body: text })
-            return { content: [{ type: 'text', text: 'sent' }] }
-          },
+  plugin: () => ({
+    tools: {
+      postReview: {
+        description: 'Post a PR review to GitHub',
+        async execute({ url, body }) {
+          /* … */
         },
       },
-    }
-  },
+    },
+  }),
 })`
 
 function HeroInstall() {
@@ -99,27 +119,64 @@ function ChannelTrust() {
   )
 }
 
-function SandboxDiagram() {
+function GroupChatVisual() {
   return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
-      <div className="relative flex h-full items-center justify-center">
-        <div className="relative w-full max-w-xs">
-          <div className="absolute -inset-4 rounded-2xl border-2 border-dashed border-zinc-300 dark:border-white/[0.1]" />
-          <div className="absolute -top-3 left-4 bg-white px-2 font-mono text-[10px] tracking-widest text-zinc-400 uppercase dark:bg-zinc-950 dark:text-zinc-600">
-            your machine
+    <div className="relative w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-7 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="flex flex-col gap-3.5">
+        <div className="flex items-start gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-zinc-500 dark:bg-white/[0.08] dark:text-zinc-400">
+            <User className="size-3.5" strokeWidth={2.2} aria-hidden />
           </div>
-          <div className="relative rounded-xl border border-brand-200 bg-white p-5 shadow-lg dark:border-brand-800/60 dark:bg-zinc-900">
-            <div className="absolute -top-3 left-4 inline-flex items-center gap-1.5 rounded-md bg-brand-700 px-2 py-0.5 font-mono text-[10px] tracking-wider text-white uppercase dark:bg-brand-600">
-              <Container className="size-3" strokeWidth={2.4} aria-hidden />
-              docker
+          <div className="min-w-0">
+            <p className="font-mono text-[11px] text-zinc-400 dark:text-zinc-600">alex</p>
+            <div className="mt-1 rounded-2xl rounded-tl-sm border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-700 dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-300">
+              @jordan can you take the deploy?
             </div>
-            <p className="mt-2 text-sm font-semibold text-zinc-800 dark:text-zinc-100">my-agent</p>
-            <ul className="mt-3 space-y-1.5 font-mono text-xs text-zinc-500 dark:text-zinc-500">
-              <li>~ typeclaw run</li>
-              <li>~ /agent mounted</li>
-              <li>~ slack-bot · up</li>
-              <li>~ cron · 3 jobs</li>
-            </ul>
+            <p className="mt-1.5 inline-flex items-center gap-1.5 font-mono text-[11px] text-zinc-400 dark:text-zinc-600">
+              <EyeOff className="size-3" strokeWidth={2.2} aria-hidden />
+              observing — not addressed to me
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-zinc-500 dark:bg-white/[0.08] dark:text-zinc-400">
+            <Bot className="size-3.5" strokeWidth={2.2} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <p className="inline-flex items-center gap-1.5 font-mono text-[11px] text-zinc-400 dark:text-zinc-600">
+              ci-bot
+              <span className="rounded bg-zinc-200 px-1 text-[9px] tracking-wider text-zinc-500 uppercase dark:bg-white/[0.08] dark:text-zinc-400">
+                bot
+              </span>
+            </p>
+            <div className="mt-1 rounded-2xl rounded-tl-sm border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-500 dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-500">
+              build passed
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-zinc-500 dark:bg-white/[0.08] dark:text-zinc-400">
+            <User className="size-3.5" strokeWidth={2.2} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <p className="font-mono text-[11px] text-zinc-400 dark:text-zinc-600">sam</p>
+            <div className="mt-1 rounded-2xl rounded-tl-sm border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-700 dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-300">
+              <span className="font-medium text-brand-700 dark:text-brand-300">@typeey</span> draft the changelog?
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white dark:bg-brand-500">
+            <Sparkles className="size-3.5" strokeWidth={2.4} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <p className="font-mono text-[11px] text-brand-600 dark:text-brand-300">typeey</p>
+            <div className="mt-1 rounded-2xl rounded-tl-sm border border-brand-200 bg-brand-50 px-3.5 py-2 text-sm text-brand-900 shadow-sm dark:border-brand-800/60 dark:bg-brand-950/50 dark:text-brand-100">
+              On it — drafting the changelog now.
+            </div>
           </div>
         </div>
       </div>
@@ -127,21 +184,202 @@ function SandboxDiagram() {
   )
 }
 
-function PluginCode() {
+function SubagentVisual() {
+  const children = [
+    { label: 'research', icon: Search },
+    { label: 'review', icon: CheckCheck },
+    { label: 'execute', icon: Terminal },
+  ]
+  return (
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="flex h-full flex-col items-center justify-center">
+        <div className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-white px-4 py-2.5 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
+          <Network className="size-4 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+          <span className="text-sm font-medium text-zinc-800 dark:text-zinc-100">main session</span>
+        </div>
+        <div
+          aria-hidden
+          className="h-6 w-px bg-gradient-to-b from-brand-300 to-brand-200 dark:from-brand-700 dark:to-brand-800/50"
+        />
+        <div
+          aria-hidden
+          className="h-px w-3/4 bg-gradient-to-r from-transparent via-brand-200 to-transparent dark:via-brand-800/60"
+        />
+        <div className="mt-5 grid w-full grid-cols-3 gap-2.5 sm:gap-3">
+          {children.map(({ label, icon: Icon }) => (
+            <div
+              key={label}
+              className="flex flex-col items-center gap-2 rounded-xl border border-zinc-200 bg-white px-2 py-3 text-center shadow-sm dark:border-white/[0.08] dark:bg-zinc-900"
+            >
+              <span className="inline-flex size-8 items-center justify-center rounded-lg bg-brand-50 text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+                <Icon className="size-4" strokeWidth={2.2} aria-hidden />
+              </span>
+              <span className="font-mono text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
+              <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-600">own context</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SecurityVisual() {
+  const layers = [
+    { icon: Shield, label: 'Guards', detail: 'severity-classified policies' },
+    { icon: KeyRound, label: 'Roles', detail: 'who can bypass what' },
+    { icon: Lock, label: 'Sandbox', detail: 'each bash call isolated' },
+  ]
+  return (
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="flex h-full flex-col justify-center gap-2.5">
+        <div className="mx-auto inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1 font-mono text-[11px] text-zinc-500 shadow-sm dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-400">
+          tool call
+        </div>
+        {layers.map(({ icon: Icon, label, detail }) => (
+          <div key={label} className="flex flex-col items-center gap-2.5">
+            <ArrowRight
+              className="size-3.5 rotate-90 text-brand-300 dark:text-brand-700"
+              strokeWidth={2.4}
+              aria-hidden
+            />
+            <div className="flex w-full items-center gap-3 rounded-xl border border-brand-200 bg-white px-4 py-2.5 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
+              <Icon className="size-4 shrink-0 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+              <div className="min-w-0">
+                <span className="text-sm font-medium text-zinc-800 dark:text-zinc-100">{label}</span>
+                <span className="ml-2 text-xs text-zinc-400 dark:text-zinc-600">{detail}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+        <ArrowRight
+          className="mx-auto size-3.5 rotate-90 text-brand-300 dark:text-brand-700"
+          strokeWidth={2.4}
+          aria-hidden
+        />
+        <div className="mx-auto inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 font-mono text-[11px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+          <Check className="size-3.5" strokeWidth={2.6} aria-hidden />
+          fires, contained
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SelfManagingVisual() {
+  const fields = [
+    { line: '"model": "gpt-5.5"', state: 'live' as const },
+    { line: '"cron": [ … ]', state: 'live' as const },
+    { line: '"channels": { … }', state: 'live' as const },
+    { line: '"sandbox": "proc-bind"', state: 'restart' as const },
+    { line: '"port": 8973', state: 'restart' as const },
+  ]
   return (
     <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg dark:border-white/[0.08] dark:bg-zinc-950">
       <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4 py-2.5 dark:border-white/[0.04] dark:bg-white/[0.02]">
-        <div className="flex gap-1.5">
-          <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
-          <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
-          <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
+        <div className="flex items-center gap-2">
+          <FileText className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.2} aria-hidden />
+          <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">typeclaw.json</span>
         </div>
-        <span className="font-mono text-xs text-zinc-400 dark:text-zinc-600">plugins/pr-review.ts</span>
-        <span className="size-2.5" />
+        <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider uppercase">
+          <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden />
+            live
+          </span>
+          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+            <span className="size-1.5 rounded-full bg-amber-500" aria-hidden />
+            restart
+          </span>
+        </div>
       </div>
-      <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed text-zinc-700 sm:p-5 sm:text-[13px] dark:text-zinc-300">
-        <code>{PLUGIN_CODE}</code>
-      </pre>
+      <div className="divide-y divide-zinc-100 font-mono text-xs sm:text-[13px] dark:divide-white/[0.04]">
+        {fields.map(({ line, state }) => (
+          <div key={line} className="flex items-center justify-between gap-3 px-4 py-2.5 sm:px-5">
+            <span className="truncate text-zinc-700 dark:text-zinc-300">{line}</span>
+            {state === 'live' ? (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium tracking-wider text-emerald-700 uppercase dark:bg-emerald-900/30 dark:text-emerald-300">
+                live
+              </span>
+            ) : (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium tracking-wider text-amber-700 uppercase dark:bg-amber-900/30 dark:text-amber-300">
+                restart
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+async function SelfExtendVisual() {
+  const highlighted = await highlight(SELF_EXTEND_CODE, {
+    lang: 'typescript',
+    themes: { light: 'github-light', dark: 'github-dark' },
+    defaultColor: false,
+    components: {
+      pre: ({ children, ...props }) => (
+        <pre
+          {...props}
+          className="mem-code overflow-x-auto p-4 font-mono text-xs leading-relaxed sm:p-5 sm:text-[13px]"
+        >
+          {children}
+        </pre>
+      ),
+    },
+  })
+  return (
+    <div className="relative w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-7 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="flex flex-col gap-2.5">
+        <div className="flex items-center gap-3 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-3 dark:border-white/[0.12] dark:bg-white/[0.02]">
+          <CircleDashed className="size-4 shrink-0 text-zinc-400 dark:text-zinc-600" strokeWidth={2.2} aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-[11px] tracking-wider text-zinc-400 uppercase dark:text-zinc-600">needs</p>
+            <p className="truncate text-sm text-zinc-600 dark:text-zinc-400">post PR reviews to GitHub</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-zinc-200 bg-white px-2 py-0.5 font-mono text-[10px] tracking-wider text-zinc-400 uppercase dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-600">
+            no tool yet
+          </span>
+        </div>
+
+        <ArrowRight
+          className="mx-auto size-3.5 rotate-90 text-brand-300 dark:text-brand-700"
+          strokeWidth={2.4}
+          aria-hidden
+        />
+
+        <div className="overflow-hidden rounded-xl border border-brand-200 bg-white shadow-sm dark:border-brand-800/60 dark:bg-zinc-950">
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-100 bg-zinc-50 px-3.5 py-2 dark:border-white/[0.04] dark:bg-white/[0.02]">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 font-mono text-[10px] font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+              <Sparkles className="size-3" strokeWidth={2.4} aria-hidden />
+              written by my-agent
+            </span>
+            <span className="truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-600">
+              plugins/pr-review.ts
+            </span>
+          </div>
+          {highlighted}
+        </div>
+
+        <ArrowRight
+          className="mx-auto size-3.5 rotate-90 text-brand-300 dark:text-brand-700"
+          strokeWidth={2.4}
+          aria-hidden
+        />
+
+        <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-3 shadow-sm dark:border-brand-800/60 dark:bg-brand-950/50">
+          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white dark:bg-brand-500">
+            <Check className="size-4" strokeWidth={2.6} aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-sm font-medium text-brand-900 dark:text-brand-100">postReview</p>
+            <p className="text-[11px] text-brand-700/70 dark:text-brand-300/70">now in its toolset</p>
+          </div>
+          <span className="shrink-0 rounded-full bg-brand-600 px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white uppercase dark:bg-brand-500">
+            ready
+          </span>
+        </div>
+      </div>
     </div>
   )
 }
@@ -165,31 +403,87 @@ function CapabilityGrid() {
   )
 }
 
-function MemoryLoopVertical() {
+const MEMORY_TIERS = [
+  {
+    icon: Waves,
+    kind: 'Short-term',
+    label: 'Streams',
+    path: 'memory/streams/',
+    blurb: 'Every reply and tool call lands in a daily log as it happens — the raw record of what it just did.',
+  },
+  {
+    icon: Layers,
+    kind: 'Long-term',
+    label: 'Topics',
+    path: 'memory/topics/',
+    blurb:
+      'The dreaming subagent distills those days into sharded knowledge, one subject per file, that it can recall later.',
+  },
+  {
+    icon: Zap,
+    kind: 'Muscle memory',
+    label: 'Skills',
+    path: 'memory/skills/',
+    blurb:
+      'Recurring procedures get written into reusable skills it loads automatically — things it can do without thinking them through again.',
+    peak: true,
+  },
+]
+
+function MemoryTiers() {
   return (
-    <div className="relative">
-      <ol className="space-y-1">
-        {MEMORY_LOOP.map((stage, i) => (
-          <li key={stage.label} className="relative pl-12">
-            <div className="absolute top-0 left-0 flex size-9 items-center justify-center rounded-full border-2 border-brand-200 bg-white font-mono text-xs font-semibold text-brand-700 dark:border-brand-800/60 dark:bg-zinc-950 dark:text-brand-300">
-              {i + 1}
-            </div>
-            {i < MEMORY_LOOP.length - 1 && (
-              <div
-                aria-hidden
-                className="absolute top-9 left-[18px] h-12 w-px bg-gradient-to-b from-brand-300 to-brand-100 dark:from-brand-700 dark:to-brand-900/30"
-              />
+    <div className="mem-loop">
+      <div className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
+        {MEMORY_TIERS.map(({ icon: Icon, kind, label, path, blurb, peak }, i) => (
+          <Fragment key={label}>
+            {i > 0 && (
+              <div aria-hidden className="flex items-center justify-center py-1 sm:py-0">
+                <ArrowRight
+                  className="mem-flow size-5 rotate-90 text-brand-400 sm:rotate-0 dark:text-brand-500"
+                  strokeWidth={2.4}
+                  style={{ '--mem-i': i - 1 } as React.CSSProperties}
+                />
+              </div>
             )}
-            <div className="pb-6">
-              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{stage.label}</p>
-              <p className="mt-1 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{stage.blurb}</p>
+            <div
+              style={{ '--mem-i': i } as React.CSSProperties}
+              className={`mem-tier relative flex flex-col rounded-2xl border p-5 shadow-sm ${
+                peak
+                  ? 'border-brand-300 bg-gradient-to-br from-brand-50 to-white dark:border-brand-700/70 dark:from-brand-950/60 dark:to-zinc-950'
+                  : 'border-zinc-200 bg-white dark:border-white/[0.08] dark:bg-white/[0.02]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span
+                  className={`inline-flex size-10 items-center justify-center rounded-xl ${
+                    peak
+                      ? 'bg-brand-600 text-white dark:bg-brand-500'
+                      : 'bg-brand-50 text-brand-700 dark:bg-brand-950/60 dark:text-brand-300'
+                  }`}
+                >
+                  <Icon className="size-5" strokeWidth={2.2} aria-hidden />
+                </span>
+                <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-600" aria-hidden>
+                  0{i + 1}
+                </span>
+              </div>
+              <p className="mt-4 font-mono text-[11px] tracking-[0.14em] text-brand-700 uppercase dark:text-brand-300">
+                {kind}
+              </p>
+              <p className="mt-1 text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{label}</p>
+              <code className="mt-1 font-mono text-[11px] text-zinc-400 dark:text-zinc-600">{path}</code>
+              <p className="mt-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
             </div>
-          </li>
+          </Fragment>
         ))}
-      </ol>
-      <div className="mt-2 inline-flex items-center gap-2 rounded-full bg-brand-50 px-3 py-1 text-xs font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
-        <ArrowRight className="size-3.5 -rotate-90" strokeWidth={2.4} aria-hidden />
-        loops back into the next session log
+      </div>
+      <div className="mt-5 flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-500">
+        <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-transparent to-brand-200 dark:to-brand-800/60" />
+        <span className="mem-loopback inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-3 py-1 font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+          <RefreshCw className="size-3.5" strokeWidth={2.4} aria-hidden />
+          what it learns loops back into the next session
+        </span>
+        <span aria-hidden className="h-px flex-1 bg-gradient-to-l from-transparent to-brand-200 dark:to-brand-800/60" />
       </div>
     </div>
   )
@@ -255,8 +549,15 @@ function MarketingTable() {
                 <div className="mt-1.5 font-mono text-[11px] font-normal tracking-normal text-zinc-400 normal-case dark:text-zinc-500">
                   {r.lang}
                 </div>
-                <p className="mx-auto mt-2 max-w-[13rem] text-xs font-normal leading-snug tracking-normal text-zinc-500 normal-case dark:text-zinc-500">
-                  {r.strength} · {r.tradeoff}
+                <p
+                  className={`mx-auto mt-3 max-w-[12rem] text-[13px] font-semibold leading-snug tracking-normal normal-case ${
+                    r.highlight ? 'text-brand-700 dark:text-brand-300' : 'text-zinc-700 dark:text-zinc-200'
+                  }`}
+                >
+                  {r.strength}
+                </p>
+                <p className="mx-auto mt-1.5 max-w-[12rem] text-[11px] font-normal leading-relaxed tracking-normal text-zinc-400 normal-case dark:text-zinc-500">
+                  {r.tradeoff}
                 </p>
               </th>
             ))}
@@ -310,23 +611,6 @@ function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps)
         <p className="mt-4 max-w-md text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
       </div>
       <div className={reverse ? 'min-w-0 lg:order-1' : 'min-w-0'}>{visual}</div>
-    </div>
-  )
-}
-
-function PermissionsVisual() {
-  return (
-    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-5 sm:p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
-      <div className="flex h-full flex-col items-center justify-center gap-4">
-        <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-white px-5 py-3 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
-          <Shield className="size-5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} />
-          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100">Owner → Full access</div>
-        </div>
-        <div className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-5 py-3 shadow-sm dark:border-white/[0.08] dark:bg-zinc-900">
-          <Lock className="size-5 text-zinc-400 dark:text-zinc-600" strokeWidth={2.4} />
-          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100">Guest → Read only</div>
-        </div>
-      </div>
     </div>
   )
 }
@@ -491,45 +775,61 @@ export default function Home() {
               Memory you can read
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              It gets sharper while you sleep — and you can read every word it learned.
+              It gets sharper while you sleep — building muscle memory you can read.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
-              A dreaming subagent distills each day&apos;s work into long-term memory and reusable skills. It all lands
-              as plain files, committed to git — so you can review what it picked up, revert what it got wrong, and own
-              its memory like the rest of your code. Self-improving, never a black box.
+              A dreaming subagent distills each day&apos;s work into long-term memory, and the moves it makes often
+              become muscle memory — reusable skills it writes for itself and loads on later runs. It all lands as plain
+              files, committed to git, so you can review what it picked up, revert what it got wrong, and own its memory
+              like the rest of your code. Plain files you can read, not a black box.
             </p>
           </Reveal>
-          <Reveal className="mx-auto mt-12 max-w-lg" delay={120}>
-            <div className="rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-8 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
-              <MemoryLoopVertical />
-            </div>
+          <Reveal className="mt-14" delay={120}>
+            <MemoryTiers />
           </Reveal>
         </section>
 
         <section className="mx-auto max-w-6xl space-y-24 px-5 py-24 sm:space-y-36 sm:px-6 sm:py-36">
           <Reveal>
             <FeatureRow
-              eyebrow="Plugins are just imports"
-              title="Extend it from inside the language you already use."
-              blurb="No plugin DSL, no IPC, no FFI, no sidecar process. A plugin is a plain .ts file that imports the runtime and adds tools, skills, channels, and commands. The same TypeScript, all the way down — nothing to bolt on."
-              visual={<PluginCode />}
+              eyebrow="Knows when not to talk"
+              title="It reads the room — and stays quiet when the message wasn't for it."
+              blurb="In a busy channel it tells humans from bots, tracks who's present, and engages on a structural decision rather than a guess. When a message clearly targets someone else, it holds back; mid-thread with you, it stays engaged without being re-mentioned, then steps back when the conversation moves on. Peer-bot loop guards and flood filters keep it from spiraling."
+              visual={<GroupChatVisual />}
             />
           </Reveal>
           <Reveal>
             <FeatureRow
-              eyebrow="One folder, one container"
-              title="A whole agent you can hold in your head."
-              blurb="It lives in a single folder and runs in its own container — its own .env, its own memory, its own channels. The container is the trust boundary; nothing it does reaches the rest of your machine. Done with it? Delete the folder. It's gone, no residue."
+              eyebrow="A bench of specialists"
+              title="It delegates to focused specialists, each in a clean context."
+              blurb="It hands off research, planning, review, and hands-on execution to child sessions — each with its own system prompt, tools, and model. Spawn and wait for a result, or fan work out in the background and collect completions later. Coalescing drops duplicate concurrent runs and depth limits keep delegation chains bounded."
               reverse
-              visual={<SandboxDiagram />}
+              visual={<SubagentVisual />}
             />
           </Reveal>
           <Reveal>
             <FeatureRow
-              eyebrow="You hold the keys"
-              title="A stranger in Slack can't push to main. You can."
-              blurb="Owner, trusted, member, guest — role-based permissions gate every action, per channel. The agent knows who's in the room and exactly what they're allowed to ask for. Powerful in your hands, harmless in everyone else's."
-              visual={<PermissionsVisual />}
+              eyebrow="Defense in depth"
+              title="Every tool call runs a gauntlet before it fires."
+              blurb="Risky actions pass through layered guards classified by severity — secret exfiltration, SSRF, prompt injection, rogue git pushes, and silent privilege escalation get stopped before they happen. Roles gate who can bypass what, and each bash call runs inside its own sandbox. Powerful in trusted hands, contained everywhere else."
+              visual={<SecurityVisual />}
+            />
+          </Reveal>
+          <Reveal>
+            <FeatureRow
+              eyebrow="Operational autonomy"
+              title="It knows its own config — so it won't strand itself."
+              blurb="It can back itself up, rebuild, and restart its own container through the host daemon. The difference: it knows which settings take effect live and which need a restart, so it won't brick itself with a change that silently does nothing. When it does restart, it hands off to the rebooted container and picks the same conversation back up — no cold-starting into silence. And when it keeps working on its own, hard budgets on turns, tokens, and wall-clock keep it from spiraling."
+              reverse
+              visual={<SelfManagingVisual />}
+            />
+          </Reveal>
+          <Reveal>
+            <FeatureRow
+              eyebrow="Plugin system"
+              title="It writes its own tools — as TypeScript plugins."
+              blurb="When a recurring job needs more than it ships with — a custom tool, a scheduled hook, a new channel — it writes itself a plugin to do it. A plugin is just a TypeScript file that imports the runtime: no DSL, no IPC, no sidecar. The same language it already runs in, so the harness it builds for itself is code you can read and keep."
+              visual={<SelfExtendVisual />}
             />
           </Reveal>
         </section>
@@ -537,10 +837,10 @@ export default function Home() {
         <section className="mx-auto max-w-3xl px-5 pb-24 sm:px-6 sm:pb-36">
           <Reveal className="mb-10 text-center">
             <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
-              one minute, end to end
+              one command to alive
             </p>
             <h2 className="mt-3 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              Three commands in. It&apos;s already learning.
+              One <code className="font-mono text-3xl sm:text-4xl">init</code> — wired, hatched, already learning.
             </h2>
           </Reveal>
           <Reveal delay={120}>
@@ -601,10 +901,16 @@ export default function Home() {
           />
           <Reveal className="relative mx-auto max-w-3xl px-5 text-center sm:px-6">
             <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
-            <h2 className="mt-4 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">Make it yours.</h2>
-            <p className="mx-auto mt-4 max-w-lg text-balance text-base text-zinc-600 dark:text-zinc-400">
-              One folder, one container, one language you already know. Spin one up, read the whole thing, fork it if
-              you like. Trying it costs nothing.
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+              built for people like you
+            </p>
+            <h2 className="mt-3 text-balance text-5xl font-semibold tracking-tight sm:text-6xl">
+              Made with care. Now make it yours.
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-balance text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
+              Every detail here was sweated over — because the details are the point. One folder, one container, one
+              language you already know. Spin one up, read it end to end, and shape it until it&apos;s exactly the agent
+              you wanted. Trying it costs nothing.
             </p>
             <div className="mt-8 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
               <Link
@@ -638,7 +944,10 @@ export default function Home() {
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-zinc-500 dark:text-zinc-500">
               Crafted in every detail — it behaves in your team&apos;s chat and gets sharper the longer it runs.
             </p>
-            <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">© {new Date().getFullYear()} TypeClaw · MIT</p>
+            <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">
+              © {new Date().getFullYear()} TypeClaw · Made with{' '}
+              <span className="text-rose-500 dark:text-rose-400">❤</span> from Seoul
+            </p>
           </div>
           <div>
             <p className="text-xs font-medium tracking-wider text-zinc-400 uppercase dark:text-zinc-500">Product</p>
