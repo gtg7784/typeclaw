@@ -1,10 +1,11 @@
 # TypeClaw
 
 <p align="center">
-  <img src="./docs/public/typeclaw.png" alt="TypeClaw logo" width="240" />
+  <img src="./docs/public/typeclaw-transparent.png" alt="TypeClaw logo" width="240" />
 </p>
 
-> The agent for perfectionists — crafted in every detail. It behaves in your team's chat and gets sharper the longer it runs. Sandboxed and self-managing.
+<center><h3>The agent for perfectionists</h3></center>
+<center><blockquote>Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</blockquote></center>
 
 ## Why?
 
