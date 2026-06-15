@@ -7,54 +7,78 @@
 <h3 align="center">The agent for perfectionists</h3>
 <p align="center">Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</p>
 
-## Why?
+## Self-improving — a learning loop, not a black box
 
-There are great agents out there. None of them were quite the shape I wanted:
+- 🌱 **Memory** — logs its own work to a daily stream as it goes
+- 💤 **Dreaming** — a subagent distills each day's work into long-term memory, committed to git as plain files you can read, diff, and revert
+- 🧠 **Muscle memory** — recurring procedures become reusable skills it writes for itself and loads on later runs
+- 🔎 **Optional embedding recall** — hybrid keyword-and-embedding search over the same markdown memory, off by default; the plain files remain the durable source of truth
 
-- **OpenClaw** — feature-rich, but heavy
-- **NanoClaw** — simple, but no plugin system
-- **PicoClaw** — fast, but Go (so plugins live outside the runtime)
-- **ZeroClaw** — light, but Rust (same problem, different ecosystem)
-- **Hermes Agent** — awesome, but Python
+## Group chat — knows when not to talk
 
-None of that matters to most people. It matters to me. If you're like me, TypeClaw is the right choice.
+- 👥 **Room awareness** — knows who's present and tells humans from bots, so it stays quiet when people are talking to each other rather than chiming in on messages it wasn't part of
+- 💬 **Sticky engagement** — holds an ongoing thread after replying without needing to be re-mentioned, then steps back when the conversation moves on; multilingual continuation detection, peer-bot loop guards, and flood filters keep it from spiraling
 
-TypeClaw is the agent I wanted to use:
+## Channels — one agent, many inboxes
 
-- **TypeScript end to end** — agent core, plugins, channel adapters, CLI, TUI all in one language
-- **Bun-native plugins** — plugins are just TS modules; no IPC, no FFI, hot-reloadable config
-- **Docker-friendly by default** — every agent runs in its own container; the host CLI is purely a launcher
-- **Self-improving** — the agent observes its own work, distills it into sharded long-term memory and reusable skills, and gets sharper over time without you writing prompts for it
+- 📨 **Supported channels** — Slack, Discord, Telegram, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
+- ✅ **Pull-request review** — treats a GitHub PR as a conversation, reviewing as a participant, with guards against claiming a verdict it didn't actually post and against leaving a PR stranded
 
-If you're like me, TypeClaw is the right choice. If not, that's fine too.
+## Web & research — reads the web like a person
 
-## What you'd expect
+- 🔍 **Live web search & fetch** — pull a page as a readable article, a JSON query, a selected slice, a grep, or raw
+- 🪪 **Browser-like fetching** — replays a real browser fingerprint so requests aren't rejected by sites that block generic clients
+- 🌐 **Interactive browser sessions** — drives a browser on live pages, with a dashboard you can step into for logins, 2FA, or CAPTCHA
 
-- 🐳 **Sandboxed by default** — every agent runs in its own Docker container with `.env` injection and bind-mounted host folders
-- 🔌 **Plugin system** — plain TypeScript modules contribute tools, skills, subagents, channels, commands, and typed config
-- 💬 **Multi-channel** — Slack, Discord, Telegram, LINE, KakaoTalk, GitHub webhooks, and a websocket TUI; one agent, many inboxes
-- ⏰ **Cron** — schedule prompts or shell commands; per-job coalescing so slow jobs don't pile up
-- 📚 **Skills on demand** — markdown procedures the agent loads only when relevant; zero token cost until used
-- 🔎 **Web research** — bundled `scout` subagent plus first-class `web_search` and `web_fetch` tools (DuckDuckGo via curl-impersonate, Wikipedia)
-- 🛡 **Security guards** — bundled `tool.before` policies catch secret exfil, SSRF, prompt injection, tainted git remotes, and silent privilege escalation (role/cron promotion) before they fire
-- 📊 **Usage, inspect, doctor** — `typeclaw usage` reports token/$ spend per session, model, or day; `typeclaw inspect` replays a session transcript and tails live activity; `typeclaw doctor` diagnoses host, agent folder, and plugin state
+## Security — defense-in-depth for risky actions
 
-## Where it goes further
+- 🛡 **Layered guards** — stop secret exfiltration, SSRF, prompt injection, rogue git pushes, and silent privilege escalation before they fire
+- 🪪 **Roles** — owner, trusted, member, and guest gate privileged actions
+- 🔑 **Permissions** — per-channel match rules decide who can ask for what; an untrusted channel user can't trigger privileged behavior
+- 🔒 **Encryption at rest** — sensitive channel passwords are sealed with authenticated encryption; the key is host-held and isn't passed into the container during normal operation
 
-- 🌱 **Self-improving** — bundled `memory` plugin logs sessions to daily streams, then a `dreaming` subagent distills them into sharded long-term memory (`memory/topics/`) on its own schedule; no prompts to write
-- 🧠 **Muscle memory** — repeated procedures get distilled into reusable skills the agent writes for itself and loads on later runs
-- 💾 **Auto-backup** — the bundled `backup` plugin commits session logs and memory on every idle window with an LLM-generated commit subject
-- 🪄 **Subagents** — first-class child sessions with their own system prompt, payload schema, and per-payload coalescing; cron and the main agent fire them through one in-process Stream
-- 🪪 **Roles and permissions** — `owner` / `trusted` / `member` / `guest` with first-message match rules per channel; gates `channel.respond`, cron scheduling, and security bypasses, so a Slack stranger can't tell the agent to push to main
-- 👥 **Group chat awareness** — knows who's in the room, distinguishes humans from bots, and stays engaged after a reply without re-mentioning
-- 🧱 **Managed-file guards** — `typeclaw.json`, `cron.json`, memory shards, and bundled skills are protected from accidental rewrites; invalid config writes and silent role/cron privilege grants are rejected at the tool boundary
-- 🌐 **Headed browser inside the container** — bundled `agent-browser` plugin ships Chrome under Xvfb so the agent can drive real web pages past bot fingerprinting
-- 🌍 **Tunnels and auto port-forward** — dev servers inside the container appear on `localhost` (even loopback-only ones); public URLs via Cloudflare Quick (zero signup) or your own external URL, with GitHub webhooks self-registered at the resulting URL
-- 🔄 **Hot reload** — change `typeclaw.json`, run `typeclaw reload` — no restart for most fields
-- 🔁 **Self-restart** — the agent can bounce its own container when it updates itself
-- 🎼 **Compose** — orchestrate multiple agents across multiple folders
+## Isolation & sandbox — runs clean, stays out of each other's way
 
-Memory loop and subagent architecture are covered in detail in [AGENTS.md](./AGENTS.md) and [`src/bundled-plugins/memory/README.md`](./src/bundled-plugins/memory/README.md).
+- 🐳 **No machine clutter** — an agent lives in its own folder and runs in its own container; nothing installs globally on your system, and stopping it shuts the running pieces down, leaving a folder you can keep, copy, or delete
+- 🧩 **No cross-agent interference** — run as many as you like; each gets its own container, files, memory, and even its own browser, so one can read a page while another drives a different one
+- 📁 **Self-contained folder** — settings, memory, and connections live together in the agent's folder, kept as a version history you can review, undo, or back up
+
+## Subagents — delegation in a fresh context
+
+- 🪄 **A bench of specialists** — it hands off research, planning, code review, and hands-on execution to focused child sessions, each with its own prompt, tools, and model
+- 🔀 **Sync or background** — spawn and block for a result, or spawn in the background and collect completions later; coalescing prevents duplicate concurrent runs and depth limits keep delegation chains bounded
+
+## Extensibility — teach it new tricks in TypeScript
+
+- 🔌 **Plugins are just imports** — a plugin is a plain TypeScript file that imports the runtime and adds tools, skills, channels, and commands; no IPC, no FFI, no DSL, distributed as packages and resolved like any dependency
+- 🛰 **MCP support** — connect external MCP servers over stdio or HTTP; their tools become the agent's tools
+- 📚 **Skills on demand** — markdown procedures load lazily when selected, so they avoid prompt-token cost until used; skills layer from bundled, your own, and what the agent learns
+- ⚙️ **Typed config with hot reload** — most config changes take effect live; boot-only fields are flagged restart-required
+
+## Connectivity — reachable wherever you need it
+
+- 🌍 **Auto port-forward** — services inside the container appear on your `localhost`, including loopback-only ones
+- 🚇 **Public tunnels** — a zero-signup public URL out of the box, or bring your own; webhooks self-register at the resulting URL
+- 🔗 **Private network access** — forwarded ports can publish to a private network when configured
+
+## Self-managing — operational autonomy, on a budget
+
+- 💾 **Self-backup** — commits and pushes its own state during idle windows, with a generated commit message
+- 🔁 **Self-restart** — can rebuild and restart its own container when it needs to, through the host daemon
+- ♻️ **Self-continuation** — keeps working through an unfinished task list when you step away, bounded by a turn, token, and wall-clock budget
+
+## Operator CLI — see what it's doing and what it costs
+
+- 🩺 **doctor** — diagnoses host, agent folder, config, and channels, with auto-fix for managed files
+- 📊 **usage** — reports token and dollar spend by day, model, session, or origin
+- 🔍 **inspect** — replays a session transcript and tails live activity
+- 📜 **logs** — streams container logs with local-time prefixes
+
+## Compose — manage a fleet from the CLI
+
+- 🎼 **Fleet operations** — discover agent folders and start, stop, restart, check status, tail logs, report usage, and run diagnostics across them from the command line
+
+Memory loop and subagent architecture are covered in detail in the [Internals docs](https://typeclaw.dev/docs/internals) and [`src/bundled-plugins/memory/README.md`](./src/bundled-plugins/memory/README.md).
 
 ## Install
 
@@ -68,14 +92,12 @@ Requires Bun ≥ 1.1 and Docker (or OrbStack) on the host.
 
 ```sh
 mkdir my-agent && cd my-agent
-typeclaw init        # scaffold typeclaw.json, .env, Dockerfile, package.json
-typeclaw start       # build + run the container
-typeclaw tui         # attach a terminal UI to the running agent
+typeclaw init        # scaffold, build, run the container, and attach a TUI
 ```
 
-That's it. The agent is now alive, listening on a websocket, ready to receive prompts from the TUI or any wired channel.
+That's it. `init` hatches the agent end to end — it scaffolds the folder (`typeclaw.json`, `.env`, `Dockerfile`, `package.json`), builds and runs the container, then drops you into a terminal UI. The agent is now alive, listening on a websocket, ready to receive prompts from the TUI or any wired channel.
 
-See `typeclaw --help` for the full command surface, or [typeclaw.dev](https://typeclaw.dev) for guides and configuration reference.
+For later sessions, `typeclaw start` runs the container and `typeclaw tui` re-attaches. See `typeclaw --help` for the full command surface, or [typeclaw.dev](https://typeclaw.dev) for guides and configuration reference.
 
 ## Development
 
@@ -94,7 +116,7 @@ bun run lint
 bun run format
 ```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bun link` → `typeclaw init`), commit and PR conventions, and where to ask questions. See [AGENTS.md](./AGENTS.md) for the long-form architecture notes — stages, hostd internals, message stream, plugin contracts, and the testing philosophy. The docs site at [typeclaw.dev](https://typeclaw.dev) lives in [`docs/`](./docs/).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bun link` → `typeclaw init`), commit and PR conventions, and where to ask questions. The [Internals docs](https://typeclaw.dev/docs/internals) cover the long-form architecture notes — stages, hostd internals, message stream, plugin contracts, and the testing philosophy. The docs site at [typeclaw.dev](https://typeclaw.dev) lives in [`docs/`](./docs/).
 
 ## Acknowledgments
 
