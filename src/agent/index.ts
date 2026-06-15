@@ -47,6 +47,7 @@ import {
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
+import { PROACTIVE_NEXT_STEP_NUDGE } from './proactive-next-step-nudge'
 import { createReloadTool } from './reload-tool'
 import type { RestartHandoffOrigin } from './restart-handoff'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
@@ -277,6 +278,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
           ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
           ...(options.suppressSystemMemory !== undefined ? { suppressSystemMemory: options.suppressSystemMemory } : {}),
+          ...(isGptOpenAiFamilyRef(activeRef) ? { proactiveNextStepNudge: true } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -382,13 +384,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...buildChannelTools(
-              options.channelRouter,
-              options.origin,
-              sessionManager.getSessionId(),
-              getOrigin,
-              isGptOpenAiFamilyRef(activeRef),
-            ),
+            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId(), getOrigin),
             ...(options.containerName
               ? [
                   createRestartTool({
@@ -664,7 +660,6 @@ export function buildChannelTools(
   origin: SessionOrigin | undefined,
   sessionId?: string,
   getOrigin?: () => SessionOrigin | undefined,
-  stripGptEmptyOptionalFollowupFiller = false,
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
@@ -680,7 +675,6 @@ export function buildChannelTools(
         router: channelRouter,
         origin: channelOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
-        stripGptEmptyOptionalFollowupFiller,
       }),
     )
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
@@ -689,7 +683,6 @@ export function buildChannelTools(
         router: channelRouter,
         origin: channelOrigin,
         ...(sessionId !== undefined ? { sessionId } : {}),
-        stripGptEmptyOptionalFollowupFiller,
       }),
     )
     // Read the live turn origin, falling back to the static snapshot when no
@@ -718,7 +711,7 @@ export function buildChannelTools(
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }
   } else {
-    tools.push(createChannelSendTool({ router: channelRouter, stripGptEmptyOptionalFollowupFiller }))
+    tools.push(createChannelSendTool({ router: channelRouter }))
   }
   return tools
 }
@@ -971,6 +964,7 @@ export type CreateResourceLoaderOptions = {
   // from `memory.vector.enabled` — vector is restart-required, so the boot
   // snapshot is coherent with the per-turn injection decision.
   suppressSystemMemory?: boolean
+  proactiveNextStepNudge?: boolean
 }
 
 // Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
@@ -1034,6 +1028,7 @@ export type SystemPromptComposition = {
   roleContext?: SessionRoleContext
   mcpCatalog?: string
   gitNudge: string
+  proactiveNextStepNudge?: string
   memorySection: string
 }
 
@@ -1078,6 +1073,9 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   }
   if (parts.gitNudge !== '') {
     prompt = `${prompt}\n\n${parts.gitNudge}`
+  }
+  if (parts.proactiveNextStepNudge !== undefined && parts.proactiveNextStepNudge !== '') {
+    prompt = `${prompt}\n\n${parts.proactiveNextStepNudge}`
   }
   if (parts.memorySection !== '') {
     prompt = `${prompt}\n\n${parts.memorySection}`
@@ -1178,6 +1176,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
       ? { mcpCatalog: renderMcpCatalog(options.mcpManager.listServers()) }
       : {}),
     gitNudge,
+    ...(options.proactiveNextStepNudge === true ? { proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE } : {}),
     memorySection,
   })
 

@@ -24,6 +24,7 @@ import {
   subscribeRestartNotice,
 } from './index'
 import { LiveSubagentRegistry } from './live-subagents'
+import { PROACTIVE_NEXT_STEP_NUDGE } from './proactive-next-step-nudge'
 import type { SessionOrigin } from './session-origin'
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
 import { DEFAULT_SYSTEM_PROMPT, SLIM_SYSTEM_PROMPT } from './system-prompt'
@@ -316,6 +317,42 @@ describe('createResourceLoader', () => {
     })
     expect(prompt).not.toContain('## Now')
     expect(prompt).not.toContain('Session started at')
+  })
+
+  test('composeSystemPrompt includes GPT proactive next-step nudge when supplied', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE,
+      memorySection: '',
+    })
+
+    expect(prompt).toContain('## Proactive next-step guidance')
+    expect(prompt).toContain('do not ask for permission or confirmation')
+    expect(prompt).toContain('Do the next step when it makes sense')
+  })
+
+  test('composeSystemPrompt omits proactive next-step nudge by default for non-GPT callers', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      memorySection: '',
+    })
+
+    expect(prompt).not.toContain('## Proactive next-step guidance')
+    expect(prompt).not.toContain('do not ask for permission or confirmation')
+  })
+
+  test('composeSystemPrompt places GPT proactive next-step nudge after git nudge and before memory', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      gitNudge: '## Git nudge\n\ncommit things',
+      proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE,
+      memorySection: '# Memory\n\nremember things',
+    })
+
+    expect(prompt.indexOf('## Git nudge')).toBeLessThan(prompt.indexOf('## Proactive next-step guidance'))
+    expect(prompt.indexOf('## Proactive next-step guidance')).toBeLessThan(prompt.indexOf('# Memory'))
   })
 
   test('composeSystemPrompt places MCP catalog after origin and before memory', () => {

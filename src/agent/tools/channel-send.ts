@@ -1,7 +1,6 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { stripEmptyOptionalFollowupFiller } from '@/agent/empty-optional-followup-guard'
 import { checkFalseReceipt } from '@/channels/github-false-receipt'
 import { evaluateRereviewGuard } from '@/channels/github-rereview-guard'
 import { recordResolvedThread } from '@/channels/github-review-turn-ledger'
@@ -37,7 +36,6 @@ export type CreateChannelSendToolOptions = {
   // finds no recorded action and falls back to its safe default.
   sessionId?: string
   logger?: ChannelToolLogger
-  stripGptEmptyOptionalFollowupFiller?: boolean
 }
 
 export function createChannelSendTool({
@@ -45,7 +43,6 @@ export function createChannelSendTool({
   origin,
   sessionId = '',
   logger = consoleChannelLogger,
-  stripGptEmptyOptionalFollowupFiller = false,
 }: CreateChannelSendToolOptions) {
   return defineTool({
     name: 'channel_send',
@@ -121,10 +118,7 @@ export function createChannelSendTool({
 
     async execute(_toolCallId, params) {
       const adapter = params.adapter as AdapterId
-      const bodyText =
-        params.text !== undefined
-          ? stripEmptyOptionalFollowupFiller(params.text, stripGptEmptyOptionalFollowupFiller)
-          : undefined
+      const bodyText = params.text
       const attachments = params.attachments
       if ((bodyText === undefined || bodyText === '') && (attachments === undefined || attachments.length === 0)) {
         logger.warn(formatChannelToolFailure('channel_send', 'missing text and attachments'))

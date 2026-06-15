@@ -1,7 +1,6 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { stripEmptyOptionalFollowupFiller } from '@/agent/empty-optional-followup-guard'
 import { checkFalseReceipt } from '@/channels/github-false-receipt'
 import { evaluateRereviewGuard } from '@/channels/github-rereview-guard'
 import {
@@ -30,7 +29,6 @@ export type CreateChannelReplyToolOptions = {
   // action and falls back to its safe default.
   sessionId?: string
   logger?: ChannelToolLogger
-  stripGptEmptyOptionalFollowupFiller?: boolean
 }
 
 // channel_reply is the happy-path companion to channel_send for channel-routed
@@ -47,7 +45,6 @@ export function createChannelReplyTool({
   origin,
   sessionId = '',
   logger = consoleChannelLogger,
-  stripGptEmptyOptionalFollowupFiller = false,
 }: CreateChannelReplyToolOptions) {
   return defineTool({
     name: 'channel_reply',
@@ -101,10 +98,7 @@ export function createChannelReplyTool({
     }),
 
     async execute(_toolCallId, params) {
-      const text =
-        params.text !== undefined
-          ? stripEmptyOptionalFollowupFiller(params.text, stripGptEmptyOptionalFollowupFiller)
-          : undefined
+      const text = params.text
       const attachments = params.attachments
       const keepTurnAlive = params.continue === true
       if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
