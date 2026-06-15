@@ -3371,7 +3371,31 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live.successfulChannelSends > successfulSendsBeforePrompt) {
       maybeNudgeContinuationWillingness(live)
       const trailing = recoverableAssistantText(live.session)
-      if (trailing === null || trailing.source !== 'leaf') return
+      if (trailing === null || trailing.source !== 'leaf') {
+        // A `continue: true` status reply landed, then the turn stranded on an
+        // unanswered `toolUse` (the post-tool follow-up never produced an
+        // assistant message — aborted loop / cancelled stream). The promised
+        // work never finished, so the user is left with a bare "checking now…"
+        // and nothing after it. Re-prompt the same logical turn so the model
+        // completes its investigation and actually replies, instead of ending
+        // in silence. Bounded by MAX_EMPTY_TURN_RETRIES; on exhaustion the turn
+        // falls through to the normal recovery path below (which posts the
+        // fallback). Any postable pre-tool/mid-turn prose is still recovered by
+        // that path — this only adds a retry for the no-prose strand.
+        if (
+          leafIsStrandedToolUse(live.session) &&
+          live.currentTurnAuthorId !== null &&
+          live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES
+        ) {
+          live.emptyTurnRetries++
+          logger.warn(
+            `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+              `cause=stranded_toolUse_after_send`,
+          )
+          live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+        }
+        return
+      }
       if (live.session.sessionManager.getLeafEntry()?.id === live.lastSendLeafId) return
     }
 
@@ -4959,6 +4983,40 @@ function assistantLeafStopReason(session: AgentSession): 'length' | 'error' | 'a
   const stop = leaf.message.stopReason
   if (stop === 'length' || stop === 'error' || stop === 'aborted') return stop
   return undefined
+}
+
+// True when the branch ends on an UNANSWERED `toolUse` that left NO postable
+// prose — the model called a tool and the upstream pi-agent-core post-tool
+// follow-up never produced an assistant message (the loop was aborted, or the
+// follow-up stream cancelled). Two leaf shapes carry this signature: the leaf
+// IS a `toolUse` assistant, or the leaf is a `toolResult` whose nearest
+// assistant ancestor (reached before any user message) is `toolUse`. The
+// no-prose requirement is the discriminator from a model that narrated a reply
+// alongside its tool call and DID land a real send this turn (that trailing
+// `toolUse` is delivered narration, not a stranded promise — leave it alone).
+// Keys on the model having INTENDED to keep working with nothing yet said; used
+// to re-prompt a turn that strands mid-work after a `continue: true` status
+// reply instead of ending in silence.
+function leafIsStrandedToolUse(session: AgentSession): boolean {
+  const leaf = session.sessionManager.getLeafEntry()
+  if (!leaf || leaf.type !== 'message') return false
+  if (leaf.message.role === 'assistant') {
+    return leaf.message.stopReason === 'toolUse' && visibleAssistantText(leaf.message).trim() === ''
+  }
+  if (leaf.message.role !== 'toolResult') return false
+  let cursor: { parentId: string | null } | undefined = leaf
+  for (let depth = 0; depth < 32 && cursor?.parentId; depth++) {
+    const parent = session.sessionManager.getEntry(cursor.parentId)
+    if (!parent) return false
+    if (parent.type === 'message') {
+      if (parent.message.role === 'assistant') {
+        return parent.message.stopReason === 'toolUse' && visibleAssistantText(parent.message).trim() === ''
+      }
+      if (parent.message.role === 'user') return false
+    }
+    cursor = parent
+  }
+  return false
 }
 
 function visibleAssistantText(message: AssistantMessage): string {

@@ -4231,6 +4231,133 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  // Regression for the "I'll check right now" → silence bug (Discord channel,
+  // 2026-06-15). The model posted a `continue: true` status reply ("지금 바로
+  // 확인할게"), kept working through several tool calls, then its post-tool
+  // follow-up stream was aborted before it could conclude. The session leaf was
+  // a toolResult under an unanswered `stopReason: 'toolUse'` assistant carrying
+  // NO visible prose (thinking + toolCall only), so pre-tool recovery had
+  // nothing to post. Because a send had already landed this turn, the recovery
+  // gate short-circuited and the turn ended silently — the promised follow-up
+  // never ran and the user got dead air after the status reply. The fix:
+  // re-prompt (empty-turn retry) so the model finishes the work it promised and
+  // actually replies.
+  test('continue-reply guard: re-prompts when the turn strands on an unanswered toolUse with no prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    const strandOnUnansweredToolUse = (): void => {
+      // A toolUse assistant with ONLY thinking + a toolCall (no visible text),
+      // whose post-tool follow-up never landed: leaf is the toolResult.
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Investigating cron behavior…' },
+          { type: 'toolCall', id: 'functions.stream_snapshot:0', name: 'stream_snapshot', arguments: { limit: 20 } },
+        ] as AssistantMessage['content'],
+        api: 'openai-completions',
+        provider: 'openai',
+        model: 'gpt-5.5',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'toolUse',
+        timestamp: 1000,
+      }
+      const assistantEntry: SessionEntry = {
+        type: 'message',
+        id: 'assistant-strand',
+        parentId: null,
+        timestamp: '2026-06-15T06:23:45.000Z',
+        message: assistantMsg,
+      }
+      const toolResultEntry: SessionEntry = {
+        type: 'message',
+        id: 'tool-result-strand',
+        parentId: 'assistant-strand',
+        timestamp: '2026-06-15T06:23:45.500Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'functions.stream_snapshot:0',
+          toolName: 'stream_snapshot',
+          content: [{ type: 'text', text: 'stream events here' }],
+          isError: false,
+          timestamp: 1000,
+        },
+      }
+      sessions[0]!.entriesById.set(assistantEntry.id, assistantEntry)
+      sessions[0]!.entriesById.set(toolResultEntry.id, toolResultEntry)
+      sessions[0]!.leafEntry = toolResultEntry
+    }
+
+    await router.route(inbound({ text: '반영했어?' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      if (attempt === 1) {
+        // The status reply (the `continue: true` "I'll check now") lands as a
+        // real send, then the turn strands on the unanswered toolUse.
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지금 바로 확인할게.' })
+        strandOnUnansweredToolUse()
+        return
+      }
+      // The retry nudge re-prompts the same logical turn; now the model
+      // finishes its investigation and posts the conclusion it promised, then
+      // ends cleanly (the leaf is the reply, not another stranded toolUse).
+      expect(text).toContain(EMPTY_TURN_RETRY_NUDGE)
+      await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'cron.json은 비어 있고, 요약은 플러그인에서 와. 재시작해야 반영돼.',
+      })
+      sessions[0]!.setAssistantText('cron.json은 비어 있고, 요약은 플러그인에서 와. 재시작해야 반영돼.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // The turn must NOT end after the bare status reply: a re-prompt fires and
+    // the real conclusion is delivered.
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent.map((s) => s.text)).toEqual([
+      '지금 바로 확인할게.',
+      'cron.json은 비어 있고, 요약은 플러그인에서 와. 재시작해야 반영돼.',
+    ])
+    expect(logs.some((m) => m.includes('empty_turn_retry attempt=1'))).toBe(true)
+  })
+
+  test('continue-reply guard: does NOT re-prompt when the trailing toolUse carries narration and a send landed', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'do the thing' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'real reply' })
+      sessions[0]!.setAssistantMidTurn('narration that accompanied the reply')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent.map((s) => s.text)).toEqual(['real reply'])
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
+  })
+
   test('silent-leaf observability: logs explicit reason instead of bailing silently', async () => {
     const dir = await tempDir()
     const logs: string[] = []
