@@ -327,9 +327,10 @@ describe('createResourceLoader', () => {
       memorySection: '',
     })
 
-    expect(prompt).toContain('## Proactive next-step guidance')
+    expect(prompt).toContain('## Proactive and requested next-step guidance')
     expect(prompt).toContain('do not ask for permission or confirmation')
     expect(prompt).toContain('Do the next step when it makes sense')
+    expect(prompt).toContain('When the user explicitly asks for suggestions')
   })
 
   test('composeSystemPrompt omits proactive next-step nudge by default for non-GPT callers', () => {
@@ -339,7 +340,7 @@ describe('createResourceLoader', () => {
       memorySection: '',
     })
 
-    expect(prompt).not.toContain('## Proactive next-step guidance')
+    expect(prompt).not.toContain('## Proactive and requested next-step guidance')
     expect(prompt).not.toContain('do not ask for permission or confirmation')
   })
 
@@ -351,8 +352,8 @@ describe('createResourceLoader', () => {
       memorySection: '# Memory\n\nremember things',
     })
 
-    expect(prompt.indexOf('## Git nudge')).toBeLessThan(prompt.indexOf('## Proactive next-step guidance'))
-    expect(prompt.indexOf('## Proactive next-step guidance')).toBeLessThan(prompt.indexOf('# Memory'))
+    expect(prompt.indexOf('## Git nudge')).toBeLessThan(prompt.indexOf('## Proactive and requested next-step guidance'))
+    expect(prompt.indexOf('## Proactive and requested next-step guidance')).toBeLessThan(prompt.indexOf('# Memory'))
   })
 
   test('composeSystemPrompt places MCP catalog after origin and before memory', () => {

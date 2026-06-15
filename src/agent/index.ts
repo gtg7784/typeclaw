@@ -15,7 +15,7 @@ import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
-import { defaultThinkingLevelForRef, providerForModelRef, type ModelRef } from '@/config/providers'
+import { defaultThinkingLevelForRef, isOpenAiFamilyRef, providerForModelRef, type ModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
 import { createMcpDispatcherTools, MCP_DISPATCHER_TOOL_NAMES } from '@/mcp/tools'
@@ -278,7 +278,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
           ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
           ...(options.suppressSystemMemory !== undefined ? { suppressSystemMemory: options.suppressSystemMemory } : {}),
-          ...(isGptOpenAiFamilyRef(activeRef) ? { proactiveNextStepNudge: true } : {}),
+          ...(isOpenAiFamilyRef(activeRef) ? { proactiveNextStepNudge: true } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -714,11 +714,6 @@ export function buildChannelTools(
     tools.push(createChannelSendTool({ router: channelRouter }))
   }
   return tools
-}
-
-function isGptOpenAiFamilyRef(ref: ModelRef): boolean {
-  const providerId = providerForModelRef(ref)
-  return providerId === 'openai' || providerId === 'openai-codex'
 }
 
 export function buildMcpDispatcherToolDefinitions(manager: McpManager): ToolDefinition[] {
