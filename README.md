@@ -27,7 +27,7 @@
 ## Web & research — reads the web like a person
 
 - 🔍 **Live web search & fetch** — pull a page as a readable article, a JSON query, a selected slice, a grep, or raw
-- 🪪 **Browser-like fetching** — replays a real browser fingerprint so requests aren't rejected by sites that block generic clients
+- 🪪 **Browser-like fetching** — replays a Chrome-like TLS/HTTP fingerprint to get past many generic-client blocks; CAPTCHA and IP-reputation gates can still fail
 - 🌐 **Interactive browser sessions** — drives a browser on live pages, with a dashboard you can step into for logins, 2FA, or CAPTCHA
 
 ## Security — defense-in-depth for risky actions
@@ -39,7 +39,7 @@
 
 ## Isolation & sandbox — runs clean, stays out of each other's way
 
-- 🐳 **No machine clutter** — an agent lives in its own folder and runs in its own container; nothing installs globally on your system, and stopping it shuts the running pieces down, leaving a folder you can keep, copy, or delete
+- 🐳 **No machine clutter** — agent runtime state lives in its own folder and container; apart from the TypeClaw CLI install, it doesn't scatter services or config across your machine, and stopping it shuts the running pieces down, leaving a folder you can keep, copy, or delete
 - 🧩 **No cross-agent interference** — run as many as you like; each gets its own container, files, memory, and even its own browser, so one can read a page while another drives a different one
 - 📁 **Self-contained folder** — settings, memory, and connections live together in the agent's folder, kept as a version history you can review, undo, or back up
 
