@@ -11,6 +11,11 @@ describe('detectContinuationWillingness — positive (self-directed future inten
     'Let me verify that real quick',
     'On it now — checking the logs',
     'working on it now, one sec',
+    "I'm on it, one sec",
+    "I'll investigate the rest",
+    "I'll look it up real quick",
+    'lemme check the logs',
+    'let me pull that up',
     'give me a moment',
     '죄송합니다. 바로 계속 확인하겠습니다.',
     '바로 확인해볼게요',
@@ -20,6 +25,14 @@ describe('detectContinuationWillingness — positive (self-directed future inten
     '나머지도 살펴볼게요',
     '잠시만요, 확인 중이에요',
     '바로 `gh`로 확인할게요',
+    // Bare-volitional KO acks (the production miss: "…먼저 볼게요" matched nothing
+    // because only the "바로 볼게요" compound was listed).
+    '확인해볼게요, 이미지랑 타입 기준 먼저 볼게요.',
+    '먼저 볼게요',
+    '한번 볼게요',
+    '검토해볼게요',
+    '찾아볼게요',
+    '바로 처리할게요',
   ]
 
   for (const text of willing) {
@@ -54,6 +67,21 @@ describe('detectContinuationWillingness — positive (multilingual self-directed
     'Tôi sẽ xem ngay.',
     'Biar saya cek dulu.',
     'Saya akan periksa sisanya.',
+    // Gap-closure cases surfaced by a cross-language audit — natural ack phrasings
+    // the original tables missed (e.g. "let me take a quick look" idioms and the
+    // present-tense "I'm looking at it now" forms each language uses).
+    'Ahora lo reviso, dame un segundo.',
+    'Voy a echar un vistazo.',
+    'Je vais jeter un œil.',
+    'Je regarde ça tout de suite.',
+    'Je vais creuser un peu.',
+    "Vado a dare un'occhiata.",
+    'Vou dar uma olhada.',
+    'Ich schaue mir das an.',
+    'Ich prüfe das gleich.',
+    'Дай мне проверить это.',
+    '让我查一下。',
+    'Bir bakayım.',
   ]
 
   for (const text of willing) {
