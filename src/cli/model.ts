@@ -19,6 +19,7 @@ import {
 import { findAgentDir, isInitialized } from '@/init'
 import { customModelMetaFromOption, fetchModelOptions, type ModelOption } from '@/init/models-dev'
 
+import { fuzzyMatch } from './fuzzy-filter'
 import { runProviderAddFlow } from './provider'
 import { c, done, errorLine } from './ui'
 
@@ -251,6 +252,7 @@ async function pickModelRef(cwd: string): Promise<PickedModelRef> {
     const choice = await autocomplete<string>({
       message: 'Pick a model',
       placeholder: 'Type to search…',
+      filter: fuzzyMatch,
       options: [
         ...modelOptions.map((option) => ({
           value: option.ref,
