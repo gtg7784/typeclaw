@@ -1,5 +1,5 @@
 import { getBun } from '@/container/shared'
-import { isMacOS } from '@/shared'
+import { isMacOS, isWindows } from '@/shared'
 
 export type TailscaleExecResult = { exitCode: number; stdout: string; stderr: string }
 export type TailscaleExec = (args: string[]) => Promise<TailscaleExecResult>
@@ -34,6 +34,7 @@ type TailscaleStatus = {
 }
 
 const MACOS_APP_CLI = '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+const WINDOWS_CLI = 'C:\\Program Files\\Tailscale\\tailscale.exe'
 
 export function createTailscaleServeManager(opts: TailscaleServeManagerOptions): TailscaleServeManager {
   const exec = opts.exec ?? defaultTailscaleExec
@@ -130,8 +131,17 @@ async function checkRunning(exec: TailscaleExec): Promise<{ ok: true } | { ok: f
   return { ok: true }
 }
 
+// `tailscale` on PATH is tried first everywhere; the platform-specific absolute
+// path is a fallback for GUI installs that leave the CLI off PATH (the macOS app
+// bundle, the Windows default install dir).
+export function tailscaleCandidates(platform: NodeJS.Platform = process.platform): string[] {
+  if (isMacOS(platform)) return ['tailscale', MACOS_APP_CLI]
+  if (isWindows(platform)) return ['tailscale', WINDOWS_CLI]
+  return ['tailscale']
+}
+
 export const defaultTailscaleExec: TailscaleExec = async (args) => {
-  const candidates = isMacOS() ? ['tailscale', MACOS_APP_CLI] : ['tailscale']
+  const candidates = tailscaleCandidates()
   let lastError = 'tailscale command not found'
 
   for (const candidate of candidates) {

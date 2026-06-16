@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
-import { createTailscaleServeManager, type TailscaleExec, type TailscaleServeEvent } from './tailscale'
+import {
+  createTailscaleServeManager,
+  tailscaleCandidates,
+  type TailscaleExec,
+  type TailscaleServeEvent,
+} from './tailscale'
 
 type ExecCall = { args: string[] }
 
@@ -116,5 +121,23 @@ describe('createTailscaleServeManager', () => {
         reason: 'serve failed',
       },
     ])
+  })
+})
+
+describe('tailscaleCandidates', () => {
+  test('macOS includes the app-bundle CLI fallback after PATH', () => {
+    const candidates = tailscaleCandidates('darwin')
+    expect(candidates[0]).toBe('tailscale')
+    expect(candidates.some((c) => c.includes('Tailscale.app'))).toBe(true)
+  })
+
+  test('Windows includes the default install path fallback after PATH', () => {
+    const candidates = tailscaleCandidates('win32')
+    expect(candidates[0]).toBe('tailscale')
+    expect(candidates.some((c) => c.toLowerCase().endsWith('tailscale.exe'))).toBe(true)
+  })
+
+  test('Linux uses PATH only', () => {
+    expect(tailscaleCandidates('linux')).toEqual(['tailscale'])
   })
 })
