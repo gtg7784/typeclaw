@@ -24,18 +24,18 @@ For sessions that already contain oversized tool results from before this plugin
   "tool-result-cap": {
     "enabled": true,
     "imageMaxBytes": 262144,
-    "textMaxBytes": 65536,
+    "textMaxBytes": 32768,
     "exemptTools": []
   }
 }
 ```
 
-| Field                           | Default  | Effect                                                                                                                                                                                                                                                                                   |
-| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool-result-cap.enabled`       | `true`   | Master switch. When `false`, the plugin returns no hooks at all and tool results pass through untouched.                                                                                                                                                                                 |
-| `tool-result-cap.imageMaxBytes` | `262144` | Maximum size (in bytes of the base64 string, not the decoded binary) for any `{type:"image"}` part in a tool result. Parts above this are replaced with a short text placeholder naming the original mime type and size. Default is ~256KB of base64 ≈ ~190KB of binary. Minimum `1024`. |
-| `tool-result-cap.textMaxBytes`  | `65536`  | Maximum length (in characters) for any `{type:"text"}` part. Parts above this are truncated: the first `textMaxBytes` characters are kept (so the LLM sees the shape of the output), and an elision marker is appended naming the byte count dropped. Minimum `1024`.                    |
-| `tool-result-cap.exemptTools`   | `[]`     | List of tool names to skip entirely. Use when a specific tool genuinely needs to return large payloads and you can absorb the per-turn cost.                                                                                                                                             |
+| Field                           | Default  | Effect                                                                                                                                                                                                                                                                                               |
+| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool-result-cap.enabled`       | `true`   | Master switch. When `false`, the plugin returns no hooks at all and tool results pass through untouched.                                                                                                                                                                                             |
+| `tool-result-cap.imageMaxBytes` | `262144` | Maximum size (in bytes of the base64 string, not the decoded binary) for any `{type:"image"}` part in a tool result. Parts above this are replaced with a short text placeholder naming the original mime type and size. Default is ~256KB of base64 ≈ ~190KB of binary. Minimum `1024`.             |
+| `tool-result-cap.textMaxBytes`  | `32768`  | Maximum length (in characters) for any `{type:"text"}` part. Parts above this are truncated: the first `textMaxBytes` characters are kept (so the LLM sees the shape of the output), and an elision marker is appended naming the byte count dropped. Default is ~32KB ≈ ~8K tokens. Minimum `1024`. |
+| `tool-result-cap.exemptTools`   | `[]`     | List of tool names to skip entirely. Use when a specific tool genuinely needs to return large payloads and you can absorb the per-turn cost.                                                                                                                                                         |
 
 All fields are **restart-required** — the plugin reads them once at boot.
 

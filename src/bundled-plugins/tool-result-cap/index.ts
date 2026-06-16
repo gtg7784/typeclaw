@@ -5,7 +5,7 @@ import { definePlugin } from '@/plugin'
 import { type CapOptions, capToolResult } from './cap-result'
 
 const DEFAULT_IMAGE_MAX_BYTES = 262_144
-const DEFAULT_TEXT_MAX_BYTES = 65_536
+const DEFAULT_TEXT_MAX_BYTES = 32_768
 const MIN_IMAGE_MAX_BYTES = 1_024
 const MIN_TEXT_MAX_BYTES = 1_024
 
