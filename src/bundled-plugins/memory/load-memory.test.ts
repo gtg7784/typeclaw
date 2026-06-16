@@ -14,6 +14,7 @@ import {
 } from './load-memory'
 import type { TopicShard } from './load-shards'
 import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import { headingToSlug } from './slug'
 import type { StreamEvent } from './stream-events'
 
 const TS = '2026-05-16T12:00:00.000Z'
@@ -452,6 +453,17 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     expect(section).toContain('- 포멀한 한국어를 선호 `kakaotalk-korean-formality`')
   })
 
+  test('keeps a non-Latin heading even when its slug is the headingToSlug untitled fallback', () => {
+    const fallbackSlug = headingToSlug('한글 메모', new Set())
+    const koreanItems: RetrievedMemoryItem[] = [
+      { source: 'topic', key: fallbackSlug, heading: '한글 메모', excerpt: 'body' },
+    ]
+
+    const section = renderRetrievedMemorySection(koreanItems, { origin: channelOrigin })
+
+    expect(section).toContain(`- 한글 메모 \`${fallbackSlug}\``)
+  })
+
   test('channel directive names both the topic-lookup and query-search calls', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
@@ -546,5 +558,13 @@ describe('renderTopicIndexMemorySection (headings fallback)', () => {
     const section = renderTopicIndexMemorySection([shard('kakaotalk-korean-formality', '포멀한 한국어를 선호')])
 
     expect(section).toContain('- 포멀한 한국어를 선호 `kakaotalk-korean-formality`')
+  })
+
+  test('keeps a non-Latin heading even when its slug is the headingToSlug untitled fallback', () => {
+    const fallbackSlug = headingToSlug('한글 메모', new Set())
+
+    const section = renderTopicIndexMemorySection([shard(fallbackSlug, '한글 메모')])
+
+    expect(section).toContain(`- 한글 메모 \`${fallbackSlug}\``)
   })
 })

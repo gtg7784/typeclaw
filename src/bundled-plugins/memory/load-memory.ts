@@ -6,7 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
-import { headingToSlug } from './slug'
+import { slugIsHeadingEcho } from './slug'
 import type { DedupedRetrievedItem } from './turn-dedup'
 
 const MAX_FILE_BYTES = 12 * 1024
@@ -156,15 +156,14 @@ export function renderTopicIndexMemorySection(
   return lines.join('\n').trimEnd()
 }
 
-// A topic-index line names a topic for the model to decide whether to open it
-// (the slug is the `memory_search({ topic })` key). When the heading is just a
-// title-cased echo of the slug it adds no signal, so drop it and render the slug
-// alone. Keep both only when they diverge — the heading then carries a facet the
-// kebab slug dropped (e.g. `gh-api-labels-array-syntax` vs "GitHub API label
-// management in the agent environment"), and a non-Latin heading never echoes its
-// (ASCII-only) slug, so its readable form is always retained.
+// A topic-index line names a topic so the model can decide whether to open it
+// (the slug is the `memory_search({ topic })` key). When the slug is just a kebab
+// echo of the heading the heading adds no signal, so render the slug alone; keep
+// both when they diverge (e.g. `gh-api-labels-array-syntax` vs "GitHub API label
+// management in the agent environment") or when the heading has no ASCII form
+// (e.g. CJK), where `slugIsHeadingEcho` returns false and the readable name stays.
 function topicIndexEntry(heading: string, slug: string): string {
-  if (headingToSlug(heading, new Set<string>()) === slug) {
+  if (slugIsHeadingEcho(heading, slug)) {
     return `- \`${slug}\``
   }
   return `- ${heading} \`${slug}\``

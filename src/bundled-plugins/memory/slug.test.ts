@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { headingToSlug, isValidSlug, SLUG_REGEX } from './slug'
+import { headingToSlug, isValidSlug, slugIsHeadingEcho, SLUG_REGEX } from './slug'
 
 describe('headingToSlug', () => {
   it('lowercases and replaces spaces with dashes', () => {
@@ -56,6 +56,28 @@ describe('headingToSlug', () => {
   it('deduplicates when slug is added to set between calls', () => {
     const existing = new Set<string>(['bar'])
     expect(headingToSlug('Bar', existing)).toBe('bar-2')
+  })
+})
+
+describe('slugIsHeadingEcho', () => {
+  it('is true when the slug is the kebab echo of the heading', () => {
+    expect(slugIsHeadingEcho('PR review checkout workflow', 'pr-review-checkout-workflow')).toBe(true)
+  })
+
+  it('is false when the heading carries a facet the slug dropped', () => {
+    expect(
+      slugIsHeadingEcho('GitHub API label management in the agent environment', 'gh-api-labels-array-syntax'),
+    ).toBe(false)
+  })
+
+  it('is false for an all-CJK heading even against its own untitled fallback slug', () => {
+    const fallbackSlug = headingToSlug('한글 메모', new Set())
+    expect(slugIsHeadingEcho('한글 메모', fallbackSlug)).toBe(false)
+  })
+
+  it('is false for an emoji-only heading against its own untitled fallback slug', () => {
+    const fallbackSlug = headingToSlug('🎉🎊', new Set())
+    expect(slugIsHeadingEcho('🎉🎊', fallbackSlug)).toBe(false)
   })
 })
 

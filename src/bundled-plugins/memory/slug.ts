@@ -20,6 +20,19 @@ export function headingToSlug(heading: string, existingSlugs: Set<string>): stri
   return slug
 }
 
+// True only when `slug` is a clean kebab echo of `heading` (the readable form
+// adds nothing the slug doesn't). A heading with no ASCII/kebab form (all-CJK,
+// emoji, pure punctuation) normalizes to empty and `headingToSlug` substitutes a
+// deterministic `untitled-<hash>`; a shard carrying exactly that fallback slug
+// would satisfy the round-trip equality and wrongly collapse away the only
+// human-readable name, so an empty normalization is never an echo.
+export function slugIsHeadingEcho(heading: string, slug: string): boolean {
+  if (normalizeHeading(heading).length === 0) {
+    return false
+  }
+  return headingToSlug(heading, new Set<string>()) === slug
+}
+
 function normalizeHeading(heading: string): string {
   let normalized = heading.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
