@@ -37,6 +37,7 @@ import {
   isGraceWorthReusing,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
+  OBSERVED_MESSAGE_MAX_CHARS,
   SESSION_GRACE_HARD_TTL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
@@ -1098,6 +1099,51 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(prompt).toContain('Current message')
     expect(prompt).toContain('<@alice> (alice): hey bot')
     expect(prompt.indexOf('unrelated')).toBeLessThan(prompt.indexOf('hey bot'))
+  })
+
+  test('caps observed Recent-context message text but never the addressed current message', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    const longObserved = 'A'.repeat(OBSERVED_MESSAGE_MAX_CHARS + 500)
+    const longCurrent = 'B'.repeat(OBSERVED_MESSAGE_MAX_CHARS + 500)
+    await router.route(inbound({ isBotMention: false, authorId: 'bob', authorName: 'bob', text: longObserved }))
+    await router.route(inbound({ text: longCurrent }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    // observed (awareness-only) message is truncated to the cap with a marker
+    expect(prompt).toContain('[…truncated]')
+    expect(prompt).toContain('A'.repeat(OBSERVED_MESSAGE_MAX_CHARS))
+    expect(prompt).not.toContain('A'.repeat(OBSERVED_MESSAGE_MAX_CHARS + 1))
+    // the addressed current message is preserved in full
+    expect(prompt).toContain(longCurrent)
+  })
+
+  test('truncates observed text on whole code points, never splitting a surrogate pair', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // each 😀 is one code point but two UTF-16 code units, so a code-unit slice
+    // at the cap would leave a dangling surrogate half
+    const emoji = '😀'.repeat(OBSERVED_MESSAGE_MAX_CHARS + 100)
+    await router.route(inbound({ isBotMention: false, authorId: 'bob', authorName: 'bob', text: emoji }))
+    await router.route(inbound({ text: 'hey bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('[…truncated]')
+    expect(prompt).not.toContain('\uFFFD')
+    // exactly the cap worth of whole emoji survives — a code-unit split would
+    // break this contiguous-emoji substring with a dangling surrogate
+    expect(prompt).toContain('😀'.repeat(OBSERVED_MESSAGE_MAX_CHARS))
+    expect(prompt).not.toContain('😀'.repeat(OBSERVED_MESSAGE_MAX_CHARS + 1))
   })
 
   test('seeds the session.turn.start retrieval query with the pure user message, not recent context or framing', async () => {
