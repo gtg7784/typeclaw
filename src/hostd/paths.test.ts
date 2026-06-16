@@ -4,6 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import {
   ensureDirs,
   homeRoot,
@@ -35,8 +37,9 @@ describe('paths', () => {
     expect(homeRoot()).toBe(home)
   })
 
-  test('all daemon paths land under TYPECLAW_HOME', () => {
-    expect(socketPath()).toBe(join(home, 'run', 'hostd.sock'))
+  test('daemon paths reflect platform IPC and TYPECLAW_HOME storage', () => {
+    if (isWindows()) expect(socketPath()).toMatch(/^\\\\\.\\pipe\\typeclaw-hostd-[a-f0-9]{32}$/)
+    else expect(socketPath()).toBe(join(home, 'run', 'hostd.sock'))
     expect(pidfilePath()).toBe(join(home, 'run', 'hostd.pid'))
     expect(lockfilePath()).toBe(join(home, 'run', 'hostd.lock'))
     expect(logfilePath()).toBe(join(home, 'log', 'hostd.log'))
