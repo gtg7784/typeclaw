@@ -520,11 +520,13 @@ const MORPHEME_PATTERNS: readonly RegExp[] = [
 // far too broad to match, so this keys on します specifically. Two request/greeting
 // idioms end in します without being work intent — お願い(いた)します ("please") and
 // 失礼します ("excuse me") — and are stripped before the test so they don't fire.
-// The (?!か) lookahead drops question forms (どうしますか "what should I do?",
-// 更新しますか "shall I update?"): a question awaits the user, it is not a
-// commitment to act this turn.
+// The (?![か？?]) lookahead drops question forms — both the か question particle
+// (どうしますか "what should I do?") and a trailing question mark, fullwidth ？ or
+// ASCII ? (どうします？, 更新します？ "shall I update?"). A question awaits the user;
+// it is not a commitment to act this turn. A statement keeps its 。/, so
+// 更新します。 still matches.
 const JA_VOLITIONAL_IDIOMS = /お願い(?:いた)?します|失礼します/g
-const JA_VOLITIONAL = /します(?!か)|してみます(?!か)/
+const JA_VOLITIONAL = /します(?![か？?])|してみます(?![か？?])/
 
 // Reply texts shorter than this are almost always a complete final answer
 // ("네", "ok", "done") where a partial match would be noise. The shortest

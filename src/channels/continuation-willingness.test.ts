@@ -179,6 +179,8 @@ describe('detectContinuationWillingness — negative (multilingual final / descr
     'よろしくお願いいたします。',
     '失礼します。',
     'どうしますか？',
+    'どうします？',
+    '更新します？',
   ]
 
   for (const text of notWilling) {
