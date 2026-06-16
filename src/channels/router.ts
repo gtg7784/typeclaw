@@ -97,6 +97,11 @@ export const MAX_DEBOUNCE_MS = 4000
 export const HOT_THRESHOLD_MS = 3000
 export const MAX_CONSECUTIVE_ABORTS = 3
 export const CONTEXT_BUFFER_SIZE = 20
+// Observed ("Recent context") messages are awareness-only and replayed in full
+// on every turn (uncached), so one long paste would otherwise re-bloat every
+// subsequent turn until it ages out. Cap each observed message's text; the
+// addressed current message is never capped (it's the actual request).
+export const OBSERVED_MESSAGE_MAX_CHARS = 800
 // Discord's typing indicator expires after ~10s; an 8s heartbeat keeps it
 // continuously visible while we debounce + generate without spamming the API.
 export const TYPING_HEARTBEAT_MS = 8000
@@ -4462,7 +4467,7 @@ function composeTurnPrompt(
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(formatInboundPromptLines(o, adapter))
+      parts.push(formatInboundPromptLines(o, adapter, OBSERVED_MESSAGE_MAX_CHARS))
     }
     parts.push('')
   }
@@ -4521,10 +4526,12 @@ function formatAuthorLine(
   authorName: string,
   authorIsBot: boolean,
   text: string,
+  maxChars?: number,
 ): string {
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
-  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${text}`
+  const body = maxChars !== undefined && text.length > maxChars ? `${text.slice(0, maxChars)} […truncated]` : text
+  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${body}`
 }
 
 function formatInboundPromptLines(
@@ -4537,10 +4544,19 @@ function formatInboundPromptLines(
     referenceContext?: InboundReferenceContext
   },
   adapter: AdapterId,
+  maxTextChars?: number,
 ): string {
   const lines = inbound.referenceContext?.sources.map(renderQuoteAnchor) ?? []
   lines.push(
-    formatAuthorLine(inbound.ts, adapter, inbound.authorId, inbound.authorName, inbound.authorIsBot, inbound.text),
+    formatAuthorLine(
+      inbound.ts,
+      adapter,
+      inbound.authorId,
+      inbound.authorName,
+      inbound.authorIsBot,
+      inbound.text,
+      maxTextChars,
+    ),
   )
   return lines.join('\n')
 }
