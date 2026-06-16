@@ -338,16 +338,16 @@ async function runExec(job: ExecJob, cwd: string): Promise<void> {
   const proc = Bun.spawn({
     cmd: [cmd, ...args],
     cwd,
-    stdout: 'pipe',
+    stdout: 'ignore',
     stderr: 'pipe',
     env: {
       ...process.env,
       TYPECLAW_PARENT_ORIGIN_JSON: JSON.stringify(parentOrigin),
     },
   })
-  const code = await proc.exited
+  const stderrText = new Response(proc.stderr).text()
+  const [code, stderr] = await Promise.all([proc.exited, stderrText])
   if (code !== 0) {
-    const stderr = await new Response(proc.stderr).text()
     throw new Error(`exec job ${job.id} exited with code ${code}: ${stderr.trim() || 'no stderr'}`)
   }
 }
