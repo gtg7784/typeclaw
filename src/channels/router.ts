@@ -111,13 +111,18 @@ export const TYPING_HEARTBEAT_MS = 8000
 // turns a temporary status into a permanent-looking artifact.
 //
 // The cap is measured from `live.typingStartedAt`, which is refreshed by
-// two signals of life (see `bumpTypingActivity`):
+// these signals of life (see `bumpTypingActivity`):
 //   1. Each new `drain()` iteration (a new turn is starting).
 //   2. Each `tool_execution_end` from the agent session (a tool just
 //      completed — the prompt is progressing, not stuck).
-// A 2-minute bash command that emits no intermediate events still trips
-// the cap, but a chatty agent running long tools stays under it
-// indefinitely. The cap exists to catch *silence*, not duration.
+//   3. Each streaming token (`message_update` carrying a `text_delta` or
+//      `thinking_delta`) — the model is actively generating, even on a
+//      pure-text reply that calls no tools.
+// Signal 3 is what keeps a long conversational reply (no tool calls, just
+// minutes of streamed text or extended thinking) under the cap: without it,
+// such a turn emits no `tool_execution_end` and the indicator was paused
+// mid-generation. A genuinely stuck model call — no tokens, no tools — still
+// trips the cap. The cap exists to catch *silence*, not duration.
 export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 
 // Idle GC: a LiveSession whose `lastInboundAt` is older than
@@ -1888,8 +1893,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const subscribeTypingActivity = (session: AgentSession, live: LiveSession): (() => void) => {
     return session.subscribe((event) => {
-      if (event.type !== 'tool_execution_end') return
-      bumpTypingActivity(live)
+      if (event.type === 'tool_execution_end') {
+        bumpTypingActivity(live)
+        return
+      }
+      if (event.type !== 'message_update') return
+      const streamed = event.assistantMessageEvent.type
+      if (streamed === 'text_delta' || streamed === 'thinking_delta') {
+        bumpTypingActivity(live)
+      }
     })
   }
 
