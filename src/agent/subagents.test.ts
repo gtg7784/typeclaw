@@ -1038,6 +1038,159 @@ describe('startSubagent', () => {
     }
   })
 
+  function scriptedResearcherSession(turns: { role?: string; content: unknown }[][]): {
+    session: AgentSession
+    prompts: string[]
+  } {
+    const prompts: string[] = []
+    let listener: ((event: unknown) => void) | null = null
+    let turnIndex = 0
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text)
+        const messages = turns[turnIndex] ?? []
+        turnIndex++
+        for (const message of messages) listener?.({ type: 'message_end', message })
+      },
+      dispose: () => {},
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+    return { session, prompts }
+  }
+
+  async function runResearcher(turns: { role?: string; content: unknown }[][]) {
+    const { session, prompts } = scriptedResearcherSession(turns)
+    const registry = { researcher: { systemPrompt: 'X' } satisfies Subagent }
+    const { completion } = startSubagent('researcher', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_researcher',
+    })
+    const result = await completion
+    return { result, prompts }
+  }
+
+  function wedgeAfterEmitting(content: string): AgentSession {
+    let listener: ((event: unknown) => void) | null = null
+    return {
+      prompt: () =>
+        new Promise<void>(() => {
+          listener?.({ type: 'message_end', message: { role: 'assistant', content } })
+        }),
+      dispose: () => {},
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+  }
+
+  test('researcher: a <report> on the first turn is returned with no recovery nudge', async () => {
+    const report = '<report>\n<summary>done</summary>\n</report>'
+    const { result, prompts } = await runResearcher([
+      [{ role: 'assistant', content: `Writing it now.\n${report}\nFinished.` }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(report)
+    expect(prompts).toHaveLength(1)
+  })
+
+  test('researcher: the last <report> block wins within a turn', async () => {
+    const stale = '<report>\n<confidence>low</confidence>\n</report>'
+    const revised = '<report>\n<confidence>high</confidence>\n</report>'
+    const { result, prompts } = await runResearcher([[{ role: 'assistant', content: `${stale}\n${revised}` }]])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(revised)
+    expect(prompts).toHaveLength(1)
+  })
+
+  test('researcher: ends with <analysis> but no <report> → recovers on the nudge (guard, not loud failure)', async () => {
+    const report = '<report>\n<summary>recovered</summary>\n</report>'
+    const { result, prompts } = await runResearcher([
+      [{ role: 'assistant', content: '<analysis>\nplan\n</analysis>' }],
+      [{ role: 'assistant', content: report }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(report)
+    expect(prompts).toHaveLength(2) // initial + one recovery nudge
+  })
+
+  test('researcher: the recovery nudge asks for the <report> as text and forbids tools', async () => {
+    const { prompts } = await runResearcher([
+      [{ role: 'assistant', content: '<analysis>\nplan\n</analysis>' }],
+      [{ role: 'assistant', content: '<report>\n<summary>ok</summary>\n</report>' }],
+    ])
+    expect(prompts[1]).toContain('<report>')
+    expect(prompts[1]).toContain('Do NOT call any tools')
+    expect(prompts[1]).toContain('write_report')
+  })
+
+  test('researcher: exhausting the nudge budget installs an honest fallback <report> (not stale preamble, not loud failure)', async () => {
+    const analysis = '<analysis>\n**Literal Request**: ...\n</analysis>'
+    const { result, prompts } = await runResearcher([
+      [{ role: 'assistant', content: analysis }],
+      [{ role: 'assistant', content: 'still working, no block yet' }],
+      [{ role: 'assistant', content: 'still no block' }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true (guard, not loud failure), got error: ${result.error}`)
+    expect(prompts).toHaveLength(3) // initial + 2 nudges (MAX_REQUIRED_BLOCK_RETRIES)
+    expect(result.finalMessage).toContain('<report>')
+    expect(result.finalMessage).toContain('could not complete')
+    expect(result.finalMessage).toContain('low')
+    expect(result.finalMessage).not.toContain('<analysis>')
+  })
+
+  test('researcher: a timeout after a <report> was captured rides the report along (recoverable near-miss)', async () => {
+    const report = '<report>\n<summary>done before the ceiling</summary>\n</report>'
+    const registry = { researcher: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+    const { completion } = startSubagent('researcher', {
+      registry,
+      createSessionForSubagent: async () => wedgeAfterEmitting(report),
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_researcher_timeout',
+    })
+    const result = await completion
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('timed out')
+      expect(result.finalMessage).toBe(report)
+    }
+  })
+
+  test('researcher: a timeout with only an <analysis> preamble captured has no recoverable report', async () => {
+    const registry = { researcher: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+    const { completion } = startSubagent('researcher', {
+      registry,
+      createSessionForSubagent: async () => wedgeAfterEmitting('<analysis>\nplan\n</analysis>'),
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_researcher_timeout_norecover',
+    })
+    const result = await completion
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.finalMessage).toBeUndefined()
+    }
+  })
+
+  test('a <report> block from a non-researcher subagent is not specially extracted (returned as free-form text)', async () => {
+    const withReport = 'Here is my answer.\n<report>\n<summary>x</summary>\n</report>'
+    const final = await captureFinal([{ role: 'assistant', content: withReport }])
+    expect(final).toBe(withReport)
+  })
+
   test('without timeoutMs a slow prompt keeps completion pending (legacy unbounded behavior preserved)', async () => {
     // given: a session whose prompt has not resolved yet, and no timeout declared
     let resolvePrompt: () => void = () => {}

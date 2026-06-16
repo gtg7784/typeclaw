@@ -241,6 +241,11 @@ export type InvokeSubagentOptions = {
     sessionId: string | undefined
     abort: () => Promise<void>
   }) => void
+  // Sink for the subagent's captured final message (a reviewer `<review>` block,
+  // a researcher `<report>` block, or the last free-form assistant text).
+  // `runSession` owns the capture so the required-block guard can re-prompt
+  // before the result settles; `startSubagent` passes this to receive the output.
+  onFinalMessageCaptured?: (msg: string) => void
 }
 
 export async function invokeSubagent(name: string, options: InvokeSubagentOptions): Promise<void> {
@@ -261,6 +266,8 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
       normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
     let aborted = false
     let drainWatch: SubagentDrainWatch | undefined
+    const requiredBlockTag = REQUIRED_FINAL_BLOCK[name]
+    const capture = attachFinalMessageCapture(session, requiredBlockTag, options.onFinalMessageCaptured ?? (() => {}))
     if (options.onSessionCreated !== undefined) {
       options.onSessionCreated({
         session,
@@ -311,6 +318,28 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           },
           cancelled: () => aborted,
         })
+      }
+      // Required-block guard (mirrors the channel empty-response guard): a subagent
+      // that owes a result block but ended without one gets a bounded re-prompt to
+      // emit it as text, then an honest fallback — never a silent stale-preamble
+      // result or a loud failure. Runs strictly after the drain settles so it is a
+      // final contract-repair pass, not another research phase; it deliberately
+      // does NOT re-run the drain.
+      if (requiredBlockTag !== undefined) {
+        for (
+          let attempt = 1;
+          !aborted && !capture.hasRequiredBlock() && attempt <= MAX_REQUIRED_BLOCK_RETRIES;
+          attempt++
+        ) {
+          console.warn(
+            `[subagent] ${name} required_block_retry attempt=${attempt}/${MAX_REQUIRED_BLOCK_RETRIES} tag=${requiredBlockTag}`,
+          )
+          await session.prompt(`${renderTurnTimeAnchor()}\n\n${renderRequiredBlockRetryNudge(requiredBlockTag)}`)
+        }
+        if (!aborted && !capture.hasRequiredBlock()) {
+          console.warn(`[subagent] ${name} required_block_fallback tag=${requiredBlockTag}`)
+          capture.setSyntheticFinalMessage(renderMissingRequiredBlockFallback(name, requiredBlockTag))
+        }
       }
       if (hooks && sessionId !== undefined) {
         await hooks.runSessionIdle({
@@ -432,6 +461,9 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
 
   const work = invokeSubagent(name, {
     ...options,
+    onFinalMessageCaptured: (msg) => {
+      finalMessage = msg
+    },
     onSessionCreated: (event) => {
       handleSettled = true
       abortSession = event.abort
@@ -439,9 +471,6 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
       if (options.onSession !== undefined) {
         options.onSession(event)
       }
-      attachFinalMessageCapture(event.session, (msg) => {
-        finalMessage = msg
-      })
     },
   })
     .then(() => ({ ok: true as const, ...(finalMessage !== undefined ? { finalMessage } : {}) }))
@@ -497,22 +526,102 @@ function raceSubagentCompletion(
   })
 }
 
-// A complete <review>...</review> block. The reviewer's contract is that this
-// block IS its result; same-message preamble/trailing chatter or a later
-// summary turn must not become the captured final message. `[\s\S]` spans
-// newlines (the block is multi-line); non-greedy stops at the first close so an
-// incidental `<review>` literal in reviewed text cannot swallow real content.
-// Global so a message with several blocks yields the last (the revision).
-const REVIEW_BLOCK_RE = /<review>[\s\S]*?<\/review>/g
+// The tags a subagent can use to wrap its structured result: the reviewer's
+// `<review>`, the researcher's `<report>`. Fixed literals — never user input —
+// so the per-tag patterns below are injection-safe.
+type FinalBlockTag = 'review' | 'report'
 
-function lastReviewBlock(text: string): string | null {
-  const matches = text.match(REVIEW_BLOCK_RE)
+// A complete <TAG>...</TAG> block. The block IS the result: same-message
+// preamble/trailing chatter or a later summary turn must not become the captured
+// final message. `[\s\S]` spans newlines (the block is multi-line); non-greedy
+// stops at the first close so an incidental `<TAG>` literal in the wrapped text
+// cannot swallow real content. Global so a message with several blocks yields the
+// last (the revision).
+const FINAL_BLOCK_RE: Readonly<Record<FinalBlockTag, RegExp>> = {
+  review: /<review>[\s\S]*?<\/review>/g,
+  report: /<report>[\s\S]*?<\/report>/g,
+}
+
+function lastTaggedBlock(text: string, tag: FinalBlockTag): string | null {
+  const matches = text.match(FINAL_BLOCK_RE[tag])
   return matches === null ? null : (matches[matches.length - 1] ?? null)
 }
 
-function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
+// Subagents whose result IS a REQUIRED tagged block — the parent must receive
+// that block or a loud failure, never a stale earlier turn. The researcher's
+// contract (src/bundled-plugins/researcher/researcher.ts) mandates a closing
+// `<report>` block; when an upstream provider retry loop ends the run on
+// unexecuted `write_report` tool calls, the researcher never emits it, and
+// without this gate the capture would silently return its earlier `<analysis>`
+// preamble as a "successful" result — the production regression this guards.
+// Keyed by the stable bundled-subagent registry name. This is STRICTER than the
+// reviewer's `<review>` (preferred, but falls back to free-form text): only the
+// subagents listed here fail loud when their block is absent.
+const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { researcher: 'report' }
+
+// Bounded re-prompt budget for the required-block guard, mirroring the channel
+// empty-response guard's MAX_EMPTY_TURN_RETRIES. A subagent that owes a result
+// block but ended without one is nudged at most this many times before the
+// honest fallback is installed.
+const MAX_REQUIRED_BLOCK_RETRIES = 2
+
+// The recovery nudge. It MUST forbid tools: the known failure mode is a provider
+// retry loop on the report-writing tool call, so re-driving the tool path would
+// just re-trigger the loop. Asking for the block as plain text is the repair.
+function renderRequiredBlockRetryNudge(tag: FinalBlockTag): string {
+  return `---
+**[SYSTEM MESSAGE — not from a human]**
+
+Your previous turn ended without the required <${tag}> block. This is an automated runtime recovery signal, not a human message.
+
+Emit the final <${tag}>...</${tag}> block NOW as plain assistant text. Do NOT call any tools — in particular do NOT call write_report. Do NOT continue researching or spawn more subagents.
+
+If the report file was not successfully written, still emit the block: set <report_file>none</report_file>, <confidence>low</confidence> (explain the report artifact was not completed), and note in <open_questions> that the run should be retried.
+
+Output exactly one <${tag}> block and nothing else.`
+}
+
+// The terminal graceful fallback when the nudges are exhausted. It fabricates NO
+// findings — only a structured, low-confidence "could not complete" notice — so
+// the parent gets a usable result instead of stale `<analysis>` or a hard error.
+function renderMissingRequiredBlockFallback(name: string, tag: FinalBlockTag): string {
+  if (tag === 'report') {
+    return `<report>
+<summary>
+The ${name} subagent could not complete a research report in this run: it ended without emitting the required <report> block (a known cause is the report tool not completing). Do not treat any earlier analysis text as findings — rerun the researcher or gather the sources directly if the answer is still needed.
+</summary>
+<report_file>
+none
+</report_file>
+<confidence>
+low — no complete research report artifact was produced.
+</confidence>
+<open_questions>
+The original research request remains unresolved; rerun the ${name} subagent or gather the sources directly.
+</open_questions>
+</report>`
+  }
+  return `<${tag}>\nThe ${name} subagent ended without emitting the required <${tag}> block and could not recover; rerun it or inspect the transcript.\n</${tag}>`
+}
+
+type SubagentCapture = {
+  // True once a required-block subagent (researcher) has emitted its `<report>`
+  // block; always false for subagents without a required block.
+  hasRequiredBlock: () => boolean
+  // Install a captured final message directly — used by the required-block guard
+  // to set an honest fallback when the block was never emitted, so the parent
+  // gets a structured result rather than stale preamble.
+  setSyntheticFinalMessage: (msg: string) => void
+}
+
+function attachFinalMessageCapture(
+  session: AgentSession,
+  requiredBlockTag: FinalBlockTag | undefined,
+  onFinalMessage: (msg: string) => void,
+): SubagentCapture {
   let lastAssistant: string | null = null
   let lastReview: string | null = null
+  let lastRequired: string | null = null
   try {
     session.subscribe((event: unknown) => {
       const ev = event as { type?: string; message?: { role?: string; content?: unknown } }
@@ -524,13 +633,36 @@ function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: 
       const text = extractFinalMessageText(ev.message?.content)
       if (text === null) return
       lastAssistant = text
-      const review = lastReviewBlock(text)
+
+      // Required-block contract (researcher): the result IS the block. A turn
+      // with text but no block — the `<analysis>` preamble, a process narrative —
+      // must NOT become the captured result, so `hasRequiredBlock` stays false and
+      // the guard in runSession re-prompts rather than returning stale preamble.
+      if (requiredBlockTag !== undefined) {
+        const block = lastTaggedBlock(text, requiredBlockTag)
+        if (block !== null) {
+          lastRequired = block
+          onFinalMessage(lastRequired)
+        }
+        return
+      }
+
+      // Preferred-block contract (reviewer) / free-form: a `<review>` block wins
+      // when present; otherwise the last free-form assistant text is the result.
+      const review = lastTaggedBlock(text, 'review')
       if (review !== null) lastReview = review
       onFinalMessage(lastReview ?? lastAssistant)
     })
   } catch {
     // session.subscribe is a stable upstream API; defensive try is for test
     // doubles that don't implement it.
+  }
+  return {
+    hasRequiredBlock: () => lastRequired !== null,
+    setSyntheticFinalMessage: (msg) => {
+      lastRequired = msg
+      onFinalMessage(msg)
+    },
   }
 }
 
