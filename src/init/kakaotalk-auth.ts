@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path'
+import { join, posix, resolve } from 'node:path'
 
 import { loginFlow as upstreamLoginFlow } from 'agent-messenger/kakaotalk'
 
@@ -34,7 +34,7 @@ export type LoginFlowOptions = Parameters<LoginFlowFn>[0]
 export type LoginFlowResult = Awaited<ReturnType<LoginFlowFn>>
 
 export function kakaotalkConfigDir(agentDir: string): string {
-  return join(agentDir, 'workspace', '.agent-messenger')
+  return posix.join(agentDir, 'workspace', '.agent-messenger')
 }
 
 export function kakaotalkSecretsPath(agentDir: string): string {
