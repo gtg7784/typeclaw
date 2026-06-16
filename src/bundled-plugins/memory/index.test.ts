@@ -21,8 +21,9 @@ import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { formatLocalDate } from '@/shared'
 
 import { renderShard } from './frontmatter'
-import memoryPlugin from './index'
+import memoryPlugin, { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
 import { streamFilePath, topicShardPath, topicsDir } from './paths'
+import { VectorStore } from './vector/store'
 
 // Fake timers replace ~10s of real setTimeout waits used to exercise the idle
 // debouncer and spawn-timeout race. Date is included in `toFake` so the
@@ -127,6 +128,7 @@ async function bootMemoryPlugin(
   // tests that detach the spawn can distinguish "spawn was kicked off" from
   // "spawn completed". `spawned` records the post-delay completion.
   const started: { name: string; payload: unknown; options: unknown }[] = []
+  const memoryPlugin = createMemoryPluginWithStoreCapture()
   const parsed = memoryPlugin.configSchema!.safeParse(rawConfig)
   if (!parsed.success) throw new Error(`config invalid: ${parsed.error.message}`)
   const spawnDelayMs = options.spawnDelayMs ?? 0
@@ -150,7 +152,19 @@ async function bootMemoryPlugin(
   return { exports, spawned, started, ctx }
 }
 
+function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps> = {}) {
+  return createMemoryPluginForTests({
+    ...overrides,
+    openAppendVectorStore: (dir) => {
+      const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
+      disposers.push(() => store.close())
+      return store
+    },
+  })
+}
+
 let agentDir: string
+let disposers: Array<() => Promise<void> | void>
 
 async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
   await mkdir(topicsDir(dir), { recursive: true })
@@ -162,9 +176,11 @@ async function writeTopic(dir: string, slug: string, heading: string, body: stri
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-plugin-'))
+  disposers = []
 })
 
 afterEach(async () => {
+  await Promise.all(disposers.map((dispose) => dispose()))
   await rm(agentDir, { recursive: true, force: true })
 })
 

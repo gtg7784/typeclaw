@@ -7,8 +7,9 @@ import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
-import { createMemoryPluginForTests } from './index'
+import { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
 import { topicShardPath, topicsDir } from './paths'
+import { VectorStore } from './vector/store'
 
 // Injected per plugin instance via the factory, NOT mock.module: a module-level
 // mock of './vector/hybrid' leaks into any sibling test that loads `./index` in
@@ -25,12 +26,15 @@ const hybridSearchMock = mock(async () => [
 ])
 
 let agentDir: string
+let disposers: Array<() => Promise<void> | void>
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-plugin-vector-'))
+  disposers = []
 })
 
 afterEach(async () => {
+  await Promise.all(disposers.map((dispose) => dispose()))
   await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
 })
 
@@ -257,7 +261,7 @@ describe('vector session.turn.start hook', () => {
   })
 
   test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
-    const memoryPlugin = createMemoryPluginForTests()
+    const memoryPlugin = createMemoryPluginWithStoreCapture()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
@@ -280,7 +284,7 @@ describe('vector session.turn.start hook', () => {
   })
 
   test('memory-logger subagent is created without onFragmentsAppended hook when vector.enabled is false', async () => {
-    const memoryPlugin = createMemoryPluginForTests()
+    const memoryPlugin = createMemoryPluginWithStoreCapture()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: false } })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
@@ -304,7 +308,7 @@ describe('vector session.turn.start hook', () => {
 })
 
 async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
-  const memoryPlugin = createMemoryPluginForTests({ hybridSearch: hybridSearchMock })
+  const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch: hybridSearchMock })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
@@ -325,7 +329,7 @@ async function bootVectorPluginWith(
   injectionBudgetBytes: number,
   logger = createPluginLogger('memory'),
 ) {
-  const memoryPlugin = createMemoryPluginForTests({ hybridSearch })
+  const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
@@ -339,6 +343,17 @@ async function bootVectorPluginWith(
     isBooted: () => true,
   })
   return memoryPlugin.plugin(ctx)
+}
+
+function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps> = {}) {
+  return createMemoryPluginForTests({
+    ...overrides,
+    openAppendVectorStore: (dir) => {
+      const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
+      disposers.push(() => store.close())
+      return store
+    },
+  })
 }
 
 function capturingLogger(infos: string[]) {

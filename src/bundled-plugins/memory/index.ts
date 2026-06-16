@@ -155,12 +155,17 @@ const VECTOR_TURN_TOP_K = 10
 // without loading the ~279 MB model, or `hybridSearch` to fake retrieval while
 // testing hook orchestration — without leaking state across other tests in the
 // same worker. Production uses the real `embed` and `hybridSearch`.
-type MemoryPluginDeps = {
+export type MemoryPluginDeps = {
   hybridSearch: typeof hybridSearch
   queryEmbedFn: EmbedFn
+  openAppendVectorStore: (agentDir: string) => VectorStore
 }
 
-const defaultDeps: MemoryPluginDeps = { hybridSearch, queryEmbedFn: embed }
+const defaultDeps: MemoryPluginDeps = {
+  hybridSearch,
+  queryEmbedFn: embed,
+  openAppendVectorStore: (agentDir) => VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db')),
+}
 
 // Builds the per-turn user-prompt memory block for a vector agent. Non-channel
 // turns always use top-K hybrid search, regardless of total shard size. Repeated
@@ -231,7 +236,7 @@ async function renderVectorTurnMemory(
   }
 }
 
-function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
+export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
   return definePlugin({
     configSchema: memoryConfigSchema,
     plugin: async (ctx) => {
@@ -401,9 +406,7 @@ function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
       }
 
       // Open a long-lived VectorStore for append-time indexing when vector is enabled.
-      const appendVectorStore = ctx.config.vector.enabled
-        ? VectorStore.open(join(ctx.agentDir, 'memory', '.vectors', 'index.db'))
-        : undefined
+      const appendVectorStore = ctx.config.vector.enabled ? deps.openAppendVectorStore(ctx.agentDir) : undefined
 
       return {
         subagents: {

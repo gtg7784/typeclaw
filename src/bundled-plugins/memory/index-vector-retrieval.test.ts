@@ -7,7 +7,7 @@ import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import { renderShard } from './frontmatter'
-import { createMemoryPluginForTests } from './index'
+import { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
 import { topicShardPath, topicsDir } from './paths'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
@@ -23,12 +23,15 @@ const DIMS = 8
 const QUERY = 'zzqxvtrprobe'
 
 let agentDir: string
+let disposers: Array<() => Promise<void> | void>
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-vector-retrieval-'))
+  disposers = []
 })
 
 afterEach(async () => {
+  await Promise.all(disposers.map((dispose) => dispose()))
   await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
 })
 
@@ -94,7 +97,7 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
 })
 
 async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
-  const memoryPlugin = createMemoryPluginForTests({ queryEmbedFn: queryAligned() })
+  const memoryPlugin = createMemoryPluginWithStoreCapture({ queryEmbedFn: queryAligned() })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
@@ -108,6 +111,17 @@ async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPlu
     isBooted: () => true,
   })
   return memoryPlugin.plugin(ctx)
+}
+
+function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps> = {}) {
+  return createMemoryPluginForTests({
+    ...overrides,
+    openAppendVectorStore: (dir) => {
+      const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
+      disposers.push(() => store.close())
+      return store
+    },
+  })
 }
 
 function hookCtx() {
