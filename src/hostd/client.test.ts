@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { createServer, type Server, type Socket as NetSocket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,7 +23,41 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
-type State = { buf: string }
+async function listen(server: Server, path: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('error', onError)
+      reject(error)
+    }
+    server.once('error', onError)
+    server.listen(path, () => {
+      server.off('error', onError)
+      resolve()
+    })
+  })
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+}
+
+async function startSocketServer(onRequest: (socket: NetSocket, req: Request) => void): Promise<Server> {
+  await mkdir(join(home, 'run'), { recursive: true })
+
+  const server = createServer((socket) => {
+    let buf = ''
+    socket.on('data', (chunk: Buffer) => {
+      buf += chunk.toString('utf8')
+      const newline = buf.indexOf('\n')
+      if (newline < 0) return
+      const line = buf.slice(0, newline)
+      onRequest(socket, JSON.parse(line) as Request)
+    })
+    socket.on('error', () => {})
+  })
+  await listen(server, socketPath())
+  return server
+}
 
 describe('isDaemonReachable', () => {
   test('returns false when no socket file exists', async () => {
@@ -36,29 +71,12 @@ describe('send', () => {
     expect(reply.ok).toBe(false)
   })
 
-  test('roundtrips a register request through a real Unix socket server', async () => {
-    const { mkdir } = await import('node:fs/promises')
-    await mkdir(join(home, 'run'), { recursive: true })
-
+  test('roundtrips a register request through a real local socket server', async () => {
     let received: Request | null = null
-    const listener = Bun.listen<State>({
-      unix: socketPath(),
-      socket: {
-        open: (s) => {
-          s.data = { buf: '' }
-        },
-        data: (s, chunk) => {
-          s.data.buf += chunk.toString('utf8')
-          const newline = s.data.buf.indexOf('\n')
-          if (newline < 0) return
-          const line = s.data.buf.slice(0, newline)
-          received = JSON.parse(line) as Request
-          s.write(`${JSON.stringify({ ok: true, result: { echoed: received } })}\n`)
-          s.end()
-        },
-        close: () => {},
-        error: () => {},
-      },
+    const listener = await startSocketServer((socket, req) => {
+      received = req
+      socket.write(`${JSON.stringify({ ok: true, result: { echoed: received } })}\n`)
+      socket.end()
     })
     try {
       const reply = await send({ kind: 'register', containerName: 'coder', cwd: '/tmp/x' })
@@ -70,60 +88,31 @@ describe('send', () => {
         cwd: '/tmp/x',
       })
     } finally {
-      listener.stop(true)
+      await closeServer(listener)
     }
   })
 
   test('times out if the daemon never responds', async () => {
-    const { mkdir } = await import('node:fs/promises')
-    await mkdir(join(home, 'run'), { recursive: true })
-
-    const listener = Bun.listen<State>({
-      unix: socketPath(),
-      socket: {
-        open: (s) => {
-          s.data = { buf: '' }
-        },
-        data: () => {},
-        close: () => {},
-        error: () => {},
-      },
-    })
+    const listener = await startSocketServer(() => {})
     try {
       const reply = await send({ kind: 'list' }, { timeoutMs: 50 })
       expect(reply.ok).toBe(false)
       if (reply.ok) return
       expect(reply.reason).toContain('timeout')
     } finally {
-      listener.stop(true)
+      await closeServer(listener)
     }
   })
 
   test('isDaemonReachable returns true when the daemon answers list', async () => {
-    const { mkdir } = await import('node:fs/promises')
-    await mkdir(join(home, 'run'), { recursive: true })
-
-    const listener = Bun.listen<State>({
-      unix: socketPath(),
-      socket: {
-        open: (s) => {
-          s.data = { buf: '' }
-        },
-        data: (s, chunk) => {
-          s.data.buf += chunk.toString('utf8')
-          const newline = s.data.buf.indexOf('\n')
-          if (newline < 0) return
-          s.write(`${JSON.stringify({ ok: true, result: { registrations: [] } })}\n`)
-          s.end()
-        },
-        close: () => {},
-        error: () => {},
-      },
+    const listener = await startSocketServer((socket) => {
+      socket.write(`${JSON.stringify({ ok: true, result: { registrations: [] } })}\n`)
+      socket.end()
     })
     try {
       expect(await isDaemonReachable(500)).toBe(true)
     } finally {
-      listener.stop(true)
+      await closeServer(listener)
     }
   })
 })
