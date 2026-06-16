@@ -607,6 +607,11 @@ type LiveSession = {
   typingStartedAt: number
   typingTimedOut: boolean
   typingStopPromise: Promise<void> | null
+  // True only while `live.session.prompt()` is actively running. Gates the
+  // deferred typing revival: a revival queued behind an in-flight cap-trip
+  // 'stop' must NOT re-arm the heartbeat once the prompt has finished, or it
+  // leaks a timer that fires past the turn's end.
+  promptInFlight: boolean
   lastInboundAt: number
   // Transcript-file size (bytes) captured immediately after cold-start, before
   // any user turn — a proxy for the fixed base-context rebuild cost (rendered
@@ -1673,6 +1678,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingStartedAt: 0,
         typingTimedOut: false,
         typingStopPromise: null,
+        promptInFlight: false,
         lastInboundAt: now(),
         baseContextBytes: 0,
         firstUnprocessedAt: 0,
@@ -1967,11 +1973,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const restartTypingAfterTimeout = (live: LiveSession): void => {
-    // Re-checked after the awaited stop: the session may have been destroyed,
-    // or an earlier queued revival may have already cleared the flag and
-    // re-armed the heartbeat (so this one becomes a no-op — no double interval,
-    // no duplicate tick).
-    if (live.destroyed || !live.typingTimedOut) return
+    // Re-checked after the awaited stop:
+    //  - `destroyed`: the session may have been torn down.
+    //  - `!typingTimedOut`: an earlier queued revival already cleared the flag
+    //    and re-armed (so this one is a no-op — no double interval/tick).
+    //  - `!promptInFlight`: the prompt finished while the cap-trip 'stop' was
+    //    still in flight. A revival queued by a late delta would otherwise
+    //    re-arm a heartbeat after generation ended — a timer nothing stops
+    //    (drain()'s turn-end stop already ran with `typingTimer === null`).
+    //    `draining` is too coarse: it stays true through the turn-end hook tail
+    //    (turn-end/idle/todos) after `prompt()` returns, so a revival running
+    //    in that window would still leak. Gate on active generation instead.
+    if (live.destroyed || !live.promptInFlight || !live.typingTimedOut) return
     live.typingTimedOut = false
     startTypingHeartbeat(live)
   }
@@ -2384,6 +2397,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const isRealUserTurn = batch.length > 0
         const retrievalContext = await fireSessionTurnStart(live, composeRetrievalQuery(batch))
         const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
+        live.promptInFlight = true
         try {
           await live.session.prompt(promptText)
           await validateChannelTurn(live, successfulSendsBeforePrompt)
@@ -2395,6 +2409,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.lastSentText.clear()
           live.lastSendLeafId = null
         } finally {
+          live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
           const emptyTurnRetryQueued = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt

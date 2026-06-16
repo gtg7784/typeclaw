@@ -6357,6 +6357,53 @@ describe('ChannelRouter typing indicator', () => {
     await Promise.all([interval, draining])
   })
 
+  test('a revival queued while the turn ends does NOT re-arm typing after the turn', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releaseCapStop: (() => void) | undefined
+    let releasePrompt: (() => void) | undefined
+    let stopCount = 0
+    // Block ONLY the cap-trip 'stop' so a revival can be queued behind it while
+    // the turn finishes; the turn-end 'stop' must pass through.
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+      if (target.phase === 'stop' && ++stopCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseCapStop = resolve
+        })
+      }
+    })
+
+    await router.route(inbound({ text: 'race then end' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the cap trips and its 'stop' clear is in flight (blocked)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    const interval = router.__testing!.fireTypingInterval(KEY)
+    await waitFor(() => releaseCapStop !== undefined)
+
+    // given: a late delta queues a revival behind the still-blocked stop
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'late' } })
+
+    // when: the prompt completes (turn ends) while the stop is still blocked,
+    // then the blocked stop is released so the queued revival can run
+    releasePrompt!()
+    releaseCapStop!()
+    await Promise.all([interval, draining])
+
+    // then: the queued revival is a no-op — no heartbeat is re-armed post-turn
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(phases).toEqual(['tick', 'stop'])
+  })
+
   test('a revived heartbeat trips the cap again after another silent window', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1000 }
