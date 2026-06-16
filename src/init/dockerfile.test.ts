@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { dockerfileSchema } from '@/config/config'
+import { isWindows } from '@/shared'
 
 import { GHCR_BASE_IMAGE_REPO } from './cli-version'
 import {
@@ -27,6 +28,8 @@ import {
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
 // covered by integration tests in src/init/index.test.ts. This file only
 // asserts the toggle-driven content of the rendered Dockerfile string.
+
+const onWindows = isWindows()
 
 // Pulls the package list passed to the main `apt-get install` line so
 // assertions are scoped to what actually gets installed and not to
@@ -1691,7 +1694,8 @@ describe('network egress entrypoint shim', () => {
   })
 })
 
-describe('entrypoint shim — executable behavior (Xvfb startup, fail-fast)', () => {
+// POSIX shell execution, #899.
+describe.skipIf(onWindows)('entrypoint shim — executable behavior (Xvfb startup, fail-fast)', () => {
   let workdir: string
   let bindir: string
   let logfile: string
@@ -2072,7 +2076,8 @@ describe('agent-browser headed-mode wrapper (Layer 4.5)', () => {
   })
 })
 
-describe('agent-browser headed-mode wrapper — executable behavior', () => {
+// POSIX shell execution, #899.
+describe.skipIf(onWindows)('agent-browser headed-mode wrapper — executable behavior', () => {
   let workdir: string
   let bindir: string
   let logfile: string

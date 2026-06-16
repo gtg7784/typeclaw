@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
@@ -798,7 +798,7 @@ describe('createServer restart-handoff consumption', () => {
     await writeHandoff(agentDir, {
       restartedAt: new Date().toISOString(),
       originatingSessionId: sessionId,
-      originatingSessionFile: sessionFile.split('/').pop()!,
+      originatingSessionFile: basename(sessionFile),
     })
 
     const session = createFakeSession()
@@ -867,7 +867,7 @@ describe('createServer restart-handoff consumption', () => {
     await writeHandoff(agentDir, {
       restartedAt: new Date(Date.now() - 90_000).toISOString(),
       originatingSessionId: sessionId,
-      originatingSessionFile: sessionFile.split('/').pop()!,
+      originatingSessionFile: basename(sessionFile),
     })
 
     const session = createFakeSession()
@@ -901,7 +901,7 @@ describe('createServer restart-handoff consumption', () => {
     await writeHandoff(agentDir, {
       restartedAt: new Date().toISOString(),
       originatingSessionId: sessionId,
-      originatingSessionFile: sessionFile.split('/').pop()!,
+      originatingSessionFile: basename(sessionFile),
     })
 
     const sessions: ReturnType<typeof createFakeSession>[] = []

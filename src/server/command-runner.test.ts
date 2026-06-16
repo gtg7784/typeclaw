@@ -12,6 +12,7 @@ import { defineCommand } from '@/plugin/define'
 import { emptyRegistry, type RegisteredCommand } from '@/plugin/registry'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
+import { isWindows } from '@/shared'
 
 import {
   bindSignalToSession,
@@ -21,6 +22,8 @@ import {
   type CommandOutbound,
   type CommandSpawnSubagent,
 } from './command-runner'
+
+const onWindows = isWindows()
 
 type CapturedFrame =
   | { kind: 'stdout'; callId: string; chunk: string }
@@ -482,7 +485,8 @@ describe('runExecForCommand', () => {
     expect(result.exitCode).toBe(3)
   })
 
-  test('aborts a long-running shell promptly via process-group SIGTERM', async () => {
+  // Windows lacks POSIX process-group signals; covered on Unix. #899
+  test.skipIf(onWindows)('aborts a long-running shell promptly via process-group SIGTERM', async () => {
     // Spawn a shell that sleeps for 30s with a background grandchild also
     // sleeping. Abort after 50ms and assert the process exits well before
     // the natural completion — this only happens if the process-group kill
