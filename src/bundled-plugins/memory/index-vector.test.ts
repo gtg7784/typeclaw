@@ -31,7 +31,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await rm(agentDir, { recursive: true, force: true })
+  await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
 })
 
 describe('vector session.turn.start hook', () => {
