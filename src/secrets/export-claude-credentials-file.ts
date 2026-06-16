@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, posix, resolve } from 'node:path'
 
 import { decodeClaudeAccessTokenExpiryMs, emitClaudeCredentialsJson } from './claude-credentials-json'
 import type { ProviderCredential, Providers } from './schema'
@@ -19,7 +19,7 @@ const FILE_MODE = 0o600
 const DIR_MODE = 0o700
 export const CLAUDE_CREDENTIALS_FILE_NAME = '.credentials.json'
 export const CLAUDE_DEFAULT_CONFIG_DIR_NAME = '.claude'
-export const CLAUDE_CREDENTIALS_RELATIVE_PATH = join(CLAUDE_DEFAULT_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME)
+export const CLAUDE_CREDENTIALS_RELATIVE_PATH = posix.join(CLAUDE_DEFAULT_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME)
 
 export type ExportClaudeCredentialsFileResult =
   | { action: 'skipped'; reason: SkipReason }

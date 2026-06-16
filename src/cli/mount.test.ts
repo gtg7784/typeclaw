@@ -104,7 +104,9 @@ describe('typeclaw mount CLI', () => {
       targetPath: '/agent/mounts/downloads',
       status: 'ok',
     })
-    expect(normalizePath(parsed.mounts[0]!.resolvedPath)).toBe(normalizePath(resolvedDownloads))
+    const actualResolvedPath = await realpath(parsed.mounts[0]!.resolvedPath)
+    const expectedResolvedPath = await realpath(resolvedDownloads)
+    expect(normalizePath(actualResolvedPath)).toBe(normalizePath(expectedResolvedPath))
   })
 
   test('remove deletes the mount and tells the user to restart', async () => {

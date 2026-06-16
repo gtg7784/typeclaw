@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
@@ -33,7 +33,7 @@ export async function refreshPackageJson(cwd: string): Promise<PackageJsonRefres
     if (updated) changed.push(PACKAGE_FILE)
   }
 
-  const gitkeepRel = join(PACKAGES_DIR, GITKEEP_FILE)
+  const gitkeepRel = posix.join(PACKAGES_DIR, GITKEEP_FILE)
   const gitkeepPath = join(cwd, gitkeepRel)
   if (!existsSync(gitkeepPath)) {
     await mkdir(join(cwd, PACKAGES_DIR), { recursive: true })

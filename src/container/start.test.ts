@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
@@ -420,8 +420,8 @@ describe('planStart mounts', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    const home = process.env.HOME ?? ''
-    expect(plan.runArgs).toContain(`${home}/some-dir:/agent/mounts/home-thing`)
+    const homeThingMount = `${join(homedir(), 'some-dir')}:/agent/mounts/home-thing`
+    expect(plan.runArgs).toContain(homeThingMount)
   })
 
   test('emits mounts in declared order', async () => {
@@ -496,7 +496,7 @@ describe('planStart mounts', () => {
 })
 
 describe('planStart model mount', () => {
-  const modelsMount = `${process.env.HOME}/.typeclaw/models:/opt/models:ro`
+  const modelsMount = `${join(homedir(), '.typeclaw', 'models')}:/opt/models:ro`
 
   test('adds shared model cache mount at /opt/models:ro when memory.vector.enabled', async () => {
     await writeDockerfile(root)
@@ -1003,7 +1003,7 @@ describe('refreshGitignore', () => {
 })
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn({ cmd: ['/usr/bin/git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
   const out = await new Response(proc.stdout).text()
   await proc.exited
   return out.trim()
@@ -1011,7 +1011,7 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
 
 async function isGitIgnored(cwd: string, path: string): Promise<boolean> {
   const proc = Bun.spawn({
-    cmd: ['/usr/bin/git', 'check-ignore', '--quiet', path],
+    cmd: ['git', 'check-ignore', '--quiet', path],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -1028,7 +1028,7 @@ async function gitInit(cwd: string): Promise<void> {
     ['config', 'user.name', 'Test User'],
     ['config', 'user.email', 'test@example.com'],
   ]) {
-    const proc = Bun.spawn({ cmd: ['/usr/bin/git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
     await proc.exited
   }
 }

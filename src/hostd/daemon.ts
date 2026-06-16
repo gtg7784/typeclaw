@@ -206,12 +206,19 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function errorCode(error: Error): unknown {
+  const direct = error as Error & { code?: unknown; cause?: unknown }
+  if (direct.code !== undefined) return direct.code
+  if (direct.cause instanceof Error) return errorCode(direct.cause)
+  return undefined
+}
+
 async function listenOnSocket(server: Server, path: string, onWindows: boolean): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => {
       server.off('error', onError)
-      const code = (error as Error & { code?: unknown }).code
-      if (onWindows && code === 'EADDRINUSE') {
+      const code = errorCode(error)
+      if (code === 'EADDRINUSE' || (onWindows && error.message.includes('Failed to listen at'))) {
         reject(new Error(`another typeclaw host daemon is already listening at ${path}`))
         return
       }

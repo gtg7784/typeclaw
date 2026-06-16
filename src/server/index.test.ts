@@ -487,18 +487,21 @@ describe('createServer restart handling', () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session)
     const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
+    try {
+      await waitFor((m) => m.type === 'connected')
 
-    // when
-    ws.send(JSON.stringify({ type: 'restart' }))
+      // when
+      ws.send(JSON.stringify({ type: 'restart' }))
 
-    // then
-    await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
-      type: 'restart_result',
-      status: 'failed',
-      error: 'restart unavailable: no container name configured',
-    })
-    ws.close()
+      // then
+      await expect(waitFor((m) => m.type === 'restart_result', 5000)).resolves.toEqual({
+        type: 'restart_result',
+        status: 'failed',
+        error: 'restart unavailable: no container name configured',
+      })
+    } finally {
+      ws.close()
+    }
   })
 
   test('accepts restart when hostd ACKs the container restart RPC', async () => {
@@ -515,17 +518,20 @@ describe('createServer restart handling', () => {
     const oldToken = process.env.TYPECLAW_HOSTD_TOKEN
     process.env.TYPECLAW_HOSTD_URL = `http://127.0.0.1:${hostd.port}`
     process.env.TYPECLAW_HOSTD_TOKEN = 'secret'
+    let ws: WebSocket | null = null
     try {
       const session = createFakeSession()
       const { url } = await startWithSession(session, { containerName: 'coder' })
-      const { ws, waitFor } = await connect(url)
+      const connected = await connect(url)
+      ws = connected.ws
+      const { waitFor } = connected
       await waitFor((m) => m.type === 'connected')
 
       // when
       ws.send(JSON.stringify({ type: 'restart' }))
 
       // then
-      await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
+      await expect(waitFor((m) => m.type === 'restart_result', 5000)).resolves.toEqual({
         type: 'restart_result',
         status: 'accepted',
         message: 'restart scheduled; reconnecting when the new container is up',
@@ -536,8 +542,8 @@ describe('createServer restart handling', () => {
           body: { kind: 'restart', containerName: 'coder', build: false },
         },
       ])
-      ws.close()
     } finally {
+      ws?.close()
       if (oldUrl === undefined) delete process.env.TYPECLAW_HOSTD_URL
       else process.env.TYPECLAW_HOSTD_URL = oldUrl
       if (oldToken === undefined) delete process.env.TYPECLAW_HOSTD_TOKEN

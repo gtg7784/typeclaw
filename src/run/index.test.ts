@@ -269,7 +269,7 @@ describe('startAgent', () => {
         id: 'boot-fire',
         schedule: '* * * * *',
         kind: 'exec',
-        command: ['sh', '-c', `echo fired > ${sentinel}`],
+        command: [process.execPath, '-e', `await Bun.write(${JSON.stringify(sentinel)}, "fired")`],
         enabled: true,
         scheduledByRole: 'owner',
       }
@@ -284,7 +284,7 @@ describe('startAgent', () => {
 
       running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron, createSchedulerFor })
 
-      await Bun.sleep(80)
+      for (let i = 0; i < 60 && !(await Bun.file(sentinel).exists()); i++) await Bun.sleep(50)
       expect(await Bun.file(sentinel).exists()).toBe(true)
     } finally {
       await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })

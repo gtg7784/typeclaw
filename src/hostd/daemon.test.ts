@@ -581,7 +581,9 @@ describe('startDaemon', () => {
     expect(existsSync(filePath)).toBe(true)
 
     const stats = await stat(filePath)
-    expect(stats.mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(stats.mode & 0o777).toBe(0o600)
+    }
 
     const contents = JSON.parse(await readFile(filePath, 'utf8'))
     expect(contents).toEqual({
