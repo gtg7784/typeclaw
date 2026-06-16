@@ -262,33 +262,44 @@ describe('startAgent', () => {
   })
 
   test('a fire emitted while the scheduler is being armed is not lost (consumer subscribes first)', async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-boot-'))
-    try {
-      const sentinel = join(agentDir, 'fired.txt')
-      const job: CronJob = {
-        id: 'boot-fire',
-        schedule: '* * * * *',
-        kind: 'exec',
-        command: [process.execPath, '-e', `await Bun.write(${JSON.stringify(sentinel)}, "fired")`],
-        enabled: true,
-        scheduledByRole: 'owner',
-      }
-      const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [job] } }) as LoadCronResult
-      // Fire synchronously at arm time. If the consumer hadn't subscribed yet,
-      // this fire would be dropped (the stream has no replay) and the sentinel
-      // would never be written.
-      const createSchedulerFor: SchedulerFactory = ({ onFire }) => {
-        onFire(job)
-        return stubScheduler()
-      }
-
-      running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron, createSchedulerFor })
-
-      for (let i = 0; i < 60 && !(await Bun.file(sentinel).exists()); i++) await Bun.sleep(50)
-      expect(await Bun.file(sentinel).exists()).toBe(true)
-    } finally {
-      await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    let resolveFired!: () => void
+    const fired = new Promise<void>((resolve) => {
+      resolveFired = resolve
+    })
+    // Observe delivery in-process via a `handler` job. Do NOT revert to an
+    // `exec` job + sentinel file + filesystem poll: that observation was a
+    // Windows CI flake (a cold `bun -e` runtime under parallel load missed the
+    // poll budget) even though the subscription-order behavior is correct.
+    const job: CronJob = {
+      id: 'boot-fire',
+      schedule: '* * * * *',
+      kind: 'handler',
+      enabled: true,
+      scheduledByRole: 'owner',
+      handler: async () => {
+        resolveFired()
+      },
     }
+    // `jobs` is typed for parsed (prompt/exec) jobs; a handler job is a valid
+    // CronJob the consumer dispatches, so widen the array element for the fake.
+    const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [job] as CronJob[] } }) as LoadCronResult
+    // Fire synchronously at arm time. If the consumer hadn't subscribed yet, the
+    // stream (no replay) would drop this fire and the handler would never run.
+    const createSchedulerFor: SchedulerFactory = ({ onFire }) => {
+      onFire(job)
+      return stubScheduler()
+    }
+
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
+
+    await Promise.race([
+      fired,
+      Bun.sleep(5000).then(() => {
+        throw new Error(
+          'cron handler not invoked within 5s — the arm-time fire was lost (consumer subscribed too late)',
+        )
+      }),
+    ])
   })
 
   test('cronConsumer is started when bundled memory plugin contributes a default dreaming cron job (no cron.json)', async () => {
