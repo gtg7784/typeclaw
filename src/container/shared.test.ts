@@ -59,8 +59,8 @@ describe('containerNameFromCwd', () => {
     expect(name).toMatch(/^tc-[0-9a-f]{8}$/)
   })
 
-  test('distinct non-ASCII folder names never collide (the core bug)', async () => {
-    // given: two single-character CJK/Korean names that the old charset filter
+  test('disambiguates the sampled non-ASCII folder names that previously collided (the core bug)', async () => {
+    // given: single-character CJK/Korean names that the old charset filter
     // collapsed to the same 'tc--' string — distinct agents, same container key.
     const bot = join(root, '봇')
     const house = join(root, '집')
