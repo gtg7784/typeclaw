@@ -380,8 +380,8 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
   test('channel origin strips excerpt bodies, keeping only headings', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
-    expect(section).toContain('## KakaoTalk reply conventions')
-    expect(section).toContain('## GitHub channel role configuration')
+    expect(section).toContain('- KakaoTalk reply conventions `kakaotalk-reply-conventions`')
+    expect(section).toContain('- GitHub channel role configuration `github-channel-role-configuration`')
     expect(section).not.toContain('the-user-prefers-formal-speech body excerpt')
     expect(section).not.toContain('roles-are-keyed-on-first-message body excerpt')
   })
@@ -413,7 +413,7 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
 
     const section = renderRetrievedMemorySection(streamItems, { origin: channelOrigin })
 
-    expect(section).toContain('## recent observation')
+    expect(section).toContain('- recent observation _(recent observation)_')
     expect(section).not.toContain('2026-06-12#frag1')
   })
 

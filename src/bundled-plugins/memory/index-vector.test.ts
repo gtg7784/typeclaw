@@ -96,10 +96,8 @@ describe('vector session.turn.start hook', () => {
 
     expect(emptySearch).toHaveBeenCalledWith('anything', expect.anything(), agentDir, 10, expect.any(Function))
     expect(retrievalContext.results).toContain('# Memory')
-    expect(retrievalContext.results).toContain('## First Topic')
-    expect(retrievalContext.results).toContain('slug: `first-topic`')
-    expect(retrievalContext.results).toContain('## Second Topic')
-    expect(retrievalContext.results).toContain('slug: `second-topic`')
+    expect(retrievalContext.results).toContain('- First Topic `first-topic`')
+    expect(retrievalContext.results).toContain('- Second Topic `second-topic`')
     expect(retrievalContext.results).not.toContain('private first body')
     expect(retrievalContext.results).not.toContain('private second body')
     expect(infos.some((line) => line.includes('suppressed=1') && line.includes('fallback=topic-index'))).toBe(true)
