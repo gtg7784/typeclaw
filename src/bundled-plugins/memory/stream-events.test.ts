@@ -156,8 +156,14 @@ describe('schema exports', () => {
     const id = newEventId()
     const after = Date.now()
     const recovered = new Date(timestampFromId(id)).getTime()
-    expect(recovered).toBeGreaterThanOrEqual(before)
-    expect(recovered).toBeLessThanOrEqual(after)
+    // Bun.randomUUIDv7() and Date.now() can read slightly different clock
+    // values on platforms with coarse timer granularity (observed on Windows,
+    // where the UUID's embedded ms landed 1ms before the bracketing Date.now()).
+    // Allow a small slack so the round-trip — recovered ≈ mint instant — is
+    // asserted without depending on the two clock reads being monotonic.
+    const CLOCK_SLACK_MS = 16
+    expect(recovered).toBeGreaterThanOrEqual(before - CLOCK_SLACK_MS)
+    expect(recovered).toBeLessThanOrEqual(after + CLOCK_SLACK_MS)
   })
 
   test('timestampFromId throws on shapes that are not UUIDv7-prefixed', () => {
