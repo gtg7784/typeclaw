@@ -1,12 +1,12 @@
 import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
-import { findAgentDir } from '@/init'
 import { CLI_VERSION } from '@/init/cli-version'
 import { runTuiViewer } from '@/inspect'
 import { formatVersionMismatchWarning } from '@/tui'
 
 import { runInspectViewer } from './inspect'
+import { requireAgentDir } from './require-agent-dir'
 import { errorLine } from './ui'
 
 export const tui = defineCommand({
@@ -27,7 +27,7 @@ export const tui = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
     const resolveUrl: () => Promise<string> =
       args.url !== undefined ? async () => args.url as string : () => defaultUrl(cwd)
 

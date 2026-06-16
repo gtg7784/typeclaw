@@ -1,7 +1,12 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createTailScope } from './inspect-controller'
+
+const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 
 function tick(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -126,5 +131,35 @@ describe('createTailScope wiring', () => {
     expect(scope.signal.aborted).toBe(true)
     expect(scope.intent()).toBe('exit')
     scope.dispose()
+  })
+})
+
+describe('typeclaw inspect refuses a non-agent folder', () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-inspect-noagent-'))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('exits 1 with a config-not-found error instead of the degraded picker', async () => {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'inspect'],
+      cwd,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+    const exitCode = await proc.exited
+
+    expect(exitCode).toBe(1)
+    expect(stderr).toMatch(/config file not found/)
+    expect(stdout).not.toContain('Pick what to view')
+    expect(stderr).not.toContain('container not running')
   })
 })

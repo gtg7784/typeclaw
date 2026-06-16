@@ -1,9 +1,9 @@
 import { defineCommand } from 'citty'
 
 import { logs, parseTailValue } from '@/container'
-import { findAgentDir } from '@/init'
 
 import { runInspectViewer } from './inspect'
+import { requireAgentDir } from './require-agent-dir'
 import { c, errorLine } from './ui'
 
 export const logsCommand = defineCommand({
@@ -30,7 +30,7 @@ export const logsCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
 
     let tail: string | undefined
     if (args.tail !== undefined) {
