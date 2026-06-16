@@ -12,7 +12,7 @@ JSON Schema–validated. `typeclaw init` scaffolds a `$schema` pointer at `./nod
 | ----------------------- | -------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `models`                | `Record<string, ref \| ref[]>`   | live                                         | model profile → ref or fallback chain                                                  |
 | `port`                  | `number`                         | restart-required                             | preferred host port; CLI falls back to ephemeral on conflict                           |
-| `mounts`                | `Mount[]`                        | restart-required                             | host directories exposed inside the container                                          |
+| `mounts`                | `Mount[]`                        | restart-required                             | host files or directories exposed inside the container                                 |
 | `plugins`               | `string[]`                       | restart-required                             | plugin module specifiers                                                               |
 | `alias`                 | `string[]`                       | live                                         | additional names the agent answers to in channels                                      |
 | `channels`              | `Record<adapter, AdapterConfig>` | live                                         | per-adapter config                                                                     |
@@ -95,7 +95,7 @@ Provider-family defaults override the SDK's reasoning level at session creation:
 }
 ```
 
-Each mount maps a host directory to `/agent/mounts/<name>` inside the container. `path` accepts absolute paths, relative paths resolved from the agent folder, and `~`/`~/...`. `readOnly` defaults to `false`; use `true` for reference data the agent should inspect but not edit. Mount changes are restart-required because Docker bind mounts are fixed when the container starts.
+Each mount maps a host **file or directory** to `/agent/mounts/<name>` inside the container. `path` accepts absolute paths, relative paths resolved from the agent folder, and `~`/`~/...`. `readOnly` defaults to `false`; use `true` for reference data the agent should inspect but not edit — the natural choice for exposing a single credential such as an SSH private key. Sockets, FIFOs, and devices are rejected. Mount changes are restart-required because Docker bind mounts are fixed when the container starts. Note that a single-file bind tracks the file's inode, so replacing the host file via write-temp-then-rename (most editors, some key-rotation tools) is not seen by the container until the next restart; mount the parent directory if you need live updates.
 
 The CLI can manage this block:
 
