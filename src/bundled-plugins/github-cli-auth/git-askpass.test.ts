@@ -3,7 +3,11 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { ensureGitAskPassHelper, resetGitAskPassHelperForTests } from './git-askpass'
+
+const onWindows = isWindows()
 
 afterEach(() => {
   resetGitAskPassHelperForTests()
@@ -14,7 +18,8 @@ async function tmpHelperPath() {
   return join(dir, 'typeclaw-git-askpass')
 }
 
-describe('ensureGitAskPassHelper', () => {
+// POSIX shell helper, #899.
+describe.skipIf(onWindows)('ensureGitAskPassHelper', () => {
   test('writes the helper and returns its path', async () => {
     const path = await tmpHelperPath()
     expect(await ensureGitAskPassHelper(path)).toBe(path)
@@ -45,7 +50,8 @@ describe('ensureGitAskPassHelper', () => {
   })
 })
 
-describe('ensureGitAskPassHelper — host-scoped behavior (executed)', () => {
+// POSIX shell helper, #899.
+describe.skipIf(onWindows)('ensureGitAskPassHelper — host-scoped behavior (executed)', () => {
   async function run(promptArg: string): Promise<{ code: number; out: string }> {
     const path = await tmpHelperPath()
     await ensureGitAskPassHelper(path)

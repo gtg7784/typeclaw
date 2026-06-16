@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { resolve as resolvePath } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { installShim, type ShimFs } from './shim-install'
+
+const onWindows = isWindows()
 
 type FakeFile = { kind: 'file'; data: string; mode: number } | { kind: 'symlink'; target: string }
 
@@ -67,7 +71,8 @@ class FakeFs {
   }
 }
 
-describe('installShim', () => {
+// POSIX symlink semantics, #899.
+describe.skipIf(onWindows)('installShim', () => {
   test('replaces an upstream symlink with an absolute-target stash so the link still resolves', () => {
     const fake = new FakeFs()
     fake.files.set('/usr/local/bin/agent-browser', {

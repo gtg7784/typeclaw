@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
@@ -12,7 +12,9 @@ describe('doc-render plugin', () => {
   test('contributes the skill directory and no tools or hooks', async () => {
     const exports = await bootPlugin()
 
-    expect(exports.skillsDirs).toEqual([expect.stringContaining('bundled-plugins/doc-render/skills')])
+    expect((exports.skillsDirs ?? []).map((dir) => dir.split(sep).join('/'))).toEqual([
+      expect.stringContaining('bundled-plugins/doc-render/skills'),
+    ])
     expect(exports.tools).toBeUndefined()
     expect(exports.hooks).toBeUndefined()
   })
@@ -25,7 +27,7 @@ describe('doc-render plugin', () => {
     // The container runs from node_modules/typeclaw/src/...; the agent-relative
     // path the skill uses must end at the same file this package ships.
     expect(RENDER_SCRIPT_AGENT_RELATIVE_PATH).toBe('node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts')
-    expect(renderScriptPath().endsWith('/bundled-plugins/doc-render/render.ts')).toBe(true)
+    expect(renderScriptPath()).toMatch(/[\\/]bundled-plugins[\\/]doc-render[\\/]render\.ts$/)
   })
 })
 

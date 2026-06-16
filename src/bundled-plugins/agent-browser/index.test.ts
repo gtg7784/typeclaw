@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { rmSync, readFileSync } from 'node:fs'
+import { sep } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
@@ -30,7 +31,9 @@ describe('agent-browser plugin', () => {
     const exports = await bootPlugin('/agent')
 
     expect(Date.now() - factoryStart).toBeLessThan(500)
-    expect(exports.skillsDirs).toEqual([expect.stringContaining('bundled-plugins/agent-browser/skills')])
+    expect((exports.skillsDirs ?? []).map((dir) => dir.split(sep).join('/'))).toEqual([
+      expect.stringContaining('bundled-plugins/agent-browser/skills'),
+    ])
     expect(exports.tools).toBeUndefined()
     expect(exports.hooks).toBeUndefined()
   })
