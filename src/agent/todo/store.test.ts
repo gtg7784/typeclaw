@@ -7,7 +7,7 @@ import type { TodoScope } from './scope'
 import { incompleteTodos, readTodos, type Todo, todoContentPath, writeTodos } from './store'
 
 const TUI_SCOPE: TodoScope = { kind: 'tui', key: 'tui' }
-const CHANNEL_SCOPE: TodoScope = { kind: 'channel', key: 'channel/slack-bot:T1:C1:_root' }
+const CHANNEL_SCOPE: TodoScope = { kind: 'channel', key: 'channel/slack-bot,T1,C1,_root' }
 
 let agentDir: string
 
@@ -108,8 +108,8 @@ describe('todoContentPath traversal guard', () => {
   })
 
   test('accepts a normal nested key', () => {
-    const path = todoContentPath(agentDir, { kind: 'channel', key: 'channel/sslack:sw:sc:n' })
-    expect(path.endsWith('todo/channel/sslack:sw:sc:n.json')).toBe(true)
+    const path = todoContentPath(agentDir, { kind: 'channel', key: 'channel/sslack,sw,sc,n' })
+    expect(path.endsWith('todo/channel/sslack,sw,sc,n.json')).toBe(true)
   })
 })
 

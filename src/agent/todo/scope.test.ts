@@ -25,7 +25,7 @@ describe('resolveTodoScope', () => {
       chat: 'C456',
       thread: '1700000000.0001',
     })
-    expect(scope).toEqual({ kind: 'channel', key: 'channel/sslack-bot:sT123:sC456:s1700000000.0001' })
+    expect(scope).toEqual({ kind: 'channel', key: 'channel/sslack-bot,sT123,sC456,s1700000000.0001' })
   })
 
   test('channel with null thread uses the distinct null-thread tag', () => {
@@ -36,7 +36,7 @@ describe('resolveTodoScope', () => {
       chat: 'C1',
       thread: null,
     })
-    expect(scope).toEqual({ kind: 'channel', key: 'channel/sdiscord-bot:sG1:sC1:n' })
+    expect(scope).toEqual({ kind: 'channel', key: 'channel/sdiscord-bot,sG1,sC1,n' })
   })
 
   test('channel ids with path-unsafe characters are encoded, not escaping the todo dir', () => {
