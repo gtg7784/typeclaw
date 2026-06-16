@@ -909,6 +909,10 @@ describe('ChannelRouter ensureLive watchdog', () => {
     const dir = await tempDir()
     const logs: string[] = []
     let callCount = 0
+    let firstCreationEntered: (() => void) | undefined
+    const firstCreation = new Promise<void>((resolve) => {
+      firstCreationEntered = resolve
+    })
     const router = createChannelRouter({
       agentDir: dir,
       configForAdapter: () => baseConfig,
@@ -920,7 +924,10 @@ describe('ChannelRouter ensureLive watchdog', () => {
       },
       createSessionForChannel: async () => {
         callCount++
-        if (callCount === 1) await new Promise(() => {})
+        if (callCount === 1) {
+          firstCreationEntered!()
+          await new Promise(() => {})
+        }
         const fake = new FakeSession()
         return {
           session: fake as unknown as AgentSession,
@@ -935,6 +942,12 @@ describe('ChannelRouter ensureLive watchdog', () => {
     // when first inbound times out, then a second inbound arrives
     await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out/)
     expect(logs.some((l) => l.includes('ensureLive failed'))).toBe(true)
+    // Gate the retry on the first creation actually reaching the factory and
+    // hanging. Under parallel-test load the watchdog can fire before the slow
+    // pre-factory chain (ensureLoaded + name/membership resolution) reaches the
+    // factory; without this barrier the hang races onto the SECOND call, which
+    // then times out too and rejects this retry.
+    await firstCreation
     await router.route(inbound({ externalMessageId: 'm2' }))
     await router.__testing!.flushDebounce(KEY)
 
