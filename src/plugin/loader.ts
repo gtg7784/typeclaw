@@ -61,8 +61,7 @@ async function loadLocal(entry: string, agentDir: string): Promise<ResolvedPlugi
   if (!existsSync(resolved)) {
     throw new PluginNotFoundError(entry, `plugin path does not exist: ${entry} (resolved to ${resolved})`)
   }
-  const url = pathToFileURL(resolved).href
-  const mod = (await import(url)) as { default?: unknown }
+  const mod = (await import(toModuleSpecifier(resolved))) as { default?: unknown }
   const defined = expectDefined(mod, entry)
   const name = basename(resolved).replace(/\.(ts|tsx|js|mjs|cjs)$/i, '')
   return { name, version: undefined, source: entry, defined }
@@ -108,10 +107,10 @@ async function loadNpm(entry: string, agentDir: string): Promise<ResolvedPlugin>
   // located on disk; the else branch lets Bun's resolver read `exports` maps.
   let importTarget: string
   if (entryPath !== null) {
-    importTarget = pathToFileURL(entryPath).href
+    importTarget = toModuleSpecifier(entryPath)
   } else {
     try {
-      importTarget = Bun.resolveSync(packageName, agentDir)
+      importTarget = toModuleSpecifier(Bun.resolveSync(packageName, agentDir))
     } catch (err) {
       throw new PluginNotFoundError(entry, `cannot resolve plugin "${entry}": ${describeError(err)}`, { cause: err })
     }
@@ -149,6 +148,10 @@ export function derivePluginNameFromPackage(packageName: string): string {
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function toModuleSpecifier(target: string): string {
+  return isAbsolute(target) ? pathToFileURL(target).href : target
 }
 
 function findPackageJson(entry: string, agentDir: string): string | null {
