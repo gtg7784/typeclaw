@@ -48,6 +48,57 @@ describe('containerNameFromCwd', () => {
 
     expect(containerNameFromCwd(folder)).toBe('tc-.hidden')
   })
+
+  test('produces a valid Docker name for an all-non-ASCII folder (Korean)', async () => {
+    const folder = join(root, '봇')
+    await mkdir(folder)
+
+    const name = containerNameFromCwd(folder)
+
+    expect(name).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/)
+    expect(name).toMatch(/^tc-[0-9a-f]{8}$/)
+  })
+
+  test('distinct non-ASCII folder names never collide (the core bug)', async () => {
+    // given: two single-character CJK/Korean names that the old charset filter
+    // collapsed to the same 'tc--' string — distinct agents, same container key.
+    const bot = join(root, '봇')
+    const house = join(root, '집')
+    const cn = join(root, '中文')
+    const jp = join(root, '日本')
+    await Promise.all([mkdir(bot), mkdir(house), mkdir(cn), mkdir(jp)])
+
+    const names = [
+      containerNameFromCwd(bot),
+      containerNameFromCwd(house),
+      containerNameFromCwd(cn),
+      containerNameFromCwd(jp),
+    ]
+
+    expect(new Set(names).size).toBe(names.length)
+  })
+
+  test('keeps surviving ASCII as a readable prefix and disambiguates by hash', async () => {
+    // given: two folders that share an ASCII suffix but differ only in their
+    // CJK prefix — the old filter mapped both to 'tc-------Agent'.
+    const cn = join(root, '中文Agent')
+    const jp = join(root, '日本Agent')
+    await Promise.all([mkdir(cn), mkdir(jp)])
+
+    const cnName = containerNameFromCwd(cn)
+    const jpName = containerNameFromCwd(jp)
+
+    expect(cnName).toMatch(/^Agent-[0-9a-f]{8}$/)
+    expect(jpName).toMatch(/^Agent-[0-9a-f]{8}$/)
+    expect(cnName).not.toBe(jpName)
+  })
+
+  test('is deterministic for the same non-ASCII folder name', async () => {
+    const folder = join(root, '한글에이전트')
+    await mkdir(folder)
+
+    expect(containerNameFromCwd(folder)).toBe(containerNameFromCwd(folder))
+  })
 })
 
 describe('imageTagFromCwd', () => {
