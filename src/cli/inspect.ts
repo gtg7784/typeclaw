@@ -1,7 +1,6 @@
 import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
-import { findAgentDir } from '@/init'
 import {
   fetchLiveSessions,
   listViewerItems,
@@ -20,6 +19,7 @@ import {
 import { originLabel, shortSessionId } from '@/inspect/label'
 
 import { createTailScope } from './inspect-controller'
+import { requireAgentDir } from './require-agent-dir'
 import { cancel, c, errorLine, isCancel, prepareStdinForClack } from './ui'
 
 const ESC_DEBOUNCE_MS = 50
@@ -51,7 +51,7 @@ export const inspectCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
     const color = useColor()
     const sessionArg = typeof args.session === 'string' ? args.session : undefined
     const filterArg = typeof args.filter === 'string' ? args.filter : undefined

@@ -1,9 +1,9 @@
 import { defineCommand } from 'citty'
 
 import { type DreamEntry, renderListRow, runDreams, type ViewAction } from '@/dreams'
-import { findAgentDir } from '@/init'
 
 import { createEscController } from './inspect-controller'
+import { requireAgentDir } from './require-agent-dir'
 import { c, cancel, errorLine, isCancel, prepareStdinForClack } from './ui'
 
 const ESC_DEBOUNCE_MS = 50
@@ -31,7 +31,7 @@ export const dreamsCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
     const color = useColor()
     const limit = parseLimit(args.limit)
     const interactive = isInteractive() && args.json !== true

@@ -1,8 +1,8 @@
 import { defineCommand } from 'citty'
 
 import { stop } from '@/container'
-import { findAgentDir } from '@/init'
 
+import { requireAgentDir } from './require-agent-dir'
 import { c, spinner } from './ui'
 
 export const stopCommand = defineCommand({
@@ -11,7 +11,7 @@ export const stopCommand = defineCommand({
     description: 'stop the agent container (host stage)',
   },
   async run() {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
 
     const s = spinner()
     s.start('Stopping container...')

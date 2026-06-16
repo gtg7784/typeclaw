@@ -1,8 +1,8 @@
 import { defineCommand } from 'citty'
 
 import { shell } from '@/container'
-import { findAgentDir } from '@/init'
 
+import { requireAgentDir } from './require-agent-dir'
 import { c, errorLine } from './ui'
 
 export const shellCommand = defineCommand({
@@ -18,7 +18,7 @@ export const shellCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+    const cwd = requireAgentDir()
 
     console.log(c.cyan(`Attaching ${args.shell} inside the container...`))
 

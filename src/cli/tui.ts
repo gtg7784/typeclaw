@@ -1,12 +1,12 @@
 import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
-import { findAgentDir } from '@/init'
 import { CLI_VERSION } from '@/init/cli-version'
 import { runTuiViewer } from '@/inspect'
 import { formatVersionMismatchWarning } from '@/tui'
 
 import { runInspectViewer } from './inspect'
+import { requireAgentDir } from './require-agent-dir'
 import { errorLine } from './ui'
 
 export const tui = defineCommand({
@@ -27,9 +27,22 @@ export const tui = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
-    const resolveUrl: () => Promise<string> =
-      args.url !== undefined ? async () => args.url as string : () => defaultUrl(cwd)
+    // An explicit --url targets an agent over the wire and needs no local agent
+    // folder — only the default-URL discovery and the esc-detach picker read
+    // local state. Require an agent folder only when --url is absent, mirroring
+    // how reload/cron/role claim gate their default-target path, not the whole
+    // command.
+    const explicitUrl = typeof args.url === 'string' ? args.url : undefined
+    let cwd: string | undefined
+    let resolveUrl: () => Promise<string>
+    if (explicitUrl === undefined) {
+      const agentDir = requireAgentDir()
+      cwd = agentDir
+      resolveUrl = () => defaultUrl(agentDir)
+    } else {
+      cwd = undefined
+      resolveUrl = async () => explicitUrl
+    }
 
     const result = await runTuiViewer({
       resolveUrl,
@@ -45,8 +58,9 @@ export const tui = defineCommand({
     // can pick another session or the container logs — `tui` is just a deep-link
     // into the session viewer, pre-opened on the live session. allowWritable
     // is false because detaching ended the live session, so no row may be
-    // offered as a writable "live TUI" anymore.
-    if (result.ok && result.escToPicker === true) {
+    // offered as a writable "live TUI" anymore. A --url-only run has no local
+    // agent folder to browse, so it exits instead of opening the local picker.
+    if (result.ok && result.escToPicker === true && cwd !== undefined) {
       const viewerExit = await runInspectViewer({ cwd, allowWritable: false })
       process.exit(viewerExit)
       return
