@@ -6,6 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
+import type { DedupedRetrievedItem } from './turn-dedup'
 
 const MAX_FILE_BYTES = 12 * 1024
 const MEMORY_FRAMING =
@@ -81,20 +82,15 @@ export type RetrievedMemoryItem = {
 
 // Per-turn vector retrieval keeps repeated content compact across a session: a
 // repeated result is still named and recoverable, but its unchanged excerpt is
-// not re-sent verbatim on every turn.
-export function renderDedupedRetrievedMemorySection(
-  freshItems: RetrievedMemoryItem[],
-  unchangedItems: RetrievedMemoryItem[],
-): string {
-  if (freshItems.length === 0 && unchangedItems.length === 0) return ''
+// not re-sent verbatim on every turn. Entries are rendered in the order given
+// (the hybridSearch relevance ranking); only each item's body-vs-reference
+// rendering varies, so a previously-seen top hit is never demoted.
+export function renderDedupedRetrievedMemorySection(entries: DedupedRetrievedItem[]): string {
+  if (entries.length === 0) return ''
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
-  for (const item of freshItems) {
+  for (const { item, changed } of entries) {
     lines.push(`## ${item.heading}`)
-    lines.push(item.excerpt.trimEnd(), '')
-  }
-  for (const item of unchangedItems) {
-    lines.push(`## ${item.heading}`)
-    lines.push(unchangedRetrievedItemReference(item), '')
+    lines.push(changed ? item.excerpt.trimEnd() : unchangedRetrievedItemReference(item), '')
   }
   return lines.join('\n').trimEnd()
 }

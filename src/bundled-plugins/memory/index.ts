@@ -227,8 +227,8 @@ async function renderVectorTurnMemory(
     }
     if (shouldFallbackToTopicIndex) return renderTopicIndexMemorySection(plan.shards, { origin: event.origin })
     if (isChannel) return renderRetrievedMemorySection(results, { origin: event.origin })
-    const { fresh, unchanged } = partitionRetrievedMemoryItems(results, injectedState)
-    return renderDedupedRetrievedMemorySection(fresh, unchanged)
+    const deduped = partitionRetrievedMemoryItems(results, injectedState)
+    return renderDedupedRetrievedMemorySection(deduped)
   } finally {
     store.close()
   }

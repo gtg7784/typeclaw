@@ -2,32 +2,28 @@ import type { RetrievedMemoryItem } from './load-memory'
 
 export type InjectedMemoryState = Map<string, string>
 
-export type RetrievedMemoryPartition = {
-  fresh: RetrievedMemoryItem[]
-  unchanged: RetrievedMemoryItem[]
+export type DedupedRetrievedItem = {
+  item: RetrievedMemoryItem
+  changed: boolean
 }
 
-// Preserves the cross-turn dedup intent after vector turns moved to top-K
-// retrieval: an unchanged retrieved excerpt is still named and recoverable via
-// memory_search, while changed retrieved content re-injects so the model never
-// reasons over a stale excerpt.
+// Returns items in their input (relevance) order with a per-item `changed`
+// flag, never split into separate groups: a high-ranked but previously-seen
+// topic must stay ahead of a lower-ranked fresh one, since hybridSearch's
+// ranking drives per-turn relevance. `changed` is false when an identical
+// excerpt was already injected this session, so the renderer emits a
+// recoverable reference instead of re-sending the body.
 export function partitionRetrievedMemoryItems(
   items: RetrievedMemoryItem[],
   state: InjectedMemoryState,
-): RetrievedMemoryPartition {
-  const fresh: RetrievedMemoryItem[] = []
-  const unchanged: RetrievedMemoryItem[] = []
-  for (const item of items) {
+): DedupedRetrievedItem[] {
+  return items.map((item) => {
     const stateKey = `${item.source}:${item.key}`
     const hash = hashItem(item)
-    if (state.get(stateKey) === hash) {
-      unchanged.push(item)
-    } else {
-      fresh.push(item)
-      state.set(stateKey, hash)
-    }
-  }
-  return { fresh, unchanged }
+    const changed = state.get(stateKey) !== hash
+    if (changed) state.set(stateKey, hash)
+    return { item, changed }
+  })
 }
 
 function hashItem(item: RetrievedMemoryItem): string {
