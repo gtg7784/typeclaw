@@ -22,7 +22,7 @@ import {
 } from './permission-guidance'
 import { createGithubReactionCallback, createGithubRemoveReactionCallback } from './reactions'
 import { reconcileOpenPrs } from './reconcile-open-prs'
-import { recoverFailedGithubDeliveries } from './recover-failed-deliveries'
+import { createRecoveredGuidLog, recoverFailedGithubDeliveries } from './recover-failed-deliveries'
 import { createGithubReviewStateResolver } from './review-state'
 import { createGithubReviewThreadResolver } from './review-thread-resolver'
 import { createTeamMembershipChecker } from './team-membership'
@@ -376,12 +376,16 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // reconcile pass above already covers the review-needed case immediately.
       const deliveryRecoveryIntervalMs = options.deliveryRecoveryIntervalMs ?? DEFAULT_DELIVERY_RECOVERY_INTERVAL_MS
       if (managedHooks.length > 0 && deliveryRecoveryIntervalMs > 0) {
+        // Created once and captured by `sweep`, so recovery idempotency persists
+        // across ticks even when the shared live dedup evicts the guid.
+        const recoveredLog = createRecoveredGuidLog(DELIVERY_RECOVERY_LOOKBACK_MS)
         const sweep = () => {
           recoverFailedGithubDeliveries({
             hooks: managedHooks,
             token: (repoSlug: string) => auth.token({ repoSlug }),
             process: (input) => processVerifiedGithubDelivery(handlerOptions, input),
             alreadySeen: (guid: string) => dedup.has(guid),
+            recoveredLog,
             lookbackMs: DELIVERY_RECOVERY_LOOKBACK_MS,
             maxPerSweep: MAX_RECOVERED_PER_SWEEP,
             logger,

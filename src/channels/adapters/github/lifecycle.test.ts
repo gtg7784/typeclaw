@@ -950,7 +950,13 @@ describe('createGithubAdapter lifecycle', () => {
   })
 
   test('delivery-recovery sweep is registered once hooks exist, queries the delivery log, and is cleared on stop', async () => {
-    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+    // Resolve deterministically when the sweep hits the deliveries endpoint,
+    // instead of racing a fixed sleep against the token-mint + list round-trips.
+    let resolveDeliveriesQueried!: () => void
+    const deliveriesQueried = new Promise<void>((resolve) => {
+      resolveDeliveriesQueried = resolve
+    })
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
       if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
       if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
         return Response.json({ id: 42, login: 'typeey-app[bot]' })
@@ -961,7 +967,10 @@ describe('createGithubAdapter lifecycle', () => {
       if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
         return Response.json({ token: 'ghs_fresh', expires_at: '2099-01-01T00:00:00Z' })
       }
-      if (url.includes('/repos/acme/widgets/hooks/7/deliveries')) return Response.json([])
+      if (url.includes('/repos/acme/widgets/hooks/7/deliveries')) {
+        resolveDeliveriesQueried()
+        return Response.json([])
+      }
       if (url.includes('/repos/acme/widgets/hooks')) {
         if (method === 'GET') return Response.json([])
         if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
@@ -995,8 +1004,7 @@ describe('createGithubAdapter lifecycle', () => {
     expect(handlers.length).toBe(1)
 
     handlers[0]!()
-    await new Promise((r) => setTimeout(r, 10))
-    expect(calls.some((c) => c.url.includes('/hooks/7/deliveries'))).toBe(true)
+    await deliveriesQueried // resolves only when the sweep queries the delivery log
 
     await adapter.stop()
     expect(clears).toBe(1)

@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import { createDeliveryDedup } from './dedup'
-import { recoverFailedGithubDeliveries, type RecoverFailedDeliveriesOptions } from './recover-failed-deliveries'
+import {
+  createRecoveredGuidLog,
+  recoverFailedGithubDeliveries,
+  type RecoverFailedDeliveriesOptions,
+} from './recover-failed-deliveries'
+
+const LOOKBACK_MS = 70 * 60 * 60 * 1000
 
 type DeliveryFixture = {
   id: number
@@ -78,7 +84,8 @@ function baseOptions(
       routed.push(input)
     },
     alreadySeen: () => false,
-    lookbackMs: 70 * 60 * 60 * 1000,
+    recoveredLog: createRecoveredGuidLog(LOOKBACK_MS, () => NOW),
+    lookbackMs: LOOKBACK_MS,
     maxPerSweep: 50,
     logger: { info: () => {}, warn: () => {} },
     now: () => NOW,
@@ -99,22 +106,15 @@ describe('recoverFailedGithubDeliveries', () => {
     expect(result.recovered).toBe(1)
   })
 
-  test('does not re-route the same guid across sweeps (shared dedup via process reserve-on-entry)', async () => {
+  test('does not re-route the same guid across sweeps (durable recoveredLog)', async () => {
     const routed: Routed[] = []
-    // Faithful fake: the real processVerifiedGithubDelivery reserves the guid in
-    // the shared dedup on entry, so a later sweep skips it. Mirror that here.
-    const dedup = createDeliveryDedup()
-    const process = async (i: Routed) => {
-      dedup.add(i.delivery)
-      routed.push(i)
-    }
-    const alreadySeen = (g: string) => dedup.has(g)
+    const recoveredLog = createRecoveredGuidLog(LOOKBACK_MS, () => NOW)
     const { fetch: fetchImpl, detailFetches } = fakeDeliveriesApi({
       byHook: { 1: [{ id: 11, guid: 'g-1', event: 'issue_comment', statusCode: 0 }] },
     })
 
-    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, process, alreadySeen }))
-    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, process, alreadySeen }))
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog }))
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog }))
 
     expect(routed.length).toBe(1)
     expect(detailFetches).toEqual([11]) // second sweep skips before the detail fetch
@@ -154,21 +154,45 @@ describe('recoverFailedGithubDeliveries', () => {
 
   test('does not refetch a recovered no-op event on the next sweep', async () => {
     const routed: Routed[] = []
-    const dedup = createDeliveryDedup()
-    // A no-op classify (allowlist/self/null drop) still reserves the guid on
-    // entry in the real core, so the failed delivery is not refetched forever.
-    const process = async (i: Routed) => {
-      dedup.add(i.delivery)
-    }
-    const alreadySeen = (g: string) => dedup.has(g)
+    const recoveredLog = createRecoveredGuidLog(LOOKBACK_MS, () => NOW)
+    // A no-op classify (allowlist/self/null drop) still resolves `process`, so
+    // the guid is recorded and the failed delivery is not refetched forever.
+    const process = async () => {}
     const { fetch: fetchImpl, detailFetches } = fakeDeliveriesApi({
       byHook: { 1: [{ id: 11, guid: 'g-noop', event: 'issues', statusCode: 410 }] },
     })
 
-    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, process, alreadySeen }))
-    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, process, alreadySeen }))
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog, process }))
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog, process }))
 
     expect(detailFetches).toEqual([11])
+  })
+
+  test('does not re-route an old recovered delivery after the live dedup evicts its guid', async () => {
+    const routed: Routed[] = []
+    const dedup = createDeliveryDedup() // the real 1000-entry LRU
+    const recoveredLog = createRecoveredGuidLog(LOOKBACK_MS, () => NOW)
+    // Mirror production: the live core reserves the guid in the shared dedup.
+    const process = async (i: Routed) => {
+      dedup.add(i.delivery)
+      routed.push(i)
+    }
+    const alreadySeen = (g: string) => dedup.has(g)
+    const { fetch: fetchImpl } = fakeDeliveriesApi({
+      byHook: { 1: [{ id: 11, guid: 'g-old', event: 'issue_comment', statusCode: 502 }] },
+    })
+
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog, process, alreadySeen }))
+    expect(routed.length).toBe(1)
+
+    // Flood the live dedup past its 1000-entry cap so g-old is evicted.
+    for (let i = 0; i < 1100; i++) dedup.add(`flood-${i}`)
+    expect(dedup.has('g-old')).toBe(false)
+
+    // g-old is still in the delivery log and gone from the live dedup, but the
+    // durable recoveredLog remembers it for the lookback window → not re-routed.
+    await recoverFailedGithubDeliveries(baseOptions({ routed, fetchImpl, recoveredLog, process, alreadySeen }))
+    expect(routed.length).toBe(1)
   })
 
   test('isolates a per-hook list failure: other hooks still recover', async () => {
@@ -268,5 +292,21 @@ describe('recoverFailedGithubDeliveries', () => {
 
     expect(routed.map((r) => r.delivery).sort()).toEqual(['g-page1', 'g-page2'])
     expect(result.recovered).toBe(2)
+  })
+})
+
+describe('createRecoveredGuidLog', () => {
+  test('remembers a guid within the TTL and forgets it once the TTL elapses', () => {
+    let nowMs = 1_000
+    const log = createRecoveredGuidLog(100, () => nowMs)
+
+    log.record('g') // recorded at 1000 → expires at 1100
+    expect(log.has('g')).toBe(true)
+
+    nowMs += 99 // 1099, still before expiry
+    expect(log.has('g')).toBe(true)
+
+    nowMs += 1 // 1100, expiry reached (expiry <= now ⇒ expired)
+    expect(log.has('g')).toBe(false)
   })
 })

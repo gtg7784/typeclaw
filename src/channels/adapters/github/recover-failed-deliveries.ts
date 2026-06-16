@@ -16,6 +16,37 @@ import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 
 export type ManagedHook = { repo: string; hookId: number }
 
+// Recovery-owned idempotency keyed by delivery GUID, retained for the FULL
+// lookback window. The shared live dedup cannot serve this alone: it is a
+// fixed 1000-entry LRU, so during a 70h lookback across many repos it can evict
+// a GUID we already recovered, after which the still-listed failed delivery
+// would be re-fetched and re-routed. This TTL log holds only RECOVERED GUIDs
+// (failed-then-recovered deliveries, a small set), expiring each exactly when it
+// also falls out of the scan window — so a recovered delivery is routed once
+// regardless of live-dedup churn. (The shared dedup still guards the live-vs-
+// sweep concurrency race; this guards cross-sweep durability.)
+export type RecoveredGuidLog = { has: (guid: string) => boolean; record: (guid: string) => void }
+
+export function createRecoveredGuidLog(ttlMs: number, now: () => number = Date.now): RecoveredGuidLog {
+  const expiresAt = new Map<string, number>()
+  return {
+    has(guid: string): boolean {
+      const expiry = expiresAt.get(guid)
+      if (expiry === undefined) return false
+      if (expiry <= now()) {
+        expiresAt.delete(guid)
+        return false
+      }
+      return true
+    },
+    record(guid: string): void {
+      const t = now()
+      for (const [g, expiry] of expiresAt) if (expiry <= t) expiresAt.delete(g)
+      expiresAt.set(guid, t + ttlMs)
+    },
+  }
+}
+
 export type RecoverFailedDeliveriesOptions = {
   hooks: readonly ManagedHook[]
   token: (repoSlug: string) => Promise<string>
@@ -23,12 +54,14 @@ export type RecoverFailedDeliveriesOptions = {
   // options. `delivery` is the GUID; the core dedups, filters by allowlist,
   // drops self-authored, and routes exactly as the live path does.
   process: (input: { event: string; delivery: string; payload: Record<string, unknown> }) => Promise<void>
-  // The LIVE delivery dedup, shared with the webhook handler, keyed by guid. A
-  // guid here means a real delivery — or a prior recovery — already routed this
-  // event; skip it. `process` reserves the guid here on entry (for ANY outcome,
-  // including a no-op classify), so a recovered delivery is never refetched on a
-  // later sweep and a concurrent live delivery cannot double-route.
+  // Fast-path skip backed by the LIVE delivery dedup (shared with the webhook
+  // handler): a guid here was just routed live (or reserved by `process` on
+  // entry), so skip it. Best-effort only — it is a 1000-entry LRU and may evict
+  // within the lookback window, which is exactly why `recoveredLog` exists.
   alreadySeen: (guid: string) => boolean
+  // Durable recovery idempotency for the whole lookback window (see
+  // createRecoveredGuidLog). Caller-owned so it persists across sweeps.
+  recoveredLog: RecoveredGuidLog
   lookbackMs: number
   maxPerSweep: number
   logger: { info: (m: string) => void; warn: (m: string) => void }
@@ -99,12 +132,23 @@ async function recoverHook(
     scanned += 1
     const guid = delivery.guid
     if (guid === '') continue
-    if (succeededGuids.has(guid) || handledThisSweep.has(guid) || options.alreadySeen(guid)) continue
+    if (
+      succeededGuids.has(guid) ||
+      handledThisSweep.has(guid) ||
+      options.alreadySeen(guid) ||
+      options.recoveredLog.has(guid)
+    ) {
+      continue
+    }
     handledThisSweep.add(guid)
 
     const payload = await fetchDeliveryPayload(fetchImpl, token, target, hook.hookId, delivery.id)
     if (payload === null) continue
     await options.process({ event: delivery.event, delivery: guid, payload })
+    // Record AFTER process resolves: an unexpected throw leaves the guid
+    // unrecorded so the next sweep retries it. A no-op classify still records
+    // (process returned), so a non-routable failed delivery is not refetched.
+    options.recoveredLog.record(guid)
     recovered += 1
   }
   return { recovered, scanned }
