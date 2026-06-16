@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
 
 export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
@@ -249,8 +250,25 @@ export function imageTagFromCwd(cwd: string): string {
 }
 
 // Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*.
+//
+// Non-ASCII names (Korean/CJK/Cyrillic/accented Latin — the common Windows case
+// where the profile folder is a localized display name, e.g. C:\Users\사용자\봇)
+// have every out-of-charset character collapsed to a dash, so distinct folders
+// reduce to the SAME string: '봇' and '집' both → 'tc--'. The container name keys
+// hostd registration and the secrets key path, so that collision is silent
+// host-side state clobbering, not cosmetics. For any name carrying a non-ASCII
+// char we append a deterministic hash of the original (cf. makeUntitledSlug in
+// the memory plugin) to keep distinct folders distinct; surviving ASCII stays a
+// readable prefix. ASCII-only names take the original branch — never renamed.
 function sanitizeContainerName(name: string): string {
   const cleaned = name.replace(/[^a-zA-Z0-9_.-]/g, '-')
+  if (/[^\u0000-\u007f]/.test(name)) {
+    const hash = createHash('sha256').update(name).digest('hex').slice(0, 8)
+    const remnant = cleaned.replace(/-+/g, '-').replace(/^-+|-+$/g, '')
+    if (remnant === '') return `tc-${hash}`
+    const base = /^[a-zA-Z0-9]/.test(remnant) ? remnant : `tc-${remnant}`
+    return `${base}-${hash}`
+  }
   if (cleaned === '' || !/^[a-zA-Z0-9]/.test(cleaned)) {
     return `tc-${cleaned || 'agent'}`
   }
