@@ -13,6 +13,14 @@
 // descriptive ("I checked and it's fine") or other-directed ("you can continue")
 // usage. This is a HINT, not a control-flow authority: the abort still fires
 // regardless; only the optional nudge is gated on it.
+//
+// Detection is two-pass: a phrase-substring pass (ALL_PHRASES) for analytic
+// languages where future intent is a separate word ("I'll", "voy a", "我会"),
+// plus a morpheme pass (MORPHEME_PATTERNS + the Japanese check) for languages
+// where it is a verb inflection/affix. The morpheme pass matches the marker
+// itself, so it generalizes across EVERY action verb (update/configure/fix/…)
+// instead of enumerating each — what the per-verb KO/TR/HI/JA lists used to do
+// by hand.
 
 // Strip markdown emphasis/code fences before matching so an inline `gh` span
 // inside "바로 `gh`로 확인할게요" does not split the phrase.
@@ -62,70 +70,80 @@ const EN_PHRASES: readonly string[] = [
   'lemme check',
   'lemme look',
   'lemme take a look',
+  // Action/config verb family. The retrieval verbs above ("check/look/look up")
+  // miss the much larger class of "I'll DO X" promises — update/configure/set up/
+  // schedule/fix/apply/create — which is exactly the class that silently truncates
+  // when the model forgets `continue: true` (the cron-update production miss).
+  "i'll update",
+  "i'll set up",
+  "i'll set it up",
+  "i'll configure",
+  "i'll schedule",
+  "i'll fix",
+  "i'll apply",
+  "i'll add",
+  "i'll create",
+  "i'll handle",
+  'let me update',
+  'let me fix',
+  'let me set up',
+  'let me configure',
+  'let me add',
+  'let me create',
+  'let me handle',
 ]
 
-// Korean: -ㄹ게요 / -겠습니다 future-volitional endings on check/look/continue/
-// proceed verbs. These endings are first-person volitional in Korean — they
-// cannot address the listener, so they are safe self-direction anchors that
-// descriptive or other-directed sentences do not produce. Bare "계속" is
-// excluded ("계속 진행하세요" = "you go ahead", terminal).
+// Korean: the -겠습니다/-겠어요 and -ㄹ게요 verb endings are first-person
+// volitional — they cannot address the listener, so they are safe self-direction
+// anchors. The -겠습니다/-겠어요 form is matched by MORPHEME_PATTERNS below (it
+// generalizes across all action verbs), so only the -게요/-게여 forms and stall
+// idioms are enumerated here. Bare adverb+noun fragments ("바로 확인", "계속 확인",
+// "곧 알려") are deliberately NOT listed: without the volitional ending they match
+// other-directed requests ("바로 확인 부탁드려요" = "please check") and descriptive
+// progressives ("계속 확인 중입니다" = "I'm still checking") — the exact false
+// positives the design forbids. Their volitional forms are caught by the morpheme
+// regex regardless.
 const KO_PHRASES: readonly string[] = [
   '확인해볼게요',
   '확인해 볼게요',
   '확인할게요',
-  '확인하겠습니다',
-  '확인해보겠습니다',
-  '확인해 보겠습니다',
-  '다시 확인하겠습니다',
-  '다시 확인해보겠습니다',
-  '이어서 확인',
-  '계속 확인',
+  '확인할게여',
   '계속 진행할게요',
-  '계속 진행하겠습니다',
-  '계속하겠습니다',
   '계속할게요',
-  '바로 확인',
   '바로 볼게요',
-  '바로 진행',
   '살펴볼게요',
-  '살펴보겠습니다',
-  '진행하겠습니다',
-  '잠시만요',
-  '잠깐만요',
-  '곧 알려',
-  // Bare first-person-volitional verb endings: the -ㄹ게요/-겠습니다 ending is
-  // self-directed regardless of the preceding adverb, so the "바로 …" prefix in
-  // the entries above is not load-bearing. "볼게요" alone (and "먼저/한번/지금 볼게요"
-  // by substring) is the exact production miss — the ack "…먼저 볼게요" did not
-  // match because only the "바로 볼게요" compound was listed. Common work verbs
-  // (검토/조회/찾아/알아/처리) in the same volitional form join here for parity with
-  // "확인/살펴" above; "볼게여" is the casual -여 variant seen in chat.
   '볼게요',
   '볼게여',
-  '확인할게여',
   '검토할게요',
   '검토해볼게요',
-  '검토하겠습니다',
   '조회해볼게요',
-  '조회하겠습니다',
   '찾아볼게요',
-  '찾아보겠습니다',
   '알아볼게요',
-  '알아보겠습니다',
   '처리할게요',
-  '처리하겠습니다',
+  '알려드릴게요',
+  // Action/config verb -게요 forms (the -겠습니다 siblings are covered by the
+  // morpheme regex; these are the casual-polite variants chat models also emit).
+  '업데이트할게요',
+  '수정할게요',
+  '설정할게요',
+  '반영할게요',
+  '적용할게요',
+  '추가할게요',
+  '생성할게요',
+  '잠시만요',
+  '잠깐만요',
 ]
 
 // The remaining languages mirror the precision-first selection above: every
 // entry pairs a FIRST-PERSON future/volitional anchor with a work verb
-// (check/look/continue/proceed/verify) or is an immediate-work idiom ("on it
-// now"). The same false-negative bias holds — bare verbs, bare acknowledgments
-// ("ok", "sí", "好"), second-person imperatives ("you continue"), and
-// descriptive past forms ("I checked") are deliberately excluded because a
-// substring match on those would mis-fire. Latin/Cyrillic/Arabic/Indic entries
-// are inflected first-person-future forms (or multi-word) so they cannot
-// collide with a bare common word; CJK entries are full 4+ character
-// intent phrases, never a lone noun.
+// (check/look/continue/proceed/verify or update/configure/fix/create) or is an
+// immediate-work idiom ("on it now"). The same false-negative bias holds — bare
+// verbs, bare acknowledgments ("ok", "sí", "好"), second-person imperatives ("you
+// continue"), and descriptive past forms ("I checked") are deliberately excluded
+// because a substring match on those would mis-fire. Latin/Cyrillic/Arabic/Indic
+// entries are inflected first-person-future forms (or multi-word) so they cannot
+// collide with a bare common word; CJK entries are full 4+ character intent
+// phrases, never a lone noun.
 
 // Spanish: "voy a" / "déjame" + work verb; "enseguida" (right away) idioms.
 const ES_PHRASES: readonly string[] = [
@@ -152,6 +170,17 @@ const ES_PHRASES: readonly string[] = [
   'un momento',
   'dame un momento',
   'dame un segundo',
+  // Action/config verb family.
+  'voy a actualizar',
+  'voy a configurar',
+  'voy a corregir',
+  'voy a arreglar',
+  'voy a crear',
+  'voy a añadir',
+  'voy a programar',
+  'voy a aplicar',
+  'déjame actualizar',
+  'déjame corregir',
 ]
 
 // French: "je vais" + work verb; "laisse-moi" idioms.
@@ -174,6 +203,16 @@ const FR_PHRASES: readonly string[] = [
   'un instant',
   'donne-moi un instant',
   'donne-moi une seconde',
+  // Action/config verb family.
+  'je vais mettre à jour',
+  'je vais configurer',
+  'je vais corriger',
+  'je vais créer',
+  'je vais ajouter',
+  'je vais programmer',
+  'je vais appliquer',
+  'laisse-moi corriger',
+  'laisse-moi mettre à jour',
 ]
 
 // Italian: "vado a" / "fammi" + work verb; "controllo subito" idioms.
@@ -194,6 +233,15 @@ const IT_PHRASES: readonly string[] = [
   'un momento',
   'dammi un momento',
   'dammi un secondo',
+  // Action/config verb family.
+  'vado ad aggiornare',
+  'vado a configurare',
+  'vado a correggere',
+  'vado a creare',
+  'vado ad aggiungere',
+  'vado ad applicare',
+  'fammi aggiornare',
+  'fammi correggere',
 ]
 
 // Portuguese: "vou" + work verb; "deixa eu" idioms.
@@ -214,6 +262,16 @@ const PT_PHRASES: readonly string[] = [
   'um momento',
   'me dê um momento',
   'me dá um segundo',
+  // Action/config verb family.
+  'vou atualizar',
+  'vou configurar',
+  'vou corrigir',
+  'vou criar',
+  'vou adicionar',
+  'vou agendar',
+  'vou aplicar',
+  'deixa eu atualizar',
+  'deixa eu corrigir',
 ]
 
 // German: "ich werde" / "lass mich" + work verb; "ich schaue gleich" idioms.
@@ -238,10 +296,22 @@ const DE_PHRASES: readonly string[] = [
   'einen moment',
   'einen augenblick',
   'gib mir eine sekunde',
+  // Action/config verb family.
+  'ich werde aktualisieren',
+  'ich werde konfigurieren',
+  'ich werde korrigieren',
+  'ich werde einrichten',
+  'ich werde erstellen',
+  'ich werde hinzufügen',
+  'ich werde anwenden',
+  'lass mich aktualisieren',
+  'lass mich korrigieren',
 ]
 
 // Russian: first-person-future verbs (проверю/посмотрю/продолжу) — the -ю/-у
-// inflection is unambiguously "I will", so it is a safe self-anchor.
+// inflection is unambiguously "I will", so it is a safe self-anchor. (Note: the
+// bare -ю ending is shared with present-imperfective "я делаю" = "I do", so this
+// stays an enumerated list rather than a morpheme regex.)
 const RU_PHRASES: readonly string[] = [
   'сейчас проверю',
   'я проверю',
@@ -254,6 +324,15 @@ const RU_PHRASES: readonly string[] = [
   'дайте мне минуту',
   'одну секунду',
   'минутку',
+  // Action/config verb family (perfective first-person futures).
+  'я обновлю',
+  'я настрою',
+  'я исправлю',
+  'я создам',
+  'я добавлю',
+  'я применю',
+  'сейчас обновлю',
+  'сейчас исправлю',
 ]
 
 // Chinese: 我会/我来/我再 + work verb. Full multi-character intent phrases only;
@@ -277,26 +356,39 @@ const ZH_PHRASES: readonly string[] = [
   '让我检查一下',
   '稍等一下',
   '我看一下',
+  // Action/config verb family.
+  '我来更新',
+  '我会更新',
+  '我来配置',
+  '我来设置',
+  '我会设置',
+  '我来修改',
+  '我会修改',
+  '我来修复',
+  '我来创建',
+  '我来添加',
+  '我马上更新',
+  '让我更新',
+  '让我改一下',
 ]
 
-// Japanese: -てみます / -します first-person volitional on check/look/continue.
-// Bare nouns (確認) are excluded; the verb ending carries the self-direction.
+// Japanese: handled by the JA_VOLITIONAL morpheme check below (-します/-いたします/
+// -してみます generalizes across all する action verbs). Only the regular-verb
+// ます forms (調べます/見てみます/続けます — bare ます is too broad to regex) and
+// stall idioms are enumerated here.
 const JA_PHRASES: readonly string[] = [
-  '確認します',
-  '確認してみます',
-  '確認いたします',
   '調べてみます',
   '調べます',
   '見てみます',
   '続けます',
-  '引き続き確認します',
-  'すぐ確認します',
   '少々お待ちください',
   'ちょっと待ってください',
 ]
 
 // Arabic: future particle سـ prefixed first-person verb (سأتحقق = "I will
-// verify"). The سأ prefix is unambiguously first-person-future.
+// verify"). The سأ prefix is first-person-future, but as a bare substring it
+// collides with the root س-أ-ل ("ask": سألت "I asked", المسألة "the matter"), so
+// this stays an enumerated list of full verbs rather than a سأ-prefix regex.
 const AR_PHRASES: readonly string[] = [
   'سأتحقق',
   'سأتأكد',
@@ -307,30 +399,31 @@ const AR_PHRASES: readonly string[] = [
   'دعني أتحقق',
   'دعني أراجع',
   'لحظة من فضلك',
+  // Action/config verb family.
+  'سأحدث',
+  'سأحدّث',
+  'سأعدل',
+  'سأعدّل',
+  'سأضبط',
+  'سأصلح',
+  'سأنشئ',
+  'سأضيف',
 ]
 
-// Hindi: first-person-future "मैं … करूँगा/देखूँगा" forms (multi-word so they
-// cannot collide with a bare common word).
-const HI_PHRASES: readonly string[] = [
-  'जाँच करूँगा',
-  'जांच करूंगा',
-  'देख लूँगा',
-  'देख लूंगा',
-  'जारी रखूँगा',
-  'जारी रखूंगा',
-  'एक मिनट रुकिए',
-]
+// Hindi: first-person-future is the -ūṅgā/-ūṅgī suffix, matched by
+// MORPHEME_PATTERNS below (it covers all X-करना compounds). Only the stall idiom
+// is enumerated here.
+const HI_PHRASES: readonly string[] = ['एक मिनट रुकिए']
 
-// Turkish: first-person-future "-eceğim/-acağım" on check/look/continue verbs.
+// Turkish: first-person-future "-eceğim/-acağım" is matched by MORPHEME_PATTERNS
+// below. The present-progressive ("ediyorum" = "I'm checking now"), optative
+// ("bir bakayım" = "let me look"), and stall idioms stay enumerated — the
+// progressive -ıyorum ending is too polysemous to regex ("biliyorum" = "I know").
 const TR_PHRASES: readonly string[] = [
-  'kontrol edeceğim',
   'kontrol ediyorum',
-  'bakacağım',
   'bir bakayım',
   'bir kontrol edeyim',
   'kontrol edeyim',
-  'inceleyeceğim',
-  'devam edeceğim',
   'hemen kontrol ediyorum',
   'hemen bakıyorum',
   'bir saniye',
@@ -348,6 +441,14 @@ const VI_PHRASES: readonly string[] = [
   'tôi xem ngay',
   'chờ một chút',
   'đợi một chút',
+  // Action/config verb family.
+  'tôi sẽ cập nhật',
+  'tôi sẽ cấu hình',
+  'tôi sẽ sửa',
+  'tôi sẽ tạo',
+  'tôi sẽ thêm',
+  'để tôi cập nhật',
+  'để tôi sửa',
 ]
 
 // Indonesian: "saya akan" / "biar saya" (I will / let me) + work verb.
@@ -362,6 +463,16 @@ const ID_PHRASES: readonly string[] = [
   'saya periksa dulu',
   'tunggu sebentar',
   'sebentar ya',
+  // Action/config verb family.
+  'saya akan perbarui',
+  'saya akan memperbarui',
+  'saya akan atur',
+  'saya akan konfigurasi',
+  'saya akan perbaiki',
+  'saya akan buat',
+  'saya akan tambah',
+  'biar saya perbaiki',
+  'biar saya perbarui',
 ]
 
 const ALL_PHRASES: readonly string[] = [
@@ -382,6 +493,41 @@ const ALL_PHRASES: readonly string[] = [
   ...ID_PHRASES,
 ]
 
+// First-person future/volitional realized as a verb inflection or affix (not a
+// separate word), so matching the marker generalizes across ALL action verbs.
+const MORPHEME_PATTERNS: readonly RegExp[] = [
+  // Korean first-person volitional: a verb stem + -겠습니다/-겠어요. The stem must
+  // be one of the action/auxiliary verbs 하 (the 하다 light verb behind every
+  // X하다 — 업데이트하겠습니다/반영하겠어요), 보 (살펴보겠습니다), 두 (반영해두겠습니다), or
+  // 놓 (해놓겠습니다). Anchoring on the verb stem is what keeps this self-directed:
+  // bare 겠 also matches adjective-stem CONJECTURE (좋겠어요 "that'd be nice",
+  // 괜찮겠어요 "must be fine") and the idioms 알겠/모르겠, none of which promise work.
+  // Listener-directed conjecture takes the honorific 시 (피곤하시겠어요 → 시겠, not
+  // 하겠), so it is excluded too.
+  /(?:하|보|두|놓)겠(?:습니다|어요)/,
+  // Turkish first-person-singular future "-acağım/-eceğim" ("I will VERB").
+  // Vowel harmony yields exactly these two suffixes; the y-buffer
+  // ("bekleyeceğim") leaves the suffix intact.
+  /acağım|eceğim/,
+  // Hindi first-person future "-ūṅgā/-ūṅgī" on any verb, covering all X-करना
+  // compounds ("अपडेट करूँगा"). Both nasal spellings (ँ U+0901 / ं U+0902) and
+  // both genders (ा/ी) are included.
+  /ू[ँं]ग[ाी]/,
+]
+
+// Japanese する-verb volitional します/いたします/してみます — covers the action class
+// (更新します/設定します/対応します). Bare ます is the universal polite verb ending and
+// far too broad to match, so this keys on します specifically. Two request/greeting
+// idioms end in します without being work intent — お願い(いた)します ("please") and
+// 失礼します ("excuse me") — and are stripped before the test so they don't fire.
+// The (?![か？?]) lookahead drops question forms — both the か question particle
+// (どうしますか "what should I do?") and a trailing question mark, fullwidth ？ or
+// ASCII ? (どうします？, 更新します？ "shall I update?"). A question awaits the user;
+// it is not a commitment to act this turn. A statement keeps its 。/, so
+// 更新します。 still matches.
+const JA_VOLITIONAL_IDIOMS = /お願い(?:いた)?します|失礼します/g
+const JA_VOLITIONAL = /します(?![か？?])|してみます(?![か？?])/
+
 // Reply texts shorter than this are almost always a complete final answer
 // ("네", "ok", "done") where a partial match would be noise. The shortest
 // legitimate intent phrases ("on it now", "확인할게요") clear this floor.
@@ -391,5 +537,7 @@ export function detectContinuationWillingness(text: string): boolean {
   if (text.length < MIN_LENGTH) return false
   const normalized = normalize(text)
   if (normalized.length < MIN_LENGTH) return false
-  return ALL_PHRASES.some((phrase) => normalized.includes(phrase))
+  if (ALL_PHRASES.some((phrase) => normalized.includes(phrase))) return true
+  if (MORPHEME_PATTERNS.some((pattern) => pattern.test(normalized))) return true
+  return JA_VOLITIONAL.test(normalized.replace(JA_VOLITIONAL_IDIOMS, ''))
 }
