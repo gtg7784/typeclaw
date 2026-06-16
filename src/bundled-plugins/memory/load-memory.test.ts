@@ -464,6 +464,14 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     expect(section).toContain(`- 한글 메모 \`${fallbackSlug}\``)
   })
 
+  test('keeps a mixed-script heading whose slug dropped the non-ASCII part', () => {
+    const items: RetrievedMemoryItem[] = [{ source: 'topic', key: 'memo', heading: '한글 memo', excerpt: 'body' }]
+
+    const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
+
+    expect(section).toContain('- 한글 memo `memo`')
+  })
+
   test('channel directive names both the topic-lookup and query-search calls', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
@@ -566,5 +574,11 @@ describe('renderTopicIndexMemorySection (headings fallback)', () => {
     const section = renderTopicIndexMemorySection([shard(fallbackSlug, '한글 메모')])
 
     expect(section).toContain(`- 한글 메모 \`${fallbackSlug}\``)
+  })
+
+  test('keeps a mixed-script heading whose slug dropped the non-ASCII part', () => {
+    const section = renderTopicIndexMemorySection([shard('memo', '한글 memo')])
+
+    expect(section).toContain('- 한글 memo `memo`')
   })
 })

@@ -75,6 +75,15 @@ describe('slugIsHeadingEcho', () => {
     expect(slugIsHeadingEcho('한글 메모', fallbackSlug)).toBe(false)
   })
 
+  it('is false for a mixed heading whose non-ASCII content normalization dropped', () => {
+    // headingToSlug('한글 memo') === 'memo', dropping the Korean text
+    expect(slugIsHeadingEcho('한글 memo', 'memo')).toBe(false)
+  })
+
+  it('still collapses an accented heading because diacritics transliterate, not drop', () => {
+    expect(slugIsHeadingEcho('café résumé', 'cafe-resume')).toBe(true)
+  })
+
   it('is false for an emoji-only heading against its own untitled fallback slug', () => {
     const fallbackSlug = headingToSlug('🎉🎊', new Set())
     expect(slugIsHeadingEcho('🎉🎊', fallbackSlug)).toBe(false)

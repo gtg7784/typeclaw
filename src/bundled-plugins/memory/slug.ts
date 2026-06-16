@@ -21,13 +21,19 @@ export function headingToSlug(heading: string, existingSlugs: Set<string>): stri
 }
 
 // True only when `slug` is a clean kebab echo of `heading` (the readable form
-// adds nothing the slug doesn't). A heading with no ASCII/kebab form (all-CJK,
-// emoji, pure punctuation) normalizes to empty and `headingToSlug` substitutes a
-// deterministic `untitled-<hash>`; a shard carrying exactly that fallback slug
-// would satisfy the round-trip equality and wrongly collapse away the only
-// human-readable name, so an empty normalization is never an echo.
+// adds nothing the slug doesn't). `headingToSlug` maps every non-ASCII letter,
+// ideograph, or symbol to `-` (or to an `untitled-<hash>` when nothing survives),
+// so a heading like `한글 memo` slugifies to `memo` and an all-CJK/emoji heading to
+// the fallback — collapsing either would drop the only human-readable name. Guard
+// by requiring the diacritic-folded heading to consist solely of ASCII
+// alphanumerics and separators/punctuation; any surviving CJK/emoji/symbol means
+// normalization discarded content, so it is never an echo. (Diacritics are
+// transliterated, not dropped — `café` → `cafe` stays a legitimate echo.)
+const ECHO_SAFE_HEADING = /^[A-Za-z0-9\s\p{P}]*$/u
+
 export function slugIsHeadingEcho(heading: string, slug: string): boolean {
-  if (normalizeHeading(heading).length === 0) {
+  const folded = heading.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (!ECHO_SAFE_HEADING.test(folded)) {
     return false
   }
   return headingToSlug(heading, new Set<string>()) === slug
