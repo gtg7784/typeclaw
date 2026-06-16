@@ -10,6 +10,21 @@ import { createStream } from '@/stream'
 import { createCronConsumer, type CronConsumerLogger, type CronSession } from './consumer'
 import type { CronJob, ExecJob, PromptJob } from './schema'
 
+async function waitForFile(path: string): Promise<string> {
+  for (let i = 0; i < 60; i++) {
+    if (await Bun.file(path).exists()) return Bun.file(path).text()
+    await Bun.sleep(50)
+  }
+  return Bun.file(path).text()
+}
+
+async function waitForCondition(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 60; i++) {
+    if (predicate()) return
+    await Bun.sleep(50)
+  }
+}
+
 // Minimal AgentSession stub satisfying the surface the model-fallback helper
 // uses: `subscribe` for soft-error detection (returns a no-op unsubscribe)
 // and `prompt` for the actual turn call. Production code routes the prompt
@@ -128,10 +143,9 @@ describe('createCronConsumer', () => {
     })
     consumer.start()
 
-    publishCron(stream, execJob('touch', ['sh', '-c', 'echo hello > out.txt']))
-    await new Promise((r) => setTimeout(r, 50))
+    publishCron(stream, execJob('touch', [process.execPath, '-e', 'await Bun.write("out.txt", "hello")']))
+    const contents = await waitForFile(join(root, 'out.txt'))
 
-    const contents = await Bun.file(join(root, 'out.txt')).text()
     expect(contents.trim()).toBe('hello')
 
     consumer.stop()
@@ -153,13 +167,16 @@ describe('createCronConsumer', () => {
       schedule: '* * * * *',
       enabled: true,
       kind: 'exec',
-      command: ['sh', '-c', 'printf "%s" "$TYPECLAW_PARENT_ORIGIN_JSON" > origin.json'],
+      command: [
+        process.execPath,
+        '-e',
+        'await Bun.write("origin.json", process.env.TYPECLAW_PARENT_ORIGIN_JSON ?? "")',
+      ],
       scheduledByRole: 'member',
     }
     publishCron(stream, job)
-    await new Promise((r) => setTimeout(r, 80))
+    const captured = await waitForFile(join(root, 'origin.json'))
 
-    const captured = await Bun.file(join(root, 'origin.json')).text()
     const parsed = JSON.parse(captured) as { kind?: string; jobId?: string; scheduledByRole?: string }
     expect(parsed.kind).toBe('cron')
     expect(parsed.jobId).toBe('nightly-checks')
@@ -180,15 +197,14 @@ describe('createCronConsumer', () => {
     })
     consumer.start()
 
-    publishCron(stream, execJob('fail', ['sh', '-c', 'exit 3']))
-    await new Promise((r) => setTimeout(r, 50))
+    publishCron(stream, execJob('fail', [process.execPath, '-e', 'process.exit(3)']))
+    await waitForCondition(() => errors.some((e) => /exited with code 3/.test(e)))
 
     expect(errors.some((e) => /exited with code 3/.test(e))).toBe(true)
 
-    publishCron(stream, execJob('after', ['sh', '-c', 'echo ok > after.txt']))
-    await new Promise((r) => setTimeout(r, 50))
+    publishCron(stream, execJob('after', [process.execPath, '-e', 'await Bun.write("after.txt", "ok")']))
+    const contents = await waitForFile(join(root, 'after.txt'))
 
-    const contents = await Bun.file(join(root, 'after.txt')).text()
     expect(contents.trim()).toBe('ok')
 
     consumer.stop()
