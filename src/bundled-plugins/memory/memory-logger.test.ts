@@ -341,7 +341,7 @@ describe('memoryLoggerSubagent', () => {
     const prompt = runSessionCalls[0]!.userPrompt!
     expect(prompt).toContain(transcript)
     expect(prompt).toContain('ses_abc')
-    expect(prompt).toMatch(/memory\/streams\/\d{4}-\d{2}-\d{2}\.jsonl/)
+    expect(prompt).toMatch(/memory[/\\]streams[/\\]\d{4}-\d{2}-\d{2}\.jsonl/)
   })
 
   test('handler includes channel location and participants in the initial prompt', async () => {

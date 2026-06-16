@@ -1,4 +1,9 @@
-import { isAbsolute, normalize } from 'node:path'
+import { posix } from 'node:path'
+
+// changedPaths are a wire format: agentDir-relative POSIX paths the container
+// emits and the host re-validates. Resolved with `path.posix` so a win32 test
+// runner keeps `/`-separators instead of rewriting `memory/x.md` to `memory\x.md`.
+const { isAbsolute, normalize } = posix
 
 import type {
   PluginCheckResult,

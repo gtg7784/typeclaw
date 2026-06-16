@@ -202,7 +202,7 @@ async function walk(root: string, dir: string, out: string[]): Promise<void> {
     if (entry.isDirectory()) {
       await walk(root, absolute, out)
     } else {
-      out.push(path.relative(root, absolute))
+      out.push(path.relative(root, absolute).split(path.sep).join('/'))
     }
   }
 }
