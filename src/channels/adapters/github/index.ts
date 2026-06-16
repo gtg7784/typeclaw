@@ -11,7 +11,7 @@ import { createDeliveryDedup } from './dedup'
 import { findPermissionGaps } from './event-permissions'
 import { createGithubFetchAttachmentCallback } from './fetch-attachment'
 import { createGithubHistoryCallback } from './history'
-import { createGithubWebhookHandler } from './inbound'
+import { createGithubWebhookHandler, processVerifiedGithubDelivery, type GithubWebhookHandlerOptions } from './inbound'
 import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
@@ -22,6 +22,7 @@ import {
 } from './permission-guidance'
 import { createGithubReactionCallback, createGithubRemoveReactionCallback } from './reactions'
 import { reconcileOpenPrs } from './reconcile-open-prs'
+import { recoverFailedGithubDeliveries } from './recover-failed-deliveries'
 import { createGithubReviewStateResolver } from './review-state'
 import { createGithubReviewThreadResolver } from './review-thread-resolver'
 import { createTeamMembershipChecker } from './team-membership'
@@ -67,6 +68,10 @@ export type GithubAdapterOptions = {
   // Test-only: replaces `setInterval` so tests can control when the
   // background refresh fires without waiting on real wall-clock time.
   setInterval?: (handler: () => void, ms: number) => { clear: () => void }
+  // How often to sweep each managed hook's GitHub delivery log for events whose
+  // inbound delivery failed (and that GitHub never redelivered), re-injecting
+  // them through the live event path. Zero disables the sweep. Default: 5 min.
+  deliveryRecoveryIntervalMs?: number
   // Write-side of the GithubTokenBridge. On App-auth start the adapter
   // registers a per-repo minter here so plugin hooks can resolve a token for
   // ad-hoc `gh` commands; it unregisters on stop and on start rollback. PAT
@@ -89,6 +94,12 @@ const consoleLogger: GithubAdapterLogger = {
 
 const DEFAULT_WEBHOOK_REGISTRATION_DELAY_MS = 2_000
 const DEFAULT_TOKEN_REFRESH_INTERVAL_MS = 30 * 60 * 1000
+const DEFAULT_DELIVERY_RECOVERY_INTERVAL_MS = 5 * 60 * 1000
+// GitHub retains the delivery log for 3 days; sweep a little under that so a
+// failed delivery is always still listable on the next interval.
+const DELIVERY_RECOVERY_LOOKBACK_MS = 70 * 60 * 60 * 1000
+// Bounds an LLM-session storm if a bad tunnel window drops a large burst.
+const MAX_RECOVERED_PER_SWEEP = 50
 
 export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapter {
   const logger = options.logger ?? consoleLogger
@@ -105,8 +116,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let started = false
   let managedHooks: ReadonlyArray<{ repo: string; hookId: number }> = []
   let tokenRefreshTimer: { clear: () => void } | null = null
+  let deliveryRecoveryTimer: { clear: () => void } | null = null
   let unregisterTokenBridge: (() => void) | null = null
   const workspaceByChat = new Map<string, string>()
+  const setIntervalFn =
+    options.setInterval ??
+    ((handler: () => void, ms: number) => {
+      const timer = setInterval(handler, ms)
+      return { clear: () => clearInterval(timer) }
+    })
 
   const rememberWorkspace = (workspace: string, chat: string): void => {
     workspaceByChat.set(chat, workspace)
@@ -174,7 +192,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         logger.error(`[github] route failed: ${err instanceof Error ? err.message : String(err)}`)
       })
   }
-  const handler = createGithubWebhookHandler({
+  const handlerOptions: GithubWebhookHandlerOptions = {
     webhookSecret,
     dedup,
     allowlist: () => options.configRef().eventAllowlist,
@@ -188,7 +206,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     fetchImpl,
     logger,
     route: routeInbound,
-  })
+  }
+  const handler = createGithubWebhookHandler(handlerOptions)
 
   return {
     async start(): Promise<void> {
@@ -251,12 +270,6 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
               )
             })
           }
-          const setIntervalFn =
-            options.setInterval ??
-            ((handler: () => void, ms: number) => {
-              const timer = setInterval(handler, ms)
-              return { clear: () => clearInterval(timer) }
-            })
           tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
         }
       } else {
@@ -355,10 +368,41 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           logger.warn(`[github] reconcile pass failed: ${err instanceof Error ? err.message : String(err)}`)
         })
       }
+      // Periodically recover inbound deliveries that failed at the tunnel and
+      // were never redelivered (the cloudflare-quick 502 loss). Registered only
+      // when we manage hooks to query, and driven by the same injectable timer
+      // as the token refresh. The first sweep fires after one interval — NOT
+      // inside start() — so start() stays free of surprise API traffic; the
+      // reconcile pass above already covers the review-needed case immediately.
+      const deliveryRecoveryIntervalMs = options.deliveryRecoveryIntervalMs ?? DEFAULT_DELIVERY_RECOVERY_INTERVAL_MS
+      if (managedHooks.length > 0 && deliveryRecoveryIntervalMs > 0) {
+        const sweep = () => {
+          recoverFailedGithubDeliveries({
+            hooks: managedHooks,
+            token: (repoSlug: string) => auth.token({ repoSlug }),
+            process: (input) => processVerifiedGithubDelivery(handlerOptions, input),
+            alreadySeen: (guid: string) => dedup.has(guid),
+            lookbackMs: DELIVERY_RECOVERY_LOOKBACK_MS,
+            maxPerSweep: MAX_RECOVERED_PER_SWEEP,
+            logger,
+            fetchImpl,
+          }).catch((err: unknown) => {
+            logger.warn(`[github] delivery recovery sweep failed: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }
+        deliveryRecoveryTimer = setIntervalFn(sweep, deliveryRecoveryIntervalMs)
+      }
     },
     async stop(): Promise<void> {
       if (!started) return
       started = false
+      // Stop the recovery sweep first: its async work outlives the synchronous
+      // unregister calls below, and a tick landing mid-teardown would query a
+      // hook we're about to deregister and could route during shutdown.
+      if (deliveryRecoveryTimer !== null) {
+        deliveryRecoveryTimer.clear()
+        deliveryRecoveryTimer = null
+      }
       options.router.unregisterOutbound('github', outbound)
       options.router.unregisterReaction('github', reaction)
       options.router.unregisterRemoveReaction('github', removeReaction)

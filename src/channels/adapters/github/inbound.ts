@@ -61,56 +61,81 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     }
 
     const delivery = req.headers.get('x-github-delivery') ?? ''
-    if (delivery !== '' && options.dedup.has(delivery)) {
-      options.logger.info(`[github] duplicate delivery ignored id=${delivery}`)
-      return ok()
-    }
-
     const event = req.headers.get('x-github-event') ?? ''
     const payload = parseJson(body)
     if (payload === null) return ok()
-    const action = readString(payload, 'action')
-    if (!isGithubEventAllowed(options.allowlist(), event, action)) return ok()
-
-    const selfId = options.selfId()
-    const selfLogin = options.selfLogin()
-    const author = readAuthor(event, payload)
-    if (author !== null && isSelfAuthor(author, selfId, selfLogin)) {
-      maybeScheduleDecoyReviewerDrop({ event, action, payload, selfLogin, options })
-      options.logger.info(
-        `[github] dropped self-authored ${event}${action !== null ? `.${action}` : ''} from @${author.login}`,
-      )
-      return ok()
-    }
-
-    // A push to an open PR (`synchronize`) is not a message to react to — it is
-    // a trigger to re-evaluate the bot's own outstanding review obligations on
-    // this PR: unresolved review threads it authored AND a sticky
-    // CHANGES_REQUESTED block (which leaves no threads when filed as a top-level
-    // verdict — the black hole this path closes). Both need an API round-trip,
-    // so it runs OFF the ACK path (like the decoy-reviewer drop) and only wakes a
-    // session when an obligation is outstanding. Returning here also keeps
-    // synchronize out of the generic awareness-only fallthrough below.
-    if (event === 'pull_request' && action === 'synchronize') {
-      if (delivery !== '') options.dedup.add(delivery)
-      scheduleReviewFollowup({ payload, selfLogin, options })
-      return ok()
-    }
-
-    const teamIsBotMember = await resolveTeamMembership(event, payload, options)
-    const reviewCommentParent = await resolveReviewCommentParent(event, payload, selfId, selfLogin, options)
-    const classified = classifyGithubInbound(event, payload, selfLogin, {
-      teamIsBotMember,
-      authType: options.authType?.() ?? 'pat',
-      reviewOn: options.reviewOn?.() ?? 'review_requested',
-      ...(reviewCommentParent !== null ? { reviewCommentParent } : {}),
-    })
-    if (classified === null) return ok()
-
-    if (delivery !== '') options.dedup.add(delivery)
-    options.route(withApprovalPolicy(classified, options.allowApprove?.() ?? true))
+    // The HTTP request is only transport; event handling is the shared core.
+    await processVerifiedGithubDelivery(options, { event, delivery, payload })
     return ok()
   }
+}
+
+// Post-verification core shared by the live HTTP handler AND the missed-delivery
+// recovery sweep (recover-failed-deliveries.ts), which pulls lost payloads from
+// GitHub's authenticated deliveries API and re-injects them with no HTTP request
+// or signature. Routing both through this one function is the load-bearing
+// invariant: recovery must never become a second, divergent event pipeline.
+// `delivery` is the `X-GitHub-Delivery` GUID (stable across redeliveries, equal
+// to a delivery's `guid`) used as the dedup key, so a recovered event and its
+// later/duplicate live delivery collapse to one route. HMAC is the caller's job:
+// the live handler verifies the body; the sweep trusts the authenticated API.
+export async function processVerifiedGithubDelivery(
+  options: GithubWebhookHandlerOptions,
+  input: { event: string; delivery: string; payload: Record<string, unknown> },
+): Promise<void> {
+  const { event, delivery, payload } = input
+  if (delivery !== '') {
+    if (options.dedup.has(delivery)) {
+      options.logger.info(`[github] duplicate delivery ignored id=${delivery}`)
+      return
+    }
+    // Reserve the delivery id synchronously, BEFORE the awaits below, so a live
+    // webhook and the recovery sweep can never both clear the dedup gate for the
+    // same event and route it twice. JS is single-threaded: nothing else runs
+    // between this has-check and add, so the reservation is atomic. The awaits
+    // and classify that follow are all throw-safe, so reserving early cannot
+    // strand a routable event.
+    options.dedup.add(delivery)
+  }
+
+  const action = readString(payload, 'action')
+  if (!isGithubEventAllowed(options.allowlist(), event, action)) return
+
+  const selfId = options.selfId()
+  const selfLogin = options.selfLogin()
+  const author = readAuthor(event, payload)
+  if (author !== null && isSelfAuthor(author, selfId, selfLogin)) {
+    maybeScheduleDecoyReviewerDrop({ event, action, payload, selfLogin, options })
+    options.logger.info(
+      `[github] dropped self-authored ${event}${action !== null ? `.${action}` : ''} from @${author.login}`,
+    )
+    return
+  }
+
+  // A push to an open PR (`synchronize`) is not a message to react to — it is
+  // a trigger to re-evaluate the bot's own outstanding review obligations on
+  // this PR: unresolved review threads it authored AND a sticky
+  // CHANGES_REQUESTED block (which leaves no threads when filed as a top-level
+  // verdict — the black hole this path closes). Both need an API round-trip,
+  // so it runs OFF the ACK path (like the decoy-reviewer drop) and only wakes a
+  // session when an obligation is outstanding. Returning here also keeps
+  // synchronize out of the generic awareness-only fallthrough below.
+  if (event === 'pull_request' && action === 'synchronize') {
+    scheduleReviewFollowup({ payload, selfLogin, options })
+    return
+  }
+
+  const teamIsBotMember = await resolveTeamMembership(event, payload, options)
+  const reviewCommentParent = await resolveReviewCommentParent(event, payload, selfId, selfLogin, options)
+  const classified = classifyGithubInbound(event, payload, selfLogin, {
+    teamIsBotMember,
+    authType: options.authType?.() ?? 'pat',
+    reviewOn: options.reviewOn?.() ?? 'review_requested',
+    ...(reviewCommentParent !== null ? { reviewCommentParent } : {}),
+  })
+  if (classified === null) return
+
+  options.route(withApprovalPolicy(classified, options.allowApprove?.() ?? true))
 }
 
 export const PR_APPROVAL_DISABLED_NOTE =
