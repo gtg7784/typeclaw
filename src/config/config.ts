@@ -1253,11 +1253,15 @@ export function parseConfigJson(raw: string, options: ParseConfigJsonOptions = {
   return { ok: true, config: result.data }
 }
 
-// Verifies a mount's host path: exists, is a directory, is readable, and is
-// writable when not declared `readOnly`. Symlinks are followed (statSync's
-// default) so a broken symlink reads as "does not exist". Permission checks
-// are skipped when running as root (uid 0) — euidaccess returns success
-// regardless, so the test would be vacuous and inconsistent with non-root.
+// Verifies a mount's host path: exists, is a regular file or directory, is
+// readable, and is writable when not declared `readOnly`. Symlinks are
+// followed (statSync's default) so a broken symlink reads as "does not exist".
+// File mounts are allowed so credentials and config can be exposed as a single
+// path (e.g. an SSH private key); sockets, FIFOs, and devices are rejected
+// because exposing them is an advanced, security-sensitive case we don't take
+// implicitly. Permission checks are skipped when running as root (uid 0) —
+// euidaccess returns success regardless, so the test would be vacuous and
+// inconsistent with non-root.
 export function validateMount(mount: Mount, cwd: string): ValidateConfigResult {
   const resolved = expandMountPath(mount.path, cwd)
   const label = `mount "${mount.name}"`
@@ -1274,8 +1278,8 @@ export function validateMount(mount: Mount, cwd: string): ValidateConfigResult {
     return { ok: false, reason: `${label}: cannot stat ${resolved}: ${detail}` }
   }
 
-  if (!stats.isDirectory()) {
-    return { ok: false, reason: `${label}: path ${resolved} is not a directory` }
+  if (!stats.isDirectory() && !stats.isFile()) {
+    return { ok: false, reason: `${label}: path ${resolved} is not a file or directory` }
   }
 
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0

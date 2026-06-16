@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer, type Server } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -1578,14 +1579,55 @@ describe('validateMount', () => {
     }
   })
 
-  test('fails with "not a directory" when the path is a regular file', async () => {
-    const filePath = join(cwd, 'file.txt')
-    await writeFile(filePath, 'hi')
-    const result = validateMount({ name: 'data', path: filePath, readOnly: false }, cwd)
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.reason).toContain('mount "data"')
-      expect(result.reason).toContain('not a directory')
+  test('ok when path is a regular file (read-write)', async () => {
+    const filePath = join(cwd, 'key')
+    await writeFile(filePath, 'secret')
+    const result = validateMount({ name: 'key', path: filePath, readOnly: false }, cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test.skipIf(isRoot)('ok when readOnly:true and path is a read-only file', async () => {
+    const filePath = join(cwd, 'key')
+    await writeFile(filePath, 'secret')
+    await chmod(filePath, 0o400)
+    try {
+      const result = validateMount({ name: 'key', path: filePath, readOnly: true }, cwd)
+      expect(result.ok).toBe(true)
+    } finally {
+      await chmod(filePath, 0o600)
+    }
+  })
+
+  test.skipIf(isRoot || onWindows)('fails when readOnly:false but the file is read-only on disk', async () => {
+    const filePath = join(cwd, 'key')
+    await writeFile(filePath, 'secret')
+    await chmod(filePath, 0o400)
+    try {
+      const result = validateMount({ name: 'key', path: filePath, readOnly: false }, cwd)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain('not writable')
+      }
+    } finally {
+      await chmod(filePath, 0o600)
+    }
+  })
+
+  // A unix socket is neither a regular file nor a directory; exposing sockets,
+  // FIFOs, and devices is an advanced case we reject rather than mount blindly.
+  test.skipIf(onWindows)('fails when the path is neither a file nor a directory', async () => {
+    const socketPath = join(cwd, 'sock')
+    const server: Server = createServer()
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve))
+    try {
+      const result = validateMount({ name: 'sock', path: socketPath, readOnly: true }, cwd)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain('mount "sock"')
+        expect(result.reason).toContain('not a file or directory')
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 

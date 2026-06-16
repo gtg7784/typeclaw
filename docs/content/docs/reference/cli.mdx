@@ -118,7 +118,7 @@ typeclaw mount add work ./workspace --description "local worktree"
 typeclaw mount remove downloads
 ```
 
-Mounts expose host directories inside the container at `/agent/mounts/<name>`. Names must be lowercase alphanumeric with `-` or `_`. Adding/removing a mount updates `typeclaw.json`; restart the running agent with `typeclaw restart` for Docker to apply the bind mount.
+Mounts expose host files or directories inside the container at `/agent/mounts/<name>`. Names must be lowercase alphanumeric with `-` or `_`. Adding/removing a mount updates `typeclaw.json`; restart the running agent with `typeclaw restart` for Docker to apply the bind mount.
 
 ## Compose
 

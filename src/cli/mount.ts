@@ -8,7 +8,7 @@ import { c, errorLine, successLine } from './ui'
 const listSub = defineCommand({
   meta: {
     name: 'list',
-    description: 'list host directories mounted into the agent container',
+    description: 'list host files and directories mounted into the agent container',
   },
   args: {
     json: {
@@ -31,7 +31,7 @@ const listSub = defineCommand({
 const addSub = defineCommand({
   meta: {
     name: 'add',
-    description: 'add a host directory mount to typeclaw.json',
+    description: 'add a host file or directory mount to typeclaw.json',
   },
   args: {
     name: {
@@ -41,7 +41,7 @@ const addSub = defineCommand({
     },
     path: {
       type: 'positional',
-      description: 'host directory path to expose inside the container',
+      description: 'host file or directory path to expose inside the container',
       required: true,
     },
     'read-only': {
@@ -74,7 +74,7 @@ const addSub = defineCommand({
 const removeSub = defineCommand({
   meta: {
     name: 'remove',
-    description: 'remove a host directory mount from typeclaw.json',
+    description: 'remove a host mount from typeclaw.json',
   },
   args: {
     name: {
@@ -98,7 +98,7 @@ const removeSub = defineCommand({
 export const mountCommand = defineCommand({
   meta: {
     name: 'mount',
-    description: 'manage host directories mounted into the agent container',
+    description: 'manage host files and directories mounted into the agent container',
   },
   subCommands: {
     list: listSub,
