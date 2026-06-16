@@ -6,9 +6,10 @@ import { join } from 'node:path'
 
 import type { DockerExec } from '@/container'
 import type { KakaoChannelBlock } from '@/secrets/schema'
+import { isWindows } from '@/shared'
 import { expectStable, waitFor } from '@/test-helpers/wait-for'
 
-import { send, sendHttp } from './client'
+import { isDaemonReachable, send, sendHttp } from './client'
 import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
 import type { KakaoRenewalCallbacks, KakaoRenewalStartInput } from './kakao-renewal-manager'
 import { registrationFilePath, registrationsDir, socketPath } from './paths'
@@ -61,6 +62,19 @@ function kakaoBlock(accountId: string): KakaoChannelBlock {
       },
     },
   }
+}
+
+async function expectDaemonEndpointListening(): Promise<void> {
+  if (isWindows()) {
+    expect(await isDaemonReachable(500)).toBe(true)
+    return
+  }
+  expect(existsSync(socketPath())).toBe(true)
+}
+
+async function daemonEndpointGone(): Promise<boolean> {
+  if (isWindows()) return !(await isDaemonReachable(50))
+  return !existsSync(socketPath())
 }
 
 describe('startDaemon', () => {
@@ -516,21 +530,21 @@ describe('startDaemon', () => {
         onShutdownCalls += 1
       },
     })
-    expect(existsSync(socketPath())).toBe(true)
+    await expectDaemonEndpointListening()
 
     const ack = await send({ kind: 'shutdown' })
     expect(ack.ok).toBe(true)
 
     const start = Date.now()
     while (Date.now() - start < 1500) {
-      if (!existsSync(socketPath()) && onShutdownCalls === 1) {
+      if ((await daemonEndpointGone()) && onShutdownCalls === 1) {
         daemon = null
         return
       }
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
     throw new Error(
-      `shutdown did not complete in time (socket exists=${existsSync(socketPath())}, onShutdown calls=${onShutdownCalls})`,
+      `shutdown did not complete in time (endpoint gone=${await daemonEndpointGone()}, onShutdown calls=${onShutdownCalls})`,
     )
   })
 
@@ -540,7 +554,7 @@ describe('startDaemon', () => {
 
     const start = Date.now()
     while (Date.now() - start < 1500) {
-      if (!existsSync(socketPath())) {
+      if (await daemonEndpointGone()) {
         daemon = null
         return
       }
