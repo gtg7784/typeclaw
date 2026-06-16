@@ -496,11 +496,15 @@ const ALL_PHRASES: readonly string[] = [
 // First-person future/volitional realized as a verb inflection or affix (not a
 // separate word), so matching the marker generalizes across ALL action verbs.
 const MORPHEME_PATTERNS: readonly RegExp[] = [
-  // Korean -겠습니다/-겠어요 first-person volitional. Excludes the two idiomatic
-  // non-volitional stems: 알겠- ("understood", a pure ack) and 모르겠- ("I don't
-  // know"). The conjecture reading of -겠- ("좋겠다" = "that'd be nice") uses the
-  // -겠다/-겠네 endings, not the -겠습니다/-겠어요 declaratives matched here.
-  /(?<!알)(?<!모르)겠(?:습니다|어요)/,
+  // Korean first-person volitional: a verb stem + -겠습니다/-겠어요. The stem must
+  // be one of the action/auxiliary verbs 하 (the 하다 light verb behind every
+  // X하다 — 업데이트하겠습니다/반영하겠어요), 보 (살펴보겠습니다), 두 (반영해두겠습니다), or
+  // 놓 (해놓겠습니다). Anchoring on the verb stem is what keeps this self-directed:
+  // bare 겠 also matches adjective-stem CONJECTURE (좋겠어요 "that'd be nice",
+  // 괜찮겠어요 "must be fine") and the idioms 알겠/모르겠, none of which promise work.
+  // Listener-directed conjecture takes the honorific 시 (피곤하시겠어요 → 시겠, not
+  // 하겠), so it is excluded too.
+  /(?:하|보|두|놓)겠(?:습니다|어요)/,
   // Turkish first-person-singular future "-acağım/-eceğim" ("I will VERB").
   // Vowel harmony yields exactly these two suffixes; the y-buffer
   // ("bekleyeceğim") leaves the suffix intact.
@@ -516,8 +520,11 @@ const MORPHEME_PATTERNS: readonly RegExp[] = [
 // far too broad to match, so this keys on します specifically. Two request/greeting
 // idioms end in します without being work intent — お願い(いた)します ("please") and
 // 失礼します ("excuse me") — and are stripped before the test so they don't fire.
+// The (?!か) lookahead drops question forms (どうしますか "what should I do?",
+// 更新しますか "shall I update?"): a question awaits the user, it is not a
+// commitment to act this turn.
 const JA_VOLITIONAL_IDIOMS = /お願い(?:いた)?します|失礼します/g
-const JA_VOLITIONAL = /します|してみます/
+const JA_VOLITIONAL = /します(?!か)|してみます(?!か)/
 
 // Reply texts shorter than this are almost always a complete final answer
 // ("네", "ok", "done") where a partial match would be noise. The shortest

@@ -135,6 +135,11 @@ describe('detectContinuationWillingness — negative (final / descriptive / othe
     // (a pure ack), 모르겠습니다 = "I don't know". The morpheme regex excludes these.
     '알겠습니다, 감사합니다!',
     '잘 모르겠습니다.',
+    // Adjective-stem conjecture/desiderative — 겠 sits on an adjective, not a verb
+    // stem, so the verb-anchored regex must not read these as work promises.
+    '좋겠어요.',
+    '괜찮겠어요.',
+    '오늘은 좀 힘들겠습니다.',
     // Bare adverb+noun fragments removed from the KO table — they fire on
     // other-directed requests and descriptive progressives, not self-intent.
     '바로 확인 부탁드려요.',
@@ -173,6 +178,7 @@ describe('detectContinuationWillingness — negative (multilingual final / descr
     'お願いします。',
     'よろしくお願いいたします。',
     '失礼します。',
+    'どうしますか？',
   ]
 
   for (const text of notWilling) {
