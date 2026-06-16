@@ -607,6 +607,11 @@ type LiveSession = {
   typingStartedAt: number
   typingTimedOut: boolean
   typingStopPromise: Promise<void> | null
+  // True only while `live.session.prompt()` is actively running. Gates the
+  // deferred typing revival: a revival queued behind an in-flight cap-trip
+  // 'stop' must NOT re-arm the heartbeat once the prompt has finished, or it
+  // leaks a timer that fires past the turn's end.
+  promptInFlight: boolean
   lastInboundAt: number
   // Transcript-file size (bytes) captured immediately after cold-start, before
   // any user turn — a proxy for the fixed base-context rebuild cost (rendered
@@ -1673,6 +1678,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingStartedAt: 0,
         typingTimedOut: false,
         typingStopPromise: null,
+        promptInFlight: false,
         lastInboundAt: now(),
         baseContextBytes: 0,
         firstUnprocessedAt: 0,
@@ -1930,16 +1936,69 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.typingStartedAt = now()
   }
 
+  // Re-arm a heartbeat that the silence cap already stopped. PR #930 made
+  // streamed deltas refresh the clock, but only via `bumpTypingActivity`,
+  // which no-ops once `typingTimer` is null. So a turn that goes silent for
+  // >MAX_TYPING_HEARTBEAT_MS (a long single tool call, a slow provider, an
+  // extended-thinking phase that emits no deltas) trips the cap, and the
+  // delta/tool signals that arrive afterwards can no longer revive it —
+  // `startTypingHeartbeat` short-circuits on `typingTimedOut`, which only
+  // resets at the next drain() iteration (i.e. never, within one long turn).
+  // Reviving here lets demonstrable progress after a timeout bring the
+  // indicator back. The revival is gated on streamed activity ONLY, never on
+  // a new inbound (a later inbound during the same in-flight turn must stay
+  // silenced — see the matching router test).
+  //
+  // On Slack this is the visible bug: its `'stop'` phase sends a permanent
+  // empty-string `setStatus` clear that does not auto-expire, so a tripped
+  // indicator stays gone. Discord/Telegram mask the same defect because their
+  // native indicators auto-expire and self-heal on the next tick.
+  const reviveTypingActivity = (live: LiveSession): void => {
+    if (live.destroyed) return
+    if (!live.typingTimedOut) {
+      bumpTypingActivity(live)
+      return
+    }
+    // A `'stop'` clear may still be in flight. Starting a new heartbeat now
+    // would short-circuit on the non-null `typingStopPromise` (losing the
+    // revival), and firing a fresh `'tick'` before Slack's empty-string clear
+    // lands would let the clear wipe the just-revived status. Defer until the
+    // stop settles so the new `'tick'` is ordered strictly after the clear.
+    const stopPromise = live.typingStopPromise
+    if (stopPromise) {
+      void stopPromise.catch(() => undefined).then(() => restartTypingAfterTimeout(live))
+      return
+    }
+    restartTypingAfterTimeout(live)
+  }
+
+  const restartTypingAfterTimeout = (live: LiveSession): void => {
+    // Re-checked after the awaited stop:
+    //  - `destroyed`: the session may have been torn down.
+    //  - `!typingTimedOut`: an earlier queued revival already cleared the flag
+    //    and re-armed (so this one is a no-op — no double interval/tick).
+    //  - `!promptInFlight`: the prompt finished while the cap-trip 'stop' was
+    //    still in flight. A revival queued by a late delta would otherwise
+    //    re-arm a heartbeat after generation ended — a timer nothing stops
+    //    (drain()'s turn-end stop already ran with `typingTimer === null`).
+    //    `draining` is too coarse: it stays true through the turn-end hook tail
+    //    (turn-end/idle/todos) after `prompt()` returns, so a revival running
+    //    in that window would still leak. Gate on active generation instead.
+    if (live.destroyed || !live.promptInFlight || !live.typingTimedOut) return
+    live.typingTimedOut = false
+    startTypingHeartbeat(live)
+  }
+
   const subscribeTypingActivity = (session: AgentSession, live: LiveSession): (() => void) => {
     return session.subscribe((event) => {
       if (event.type === 'tool_execution_end') {
-        bumpTypingActivity(live)
+        reviveTypingActivity(live)
         return
       }
       if (event.type !== 'message_update') return
       const streamed = event.assistantMessageEvent.type
       if (streamed === 'text_delta' || streamed === 'thinking_delta') {
-        bumpTypingActivity(live)
+        reviveTypingActivity(live)
       }
     })
   }
@@ -2338,6 +2397,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const isRealUserTurn = batch.length > 0
         const retrievalContext = await fireSessionTurnStart(live, composeRetrievalQuery(batch))
         const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
+        live.promptInFlight = true
         try {
           await live.session.prompt(promptText)
           await validateChannelTurn(live, successfulSendsBeforePrompt)
@@ -2349,6 +2409,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.lastSentText.clear()
           live.lastSendLeafId = null
         } finally {
+          live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
           const emptyTurnRetryQueued = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt

@@ -6228,7 +6228,7 @@ describe('ChannelRouter typing indicator', () => {
     await draining
   })
 
-  test('tool_execution_end after the cap has already tripped does NOT resurrect typing', async () => {
+  test('a streamed text_delta after the cap has tripped revives typing', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1000 }
     const { router, sessions } = makeRouter(dir, { nowRef })
@@ -6238,7 +6238,7 @@ describe('ChannelRouter typing indicator', () => {
       phases.push(target.phase)
     })
 
-    await router.route(inbound({ text: 'silent then loud' }))
+    await router.route(inbound({ text: 'silent then streaming' }))
     sessions[0]!.onPrompt = async () => {
       await new Promise<void>((resolve) => {
         releasePrompt = resolve
@@ -6247,19 +6247,196 @@ describe('ChannelRouter typing indicator', () => {
     const draining = router.__testing!.flushDebounce(KEY)
     await waitFor(() => releasePrompt !== undefined)
 
+    // given: a >2-min silent gap trips the cap and stops the heartbeat
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(phases).toEqual(['tick', 'stop'])
+
+    // when: the model resumes streaming text after the timeout
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'back' } })
+
+    // then: the heartbeat is re-armed and a fresh tick fires
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    expect(phases).toEqual(['tick', 'stop', 'tick'])
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('a tool_execution_end after the cap has tripped revives typing', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'long tool then resume' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: a long tool call exceeds the cap and the heartbeat stops
     nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
     await router.__testing!.fireTypingInterval(KEY)
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
 
+    // when: that tool finally finishes after the timeout
     sessions[0]!.emit({
       type: 'tool_execution_end',
-      toolCallId: 'late',
+      toolCallId: 'slow',
       toolName: 'bash',
       result: 'ok',
       isError: false,
     })
+
+    // then: the heartbeat revives
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    expect(phases).toEqual(['tick', 'stop', 'tick'])
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('revival defers the fresh tick until an in-flight stop clear settles', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releaseCapStop: (() => void) | undefined
+    let releasePrompt: (() => void) | undefined
+    let stopCount = 0
+    // Block ONLY the cap-trip 'stop' so the revival race window stays open;
+    // the turn-end 'stop' (after the prompt resolves) must pass through freely.
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+      if (target.phase === 'stop' && ++stopCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseCapStop = resolve
+        })
+      }
+    })
+
+    await router.route(inbound({ text: 'race' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the cap trips and the 'stop' clear is still in flight (blocked)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    const interval = router.__testing!.fireTypingInterval(KEY)
+    await waitFor(() => releaseCapStop !== undefined)
+    expect(phases).toEqual(['tick', 'stop'])
+
+    // when: deltas arrive while the stop clear has not yet completed
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'a' } })
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'b' } })
+
+    // then: no revived tick lands before the clear is released
+    expect(phases).toEqual(['tick', 'stop'])
+
+    // when: the stop clear finally settles
+    releaseCapStop!()
+    await waitFor(() => router.__testing!.isTypingActive(KEY))
+
+    // then: exactly one revived tick fires (queued revivals collapse)
+    expect(phases).toEqual(['tick', 'stop', 'tick'])
+
+    releasePrompt!()
+    await Promise.all([interval, draining])
+  })
+
+  test('a revival queued while the turn ends does NOT re-arm typing after the turn', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releaseCapStop: (() => void) | undefined
+    let releasePrompt: (() => void) | undefined
+    let stopCount = 0
+    // Block ONLY the cap-trip 'stop' so a revival can be queued behind it while
+    // the turn finishes; the turn-end 'stop' must pass through.
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+      if (target.phase === 'stop' && ++stopCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseCapStop = resolve
+        })
+      }
+    })
+
+    await router.route(inbound({ text: 'race then end' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the cap trips and its 'stop' clear is in flight (blocked)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    const interval = router.__testing!.fireTypingInterval(KEY)
+    await waitFor(() => releaseCapStop !== undefined)
+
+    // given: a late delta queues a revival behind the still-blocked stop
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'late' } })
+
+    // when: the prompt completes (turn ends) while the stop is still blocked,
+    // then the blocked stop is released so the queued revival can run
+    releasePrompt!()
+    releaseCapStop!()
+    await Promise.all([interval, draining])
+
+    // then: the queued revival is a no-op — no heartbeat is re-armed post-turn
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
     expect(phases).toEqual(['tick', 'stop'])
+  })
+
+  test('a revived heartbeat trips the cap again after another silent window', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'silent, loud, silent' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the cap trips, then a delta revives the heartbeat
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'back' } })
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+
+    // when: another full silent window elapses with no activity
+    nowRef.value += MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+
+    // then: the cap trips again (silence detection preserved)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(phases).toEqual(['tick', 'stop', 'tick', 'stop'])
 
     releasePrompt!()
     await draining
