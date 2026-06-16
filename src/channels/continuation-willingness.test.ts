@@ -33,6 +33,18 @@ describe('detectContinuationWillingness — positive (self-directed future inten
     '검토해볼게요',
     '찾아볼게요',
     '바로 처리할게요',
+    // Action/config verb family (English) — "I'll DO X" promises beyond the
+    // retrieval verbs. The cron-update production miss is the canonical case.
+    "I'll update the cron timing logic.",
+    'Let me set up the new cron job now.',
+    "I'll fix it right away.",
+    "I'll configure the job.",
+    // Action/config verb family (Korean) — caught by the -겠습니다 morpheme regex
+    // (any verb, not just check/look) and the -게요 action forms.
+    '크론 타이밍 로직 반영해두겠습니다.',
+    '바로 티켓 AC 업데이트하겠습니다 🙏',
+    '설정 값 수정하겠습니다.',
+    '업데이트할게요',
   ]
 
   for (const text of willing) {
@@ -82,6 +94,21 @@ describe('detectContinuationWillingness — positive (multilingual self-directed
     'Дай мне проверить это.',
     '让我查一下。',
     'Bir bakayım.',
+    // Action/config verb family across languages — the "I'll DO X" class that the
+    // retrieval-only tables missed. Korean/Turkish/Hindi/Japanese hit the morpheme
+    // pass; the rest hit the phrase pass.
+    'Voy a actualizar la configuración.',
+    'Je vais corriger ça.',
+    'Ich werde aktualisieren.',
+    'Сейчас обновлю конфигурацию.',
+    '我来更新一下。',
+    '設定を更新します。',
+    '対応してみます。',
+    'मैं इसे अपडेट करूँगा।',
+    'Hemen güncelleyeceğim.',
+    'Ayarı yapacağım.',
+    'Tôi sẽ cập nhật ngay.',
+    'Saya akan perbarui sekarang.',
   ]
 
   for (const text of willing) {
@@ -104,6 +131,14 @@ describe('detectContinuationWillingness — negative (final / descriptive / othe
     '계속 진행하세요.',
     '이대로 진행하셔도 됩니다.',
     '리뷰 완료했습니다. 승인합니다.',
+    // Idiomatic -겠습니다 that is NOT volitional work intent: 알겠습니다 = "understood"
+    // (a pure ack), 모르겠습니다 = "I don't know". The morpheme regex excludes these.
+    '알겠습니다, 감사합니다!',
+    '잘 모르겠습니다.',
+    // Bare adverb+noun fragments removed from the KO table — they fire on
+    // other-directed requests and descriptive progressives, not self-intent.
+    '바로 확인 부탁드려요.',
+    '계속 확인 중입니다.',
     '',
     '...',
   ]
@@ -133,6 +168,11 @@ describe('detectContinuationWillingness — negative (multilingual final / descr
     'Tamam, kontrol ettim, sorun yok.',
     'Vâng, tôi đã kiểm tra rồi.',
     'Oke, sudah saya periksa, tidak ada masalah.',
+    // Japanese idioms that end in します but are requests/greetings, not work
+    // intent — stripped before the morpheme test so they do not fire.
+    'お願いします。',
+    'よろしくお願いいたします。',
+    '失礼します。',
   ]
 
   for (const text of notWilling) {
