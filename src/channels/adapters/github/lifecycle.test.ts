@@ -932,7 +932,10 @@ describe('createGithubAdapter lifecycle', () => {
     })
 
     await adapter.start()
-    expect(refreshHandlers.length).toBe(1)
+    // Two timers register through the injected setInterval: the token refresh
+    // (index 0, registered first in the seed block) and the delivery-recovery
+    // sweep (index 1, registered last once managedHooks is populated).
+    expect(refreshHandlers.length).toBe(2)
     expect(process.env.GH_TOKEN).toBe('ghs_fresh')
 
     // Fire the refresh handler manually. tokenFn() is called and returns the
@@ -944,6 +947,67 @@ describe('createGithubAdapter lifecycle', () => {
 
     await adapter.stop()
     expect(process.env.GH_TOKEN).toBeUndefined()
+  })
+
+  test('delivery-recovery sweep is registered once hooks exist, queries the delivery log, and is cleared on stop', async () => {
+    // Resolve deterministically when the sweep hits the deliveries endpoint,
+    // instead of racing a fixed sleep against the token-mint + list round-trips.
+    let resolveDeliveriesQueried!: () => void
+    const deliveriesQueried = new Promise<void>((resolve) => {
+      resolveDeliveriesQueried = resolve
+    })
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/repos/acme/widgets/installation' && method === 'GET') {
+        return Response.json({ id: 99 })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_fresh', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      if (url.includes('/repos/acme/widgets/hooks/7/deliveries')) {
+        resolveDeliveriesQueried()
+        return Response.json([])
+      }
+      if (url.includes('/repos/acme/widgets/hooks')) {
+        if (method === 'GET') return Response.json([])
+        if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const handlers: Array<() => void> = []
+    let clears = 0
+    const fakeInterval = (handler: () => void) => {
+      handlers.push(handler)
+      return { clear: () => (clears += 1) }
+    }
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets']),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+      tokenRefreshIntervalMs: 0,
+      setInterval: fakeInterval,
+    })
+
+    await adapter.start()
+    // tokenRefreshIntervalMs: 0 disables the refresh timer, so the only timer is
+    // the recovery sweep — proving it registers independently of token refresh.
+    expect(handlers.length).toBe(1)
+
+    handlers[0]!()
+    await deliveriesQueried // resolves only when the sweep queries the delivery log
+
+    await adapter.stop()
+    expect(clears).toBe(1)
   })
 
   test('tokenRefreshIntervalMs: 0 disables the background refresh', async () => {

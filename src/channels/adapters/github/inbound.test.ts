@@ -10,6 +10,7 @@ import {
   createGithubWebhookHandler,
   type GithubWebhookHandlerOptions,
   PR_APPROVAL_DISABLED_NOTE,
+  processVerifiedGithubDelivery,
   verifySignature,
 } from './inbound'
 import { decodeGithubReactionRef } from './reactions'
@@ -1083,6 +1084,30 @@ describe('createGithubWebhookHandler', () => {
 
     await handler(signedRequest(body, 'issue_comment', 'same-delivery'))
     await handler(signedRequest(body, 'issue_comment', 'same-delivery'))
+
+    expect(count).toBe(1)
+  })
+
+  it('reserves the delivery id before awaiting, so a live + recovery race routes once', async () => {
+    let count = 0
+    const options: GithubWebhookHandlerOptions = {
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['issue_comment.created'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot',
+      logger,
+      route: () => {
+        count++
+      },
+    }
+    const payload = issueCommentPayload({ pullRequest: false }) as Record<string, unknown>
+
+    // A live webhook and the recovery sweep process the same guid concurrently.
+    await Promise.all([
+      processVerifiedGithubDelivery(options, { event: 'issue_comment', delivery: 'race-guid', payload }),
+      processVerifiedGithubDelivery(options, { event: 'issue_comment', delivery: 'race-guid', payload }),
+    ])
 
     expect(count).toBe(1)
   })
