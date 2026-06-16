@@ -6,6 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
+import { headingToSlug } from './slug'
 import type { DedupedRetrievedItem } from './turn-dedup'
 
 const MAX_FILE_BYTES = 12 * 1024
@@ -130,7 +131,7 @@ export function renderRetrievedMemorySection(
       lines.push(`## ${item.heading}`)
       lines.push(item.excerpt.trimEnd(), '')
     } else if (item.source === 'topic' || item.source === 'reference') {
-      lines.push(`- ${item.heading} \`${item.key}\``)
+      lines.push(topicIndexEntry(item.heading, item.key))
     } else {
       lines.push(`- ${item.heading} _(recent observation)_`)
     }
@@ -150,9 +151,23 @@ export function renderTopicIndexMemorySection(
   if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
   lines.push(topicIndexDirective(options), '')
   for (const shard of shards) {
-    lines.push(`- ${shard.frontmatter.heading} \`${shard.slug}\``)
+    lines.push(topicIndexEntry(shard.frontmatter.heading, shard.slug))
   }
   return lines.join('\n').trimEnd()
+}
+
+// A topic-index line names a topic for the model to decide whether to open it
+// (the slug is the `memory_search({ topic })` key). When the heading is just a
+// title-cased echo of the slug it adds no signal, so drop it and render the slug
+// alone. Keep both only when they diverge — the heading then carries a facet the
+// kebab slug dropped (e.g. `gh-api-labels-array-syntax` vs "GitHub API label
+// management in the agent environment"), and a non-Latin heading never echoes its
+// (ASCII-only) slug, so its readable form is always retained.
+function topicIndexEntry(heading: string, slug: string): string {
+  if (headingToSlug(heading, new Set<string>()) === slug) {
+    return `- \`${slug}\``
+  }
+  return `- ${heading} \`${slug}\``
 }
 
 function topicIndexDirective(options: Pick<LoadMemoryOptions, 'origin'>): string {
