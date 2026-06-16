@@ -1,3 +1,5 @@
+import type { AdapterId } from '../schema'
+
 export type DiscordMentionUser = { id: string; username?: string; global_name?: string | null }
 
 export type MentionHintOptions = { botUserId?: string | null }
@@ -11,6 +13,21 @@ const SLACK_MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g
 // Discord uses `<@id>` and the nickname form `<@!id>`; the `!` is optional and
 // irrelevant to the target user, so it is captured but discarded on rewrite.
 const DISCORD_MENTION_PATTERN = /<@!?(\d+)>/g
+
+// User ids the agent addressed by @-mention in an outbound message, so the
+// router can grant them sticky credit (their reply answers us without a
+// re-mention). Only Slack (`<@U…>`) and Discord (`<@id>`) encode mentions as
+// raw id tokens that map 1:1 to an inbound `authorId`; Telegram (`@username`),
+// GitHub (`@login`), LINE and KakaoTalk have no token→authorId mapping here, so
+// they return [] by design and the caller falls back to existing rules.
+export function extractMentionedUserIds(adapter: AdapterId, text: string): string[] {
+  const pattern =
+    adapter === 'slack-bot' ? SLACK_MENTION_PATTERN : adapter === 'discord-bot' ? DISCORD_MENTION_PATTERN : null
+  if (pattern === null) return []
+  const ids = new Set<string>()
+  for (const match of text.matchAll(pattern)) ids.add(match[1]!)
+  return Array.from(ids)
+}
 
 export async function addSlackMentionHints(
   text: string,

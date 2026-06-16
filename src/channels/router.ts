@@ -24,6 +24,7 @@ import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
+import { extractMentionedUserIds } from './adapters/mention-hints'
 import { formatChannelCommandHelp } from './commands'
 import { detectContinuationWillingness } from './continuation-willingness'
 import {
@@ -3387,11 +3388,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const disengagedThisTurn = live.disengagedTurn !== null && live.disengagedTurn === live.turnSeq
       const adapterConfig = options.configForAdapter(msg.adapter)
       if (adapterConfig && !disengagedThisTurn) {
-        const targetIds = Array.from(
-          live.currentTurnAuthorIds.size > 0 ? live.currentTurnAuthorIds : live.lastTurnAuthorIds,
-        )
-        if (targetIds.length > 0) {
-          grantStickyForReplyTargets(stickyLedger, keyId, targetIds, adapterConfig.engagement, now())
+        const targets = new Set(live.currentTurnAuthorIds.size > 0 ? live.currentTurnAuthorIds : live.lastTurnAuthorIds)
+        // A user the agent addresses by @-mention is a reply target too: their
+        // next message answers us without re-mentioning the bot. Granting them
+        // sticky closes the gap where the agent asks "<@U123> can you confirm?"
+        // and that user's plain reply was observed until they re-pinged.
+        // Self-mentions (e.g. a quoted inbound) are excluded — we credit the
+        // OTHERS we addressed, not ourselves.
+        if (text !== undefined) {
+          const selfId = resolveSelfIdentity(live.key)?.id
+          for (const id of extractMentionedUserIds(msg.adapter, text)) {
+            if (id !== selfId) targets.add(id)
+          }
+        }
+        if (targets.size > 0) {
+          grantStickyForReplyTargets(stickyLedger, keyId, Array.from(targets), adapterConfig.engagement, now())
         }
       }
       const turnCount = live.consecutiveSends.get(sendKey) ?? 0
