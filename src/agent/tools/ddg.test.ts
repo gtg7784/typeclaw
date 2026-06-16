@@ -3,7 +3,11 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { _setCurlBinaryForTest, fetchDdgHtml, parseDdgHtml } from './ddg'
+
+const onWindows = isWindows()
 
 const REAL_RESULT_HTML = `
 <html><body><table>
@@ -125,7 +129,8 @@ describe('parseDdgHtml', () => {
   })
 })
 
-describe('fetchDdgHtml', () => {
+// POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+describe.skipIf(onWindows)('fetchDdgHtml', () => {
   // We test the curl-impersonate spawn path against a fake binary in a
   // tmpdir. AGENTS.md §5 prefers real implementations with controlled inputs
   // over mocks, so we hand-roll a shell script that stands in for

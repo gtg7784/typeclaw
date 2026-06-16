@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto'
 import { chmod, mkdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, userInfo } from 'node:os'
+import { join, resolve } from 'node:path'
+
+import { isWindows } from '@/shared'
 
 // Fixed in-container path where the host daemon's run dir is bind-mounted.
 // The agent uses this to reach the host daemon (e.g. for the `restart` tool).
@@ -33,7 +36,24 @@ export function logDir(): string {
 }
 
 export function socketPath(): string {
+  if (isWindows()) return windowsPipePath()
   return join(runDir(), SOCKET_FILE)
+}
+
+function windowsPipePath(): string {
+  const uid =
+    typeof process.getuid === 'function'
+      ? `uid:${process.getuid()}`
+      : `user:${process.env.USERDOMAIN ?? ''}\\${userInfo().username}`
+  // Locale-invariant lowercasing: toLocaleLowerCase under e.g. tr-TR would map
+  // 'I' to a dotless 'ı', hashing the same path differently per process locale.
+  const scopedHome = resolve(homeRoot()).toLowerCase()
+  const hash = createHash('sha256').update(`${uid}\0${scopedHome}`).digest('hex').slice(0, 32)
+
+  // Node's net named-pipe API has no portable ACL hook. TypeClaw accepts that
+  // under the single-tenant dev-box model; the per-user/per-home pipe name keeps
+  // the pipe scoped, while the separate HTTP leg remains restart/secrets-only.
+  return `\\\\.\\pipe\\typeclaw-hostd-${hash}`
 }
 
 export function pidfilePath(): string {

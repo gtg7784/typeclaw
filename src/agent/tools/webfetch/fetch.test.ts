@@ -3,8 +3,12 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { _resetAvailabilityCacheForTest, _setCurlBinaryForTest } from '../curl-impersonate'
 import { _setForceFallbackForTest, fetchWithLimits, normalizeUrl, parseMimeType, WebFetchError } from './fetch'
+
+const onWindows = isWindows()
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -154,7 +158,8 @@ describe('fetchWithLimits — Bun.fetch fallback path', () => {
   })
 })
 
-describe('fetchWithLimits — curl-impersonate path', () => {
+// POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+describe.skipIf(onWindows)('fetchWithLimits — curl-impersonate path', () => {
   let scratchDir: string
 
   beforeEach(() => {

@@ -128,7 +128,7 @@ describe('channel_fetch_attachment', () => {
     const result = await runTool(tool, { attachment_id: 1, filename: 'renamed.bin' })
 
     expect(calls).toEqual([{ ref: 'F1', filename: 'renamed.bin' }])
-    expect(result.details?.path?.endsWith('/renamed.bin')).toBe(true)
+    expect(result.details?.path).toMatch(/[/\\]renamed\.bin$/)
   })
 
   test('rejects hallucinated attachment ids with a valid id list', async () => {

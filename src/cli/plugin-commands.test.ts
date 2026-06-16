@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { renderCommandHelp, renderPluginCommandsSection } from './plugin-command-help'
 import { discoverCommands, resolveAgentDir } from './plugin-commands'
@@ -9,6 +10,7 @@ import { dispatchPluginCommand } from './plugin-commands-dispatch'
 
 const tmpDirs: string[] = []
 const REPO_ROOT = resolvePath(import.meta.dir, '..', '..')
+const PLUGIN_IMPORT = pathToFileURL(join(import.meta.dir, '..', 'plugin', 'index.ts')).href
 
 afterAll(async () => {
   await Promise.all(tmpDirs.map((d) => rm(d, { recursive: true, force: true })))
@@ -31,7 +33,7 @@ async function mkTempAgent(plugin?: string): Promise<string> {
 }
 
 const HOST_ECHO_PLUGIN = `
-import { definePlugin, defineCommand } from '${join(import.meta.dir, '..', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 import { z } from 'zod'
 
 export default definePlugin({
@@ -53,7 +55,7 @@ export default definePlugin({
 `
 
 const EITHER_AGENTDIR_PLUGIN = `
-import { definePlugin, defineCommand } from '${join(import.meta.dir, '..', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 
 export default definePlugin({
   commands: {
@@ -73,7 +75,7 @@ export default definePlugin({
 `
 
 const CONTAINER_ONLY_PLUGIN = `
-import { definePlugin, defineCommand } from '${join(import.meta.dir, '..', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 
 export default definePlugin({
   commands: {
@@ -313,7 +315,7 @@ describe('dispatchPluginCommand', () => {
 describe('renderCommandHelp', () => {
   test('renders default values and required flags', async () => {
     const dir = await mkTempAgent(`
-import { definePlugin, defineCommand } from '${join(import.meta.dir, '..', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 import { z } from 'zod'
 
 export default definePlugin({
@@ -347,7 +349,7 @@ export default definePlugin({
 
   test('renders "(no options)" for commands without args', async () => {
     const dir = await mkTempAgent(`
-import { definePlugin, defineCommand } from '${join(import.meta.dir, '..', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 
 export default definePlugin({
   commands: {

@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { derivePluginNameFromPackage, loadPluginEntry, PluginNotFoundError, splitPluginEntrySpec } from './loader'
+
+const pluginIndexSpecifier = pathToFileURL(join(process.cwd(), 'src', 'plugin', 'index.ts')).href
 
 describe('splitPluginEntrySpec', () => {
   test('splits a versioned unscoped entry', () => {
@@ -71,7 +74,7 @@ describe('loadPluginEntry — local path', () => {
       await mkdir(join(dir, 'plugins'))
       await writeFile(
         join(dir, 'plugins', 'local-thing.ts'),
-        `import { definePlugin } from '${process.cwd()}/src/plugin/index.ts'
+        `import { definePlugin } from '${pluginIndexSpecifier}'
 export default definePlugin({
   plugin: async () => ({}),
 })`,
@@ -148,7 +151,7 @@ describe('loadPluginEntry — npm', () => {
       )
       await writeFile(
         join(pkgDir, 'index.js'),
-        `import { definePlugin } from '${process.cwd()}/src/plugin/index.ts'
+        `import { definePlugin } from '${pluginIndexSpecifier}'
 export default definePlugin({
   plugin: async () => ({}),
 })`,
@@ -177,7 +180,7 @@ export default definePlugin({
       )
       await writeFile(
         join(pkgDir, 'index.js'),
-        `import { definePlugin } from '${process.cwd()}/src/plugin/index.ts'
+        `import { definePlugin } from '${pluginIndexSpecifier}'
 export default definePlugin({
   plugin: async () => ({}),
 })`,

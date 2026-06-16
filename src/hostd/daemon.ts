@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs'
 import { chmod, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { createServer, type Server, type Socket as NetSocket } from 'node:net'
 import { join } from 'node:path'
-
-import type { Socket, UnixSocketListener } from 'bun'
 
 import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
 import { kakaoChannelBlockSchema, lineChannelBlockSchema } from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
+import { isWindows } from '@/shared'
 
 import { isDaemonReachable } from './client'
 import type { KakaoRenewalCallbacks, KakaoRenewalLogEvent } from './kakao-renewal-manager'
@@ -121,8 +121,6 @@ const MAX_HTTP_REQUEST_BYTES = 64 * 1024
 // it's already in use by some other local service.
 const STABLE_HTTP_PORT = 8974
 
-type ServerState = { buf: string }
-
 function json(response: RpcResponse, status = 200): globalThis.Response {
   return new Response(JSON.stringify(response), {
     status,
@@ -208,12 +206,47 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+async function listenOnSocket(server: Server, path: string, onWindows: boolean): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('error', onError)
+      const code = (error as Error & { code?: unknown }).code
+      if (onWindows && code === 'EADDRINUSE') {
+        reject(new Error(`another typeclaw host daemon is already listening at ${path}`))
+        return
+      }
+      reject(error)
+    }
+    server.once('error', onError)
+    server.listen(path, () => {
+      server.off('error', onError)
+      resolve()
+    })
+  })
+}
+
+async function closeSocketServer(server: Server, sockets: Set<NetSocket>): Promise<void> {
+  await new Promise<void>((resolve) => {
+    try {
+      server.close(() => resolve())
+    } catch {
+      resolve()
+    }
+    for (const socket of sockets) {
+      try {
+        socket.destroy()
+      } catch {}
+    }
+  })
+}
+
 export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   await ensureDirs()
   const path = opts.socket ?? socketPath()
+  const onWindows = isWindows()
 
-  if (existsSync(path)) {
-    if (await isDaemonReachable(500)) {
+  if (!onWindows && existsSync(path)) {
+    if (await isDaemonReachable(500, { socket: path })) {
       throw new Error(`another typeclaw host daemon is already listening at ${path}`)
     }
     try {
@@ -488,37 +521,37 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     }
   }
 
-  const respond = (sock: Socket<ServerState>, response: RpcResponse): void => {
+  const respond = (socket: NetSocket, response: RpcResponse): void => {
     try {
-      sock.write(`${JSON.stringify(response)}\n`)
+      socket.write(`${JSON.stringify(response)}\n`)
     } catch {}
     try {
-      sock.end()
+      socket.end()
     } catch {}
   }
 
-  const handleData = (sock: Socket<ServerState>, chunk: Buffer): void => {
-    sock.data.buf += chunk.toString('utf8')
-    if (sock.data.buf.length > MAX_REQUEST_BUFFER_BYTES) {
-      respond(sock, { ok: false, reason: 'request exceeds buffer limit' })
+  const handleData = (socket: NetSocket, chunk: Buffer, state: { buf: string }): void => {
+    state.buf += chunk.toString('utf8')
+    if (state.buf.length > MAX_REQUEST_BUFFER_BYTES) {
+      respond(socket, { ok: false, reason: 'request exceeds buffer limit' })
       return
     }
-    let newline = sock.data.buf.indexOf('\n')
+    let newline = state.buf.indexOf('\n')
     while (newline >= 0) {
-      const line = sock.data.buf.slice(0, newline)
-      sock.data.buf = sock.data.buf.slice(newline + 1)
+      const line = state.buf.slice(0, newline)
+      state.buf = state.buf.slice(newline + 1)
       let req: Request
       try {
         req = JSON.parse(line) as Request
       } catch {
-        respond(sock, { ok: false, reason: 'invalid request json' })
+        respond(socket, { ok: false, reason: 'invalid request json' })
         return
       }
       void dispatch(req).then(
-        (response) => respond(sock, response),
-        (error) => respond(sock, { ok: false, reason: error instanceof Error ? error.message : String(error) }),
+        (response) => respond(socket, response),
+        (error) => respond(socket, { ok: false, reason: error instanceof Error ? error.message : String(error) }),
       )
-      newline = sock.data.buf.indexOf('\n')
+      newline = state.buf.indexOf('\n')
     }
   }
 
@@ -599,25 +632,28 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   // Boot-time restore: replay every persisted registration into the in-memory
-  // maps and revive portbroker for it. Runs before Bun.listen so the socket
+  // maps and revive portbroker for it. Runs before the IPC listener so the socket
   // is never accepting RPCs against a half-restored registry. A bad file
   // (parse error, schema mismatch) is logged-and-skipped — one corrupt
   // registration must not gate every other container's recovery.
   await restorePersistedRegistrations(applyRegistration, log, probeContainerAlive, removeRegistrationFile)
 
-  const listener: UnixSocketListener<ServerState> = Bun.listen<ServerState>({
-    unix: path,
-    socket: {
-      open: (sock) => {
-        sock.data = { buf: '' }
-      },
-      data: handleData,
-      close: () => {},
-      error: () => {},
-    },
+  const sockets = new Set<NetSocket>()
+  const listener = createServer((socket) => {
+    const state = { buf: '' }
+    sockets.add(socket)
+    socket.on('data', (chunk: Buffer) => handleData(socket, chunk, state))
+    socket.on('close', () => sockets.delete(socket))
+    socket.on('error', () => {})
   })
-  // Restrict socket to the owning user; ~/.typeclaw/run is also 0700.
-  await chmod(path, 0o600).catch(() => {})
+  try {
+    await listenOnSocket(listener, path, onWindows)
+  } catch (error) {
+    httpServer.stop(true)
+    throw error
+  }
+  // Restrict POSIX sockets to the owning user; ~/.typeclaw/run is also 0700.
+  if (!onWindows) await chmod(path, 0o600).catch(() => {})
   log({ kind: 'daemon-listening', socket: path })
 
   const runGc = async (): Promise<void> => {
@@ -658,9 +694,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       stopped = true
       log({ kind: 'daemon-stopping' })
       clearInterval(gcTimer)
-      try {
-        listener.stop(true)
-      } catch {}
+      await closeSocketServer(listener, sockets)
       httpServer.stop(true)
       if (opts.portbroker) {
         const names = Array.from(cwds.keys())
@@ -672,9 +706,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       }
       cwds.clear()
       restartTokens.clear()
-      try {
-        if (existsSync(path)) await unlink(path)
-      } catch {}
+      if (!onWindows) {
+        try {
+          if (existsSync(path)) await unlink(path)
+        } catch {}
+      }
     },
   }
   return daemonHandle

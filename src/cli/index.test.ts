@@ -2,11 +2,16 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+import { isWindows } from '@/shared'
 
 import { BUILTIN_COMMAND_NAMES } from './builtins'
 
 const REPO_ROOT = resolvePath(import.meta.dir, '..', '..')
 const CLI_ENTRY = join(REPO_ROOT, 'src', 'cli', 'index.ts')
+const PLUGIN_IMPORT = pathToFileURL(join(REPO_ROOT, 'src', 'plugin', 'index.ts')).href
+const onWindows = isWindows()
 const tmpDirs: string[] = []
 
 afterAll(async () => {
@@ -39,7 +44,7 @@ async function runCli(args: string[], cwd: string): Promise<{ stdout: string; st
 }
 
 const ECHO_PLUGIN = `
-import { definePlugin, defineCommand } from '${join(REPO_ROOT, 'src', 'plugin')}'
+import { definePlugin, defineCommand } from '${PLUGIN_IMPORT}'
 import { z } from 'zod'
 
 export default definePlugin({
@@ -82,15 +87,18 @@ describe('BUILTIN_COMMAND_NAMES exposure', () => {
 // shared state between tests — so `.concurrent` runs them on the runner's
 // worker pool instead of serially. The 6 host-stage subprocess tests below
 // drop from ~1.8s sequential to ~0.4s in parallel.
+// Spawns POSIX shell plugin-command shim, #899.
+const pluginCommandTest = onWindows ? test.skip : test.concurrent
+
 describe('typeclaw <plugin-command> on host stage', () => {
-  test.concurrent('QA-5 end-to-end: dispatches a host command via CLI entrypoint', async () => {
+  pluginCommandTest('QA-5 end-to-end: dispatches a host command via CLI entrypoint', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stdout, code } = await runCli(['echo-host', '--msg=hello'], dir)
     expect(code).toBe(0)
     expect(stdout).toContain('got: hello')
   })
 
-  test.concurrent('exits 2 with stderr message when required arg is missing', async () => {
+  pluginCommandTest('exits 2 with stderr message when required arg is missing', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stderr, code } = await runCli(['echo-host'], dir)
     expect(code).toBe(2)
@@ -105,7 +113,7 @@ describe('typeclaw <plugin-command> on host stage', () => {
 })
 
 describe('typeclaw --help on host stage', () => {
-  test.concurrent('QA-16: appends a Plugin commands section listing discovered commands', async () => {
+  pluginCommandTest('QA-16: appends a Plugin commands section listing discovered commands', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stdout, code } = await runCli(['--help'], dir)
     expect(code).toBe(0)

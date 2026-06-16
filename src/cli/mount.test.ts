@@ -8,6 +8,7 @@ import { formatMountList } from './mount'
 const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 const ANSI_SEQUENCE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[a-zA-Z]`, 'g')
 const stripAnsi = (s: string): string => s.replace(ANSI_SEQUENCE, '')
+const normalizePath = (s: string): string => s.split(/[\\/]/).join('/')
 
 describe('typeclaw mount CLI', () => {
   let cwd: string
@@ -100,10 +101,10 @@ describe('typeclaw mount CLI', () => {
     expect(parsed.mounts).toHaveLength(1)
     expect(parsed.mounts[0]).toMatchObject({
       name: 'downloads',
-      resolvedPath: resolvedDownloads,
       targetPath: '/agent/mounts/downloads',
       status: 'ok',
     })
+    expect(normalizePath(parsed.mounts[0]!.resolvedPath)).toBe(normalizePath(resolvedDownloads))
   })
 
   test('remove deletes the mount and tells the user to restart', async () => {

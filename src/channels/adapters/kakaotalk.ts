@@ -1,3 +1,5 @@
+import { basename } from 'node:path'
+
 import {
   KakaoCredentialManager,
   KakaoTalkClient as RealKakaoTalkClient,
@@ -203,7 +205,9 @@ export function createOutboundCallback(deps: {
       try {
         items = await Promise.all(
           attachments.map(async (a) => {
-            const filename = a.filename ?? a.path.split('/').pop() ?? 'file'
+            // basename (not split('/')) so a native-Windows host's backslash
+            // attachment paths still yield just the filename (issue #899).
+            const filename = a.filename ?? (basename(a.path) || 'file')
             const data = await readFile(a.path)
             return { data, filename }
           }),

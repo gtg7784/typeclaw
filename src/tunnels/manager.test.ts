@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
 import { createStream } from '@/stream'
 import { waitFor } from '@/test-helpers/wait-for'
 
@@ -11,6 +12,7 @@ import { createTunnelManager } from './manager'
 import type { TunnelConfig, TunnelUrlChangedPayload } from './types'
 
 const silentLogger = { info: () => {}, warn: () => {}, error: () => {} }
+const onWindows = isWindows()
 
 function createScratchDir(): string {
   return mkdtempSync(join(tmpdir(), 'tunnel-manager-test-'))
@@ -187,7 +189,8 @@ describe('createTunnelManager (external provider)', () => {
 })
 
 describe('createTunnelManager (cloudflare-quick provider)', () => {
-  it('resolves channel-owned upstream ports before constructing the provider', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('resolves channel-owned upstream ports before constructing the provider', async () => {
     const scratchDir = createScratchDir()
     const argvFile = join(scratchDir, 'argv.txt')
     const binary = installFakeCloudflared(
@@ -228,7 +231,8 @@ printf '%s\n' "$@" > "${argvFile}"
     ).toThrow("tunnel 'github-webhook' (cloudflare-quick): no upstream port resolved for channel 'github'")
   })
 
-  it('uses manual upstreamPort without calling the channel resolver', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('uses manual upstreamPort without calling the channel resolver', async () => {
     const scratchDir = createScratchDir()
     const argvFile = join(scratchDir, 'argv.txt')
     const binary = installFakeCloudflared(

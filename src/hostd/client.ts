@@ -1,16 +1,21 @@
 import { existsSync } from 'node:fs'
+import { connect, type Socket as NetSocket } from 'node:net'
 
-import type { Socket } from 'bun'
+import { isWindows } from '@/shared'
 
 import { socketPath } from './paths'
 import type { Request, Response } from './protocol'
 
 const DEFAULT_TIMEOUT_MS = 3_000
 
-export async function isDaemonReachable(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<boolean> {
-  if (!existsSync(socketPath())) return false
+export async function isDaemonReachable(
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  opts: Pick<SendOptions, 'socket'> = {},
+): Promise<boolean> {
+  const path = opts.socket ?? socketPath()
+  if (!isWindows() && !existsSync(path)) return false
   try {
-    const reply = await send({ kind: 'list' }, { timeoutMs })
+    const reply = await send({ kind: 'list' }, { timeoutMs, socket: path })
     return reply.ok
   } catch {
     return false
@@ -58,56 +63,47 @@ export async function send(req: Request, opts: SendOptions = {}): Promise<Respon
   const path = opts.socket ?? socketPath()
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  type State = { buf: string; resolve: (r: Response) => void }
-  const state: State = {
-    buf: '',
-    resolve: () => {},
-  }
+  return new Promise<Response>((resolve) => {
+    let buf = ''
+    let settled = false
+    let sock: NetSocket | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
 
-  const replyPromise = new Promise<Response>((resolve) => {
-    state.resolve = resolve
-  })
+    const finish = (response: Response, destroy = false): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (sock) {
+        try {
+          if (destroy) sock.destroy()
+          else sock.end()
+        } catch {}
+      }
+      resolve(response)
+    }
 
-  let sock: Socket<State>
-  try {
-    sock = await Bun.connect<State>({
-      unix: path,
-      socket: {
-        data: (s, chunk) => {
-          s.data.buf += chunk.toString('utf8')
-          const newline = s.data.buf.indexOf('\n')
-          if (newline < 0) return
-          const line = s.data.buf.slice(0, newline)
-          try {
-            const parsed = JSON.parse(line) as Response
-            s.data.resolve(parsed)
-          } catch {
-            s.data.resolve({ ok: false, reason: 'invalid response from daemon' })
-          }
-          s.end()
-        },
-        close: () => {},
-        error: () => {
-          state.resolve({ ok: false, reason: 'socket error' })
-        },
-      },
+    timer = setTimeout(() => finish({ ok: false, reason: `daemon ack timeout after ${timeoutMs}ms` }, true), timeoutMs)
+    sock = connect(path)
+    sock.on('connect', () => {
+      try {
+        sock?.write(`${JSON.stringify(req)}\n`)
+      } catch (error) {
+        finish({ ok: false, reason: error instanceof Error ? error.message : String(error) }, true)
+      }
     })
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-  }
-  sock.data = state
-  sock.write(`${JSON.stringify(req)}\n`)
-
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const timeoutPromise = new Promise<Response>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, reason: `daemon ack timeout after ${timeoutMs}ms` }), timeoutMs)
+    sock.on('data', (chunk: Buffer) => {
+      buf += chunk.toString('utf8')
+      const newline = buf.indexOf('\n')
+      if (newline < 0) return
+      const line = buf.slice(0, newline)
+      try {
+        finish(JSON.parse(line) as Response)
+      } catch {
+        finish({ ok: false, reason: 'invalid response from daemon' }, true)
+      }
+    })
+    sock.on('error', (error) => {
+      finish({ ok: false, reason: error instanceof Error ? error.message : String(error) }, true)
+    })
   })
-  try {
-    return await Promise.race([replyPromise, timeoutPromise])
-  } finally {
-    if (timer) clearTimeout(timer)
-    try {
-      sock.end()
-    } catch {}
-  }
 }

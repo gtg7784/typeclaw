@@ -3,8 +3,12 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { _setCurlBinaryForTest } from './ddg'
 import { webSearchTool } from './websearch'
+
+const onWindows = isWindows()
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -38,7 +42,8 @@ const MINIMAL_DDG_HTML = `
 // via _setCurlBinaryForTest, so these end-to-end tests exercise the real
 // spawn codepath plus the webSearchTool's success/error orchestration
 // without depending on a real network or a real curl_chrome136 install.
-describe('websearch tool: web (DuckDuckGo)', () => {
+// POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+describe.skipIf(onWindows)('websearch tool: web (DuckDuckGo)', () => {
   let scratchDir: string
 
   beforeEach(() => {

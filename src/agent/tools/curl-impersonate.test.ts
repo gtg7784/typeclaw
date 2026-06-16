@@ -3,6 +3,8 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import {
   CurlImpersonateError,
   _resetAvailabilityCacheForTest,
@@ -12,6 +14,8 @@ import {
   isCurlExitTimeout,
   isCurlImpersonateAvailable,
 } from './curl-impersonate'
+
+const onWindows = isWindows()
 
 // We can't predict the per-request random sentinel from the test, so the
 // fake binary reads it out of argv (the value following '-w') and renders
@@ -35,7 +39,8 @@ printf '%s' '${body}'
 printf '%s' "$RENDERED"
 `
 
-describe('curlImpersonate', () => {
+// POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+describe.skipIf(onWindows)('curlImpersonate', () => {
   let scratchDir: string
   let argvFile: string
 
@@ -265,7 +270,8 @@ describe('isCurlImpersonateAvailable', () => {
     _resetAvailabilityCacheForTest()
   })
 
-  test('returns true when the binary exits 0 on --version', async () => {
+  // POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+  test.skipIf(onWindows)('returns true when the binary exits 0 on --version', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'curl-available-test-'))
     try {
       const path = join(dir, 'fake-curl')
@@ -289,7 +295,8 @@ describe('isCurlImpersonateAvailable', () => {
     expect(available).toBe(false)
   })
 
-  test('caches the result for the life of the process', async () => {
+  // POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
+  test.skipIf(onWindows)('caches the result for the life of the process', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'curl-cache-test-'))
     try {
       const path = join(dir, 'fake-curl')

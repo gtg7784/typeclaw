@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { devNull, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ChannelRouter } from '@/channels/router'
@@ -267,7 +267,7 @@ describe('channel_fetch_attachment failure logging', () => {
       origin: attachmentOrigin,
       // Pointing at a path that exists as a FILE forces mkdir(recursive) to throw ENOTDIR.
       // This exercises the write-failure branch without mocking node:fs.
-      inboxDir: '/dev/null/not-a-dir',
+      inboxDir: join(devNull, 'not-a-dir'),
       logger,
     })
     await tool.execute('id', { attachment_id: 1 }, undefined, undefined, fakeCtx)

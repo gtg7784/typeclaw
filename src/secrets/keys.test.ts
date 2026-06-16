@@ -3,7 +3,11 @@ import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { createKeyStore, KeyStoreError } from './keys'
+
+const onWindows = isWindows()
 
 async function withTempKeysDir<T>(fn: (keysDir: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'typeclaw-keys-'))
@@ -26,7 +30,8 @@ describe('keys store', () => {
       const store = createKeyStore({ keysDir })
       await store.ensure('kakao')
       const info = await stat(store.keyPath('kakao'))
-      expect(info.mode & 0o777).toBe(0o600)
+      // NTFS mode bits are not meaningful on Windows; see #899.
+      if (!onWindows) expect(info.mode & 0o777).toBe(0o600)
     })
   })
 

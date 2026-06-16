@@ -51,6 +51,8 @@ export function resolveTodoScope(origin: SessionOrigin): TodoScope | null {
   }
 }
 
+const CHANNEL_SCOPE_SEPARATOR = ','
+
 function channelScopeKey(origin: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
   const parts = [
     encodeComponent(origin.adapter),
@@ -58,7 +60,7 @@ function channelScopeKey(origin: { adapter: string; workspace: string; chat: str
     encodeComponent(origin.chat),
     encodeComponent(origin.thread),
   ]
-  return `channel/${parts.join(':')}`
+  return `channel/${parts.join(CHANNEL_SCOPE_SEPARATOR)}`
 }
 
 // Encode one scope component injectively. Every component is emitted as a
@@ -69,7 +71,7 @@ function channelScopeKey(origin: { adapter: string; workspace: string; chat: str
 // confused: a null thread vs a literal "n" string, an empty string vs a
 // literal "_empty" string, and any value vs another whose unsafe chars happen
 // to map together. `encodeURIComponent` is itself injective and never emits
-// `/` or `:`, so the joined key is both a single filesystem-safe path segment
+// `/` or `,`, so the joined key is both a single filesystem-safe path segment
 // and a collision-free identity for the conversation whose todo file it names.
 function encodeComponent(value: string | null): string {
   if (value === null) return 'n'

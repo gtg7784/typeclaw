@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { checkNonWorkspaceWriteGuard } from './non-workspace-write'
 
 describe('non-workspace-write guard policy', () => {
@@ -32,7 +34,8 @@ describe('non-workspace-write guard policy', () => {
     expect(result).toBeUndefined()
   })
 
-  test('allows unacknowledged writes under /tmp (virtual per-session scratch)', async () => {
+  // Container scratch is the Linux /tmp namespace; Windows host path semantics are tracked in #899.
+  test.skipIf(isWindows())('allows unacknowledged writes under /tmp (virtual per-session scratch)', async () => {
     const agentDir = await makeAgentDir()
 
     const result = await checkNonWorkspaceWriteGuard({

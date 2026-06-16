@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { COMPILER_PACKAGE, COMPILER_VERSION, isModuleNotFound, missingCompilerGuidance } from './render'
 
@@ -36,7 +37,7 @@ describe('missingCompilerGuidance', () => {
 })
 
 describe('render script CLI', () => {
-  const scriptPath = new URL('./render.ts', import.meta.url).pathname
+  const scriptPath = fileURLToPath(new URL('./render.ts', import.meta.url))
 
   test('exits 2 with usage when args are missing', async () => {
     const proc = Bun.spawn(['bun', 'run', scriptPath], { stdout: 'pipe', stderr: 'pipe' })
@@ -69,6 +70,6 @@ describe('compiler resolution from a nested document directory', () => {
     await mkdir(docDir, { recursive: true })
 
     const resolved = Bun.resolveSync('fake-renderer', docDir)
-    expect(resolved.endsWith('/node_modules/fake-renderer/index.js')).toBe(true)
+    expect(resolved).toMatch(/[\\/]node_modules[\\/]fake-renderer[\\/]index\.js$/)
   })
 })

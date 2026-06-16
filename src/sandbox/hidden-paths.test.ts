@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { join } from 'node:path'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 import { createPermissionService } from '@/permissions/permissions'
@@ -7,6 +8,12 @@ import { rolesConfigSchema, type RolesConfig } from '@/permissions/schema'
 import { resolveHiddenPaths } from './hidden-paths'
 
 const AGENT = '/agent'
+const hiddenDirs = (agentDir: string) => [
+  join(agentDir, 'workspace'),
+  join(agentDir, 'memory'),
+  join(agentDir, 'sessions'),
+]
+const secretFiles = (agentDir: string) => [join(agentDir, '.env'), join(agentDir, 'secrets.json')]
 
 function parseRoles(raw: unknown): RolesConfig {
   const result = rolesConfigSchema.safeParse(raw)
@@ -51,20 +58,20 @@ describe('resolveHiddenPaths — builtin tiers', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('member'), AGENT)
     expect(dirs).toEqual([])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('guest hides the private surface AND the secret files', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('guest'), AGENT)
-    expect(dirs).toEqual(['/agent/workspace', '/agent/memory', '/agent/sessions'])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('guest never hides public/ — it is the guest-visible zone', () => {
     const svc = createPermissionService()
     const { dirs } = resolveHiddenPaths(svc, spawnedBy('guest'), AGENT)
-    expect(dirs).not.toContain('/agent/public')
+    expect(dirs).not.toContain(join(AGENT, 'public'))
   })
 })
 
@@ -72,8 +79,8 @@ describe('resolveHiddenPaths — fail-safe', () => {
   test('undefined origin is treated as guest (everything hidden)', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, undefined, AGENT)
-    expect(dirs).toEqual(['/agent/workspace', '/agent/memory', '/agent/sessions'])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('unmatched channel author resolves to guest (everything hidden)', () => {
@@ -87,8 +94,8 @@ describe('resolveHiddenPaths — fail-safe', () => {
       lastInboundAuthorId: 'U_STRANGER',
     }
     const { dirs, files } = resolveHiddenPaths(svc, stranger, AGENT)
-    expect(dirs).toEqual(['/agent/workspace', '/agent/memory', '/agent/sessions'])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 })
 
@@ -98,7 +105,7 @@ describe('resolveHiddenPaths — custom roles via fs.see grants', () => {
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('contributor'), AGENT)
     expect(dirs).toEqual([])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('custom role with both fs.see grants hides nothing', () => {
@@ -120,7 +127,7 @@ describe('resolveHiddenPaths — legacy security.bypass fallback', () => {
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('legacymember'), AGENT)
     expect(dirs).toEqual([])
-    expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('a role with bypass.medium (no fs.see.*) sees both private surface and secrets', () => {
@@ -138,7 +145,7 @@ describe('resolveHiddenPaths — agentDir relativity', () => {
   test('masks are rooted at the given agentDir, not a hardcoded /agent', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, undefined, '/srv/app')
-    expect(dirs).toEqual(['/srv/app/workspace', '/srv/app/memory', '/srv/app/sessions'])
-    expect(files).toEqual(['/srv/app/.env', '/srv/app/secrets.json'])
+    expect(dirs).toEqual(hiddenDirs('/srv/app'))
+    expect(files).toEqual(secretFiles('/srv/app'))
   })
 })
