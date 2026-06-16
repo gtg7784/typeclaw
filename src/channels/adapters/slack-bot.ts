@@ -32,6 +32,7 @@ import type {
 } from '@/channels/types'
 import { chunkMarkdown } from '@/markdown'
 
+import { addSlackMentionHints } from './mention-hints'
 import { createSlackAuthorResolver, type SlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import {
@@ -703,11 +704,14 @@ export function createSlackHistoryCallback(deps: {
     // users.info entry. The resolver caches/coalesces, so repeated authors
     // cost one lookup each.
     if (authorResolver !== undefined) {
+      const resolver = authorResolver
+      const botId = botUserIdRef()
       await Promise.all(
         mapped.map(async (message, index) => {
+          message.text = await addSlackMentionHints(message.text, resolver.resolve, { botUserId: botId })
           const userId = rawMessages[index]?.user
           if (userId === undefined || userId === '') return
-          message.authorName = await authorResolver.resolve(userId)
+          message.authorName = await resolver.resolve(userId)
         }),
       )
     }
@@ -1133,9 +1137,10 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       }
 
       dedupe.mark(event)
+      const hintedText = await addSlackMentionHints(verdict.payload.text, authorResolver.resolve, { botUserId })
       const slackAttachments = Array.isArray(event.attachments) ? event.attachments : undefined
       const referenceResult = await enrichSlackReferenceContext({
-        text: verdict.payload.text,
+        text: hintedText,
         channelId: event.channel,
         messageTs: event.ts,
         ...(slackAttachments !== undefined ? { attachments: slackAttachments } : {}),
@@ -1143,6 +1148,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       })
       const enriched = {
         ...verdict.payload,
+        text: hintedText,
         authorName: resolvedUserName,
         ...(referenceResult.referenceContext !== undefined
           ? { referenceContext: referenceResult.referenceContext }
