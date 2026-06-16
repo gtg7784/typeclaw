@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -43,7 +44,7 @@ describe('resolveGitRepo', () => {
     expect(res.ok).toBe(true)
     // git canonicalizes the root (on macOS /var → /private/var), so assert the
     // resolved root is the git toplevel rather than byte-equal to the tmp path.
-    if (res.ok) expect(normalizePath(res.root).endsWith(normalizePath(repo))).toBe(true)
+    if (res.ok) expect(normalizePath(realpathSync(res.root)).endsWith(normalizePath(realpathSync(repo)))).toBe(true)
   })
 
   it('reports not-a-repo outside any git tree', async () => {

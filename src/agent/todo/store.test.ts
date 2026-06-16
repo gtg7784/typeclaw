@@ -109,7 +109,7 @@ describe('todoContentPath traversal guard', () => {
 
   test('accepts a normal nested key', () => {
     const path = todoContentPath(agentDir, { kind: 'channel', key: 'channel/sslack,sw,sc,n' })
-    expect(path.endsWith('todo/channel/sslack,sw,sc,n.json')).toBe(true)
+    expect(path.endsWith(join('todo', 'channel', 'sslack,sw,sc,n.json'))).toBe(true)
   })
 })
 

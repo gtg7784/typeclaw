@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import * as z from 'zod'
@@ -959,7 +959,8 @@ describe('scaffold', () => {
     }
     const spec = pkg.dependencies.typeclaw ?? ''
     expect(spec.startsWith('file:')).toBe(true)
-    const target = join(root, spec.slice('file:'.length))
+    const rel = spec.slice('file:'.length)
+    const target = isAbsolute(rel) ? rel : join(root, rel)
     const targetPkg = JSON.parse(await readFile(join(target, 'package.json'), 'utf8')) as { name: string }
     expect(targetPkg.name).toBe('typeclaw')
   })
