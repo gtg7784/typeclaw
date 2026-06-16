@@ -1689,6 +1689,145 @@ describe('ChannelRouter sticky credits', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(1)
   })
+
+  test('a user the agent @-mentions auto-engages on their next plain reply', async () => {
+    // given a 2-human group (alice + bob both seen) so the solo-human fallback is
+    // off — an untriggered plain message would otherwise be observed
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(
+      inbound({ authorId: '111', authorName: 'alice', externalMessageId: 'p1', isBotMention: true, text: 'bot hi' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1100
+    await router.route(
+      inbound({ authorId: '777', authorName: 'bob', externalMessageId: 'n0', isBotMention: false, text: 'hi all' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // when alice triggers a turn and the agent's reply @-mentions bob, a third party
+    nowRef.value = 1500
+    sessions[0]!.onPrompt = async () => {
+      await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'good question — <@777> can you confirm?',
+      })
+    }
+    await router.route(
+      inbound({
+        authorId: '111',
+        authorName: 'alice',
+        externalMessageId: 'p2',
+        isBotMention: true,
+        text: 'bot what about X?',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // then bob's plain reply (no mention of the bot) engages: the @-mention granted bob a sticky credit
+    nowRef.value = 2000
+    await router.route(
+      inbound({
+        authorId: '777',
+        authorName: 'bob',
+        externalMessageId: 'n1',
+        isBotMention: false,
+        text: 'sure, it is Y',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('sure, it is Y')
+  })
+
+  test('a user the agent did NOT mention stays observed on a plain reply', async () => {
+    // given the same 2-human group, but the agent's reply mentions nobody
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(
+      inbound({ authorId: '111', authorName: 'alice', externalMessageId: 'p1', isBotMention: true, text: 'bot hi' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1100
+    await router.route(
+      inbound({ authorId: '777', authorName: 'bob', externalMessageId: 'n0', isBotMention: false, text: 'hi all' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // when alice triggers a turn and the agent replies without any @-mention
+    nowRef.value = 1500
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'good question, let me check' })
+    }
+    await router.route(
+      inbound({
+        authorId: '111',
+        authorName: 'alice',
+        externalMessageId: 'p2',
+        isBotMention: true,
+        text: 'bot what about X?',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // then bob's unrelated plain reply is observed, not engaged — only alice (the turn author) holds a credit
+    nowRef.value = 2000
+    await router.route(
+      inbound({
+        authorId: '777',
+        authorName: 'bob',
+        externalMessageId: 'n1',
+        isBotMention: false,
+        text: 'sure, it is Y',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('the bot does not grant itself sticky when its reply contains a self-mention', async () => {
+    // given a registered self-identity and a turn authored by alice (111)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerSelfIdentity('discord-bot', () => ({ id: '999' }))
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(
+      inbound({ authorId: '111', authorName: 'alice', externalMessageId: 'p1', isBotMention: true, text: 'bot hi' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // when the agent's reply mentions both the bot itself (999) and bob (777),
+    // e.g. a quoted inbound that @-pinged the bot
+    nowRef.value = 1500
+    sessions[0]!.onPrompt = async () => {
+      await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: '> <@999> ping\n<@777> thoughts?',
+      })
+    }
+    await router.route(
+      inbound({ authorId: '111', authorName: 'alice', externalMessageId: 'p2', isBotMention: true, text: 'bot go' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then only alice (111, turn author) and bob (777, mentioned) hold credits — self (999) is excluded
+    expect(router.clearSticky(KEY).cleared).toBe(2)
+  })
 })
 
 describe('ChannelRouter outbound', () => {

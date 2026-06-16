@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { addDiscordMentionHints, addSlackMentionHints } from './mention-hints'
+import { addDiscordMentionHints, addSlackMentionHints, extractMentionedUserIds } from './mention-hints'
 
 describe('addSlackMentionHints', () => {
   const resolver = (names: Record<string, string>) => async (id: string) => names[id] ?? id
@@ -103,5 +103,30 @@ describe('addDiscordMentionHints', () => {
   test('returns text unchanged when there are no mentions', () => {
     const out = addDiscordMentionHints('just plain text', users([]))
     expect(out).toBe('just plain text')
+  })
+})
+
+describe('extractMentionedUserIds', () => {
+  test('slack: extracts ids, dedupes, drops legacy labels, handles W ids', () => {
+    expect(extractMentionedUserIds('slack-bot', 'hi <@U1> and <@U1|old> and <@W2>')).toEqual(['U1', 'W2'])
+  })
+
+  test('slack: extracts the id regardless of surrounding non-Latin script', () => {
+    expect(extractMentionedUserIds('slack-bot', '안녕하세요 <@U0TEST1A2B> 확인 부탁해요')).toEqual(['U0TEST1A2B'])
+  })
+
+  test('discord: extracts ids from both <@id> and <@!id>', () => {
+    expect(extractMentionedUserIds('discord-bot', 'yo <@123> and <@!456> again <@123>')).toEqual(['123', '456'])
+  })
+
+  test('returns [] for adapters without id-token mentions', () => {
+    for (const adapter of ['telegram-bot', 'github', 'line', 'kakaotalk'] as const) {
+      expect(extractMentionedUserIds(adapter, 'hey @someone <@U1> <@123>')).toEqual([])
+    }
+  })
+
+  test('returns [] when no mentions are present', () => {
+    expect(extractMentionedUserIds('slack-bot', 'just plain text')).toEqual([])
+    expect(extractMentionedUserIds('discord-bot', 'just plain text')).toEqual([])
   })
 })
