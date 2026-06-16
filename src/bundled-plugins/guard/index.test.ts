@@ -26,8 +26,9 @@ describe('guard plugin', () => {
 
     expect(blocked).toEqual({
       block: true,
-      reason:
-        'Guard `nonWorkspaceWrite` blocked write outside the workspace: /agent/notes.md. The free-write zone is /agent/workspace. Retry with `acknowledgeGuards.nonWorkspaceWrite: true` only if this write is intentional.',
+      reason: expect.stringMatching(
+        /Guard `nonWorkspaceWrite` blocked write outside the workspace: (?:[A-Z]:)?[\\/]agent[\\/]notes\.md\. The free-write zone is (?:[A-Z]:)?[\\/]agent[\\/]workspace\. Retry with `acknowledgeGuards\.nonWorkspaceWrite: true` only if this write is intentional\./,
+      ),
     })
     expect(acknowledged).toBeUndefined()
   })

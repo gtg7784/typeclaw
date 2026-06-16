@@ -3,7 +3,11 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { CapJsonlReadError, capJsonlFileInPlace } from './cap-jsonl'
+
+const onWindows = isWindows()
 
 const baseOptions = {
   imageMaxBytes: 100,
@@ -219,7 +223,8 @@ describe('capJsonlFileInPlace', () => {
     expect(() => capJsonlFileInPlace(subdir, baseOptions)).toThrow(CapJsonlReadError)
   })
 
-  test('preserves the original file mode across the temp+rename rewrite', () => {
+  // chmod/file-mode is a no-op on NTFS, so mode preservation is unobservable. #899
+  test.skipIf(onWindows)('preserves the original file mode across the temp+rename rewrite', () => {
     const path = makeTmpJsonl([
       { type: 'session', id: 's1', timestamp: '2026-05-12T00:00:00Z', cwd: '/a' },
       {
