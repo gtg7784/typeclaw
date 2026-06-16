@@ -238,6 +238,22 @@ describe('loadMemory retrieval cache', () => {
     expect(section).not.toContain('y'.repeat(8 * 1024 + 100))
   })
 
+  test('caps an oversized multibyte (CJK) cache by UTF-8 bytes, not code units', async () => {
+    await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
+    // 4000 Korean chars = 12 KB in UTF-8 but only 4000 code units: a code-unit
+    // cap would let it through, a byte cap must truncate it.
+    const cjk = '가'.repeat(4000)
+    await writeFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_cjk.md'), cjk, 'utf8')
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_cjk' })
+
+    expect(section).toContain('[retrieval cache truncated]')
+    const injected = section.match(/가+/)?.[0] ?? ''
+    expect(injected.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(injected, 'utf8')).toBeLessThanOrEqual(8 * 1024)
+    expect(section).not.toContain('가'.repeat(4000))
+  })
+
   test('leaves output unchanged when the filesystem retrieval cache is absent', async () => {
     const withoutSession = await loadMemory(agentDir)
     const withMissingCache = await loadMemory(agentDir, { currentSessionId: 'ses_missing' })

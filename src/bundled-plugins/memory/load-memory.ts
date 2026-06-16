@@ -174,14 +174,26 @@ async function appendRetrievalCache(result: string, agentDir: string, options: L
     const trimmed = cacheContent.trim()
     if (trimmed.length === 0) return result
     const bounded =
-      trimmed.length > MAX_RETRIEVAL_CACHE_BYTES
-        ? `${trimmed.slice(0, MAX_RETRIEVAL_CACHE_BYTES)}\n\n[retrieval cache truncated]`
+      Buffer.byteLength(trimmed, 'utf8') > MAX_RETRIEVAL_CACHE_BYTES
+        ? `${truncateUtf8Bytes(trimmed, MAX_RETRIEVAL_CACHE_BYTES)}\n\n[retrieval cache truncated]`
         : trimmed
     return `${result}\n\n## Retrieved memory (session ${options.currentSessionId})\n\n${bounded}`
   } catch (err) {
     if (!isEnoent(err)) throw err
     return result
   }
+}
+
+// Truncate to at most maxBytes UTF-8 bytes without splitting a multibyte
+// sequence. String.slice/length count UTF-16 code units, so a code-unit cap
+// would let CJK/emoji content (multi-byte in UTF-8) blow past the byte budget —
+// typeclaw is multi-language, so the cap must be measured in bytes.
+function truncateUtf8Bytes(s: string, maxBytes: number): string {
+  const buf = Buffer.from(s, 'utf8')
+  if (buf.length <= maxBytes) return s
+  let end = maxBytes
+  while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end--
+  return buf.toString('utf8', 0, end)
 }
 
 async function pathExists(path: string): Promise<boolean> {
