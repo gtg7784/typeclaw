@@ -1930,16 +1930,62 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.typingStartedAt = now()
   }
 
+  // Re-arm a heartbeat that the silence cap already stopped. PR #930 made
+  // streamed deltas refresh the clock, but only via `bumpTypingActivity`,
+  // which no-ops once `typingTimer` is null. So a turn that goes silent for
+  // >MAX_TYPING_HEARTBEAT_MS (a long single tool call, a slow provider, an
+  // extended-thinking phase that emits no deltas) trips the cap, and the
+  // delta/tool signals that arrive afterwards can no longer revive it —
+  // `startTypingHeartbeat` short-circuits on `typingTimedOut`, which only
+  // resets at the next drain() iteration (i.e. never, within one long turn).
+  // Reviving here lets demonstrable progress after a timeout bring the
+  // indicator back. The revival is gated on streamed activity ONLY, never on
+  // a new inbound (a later inbound during the same in-flight turn must stay
+  // silenced — see the matching router test).
+  //
+  // On Slack this is the visible bug: its `'stop'` phase sends a permanent
+  // empty-string `setStatus` clear that does not auto-expire, so a tripped
+  // indicator stays gone. Discord/Telegram mask the same defect because their
+  // native indicators auto-expire and self-heal on the next tick.
+  const reviveTypingActivity = (live: LiveSession): void => {
+    if (live.destroyed) return
+    if (!live.typingTimedOut) {
+      bumpTypingActivity(live)
+      return
+    }
+    // A `'stop'` clear may still be in flight. Starting a new heartbeat now
+    // would short-circuit on the non-null `typingStopPromise` (losing the
+    // revival), and firing a fresh `'tick'` before Slack's empty-string clear
+    // lands would let the clear wipe the just-revived status. Defer until the
+    // stop settles so the new `'tick'` is ordered strictly after the clear.
+    const stopPromise = live.typingStopPromise
+    if (stopPromise) {
+      void stopPromise.catch(() => undefined).then(() => restartTypingAfterTimeout(live))
+      return
+    }
+    restartTypingAfterTimeout(live)
+  }
+
+  const restartTypingAfterTimeout = (live: LiveSession): void => {
+    // Re-checked after the awaited stop: the session may have been destroyed,
+    // or an earlier queued revival may have already cleared the flag and
+    // re-armed the heartbeat (so this one becomes a no-op — no double interval,
+    // no duplicate tick).
+    if (live.destroyed || !live.typingTimedOut) return
+    live.typingTimedOut = false
+    startTypingHeartbeat(live)
+  }
+
   const subscribeTypingActivity = (session: AgentSession, live: LiveSession): (() => void) => {
     return session.subscribe((event) => {
       if (event.type === 'tool_execution_end') {
-        bumpTypingActivity(live)
+        reviveTypingActivity(live)
         return
       }
       if (event.type !== 'message_update') return
       const streamed = event.assistantMessageEvent.type
       if (streamed === 'text_delta' || streamed === 'thinking_delta') {
-        bumpTypingActivity(live)
+        reviveTypingActivity(live)
       }
     })
   }
