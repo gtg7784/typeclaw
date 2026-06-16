@@ -11,18 +11,23 @@ import { createCronConsumer, type CronConsumerLogger, type CronSession } from '.
 import type { CronJob, ExecJob, PromptJob } from './schema'
 
 async function waitForFile(path: string): Promise<string> {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 200; i++) {
     if (await Bun.file(path).exists()) return Bun.file(path).text()
     await Bun.sleep(50)
   }
-  return Bun.file(path).text()
+  throw new Error(`file was not created before timeout: ${path}`)
 }
 
 async function waitForCondition(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 200; i++) {
     if (predicate()) return
     await Bun.sleep(50)
   }
+  throw new Error('condition was not met before timeout')
+}
+
+async function waitForConsumerIdle(consumer: ReturnType<typeof createCronConsumer>): Promise<void> {
+  await waitForCondition(() => consumer.inFlightCount() === 0)
 }
 
 // Minimal AgentSession stub satisfying the surface the model-fallback helper
@@ -145,6 +150,7 @@ describe('createCronConsumer', () => {
 
     publishCron(stream, execJob('touch', [process.execPath, '-e', 'await Bun.write("out.txt", "hello")']))
     const contents = await waitForFile(join(root, 'out.txt'))
+    await waitForConsumerIdle(consumer)
 
     expect(contents.trim()).toBe('hello')
 
@@ -176,6 +182,7 @@ describe('createCronConsumer', () => {
     }
     publishCron(stream, job)
     const captured = await waitForFile(join(root, 'origin.json'))
+    await waitForConsumerIdle(consumer)
 
     const parsed = JSON.parse(captured) as { kind?: string; jobId?: string; scheduledByRole?: string }
     expect(parsed.kind).toBe('cron')
@@ -204,6 +211,7 @@ describe('createCronConsumer', () => {
 
     publishCron(stream, execJob('after', [process.execPath, '-e', 'await Bun.write("after.txt", "ok")']))
     const contents = await waitForFile(join(root, 'after.txt'))
+    await waitForConsumerIdle(consumer)
 
     expect(contents.trim()).toBe('ok')
 
