@@ -20,7 +20,7 @@ import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { detectMissingDeps } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
-import { detectWsl, isWindowsDriveMount, type WslInfo } from '@/shared'
+import { detectWsl, isWindows, isWindowsDriveMount, type WslInfo } from '@/shared'
 
 import { buildChannelChecks } from './channel-checks'
 import type { DoctorCheck } from './types'
@@ -39,6 +39,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     configValid(),
     hostdHomeWritable(),
     wslDriveMount(),
+    windowsSecretPerms(),
     hostdReachable(),
     hostdRegistration(),
     containerState(dockerExec),
@@ -280,6 +281,45 @@ export function wslDriveMount(deps: Partial<WslDriveMountDeps> = {}): DoctorChec
         fix: {
           description:
             'Move the agent folder to the WSL Linux filesystem (e.g. ~/my-agent) and, if needed, set TYPECLAW_HOME to a Linux path.',
+        },
+      }
+    },
+  }
+}
+
+export type WindowsSecretPermsDeps = {
+  isWindows: () => boolean
+  typeclawHome: () => string
+}
+
+// On native Windows the 0600/0700 modes typeclaw sets on secrets.json and the
+// encryption keys are no-ops — NTFS uses ACLs, not Unix modes — so their
+// confidentiality rests on the inherited %USERPROFILE% ACLs rather than the
+// hardening typeclaw enforces on POSIX. Surface that as a warning.
+export function windowsSecretPerms(deps: Partial<WindowsSecretPermsDeps> = {}): DoctorCheck {
+  const onWindows = deps.isWindows ?? isWindows
+  const typeclawHome = deps.typeclawHome ?? homeRoot
+
+  return {
+    name: 'hostd.windows-secret-perms',
+    category: 'hostd',
+    description: 'secrets rely on enforced file permissions (native Windows)',
+    async run(ctx) {
+      if (!onWindows()) return { status: 'ok', message: 'not running on native Windows' }
+
+      const details = [`hostd home: ${typeclawHome()}`]
+      if (ctx.hasAgentFolder) details.push(`agent folder: ${ctx.cwd}`)
+      details.push(
+        'NTFS ignores the 0600/0700 chmod typeclaw applies to secrets.json and encryption keys; their confidentiality relies on the inherited %USERPROFILE% ACLs instead.',
+      )
+
+      return {
+        status: 'warning',
+        message: 'native Windows does not enforce the file modes that protect agent secrets',
+        details,
+        fix: {
+          description:
+            'Keep the agent folder and ~/.typeclaw under your user profile, where default ACLs restrict access to your account; avoid a shared or everyone-readable location.',
         },
       }
     },
