@@ -7,7 +7,7 @@ import { createApproveIdempotencyGuard } from './approve-idempotency'
 import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
 import { analyzeGhCommand, effectiveGhTokensForAuthenticatedUserEndpoint } from './gh-command'
 import { ensureGitAskPassHelper } from './git-askpass'
-import { analyzeGitCommand, defaultGitResolvers } from './git-command'
+import { analyzeGitCommand, defaultGitResolvers, resolveGhDefaultRepoFromCwd } from './git-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
 import { classifyGhToken, shouldMintAppToken } from './token-class'
@@ -72,6 +72,35 @@ export default definePlugin({
 
     type HookResult = void | { block: true; reason: string }
 
+    // A TRUSTED repo to fill in for a repo-less `gh` command, resolved from
+    // sources the command author cannot forge: (1) a GitHub channel session's
+    // own repo (origin.workspace comes from the signed webhook payload), then
+    // (2) the working tree's `origin` remote. NOT from any `-R`/path in the
+    // command (that is the attacker-controllable input the parser already
+    // handles). The slug is still gated by the repos[] allowlist at mint time.
+    const resolveTrustedFallbackRepo = async (origin: SessionOrigin | undefined): Promise<string | undefined> => {
+      if (origin?.kind === 'channel' && origin.adapter === 'github' && origin.workspace !== '') {
+        return origin.workspace
+      }
+      const fromCwd = await resolveGhDefaultRepoFromCwd(ctx.agentDir, defaultGitResolvers)
+      return fromCwd ?? undefined
+    }
+
+    // When a repo-less `gh` is blocked but a trusted repo IS available, show the
+    // exact single-bare rewrite so the agent recovers in one step instead of
+    // guessing. Composition blocks get a split-the-script instruction. The
+    // returned text is appended to the block reason (synchronous, always seen).
+    const buildGhBlockGuidance = (code: string, fallbackRepo: string | undefined): string => {
+      const slug = fallbackRepo ?? 'owner/repo'
+      if (code === 'composition') {
+        return (
+          ` Run each gh as its own single bare command, e.g. \`gh label edit <name> -R ${slug} --name ...\` —` +
+          ' not inside a function, `if`/`then`, `&&`, `;`, or `$(...)`.'
+        )
+      }
+      return ` For example: \`gh <cmd> -R ${slug}\` as a single bare command.`
+    }
+
     // 'fall-through' means "not a repo-targeting gh command" so the caller can
     // try the git path on the same command (e.g. `git ... # gh` substrings).
     const handleGhCommand = async (params: {
@@ -91,7 +120,26 @@ export default definePlugin({
       }
       if (review.dump !== null) return review.dump
 
-      const decision = analyzeGhCommand(command)
+      // Analyze first WITHOUT the fallback: an explicit `-R`/path repo must win,
+      // and we only pay for fallback resolution (a git subprocess) when the
+      // command is otherwise repo-less. A trusted fallback is then applied ONLY to
+      // a `missing-repo` block (never to composition/non-literal/multi-owner/api),
+      // and re-analysis re-runs the SAME composition gate, so a compound command
+      // still blocks. `fallbackRepoUsed` marks an inject that came from the
+      // fallback so we also set GH_REPO (gh needs the repo, not just the token).
+      let decision = analyzeGhCommand(command)
+      let fallbackRepo: string | undefined
+      let fallbackRepoUsed = false
+      if (decision.kind === 'block' && decision.code === 'missing-repo') {
+        fallbackRepo = await resolveTrustedFallbackRepo(event.origin)
+        if (fallbackRepo !== undefined) {
+          const withFallback = analyzeGhCommand(command, fallbackRepo)
+          if (withFallback.kind === 'inject') {
+            decision = withFallback
+            fallbackRepoUsed = true
+          }
+        }
+      }
 
       // `/user` classifies as pass-through (no repo to mint for), so this block
       // must run BEFORE the pass-through return. Resolve the EFFECTIVE token per
@@ -140,7 +188,10 @@ export default definePlugin({
         // NOT apply — a PAT needs no per-repo mint — so we never surface it here.
         if (runsUnsandboxed(event.origin)) {
           if (decision.kind === 'inject') {
-            event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: process.env.GH_TOKEN as string }
+            event.args[TYPECLAW_INTERNAL_BASH_ENV] = {
+              GH_TOKEN: process.env.GH_TOKEN as string,
+              ...(fallbackRepoUsed && fallbackRepo !== undefined ? { GH_REPO: fallbackRepo } : {}),
+            }
           }
           return
         }
@@ -148,14 +199,18 @@ export default definePlugin({
         // available (a PAT must NOT suppress it, or the original silent-failure
         // bug returns); otherwise block with guidance rather than failing mute.
         if (!shouldMintAppToken(undefined, hasAppTokenResolver())) {
-          if (decision.kind === 'block') return { block: true, reason: decision.reason }
+          if (decision.kind === 'block') {
+            return { block: true, reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo) }
+          }
           warnSandboxedPatWithheldOnce()
           return { block: true, reason: sandboxedPatWithheldReason }
         }
         mintForSandboxedPat = true
       }
 
-      if (decision.kind === 'block') return { block: true, reason: decision.reason }
+      if (decision.kind === 'block') {
+        return { block: true, reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo) }
+      }
 
       // No App auth (no App-class GH_TOKEN and no live minter): leave whatever
       // is seeded so `gh` fails honestly rather than us guessing a token. The
@@ -166,8 +221,14 @@ export default definePlugin({
       if (result.kind === 'unavailable') return { block: true, reason: result.reason }
       // Inject via the internal env overlay (delivered to the spawn / bwrap
       // --setenv by the bash wrapper) so the token never enters the command
-      // string, where it could leak through logs or later hooks.
-      event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
+      // string, where it could leak through logs or later hooks. When the repo
+      // came from a trusted fallback (not an explicit -R), also set GH_REPO so
+      // `gh` actually targets it — a token alone leaves the repo unresolved.
+      // GH_REPO is non-secret; the token still scopes reach to that repo.
+      event.args[TYPECLAW_INTERNAL_BASH_ENV] = {
+        GH_TOKEN: result.token,
+        ...(fallbackRepoUsed ? { GH_REPO: decision.repoSlug } : {}),
+      }
       return
     }
 

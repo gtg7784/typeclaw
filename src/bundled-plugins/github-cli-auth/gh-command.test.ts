@@ -559,6 +559,51 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('gh api /user')).toEqual({ kind: 'pass-through' })
     expect(analyzeGhCommand("gh api /user --jq '.login'")).toEqual({ kind: 'pass-through' })
   })
+
+  it('tags each block with a structured code so the caller can react', () => {
+    const missing = analyzeGhCommand('gh label list')
+    expect(missing.kind === 'block' && missing.code).toBe('missing-repo')
+    const nonLiteral = analyzeGhCommand('gh label list -R "$repo"')
+    expect(nonLiteral.kind === 'block' && nonLiteral.code).toBe('non-literal-repo')
+    const composition = analyzeGhCommand('set -e; gh label list -R acme/widgets')
+    expect(composition.kind === 'block' && composition.code).toBe('composition')
+  })
+})
+
+describe('analyzeGhCommand with a trusted fallback repo', () => {
+  it('injects the fallback for a repo-less bare command', () => {
+    expect(analyzeGhCommand('gh label list', 'acme/widgets')).toEqual({ kind: 'inject', repoSlug: 'acme/widgets' })
+  })
+
+  it('STILL blocks a compound command even with a fallback (token would leak to siblings)', () => {
+    const result = analyzeGhCommand('set -euo pipefail; gh label list', 'acme/widgets')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.code).toBe('composition')
+  })
+
+  it('STILL blocks a non-literal -R even with a fallback (never papers over a user $var)', () => {
+    const result = analyzeGhCommand('gh label edit foo -R "$repo" --name x', 'acme/widgets')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.code).toBe('non-literal-repo')
+  })
+
+  it('lets an explicit literal -R win over the fallback', () => {
+    expect(analyzeGhCommand('gh label list -R real/repo', 'acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'real/repo',
+    })
+  })
+
+  it('does not apply the fallback to a gh api path (the path is authoritative)', () => {
+    expect(analyzeGhCommand('gh api repos/path/repo/labels', 'acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'path/repo',
+    })
+  })
+
+  it('never treats a non-literal fallback as a repo', () => {
+    expect(analyzeGhCommand('gh label list', '$owner/$repo').kind).toBe('block')
+  })
 })
 
 describe('usesGhApiAuthenticatedUserEndpoint', () => {

@@ -1,6 +1,12 @@
+// `code` classifies a block so the caller can react structurally instead of
+// string-matching the reason: only `missing-repo` is eligible for a trusted
+// repo-fallback (origin/cwd) that turns the block into a mint; `composition`,
+// `multi-owner`, `api-repo-conflict`, and `non-literal-repo` must stay blocks.
+export type GhBlockCode = 'missing-repo' | 'non-literal-repo' | 'composition' | 'multi-owner' | 'api-repo-conflict'
+
 export type GhCommandDecision =
   | { kind: 'pass-through' }
-  | { kind: 'block'; reason: string }
+  | { kind: 'block'; code: GhBlockCode; reason: string }
   // `rewrittenCommand`, when present, MUST replace the executed command: `gh api`
   // rejects `-R/--repo` ("unknown shorthand flag"), so for a graphql endpoint the
   // flag is consumed as our repo hint and stripped before exec. Other inject paths
@@ -38,7 +44,7 @@ const API_REPO_CONFLICT_REASON =
 // `gh api /repos/x/y` path slip past an `-R`-derived check.
 type GhSegmentDecision =
   | { kind: 'pass-through' }
-  | { kind: 'block'; reason: string }
+  | { kind: 'block'; code: GhBlockCode; reason: string }
   // `stripRepoFlag` marks a graphql inject whose `-R/--repo` is a TypeClaw-only
   // hint that `gh api` would reject, so it must be removed from the command.
   | { kind: 'inject'; repoSlugs: readonly string[]; stripRepoFlag?: boolean }
@@ -130,7 +136,16 @@ const REPO_LESS_SUBCOMMANDS = new Set([
 // installation). We therefore inspect EVERY `gh` invocation, not just the
 // first: a repo-targeting `gh` with no resolvable repo blocks (missing-repo),
 // and invocations spanning more than one owner block (multi-owner).
-export function analyzeGhCommand(command: string): GhCommandDecision {
+// `fallbackRepo`, when supplied, is a TRUSTED literal `owner/repo` the CALLER
+// resolved from a non-command source (GitHub session origin or the cwd git
+// remote) and already allowlist-checked. It fills in for a repo-less non-`api`
+// segment that would otherwise block `missing-repo`, so a bare `gh label list`
+// can mint. It deliberately flows through the SAME multi-owner + single-bare
+// composition gates below, so a compound command still blocks even with a
+// fallback (the token would leak to siblings). It NEVER overrides an explicit
+// `-R`/path repo, and is NOT applied to `non-literal-repo` (a `$var` the user
+// wrote) or `gh api` (path is authoritative).
+export function analyzeGhCommand(command: string, fallbackRepo?: string): GhCommandDecision {
   const tokens = tokenize(command)
   const ghStarts = findGhInvocations(tokens)
   if (ghStarts.length === 0) return { kind: 'pass-through' }
@@ -141,7 +156,7 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
     const start = ghStarts[i] as number
     const end = ghStarts[i + 1] ?? tokens.length
     const args = tokens.slice(start + 1, end)
-    const segment = classifyGhSegment(args)
+    const segment = classifyGhSegment(args, fallbackRepo)
     if (segment.kind === 'block') return segment
     if (segment.kind === 'inject') {
       repoSlugs.push(...segment.repoSlugs)
@@ -151,7 +166,7 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
 
   if (repoSlugs.length === 0) return { kind: 'pass-through' }
   const owners = new Set(repoSlugs.map((slug) => slug.split('/')[0]))
-  if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
+  if (owners.size > 1) return { kind: 'block', code: 'multi-owner', reason: MULTI_OWNER_REASON }
 
   const repoSlug = repoSlugs[0] as string
 
@@ -167,7 +182,7 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
   const piped = analyzeReaderPipeline(command, stripRepoFlag)
   if (piped !== null) return { kind: 'inject', repoSlug, rewrittenCommand: piped }
 
-  return { kind: 'block', reason: COMPOSITION_REASON }
+  return { kind: 'block', code: 'composition', reason: COMPOSITION_REASON }
 }
 
 // stdin-only readers whose only sink is stdout (back to the agent, who already
@@ -498,7 +513,7 @@ function matchRepoFlagAt(command: string, start: number): number | null {
   return null
 }
 
-function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
+function classifyGhSegment(args: readonly string[], fallbackRepo?: string): GhSegmentDecision {
   const subcommand = args.find((t) => !t.startsWith('-'))
   if (subcommand === undefined) return { kind: 'pass-through' }
 
@@ -513,11 +528,19 @@ function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
 
   // A `-R`/`--repo` IS present but its value isn't a literal slug (e.g. `-R "$repo"`):
   // tell the user that, not the misleading "add -R" message — they already did.
-  if (repoFlagHasNonLiteralValue(args)) return { kind: 'block', reason: NON_LITERAL_REPO_REASON }
+  // A trusted fallback never papers over a value the user explicitly mistyped.
+  if (repoFlagHasNonLiteralValue(args))
+    return { kind: 'block', code: 'non-literal-repo', reason: NON_LITERAL_REPO_REASON }
 
   if (REPO_LESS_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
 
-  return { kind: 'block', reason: MISSING_REPO_REASON }
+  // Repo-less repo-scoped subcommand. A caller-supplied trusted fallback repo
+  // (origin/cwd, already allowlisted) fills it so the command can mint; absent
+  // one, block missing-repo. The fallback still passes through the composition
+  // gate in analyzeGhCommand, so a compound command blocks regardless.
+  if (fallbackRepo !== undefined && isRepoSlug(fallbackRepo)) return { kind: 'inject', repoSlugs: [fallbackRepo] }
+
+  return { kind: 'block', code: 'missing-repo', reason: MISSING_REPO_REASON }
 }
 
 // Repo authority for `gh api`: the literal endpoint path wins. A `-R/--repo`
@@ -537,7 +560,7 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
     // mask it.
     const flagRepos = extractAllRepoFlags(args)
     if (flagRepos.some((slug) => !pathRepos.includes(slug))) {
-      return { kind: 'block', reason: API_REPO_CONFLICT_REASON }
+      return { kind: 'block', code: 'api-repo-conflict', reason: API_REPO_CONFLICT_REASON }
     }
     // Every `-R` here is redundant: it matches the repo already named in the
     // literal path, which is authoritative. `gh api` rejects `-R` outright, so
@@ -565,7 +588,7 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   // with a non-literal value (e.g. `gh api graphql -R "$repo"`), say so rather
   // than silently passing through to an unauthenticated `gh api`.
   if (flagRepo === null && repoFlagHasNonLiteralValue(args)) {
-    return { kind: 'block', reason: NON_LITERAL_REPO_REASON }
+    return { kind: 'block', code: 'non-literal-repo', reason: NON_LITERAL_REPO_REASON }
   }
 
   return { kind: 'pass-through' }
