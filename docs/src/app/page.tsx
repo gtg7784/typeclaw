@@ -163,7 +163,7 @@ function GroupChatVisual() {
           <div className="min-w-0">
             <p className="font-mono text-[11px] text-zinc-400 dark:text-zinc-600">sam</p>
             <div className="mt-1 rounded-2xl rounded-tl-sm border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-700 dark:border-white/[0.08] dark:bg-zinc-900 dark:text-zinc-300">
-              <span className="font-medium text-brand-accent dark:text-brand-300">@typeey</span> draft the changelog?
+              typeey, draft the changelog
             </div>
           </div>
         </div>
