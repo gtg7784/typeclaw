@@ -90,3 +90,38 @@ jobs:
 
       - name: Format check
         run: bun run format:check
+
+  windows-test:
+    # Companion to windows-static: runs the full suite on native Windows to triage
+    # which tests assume POSIX (Docker, Unix sockets, chmod, /tmp). Many are
+    # expected to fail until guarded (#899), so it's continue-on-error and purely
+    # informational — read its logs for the Windows failure list. Gated to push
+    # (post-merge on main) to avoid the 2x Windows-runner cost on every PR;
+    # broaden the trigger and drop continue-on-error once the suite is green on
+    # Windows. The longer --timeout absorbs the slower Windows runner so failures
+    # reflect real incompatibilities, not timeouts.
+    name: windows tests (informational triage)
+    runs-on: windows-latest
+    if: github.event_name == 'push'
+    continue-on-error: true
+    env:
+      FIREWORKS_API_KEY: dummy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@typeclaw.dev"
+          git config --global user.name "TypeClaw CI"
+
+      - name: Test
+        run: bun test --parallel --timeout 60000
