@@ -86,11 +86,15 @@ const slackChannelRootOrigin: ChannelReplyOrigin = {
 
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[4]
 
+// `continue` is schema-required; this helper defaults it to `false` (terminal) so
+// tests not exercising the continue path stay terse. Keep the divergence.
 async function runTool(
   tool: ReturnType<typeof createChannelReplyTool>,
-  params: Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1],
+  params: Omit<Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1], 'continue'> & {
+    continue?: boolean
+  },
 ) {
-  return tool.execute('id', params, undefined, undefined, fakeCtx)
+  return tool.execute('id', { ...params, continue: params.continue ?? false }, undefined, undefined, fakeCtx)
 }
 
 describe('createChannelReplyTool', () => {
@@ -397,6 +401,14 @@ describe('createChannelReplyTool', () => {
       })
       const result = await runTool(tool, { text: 'nope', continue: true })
       expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
+    })
+
+    test('continue is the one required parameter (so the schema rejects a reply that omits it)', () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: slackThreadOrigin,
+      })
+      expect((tool.parameters as { required?: readonly string[] }).required).toEqual(['continue'])
     })
   })
 

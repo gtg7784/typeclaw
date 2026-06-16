@@ -71,9 +71,11 @@ function tool(onSend?: (msg: OutboundMessage) => SendResult, origin: ChannelRepl
 
 async function run(
   t: ReturnType<typeof createChannelReplyTool>,
-  params: Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1],
+  params: Omit<Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1], 'continue'> & {
+    continue?: boolean
+  },
 ) {
-  return t.execute('id', params, undefined, undefined, fakeCtx)
+  return t.execute('id', { ...params, continue: params.continue ?? false }, undefined, undefined, fakeCtx)
 }
 
 describe('channel_reply false-receipt guard', () => {
