@@ -6,6 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
+import type { DedupedRetrievedItem } from './turn-dedup'
 
 const MAX_FILE_BYTES = 12 * 1024
 const MEMORY_FRAMING =
@@ -52,9 +53,9 @@ export async function loadMemory(agentDir: string, options: LoadMemoryOptions = 
   return appendRetrievalCache(renderSection(effectivePlan, options), agentDir, options)
 }
 
-// Returns the raw direct/index plan WITHOUT `forceIndexForChannel`, so a vector
-// agent's per-turn "all shards under budget" really means all shards. Callers
-// that need the channel-bleed defense re-apply it via `renderMemorySection`.
+// Returns the raw direct/index plan WITHOUT `forceIndexForChannel`. Vector
+// per-turn retrieval still needs the complete shard list for channel force-index
+// and for the non-channel headings fallback when retrieval returns nothing.
 export async function loadMemoryInjectionPlan(
   agentDir: string,
   options: Pick<LoadMemoryOptions, 'injectionBudgetBytes'> = {},
@@ -72,29 +73,6 @@ export function renderMemorySection(plan: InjectionPlan, options: Pick<LoadMemor
   return renderSection(plan, options)
 }
 
-// Direct-mode render: `unchangedShards` had their body injected earlier this
-// session, so it is replaced by a one-line slug reference the agent can re-fetch
-// on demand; `fullShards` (new or changed) keep their full body. Non-channel only
-// — channel turns are force-indexed upstream, so no channel-bleed boundary here.
-export function renderDedupedMemorySection(fullShards: TopicShard[], unchangedShards: TopicShard[]): string {
-  if (fullShards.length === 0 && unchangedShards.length === 0) return ''
-  const lines = ['# Memory', '', MEMORY_FRAMING, '']
-  for (const shard of fullShards) {
-    const topic = topicEntryFromShard(shard)
-    lines.push(`## ${topic.name}`)
-    lines.push(renderBody(topic), '')
-  }
-  for (const shard of unchangedShards) {
-    lines.push(`## ${shard.frontmatter.heading}`)
-    lines.push(unchangedShardReference(shard.slug), '')
-  }
-  return lines.join('\n').trimEnd()
-}
-
-function unchangedShardReference(slug: string): string {
-  return `slug: \`${slug}\` — unchanged since earlier this session; call \`memory_search({ topic: "${slug}" })\` to re-read the full body.`
-}
-
 export type RetrievedMemoryItem = {
   source: 'topic' | 'stream' | 'reference'
   key: string
@@ -102,8 +80,30 @@ export type RetrievedMemoryItem = {
   excerpt: string
 }
 
-// Over-budget vector turns inject the top-K relevant memories (not all shards).
-// Same `# Memory` framing + channel-bleed boundary as the direct path, so the
+// Per-turn vector retrieval keeps repeated content compact across a session: a
+// repeated result is still named and recoverable, but its unchanged excerpt is
+// not re-sent verbatim on every turn. Entries are rendered in the order given
+// (the hybridSearch relevance ranking); only each item's body-vs-reference
+// rendering varies, so a previously-seen top hit is never demoted.
+export function renderDedupedRetrievedMemorySection(entries: DedupedRetrievedItem[]): string {
+  if (entries.length === 0) return ''
+  const lines = ['# Memory', '', MEMORY_FRAMING, '']
+  for (const { item, changed } of entries) {
+    lines.push(`## ${item.heading}`)
+    lines.push(changed ? item.excerpt.trimEnd() : unchangedRetrievedItemReference(item), '')
+  }
+  return lines.join('\n').trimEnd()
+}
+
+function unchangedRetrievedItemReference(item: RetrievedMemoryItem): string {
+  if (item.source === 'topic' || item.source === 'reference') {
+    return `slug: \`${item.key}\` — unchanged since earlier this session; call \`memory_search({ topic: "${item.key}" })\` to re-read the full body.`
+  }
+  return 'recent observation — unchanged since earlier this session; call `memory_search({ query: ... })` with terms from this heading to re-read the full text.'
+}
+
+// Vector turns inject the top-K relevant memories (not all shards).
+// Same `# Memory` framing + channel-bleed boundary as the fallback index, so the
 // passive-context guarantees hold regardless of which branch ran.
 //
 // Channel origins get headings only (excerpt stripped, fetched on demand via
@@ -133,6 +133,31 @@ export function renderRetrievedMemorySection(
     }
   }
   return lines.join('\n').trimEnd()
+}
+
+// Non-channel vector turns run top-K retrieval even for tiny memory sets. If the
+// relevance gate suppresses every candidate (or the index is empty/stale), this
+// headings-only fallback preserves discoverability without dumping shard bodies.
+export function renderTopicIndexMemorySection(
+  shards: TopicShard[],
+  options: Pick<LoadMemoryOptions, 'origin'> = {},
+): string {
+  if (shards.length === 0) return ''
+  const lines = ['# Memory', '', MEMORY_FRAMING, '']
+  if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
+  lines.push(topicIndexDirective(options), '')
+  for (const shard of shards) {
+    lines.push(`## ${shard.frontmatter.heading}`)
+    lines.push(`slug: \`${shard.slug}\``, '')
+  }
+  return lines.join('\n').trimEnd()
+}
+
+function topicIndexDirective(options: Pick<LoadMemoryOptions, 'origin'>): string {
+  if (options.origin?.kind === 'channel') {
+    return 'Memory shown as headings only in channels. Call `memory_search({ topic: "<slug>" })` with a slug below to read a full body.'
+  }
+  return 'No relevant memory cleared retrieval for this turn. All topic headings are shown so memory stays discoverable; call `memory_search({ topic: "<slug>" })` with a slug below to read a full body.'
 }
 
 function retrievedIndexDirective(): string {
