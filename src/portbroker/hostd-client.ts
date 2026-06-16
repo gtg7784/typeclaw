@@ -30,7 +30,8 @@ export type BrokerOptions = {
   // and reports the reason so hostd can GC the stale registration.
   onFatalAuthFailure?: (reason: string) => void
   onLog?: (msg: string) => void
-  connectWs?: (url: string) => Promise<WsClient>
+  connectWs?: (url: string, timeoutMs: number) => Promise<WsClient>
+  connectTimeoutMs?: number
   listenHost?: ListenHostFn
   reconnectDelaysMs?: number[]
   hostBindAddr?: string
@@ -71,6 +72,7 @@ export type Broker = {
 
 const DEFAULT_RECONNECT_DELAYS = [1_000, 2_000, 4_000, 10_000]
 const DEFAULT_HOST_BIND = '127.0.0.1'
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 
 // broker-hello-nack reasons emitted by container-server.ts when authentication
 // fails. These are immutable for a broker instance's lifetime, so reconnecting
@@ -82,6 +84,7 @@ export function createBroker(opts: BrokerOptions): Broker {
   const reconnectDelays = opts.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS
   const hostBind = opts.hostBindAddr ?? DEFAULT_HOST_BIND
   const connectWs = opts.connectWs ?? defaultConnectWs
+  const connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
   const listenHost = opts.listenHost ?? defaultListenHost
 
   type ForwarderState = {
@@ -437,7 +440,7 @@ export function createBroker(opts: BrokerOptions): Broker {
     const url = `ws://127.0.0.1:${hostPort}/portbroker`
     let client: WsClient
     try {
-      client = await connectWs(url)
+      client = await connectWs(url, connectTimeoutMs)
     } catch (err) {
       log(`ws connect ${url}: ${err instanceof Error ? err.message : String(err)}`)
       scheduleReconnect()
@@ -504,12 +507,31 @@ export function createBroker(opts: BrokerOptions): Broker {
   }
 }
 
-async function defaultConnectWs(url: string): Promise<WsClient> {
+async function defaultConnectWs(url: string, timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS): Promise<WsClient> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url)
-    let resolved = false
+    let settled = false
     const messageCbs: Array<(msg: ContainerToHostd) => void> = []
     const closeCbs: Array<() => void> = []
+    let connectTimeout: ReturnType<typeof setTimeout> | null = null
+    const clearConnectTimeout = (): void => {
+      if (connectTimeout !== null) {
+        clearTimeout(connectTimeout)
+        connectTimeout = null
+      }
+    }
+    const failConnect = (err: Error): void => {
+      if (settled) return
+      settled = true
+      clearConnectTimeout()
+      reject(err)
+    }
+    connectTimeout = setTimeout(() => {
+      failConnect(new Error(`ws connect timeout after ${timeoutMs}ms to ${url}`))
+      try {
+        ws.close()
+      } catch {}
+    }, timeoutMs)
     const client: WsClient = {
       send: (msg) => {
         try {
@@ -529,7 +551,9 @@ async function defaultConnectWs(url: string): Promise<WsClient> {
       },
     }
     ws.onopen = (): void => {
-      resolved = true
+      if (settled) return
+      settled = true
+      clearConnectTimeout()
       resolve(client)
     }
     ws.onmessage = (ev: MessageEvent): void => {
@@ -542,9 +566,11 @@ async function defaultConnectWs(url: string): Promise<WsClient> {
       for (const cb of messageCbs) cb(msg)
     }
     ws.onerror = (): void => {
-      if (!resolved) reject(new Error(`ws error connecting to ${url}`))
+      failConnect(new Error(`ws error connecting to ${url}`))
     }
     ws.onclose = (): void => {
+      if (!settled) failConnect(new Error(`ws closed connecting to ${url}`))
+      else clearConnectTimeout()
       for (const cb of closeCbs) cb()
     }
   })

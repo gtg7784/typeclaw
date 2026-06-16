@@ -131,7 +131,8 @@ function setup(opts: {
   policy: PortForward
   resolveHostPort?: () => Promise<number | null>
   failPorts?: Set<number>
-  connectWs?: () => Promise<WsClient>
+  connectWs?: (url: string, timeoutMs: number) => Promise<WsClient>
+  connectTimeoutMs?: number
   boundPortFor?: (requestedPort: number) => number
 }) {
   const ws = makeFakeWs()
@@ -148,6 +149,7 @@ function setup(opts: {
     onEvent: (e) => events.push(e),
     onFatalAuthFailure: (reason) => fatalAuthFailures.push(reason),
     connectWs: opts.connectWs ?? (async () => ws),
+    ...(opts.connectTimeoutMs !== undefined ? { connectTimeoutMs: opts.connectTimeoutMs } : {}),
     listenHost: makeFakeListenHost({
       ...(opts.failPorts ? { failPorts: opts.failPorts } : {}),
       ...(opts.boundPortFor ? { boundPortFor: opts.boundPortFor } : {}),
@@ -463,6 +465,48 @@ describe('createBroker', () => {
 
     expect(listenCalls.filter((c) => c.port === 5173)).toHaveLength(1)
     expect(broker.forwardedPorts()).toEqual([15173])
+    await broker.stop()
+  })
+
+  test('passes configured connect timeout to websocket attempts', async () => {
+    const attempts: Array<{ url: string; timeoutMs: number }> = []
+    const ws = makeFakeWs()
+    const { broker } = setup({
+      policy: { allow: '*' },
+      connectTimeoutMs: 25,
+      connectWs: async (url, timeoutMs) => {
+        attempts.push({ url, timeoutMs })
+        return ws
+      },
+    })
+
+    broker.start()
+
+    await waitFor(() => ws.outbox.find((m) => m.type === 'broker-hello'))
+    expect(attempts).toEqual([{ url: 'ws://127.0.0.1:12345/portbroker', timeoutMs: 25 }])
+    await broker.stop()
+  })
+
+  test('connect rejection schedules reconnect with configured timeout on each attempt', async () => {
+    const attempts: Array<{ url: string; timeoutMs: number }> = []
+    const ws = makeFakeWs()
+    const { broker } = setup({
+      policy: { allow: '*' },
+      connectTimeoutMs: 25,
+      connectWs: async (url, timeoutMs) => {
+        attempts.push({ url, timeoutMs })
+        if (attempts.length === 1) throw new Error('connect timeout')
+        return ws
+      },
+    })
+
+    broker.start()
+
+    await waitFor(() => ws.outbox.find((m) => m.type === 'broker-hello'))
+    expect(attempts).toEqual([
+      { url: 'ws://127.0.0.1:12345/portbroker', timeoutMs: 25 },
+      { url: 'ws://127.0.0.1:12345/portbroker', timeoutMs: 25 },
+    ])
     await broker.stop()
   })
 
