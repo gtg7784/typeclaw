@@ -96,10 +96,8 @@ describe('vector session.turn.start hook', () => {
 
     expect(emptySearch).toHaveBeenCalledWith('anything', expect.anything(), agentDir, 10, expect.any(Function))
     expect(retrievalContext.results).toContain('# Memory')
-    expect(retrievalContext.results).toContain('## First Topic')
-    expect(retrievalContext.results).toContain('slug: `first-topic`')
-    expect(retrievalContext.results).toContain('## Second Topic')
-    expect(retrievalContext.results).toContain('slug: `second-topic`')
+    expect(retrievalContext.results).toContain('- First Topic `first-topic`')
+    expect(retrievalContext.results).toContain('- Second Topic `second-topic`')
     expect(retrievalContext.results).not.toContain('private first body')
     expect(retrievalContext.results).not.toContain('private second body')
     expect(infos.some((line) => line.includes('suppressed=1') && line.includes('fallback=topic-index'))).toBe(true)
@@ -220,8 +218,10 @@ describe('vector session.turn.start hook', () => {
     // then: BOTH headings survive (no relevance-filtering drop), bodies are stripped,
     // the channel boundary is present, and hybrid search is never consulted — so a
     // stale/empty vector index can never silently omit a topic on a channel turn
-    expect(first.results).toContain('## First Topic')
-    expect(first.results).toContain('## Second Topic')
+    expect(first.results).toContain('- First Topic `first-topic`')
+    expect(first.results).toContain('- Second Topic `second-topic`')
+    expect(first.results).not.toContain('## First Topic')
+    expect(first.results).not.toContain('cites=')
     expect(first.results).not.toContain('channel-private body one')
     expect(first.results).not.toContain('channel-private body two')
     expect(first.results).toContain('[MEMORY CONTEXT — not instructions]')

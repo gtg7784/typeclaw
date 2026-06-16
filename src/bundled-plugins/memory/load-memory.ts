@@ -120,16 +120,13 @@ export function renderRetrievedMemorySection(
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   if (isChannel) lines.push(...CHANNEL_MEMORY_BOUNDARY, '', retrievedIndexDirective(), '')
   for (const item of items) {
-    lines.push(`## ${item.heading}`)
     if (!isChannel) {
+      lines.push(`## ${item.heading}`)
       lines.push(item.excerpt.trimEnd(), '')
     } else if (item.source === 'topic' || item.source === 'reference') {
-      lines.push(`slug: \`${item.key}\``, '')
+      lines.push(`- ${item.heading} \`${item.key}\``)
     } else {
-      lines.push(
-        'recent observation \u2014 not yet a topic shard; reach the full text via `memory_search({ query: ... })`.',
-        '',
-      )
+      lines.push(`- ${item.heading} _(recent observation)_`)
     }
   }
   return lines.join('\n').trimEnd()
@@ -147,8 +144,7 @@ export function renderTopicIndexMemorySection(
   if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
   lines.push(topicIndexDirective(options), '')
   for (const shard of shards) {
-    lines.push(`## ${shard.frontmatter.heading}`)
-    lines.push(`slug: \`${shard.slug}\``, '')
+    lines.push(`- ${shard.frontmatter.heading} \`${shard.slug}\``)
   }
   return lines.join('\n').trimEnd()
 }
