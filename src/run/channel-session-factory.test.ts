@@ -305,7 +305,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
 
     expect(result.hooks).toBe(runtime.get().hooks)
     expect(typeof result.getTranscriptPath).toBe('function')
-    expect(result.getTranscriptPath?.()).toMatch(/sessions\//)
+    expect(result.getTranscriptPath?.()).toMatch(/sessions[/\\]/)
   })
 
   test('omits hooks when no plugin runtime content (matches existing plugin-omission policy)', async () => {

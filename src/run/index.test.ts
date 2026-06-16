@@ -287,7 +287,7 @@ describe('startAgent', () => {
       await Bun.sleep(80)
       expect(await Bun.file(sentinel).exists()).toBe(true)
     } finally {
-      await rm(agentDir, { recursive: true, force: true })
+      await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
     }
   })
 
