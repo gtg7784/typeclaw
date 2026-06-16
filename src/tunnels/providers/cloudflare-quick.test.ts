@@ -1,12 +1,15 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, test } from 'bun:test'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
 import { waitFor } from '@/test-helpers/wait-for'
 
 import { createCloudflareQuickProvider } from './cloudflare-quick'
+
+const onWindows = isWindows()
 
 const config = {
   name: 'github-webhook',
@@ -26,7 +29,8 @@ describe('createCloudflareQuickProvider', () => {
     return path
   }
 
-  it('spawns cloudflared, captures stderr, and emits the quick tunnel URL', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('spawns cloudflared, captures stderr, and emits the quick tunnel URL', async () => {
     const scratchDir = createScratchDir()
     const argvFile = join(scratchDir, 'argv.txt')
     const binary = installFakeCloudflared(
@@ -74,7 +78,8 @@ sleep 30
     }
   })
 
-  it('subscribers receive future stderr lines without replay', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('subscribers receive future stderr lines without replay', async () => {
     const scratchDir = createScratchDir()
     // Gate `after` on subscription, not a wall-clock sleep: under load a fixed
     // delay can elapse before the subscriber registers, leaving `after` with
@@ -136,7 +141,8 @@ sleep 30
     }
   })
 
-  it('restarts a crashed process with backoff until a URL is emitted', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('restarts a crashed process with backoff until a URL is emitted', async () => {
     const scratchDir = createScratchDir()
     const countFile = join(scratchDir, 'count.txt')
     const binary = installFakeCloudflared(
@@ -179,7 +185,8 @@ sleep 30
     }
   })
 
-  it('stops retrying after the failure cap is reached before any URL is emitted', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('stops retrying after the failure cap is reached before any URL is emitted', async () => {
     const scratchDir = createScratchDir()
     const countFile = join(scratchDir, 'count.txt')
     const binary = installFakeCloudflared(
@@ -214,7 +221,8 @@ exit 3
     }
   })
 
-  it('SIGKILLs processes that ignore SIGTERM during stop', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('SIGKILLs processes that ignore SIGTERM during stop', async () => {
     const scratchDir = createScratchDir()
     const binary = installFakeCloudflared(
       scratchDir,
@@ -246,7 +254,8 @@ sleep 30
     }
   })
 
-  it('broadcasts the URL but stays unhealthy when the upstream is unreachable', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('broadcasts the URL but stays unhealthy when the upstream is unreachable', async () => {
     const scratchDir = createScratchDir()
     const binary = installFakeCloudflared(
       scratchDir,
@@ -283,7 +292,8 @@ sleep 30
     }
   })
 
-  it('flips to healthy on recheck once the upstream comes up', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('flips to healthy on recheck once the upstream comes up', async () => {
     const scratchDir = createScratchDir()
     const binary = installFakeCloudflared(
       scratchDir,
@@ -317,53 +327,59 @@ sleep 30
     }
   })
 
-  it('does not mark healthy when a probe resolves after cloudflared has already exited', async () => {
-    const scratchDir = createScratchDir()
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)(
+    'does not mark healthy when a probe resolves after cloudflared has already exited',
+    async () => {
+      const scratchDir = createScratchDir()
+      const binary = installFakeCloudflared(
+        scratchDir,
+        `
 echo "https://exited.trycloudflare.com" >&2
 exit 1
 `,
-    )
-    let releaseProbe!: () => void
-    const probeGate = new Promise<void>((resolve) => {
-      releaseProbe = resolve
-    })
-    let probeStarted = false
-    const provider = createCloudflareQuickProvider({
-      config,
-      upstreamPort: 4851,
-      binary,
-      onUrlChange: () => {},
-      // Probe blocks until released; by then the process has exited and the
-      // tunnel is in restart backoff. A reachable result must NOT win.
-      probeUpstream: async () => {
-        probeStarted = true
-        await probeGate
-        return true
-      },
-      restartBackoffMs: [30_000],
-      upstreamRecheckMs: 5,
-      stopGraceMs: 10,
-    })
+      )
+      let releaseProbe!: () => void
+      const probeGate = new Promise<void>((resolve) => {
+        releaseProbe = resolve
+      })
+      let probeStarted = false
+      const provider = createCloudflareQuickProvider({
+        config,
+        upstreamPort: 4851,
+        binary,
+        onUrlChange: () => {},
+        // Probe blocks until released; by then the process has exited and the
+        // tunnel is in restart backoff. A reachable result must NOT win.
+        probeUpstream: async () => {
+          probeStarted = true
+          await probeGate
+          return true
+        },
+        restartBackoffMs: [30_000],
+        upstreamRecheckMs: 5,
+        stopGraceMs: 10,
+      })
 
-    try {
-      await provider.start()
-      await waitFor(() => probeStarted, { description: 'probe started' })
-      await waitFor(() => provider.snapshot().detail.includes('restarting'), { description: 'restart backoff entered' })
+      try {
+        await provider.start()
+        await waitFor(() => probeStarted, { description: 'probe started' })
+        await waitFor(() => provider.snapshot().detail.includes('restarting'), {
+          description: 'restart backoff entered',
+        })
 
-      releaseProbe()
-      await Bun.sleep(20)
+        releaseProbe()
+        await Bun.sleep(20)
 
-      const snap = provider.snapshot()
-      expect(snap.status).not.toBe('healthy')
-      expect(snap.detail).toContain('restarting')
-      await provider.stop()
-    } finally {
-      releaseProbe()
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
+        const snap = provider.snapshot()
+        expect(snap.status).not.toBe('healthy')
+        expect(snap.detail).toContain('restarting')
+        await provider.stop()
+      } finally {
+        releaseProbe()
+        await provider.stop()
+        rmSync(scratchDir, { recursive: true, force: true })
+      }
+    },
+  )
 })

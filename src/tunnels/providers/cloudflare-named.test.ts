@@ -1,12 +1,15 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, test } from 'bun:test'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
 import { waitFor } from '@/test-helpers/wait-for'
 
 import { createCloudflareNamedProvider } from './cloudflare-named'
+
+const onWindows = isWindows()
 
 const config = {
   name: 'github-webhook',
@@ -28,50 +31,54 @@ describe('createCloudflareNamedProvider', () => {
     return path
   }
 
-  it('emits the configured hostname synchronously at start and spawns cloudflared with the token', async () => {
-    const scratchDir = createScratchDir()
-    const argvFile = join(scratchDir, 'argv.txt')
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)(
+    'emits the configured hostname synchronously at start and spawns cloudflared with the token',
+    async () => {
+      const scratchDir = createScratchDir()
+      const argvFile = join(scratchDir, 'argv.txt')
+      const binary = installFakeCloudflared(
+        scratchDir,
+        `
 printf '%s\n' "$@" > "${argvFile}"
 echo "2026-01-01T00:00:00Z INF Connection registered" >&2
 trap 'exit 0' TERM
 sleep 30
 `,
-    )
-    const urls: string[] = []
-    const provider = createCloudflareNamedProvider({
-      config,
-      binary,
-      onUrlChange: (url) => urls.push(url),
-      resolveToken: () => 'eyJhIjoiZmFrZS10b2tlbiJ9',
-      stopGraceMs: 10,
-    })
+      )
+      const urls: string[] = []
+      const provider = createCloudflareNamedProvider({
+        config,
+        binary,
+        onUrlChange: (url) => urls.push(url),
+        resolveToken: () => 'eyJhIjoiZmFrZS10b2tlbiJ9',
+        stopGraceMs: 10,
+      })
 
-    try {
-      // URL must be emitted synchronously - subscribers wire up immediately,
-      // not after cloudflared comes up.
-      await provider.start()
-      expect(urls).toEqual(['https://agent.example.com'])
-      expect(provider.snapshot().url).toBe('https://agent.example.com')
+      try {
+        // URL must be emitted synchronously - subscribers wire up immediately,
+        // not after cloudflared comes up.
+        await provider.start()
+        expect(urls).toEqual(['https://agent.example.com'])
+        expect(provider.snapshot().url).toBe('https://agent.example.com')
 
-      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy after first stderr' })
-      expect((await readFile(argvFile, 'utf8')).split('\n').filter(Boolean)).toEqual([
-        'tunnel',
-        '--no-autoupdate',
-        'run',
-        '--token',
-        'eyJhIjoiZmFrZS10b2tlbiJ9',
-      ])
+        await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy after first stderr' })
+        expect((await readFile(argvFile, 'utf8')).split('\n').filter(Boolean)).toEqual([
+          'tunnel',
+          '--no-autoupdate',
+          'run',
+          '--token',
+          'eyJhIjoiZmFrZS10b2tlbiJ9',
+        ])
 
-      await provider.stop()
-      expect(provider.snapshot().status).toBe('stopped')
-    } finally {
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
+        await provider.stop()
+        expect(provider.snapshot().status).toBe('stopped')
+      } finally {
+        await provider.stop()
+        rmSync(scratchDir, { recursive: true, force: true })
+      }
+    },
+  )
 
   it('flips to permanently-failed when the token env var is unset', async () => {
     const scratchDir = createScratchDir()
@@ -143,7 +150,8 @@ sleep 30
     }
   })
 
-  it('restarts a crashed process with backoff', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('restarts a crashed process with backoff', async () => {
     const scratchDir = createScratchDir()
     const countFile = join(scratchDir, 'count.txt')
     const binary = installFakeCloudflared(
@@ -195,7 +203,8 @@ sleep 30
     }
   })
 
-  it('stops retrying after the consecutive-crash cap is reached', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('stops retrying after the consecutive-crash cap is reached', async () => {
     const scratchDir = createScratchDir()
     const countFile = join(scratchDir, 'count.txt')
     const binary = installFakeCloudflared(
@@ -229,7 +238,8 @@ exit 3
     }
   })
 
-  it('SIGKILLs processes that ignore SIGTERM during stop', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('SIGKILLs processes that ignore SIGTERM during stop', async () => {
     const scratchDir = createScratchDir()
     const binary = installFakeCloudflared(
       scratchDir,
@@ -289,7 +299,8 @@ sleep 30
     ).toThrow(/provider must be 'cloudflare-named'/)
   })
 
-  it('subscribers receive future stderr lines without replay', async () => {
+  // Spawns cloudflared; absent on the Windows runner. #899
+  test.skipIf(onWindows)('subscribers receive future stderr lines without replay', async () => {
     const scratchDir = createScratchDir()
     // Gate `after` on subscription, not a wall-clock sleep: under load a fixed
     // delay can elapse before the subscriber registers, leaving `after` with
