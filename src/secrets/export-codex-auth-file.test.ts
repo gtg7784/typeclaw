@@ -4,8 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import { exportCodexAuthFileIfApplicable } from './export-codex-auth-file'
 import type { Providers } from './schema'
+
+const onWindows = isWindows()
 
 function makeJwt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
@@ -99,7 +103,8 @@ describe('exportCodexAuthFileIfApplicable', () => {
         homeDir: home,
       })
       const stat = statSync(join(home, '.codex', 'auth.json'))
-      expect(stat.mode & 0o777).toBe(0o600)
+      // NTFS mode bits are not meaningful on Windows; see #899.
+      if (!onWindows) expect(stat.mode & 0o777).toBe(0o600)
     })
   })
 

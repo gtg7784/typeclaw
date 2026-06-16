@@ -5,8 +5,12 @@ import { join } from 'node:path'
 
 import { AuthStorage } from '@mariozechner/pi-coding-agent'
 
+import { isWindows } from '@/shared'
+
 import { parseSecretsFile } from './schema'
 import { createSecretsStoreForAgent, SecretsBackend } from './storage'
+
+const onWindows = isWindows()
 
 describe('SecretsBackend', () => {
   let dir: string
@@ -85,7 +89,8 @@ describe('SecretsBackend', () => {
 
     const stats = await stat(secretsPath)
     const perms = stats.mode & 0o777
-    expect(perms).toBe(0o600)
+    // NTFS mode bits are not meaningful on Windows; see #899.
+    if (!onWindows) expect(perms).toBe(0o600)
   })
 
   test('seed file is parseable as v2 envelope before any credential is written', async () => {
