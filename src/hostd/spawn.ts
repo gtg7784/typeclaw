@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
 import { open, readFile, unlink, writeFile } from 'node:fs/promises'
 
+import { isWindows } from '@/shared'
+
 import { isDaemonReachable, send } from './client'
 import { ensureDirs, lockfilePath, logfilePath, pidfilePath, socketPath } from './paths'
 import type { HttpInfoResult, VersionResult } from './protocol'
@@ -75,6 +77,11 @@ async function requestShutdownAndWait(): Promise<boolean> {
   if (!reply.ok) return false
   const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS
   while (Date.now() < deadline) {
+    if (isWindows()) {
+      if (!(await isDaemonReachable(POLL_INTERVAL_MS))) return true
+      await sleep(POLL_INTERVAL_MS)
+      continue
+    }
     if (!existsSync(socketPath())) return true
     await sleep(POLL_INTERVAL_MS)
   }

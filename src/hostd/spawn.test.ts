@@ -4,6 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
+import { isDaemonReachable } from './client'
 import { startDaemon, type Daemon } from './daemon'
 import { socketPath } from './paths'
 import { ensureDaemon } from './spawn'
@@ -25,6 +28,22 @@ afterEach(async () => {
   else process.env.TYPECLAW_HOME = prev
   await rm(home, { recursive: true, force: true })
 })
+
+async function expectDaemonEndpointListening(): Promise<void> {
+  if (isWindows()) {
+    expect(await isDaemonReachable(500)).toBe(true)
+    return
+  }
+  expect(existsSync(socketPath())).toBe(true)
+}
+
+async function expectDaemonEndpointGone(): Promise<void> {
+  if (isWindows()) {
+    expect(await isDaemonReachable(50)).toBe(false)
+    return
+  }
+  expect(existsSync(socketPath())).toBe(false)
+}
 
 describe('ensureDaemon', () => {
   test('reuses a reachable daemon when the version matches', async () => {
@@ -49,7 +68,7 @@ describe('ensureDaemon', () => {
       version: 'old',
       gcIntervalMs: 1_000_000,
     })
-    expect(existsSync(socketPath())).toBe(true)
+    await expectDaemonEndpointListening()
 
     const result = await ensureDaemon({
       cliEntry: '/nonexistent/cli.ts',
@@ -63,14 +82,14 @@ describe('ensureDaemon', () => {
     // fails. The end-to-end behavior we want to assert: the stale daemon was
     // torn down (socket gone) and ensureDaemon did NOT reuse it.
     daemon = null
-    expect(existsSync(socketPath())).toBe(false)
+    await expectDaemonEndpointGone()
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.reason.toLowerCase()).toContain('reachable')
   })
 
   test('happy path: socket missing -> spawns a new daemon (when cliEntry resolves)', async () => {
-    expect(existsSync(socketPath())).toBe(false)
+    await expectDaemonEndpointGone()
 
     const result = await ensureDaemon({
       cliEntry: '/nonexistent/cli.ts',
