@@ -225,6 +225,19 @@ describe('loadMemory retrieval cache', () => {
     expect(section).toContain('focused retrieved context')
   })
 
+  test('caps an oversized retrieval cache so a runaway summary cannot bloat the prompt', async () => {
+    await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
+    const huge = 'y'.repeat(20 * 1024)
+    await writeFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_big.md'), huge, 'utf8')
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_big' })
+
+    expect(section).toContain('## Retrieved memory (session ses_big)')
+    expect(section).toContain('[retrieval cache truncated]')
+    expect(section).toContain('y'.repeat(8 * 1024))
+    expect(section).not.toContain('y'.repeat(8 * 1024 + 100))
+  })
+
   test('leaves output unchanged when the filesystem retrieval cache is absent', async () => {
     const withoutSession = await loadMemory(agentDir)
     const withMissingCache = await loadMemory(agentDir, { currentSessionId: 'ses_missing' })
