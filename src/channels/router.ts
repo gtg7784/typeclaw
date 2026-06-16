@@ -4530,8 +4530,18 @@ function formatAuthorLine(
 ): string {
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
-  const body = maxChars !== undefined && text.length > maxChars ? `${text.slice(0, maxChars)} […truncated]` : text
-  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${body}`
+  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${capObservedText(text, maxChars)}`
+}
+
+// Cap by whole code points so truncation never splits a surrogate pair (emoji,
+// astral-plane chars) into a dangling half. `text.length` (UTF-16 code units) is
+// a cheap upper bound on the code-point count, so a string already within the
+// cap skips the array build.
+function capObservedText(text: string, maxChars: number | undefined): string {
+  if (maxChars === undefined || text.length <= maxChars) return text
+  const points = Array.from(text)
+  if (points.length <= maxChars) return text
+  return `${points.slice(0, maxChars).join('')} […truncated]`
 }
 
 function formatInboundPromptLines(
