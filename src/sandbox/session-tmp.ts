@@ -1,5 +1,10 @@
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { posix } from 'node:path'
+
+// Container-only code over the POSIX `/tmp`; pinned to `path.posix` so the test
+// suite produces the same backing paths on a win32 runner (default `node:path`
+// would yield `\tmp\…` and diverge from the Linux runtime).
+const { isAbsolute, join, relative, resolve } = posix
 
 // Per-session scratch lives on the REAL container /tmp, namespaced by session id.
 // It sits OUTSIDE the agent folder on purpose: the agent folder's `sessions/` is

@@ -178,7 +178,10 @@ function matchHidden(
   }
   for (const dir of deniedDirs) {
     const realDir = realpathRealIntendedPath(dir)
-    if (resolved === realDir || resolved.startsWith(`${realDir}/`)) return dir
+    // realpathRealIntendedPath joins with the platform separator, so the
+    // under-dir test must use path.sep too — a hardcoded "/" never matches the
+    // "\"-joined paths a win32 test runner produces.
+    if (resolved === realDir || resolved.startsWith(`${realDir}${path.sep}`)) return dir
   }
   return undefined
 }
