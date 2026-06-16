@@ -2,6 +2,8 @@ import { RootProvider } from 'fumadocs-ui/provider/next'
 import type { Metadata } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
 
+import { SITE_DESCRIPTION, SITE_KEYWORDS, SITE_NAME, SITE_TITLE, SITE_URL } from '@/lib/seo'
+
 import './globals.css'
 
 const geistSans = Geist({
@@ -14,35 +16,18 @@ const geistMono = Geist_Mono({
   subsets: ['latin'],
 })
 
-const SITE_URL = 'https://typeclaw.dev'
-const SITE_TITLE = 'TypeClaw — A TypeScript-native agent runtime'
-const SITE_DESCRIPTION =
-  'TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime. Sandboxed by default, plugins as plain TS modules, self-improving via memory.'
-
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
     default: SITE_TITLE,
-    template: '%s · TypeClaw',
+    template: `%s · ${SITE_NAME}`,
   },
   description: SITE_DESCRIPTION,
-  applicationName: 'TypeClaw',
-  keywords: [
-    'TypeClaw',
-    'AI agent runtime',
-    'TypeScript agent',
-    'Bun agent',
-    'Docker agent',
-    'self-hosted AI agent',
-    'agent framework',
-    'LLM agent',
-    'Slack bot',
-    'Discord bot',
-    'cron AI agent',
-  ],
-  authors: [{ name: 'TypeClaw' }],
-  creator: 'TypeClaw',
-  publisher: 'TypeClaw',
+  applicationName: SITE_NAME,
+  keywords: SITE_KEYWORDS,
+  authors: [{ name: SITE_NAME }],
+  creator: SITE_NAME,
+  publisher: SITE_NAME,
   alternates: {
     canonical: '/',
   },
@@ -50,7 +35,7 @@ export const metadata: Metadata = {
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
     url: SITE_URL,
-    siteName: 'TypeClaw',
+    siteName: SITE_NAME,
     type: 'website',
     images: [{ url: '/typeclaw.png', width: 1000, height: 1000, alt: 'Typeey, the TypeClaw mascot' }],
   },
@@ -80,21 +65,21 @@ const jsonLd = {
       '@type': 'WebSite',
       '@id': `${SITE_URL}/#website`,
       url: SITE_URL,
-      name: 'TypeClaw',
+      name: SITE_NAME,
       description: SITE_DESCRIPTION,
       publisher: { '@id': `${SITE_URL}/#organization` },
     },
     {
       '@type': 'Organization',
       '@id': `${SITE_URL}/#organization`,
-      name: 'TypeClaw',
+      name: SITE_NAME,
       url: SITE_URL,
       logo: `${SITE_URL}/typeclaw.png`,
       sameAs: ['https://github.com/typeclaw/typeclaw'],
     },
     {
       '@type': 'SoftwareApplication',
-      name: 'TypeClaw',
+      name: SITE_NAME,
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Linux, macOS, Windows (via Docker)',
       description: SITE_DESCRIPTION,
