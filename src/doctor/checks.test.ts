@@ -10,8 +10,11 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 
 import {
   buildStaticChecks,
+  detectWindowsBindMountIssues,
+  windowsBindMount,
   windowsSecretPerms,
   wslDriveMount,
+  type WindowsBindMountDeps,
   type WindowsSecretPermsDeps,
   type WslDriveMountDeps,
 } from './checks'
@@ -99,6 +102,61 @@ describe('windowsSecretPerms', () => {
 
   test('is registered in the static check set', () => {
     expect(buildStaticChecks().some((c) => c.name === 'hostd.windows-secret-perms')).toBe(true)
+  })
+})
+
+describe('windowsBindMount', () => {
+  function winDeps(overrides: Partial<WindowsBindMountDeps> = {}): WindowsBindMountDeps {
+    return { isWindows: () => true, ...overrides }
+  }
+
+  test('passes when not on native Windows', async () => {
+    const check = windowsBindMount({ isWindows: () => false })
+    const result = await check.run({ cwd: '\\\\nas\\share\\agent', hasAgentFolder: true })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('not running on native Windows')
+  })
+
+  test('passes for a clean local path', async () => {
+    const check = windowsBindMount(winDeps())
+    const result = await check.run({ cwd: 'C:\\agents\\my-agent', hasAgentFolder: true })
+    expect(result.status).toBe('ok')
+  })
+
+  test('warns on a UNC/network path', async () => {
+    const check = windowsBindMount(winDeps())
+    const result = await check.run({ cwd: '\\\\nas\\share\\agent', hasAgentFolder: true })
+    expect(result.status).toBe('warning')
+    expect(result.details?.some((d) => d.includes('UNC'))).toBe(true)
+  })
+
+  test('warns on a OneDrive path', async () => {
+    const check = windowsBindMount(winDeps())
+    const result = await check.run({ cwd: 'C:\\Users\\dev\\OneDrive\\agent', hasAgentFolder: true })
+    expect(result.status).toBe('warning')
+    expect(result.details?.some((d) => d.toLowerCase().includes('onedrive'))).toBe(true)
+  })
+
+  test('is registered in the static check set', () => {
+    expect(buildStaticChecks().some((c) => c.name === 'container.windows-bind-mount')).toBe(true)
+  })
+})
+
+describe('detectWindowsBindMountIssues', () => {
+  test('flags UNC paths', () => {
+    expect(detectWindowsBindMountIssues('\\\\nas\\share\\agent')).toHaveLength(1)
+  })
+
+  test('flags OneDrive business folders', () => {
+    expect(detectWindowsBindMountIssues('C:\\Users\\dev\\OneDrive - Acme\\agent')).toHaveLength(1)
+  })
+
+  test('flags paths over the MAX_PATH limit', () => {
+    expect(detectWindowsBindMountIssues(`C:\\${'a'.repeat(300)}`)).toHaveLength(1)
+  })
+
+  test('passes clean local paths', () => {
+    expect(detectWindowsBindMountIssues('C:\\agents\\my-agent')).toEqual([])
   })
 })
 

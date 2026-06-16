@@ -42,6 +42,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     windowsSecretPerms(),
     hostdReachable(),
     hostdRegistration(),
+    windowsBindMount(),
     containerState(dockerExec),
     containerHostPort(),
     ...buildChannelChecks(),
@@ -324,6 +325,56 @@ export function windowsSecretPerms(deps: Partial<WindowsSecretPermsDeps> = {}): 
       }
     },
   }
+}
+
+export type WindowsBindMountDeps = {
+  isWindows: () => boolean
+}
+
+// Docker Desktop bind-mounts the agent folder into its Linux VM, and a few host
+// locations don't survive that translation: UNC/network paths (\\server\share)
+// aren't shareable, OneDrive-virtualized folders fail on placeholder files, and
+// paths near the legacy MAX_PATH (260) limit break mid-build. Flag them so
+// `typeclaw start` fails loudly here instead of cryptically at mount time.
+export function windowsBindMount(deps: Partial<WindowsBindMountDeps> = {}): DoctorCheck {
+  const onWindows = deps.isWindows ?? isWindows
+
+  return {
+    name: 'container.windows-bind-mount',
+    category: 'container',
+    description: 'agent folder is bind-mountable by Docker Desktop (native Windows)',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      if (!onWindows()) return { status: 'ok', message: 'not running on native Windows' }
+
+      const issues = detectWindowsBindMountIssues(ctx.cwd)
+      if (issues.length === 0) return { status: 'ok', message: 'agent folder path is bind-mountable' }
+
+      return {
+        status: 'warning',
+        message: 'agent folder may not bind-mount cleanly under Docker Desktop',
+        details: issues,
+        fix: {
+          description:
+            'Use a local, short, non-OneDrive path under your user profile (e.g. C:\\agents\\my-agent), then re-run typeclaw start.',
+        },
+      }
+    },
+  }
+}
+
+export function detectWindowsBindMountIssues(path: string): string[] {
+  const issues: string[] = []
+  if (path.startsWith('\\\\')) {
+    issues.push(`UNC/network path is not shareable with Docker Desktop: ${path}`)
+  }
+  if (path.split(/[\\/]/).some((seg) => /^onedrive(?: -.*)?$/i.test(seg))) {
+    issues.push(`path is under OneDrive, where virtualized files can break bind mounts: ${path}`)
+  }
+  if (path.length > 260) {
+    issues.push(`path length ${path.length} exceeds the legacy Windows MAX_PATH (260) limit`)
+  }
+  return issues
 }
 
 function hostdReachable(): DoctorCheck {
