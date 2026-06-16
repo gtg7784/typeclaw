@@ -2897,7 +2897,11 @@ describe('start (composition)', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     let runAttempts = 0
-    const drainStart = Date.now()
+    // Start the drain clock at the FIRST docker-run attempt, not before
+    // start(). start()'s setup (config reads, planStart) can itself exceed
+    // drainMs on slow filesystems (Windows CI), which would let the very
+    // first run land after the window and skip the retry path entirely.
+    let drainStart: number | null = null
     const drainMs = 150
     const conflictStderr =
       'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
@@ -2909,6 +2913,7 @@ describe('start (composition)', () => {
       if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
       if (args[0] === 'run') {
         runAttempts++
+        drainStart ??= Date.now()
         // Returns conflict until enough wall time has elapsed for the
         // name reservation to drain.
         if (Date.now() - drainStart < drainMs) {

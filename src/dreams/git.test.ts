@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,8 +6,6 @@ import { join } from 'node:path'
 import { parseLogOutput, readDreamCommitLog, readDreamCommitShow, resolveGitRepo } from './git'
 
 let repo: string
-
-const normalizePath = (s: string): string => s.split(/[\\/]/).join('/')
 
 async function git(args: string[], cwd: string): Promise<void> {
   const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
@@ -42,9 +39,14 @@ describe('resolveGitRepo', () => {
 
     const res = await resolveGitRepo(sub)
     expect(res.ok).toBe(true)
-    // git canonicalizes the root (on macOS /var → /private/var), so assert the
-    // resolved root is the git toplevel rather than byte-equal to the tmp path.
-    if (res.ok) expect(normalizePath(realpathSync(res.root)).endsWith(normalizePath(realpathSync(repo)))).toBe(true)
+    // Resolve the root through git from both the subdirectory and the repo
+    // root, then compare. Routing both sides through git applies the same
+    // canonicalization (macOS /var → /private/var, Windows 8.3 short-name
+    // expansion like RUNNER~1 → runneradmin), so the roots are byte-equal
+    // without depending on realpathSync matching git's normalization per-OS.
+    const fromRoot = await resolveGitRepo(repo)
+    expect(fromRoot.ok).toBe(true)
+    if (res.ok && fromRoot.ok) expect(res.root).toBe(fromRoot.root)
   })
 
   it('reports not-a-repo outside any git tree', async () => {
