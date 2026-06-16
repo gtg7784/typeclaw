@@ -165,7 +165,13 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       logger: silent,
     })
 
-    const result = await tool.execute('id', { text: 'sure, here is the rationale' }, undefined, undefined, fakeCtx)
+    const result = await tool.execute(
+      'id',
+      { text: 'sure, here is the rationale', continue: false },
+      undefined,
+      undefined,
+      fakeCtx,
+    )
 
     expect(result.details).toEqual({ ok: true })
     expect(calls).toHaveLength(1)
@@ -205,7 +211,7 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       origin: { adapter: 'github', workspace: inbound.workspace, chat: inbound.chat, thread: inbound.thread },
       logger: silent,
     })
-    await tool.execute('id', { text: 'got it' }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { text: 'got it', continue: false }, undefined, undefined, fakeCtx)
 
     expect(calls[0]?.url).toBe('https://api.github.com/repos/acme/project/pulls/7/comments/555/replies')
   })
@@ -237,7 +243,7 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       origin: { adapter: 'github', workspace: inbound.workspace, chat: inbound.chat, thread: inbound.thread },
       logger: silent,
     })
-    await tool.execute('id', { text: 'reply' }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { text: 'reply', continue: false }, undefined, undefined, fakeCtx)
 
     expect(calls[0]?.url).toContain('/pulls/7/comments/200/replies')
     expect(calls[0]?.url).not.toContain('/issues/7/comments')

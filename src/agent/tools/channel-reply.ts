@@ -78,15 +78,13 @@ export function createChannelReplyTool({
           },
         ),
       ),
-      continue: Type.Optional(
-        Type.Boolean({
-          description:
-            'Set `true` when this reply is a mid-turn status update (e.g. "working on it…") and you still have work to do THIS turn — fetching data, running a tool, spawning a subagent, then replying again. ' +
-            'Omitting it on such an ack silently truncates the turn: a successful reply ends the turn by default, so the fetch/subagent/answer you intended to do next never runs. ' +
-            'A normal final reply omits this (no wasted follow-up LLM call). ' +
-            'Do not set it just to seem responsive; only when genuine multi-step work follows in the same turn.',
-        }),
-      ),
+      continue: Type.Boolean({
+        description:
+          'REQUIRED on every channel_reply — you must explicitly choose, there is no default. Set `true` when this reply is a mid-turn status update (e.g. "working on it…") and you still have work to do THIS turn — fetching data, running a tool, spawning a subagent, then replying again; `true` keeps the turn alive so that follow-up actually runs. ' +
+          'Set `false` when this reply is your final message for the turn (the common case). ' +
+          'This choice is mandatory precisely because a missing value used to default to ending the turn silently: a successful reply ends the turn unless `continue` is `true`, so a `false` on an ack you meant to keep working from drops the work you promised. ' +
+          'Do not set `true` just to seem responsive; only when genuine multi-step work follows in the same turn.',
+      }),
       resolve_review_thread: Type.Optional(
         Type.Boolean({
           description:
