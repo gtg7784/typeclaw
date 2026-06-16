@@ -286,7 +286,8 @@ describe('planSelfUpdate local installs', () => {
     })
   })
 
-  test('local install at filesystem root resolves install root to "/"', () => {
+  test.skipIf(process.platform === 'win32')('local install at filesystem root resolves install root to "/"', () => {
+    // POSIX filesystem root "/" does not model Windows drive roots.
     const packageJsonPath = join('/', 'node_modules', 'typeclaw', 'package.json')
 
     const plan = planSelfUpdate({ manager: 'auto', packageJsonPath, fileExists: neverExists })

@@ -202,27 +202,31 @@ describe('loadAllShards shard cache', () => {
     expect(refreshed[0]?.body).toBe('same-len-v2\n')
   })
 
-  test('invalidates the cached shard when ctime changes even if mtime is preserved (rsync -t / touch -r case)', async () => {
-    const agentDir = await makeAgentDir()
-    const path = topicShardPath(agentDir, 'alpha')
-    await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
-    const pinned = new Date(1779000000000)
-    await utimes(path, pinned, pinned)
+  test.skipIf(process.platform === 'win32')(
+    'invalidates the cached shard when ctime changes even if mtime is preserved (rsync -t / touch -r case)',
+    async () => {
+      // ctime-change-with-preserved-mtime is a Unix rsync/touch scenario, not Windows creation time.
+      const agentDir = await makeAgentDir()
+      const path = topicShardPath(agentDir, 'alpha')
+      await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
+      const pinned = new Date(1779000000000)
+      await utimes(path, pinned, pinned)
 
-    const first = await loadAllShards(agentDir)
-    expect(first[0]?.body).toBe('v1-body\n')
+      const first = await loadAllShards(agentDir)
+      expect(first[0]?.body).toBe('v1-body\n')
 
-    // Simulate a metadata-preserving external edit: write new bytes, then
-    // restore mtime to the original value. ctime cannot be backdated via
-    // utimes -- the kernel always bumps it on inode content change -- so
-    // ctime is what catches this case. Without ctime in the cache key the
-    // next call would return stale v1 bytes (the bug Oracle flagged).
-    await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
-    await utimes(path, pinned, pinned)
+      // Simulate a metadata-preserving external edit: write new bytes, then
+      // restore mtime to the original value. ctime cannot be backdated via
+      // utimes -- the kernel always bumps it on inode content change -- so
+      // ctime is what catches this case. Without ctime in the cache key the
+      // next call would return stale v1 bytes (the bug Oracle flagged).
+      await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
+      await utimes(path, pinned, pinned)
 
-    const refreshed = await loadAllShards(agentDir)
-    expect(refreshed[0]?.body).toBe('v2-body\n')
-  })
+      const refreshed = await loadAllShards(agentDir)
+      expect(refreshed[0]?.body).toBe('v2-body\n')
+    },
+  )
 
   test('drops cache entries for shards that were deleted', async () => {
     const agentDir = await makeAgentDir()
