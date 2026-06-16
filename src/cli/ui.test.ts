@@ -476,13 +476,15 @@ describe('prepareStdinForClack', () => {
     // when: handing stdin to clack
     prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
     // then: the stream is resumed so clack's keypress listener gets input
-    expect(stdin.resumed).toBe(1)
+    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
   })
 
-  test('clears stale raw mode before the picker takes over', () => {
+  test('kicks stdin back to flowing with a raw-mode toggle, ending non-raw', () => {
+    // A pi-tui ProcessTerminal.stop() leaves stdin paused; on->off raw toggle
+    // re-flows it under Bun/SSH, and the final non-raw state is what clack owns.
     const stdin = fakeStdin({ isTTY: true })
     prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
-    expect(stdin.rawModeCalls).toEqual([false])
+    expect(stdin.rawModeCalls).toEqual([true, false])
   })
 
   test('is a no-op on a non-TTY stdin (piped/redirected input)', () => {
@@ -495,13 +497,13 @@ describe('prepareStdinForClack', () => {
   test('still resumes when setRawMode throws (terminal already torn down)', () => {
     const stdin = fakeStdin({ isTTY: true, rawModeThrows: true })
     expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
-    expect(stdin.resumed).toBe(1)
+    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
   })
 
   test('resumes even when setRawMode is unavailable on the stream', () => {
     const stdin = fakeStdin({ isTTY: true, hasSetRawMode: false })
     expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
-    expect(stdin.resumed).toBe(1)
+    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
   })
 })
 

@@ -14,14 +14,18 @@ type ClackInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume'>
 // Bun's readline keypress wiring only transitions stdin into flowing raw mode
 // reliably once the stream has already been resumed; on a never-resumed stdin
 // the picker renders but arrow keys echo as raw `^[[B` and never advance it.
-// Local terminals dodge this because stdin was already flowing. So before every
-// picker: clear any stale raw mode for a clean baseline, then resume the stream.
-// Never pause() here — a previously-paused process.stdin does not reliably
-// re-flow under Bun, which is the same failure this resume() is fixing.
+// Local terminals dodge this because stdin was already flowing. Worse, after a
+// pi-tui viewer (ProcessTerminal.stop() calls process.stdin.pause()), a plain
+// resume() does NOT re-flow stdin under Bun, so the next picker is dead over
+// SSH. Toggling raw mode on->off forces the TTY read back into flowing mode;
+// the trailing resume() + non-raw state is the baseline clack expects.
+// Never pause() here — a paused process.stdin does not reliably re-flow.
 export function prepareStdinForClack(input: ClackInput = process.stdin): void {
   if (!input.isTTY) return
+  input.resume()
   if (typeof input.setRawMode === 'function') {
     try {
+      input.setRawMode(true)
       input.setRawMode(false)
     } catch {
       /* terminal already torn down */
