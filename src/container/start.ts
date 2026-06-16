@@ -671,7 +671,7 @@ export async function planStart({
   // so mounting an empty cache would only invite a confusing local_files_only
   // miss if something inside the container reached for the model anyway.
   if (agentUsesVector(cwd)) {
-    runArgs.push('-v', `${homeRoot()}/models:/opt/models:ro`)
+    runArgs.push('-v', `${join(homeRoot(), 'models')}:/opt/models:ro`)
     runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
   }
 
