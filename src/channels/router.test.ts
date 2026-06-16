@@ -5799,6 +5799,112 @@ describe('ChannelRouter typing indicator', () => {
     await draining
   })
 
+  test('a streamed text_delta resets the heartbeat clock so a long tool-less reply keeps typing alive', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'write me a long essay' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the model is streaming text (no tools) right at the cap edge
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS - 1
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } })
+    // when: we step past the original cap; the timer must NOT trip
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS + 100
+    await router.__testing!.fireTypingInterval(KEY)
+
+    // then: still active, still ticking, no cap warning logged
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    expect(phases.at(-1)).toBe('tick')
+    expect(logs.some((m) => m.includes('typing indicator paused'))).toBe(false)
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('a streamed thinking_delta resets the heartbeat clock so a long thinking phase keeps typing alive', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'reason about this hard problem' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: the model is streaming extended thinking (no text, no tools) at the cap edge
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS - 1
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'hmm' } })
+    // when: we step past the original cap; the timer must NOT trip
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS + 100
+    await router.__testing!.fireTypingInterval(KEY)
+
+    // then: still active, still ticking, no cap warning logged
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    expect(phases.at(-1)).toBe('tick')
+    expect(logs.some((m) => m.includes('typing indicator paused'))).toBe(false)
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('a message_update that is not a text/thinking delta does NOT reset the cap', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'tool-call only turn' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: only a toolcall_delta arrives at the cap edge (not a signal of life)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS - 1
+    sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', delta: '{}' } })
+    // when: we step past the cap
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS + 100
+    await router.__testing!.fireTypingInterval(KEY)
+
+    // then: the cap tripped — the toolcall_delta did not refresh it
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(phases).toEqual(['tick', 'stop'])
+
+    releasePrompt!()
+    await draining
+  })
+
   test('cap still fires after MAX_TYPING_HEARTBEAT_MS of pure silence (no tool events)', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1000 }
