@@ -9,8 +9,16 @@ export type GhCommandDecision =
 
 const MISSING_REPO_REASON =
   'This GitHub App spans multiple owners, so `gh` has no single correct token. ' +
-  'Re-run with an explicit repo: `gh <cmd> -R owner/repo` (or `gh api /repos/owner/repo/...`) ' +
-  'so the right installation token can be injected.'
+  'Re-run as a single bare command with a LITERAL repo: `gh <cmd> -R owner/repo` ' +
+  '(or `gh api /repos/owner/repo/...`) so the right installation token can be injected. ' +
+  'The repo must be a concrete `owner/repo` slug, not a shell variable.'
+
+const NON_LITERAL_REPO_REASON =
+  'The `-R/--repo` value is not a literal `owner/repo` slug TypeClaw can verify. ' +
+  'Shell variables like `-R "$repo"` are not readable by the static GitHub App token ' +
+  'guard (it never expands the shell). Re-run as a single bare command with a literal ' +
+  'repo: `gh <cmd> -R owner/repo`, or `gh api /repos/owner/repo/...`; only a trailing ' +
+  'stdin-only reader pipeline such as `| jq ...` may follow.'
 
 const MULTI_OWNER_REASON =
   'This command targets repos under more than one owner; a single GH_TOKEN cannot ' +
@@ -36,6 +44,9 @@ type GhSegmentDecision =
   | { kind: 'inject'; repoSlugs: readonly string[]; stripRepoFlag?: boolean }
 
 const COMPOSITION_REASON =
+  'Allowed shape: a single bare `gh <cmd> -R owner/repo` (or `gh api /repos/owner/repo/...`) ' +
+  'with a LITERAL repo slug, optionally followed by a trailing stdin-only reader pipeline ' +
+  'such as `| jq ...`. ' +
   'A repo-targeting `gh` command receives a minted GitHub App token in its process ' +
   'environment, so it must run as a single bare `gh` command — no `;`, `&&`, `||`, `&`, ' +
   'newlines, redirections, command/process substitution, subshells, heredocs, or unquoted ' +
@@ -500,6 +511,10 @@ function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
   const explicit = extractRepoFlag(args)
   if (explicit !== null) return { kind: 'inject', repoSlugs: [explicit] }
 
+  // A `-R`/`--repo` IS present but its value isn't a literal slug (e.g. `-R "$repo"`):
+  // tell the user that, not the misleading "add -R" message — they already did.
+  if (repoFlagHasNonLiteralValue(args)) return { kind: 'block', reason: NON_LITERAL_REPO_REASON }
+
   if (REPO_LESS_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
 
   return { kind: 'block', reason: MISSING_REPO_REASON }
@@ -544,6 +559,13 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   // `gh api` rejects `-R`, so the flag must be stripped from the command.
   if (flagRepo !== null && isGraphqlEndpoint(args)) {
     return { kind: 'inject', repoSlugs: [flagRepo], stripRepoFlag: true }
+  }
+
+  // No literal path repo and no usable literal `-R`: if a `-R`/`--repo` was given
+  // with a non-literal value (e.g. `gh api graphql -R "$repo"`), say so rather
+  // than silently passing through to an unauthenticated `gh api`.
+  if (flagRepo === null && repoFlagHasNonLiteralValue(args)) {
+    return { kind: 'block', reason: NON_LITERAL_REPO_REASON }
   }
 
   return { kind: 'pass-through' }
@@ -660,6 +682,27 @@ function extractRepoFlag(args: readonly string[]): string | null {
   return null
 }
 
+// True when a `-R`/`--repo` flag is present but its value is not a literal slug
+// `extractRepoFlag` would accept (missing, a shell variable, a placeholder, or a
+// malformed slug). Lets the classifier emit NON_LITERAL_REPO_REASON instead of
+// the misleading "add -R" message when the user DID pass `-R` but with `$repo`.
+function repoFlagHasNonLiteralValue(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === undefined) continue
+    if (arg === '-R' || arg === '--repo') {
+      const value = args[i + 1]
+      if (value === undefined || value.startsWith('-')) return true
+      if (!isRepoSlug(value)) return true
+    } else if (arg.startsWith('--repo=')) {
+      if (!isRepoSlug(arg.slice('--repo='.length))) return true
+    } else if (arg.startsWith('-R=')) {
+      if (!isRepoSlug(arg.slice('-R='.length))) return true
+    }
+  }
+  return false
+}
+
 // Every valid `-R`/`--repo` slug in `args`, not just the first. The strip removes
 // ALL unquoted repo flags, so the conflict check must see ALL of them: a command
 // like `... -R path/repo -R victim/private` is a mint-for-X-hit-Y attempt where
@@ -772,7 +815,13 @@ function apiEndpointHasOwnerRepoPlaceholder(args: readonly string[]): boolean {
   return endpoint.includes('{owner}') || endpoint.includes('{repo}')
 }
 
+// Security invariant: `extractRepoFlag` mints a token from this value, so only a
+// CONCRETE static `owner/name` may pass. A value carrying `$`/`${}` expansion or
+// `{owner}`/`{repo}` placeholders is rejected here so a `-R '$owner/$repo'`
+// (single-quoted, so it slips the composition gate) can never be injected and
+// mint for an unverifiable target; it surfaces as NON_LITERAL_REPO_REASON instead.
 function isRepoSlug(value: string): boolean {
+  if (value.includes('$') || value.includes('{') || value.includes('}')) return false
   const [owner, name, ...rest] = value.split('/')
   return owner !== undefined && owner !== '' && name !== undefined && name !== '' && rest.length === 0
 }

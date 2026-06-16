@@ -173,17 +173,20 @@ describe('analyzeGhCommand', () => {
     })
   })
 
-  it('the strip rewrite never touches a -R/--repo whose value is not an owner/repo slug', () => {
-    // The graphql repo hint is taken from a valid slug; an attached `=` form
-    // whose value is NOT owner/repo must be left verbatim by the rewrite (the
-    // detection path already rejected it, so the rewrite must agree).
-    const noStrip = [
+  it('blocks a graphql -R/--repo whose value is not an owner/repo slug (never injected or stripped)', () => {
+    // A graphql repo hint is taken only from a valid literal slug. An attached
+    // `=` form whose value is NOT owner/repo is never minted/stripped; instead of
+    // silently passing through to an unauthenticated `gh api`, it now blocks with
+    // an actionable reason so the agent knows the hint was unusable.
+    const nonLiteral = [
       'gh api graphql -R=notaslug -f query=x',
       'gh api graphql --repo=owner/repo/extra -f query=x',
       'gh api graphql -R= -f query=x',
     ]
-    for (const input of noStrip) {
-      expect(analyzeGhCommand(input)).toEqual({ kind: 'pass-through' })
+    for (const input of nonLiteral) {
+      const result = analyzeGhCommand(input)
+      expect(result.kind).toBe('block')
+      if (result.kind === 'block') expect(result.reason).toContain('not a literal')
     }
   })
 
@@ -205,6 +208,37 @@ describe('analyzeGhCommand', () => {
 
   it('blocks gh pr create without a repo', () => {
     expect(analyzeGhCommand('gh pr create --title x --body y').kind).toBe('block')
+  })
+
+  it('blocks -R with an unexpanded shell variable and says it is not literal', () => {
+    const result = analyzeGhCommand('gh label edit foo -R "$repo" --name x')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('not a literal')
+  })
+
+  it('does NOT inject a single-quoted variable repo slug (must not mint for an unverifiable target)', () => {
+    const result = analyzeGhCommand("gh label list -R '$owner/$repo'")
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('not a literal')
+  })
+
+  it('blocks --repo= with a variable value', () => {
+    const result = analyzeGhCommand('gh issue list --repo=$repo')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('not a literal')
+  })
+
+  it('blocks a gh api graphql call whose -R hint is a shell variable', () => {
+    const result = analyzeGhCommand('gh api graphql -R "$repo" -f query=x')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('not a literal')
+  })
+
+  it('still injects for a literal -R even though the var path now blocks', () => {
+    expect(analyzeGhCommand('gh label edit foo -R acme/widgets --name x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
   })
 
   it('blocks a leading environment assignment before a repo-targeting gh', () => {
