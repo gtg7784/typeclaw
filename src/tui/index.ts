@@ -23,6 +23,7 @@ import {
   formatUserPromptHistory,
   withTimestamp,
 } from './format'
+import { armTerminalGuard } from './terminal-guard'
 import { colors, editorTheme, markdownTheme } from './theme'
 
 export type ClientFactory = (url: string) => Promise<Client>
@@ -103,6 +104,10 @@ export function createTui({
     const status = new Text(colors.dim(`connecting to ${displayUrl}...`), 0, 0)
     tui.addChild(status)
     tui.start()
+    // Armed once the terminal is in raw mode + Kitty kbd protocol: restores the
+    // terminal on an abnormal exit (SSH SIGHUP, kill, crash) that never reaches
+    // tui.stop(), so the shell isn't left echoing Kitty key-release events.
+    const guard = armTerminalGuard()
     tui.requestRender()
 
     // Pre-handshake failures resolve 'connectFailed' (not throw): the standalone
@@ -113,6 +118,7 @@ export function createTui({
       status.setText(colors.red(`connection error: ${err instanceof Error ? err.message : String(err)}`))
       tui.requestRender()
       tui.stop()
+      guard.disarm()
       exit(1)
       return null
     })
@@ -124,6 +130,7 @@ export function createTui({
       tui.requestRender()
       client.close()
       tui.stop()
+      guard.disarm()
       exit(1)
       return null
     })
@@ -418,21 +425,32 @@ export function createTui({
     // Settle BEFORE closing the client: client.close() fires onClose, which
     // settles 'lostConnection'. settle() is idempotent, so the first call wins —
     // settling the deliberate outcome first keeps the later onClose a no-op.
-    const teardown = (): void => {
-      stopAllLoaders()
-      tui.stop()
-      client.close()
+    // drainInput() runs before stop() so late Kitty key-release bytes (the keys
+    // that triggered the exit) are swallowed instead of leaking to the shell
+    // over a slow SSH link. The promise is memoized so repeated callers (a
+    // fire-and-forget detach/exit plus the end-of-run await) share ONE teardown
+    // and the end-of-run await truly blocks until draining finishes — otherwise
+    // the next clack picker could start reading stdin mid-drain.
+    let teardownPromise: Promise<void> | null = null
+    const teardown = (): Promise<void> => {
+      teardownPromise ??= (async () => {
+        stopAllLoaders()
+        await terminal.drainInput().catch(() => {})
+        tui.stop()
+        client.close()
+        guard.disarm()
+      })()
+      return teardownPromise
     }
 
     const exitWith = (code: number): void => {
       settle({ reason: 'exit', exitCode: code })
-      teardown()
-      exit(code)
+      void teardown().finally(() => exit(code))
     }
 
     const detach = (): void => {
       settle({ reason: 'detach' })
-      teardown()
+      void teardown()
     }
 
     // Ctrl+C exits the client. In raw mode the kernel does NOT generate SIGINT,
@@ -490,7 +508,7 @@ export function createTui({
     }
 
     const result = await outcome
-    tui.stop()
+    await teardown()
     return result
   }
 

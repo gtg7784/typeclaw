@@ -10,6 +10,7 @@ import {
 } from '@mariozechner/pi-tui'
 
 import { formatToolEnd, formatToolStart, formatUserPromptHistory } from '@/tui/format'
+import { armTerminalGuard } from '@/tui/terminal-guard'
 import { colors, markdownTheme } from '@/tui/theme'
 
 import { streamSessionEvents, type LiveSourceFactory, type StreamPhase } from './index'
@@ -46,6 +47,9 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     tui.addChild(new Text(header(opts.summary), 0, 0))
     tui.addChild(status)
     tui.start()
+    // Restores the terminal on an abnormal exit (SSH SIGHUP, kill, crash) that
+    // never reaches tui.stop(), so the shell isn't left in Kitty kbd mode.
+    const guard = armTerminalGuard()
     tui.requestRender()
 
     // The status line is pinned last (no editor to pin, unlike createTui). Each
@@ -71,12 +75,21 @@ export function createTranscriptView(opts: TranscriptViewOptions) {
     const outcome = new Promise<TranscriptViewOutcome>((resolve) => {
       settle = resolve
     })
+    // drainInput() before stop() swallows late Kitty key-release bytes so they
+    // don't leak to the shell over a slow SSH link; disarm() drops the abnormal-
+    // exit guard now that a clean teardown ran.
     const finish = (reason: TranscriptViewOutcome['reason']): void => {
       if (settle === null) return
       const fn = settle
       settle = null
-      tui.stop()
-      fn({ reason })
+      void terminal
+        .drainInput()
+        .catch(() => {})
+        .then(() => {
+          tui.stop()
+          guard.disarm()
+          fn({ reason })
+        })
     }
 
     tui.addInputListener((data) => {
