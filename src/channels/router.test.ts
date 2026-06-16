@@ -2360,6 +2360,125 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent).toHaveLength(0)
   })
 
+  test('cold-start solo-human fallback: a bare-empty stop retries, then the model answers', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // given: a non-mention direct question on a freshly cold-started solo channel
+    await router.route(inbound({ isBotMention: false, text: '일정 어떻게 되는 거더라' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // when: the model whiffs an empty completion, then answers on the retry
+      if (calls === 1) sessions[0]!.setAssistantText('')
+      else sessions[0]!.setAssistantText('마감은 다음 주 화요일이야.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: it retried instead of dropping silently, and the answer landed
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(logs.some((m) => m.includes('empty_turn_retry') && m.includes('cause=cold_start_solo_bare_empty'))).toBe(
+      true,
+    )
+    expect(sent.map((s) => s.text)).toEqual(['마감은 다음 주 화요일이야.'])
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(false)
+  })
+
+  test('cold-start solo-human fallback: a persistent bare-empty stop exhausts to the visible fallback', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: false, text: '일정 알려줘' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('')
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_EMPTY_TURN_RETRIES)
+    expect(
+      logs.filter((m) => m.includes('empty_turn_retry') && m.includes('cause=cold_start_solo_bare_empty')).length,
+    ).toBe(MAX_EMPTY_TURN_RETRIES)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=cold_start_solo_bare_empty_retries_exhausted'))).toBe(
+      true,
+    )
+  })
+
+  test('cold-start solo-human fallback: an explicit NO_REPLY stays silent (no retry)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: false, text: 'just chatter' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('cold_start_solo_bare_empty'))).toBe(false)
+    expect(sent).toHaveLength(0)
+  })
+
+  test('cold-start bare-empty is NOT retried when the message @-mentions the bot (explicit address)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // given: a MENTION is explicit address, so the historical empty=silent path holds
+    await router.route(inbound({ isBotMention: true, text: 'hey bot' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('')
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('cold_start_solo_bare_empty'))).toBe(false)
+  })
+
+  test('bare-empty is NOT retried on a later warm turn — only the first cold-start turn is armed', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // given: turn 1 (cold-start solo) answers normally, advancing turnSeq past 0
+    await router.route(inbound({ isBotMention: false, text: 'q1', externalMessageId: 'm1' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('answer 1')
+    await router.__testing!.flushDebounce(KEY)
+
+    // when: a later turn whiffs a bare-empty stop
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('')
+    await router.route(inbound({ isBotMention: false, text: 'q2', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the arm self-cleared — no retry, historical no_reply
+    expect(logs.some((m) => m.includes('cold_start_solo_bare_empty'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+  })
+
   test('suppresses recovery when assistant ends with NO_REPLY after leaked reasoning', async () => {
     const dir = await tempDir()
     const logs: string[] = []

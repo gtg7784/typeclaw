@@ -265,6 +265,28 @@ export const EMPTY_TURN_RETRY_NUDGE = [
 // drop so the human is never left staring at dead air after a degenerate turn.
 export const EMPTY_TURN_FALLBACK_TEXT =
   "⚠️ I got stuck putting together a reply and couldn't finish. Could you rephrase or try again?"
+// Distinct from EMPTY_TURN_RETRY_NUDGE: that one diagnoses budget exhaustion
+// ("ran out of output budget"), which is FALSE for a clean `stop` with empty
+// text. This nudge names the real failure — a turn that ended sending nothing
+// to a message addressed to the agent in a one-on-one conversation — and steers
+// the model to either answer or record the silence explicitly (skip_response /
+// NO_REPLY) rather than ending empty again.
+export const COLD_START_REPLY_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your previous turn ended without sending anything, but the last message was',
+  'addressed to you in a direct, one-on-one conversation — ending silent there',
+  'reads as ignoring the person. This is an automated signal from the channel',
+  'router, not a message from anyone in the chat. **Do not acknowledge or reply',
+  'to this notice itself.**',
+  '',
+  'Answer the last user message now via your channel reply tool. If you truly',
+  'have nothing to add, call `skip_response({ reason })` (preferred) or end with',
+  'exactly `NO_REPLY` so the silence is recorded — do not just end empty.',
+  '',
+  '---',
+].join('\n')
 // At most one continuation nudge per logical turn. Stricter than the empty-turn
 // retry budget (2) because the turn ALREADY delivered a user-facing reply — this
 // is a one-shot correction offer, not recovery from no output.
@@ -777,6 +799,20 @@ type LiveSession = {
   // decision used, so the prompt nudge and sticky suppression agree on
   // "is this a multi-human group". Read by composeTurnPrompt().
   multiHumanGroup: boolean
+  // True when this live session was born from a cold-start (no persisted
+  // session existed — first contact or a stale-rollover after long idle), as
+  // opposed to rehydrating an existing session. Combined with `turnSeq === 0`
+  // it pinpoints the very first prompt of a freshly woken session.
+  createdFromColdStart: boolean
+  // Set in route() when the FIRST turn of a cold-start session engages via the
+  // solo-human "answer everything" fallback (not an explicit mention/reply/DM,
+  // not a multi-human group). Read by validateChannelTurn: a BARE-EMPTY stop on
+  // such a turn is a model whiff on a direct one-on-one question, not deliberate
+  // silence, so it earns an empty-turn retry instead of a silent no_reply.
+  // Recomputed on every engage, so it self-clears once turnSeq leaves the first
+  // turn; explicit NO_REPLY / skip_response and any turn that already sent stay
+  // on the historical silent path.
+  coldStartSoloFallbackTurnActive: boolean
   membershipFetch: Promise<MembershipCount | null> | null
   // Provider soft-error (`stopReason: 'error'`) captured during the current
   // turn, deferred to turn-end. Upstream surfaces transient errors (e.g.
@@ -1678,6 +1714,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         consecutiveEngagedPeerBotTurns: 0,
         loopGuardActive: false,
         multiHumanGroup: false,
+        createdFromColdStart: isColdStart,
+        coldStartSoloFallbackTurnActive: false,
         membershipFetch,
         pendingProviderError: null,
         destroyed: false,
@@ -2569,7 +2607,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     const membership = await membershipForEngagement(live)
 
-    live.multiHumanGroup = isMultiHumanGroup(event.isDm, countEffectiveHumans(live.participants, membership, now()))
+    const effectiveHumans = countEffectiveHumans(live.participants, membership, now())
+    live.multiHumanGroup = isMultiHumanGroup(event.isDm, effectiveHumans)
 
     const decision: EngagementDecision = decideEngagement({
       message: event,
@@ -2594,6 +2633,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     publishInbound(event, 'engage', live.sessionId)
+
+    // Arm cold-start bare-empty recovery only for the exact incident shape: the
+    // FIRST prompt (`turnSeq === 0`) of a freshly cold-started session that
+    // engaged via the solo-human answer-everything fallback — a lone human, no
+    // explicit mention/reply/DM, not a multi-human group. Recomputed on every
+    // engage so it self-clears once the first turn advances `turnSeq`; explicit
+    // address (mention/reply/DM) keeps the historical silent-on-empty path.
+    live.coldStartSoloFallbackTurnActive =
+      live.createdFromColdStart &&
+      live.turnSeq === 0 &&
+      effectiveHumans <= 1 &&
+      !event.authorIsBot &&
+      !event.isDm &&
+      !event.isBotMention &&
+      event.replyToBotMessageId === null &&
+      !live.multiHumanGroup
 
     const engageReaction = autoReactOnEngage(event)
 
@@ -3609,6 +3664,36 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     let assistantText = candidateText
 
     if (endsWithNoReplySignal(assistantText)) {
+      // A BARE-EMPTY stop (no visible text, not an explicit NO_REPLY token) on
+      // the armed cold-start solo-human fallback turn is the production "dropped
+      // the owner's first question" shape — a model whiff on a direct one-on-one
+      // question, not a deliberate decline. Give it the bounded empty-turn retry
+      // with a dedicated nudge; on exhaustion post the visible fallback so the
+      // human is never stranded on silence. Gated hard so deliberate silence
+      // still stays silent: explicit NO_REPLY (non-empty trim), any turn that
+      // already sent (successfulChannelSends moved), a queued fresh inbound (the
+      // next drain answers it), and every turn outside the armed cold-start solo
+      // path all fall through to the historical no_reply below.
+      if (
+        assistantText.trim() === '' &&
+        source === 'leaf' &&
+        live.coldStartSoloFallbackTurnActive &&
+        live.currentTurnAuthorId !== null &&
+        live.successfulChannelSends === successfulSendsBeforePrompt &&
+        live.promptQueue.length === 0
+      ) {
+        if (live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
+          live.emptyTurnRetries++
+          logger.warn(
+            `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+              `cause=cold_start_solo_bare_empty`,
+          )
+          live.pendingSystemReminders.push(COLD_START_REPLY_NUDGE)
+          return
+        }
+        await postEmptyTurnFallback('cold_start_solo_bare_empty_retries_exhausted')
+        return
+      }
       const leakedReasoning = !isNoReplySignal(assistantText)
       logger.info(`[channels] ${live.keyId} no_reply${leakedReasoning ? ' (with_leaked_reasoning)' : ''}`)
       return
