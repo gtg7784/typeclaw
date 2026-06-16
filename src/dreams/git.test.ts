@@ -7,6 +7,8 @@ import { parseLogOutput, readDreamCommitLog, readDreamCommitShow, resolveGitRepo
 
 let repo: string
 
+const normalizePath = (s: string): string => s.split(/[\\/]/).join('/')
+
 async function git(args: string[], cwd: string): Promise<void> {
   const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
   const code = await proc.exited
@@ -41,7 +43,7 @@ describe('resolveGitRepo', () => {
     expect(res.ok).toBe(true)
     // git canonicalizes the root (on macOS /var → /private/var), so assert the
     // resolved root is the git toplevel rather than byte-equal to the tmp path.
-    if (res.ok) expect(res.root.endsWith(repo)).toBe(true)
+    if (res.ok) expect(normalizePath(res.root).endsWith(normalizePath(repo))).toBe(true)
   })
 
   it('reports not-a-repo outside any git tree', async () => {

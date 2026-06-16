@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
+import { isWindows } from '@/shared'
 
 import {
   buildConfigMigrationCommitMessage,
@@ -30,6 +31,7 @@ import {
 import { isModelRef, type ModelRef } from './providers'
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+const onWindows = isWindows()
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 const VALID_MODEL_2 = 'openai/gpt-5.4-nano'
@@ -1596,7 +1598,8 @@ describe('validateMount', () => {
     }
   })
 
-  test.skipIf(isRoot)('fails when readOnly:false but path is read-only on disk', async () => {
+  // chmod read-only semantics are not meaningful on Windows; see #899.
+  test.skipIf(isRoot || onWindows)('fails when readOnly:false but path is read-only on disk', async () => {
     const dir = join(cwd, 'ro')
     await mkdir(dir)
     await chmod(dir, 0o555)
@@ -1623,7 +1626,8 @@ describe('validateMount', () => {
     }
   })
 
-  test.skipIf(isRoot)('fails when path is unreadable', async () => {
+  // chmod unreadable semantics are not meaningful on Windows; see #899.
+  test.skipIf(isRoot || onWindows)('fails when path is unreadable', async () => {
     const dir = join(cwd, 'noread')
     await mkdir(dir)
     await chmod(dir, 0o000)
@@ -1645,20 +1649,23 @@ describe('expandMountPath', () => {
   })
 
   test('resolves relative paths against cwd', () => {
-    expect(expandMountPath('./rel', '/cwd')).toBe('/cwd/rel')
-    expect(expandMountPath('rel', '/cwd')).toBe('/cwd/rel')
+    const cwd = join(tmpdir(), 'typeclaw-cwd')
+    expect(expandMountPath('./rel', cwd)).toBe(join(cwd, 'rel'))
+    expect(expandMountPath('rel', cwd)).toBe(join(cwd, 'rel'))
   })
 
   test('expands ~ to homedir', () => {
-    const expanded = expandMountPath('~/notes', '/cwd')
-    expect(expanded.endsWith('/notes')).toBe(true)
-    expect(expanded.startsWith('/cwd')).toBe(false)
+    const cwd = join(tmpdir(), 'typeclaw-cwd')
+    const expanded = expandMountPath('~/notes', cwd)
+    expect(expanded).toBe(join(homedir(), 'notes'))
+    expect(expanded.startsWith(cwd)).toBe(false)
   })
 
   test('expands bare ~ to homedir', () => {
-    const expanded = expandMountPath('~', '/cwd')
-    expect(expanded.startsWith('/cwd')).toBe(false)
-    expect(expanded.length).toBeGreaterThan(0)
+    const cwd = join(tmpdir(), 'typeclaw-cwd')
+    const expanded = expandMountPath('~', cwd)
+    expect(expanded).toBe(homedir())
+    expect(expanded.startsWith(cwd)).toBe(false)
   })
 })
 
