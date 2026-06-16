@@ -1,4 +1,5 @@
 import { getBun } from '@/container/shared'
+import { isMacOS } from '@/shared'
 
 export type TailscaleExecResult = { exitCode: number; stdout: string; stderr: string }
 export type TailscaleExec = (args: string[]) => Promise<TailscaleExecResult>
@@ -130,7 +131,7 @@ async function checkRunning(exec: TailscaleExec): Promise<{ ok: true } | { ok: f
 }
 
 export const defaultTailscaleExec: TailscaleExec = async (args) => {
-  const candidates = process.platform === 'darwin' ? ['tailscale', MACOS_APP_CLI] : ['tailscale']
+  const candidates = isMacOS() ? ['tailscale', MACOS_APP_CLI] : ['tailscale']
   let lastError = 'tailscale command not found'
 
   for (const candidate of candidates) {

@@ -6,6 +6,8 @@ import { promisify } from 'node:util'
 
 import QRCode from 'qrcode'
 
+import { isMacOS, isWindows } from '@/shared'
+
 const execFileAsync = promisify(execFile)
 
 // The upstream LINE SDK's QR login hands back a raw auth URL
@@ -108,12 +110,11 @@ async function writeQRHtmlFile(
 }
 
 async function openInBrowser(filePath: string): Promise<void> {
-  const platform = process.platform
-  if (platform === 'darwin') {
+  if (isMacOS()) {
     await execFileAsync('open', [filePath])
     return
   }
-  if (platform === 'win32') {
+  if (isWindows()) {
     await execFileAsync('cmd', ['/c', 'start', '', filePath])
     return
   }
