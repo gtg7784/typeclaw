@@ -12,10 +12,8 @@ import { formatLocalDate } from '@/shared'
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
 import {
-  forceIndexForChannel,
   loadMemoryInjectionPlan,
   renderDedupedRetrievedMemorySection,
-  renderMemorySection,
   renderRetrievedMemorySection,
   renderTopicIndexMemorySection,
 } from './load-memory'
@@ -184,9 +182,8 @@ async function renderVectorTurnMemory(
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   const isChannel = event.origin?.kind === 'channel'
   if (plan.mode === 'direct' && isChannel) {
-    const indexed = forceIndexForChannel(plan, { origin: event.origin, injectionBudgetBytes })
     logger?.info(`[vector-retrieval] mode=index topics=${plan.shards.length} channel=forced`)
-    return renderMemorySection(indexed, { origin: event.origin })
+    return renderTopicIndexMemorySection(plan.shards, { origin: event.origin })
   }
   const store = VectorStore.open(join(event.agentDir, 'memory', '.vectors', 'index.db'))
   try {
