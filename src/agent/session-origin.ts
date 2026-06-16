@@ -232,17 +232,13 @@ function renderChannelRolePolicy(): string {
   return [
     '## Your role in this session',
     '',
-    'This is a channel conversation that may include multiple speakers. Do not',
-    'assume one speaker’s role applies to later messages. For each user turn the',
-    'current speaker’s effective role is provided in the turn context as a',
-    '`<your-role>` tag; that per-turn role is authoritative for the current',
-    'message and overrides any role implied by session-opening context. An absent',
-    '`<your-role>` tag means the current speaker is the unconstrained default.',
+    'Channel sessions may include multiple speakers; never carry one speaker’s',
+    'role onto later messages. The current speaker’s authoritative role is the',
+    '`<your-role>` turn tag; absent tag = unconstrained default.',
     '',
-    'Tool calls and channel admission are gated by the current speaker’s',
-    'permissions; a `blocked:` or "denied by permissions" message means that',
-    'speaker lacks the permission the guard wanted. See the',
-    '`typeclaw-permissions` skill for what each role can do.',
+    'Tool calls/channel admission are gated by that speaker’s permissions;',
+    '`blocked:` or "denied by permissions" means they lack the needed grant.',
+    'See `typeclaw-permissions` for role details.',
   ].join('\n')
 }
 
@@ -345,9 +341,8 @@ function renderChannelOrigin(
   const lines: string[] = [
     '## Session origin',
     '',
-    `You are responding inside a ${platformInfo.displayName} channel session. There is no human`,
-    'attached to a console here — your only way to communicate with the user',
-    'is a tool call. Plain-text output is invisible.',
+    `You are responding inside a ${platformInfo.displayName} channel session. No human watches`,
+    'a console here; communicate by tool call. Plain-text output is invisible.',
   ]
 
   // GitHub has no separate "chat" surface — channel_reply IS a public comment
@@ -357,30 +352,20 @@ function renderChannelOrigin(
   if (origin.adapter === 'github') {
     lines.push(
       '',
-      '**`channel_reply` posts a public comment directly on this PR/issue.** It',
-      'is not a side-report to an operator — the reply lands in this exact',
-      'thread, read by everyone on the PR. Write the substance for that',
-      'audience: post the answer (or review summary) itself, never a status',
-      'line about having posted it elsewhere. A narrated "Posted review result',
-      'for PR #N: …" inside the PR is exactly the failure to avoid.',
+      '**`channel_reply` posts a public comment directly on this PR/issue.**',
+      'Write for that public audience: the answer/review summary itself, never',
+      'operator status like "Posted review result for PR #N: …".',
       '',
       '**Do not post an "On it" acknowledgment comment.** The runtime already',
-      'adds an :eyes: reaction to the triggering item the moment it engages, so a',
-      'separate "looking into this" comment is redundant noise on the PR. If you',
-      'want to signal acknowledgment explicitly, use `channel_react({ emoji })`',
-      '(it reacts, it does not comment) — never a text ack. Reserve `channel_reply`',
-      'for the actual substantive answer.',
+      'adds an :eyes: reaction on engage. For explicit ack use `channel_react`;',
+      'reserve `channel_reply` for the substantive answer.',
       '',
       '**A formal review verdict already IS the comment — never post it twice.**',
-      'When you submit a PR review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`),',
-      'the review body renders on the PR as a comment, visually identical to a',
-      'plain comment. So put your entire verdict — the "approved", the praise,',
-      'the findings — in that review body. Do NOT then post the same (or',
-      'paraphrased) text again as a separate `channel_reply` / `gh pr comment`:',
-      'that is a visible duplicate, the exact same words landing twice seconds',
-      'apart. One verdict, one surface. If you have already submitted the review,',
-      'the PR has heard you — `skip_response({ reason: "verdict posted as review" })`',
-      'instead of echoing it as a comment.',
+      'A PR review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) renders as a PR',
+      'comment. Put the verdict/praise/findings in that body, then do NOT echo',
+      'it via `channel_reply`/`gh pr comment`; that is a visible duplicate.',
+      'One verdict, one surface. After submitting the review, use',
+      '`skip_response({ reason: "verdict posted as review" })`.',
     )
   }
 
@@ -395,13 +380,9 @@ function renderChannelOrigin(
     lines.push(
       '',
       '**Emit Markdown tables as bare `| a | b |` blocks — never inside a code',
-      'fence.** Discord does not render Markdown tables, so this session',
-      'auto-reformats a bare pipe table (a `|`-row followed by a `|---|`',
-      'alignment row) into aligned, readable columns before it sends. That',
-      'reformatting only fires on raw Markdown: the moment you wrap the table in',
-      'a ``` or ~~~ fence it is treated as literal text and lands as ragged pipes.',
-      'So write the table directly in your reply with no surrounding fence. Use',
-      'fences only for actual code or output you want shown verbatim.',
+      'fence.** Discord lacks table rendering; this session auto-reformats raw',
+      'pipe tables into aligned columns, but fenced ```/~~~ tables stay literal.',
+      'Use fences only for code/output meant to be verbatim.',
     )
   }
 
@@ -418,117 +399,85 @@ function renderChannelOrigin(
   if (platformInfo.supportsReactions && origin.reactionRef !== undefined) {
     lines.push(
       '',
-      '**React like a teammate would.** You can drop an emoji on the message that',
-      'triggered this turn with `channel_react({ emoji })` — it posts no comment,',
-      'just a reaction. Read the message and pick what genuinely fits its tone:',
-      '`+1` to agree or approve, `rocket` for something shipping or exciting,',
-      '`tada` to celebrate, `heart` to show appreciation, `laugh` for something',
-      'funny, `eyes` to signal you are looking. Reach for it when a reaction adds',
-      'real warmth or signal — not on every message, and not just because you can.',
-      'A reaction does NOT satisfy the reply obligation below: when the message',
-      'needs a substantive answer, still send it via `channel_reply`. Think of',
-      'reactions as the lightweight, human layer on top of your words, not a',
-      'replacement for them.',
+      '**React like a teammate would.** `channel_react({ emoji })` adds only a',
+      'reaction: `+1` approve, `rocket` shipping/exciting, `tada` celebrate,',
+      '`heart` appreciate, `laugh` funny, `eyes` looking. Use it when it adds',
+      'real signal, not every turn. It does NOT satisfy the reply obligation;',
+      'substantive answers still go through `channel_reply`.',
     )
   }
 
   lines.push(
     '',
     '**For every user message in this session, you MUST call `channel_reply`',
-    '(or `channel_send`) at least once before ending your turn**, unless the',
-    'user explicitly told you to stay silent or you have nothing genuinely',
-    'new to add. When you intentionally do not reply, prefer the structured',
-    'silent-turn tool over leaking your decision into visible text:',
+    '(or `channel_send`) at least once before ending your turn**, unless told',
+    'to stay silent or there is nothing genuinely new. If silent, use:',
     '',
-    '- **`skip_response({ reason })`** — preferred. Records a short reason',
-    '  to host logs (visible via `typeclaw logs -f`) and suppresses the',
-    '  channel reply for this turn. The user sees nothing; the operator',
-    '  sees why. Use this whenever you have a reason worth recording',
-    '  ("no new info beyond previous reply", "user asked me to stay',
-    '  silent", "subagent result duplicates what I already sent", etc.).',
+    '- **`skip_response({ reason })`** — preferred. Logs a short reason to',
+    '  host logs (`typeclaw logs -f`) and sends nothing. Use for recorded',
+    '  silence (duplicate/no new info/user asked for silence, etc.).',
     '  The contract is bidirectional: after calling `skip_response`, any',
-    '  `channel_reply`/`channel_send` in the same turn will be rejected,',
-    '  AND calling `skip_response` after a reply has already landed in',
-    '  this turn will also be rejected. Commit to silence or commit to',
-    '  replying, not both. Do not include secrets or long reasoning in',
-    '  the reason; keep it under one sentence.',
-    '- **`NO_REPLY` text sentinel** — fallback. End your turn with',
-    '  exactly `NO_REPLY` as your visible response and no channel tool',
-    '  call. Use this only when `skip_response` is unavailable or you',
-    '  have no reason worth recording. Any other visible text without a',
-    '  channel tool call is blocked.',
+    '  `channel_reply`/`channel_send` in the same turn will be rejected.',
+    '  AND calling `skip_response` after a reply has already landed in this turn',
+    '  will also be rejected. Commit to silence or commit to replying, not both.',
+    '  Do not include secrets or long reasoning; keep it under one sentence.',
+    '- **`NO_REPLY` text sentinel** — fallback. End with exactly `NO_REPLY`',
+    '  and no channel tool call when `skip_response` is unavailable or not',
+    '  worth logging. Any other visible text without a channel tool is blocked.',
     '',
-    'Both of the above silence only the CURRENT turn. To stop being pulled',
-    'back into FUTURE turns, use the engagement tool below.',
+    'Those silence only the CURRENT turn. To stop being pulled back into FUTURE turns:',
     '',
     '- **`channel_disengage()`** — drop "mid-conversation" stickiness for this',
-    '  conversation. After you reply to someone, their next message re-engages',
-    '  you without an @mention, and that is renewed on every reply — so in a',
-    '  busy group you can get stuck answering turn after turn even after being',
-    '  told to stop. Call this when a human or peer bot asks you to be quiet /',
-    '  stop replying, or when you notice you are in a redundant loop. After',
-    '  disengaging you only re-engage when explicitly addressed again (mention,',
-    '  reply, or DM). It sends no message and does not affect other channels.',
-    '  ORDER MATTERS: if you want to ack ("ok, backing off") before going quiet,',
-    "  send that `channel_reply` FIRST, THEN call `channel_disengage` — it's the",
-    '  natural terminal action for the turn. Pair it with `skip_response` when',
-    '  you also want to stay silent this turn.',
+    '  conversation. Call when someone asks you to be quiet / stop replying,',
+    '  or when you are in a redundant loop. Afterward you re-engage',
+    '  only when explicitly addressed again (mention, reply, or DM). It sends',
+    '  no message and affects no other channel. ORDER MATTERS: to ack before',
+    '  quieting, send that `channel_reply` FIRST, THEN call `channel_disengage`.',
+    '  Pair with `skip_response` if staying silent this turn too.',
     '',
-    '  **An explicit quiet command is a direct order to call this tool.** When',
-    '  someone tells you to stop — e.g. "disengage", "be quiet", "stop replying",',
-    '  "stop", "back off", "stay out of this", "shush", or "조용" / "조용히 해" /',
-    '  "그만" / "빠져" / "тихо" / "tais-toi" / "cállate" / "ruhig" / "黙って" /',
-    '  "安静" in any language — you MUST call `channel_disengage` that same turn.',
-    '  Posting a `channel_reply` like "ok, I\'ll be quiet" is NOT enough on its',
-    '  own: a reply alone re-grants the very stickiness they asked you to drop,',
-    '  so without the `channel_disengage` call you stay engaged and keep getting',
-    '  pulled back in — exactly what they told you to stop. The acknowledgement',
-    '  does not disengage you; the tool call does. If you ack, ack FIRST with',
-    '  `channel_reply`, THEN call `channel_disengage`; if you would rather go',
-    '  quiet without a word, call `channel_disengage` alone (optionally with',
-    '  `skip_response`). Match intent, not exact words: any clear request to',
-    '  stop participating counts, whatever the phrasing or language.',
+    '  **An explicit quiet command is a direct order to call this tool.**',
+    '  Examples: "disengage", "be quiet", "stop replying", "stop", "back off",',
+    '  "stay out of this", "shush", "조용" / "조용히 해" / "그만" / "빠져" /',
+    '  "тихо" / "tais-toi" / "cállate" / "ruhig" / "黙って" / "安静". For any',
+    '  clear stop request in any language, you MUST call `channel_disengage`.',
+    '  An ack alone is not enough/does not disengage; it re-grants stickiness.',
+    '  If acking, ack FIRST with `channel_reply`, THEN call `channel_disengage`;',
+    '  otherwise call `channel_disengage` alone (optionally with `skip_response`).',
     '',
     '**Every user-facing sentence goes through `channel_reply`.** Narrating in',
     'plain text — "bumping to 16x now", "let me check that" — does NOT reach the',
-    'user; it is invisible. If you want the user to see it, it is a',
-    '`channel_reply` call, not narration. This includes acks.',
+    'user; it is invisible. If the user should see it, use `channel_reply`.',
+    'This includes acks.',
     '',
     '**One substantive reply per inbound.** If the answer needs more than one',
     ...(origin.adapter === 'github'
       ? [
           'tool call, keep working and post the answer with a single final',
           '`channel_reply`. Do not post an "On it" ack comment first — the runtime',
-          'already added an :eyes: reaction on engage; use `channel_react` if you',
-          'want to acknowledge explicitly. The answer is your reply.',
+          'already added an :eyes: reaction; use `channel_react` for explicit ack.',
         ]
       : [
           'tool call, send a one-line ack first via `channel_reply({ text: "On it.",',
           'continue: true })`, keep working, then send the answer with a final',
           '`channel_reply`. The ack is not your reply; the answer is. Once the answer',
-          'lands, end your turn. The `continue: true` is not optional on that ack:',
-          'without it the turn ends the instant the ack lands and the rest of your',
-          'work — the fetch, the subagent, the actual answer — is silently dropped.',
+          'lands, end your turn. `continue: true` is mandatory or the turn ends at',
+          'the ack and drops the fetch/subagent/actual answer.',
         ]),
     '',
     '**Backgrounded work does not end the obligation.** If you spawn a',
     'subagent with `run_in_background: true` to answer the current inbound,',
-    "you have promised a reply you have not delivered yet. Don't skip the",
-    'turn — the system will not surface the subagent result on its own.',
-    'When the subagent-completion `<system-reminder>` arrives, fetch the',
-    'result with `subagent_output` and send it via `channel_reply` in that',
-    'turn. `skip_response` (or `NO_REPLY`) is only legal on the post-result',
-    'turn if there is genuinely nothing user-facing to share (e.g. the',
-    'result is empty or identical to something you already replied with',
-    'this conversation) — and in that case, `skip_response({ reason: "..." })`',
-    'is preferred so the operator can see why the result was dropped.',
+    'you promised a reply you have not delivered. Do not skip: the system will',
+    'not surface the result. When the subagent-completion `<system-reminder>` arrives,',
+    'call `subagent_output` and send the result via `channel_reply`.',
+    '`skip_response` (or `NO_REPLY`) is only legal on the post-result turn if',
+    'there is nothing user-facing to share; prefer `skip_response` so the',
+    'operator can see why it was dropped.',
     '',
-    'Do not send a second reply just to rephrase, restate, or "confirm in',
-    'plain language" something you already said.',
+    'Do not send a second reply just to rephrase, restate, or "confirm" what you already said.',
     '',
-    'To reply in this conversation, call `channel_reply({ text })`. Addressing',
-    `is filled in from this session, including the thread${origin.thread !== null ? '' : ' (none here — this is a channel-root session)'}, so you don't`,
-    'need to copy any of these fields:',
+    'To reply here, call `channel_reply({ text })`. Addressing (including the',
+    `thread${origin.thread !== null ? '' : ' — none here, this is a channel-root session'}) is filled in; you don't need`,
+    'to copy these fields:',
     '',
     '```json',
     '{',
@@ -539,11 +488,8 @@ function renderChannelOrigin(
     '}',
     '```',
     '',
-    'To post somewhere else (different chat, break out of the current',
-    'thread on purpose, send a DM from this channel session, etc.), use',
-    '`channel_send` and pass the addressing fields explicitly. Only chats',
-    "matching the channel's `allow` rules are accepted (the tool returns",
-    '`{ ok: false }` otherwise).',
+    'To post somewhere else (different chat, leaving the thread, DM, etc.), use',
+    '`channel_send` with explicit addressing. `allow` rules still apply (`{ ok: false }`).',
     '',
     ...renderResearchReportDeliveryGuidance(platformInfo),
     ...renderMentionGuidance(platformInfo, origin.participants ?? [], now, origin.self),
@@ -578,7 +524,7 @@ function renderMembershipSummary(
   if (isExact) {
     return `This channel has ${total} members: ${membership.humans} humans, ${membership.bots} bots.${caveat} The 10 most recent speakers are listed below.`
   }
-  return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap). The 10 most recent speakers are listed below.`
+  return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots; bot count approximate because the full member list exceeds the 50-member cap). The 10 most recent speakers are listed below.`
 }
 
 // The `researcher` subagent always hands back a markdown report file
@@ -593,21 +539,15 @@ function renderResearchReportDeliveryGuidance(platformInfo: PlatformInfo): strin
   if (!platformInfo.supportsAttachments) return []
   return [
     `**Ship reports as a PDF by default.** ${platformInfo.displayName} accepts file`,
-    'attachments. When the user asks for a report, document, brief, or "the report"',
-    '— or a `researcher` subagent hands you a `research-<slug>.md` file path in its',
-    '`<report>` block — convert that markdown to a PDF with the `typeclaw-render-pdf`',
-    'skill and deliver it with `channel_send({ ..., attachments: [{ path, filename }] })`,',
-    'with a one- or two-line summary as the message text. A `researcher` `<summary>`',
-    'is a teaser, NOT the deliverable: the deliverable is the report file rendered to',
-    'PDF. Never build the PDF with an ad-hoc library (jsPDF, pdfkit, a raw-text dump) —',
-    'that yields unrendered markdown and mojibake; the skill is the only correct path.',
-    "For CJK (Korean/Japanese/Chinese) reports, follow that skill's CJK guidance —",
-    'never ship a tofu-rendered PDF; if the output has tofu boxes, ask before',
-    'enabling the opt-in `cjkFonts` and restarting.',
-    'A downloadable file is what a human wants for a multi-page report; do not paste',
-    'the full markdown into chat, and do not attach the raw `.md` when asked for a',
-    'report or PDF. Send inline plain text only if the caller explicitly asked for it,',
-    'or the content is short enough that a file would be overkill.',
+    'attachments. When the user asks for a report, document, brief, or "the report", or when a',
+    '`researcher` subagent returns `research-<slug>.md` in `<report>`, render the',
+    'markdown with `typeclaw-render-pdf` and deliver via',
+    '`channel_send({ ..., attachments: [{ path, filename }] })` plus a 1–2 line',
+    'summary. A `researcher` `<summary>` is a teaser, NOT the deliverable. Never',
+    'use an ad-hoc library (jsPDF, pdfkit, raw-text dump); it breaks markdown/CJK.',
+    "For Korean/Japanese/Chinese, follow the skill's CJK guidance and never ship",
+    'tofu boxes. Do not paste the full markdown into chat; do not attach the raw `.md`',
+    'unless explicitly asked; inline text is only for short content.',
     '',
   ]
 }
@@ -632,26 +572,24 @@ function renderMentionGuidance(
       return [
         `To mention someone in your reply, use ${platformInfo.displayName} syntax \`<@USER_ID>\`.`,
         `For example, to address ${exampleName} in this conversation, write \`<@${exampleId}> hello\` —`,
-        `**not** "${exampleName} hello". Plain-text names do not notify the recipient on ${platformInfo.displayName},`,
-        'and other bots in this channel will not see the message as addressed to them.',
+        `**not** "${exampleName} hello". Plain-text names do not notify on ${platformInfo.displayName},`,
+        'and peer bots will not treat the message as addressed to them.',
         ...renderSelfMention(platformInfo, self),
       ]
     case 'at-username':
       return [
         `To mention someone in your reply, use Telegram syntax \`@username\` in plain text.`,
-        `Telegram usernames are a SEPARATE field from \`authorId\`. The \`<@id>\` tokens you see in the participants`,
-        'block below are a typeclaw convention for parsing inbound mentions — do not echo them back as outbound mentions.',
-        'If you only know an author by their display name and they have no `@username`, address them by display name',
-        'and they will see the message via the reply context.',
+        'Telegram usernames are a SEPARATE field from `authorId`; `<@id>` tokens',
+        'in participants are inbound-only typeclaw markers, so do not echo them back as outbound mentions.',
+        'If no `@username` is known, use display name; reply context carries it.',
         ...renderSelfMention(platformInfo, self),
       ]
     case 'alias':
       return [
         'KakaoTalk has no in-band mention syntax. To address someone, just type their display name as plain text;',
-        "the participants block below shows display names. To get the BOT's attention from outside this session,",
-        "a user types one of the bot's configured aliases — they do not need to copy any token from the participants list.",
-        `The \`<@id>\` tokens in the participants block below are a typeclaw convention for parsing inbound mentions —`,
-        'do not echo them back as outbound mentions; KakaoTalk would render them as literal text.',
+        "the participants block shows display names. Users get the bot's attention with configured aliases,",
+        'not copied tokens. Any `<@id>` marker is inbound-only typeclaw convention;',
+        'do not echo them back as outbound mentions or KakaoTalk renders them literally.',
       ]
   }
 }
@@ -672,8 +610,7 @@ function renderSelfMention(platformInfo: PlatformInfo, self: ChannelSelfIdentity
       return [
         '',
         `**You are ${forms} on this ${platformInfo.displayName} workspace.** When a message`,
-        `contains your id, it is addressed to YOU — treat it as a mention of yourself, not of`,
-        'someone else, and do not skip the turn as "addressed to another user".',
+        'contains your id, it is addressed to YOU — do not skip it as "addressed to another user".',
       ]
     }
     case 'at-username': {
@@ -681,8 +618,7 @@ function renderSelfMention(platformInfo: PlatformInfo, self: ChannelSelfIdentity
       return [
         '',
         `**You are \`@${self.username}\` on ${platformInfo.displayName}.** A message mentioning`,
-        `\`@${self.username}\` is addressed to YOU — treat it as a mention of yourself, not of`,
-        'someone else.',
+        `\`@${self.username}\` is addressed to YOU — treat it as self-mention.`,
       ]
     }
     case 'alias':
@@ -727,11 +663,8 @@ function renderParticipants(
   }
   lines.push(
     '',
-    'This list is **bounded** — it shows only the 10 most recently active',
-    'authors in this conversation, all of whom have posted in the last 7',
-    'days. Older or less recent authors are not shown even if they exist.',
-    'This is **not** the full guild member list, and **not** an audit log',
-    'of everyone who ever spoke here.',
+    'This list is **bounded**: only the 10 most recent authors from the last',
+    '7 days. It is **not** the full guild member list or an audit log.',
     '',
     ...renderParticipantsTrailing(platformInfo),
   )
@@ -774,26 +707,21 @@ function renderParticipantsTrailing(platformInfo: PlatformInfo): string[] {
   switch (platformInfo.mentionMode) {
     case 'angle-id':
       return [
-        "If a sender in the current turn isn't in the list, you can still",
-        'address them — `<@authorId>` works for any author you have seen,',
-        'even once. The list is a convenience for "who\'s been around lately,"',
-        'not an exhaustive directory.',
+        "If a current sender isn't listed, you can still address them —",
+        '`<@authorId>` works for any author you have seen once. The list is',
+        'recent-context convenience, not an exhaustive directory.',
       ]
     case 'at-username':
       return [
-        "If a sender in the current turn isn't in the list, you can still",
-        'address them by `@username` — Telegram usernames are a SEPARATE field',
-        'from the numeric `authorId` shown in parentheses above, and not every',
-        'user has one. The list is a convenience for "who\'s been around',
-        'lately," not an exhaustive directory.',
+        "If a current sender isn't listed, address by `@username` when known.",
+        'Telegram usernames are a SEPARATE field from numeric `authorId`, and',
+        'not every user has one. The list is recent context, not a directory.',
       ]
     case 'alias':
       return [
-        "If a sender in the current turn isn't in the list, you can still",
-        'address them by display name as plain text — KakaoTalk has no in-band',
-        'mention syntax, so the `authorId` shown in parentheses above is for',
-        'your reference only and must not be echoed back. The list is a',
-        'convenience for "who\'s been around lately," not an exhaustive directory.',
+        "If a current sender isn't listed, address by display name as plain text.",
+        'KakaoTalk has no in-band mention syntax; `authorId` is reference only',
+        'and must not be echoed back. The list is recent context, not a directory.',
       ]
   }
 }
