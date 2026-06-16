@@ -45,7 +45,9 @@ function windowsPipePath(): string {
     typeof process.getuid === 'function'
       ? `uid:${process.getuid()}`
       : `user:${process.env.USERDOMAIN ?? ''}\\${userInfo().username}`
-  const scopedHome = resolve(homeRoot()).toLocaleLowerCase()
+  // Locale-invariant lowercasing: toLocaleLowerCase under e.g. tr-TR would map
+  // 'I' to a dotless 'ı', hashing the same path differently per process locale.
+  const scopedHome = resolve(homeRoot()).toLowerCase()
   const hash = createHash('sha256').update(`${uid}\0${scopedHome}`).digest('hex').slice(0, 32)
 
   // Node's net named-pipe API has no portable ACL hook. TypeClaw accepts that
