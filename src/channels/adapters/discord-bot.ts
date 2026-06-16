@@ -48,6 +48,7 @@ import {
   registerCommands,
   type DiscordCommandDeclaration,
 } from './discord-bot-slash-commands'
+import { addDiscordMentionHints, type DiscordMentionUser } from './mention-hints'
 
 // One declared slash command per logical agent gesture. /stop maps to the
 // existing channel-command of the same name in the router. Adding new
@@ -507,6 +508,7 @@ type DiscordRawHistoryMessage = {
   author: { id: string; username?: string; global_name?: string | null; bot?: boolean }
   content: string
   timestamp: string
+  mentions?: DiscordMentionUser[]
   message_reference?: { message_id?: string; channel_id?: string }
   attachments?: DiscordFile[]
   embeds?: DiscordGatewayEmbed[]
@@ -597,7 +599,7 @@ function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | nu
   // never resolve them. Mirror the classifier's splitInbound: bake placeholders
   // into text and carry the structured attachments so the router can resolve ids.
   const attachments = describeDiscordMedia(source)
-  const text = bodyOf(source)
+  const text = addDiscordMentionHints(bodyOf(source), mentionUserMap(source.mentions), { botUserId })
   return {
     externalMessageId: msg.id,
     authorId: source.author.id,
@@ -615,6 +617,10 @@ function bodyOf(msg: DiscordRawHistoryMessage): string {
   if (attachments.length === 0) return msg.content
   const placeholders = attachments.map(renderPlaceholder).join('\n')
   return msg.content === '' ? placeholders : `${msg.content}\n${placeholders}`
+}
+
+function mentionUserMap(mentions: readonly DiscordMentionUser[] | undefined): Map<string, DiscordMentionUser> {
+  return new Map((mentions ?? []).map((user) => [user.id, user]))
 }
 
 function clampLimit(requested: number, max: number): number {
@@ -932,9 +938,10 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         return
       }
 
+      const hintedText = addDiscordMentionHints(verdict.payload.text, mentionUserMap(event.mentions), { botUserId })
       const replyMessageId = event.message_reference?.message_id
       const referenceResult = await enrichDiscordMessageReferences({
-        text: verdict.payload.text,
+        text: hintedText,
         ...(replyMessageId !== undefined
           ? { reply: { channelId: event.message_reference?.channel_id ?? event.channel_id, messageId: replyMessageId } }
           : {}),
@@ -950,8 +957,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       })
       const payload =
         referenceResult.referenceContext === undefined
-          ? verdict.payload
-          : { ...verdict.payload, referenceContext: referenceResult.referenceContext }
+          ? { ...verdict.payload, text: hintedText }
+          : { ...verdict.payload, text: hintedText, referenceContext: referenceResult.referenceContext }
 
       const routedTag = await formatChannelTag(payload.workspace, payload.chat)
       logger.info(
