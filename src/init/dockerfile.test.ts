@@ -1611,6 +1611,12 @@ describe('network egress entrypoint shim', () => {
     expect(shim.match(/^[ \t]*link_configured_symlinks$/gm)?.length).toBe(2)
   })
 
+  test('sets GWS_CONFIG_HOME without changing global XDG_CONFIG_HOME so git config lookup is untouched', () => {
+    const dockerfile = buildDockerfile(dockerfileSchema.parse({}))
+    expect(dockerfile).not.toContain('ENV XDG_CONFIG_HOME=')
+    expect(dockerfile).toContain('ENV GWS_CONFIG_HOME=/agent/workspace/.config/gws')
+  })
+
   test('also symlinks Claude Code .credentials.json into /agent/.typeclaw/home/ so OAuth credentials survive container restarts', () => {
     const shim = buildEntrypointShim()
     // Claude Code rotates tokens in-place by rewriting .credentials.json on
@@ -1747,6 +1753,7 @@ exit 0
     // Fake Xvfb that exits 1 the instant it starts. The shim's
     // `kill -0 $xvfb_pid` check should detect this on the next poll
     // iteration and `exit 1` with a clear stderr line.
+    await symlinkHostBinaries(bindir, ['mkdir', 'ln', 'readlink'])
     await writeShellScript(
       join(bindir, 'Xvfb'),
       `#!/bin/sh
@@ -1754,7 +1761,8 @@ exit 1
 `,
     )
 
-    const shim = buildEntrypointShim()
+    const testSocketPath = join(workdir, 'x11-socket-X99')
+    const shim = buildEntrypointShim().replaceAll('/tmp/.X11-unix/X99', testSocketPath)
     const failShimPath = join(workdir, 'shim-fail.sh')
     await writeShellScript(failShimPath, shim)
 
@@ -1783,7 +1791,7 @@ exit 1
 
     const noXvfbBin = join(workdir, 'bin-link-test')
     await mkdir(noXvfbBin, { recursive: true })
-    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln'])
+    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln', 'readlink'])
     await writeShellScript(join(noXvfbBin, 'bun'), `#!/bin/sh\nexit 0\n`)
     await writeShellScript(
       join(noXvfbBin, 'setpriv'),
@@ -1829,7 +1837,7 @@ exec "$@"
 
     const noXvfbBin = join(workdir, 'bin-idem-test')
     await mkdir(noXvfbBin, { recursive: true })
-    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln'])
+    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln', 'readlink'])
     await writeShellScript(join(noXvfbBin, 'bun'), `#!/bin/sh\nexit 0\n`)
     await writeShellScript(
       join(noXvfbBin, 'setpriv'),
@@ -1874,7 +1882,7 @@ exec "$@"
 
     const bin = join(workdir, 'bin-sym')
     await mkdir(bin, { recursive: true })
-    await symlinkHostBinaries(bin, ['mkdir', 'ln'])
+    await symlinkHostBinaries(bin, ['mkdir', 'ln', 'readlink'])
     // Fake `bun`: pass `-e <script>` through to the real bun (link_configured_symlinks
     // needs a real JSON parser + fs), but turn the final `bun run typeclaw` exec
     // into a no-op so the shim ends cleanly without launching the agent.
@@ -1922,7 +1930,7 @@ exec "$@"
 
     const bin = join(workdir, 'bin-noclobber')
     await mkdir(bin, { recursive: true })
-    await symlinkHostBinaries(bin, ['mkdir', 'ln'])
+    await symlinkHostBinaries(bin, ['mkdir', 'ln', 'readlink'])
     await writeShellScript(join(bin, 'bun'), `#!/bin/sh\nif [ "$1" = "-e" ]; then exec ${realBun} "$@"; fi\nexit 0\n`)
     await writeShellScript(
       join(bin, 'setpriv'),
@@ -1965,7 +1973,7 @@ exec "$@"
     // image so the helper's mkdir+ln calls work for the same reason.
     const isolatedBin = join(workdir, 'bin-no-xvfb')
     await mkdir(isolatedBin, { recursive: true })
-    await symlinkHostBinaries(isolatedBin, ['mkdir', 'ln'])
+    await symlinkHostBinaries(isolatedBin, ['mkdir', 'ln', 'readlink'])
     await writeShellScript(
       join(isolatedBin, 'bun'),
       `#!/bin/sh\necho "DISPLAY: \${DISPLAY:-<unset>}" > "${logfile}"\nexit 0\n`,
