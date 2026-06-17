@@ -358,9 +358,9 @@ set -eu
 # The persist root lives under /agent/.typeclaw/home/ (bind-mounted
 # from the agent folder via the -v <cwd>:/agent flag in start.ts).
 # Namespacing under .typeclaw/ keeps the agent's top-level layout clean and reserves
-# a system-owned subtree we can extend later (e.g. ~/.gemini/,
-# ~/.config/<tool>/) without colliding with user files. The directory
-# is gitignored by buildGitignore() so credentials never enter history.
+# a system-owned subtree we can extend later (e.g. ~/.gemini/) without
+# colliding with user files. The directory is gitignored by buildGitignore()
+# so credentials never enter history.
 #
 # Three invariants this function enforces:
 #
@@ -372,11 +372,11 @@ set -eu
 #    if a previous container life happened to write a real ~/.codex/
 #    dir before this code shipped.
 #
-# 2. We symlink the FILE, not the directory. Codex writes other state
-#    to ~/.codex/ over time (history.jsonl, log/, config.toml). Linking
-#    only auth.json keeps the persistence scope tight to credentials;
-#    history/logs stay ephemeral by design. Future credentials get
-#    added file-by-file here, not by widening to a directory link.
+# 2. We symlink credential FILES for tools whose config dirs are mostly
+#    scratch/history (Codex, Claude). We do not redirect global config
+#    locations such as XDG_CONFIG_HOME or ~/.config here because tools like
+#    git also read config from those paths; first-party bundles that need
+#    persistence should set their own app-specific env vars instead.
 #
 # 3. We mkdir -p the target's parent on every boot. /agent is bind-
 #    mounted, so the host-side path may exist or not depending on
@@ -1263,6 +1263,9 @@ ${fromAndHeavyLayers}
 # tiny and lets edits on the host take effect without rebuilds.
 
 ENV NODE_ENV=production
+
+# Persist first-party GWS config without changing global XDG/git config lookup.
+ENV GWS_CONFIG_HOME=/agent/workspace/.config/gws
 
 # Keep agent-messenger's fallback config dir inside workspace/ for any future
 # SDK fallback paths. TypeClaw's KakaoTalk adapter does not write there:
