@@ -253,9 +253,18 @@ describe('streamLive — live session events', () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_anything',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    // Regression: a fixed setTimeout raced the subscribe round-trip under CI
+    // load — the broadcast fired before the server wired its subscriber, the
+    // event was dropped, and the test hung to the 30s timeout. Gate on onSubscribed.
+    void subscribed.promise.then(() => {
       stream.publish({
         target: { kind: 'broadcast' },
         payload: {
@@ -276,7 +285,7 @@ describe('streamLive — live session events', () => {
           decision: 'engage',
         },
       })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
@@ -296,14 +305,22 @@ describe('streamLive — live session events', () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_anything',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    // Same subscribe-round-trip race as the well-formed inbound test above:
+    // gate the publish on onSubscribed rather than a fixed timeout.
+    void subscribed.promise.then(() => {
       stream.publish({
         target: { kind: 'broadcast' },
         payload: { kind: 'channel-inbound', adapter: 'slack' },
       })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
