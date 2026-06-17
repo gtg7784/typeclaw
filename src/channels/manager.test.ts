@@ -34,18 +34,20 @@ function deferred<T = void>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-function makeFakeAdapter(): FakeAdapter {
+function makeFakeAdapter(): FakeAdapter & { connected: boolean } {
   const adapter = {
+    connected: true,
     startCalls: 0,
     stopCalls: 0,
     async start() {
       adapter.startCalls++
+      adapter.connected = true
     },
     async stop() {
       adapter.stopCalls++
     },
     isConnected() {
-      return true
+      return adapter.connected
     },
   }
   return adapter
@@ -137,6 +139,124 @@ function recordingLogger(): {
     messages,
   }
 }
+
+describe('channel manager — connection recovery', () => {
+  test('restarts a live adapter that remains disconnected past the grace period', async () => {
+    cfg['discord-bot'] = enabledAdapterCfg()
+    let now = 1_000
+    let tick: (() => void) | null = null
+    const logger = recordingLogger()
+    const firstAdapter = makeFakeAdapter()
+    const secondAdapter = makeFakeAdapter()
+    const adapters = [firstAdapter, secondAdapter]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { DISCORD_BOT_TOKEN: 'token' },
+      logger,
+      createDiscordAdapter: () => adapters.shift()!,
+      connectionRecovery: {
+        checkIntervalMs: 10,
+        disconnectedGraceMs: 100,
+        now: () => now,
+        setInterval: (fn) => {
+          tick = fn
+          return 'timer'
+        },
+        clearInterval: () => {},
+      },
+    })
+
+    await mgr.start()
+    expect(firstAdapter.startCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(0)
+    expect(tick).not.toBeNull()
+    const runTick = () => {
+      if (tick === null) throw new Error('recovery timer was not registered')
+      tick()
+    }
+
+    firstAdapter.connected = false
+    runTick()
+    await Promise.resolve()
+    expect(firstAdapter.stopCalls).toBe(0)
+    expect(secondAdapter.startCalls).toBe(0)
+    expect(logger.messages).toContain('warn:[channels] adapter "discord-bot" is disconnected; waiting for SDK recovery')
+
+    now += 101
+    runTick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(firstAdapter.stopCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(1)
+    expect(logger.messages).toContain(
+      'warn:[channels] adapter "discord-bot" disconnected for 101ms; restarting adapter',
+    )
+
+    await mgr.stop()
+  })
+  test('does not queue duplicate recovery restarts while the first restart is pending', async () => {
+    cfg['discord-bot'] = enabledAdapterCfg()
+    let now = 1_000
+    let tick: (() => void) | null = null
+    const stopGate = deferred()
+    const firstAdapter = makeFakeAdapter()
+    firstAdapter.stop = async () => {
+      firstAdapter.stopCalls++
+      await stopGate.promise
+    }
+    const secondAdapter = makeFakeAdapter()
+    const thirdAdapter = makeFakeAdapter()
+    const adapters = [firstAdapter, secondAdapter, thirdAdapter]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { DISCORD_BOT_TOKEN: 'token' },
+      createDiscordAdapter: () => adapters.shift()!,
+      connectionRecovery: {
+        checkIntervalMs: 10,
+        disconnectedGraceMs: 100,
+        now: () => now,
+        setInterval: (fn) => {
+          tick = fn
+          return 'timer'
+        },
+        clearInterval: () => {},
+      },
+    })
+
+    await mgr.start()
+    const runTick = () => {
+      if (tick === null) throw new Error('recovery timer was not registered')
+      tick()
+    }
+
+    firstAdapter.connected = false
+    runTick()
+    now += 101
+    runTick()
+    await Promise.resolve()
+
+    expect(firstAdapter.stopCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(0)
+
+    now += 101
+    runTick()
+    await Promise.resolve()
+
+    expect(firstAdapter.stopCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(0)
+    expect(thirdAdapter.startCalls).toBe(0)
+
+    stopGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(secondAdapter.startCalls).toBe(1)
+    expect(thirdAdapter.startCalls).toBe(0)
+
+    await mgr.stop()
+  })
+})
 
 describe('channel manager — restartAdapter serialization', () => {
   test('restartAdapter stops a live github adapter before starting it again', async () => {

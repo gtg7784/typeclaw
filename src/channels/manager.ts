@@ -104,6 +104,17 @@ export type ChannelManagerOptions = {
   // unregistered. See CreateChannelRouterOptions.onReload/onRestart.
   onReload?: () => Promise<string>
   onRestart?: (ctx?: RestartCommandContext) => Promise<string>
+  // Persistent messenger SDKs usually reconnect themselves, but a host sleep/offline
+  // cycle can leave a socket half-dead forever. The manager watches live adapters
+  // and restarts one that stays disconnected past this grace period. Test seams are
+  // optional so production uses normal timers/time.
+  connectionRecovery?: {
+    checkIntervalMs?: number
+    disconnectedGraceMs?: number
+    now?: () => number
+    setInterval?: (fn: () => void, ms: number) => unknown
+    clearInterval?: (handle: unknown) => void
+  }
 }
 
 export type ChannelManager = {
@@ -132,6 +143,8 @@ type AnyAdapter =
 type AdapterEntry = {
   adapter: AnyAdapter
   credentialSignature: string
+  disconnectedSinceMs: number | null
+  recoveryRestartQueued: boolean
 }
 
 export function createChannelManager(options: ChannelManagerOptions): ChannelManager {
@@ -158,6 +171,14 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 
   const live = new Map<AdapterId, AdapterEntry>()
   const perAdapterSerial = new Map<AdapterId, Promise<unknown>>()
+  const recovery = options.connectionRecovery ?? {}
+  const recoveryCheckIntervalMs = recovery.checkIntervalMs ?? 30_000
+  const recoveryDisconnectedGraceMs = recovery.disconnectedGraceMs ?? 90_000
+  const recoveryNow = recovery.now ?? (() => Date.now())
+  const recoverySetInterval = recovery.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
+  const recoveryClearInterval =
+    recovery.clearInterval ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>))
+  let recoveryTimer: unknown = null
 
   const runSerially = <T>(name: AdapterId, op: () => Promise<T>): Promise<T> => {
     const prev = perAdapterSerial.get(name) ?? Promise.resolve()
@@ -271,7 +292,12 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     }
     try {
       await adapter.start()
-      live.set(name, { adapter, credentialSignature: signature })
+      live.set(name, {
+        adapter,
+        credentialSignature: signature,
+        disconnectedSinceMs: adapter.isConnected() ? null : recoveryNow(),
+        recoveryRestartQueued: false,
+      })
       logger.info(`[channels] adapter "${name}" started`)
       return true
     } catch (err) {
@@ -290,6 +316,54 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     } catch (err) {
       logger.error(`[channels] adapter "${name}" failed to stop: ${describe(err)}`)
     }
+  }
+
+  const checkConnectionRecovery = (): void => {
+    const now = recoveryNow()
+    for (const [name, entry] of live) {
+      if (entry.adapter.isConnected()) {
+        entry.disconnectedSinceMs = null
+        entry.recoveryRestartQueued = false
+        continue
+      }
+      if (entry.disconnectedSinceMs === null) {
+        entry.disconnectedSinceMs = now
+        logger.warn(`[channels] adapter "${name}" is disconnected; waiting for SDK recovery`)
+        continue
+      }
+      const disconnectedForMs = now - entry.disconnectedSinceMs
+      if (disconnectedForMs < recoveryDisconnectedGraceMs || entry.recoveryRestartQueued) continue
+      entry.recoveryRestartQueued = true
+      logger.warn(
+        `[channels] adapter "${name}" disconnected for ${Math.round(disconnectedForMs)}ms; restarting adapter`,
+      )
+      void runSerially(name, async () => {
+        try {
+          const current = live.get(name)
+          if (current !== entry) return
+          const currentCfg = options.channelsConfigRef()[name]
+          if (currentCfg === undefined || currentCfg.enabled === false) {
+            logger.info(`[channels] recovery restart for "${name}" skipped; adapter no longer enabled`)
+            return
+          }
+          await stopAdapter(name)
+          await startAdapter(name, currentCfg)
+        } finally {
+          if (live.get(name) === entry) entry.recoveryRestartQueued = false
+        }
+      })
+    }
+  }
+
+  const startRecoveryTimer = (): void => {
+    if (recoveryTimer !== null) return
+    recoveryTimer = recoverySetInterval(checkConnectionRecovery, recoveryCheckIntervalMs)
+  }
+
+  const stopRecoveryTimer = (): void => {
+    if (recoveryTimer === null) return
+    recoveryClearInterval(recoveryTimer)
+    recoveryTimer = null
   }
 
   return {
@@ -313,9 +387,11 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const results = await Promise.allSettled(starts)
       const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
       if (failure !== undefined) throw failure.reason
+      startRecoveryTimer()
     },
 
     async stop(): Promise<void> {
+      stopRecoveryTimer()
       for (const name of Array.from(live.keys())) await runSerially(name, () => stopAdapter(name))
       await router.stop()
     },
