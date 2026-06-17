@@ -1168,7 +1168,7 @@ function persistMigratedConfig(cwd: string, json: unknown, applied: readonly Mig
   }
 }
 
-export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
+export type ValidateConfigResult = { ok: true; warnings?: string[] } | { ok: false; reason: string }
 
 // Missing file → ok (matches `loadMounts` in src/container/up.ts; `isInitialized`
 // is the dedicated check for "not initialized"). Present but invalid → fail, so
@@ -1200,6 +1200,18 @@ export function validateConfig(cwd: string, options: ValidateConfigOptions = {})
   const parsed = parseConfigJson(raw, { migrate: true, persistTarget: cwd })
   if (!parsed.ok) return parsed
 
+  const allowUnsafeAppend = process.env[ALLOW_UNSAFE_DOCKER_APPEND_ENV] === '1'
+  const warnings: string[] = []
+  const appendLines = parsed.config.docker.file.append
+  for (let i = 0; i < appendLines.length; i++) {
+    const check = validateDockerfileAppendLine(appendLines[i]!)
+    if (!check.ok) {
+      if (check.kind === 'semantic' && allowUnsafeAppend) continue
+      return { ok: false, reason: `docker.file.append[${i}] ${check.reason}` }
+    }
+    if (check.warning) warnings.push(`docker.file.append[${i}] ${check.warning}`)
+  }
+
   if (!options.skipMounts) {
     for (const mount of parsed.config.mounts) {
       const check = validateMount(mount, cwd)
@@ -1207,7 +1219,7 @@ export function validateConfig(cwd: string, options: ValidateConfigOptions = {})
     }
   }
 
-  return { ok: true }
+  return warnings.length > 0 ? { ok: true, warnings } : { ok: true }
 }
 
 export type ParseConfigJsonResult = { ok: true; config: Config } | { ok: false; reason: string }
@@ -1300,6 +1312,181 @@ export function validateMount(mount: Mount, cwd: string): ValidateConfigResult {
         reason: `${label}: path ${resolved} is not writable (declare readOnly: true if read-only access is intended)`,
       }
     }
+  }
+
+  return { ok: true }
+}
+
+// Host env (not config) on purpose: an in-container agent can edit its own
+// typeclaw.json but cannot set the env of the host `typeclaw start` that runs
+// this gate, so it can never waive its own footgun. Only relaxes SEMANTIC
+// blocks; structural blocks always fire (they break Dockerfile generation).
+const ALLOW_UNSAFE_DOCKER_APPEND_ENV = 'TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND'
+
+// FROM/ENTRYPOINT/CMD/MAINTAINER are intentionally excluded — see the
+// structural blocks in validateDockerfileAppendLine for why.
+const ALLOWED_APPEND_INSTRUCTIONS = new Set([
+  'RUN',
+  'ENV',
+  'ARG',
+  'LABEL',
+  'COPY',
+  'ADD',
+  'USER',
+  'WORKDIR',
+  'SHELL',
+  'EXPOSE',
+  'VOLUME',
+  'STOPSIGNAL',
+  'HEALTHCHECK',
+  'ONBUILD',
+])
+
+// Decode primitives that, paired with dynamic execution on the same line, form
+// the "decode an opaque blob and run it" anti-pattern that bricked a real build
+// (an agent base64-decoded the bash entrypoint shim and fed it to python3
+// exec). Matching is substring/case-insensitive — these are code tokens the
+// agent emits, not natural-language, so English literals are correct here (cf.
+// the protocol-token exception in AGENTS.md).
+const DECODE_PRIMITIVES = ['base64', 'b64decode', 'atob(', 'unhexlify', '.fromhex(', 'xxd -r']
+
+// True dynamic-execution sinks — language constructs that run a STRING as code.
+// Deliberately NOT including interpreter flags like `python3 -c`/`node -e`: a
+// benign `python3 -c "print(base64.b64encode(...))"` legitimately mentions a
+// decode primitive without ever executing the decoded bytes. The footgun is
+// decode + a real exec sink (or decode piped to an interpreter, below).
+const EXEC_PRIMITIVES = ['exec(', 'eval(', 'new function(', 'function(']
+
+// Decoded stdout piped straight into an interpreter: `base64 -d ... | sh`,
+// `... | python3`, etc. The pipe is the execution step here, so it pairs with
+// DECODE_PRIMITIVES independently of the EXEC_PRIMITIVES sinks above.
+const DECODE_PIPED_TO_INTERPRETER =
+  /\|\s*(?:sudo\s+)?(?:ba)?sh\b|\|\s*(?:sudo\s+)?python3?\b|\|\s*(?:sudo\s+)?(?:node|perl|ruby)\b/i
+
+// Risky-but-legitimate operator patterns: piping a remote script straight into
+// a shell, or ADDing a remote URL. Common enough in real build steps that a
+// hard block would frustrate power users, dangerous enough to flag.
+const APPEND_WARN_PATTERNS: Array<{ test: RegExp; note: string }> = [
+  {
+    test: /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b/i,
+    note: 'pipes a remote script directly into a shell (curl|bash); verify the source is trusted',
+  },
+  {
+    test: /<\(\s*(?:curl|wget)\b/i,
+    note: 'executes a remote script via process substitution; verify the source is trusted',
+  },
+  {
+    test: /^ADD\s+https?:\/\//i,
+    note: 'ADD of a remote URL fetches an unpinned artifact at build time; prefer a pinned COPY or checksum-verified RUN',
+  },
+]
+
+export type AppendLineCheck =
+  | { ok: true; warning?: string }
+  // `structural` blocks are unconditional (they break Dockerfile generation);
+  // `semantic` blocks are waivable via the host env override.
+  | { ok: false; reason: string; kind: 'structural' | 'semantic' }
+
+// Pure, side-effect-free validator for ONE docker.file.append entry. The newline
+// rejection stays in the zod schema (dockerfileLineSchema) so it fires on every
+// parse including the agent's own config-write guard; this adds the contextual
+// policy the schema can't express cheaply. Returns the first problem found.
+export function validateDockerfileAppendLine(line: string): AppendLineCheck {
+  const trimmed = line.trim()
+
+  if (trimmed === '') {
+    return { ok: false, reason: 'is empty or whitespace-only', kind: 'structural' }
+  }
+
+  // A trailing backslash is a line continuation: it would merge the generated
+  // ENTRYPOINT (spliced right after the append block) into this instruction.
+  if (/\\\s*$/.test(line)) {
+    return {
+      ok: false,
+      reason:
+        'ends with a line-continuation backslash, which would swallow the generated ENTRYPOINT; keep each entry self-contained',
+      kind: 'structural',
+    }
+  }
+
+  // Heredoc syntax spans multiple lines by definition and cannot work in a
+  // single spliced entry — it would consume the following generated lines.
+  if (/<<-?\s*['"]?\w/.test(trimmed)) {
+    return {
+      ok: false,
+      reason: 'uses heredoc syntax (<<EOF), which cannot be expressed as a single Dockerfile line',
+      kind: 'structural',
+    }
+  }
+
+  if (trimmed.startsWith('#')) {
+    // Parser directives (`# syntax=`, `# escape=`) only have meaning at the top
+    // of a Dockerfile; spliced before ENTRYPOINT they are at best inert and at
+    // worst confusing. Plain comments are fine.
+    if (/^#\s*(syntax|escape|check)\s*=/i.test(trimmed)) {
+      return {
+        ok: false,
+        reason: 'is a parser directive (# syntax=/# escape=), which is only valid at the top of a Dockerfile',
+        kind: 'structural',
+      }
+    }
+    return { ok: true }
+  }
+
+  const instruction = trimmed.split(/\s+/, 1)[0]?.toUpperCase() ?? ''
+
+  if (instruction === 'FROM') {
+    return {
+      ok: false,
+      reason: 'starts a new build stage (FROM), discarding everything TypeClaw layered before it',
+      kind: 'structural',
+    }
+  }
+  if (instruction === 'ENTRYPOINT' || instruction === 'CMD') {
+    return {
+      ok: false,
+      reason: `overrides the container ${instruction}, which TypeClaw owns (the entrypoint shim is appended right after this block)`,
+      kind: 'structural',
+    }
+  }
+  if (!ALLOWED_APPEND_INSTRUCTIONS.has(instruction)) {
+    return {
+      ok: false,
+      reason: `does not begin with a recognized Dockerfile instruction (got "${instruction}")`,
+      kind: 'structural',
+    }
+  }
+
+  const lower = trimmed.toLowerCase()
+
+  // The actual incident: mutating TypeClaw's own entrypoint shim. This is never
+  // a supported customization surface — entrypoint changes belong in TypeClaw
+  // source, not in a build-time patch script.
+  if (lower.includes('typeclaw-entrypoint')) {
+    return {
+      ok: false,
+      reason:
+        'references the TypeClaw-owned entrypoint (typeclaw-entrypoint); patching it from docker.file.append is unsupported and brittle',
+      kind: 'semantic',
+    }
+  }
+
+  // Decode-an-opaque-blob-and-execute-it. A benign decode (encoding output,
+  // writing a file) or a bare `python3 -c "print(...)"` both pass; only decode
+  // PAIRED with a real exec sink — or piped into an interpreter — is blocked.
+  const hasDecode = DECODE_PRIMITIVES.some((p) => lower.includes(p))
+  const hasExec = EXEC_PRIMITIVES.some((p) => lower.includes(p)) || DECODE_PIPED_TO_INTERPRETER.test(lower)
+  if (hasDecode && hasExec) {
+    return {
+      ok: false,
+      reason:
+        'decodes an opaque payload and executes it (e.g. base64 + exec/eval), an obfuscated-code anti-pattern that has bricked builds',
+      kind: 'semantic',
+    }
+  }
+
+  for (const { test, note } of APPEND_WARN_PATTERNS) {
+    if (test.test(trimmed)) return { ok: true, warning: note }
   }
 
   return { ok: true }

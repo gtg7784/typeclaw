@@ -3,7 +3,9 @@ import { start, type StartResult } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
 
-export type AgentResult<T> = { name: string; ok: true; data: T } | { name: string; ok: false; reason: string }
+export type AgentResult<T> =
+  | { name: string; ok: true; data: T; warnings?: string[] }
+  | { name: string; ok: false; reason: string }
 
 export type StartSuccess = Extract<StartResult, { ok: true }>
 
@@ -55,7 +57,7 @@ async function runOne(
   try {
     const data = await start({ cwd, preferredHostPort, forceBuild, cliEntry })
     if (!data.ok) return { name, ok: false, reason: data.reason }
-    return { name, ok: true, data }
+    return { name, ok: true, data, warnings: validated.warnings }
   } catch (error) {
     return { name, ok: false, reason: error instanceof Error ? error.message : String(error) }
   }

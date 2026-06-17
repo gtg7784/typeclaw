@@ -222,6 +222,19 @@ export function successLine(message: string): string {
   return `${c.green('●')} ${message}`
 }
 
+export function warnLine(message: string): string {
+  return `${c.yellow('⚠')} ${message}`
+}
+
+// Single host-side sink for non-fatal validateConfig warnings (e.g. a
+// curl|bash docker.file.append line). Every CLI gate that calls validateConfig
+// before a start/rebuild routes through this so no path silently drops them.
+export function reportConfigWarnings(warnings: string[] | undefined): void {
+  for (const warning of warnings ?? []) {
+    console.warn(warnLine(warning))
+  }
+}
+
 // The exact JSON manifest a user pastes into
 // https://api.slack.com/apps → From a manifest. Kept as a typed object so
 // the file stays a single source of truth and `JSON.stringify` guarantees
