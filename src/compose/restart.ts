@@ -62,7 +62,7 @@ async function runOne(
     onStopped()
     const started = await start({ cwd, preferredHostPort, forceBuild, cliEntry })
     if (!started.ok) return { name, ok: false, reason: started.reason }
-    return { name, ok: true, data: { stop: stopped, start: started } }
+    return { name, ok: true, data: { stop: stopped, start: started }, warnings: validated.warnings }
   } catch (error) {
     return { name, ok: false, reason: error instanceof Error ? error.message : String(error) }
   }

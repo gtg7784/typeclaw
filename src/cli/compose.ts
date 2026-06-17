@@ -325,7 +325,8 @@ function makeBoard(header: string): Board {
 function formatStartDone<T extends { alreadyRunning?: boolean; hostPort: number }>(result: AgentResult<T>): string {
   if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
   const verb = result.data.alreadyRunning ? 'already running' : 'started'
-  return `${c.green('✔')} ${verb} on host port ${c.cyan(String(result.data.hostPort))}`
+  const head = `${c.green('✔')} ${verb} on host port ${c.cyan(String(result.data.hostPort))}`
+  return appendWarnings(head, result.warnings)
 }
 
 function formatStopDone<T extends { running: boolean }>(result: AgentResult<T>): string {
@@ -336,7 +337,15 @@ function formatStopDone<T extends { running: boolean }>(result: AgentResult<T>):
 
 function formatRestartDone<T extends { start: { hostPort: number } }>(result: AgentResult<T>): string {
   if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
-  return `${c.green('✔')} restarted on host port ${c.cyan(String(result.data.start.hostPort))}`
+  const head = `${c.green('✔')} restarted on host port ${c.cyan(String(result.data.start.hostPort))}`
+  return appendWarnings(head, result.warnings)
+}
+
+// Surface non-fatal validateConfig warnings under the per-agent compose status
+// line so compose start/restart don't silently drop what `typeclaw start` prints.
+function appendWarnings(head: string, warnings: string[] | undefined): string {
+  if (warnings === undefined || warnings.length === 0) return head
+  return [head, ...warnings.map((w) => `  ${c.yellow('⚠')} ${w}`)].join('\n')
 }
 
 function emitComposeDoctor(report: ComposeDoctorReport, opts: { verbose: boolean; json: boolean }): void {
