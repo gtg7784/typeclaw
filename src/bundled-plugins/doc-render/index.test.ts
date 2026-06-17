@@ -77,6 +77,13 @@ describe('doc-render theme library (lib.typ)', () => {
       expect(raw).not.toContain(`"${systemOnly}"`)
     }
   })
+
+  test('keeps the running header safe when the title is omitted', async () => {
+    const raw = await readFile(templateLibPath(), 'utf8')
+
+    expect(raw).toContain('#_eyebrow(spec, if title != none { title } else { "" })')
+    expect(raw).not.toContain('#_eyebrow(spec, title) #h(1fr)')
+  })
 })
 
 describe('typeclaw-render-pdf skill', () => {

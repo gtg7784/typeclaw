@@ -255,7 +255,7 @@
     header: context {
       if spec.header and counter(page).get().first() > 1 {
         block(width: 100%)[
-          #_eyebrow(spec, title) #h(1fr) #_eyebrow(spec, if author != none { author } else { "" })
+          #_eyebrow(spec, if title != none { title } else { "" }) #h(1fr) #_eyebrow(spec, if author != none { author } else { "" })
           #v(-0.5em)
           #line(length: 100%, stroke: 0.5pt + _hair(spec))
         ]
