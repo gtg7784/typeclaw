@@ -1,26 +1,29 @@
 ---
 name: typeclaw-render-pdf
-description: "The ONLY supported way to render Markdown into a polished, professional PDF (and optionally attach it to a channel). Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, render report, export document, anything a human would want to download, print, or forward, including a researcher's report file shipped as a Slack/Discord attachment. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'render report', 'export document', 'the report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부', '리포트', '보고서'. Provided by the bundled `doc-render` plugin: a small Typst toolchain is installed on first use via `bun add` (no PDF library is baked into the image), and a bundled render script does the compile. Handles CJK/Korean/Japanese/Chinese: CJK fonts are opt-in, so if the output has tofu (□□□) boxes it tells you to enable `docker.file.cjkFonts` and restart, then regenerates — it never auto-downloads a font. Also load before saying you cannot produce PDFs — you can. NEVER build a PDF with jsPDF, pdfkit, a canvas text dump, a headless-browser raw-text print, or Python ReportLab — those produce unrendered markdown and broken CJK; this skill is the only correct path. Covers the one-time install, the styled wrapper, the render command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead; doc-render produces documents, it does not read them."
+description: "The ONLY supported way to render Markdown into a polished, professional PDF (and optionally attach it to a channel). Load this whenever you need to deliver a document as a PDF rather than raw markdown — reports, summaries, briefs, meeting notes, docs, render report, export document, anything a human would want to download, print, or forward, including a researcher's report file shipped as a Slack/Discord attachment. Triggers: 'make a PDF', 'export to PDF', 'markdown to PDF', 'PDF report', 'render report', 'export document', 'the report', 'attach the report', 'send me a PDF', 'as a PDF', 'turn this into a document', 'make it look good', 'beautiful PDF', 'nicer PDF', a researcher/subagent result you want to ship as a file, 'PDF로', 'PDF로 만들어', 'PDF로 변환', 'PDF 첨부', '리포트', '보고서', '예쁘게'. Provided by the bundled `doc-render` plugin: a small Typst toolchain is installed on first use via `bun add` (no PDF library is baked into the image), a bundled themed report library does the styling, and a bundled render script does the compile. The library ships four polished themes (editorial / modern / report / minimal) so the output looks deliberately designed, not like a default-template export. Handles CJK/Korean/Japanese/Chinese: CJK fonts are opt-in, so if the output has tofu (□□□) boxes it tells you to enable `docker.file.cjkFonts` and restart, then regenerates — it never auto-downloads a font. Also load before saying you cannot produce PDFs — you can. NEVER build a PDF with jsPDF, pdfkit, a canvas text dump, a headless-browser raw-text print, or Python ReportLab — those produce unrendered markdown and broken CJK; this skill is the only correct path. Covers the one-time install, picking a theme, the render command, and how to attach the PDF to Slack/Discord/Telegram/KakaoTalk. For operating on EXISTING PDFs (merge, split, extract text, fill forms), this is not the skill — use pypdf/qpdf instead; doc-render produces documents, it does not read them."
 ---
 
 # typeclaw-render-pdf
 
 You can produce professional PDFs from Markdown. The bundled `doc-render` plugin
-ships the render script; the only thing installed on demand is the
-[Typst](https://typst.app) compiler — a single npm package the agent `bun add`s
-into its own `node_modules` the **first time** you need a PDF, then reuses. No
-Pandoc, no LaTeX, no headless browser, and no PDF toolchain baked into the image.
+ships two things: a **themed report library** (`lib.typ`) that does all the
+styling, and a **render script** that does the compile. The only thing installed
+on demand is the [Typst](https://typst.app) compiler — a single npm package the
+agent `bun add`s into its own `node_modules` the **first time** you need a PDF,
+then reuses. No Pandoc, no LaTeX, no headless browser, no PDF toolchain baked
+into the image.
 
-The flow is: **(1)** install the compiler once (`bun add` — it lands in the
-agent's `node_modules`, surviving restarts), **(2)** write a styled `.typ`
-wrapper that reads your Markdown, **(3)** run the bundled render script. If a
-channel asked for the PDF, attach the result with `channel_send`.
+The flow is: **(1)** install the compiler once (`bun add`), **(2)** have your
+Markdown ready, **(3)** copy the theme library next to it and write a tiny
+4-line wrapper that picks a **theme**, **(4)** run the render script. If a channel
+asked for the PDF, attach the result with `channel_send`.
 
-You do **not** need to learn Typst markup. The
-[`cmarker`](https://typst.app/universe/package/cmarker/) package renders your
-CommonMark (headings, lists, tables, code, blockquotes, footnotes, links,
-images). The wrapper only sets _styling_ — fonts, margins, headings, page numbers
-— so the output looks deliberate, not like a default-template export.
+You do **not** write Typst markup or hand-style anything. The library's
+`report` template styles every Markdown element — headings, lists, tables, code,
+quotes, links, figures — and adds a cover, running header, and page footer. The
+[`cmarker`](https://typst.app/universe/package/cmarker/) package converts your
+CommonMark to Typst; the theme makes it look designed. **Your only real choice is
+which theme fits the document.**
 
 > **This is the only supported way to make a PDF from Markdown in TypeClaw.**
 > Do **not** reach for `jsPDF`, `pdfkit`, a `<canvas>` text dump, a
@@ -34,7 +37,9 @@ images). The wrapper only sets _styling_ — fonts, margins, headings, page numb
 
 - A research report, brief, or summary the user wants as a downloadable file.
 - A subagent (e.g. the `researcher`) handed you a `research-<slug>.md` to ship as a PDF.
-- Any channel message asking for "a PDF" / "the report attached" / "PDF로 보내줘".
+- Any channel message asking for "a PDF" / "the report attached" / "예쁘게 PDF로".
+- Anyone complaining a previous PDF looked "plain" — switch theme and/or follow
+  the design tips below; do not hand-roll a new styling system.
 
 When plain markdown in chat is fine, **don't** make a PDF. This is for when a
 _file_ is the deliverable.
@@ -52,11 +57,9 @@ this only runs once per container life:
 bun add @myriaddreamin/typst-ts-node-compiler@0.7.0
 ```
 
-The `@0.7.0` pin embeds Typst 0.14.2 and keeps the toolchain reproducible — a
-future npm release can't silently change the embedded Typst version or the API
-the render script depends on. If you forget this step, the render script in
-Step 3 stops with the exact `bun add` line to run, so you can also just try the
-render and follow its guidance.
+The `@0.7.0` pin embeds Typst 0.14.2 and keeps the toolchain reproducible. If you
+forget this step, the render script in Step 3 stops with the exact `bun add` line
+to run, so you can also just try the render and follow its guidance.
 
 > **Where it goes:** the agent's own `node_modules` — the canonical home for
 > executable dependencies, gitignored, not user-facing. Do **not** create a
@@ -67,80 +70,92 @@ render and follow its guidance.
 
 Use an existing markdown file (yours or a subagent's), or `write` your content to
 a markdown file. Standard CommonMark plus tables and footnotes all work. Put the
-`.md` and the `.typ` (Step 2) in the same directory so the wrapper's relative
-`read("...")` resolves — any agent-writable directory works (`workspace/`,
-`public/`, `mounts/`, or wherever the source `.md` already lives, e.g. a
-researcher's report under `public/`). There is no required directory; keep the
-two files together and run the render from there.
+`.md`, the copied `lib.typ`, and the `.typ` wrapper (Step 2) in the **same
+directory** so the wrapper's relative `read("...")` and `#import "lib.typ"` both
+resolve. Any agent-writable directory works (`workspace/`, `public/`, `mounts/`,
+or wherever the source `.md` already lives, e.g. a researcher's report under
+`public/`). There is no required directory; keep the three files together and run
+the render from there.
 
-## Step 2 — write the styled wrapper
+## Step 2 — pick a theme and write the wrapper
 
-`write` a `.typ` next to your markdown, pointing `read("...")` at the markdown
-filename. The wrapper below is a clean, professional **starting point** — not a
-fixed template. Design the document to fit its content and audience: a dense
-technical brief wants tighter margins than an airy exec summary; a launch report
-might open with a cover banner. Adjust fonts, spacing, and structure freely, and
-reach for the **Rich elements** palette below when plain prose isn't enough.
+First, **copy the bundled theme library** next to your markdown (Typst's
+workspace sandbox only resolves imports under the render's working directory, so
+the library must sit beside the wrapper — an absolute import from outside won't
+resolve):
 
-```typst
-#set document(title: "Report")
-#set page(
-  paper: "a4",
-  margin: (x: 2.5cm, y: 2.75cm),
-  numbering: "1",
-  footer: context align(center, text(size: 9pt, fill: luma(120))[
-    #counter(page).display("1 / 1", both: true)
-  ]),
-)
-#set text(font: ("Libertinus Serif", "New Computer Modern", "Noto Serif CJK KR"), size: 11pt, lang: "en")
-#set par(justify: true, leading: 0.68em, spacing: 1.1em)
-
-#show heading: set text(weight: "semibold")
-#show heading.where(level: 1): it => block(width: 100%, above: 1.4em, below: 0.9em)[
-  #text(size: 1.5em, it.body)
-  #v(-0.4em)
-  #line(length: 100%, stroke: 0.5pt + luma(200))
-]
-#show link: it => text(fill: rgb("#1a56db"), underline(it))
-#show quote.where(block: true): it => block(
-  inset: (left: 1em), stroke: (left: 2pt + luma(200)),
-  text(style: "italic", fill: luma(80), it.body),
-)
-#show raw.where(block: true): it => block(
-  fill: luma(245), inset: 8pt, radius: 4pt, width: 100%, text(size: 9pt, it),
-)
-#show table: set table(stroke: 0.5pt + luma(200))
-
-#import "@preview/cmarker:0.1.8"
-#cmarker.render(read("report.md"), h1-level: 1, blockquote: quote.with(block: true))
+```sh
+cd /agent/workspace            # or wherever your .md lives (public/, mounts/, …)
+cp /agent/node_modules/typeclaw/src/bundled-plugins/doc-render/templates/lib.typ .
 ```
 
-Notes:
+Then `write` a tiny `.typ` wrapper next to the markdown. This is the **entire**
+wrapper — you do not style anything yourself; the theme does it:
 
-- `read("report.md")` is **relative to the render's working directory**, so Step 3
-  `cd`s into the directory holding the `.typ` and `.md` before running. Keep them
-  together.
-- Fonts `Libertinus Serif` / `New Computer Modern` are bundled with Typst (no font
-  install) and carry the Latin text. `"Noto Serif CJK KR"` is appended as the
-  fallback so Korean/CJK glyphs resolve per-glyph wherever the Latin fonts have no
-  glyph, leaving Latin runs untouched. It is only present when the container's
-  `cjkFonts` toggle is on — see "## Handling CJK content".
-- `cmarker` fetches from the Typst package registry on first compile (the same
-  network the `bun add` step needs). It caches under the render's `$HOME`, which
-  in a sandboxed (channel/guest) session is per-session scratch — so a later
-  session may re-fetch it. That's a one-time network hit, not an error.
+```typst
+#import "lib.typ": report, callout, kpi, kpi-row, pullquote
+#show: report.with(
+  theme: "editorial",                       // editorial | modern | report | minimal
+  title: "Edge-AI Quarterly Brief",
+  subtitle: "Q2 2026 · Internal Distribution",
+  date: "2026-06-17",
+  author: "Research",
+)
+#import "@preview/cmarker:0.1.8"
+#cmarker.render(
+  read("report.md"),
+  h1-level: 1,
+  blockquote: quote.with(block: true),
+  // makes the helpers available to <!--raw-typst …--> snippets in the markdown
+  scope: (callout: callout, kpi: kpi, kpi-row: kpi-row, pullquote: pullquote),
+)
+```
+
+### Choosing the theme
+
+Pick the one that fits the document's purpose. All four are built on the fonts
+that ship in the container, so they render identically everywhere.
+
+- **`editorial`** — magazine look: a dedicated cover page, smallcaps tracked
+  headings, booktabs tables, wine accent. The elegant default for prose: reports,
+  briefs, memos, articles.
+- **`modern`** — startup look: a bold bleed-bar masthead, accent-bar headings,
+  airy ragged-right, indigo accent, accent-header tables. Product/launch briefs,
+  updates, anything that should feel current.
+- **`report`** — data / consulting look: a cover page with a full accent band,
+  accent-ruled section heads, strong navy zebra tables, plus `kpi()` and
+  `pullquote()` helpers. Boardroom-ready analyses and data reports.
+- **`minimal`** — Apple-clean: a spacious title block, large light headings, no
+  running header, generous margins, ultra-light tables. Short notes, letters,
+  one-pagers.
+
+When unsure, use `editorial`. If a user said the last PDF looked plain, try
+`modern` or `report` (the most visibly "designed") and apply the tips below.
+
+### Optional knobs
+
+- `accent: rgb("#0f766e")` — override the theme's accent color (links, rules,
+  headings, cover, table headers). Omit or pass `accent: auto` for the theme
+  default.
+- `cover: "page" | "masthead" | "title" | none` — override the cover treatment
+  (`page` = dedicated cover page, `masthead` = bold top block, `title` = compact
+  title block), or `none` to drop it (e.g. a short memo). Omit for the theme
+  default.
+- Omit `title` entirely and no cover is drawn — useful when the markdown already
+  opens with its own H1.
 
 ## Step 3 — render
 
 The render script is **bundled with the plugin** — you do not write it. It lives
 at `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts`.
 
-**`cd` into the directory holding your `.typ` and `.md` first** — your shell
-starts at the agent root, and the wrapper's `read("report.md")` resolves relative
-to the render's working directory, so you must run it from there:
+You should already be `cd`'d into the directory holding your `.typ`, `.md`, and
+the copied `lib.typ` (from Step 2). The wrapper's `read("report.md")` and
+`#import "lib.typ"` both resolve relative to the render's working directory, so
+you must run it from there:
 
 ```sh
-cd /agent/workspace            # or wherever your .typ + .md live (public/, mounts/, …)
+cd /agent/workspace            # or wherever your .typ + .md + lib.typ live
 bun run /agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts report.typ report.pdf
 ```
 
@@ -155,12 +170,68 @@ issue and do **not** switch to another PDF library (it won't help). Any other
 error is a real Typst compile error (usually raw HTML or an unsupported markdown
 extension) and names the offending line — simplify that part and re-run.
 
+## Make it genuinely beautiful (design tips)
+
+A theme gets you 90% of the way. The rest is content discipline — the same things
+that separate a designed document from a markdown dump:
+
+- **Front-load structure.** A short lead paragraph under the title, then clear
+  `##` sections. Don't open with a wall of text.
+- **Tables over repeated bullet stanzas.** If you're repeating the same fields
+  per item (name, value, status…), a table reads far better than N bullet lists.
+  The theme styles tables with clean rules and a header row.
+- **Caption your images** so they read as figures, not floating screenshots:
+
+  ```markdown
+  <!--raw-typst
+  #figure(image("chart.png", width: 80%), caption: [Revenue trend, Q1–Q2 2026.])
+  -->
+  ```
+
+  Images default to a sensible max width; keep them to one strong figure per idea
+  rather than many raw dumps at random sizes.
+
+- **Use callouts for what matters** — a risk, a key result, a caveat — instead of
+  bolding a whole paragraph. `callout` is exported by the library (pass it via
+  `scope:` as shown above), then used inside the markdown:
+
+  ```markdown
+  <!--raw-typst
+  #callout(kind: "warning", title: "Risk")[A single supplier covers 40% of NPUs.]
+  #callout(kind: "success")[Revenue grew 31% YoY, ahead of plan.]
+  -->
+  ```
+
+  Kinds: `note`, `tip`, `success`, `warning`, `danger`. Keep them rare — two or
+  three in a document read as deliberate; a wall of colored boxes reads as noise.
+
+- **Lead with the numbers (data reports).** For a metrics-heavy document, open a
+  section with a row of KPI cards instead of burying figures in prose. `kpi` and
+  `kpi-row` are exported by the library (pass them via `scope:` as shown above):
+
+  ```markdown
+  <!--raw-typst
+  #kpi-row(
+    kpi("$5.5M", "Revenue", sub: "+31% YoY"),
+    kpi("124%", "Net retention", sub: "+6pt"),
+    kpi("63.4%", "Gross margin", sub: "+240bp"),
+  )
+  -->
+  ```
+
+  Use `pullquote("…", by: "…")` for a centered featured quote between sections.
+
+- **Let whitespace breathe, but don't pad.** Trust the theme's rhythm; don't add
+  manual `#v(...)` spacers around everything.
+
 ## Handling CJK content
 
-CJK fonts are **opt-in** (the `docker.file.cjkFonts` toggle). When they are off,
-Typst still renders — it just substitutes `.notdef` tofu (□) boxes for every
-Korean/Japanese/Chinese glyph. **Do not** download, vendor, or `curl` a font to
-work around this, and **do not** silently deliver a tofu PDF.
+CJK fonts are **opt-in** (the `docker.file.cjkFonts` toggle). The themes already
+list `Noto Serif CJK` / `Noto Sans Mono CJK` as fallbacks, so Korean/Japanese/
+Chinese resolve automatically **when those fonts are present**. When the toggle
+is off, Typst still renders — it just substitutes `.notdef` tofu (□) boxes for
+every CJK glyph. **Do not** download, vendor, or `curl` a font to work around
+this, and **do not** silently deliver a tofu PDF.
 
 You don't need a pre-render gate: render first, then verify. If the source
 markdown contains CJK and the resulting PDF shows tofu boxes (or you know CJK
@@ -177,75 +248,6 @@ Only after the user agrees: edit `typeclaw.json` to set `docker.file.cjkFonts:
 true` (use the `typeclaw-config` skill), ask them to `typeclaw restart`, and
 regenerate the PDF after the restarted container comes back. If the markdown has
 no CJK, this section doesn't apply.
-
-## Rich elements (optional)
-
-When plain markdown isn't enough — a cover banner, callout boxes, multi-column
-sections, captioned figures — you don't switch to HTML (Typst doesn't render
-HTML). Instead, drop **raw Typst** into the markdown via `<!--raw-typst ... -->`
-comments. `cmarker` evaluates them as Typst (the `raw-typst: true` option is the
-default). The rest of the document stays plain markdown.
-
-Each snippet below is self-contained — paste it into your `.md` where you want the
-element. They use Typst built-ins only (no extra packages).
-
-**Cover banner** (top of a report):
-
-```markdown
-<!--raw-typst
-#block(width: 100%, fill: rgb("#0f172a"), inset: 18pt, radius: 6pt)[
-  #text(fill: white, size: 1.6em, weight: "bold")[Quarterly Business Review]
-  #v(2pt)
-  #text(fill: rgb("#94a3b8"), size: 0.95em)[Acme Robotics · Q2 2026 · Confidential]
-]
-#v(1em)
--->
-```
-
-**Callout boxes** (info / warning — change the two colors for other variants):
-
-```markdown
-<!--raw-typst
-#block(fill: rgb("#eff6ff"), stroke: (left: 3pt + rgb("#3b82f6")), inset: 12pt, radius: 4pt, width: 100%)[
-  #text(weight: "bold")[Note.] Revenue grew 31% YoY.
-]
-#v(0.6em)
-#block(fill: rgb("#fef2f2"), stroke: (left: 3pt + rgb("#ef4444")), inset: 12pt, radius: 4pt, width: 100%)[
-  #text(weight: "bold")[Risk.] A single supplier covers 40% of NPUs.
-]
--->
-```
-
-**Two-column section** (use `#colbreak()` to split):
-
-```markdown
-<!--raw-typst
-#columns(2, gutter: 1.4em)[
-  #text(weight: "bold")[Strengths]
-  - Net retention 124%
-  - Margin +240bps
-  #colbreak()
-  #text(weight: "bold")[Risks]
-  - Supplier concentration
-  - Partial FX hedging
-]
--->
-```
-
-**Figure with caption** (swap the `rect(...)` for `image("chart.png")` to embed an
-image written next to the markdown):
-
-```markdown
-<!--raw-typst
-#figure(
-  rect(width: 60%, height: 48pt, fill: luma(245), stroke: 0.5pt + luma(180)),
-  caption: [Revenue trend, Q1–Q2 2026.],
-)
--->
-```
-
-Keep it tasteful — a banner, a couple of callouts, and one good figure read as
-deliberate; a wall of colored boxes reads as noise.
 
 ## Rendering an _existing_ web page or HTML to PDF
 
@@ -276,16 +278,17 @@ reports. For authored documents, stay on the Typst path above.
 ## If you got the markdown from a subagent
 
 The `researcher` subagent writes its report to `research-<slug>.md` and returns a
-`<report>` block naming the file. Point the wrapper's `read(...)` at that file,
-render in that file's directory, and attach. You do the PDF step — the
-researcher's `bash` is read-only and it only emits markdown by design.
+`<report>` block naming the file. Copy `lib.typ` into that file's directory, point
+the wrapper's `read(...)` at the report, render there, and attach. You do the PDF
+step — the researcher's `bash` is read-only and it only emits markdown by design.
 
 ## Customizing this skill
 
-This is a bundled default. Want a different house style, a cover page with a
-logo, or a different converter? Copy this file to
-`.agents/skills/<your-name>/SKILL.md` (use a **different** `name`; bundled skills
-win name collisions) and edit it there.
+This is a bundled default. Want a fifth theme, a cover page with a logo, or a
+house style? Two options: (a) copy `lib.typ` into the document directory and edit
+your local copy before rendering (one-off), or (b) for a durable change, copy this
+file to `.agents/skills/<your-name>/SKILL.md` (use a **different** `name`; bundled
+skills win name collisions) and point it at your own theme library.
 
 ## Known limitations
 
@@ -303,12 +306,15 @@ might expect:
 
 ## Don'ts
 
-- **Don't** hand-write Typst markup for the body. Let `cmarker` render the
-  markdown; only style via `#set` / `#show` rules in the wrapper (and the optional
-  raw-typst rich elements).
+- **Don't** hand-write a styling wrapper. Use `#show: report.with(theme: …)` from
+  the bundled library; only reach for raw Typst (via `<!--raw-typst … -->`) for
+  the occasional figure or callout.
+- **Don't** import `lib.typ` by absolute path — copy it next to the markdown
+  first (Typst's workspace sandbox won't resolve an import from outside the
+  render's working directory).
 - **Don't** build a `package.json` / `node_modules` / a render script under
   `workspace/`. The compiler installs at the agent root via `bun add`; the render
-  script is bundled with the plugin (at
-  `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/render.ts`).
+  script and theme library are bundled with the plugin (under
+  `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/`).
 - **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments.
   Link or inline instead.
