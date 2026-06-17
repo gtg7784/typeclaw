@@ -6,7 +6,7 @@ import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { guardIncompleteInit } from './incomplete-init'
-import { errorLine, renderStartSuccess, spinner, warnLine } from './ui'
+import { errorLine, renderStartSuccess, reportConfigWarnings, spinner } from './ui'
 
 export const startCommand = defineCommand({
   meta: {
@@ -61,9 +61,7 @@ export const startCommand = defineCommand({
       console.error(errorLine(validated.reason))
       process.exit(1)
     }
-    for (const warning of validated.warnings ?? []) {
-      console.warn(warnLine(warning))
-    }
+    reportConfigWarnings(validated.warnings)
 
     const s = spinner()
     s.start('Starting container...')
