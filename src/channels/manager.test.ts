@@ -195,6 +195,67 @@ describe('channel manager — connection recovery', () => {
 
     await mgr.stop()
   })
+  test('does not queue duplicate recovery restarts while the first restart is pending', async () => {
+    cfg['discord-bot'] = enabledAdapterCfg()
+    let now = 1_000
+    let tick: (() => void) | null = null
+    const stopGate = deferred()
+    const firstAdapter = makeFakeAdapter()
+    firstAdapter.stop = async () => {
+      firstAdapter.stopCalls++
+      await stopGate.promise
+    }
+    const secondAdapter = makeFakeAdapter()
+    const thirdAdapter = makeFakeAdapter()
+    const adapters = [firstAdapter, secondAdapter, thirdAdapter]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { DISCORD_BOT_TOKEN: 'token' },
+      createDiscordAdapter: () => adapters.shift()!,
+      connectionRecovery: {
+        checkIntervalMs: 10,
+        disconnectedGraceMs: 100,
+        now: () => now,
+        setInterval: (fn) => {
+          tick = fn
+          return 'timer'
+        },
+        clearInterval: () => {},
+      },
+    })
+
+    await mgr.start()
+    const runTick = () => {
+      if (tick === null) throw new Error('recovery timer was not registered')
+      tick()
+    }
+
+    firstAdapter.connected = false
+    runTick()
+    now += 101
+    runTick()
+    await Promise.resolve()
+
+    expect(firstAdapter.stopCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(0)
+
+    now += 101
+    runTick()
+    await Promise.resolve()
+
+    expect(firstAdapter.stopCalls).toBe(1)
+    expect(secondAdapter.startCalls).toBe(0)
+    expect(thirdAdapter.startCalls).toBe(0)
+
+    stopGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(secondAdapter.startCalls).toBe(1)
+    expect(thirdAdapter.startCalls).toBe(0)
+
+    await mgr.stop()
+  })
 })
 
 describe('channel manager — restartAdapter serialization', () => {

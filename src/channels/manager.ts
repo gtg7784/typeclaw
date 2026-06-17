@@ -144,6 +144,7 @@ type AdapterEntry = {
   adapter: AnyAdapter
   credentialSignature: string
   disconnectedSinceMs: number | null
+  recoveryRestartQueued: boolean
 }
 
 export function createChannelManager(options: ChannelManagerOptions): ChannelManager {
@@ -295,6 +296,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         adapter,
         credentialSignature: signature,
         disconnectedSinceMs: adapter.isConnected() ? null : recoveryNow(),
+        recoveryRestartQueued: false,
       })
       logger.info(`[channels] adapter "${name}" started`)
       return true
@@ -321,6 +323,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     for (const [name, entry] of live) {
       if (entry.adapter.isConnected()) {
         entry.disconnectedSinceMs = null
+        entry.recoveryRestartQueued = false
         continue
       }
       if (entry.disconnectedSinceMs === null) {
@@ -329,23 +332,25 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         continue
       }
       const disconnectedForMs = now - entry.disconnectedSinceMs
-      if (disconnectedForMs < recoveryDisconnectedGraceMs) continue
-      // Mark the episode as handled before queueing the async restart so repeated
-      // timer ticks do not enqueue duplicate restarts while stop/start is pending.
-      entry.disconnectedSinceMs = now
+      if (disconnectedForMs < recoveryDisconnectedGraceMs || entry.recoveryRestartQueued) continue
+      entry.recoveryRestartQueued = true
       logger.warn(
         `[channels] adapter "${name}" disconnected for ${Math.round(disconnectedForMs)}ms; restarting adapter`,
       )
       void runSerially(name, async () => {
-        const current = live.get(name)
-        if (current !== entry) return
-        const currentCfg = options.channelsConfigRef()[name]
-        if (currentCfg === undefined || currentCfg.enabled === false) {
-          logger.info(`[channels] recovery restart for "${name}" skipped; adapter no longer enabled`)
-          return
+        try {
+          const current = live.get(name)
+          if (current !== entry) return
+          const currentCfg = options.channelsConfigRef()[name]
+          if (currentCfg === undefined || currentCfg.enabled === false) {
+            logger.info(`[channels] recovery restart for "${name}" skipped; adapter no longer enabled`)
+            return
+          }
+          await stopAdapter(name)
+          await startAdapter(name, currentCfg)
+        } finally {
+          if (live.get(name) === entry) entry.recoveryRestartQueued = false
         }
-        await stopAdapter(name)
-        await startAdapter(name, currentCfg)
       })
     }
   }
