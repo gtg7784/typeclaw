@@ -25,6 +25,7 @@ import {
   resolveModel,
   resolveProfile,
   validateConfig,
+  validateDockerfileAppendLine,
   validateMount,
   withDefaultPlugins,
   type Models,
@@ -1442,15 +1443,92 @@ describe('mountSchema path validation', () => {
   })
 })
 
+describe('validateDockerfileAppendLine', () => {
+  test('allows a recognized instruction (case-insensitive)', () => {
+    expect(validateDockerfileAppendLine('RUN apt-get update').ok).toBe(true)
+    expect(validateDockerfileAppendLine('env FOO=bar').ok).toBe(true)
+    expect(validateDockerfileAppendLine('# a plain comment').ok).toBe(true)
+  })
+
+  test('allows a benign python3 -c without execution of decoded content', () => {
+    expect(validateDockerfileAppendLine('RUN python3 -c "print(1)"').ok).toBe(true)
+    expect(validateDockerfileAppendLine('RUN python3 -c "import base64; print(base64.b64encode(b\'x\'))"').ok).toBe(
+      true,
+    )
+  })
+
+  test('blocks the decode-and-execute anti-pattern as semantic', () => {
+    const result = validateDockerfileAppendLine(
+      'RUN python3 -c "import base64; exec(base64.b64decode(\'AA==\').decode())"',
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.kind).toBe('semantic')
+      expect(result.reason).toContain('decodes an opaque payload')
+    }
+  })
+
+  test('blocks node -e eval of a base64 Buffer as semantic', () => {
+    const result = validateDockerfileAppendLine('RUN node -e "eval(Buffer.from(x,\'base64\').toString())"')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.kind).toBe('semantic')
+  })
+
+  test('blocks references to the TypeClaw-owned entrypoint as semantic', () => {
+    const result = validateDockerfileAppendLine('RUN sed -i s/a/b/ /usr/local/bin/typeclaw-entrypoint')
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.kind).toBe('semantic')
+      expect(result.reason).toContain('typeclaw-entrypoint')
+    }
+  })
+
+  test('blocks FROM, ENTRYPOINT, and CMD as structural', () => {
+    for (const line of ['FROM alpine', 'ENTRYPOINT ["/bin/sh"]', 'CMD ["run"]']) {
+      const result = validateDockerfileAppendLine(line)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.kind).toBe('structural')
+    }
+  })
+
+  test('blocks unknown instructions, trailing backslash, heredoc, parser directives, and empty lines as structural', () => {
+    for (const line of [
+      'NOTANINSTRUCTION foo',
+      'RUN echo hi \\',
+      'RUN cat <<EOF',
+      '# syntax=docker/dockerfile:1',
+      '   ',
+    ]) {
+      const result = validateDockerfileAppendLine(line)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.kind).toBe('structural')
+    }
+  })
+
+  test('warns (but allows) curl piped to a shell and remote ADD', () => {
+    const curl = validateDockerfileAppendLine('RUN curl -fsSL https://example.com/i.sh | bash')
+    expect(curl.ok).toBe(true)
+    if (curl.ok) expect(curl.warning).toContain('remote script')
+
+    const add = validateDockerfileAppendLine('ADD https://example.com/x.tar.gz /tmp/x.tar.gz')
+    expect(add.ok).toBe(true)
+    if (add.ok) expect(add.warning).toContain('remote')
+  })
+})
+
 describe('validateConfig', () => {
   let cwd: string
+  const ORIGINAL_ALLOW_UNSAFE = process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
 
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), 'typeclaw-validate-'))
+    delete process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
   })
 
   afterEach(async () => {
     await rm(cwd, { recursive: true, force: true })
+    if (ORIGINAL_ALLOW_UNSAFE === undefined) delete process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
+    else process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND = ORIGINAL_ALLOW_UNSAFE
   })
 
   test('returns ok when typeclaw.json is missing', () => {
@@ -1542,6 +1620,64 @@ describe('validateConfig', () => {
     )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
+  })
+
+  test('blocks a dangerous docker.file.append entry with an indexed reason', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: VALID_MODEL },
+        docker: {
+          file: {
+            append: ['RUN echo ok', 'RUN python3 -c "import base64; exec(base64.b64decode(\'AA==\').decode())"'],
+          },
+        },
+      }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('docker.file.append[1]')
+      expect(result.reason).toContain('decodes an opaque payload')
+    }
+  })
+
+  test('surfaces a warning (but stays ok) for a curl|bash docker.file.append entry', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: VALID_MODEL },
+        docker: { file: { append: ['RUN curl -fsSL https://example.com/i.sh | sh'] } },
+      }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.warnings).toBeDefined()
+      expect(result.warnings?.[0]).toContain('docker.file.append[0]')
+    }
+  })
+
+  test('TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND=1 waives semantic blocks but not structural ones', async () => {
+    process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND = '1'
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: VALID_MODEL },
+        docker: { file: { append: ['RUN sed -i s/a/b/ /usr/local/bin/typeclaw-entrypoint'] } },
+      }),
+    )
+    expect(validateConfig(cwd).ok).toBe(true)
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: VALID_MODEL },
+        docker: { file: { append: ['FROM alpine'] } },
+      }),
+    )
+    expect(validateConfig(cwd).ok).toBe(false)
   })
 })
 

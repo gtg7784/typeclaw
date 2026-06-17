@@ -222,6 +222,10 @@ export function successLine(message: string): string {
   return `${c.green('●')} ${message}`
 }
 
+export function warnLine(message: string): string {
+  return `${c.yellow('⚠')} ${message}`
+}
+
 // The exact JSON manifest a user pastes into
 // https://api.slack.com/apps → From a manifest. Kept as a typed object so
 // the file stays a single source of truth and `JSON.stringify` guarantees
