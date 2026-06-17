@@ -1761,13 +1761,13 @@ exit 1
 `,
     )
 
-    const shim = buildEntrypointShim()
+    const testSocketPath = join(workdir, 'x11-socket-X99')
+    const shim = buildEntrypointShim().replaceAll('/tmp/.X11-unix/X99', testSocketPath)
     const failShimPath = join(workdir, 'shim-fail.sh')
     await writeShellScript(failShimPath, shim)
 
     const fakeHome = join(workdir, 'home-xvfb-fail')
     await mkdir(fakeHome, { recursive: true })
-    rmSync('/tmp/.X11-unix/X99', { force: true })
     const proc = Bun.spawn(['/bin/sh', failShimPath, 'run'], {
       env: {
         PATH: `${bindir}:${process.env['PATH'] ?? ''}`,
