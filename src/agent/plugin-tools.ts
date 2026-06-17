@@ -576,6 +576,8 @@ async function applyBashSandbox(
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
   if (dirs.length === 0 && files.length === 0) return
 
+  const sandboxEnvOverlay = buildRoleScopedConfigEnv(agentDir, dirs, envOverlay)
+
   await ensureBwrapAvailable()
   // Per-session /tmp: bind this session's scratch dir over the default
   // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
@@ -671,9 +673,29 @@ async function applyBashSandbox(
     cwd: agentDir,
     proc,
     procSelfExe: resolveProcSelfExe(),
-    ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
+    ...(sandboxEnvOverlay !== undefined ? { env: { set: sandboxEnvOverlay } } : {}),
   })
   mutableArgs.command = commandString
+}
+
+function buildRoleScopedConfigEnv(
+  agentDir: string,
+  hiddenDirs: string[],
+  envOverlay: BashEnvOverlay | undefined,
+): BashEnvOverlay | undefined {
+  // Low-trust roles have workspace/ masked. Do not let container-global config
+  // env vars point CLIs back at that private surface: apps that honor XDG should
+  // still run, but their config must land in the sandbox's per-session /tmp.
+  // Trusted/owner never get here (no hidden dirs), so their Dockerfile-level
+  // persistent GWS_CONFIG_HOME remains /agent/workspace/.config/gws.
+  const workspaceHidden = hiddenDirs.includes(join(agentDir, 'workspace'))
+  if (!workspaceHidden) return envOverlay
+
+  return {
+    ...envOverlay,
+    XDG_CONFIG_HOME: '/tmp/.config',
+    GWS_CONFIG_HOME: '/tmp/.config/gws',
+  }
 }
 
 function subtractMaskedProtected(
