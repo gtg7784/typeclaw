@@ -271,6 +271,17 @@ async function resolveDefaultPushRemote(cwd: string, resolvers: GitResolvers): P
   return 'origin'
 }
 
+// The `gh`-side cwd default repo: the working tree's `origin` FETCH url only.
+// Unlike `git push`, `gh <cmd>` with no `-R` has no push semantics, so we do NOT
+// consult the branch.pushRemote/remote.pushDefault chain — origin is what `gh`
+// itself would infer. Returns a literal `owner/repo` slug or null; the caller
+// still gates it through the repos[] allowlist before minting.
+export async function resolveGhDefaultRepoFromCwd(cwd: string, resolvers: GitResolvers): Promise<string | null> {
+  const url = await resolvers.resolveRemoteUrl(cwd, 'origin', false)
+  if (url === null) return null
+  return parseGithubRepoFromGitUrl(url)
+}
+
 const HTTPS_GITHUB_RE = /^https:\/\/github\.com\/([^/\s:@]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i
 const SCP_GITHUB_RE = /^git@github\.com:([^/\s:?#]+)\/([^/\s?#]+?)(?:\.git)?$/i
 const SSH_GITHUB_RE = /^ssh:\/\/git@github\.com(?::\d+)?\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i

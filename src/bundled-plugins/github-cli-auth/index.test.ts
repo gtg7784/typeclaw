@@ -65,6 +65,16 @@ function bashEvent(command: string): ToolBeforeEvent {
   return { tool: 'bash', sessionId: 's', callId: 'c', args: { command } }
 }
 
+function githubOriginBashEvent(command: string, workspace: string): ToolBeforeEvent {
+  return {
+    tool: 'bash',
+    sessionId: 's',
+    callId: 'c',
+    args: { command },
+    origin: { kind: 'channel', adapter: 'github', workspace, chat: workspace, thread: null },
+  }
+}
+
 const tokenResolver = (token: string) => async (): Promise<GithubTokenResolveResult> => ({ kind: 'token', token })
 const unavailableResolver = async (): Promise<GithubTokenResolveResult> => ({
   kind: 'unavailable',
@@ -98,6 +108,62 @@ describe('github-cli-auth plugin', () => {
     })
 
     expect(result).toMatchObject({ block: true })
+  })
+
+  test('GitHub-origin: a repo-less bare gh mints for origin.workspace and sets GH_REPO', async () => {
+    delete process.env.GH_TOKEN
+    const seen: string[] = []
+    const hook = await hookFor(async (slug) => {
+      seen.push(slug)
+      return { kind: 'token', token: 'ghs_minted' }
+    }, true)
+    const event = githubOriginBashEvent('gh label list', 'acme/widgets')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(seen).toEqual(['acme/widgets'])
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted', GH_REPO: 'acme/widgets' })
+    expect(event.args.command).toBe('gh label list')
+  })
+
+  test('GitHub-origin: an explicit -R wins over the origin fallback and sets no GH_REPO', async () => {
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'), true)
+    const event = githubOriginBashEvent('gh label list -R real/repo', 'acme/widgets')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
+  })
+
+  test('GitHub-origin: a COMPOUND repo-less gh still blocks even though a fallback exists', async () => {
+    delete process.env.GH_TOKEN
+    const hook = await hookFor(tokenResolver('ghs_minted'), true)
+    const event = githubOriginBashEvent('set -e; gh label list', 'acme/widgets')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
+  test('non-GitHub origin with no resolvable repo: blocks with an actionable rewrite, never guesses', async () => {
+    delete process.env.GH_TOKEN
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    }, true)
+    const event = bashEvent('gh label list')
+
+    const result = await hook(event, hookCtx)
+
+    expect(result).toMatchObject({ block: true })
+    if (result && 'reason' in result) expect(result.reason).toContain('-R')
+    expect(resolverCalled).toBe(false)
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 
   test('App auth: blocks when the bridge is unavailable', async () => {
