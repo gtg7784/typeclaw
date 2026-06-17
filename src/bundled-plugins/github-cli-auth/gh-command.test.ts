@@ -109,6 +109,24 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('gh api -R acme/widgets /repos/victim/private/issues').kind).toBe('block')
   })
 
+  it('blocks a literal /repos path gh api when -R/--repo is a non-literal value (never injects)', () => {
+    // A single-quoted `-R '$repo'` neutralizes the `$` (so the composition gate
+    // passes) and is dropped by extractAllRepoFlags (literal-only), which used to
+    // let the literal-path branch inject for the PATH repo while the unverifiable
+    // flag named something else. The non-literal guard must fire before that.
+    const attacks = [
+      "gh api /repos/acme/widgets/issues -R '$repo'",
+      'gh api /repos/acme/widgets/issues -R "$repo"',
+      "gh api /repos/acme/widgets/labels -R '$victim'",
+      'gh api repos/acme/widgets/issues --repo=$repo',
+    ]
+    for (const input of attacks) {
+      const result = analyzeGhCommand(input)
+      expect(result.kind).toBe('block')
+      if (result.kind === 'block') expect(result.code).toBe('non-literal-repo')
+    }
+  })
+
   it('uses -R for a quoted {owner}/{repo} placeholder endpoint', () => {
     expect(analyzeGhCommand("gh api 'repos/{owner}/{repo}/issues' -R acme/widgets")).toEqual({
       kind: 'inject',

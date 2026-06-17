@@ -553,6 +553,18 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   const pathRepos = extractReposFromApiPath(args)
   const flagRepo = extractRepoFlag(args)
 
+  // A non-literal `-R/--repo` (e.g. `-R '$repo'`) blocks BEFORE any inject path,
+  // including the literal `/repos/owner/repo` path branch below. Without this, a
+  // single-quoted `gh api /repos/acme/widgets/... -R '$repo'` slips the composition
+  // gate (single quotes neutralize `$`) AND is dropped by extractAllRepoFlags
+  // (which keeps literal slugs only), so the path branch would mint for the PATH
+  // repo while the unverifiable flag named something else — the exact mint-for-X-
+  // hit-Y the conflict guard exists to stop. We never inject when an unreadable
+  // repo flag is present.
+  if (repoFlagHasNonLiteralValue(args)) {
+    return { kind: 'block', code: 'non-literal-repo', reason: NON_LITERAL_REPO_REASON }
+  }
+
   if (pathRepos.length > 0) {
     // Check EVERY repo flag, not just the first: the strip removes all of them,
     // so a single non-redundant flag anywhere is a mint-for-X-hit-Y attempt and
