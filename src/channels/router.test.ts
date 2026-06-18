@@ -7099,20 +7099,17 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
 
     // when a first message engages the bot and a second arrives after the
     // idle-hook watchdog should have fired
-    const start = Date.now()
     await router.route(inbound({ text: 'first' }))
     await router.__testing!.flushDebounce(KEY)
     await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
     await router.__testing!.flushDebounce(KEY)
-    const elapsed = Date.now() - start
 
-    // then both prompts ran (the second is the real proof — without the
-    // watchdog the drain loop would still be parked inside the hung idle
-    // hook and `live.draining` would block enqueue from firing a new drain),
-    // the run completed within the watchdog window, and a warning naming
-    // the timeout was emitted so an operator can attribute the hang
+    // then both prompts ran. The second prompt is the real proof — without the
+    // watchdog the drain loop would still be parked inside the hung idle hook
+    // and `live.draining` would block enqueue from firing a new drain. Avoid a
+    // wall-clock ceiling here: Windows runners can stall the Bun event loop long
+    // enough to make timing assertions flaky even though the watchdog worked.
     expect(sessions[0]!.prompts).toHaveLength(2)
-    expect(elapsed).toBeLessThan(2000)
     const idleWarn = logs.find((l) => l.includes('warn:[channels]') && l.includes('session.idle hook threw'))
     expect(idleWarn).toBeDefined()
     expect(idleWarn).toMatch(/session\.idle timed out after 30ms/)
