@@ -930,6 +930,25 @@ describe('refreshDockerfile', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('returns warnings for unsafe docker.file.append lines and strips them from the written Dockerfile', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-strip-'))
+    try {
+      const dangerous = 'RUN python3 -c "import base64; exec(base64.b64decode(\'AA==\').decode())"'
+      await writeTypeclawConfig(dir, { docker: { file: { append: ['ENV SAFE=1', dangerous] } } })
+
+      const result = await refreshDockerfile(dir)
+
+      expect(result.changed).toBe(true)
+      expect(result.warnings.join('\n')).toContain('docker.file.append[1] stripped')
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).toContain('ENV SAFE=1')
+      expect(written).not.toContain('exec(base64.b64decode')
+      expect(written).toContain('typeclaw stripped 1 unsafe docker.file.append line(s)')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('refreshGitignore', () => {

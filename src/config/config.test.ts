@@ -1518,17 +1518,13 @@ describe('validateDockerfileAppendLine', () => {
 
 describe('validateConfig', () => {
   let cwd: string
-  const ORIGINAL_ALLOW_UNSAFE = process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
 
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), 'typeclaw-validate-'))
-    delete process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
   })
 
   afterEach(async () => {
     await rm(cwd, { recursive: true, force: true })
-    if (ORIGINAL_ALLOW_UNSAFE === undefined) delete process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND
-    else process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND = ORIGINAL_ALLOW_UNSAFE
   })
 
   test('returns ok when typeclaw.json is missing', () => {
@@ -1622,7 +1618,7 @@ describe('validateConfig', () => {
     expect(result.ok).toBe(false)
   })
 
-  test('blocks a dangerous docker.file.append entry with an indexed reason', async () => {
+  test('warns (but stays ok) for a dangerous docker.file.append entry — fail-safe: stripped on start, never blocks', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
@@ -1635,10 +1631,13 @@ describe('validateConfig', () => {
       }),
     )
     const result = validateConfig(cwd)
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.reason).toContain('docker.file.append[1]')
-      expect(result.reason).toContain('decodes an opaque payload')
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.warnings).toBeDefined()
+      const joined = (result.warnings ?? []).join('\n')
+      expect(joined).toContain('docker.file.append[1]')
+      expect(joined).toContain('will be stripped on start')
+      expect(joined).toContain('decodes an opaque payload')
     }
   })
 
@@ -1658,9 +1657,7 @@ describe('validateConfig', () => {
     }
   })
 
-  test('TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND=1 waives semantic blocks but not structural ones', async () => {
-    process.env.TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND = '1'
-
+  test('append lines never block start — both semantic and structural blocks stay ok with a strip warning', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
@@ -1668,7 +1665,9 @@ describe('validateConfig', () => {
         docker: { file: { append: ['RUN sed -i s/a/b/ /usr/local/bin/typeclaw-entrypoint'] } },
       }),
     )
-    expect(validateConfig(cwd).ok).toBe(true)
+    const semantic = validateConfig(cwd)
+    expect(semantic.ok).toBe(true)
+    if (semantic.ok) expect((semantic.warnings ?? []).join('\n')).toContain('will be stripped on start')
 
     await writeFile(
       join(cwd, 'typeclaw.json'),
@@ -1677,7 +1676,9 @@ describe('validateConfig', () => {
         docker: { file: { append: ['FROM alpine'] } },
       }),
     )
-    expect(validateConfig(cwd).ok).toBe(false)
+    const structural = validateConfig(cwd)
+    expect(structural.ok).toBe(true)
+    if (structural.ok) expect((structural.warnings ?? []).join('\n')).toContain('will be stripped on start')
   })
 })
 

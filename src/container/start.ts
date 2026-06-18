@@ -20,7 +20,7 @@ import {
   readInstalledTypeclawVersionFromAgent,
 } from '@/init/auto-upgrade'
 import { resolveBaseImageVersion } from '@/init/cli-version'
-import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
+import { buildDockerfile, classifyDockerfileAppend, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
@@ -148,6 +148,10 @@ export type StartResult =
       // registry. Non-fatal by design: a typo'd or unpublished plugin warns
       // instead of blocking the launch.
       skippedPlugins: string[]
+      // Non-fatal warnings from docker.file.append: unsafe lines stripped from
+      // the generated Dockerfile, plus warn-but-allow lines (curl|bash, remote
+      // ADD). Surfaced by the CLI so a stripped line is never a silent no-op.
+      dockerfileWarnings: string[]
     }
   | { ok: false; reason: string }
 
@@ -485,6 +489,7 @@ export async function start({
       alreadyRunning: false,
       autoUpgrade: upgrade,
       skippedPlugins: pluginReconcile.skipped,
+      dockerfileWarnings: dockerfileRefresh.warnings,
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
@@ -701,18 +706,24 @@ async function resolvePublishHost(exec: DockerExec): Promise<string> {
 // the cheapest correct signal: the build context for `docker build` is the
 // Dockerfile itself, so equal contents definitionally produce an equivalent
 // image.
-export async function refreshDockerfile(cwd: string, opts: { buildKit?: boolean } = {}): Promise<{ changed: boolean }> {
+export async function refreshDockerfile(
+  cwd: string,
+  opts: { buildKit?: boolean } = {},
+): Promise<{ changed: boolean; warnings: string[] }> {
   const cfg = await loadTypeclawConfig(cwd)
   const next = buildDockerfile(cfg.docker.file, {
     baseImageVersion: resolveBaseImageVersion(cwd),
     cjkFontsAuto: hostLocaleIsCjk(),
     buildKit: opts.buildKit,
   })
+  // Reuse the renderer's classifier so reported warnings match exactly what was
+  // stripped/kept in the Dockerfile above (single source of truth).
+  const { warnings } = classifyDockerfileAppend(cfg.docker.file.append)
   const path = join(cwd, DOCKERFILE)
   const prev = await readFile(path, 'utf8').catch(() => null)
-  if (prev === next) return { changed: false }
+  if (prev === next) return { changed: false, warnings }
   await writeFile(path, next)
-  return { changed: true }
+  return { changed: true, warnings }
 }
 
 // Builds the agent image with a seamless buildx->legacy fallback. The preferred
@@ -836,6 +847,7 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
   }
   const tuiToken = await resolveTuiToken({ cwd, exec })
   const plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, tuiToken })
+  const { warnings: dockerfileWarnings } = classifyDockerfileAppend((await loadTypeclawConfig(cwd)).docker.file.append)
   return {
     ok: true,
     plan,
@@ -847,6 +859,7 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
     alreadyRunning: true,
     autoUpgrade: { kind: 'skipped-already-running' },
     skippedPlugins: [],
+    dockerfileWarnings,
   }
 }
 

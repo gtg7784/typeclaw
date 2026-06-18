@@ -170,5 +170,6 @@ function startOk(opts: StartOptions): StartResult {
     alreadyRunning: false,
     autoUpgrade: { kind: 'skipped-no-dep' },
     skippedPlugins: [],
+    dockerfileWarnings: [],
   }
 }
