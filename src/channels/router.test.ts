@@ -7104,11 +7104,13 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then both prompts ran. The second prompt is the real proof — without the
-    // watchdog the drain loop would still be parked inside the hung idle hook
-    // and `live.draining` would block enqueue from firing a new drain. Avoid a
-    // wall-clock ceiling here: Windows runners can stall the Bun event loop long
-    // enough to make timing assertions flaky even though the watchdog worked.
+    // then both prompts ran (the second is the real proof — without the
+    // watchdog the drain loop would still be parked inside the hung idle
+    // hook and `live.draining` would block enqueue from firing a new drain),
+    // and a warning naming the timeout was emitted so an operator can
+    // attribute the hang. Avoid asserting wall-clock elapsed time here:
+    // Windows CI occasionally pauses this process long enough to exceed a
+    // tight bound even though the drain loop made forward progress.
     expect(sessions[0]!.prompts).toHaveLength(2)
     const idleWarn = logs.find((l) => l.includes('warn:[channels]') && l.includes('session.idle hook threw'))
     expect(idleWarn).toBeDefined()
