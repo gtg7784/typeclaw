@@ -8,6 +8,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
+import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
@@ -782,6 +783,7 @@ export function createServer({
                 retrievalContext.results.length > 0
                   ? `${renderTurnTimeAnchor()}\n\n${msg.text}\n\n${retrievalContext.results}`
                   : `${renderTurnTimeAnchor()}\n\n${msg.text}`
+              applyTurnThinkingLevel(state.session, msg.text, state.session.thinkingLevel)
               await state.session.prompt(turnText)
               send(ws, doneMessage(state))
             } catch (err) {
@@ -1064,6 +1066,9 @@ async function drain(
   state.draining = true
   const fireIdle = makeIdleHookCaller(state)
   const { fireTurnStart, fireTurnEnd } = makeTurnHookCallers(state, agentDir)
+  // Capture before the loop: a prior escalated turn moves the live getter to
+  // `high`, so re-reading per-iteration would lose the real per-session default.
+  const turnThinkingDefault = state.session.thinkingLevel
   try {
     while (state.drainQueue.length > 0) {
       const item = state.drainQueue.shift()
@@ -1086,6 +1091,7 @@ async function drain(
           retrievalContext.results.length > 0
             ? `${renderTurnTimeAnchor()}\n\n${item.text}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${item.text}`
+        applyTurnThinkingLevel(state.session, item.text, turnThinkingDefault)
         await state.session.prompt(turnText)
         send(ws, doneMessage(state))
       } catch (err) {

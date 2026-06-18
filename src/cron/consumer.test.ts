@@ -1125,4 +1125,48 @@ describe('createCronConsumer count gate', () => {
 
     consumer.stop()
   })
+
+  describe('attention escalation', () => {
+    function thinkingTrackingSession(levels: string[], sessionDefault: 'low' | 'medium'): AgentSession {
+      return {
+        subscribe: () => () => {},
+        prompt: async () => {},
+        thinkingLevel: sessionDefault,
+        setThinkingLevel: (level: string) => {
+          levels.push(level)
+        },
+      } as unknown as AgentSession
+    }
+
+    test('bumps thinking level to high on an escalation prompt and to the default otherwise', async () => {
+      const levelsByJob = new Map<string, string[]>()
+      const factory = {
+        createSessionForCron: async (job: PromptJob): Promise<CronSession> => {
+          const levels: string[] = []
+          levelsByJob.set(job.id, levels)
+          return {
+            prompt: async () => {},
+            session: thinkingTrackingSession(levels, 'low'),
+          }
+        },
+      }
+      const stream = createStream()
+      const consumer = createCronConsumer({
+        stream,
+        cwd: root,
+        createSessionForCron: factory.createSessionForCron,
+        logger: silentLogger,
+      })
+      consumer.start()
+
+      publishCron(stream, promptJob('frustrated', '제대로 해'))
+      publishCron(stream, promptJob('routine', 'post the daily summary'))
+      await waitForConsumerIdle(consumer)
+
+      expect(levelsByJob.get('frustrated')).toEqual(['high'])
+      expect(levelsByJob.get('routine')).toEqual(['low'])
+
+      consumer.stop()
+    })
+  })
 })

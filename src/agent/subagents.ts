@@ -5,6 +5,7 @@ import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
+import { applyTurnThinkingLevel } from './attention-escalation'
 import { type AgentSession, createSession, type PluginSessionWiring } from './index'
 import { subscribeProviderErrors } from './provider-error'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
@@ -304,6 +305,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           retrievalContext.results.length > 0
             ? `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`
+        applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel)
         await session.prompt(turnText)
       } finally {
         if (hooks && turnEvent !== undefined) {
