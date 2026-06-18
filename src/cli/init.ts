@@ -554,6 +554,7 @@ export async function collectWizardInputs(
       const decision = await prompts.confirmResumeCheckpoint(sanitized)
       if (decision === 'resume') {
         seedWizardState(state, sanitized)
+        step = resumeStep(state)
       } else {
         await checkpointStore.clear(cwd)
       }
@@ -1028,6 +1029,12 @@ function seedWizardState(state: WizardState, checkpoint: WizardAnswerCheckpointV
 function resolveModelOption(catalog: WizardState['catalog'], ref: string | undefined): ModelOption | undefined {
   if (catalog === undefined || ref === undefined) return undefined
   return catalog.options.find((option) => option.ref === ref)
+}
+
+function resumeStep(state: WizardState): StepId {
+  if (state.providerId !== undefined) return 'reuse-existing-key'
+  if (state.vendorId !== undefined) return 'pick-provider-variant'
+  return 'pick-vendor'
 }
 
 function projectCheckpoint(cwd: string, state: WizardState): WizardAnswerCheckpointV1 {

@@ -1361,8 +1361,9 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
   })
 
   test('prompts to resume when a checkpoint exists and seeds prior answers', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
     const existing = checkpointFromSelections({
-      cwd: '/agent',
+      cwd,
       vendorId: 'fireworks',
       providerId: 'fireworks',
       modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
@@ -1372,13 +1373,19 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
     const { store } = inMemoryStore(existing)
 
     let confirmCalls = 0
+    let vendorCalls = 0
     let modelInitial: string | undefined
     await collectWizardInputs(
-      '/agent',
+      cwd,
       basePrompts({
         confirmResumeCheckpoint: async () => {
           confirmCalls += 1
           return 'resume'
+        },
+        readExistingApiKey: async () => 'sk_existing',
+        pickVendor: async () => {
+          vendorCalls += 1
+          return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
         },
         pickModel: async (_options, _providerId, initial) => {
           modelInitial = initial
@@ -1389,7 +1396,48 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
     )
 
     expect(confirmCalls).toBe(1)
+    expect(vendorCalls).toBe(0)
     expect(modelInitial).toBe(FIREWORKS_REF)
+  })
+
+  test('resume reuses existing provider and channel secrets without credential prompts', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
+    const existing = checkpointFromSelections({
+      cwd,
+      vendorId: 'fireworks',
+      providerId: 'fireworks',
+      modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+      channelChoice: 'discord',
+    })
+    const { store } = inMemoryStore(existing)
+
+    let askApiKeyCalls = 0
+    let runChannelFlowCalls = 0
+    const result = await collectWizardInputs(
+      cwd,
+      basePrompts({
+        confirmResumeCheckpoint: async () => 'resume',
+        readExistingApiKey: async () => 'sk_existing',
+        pickChannel: async () => ({ kind: 'value', value: 'discord' }),
+        hasExistingChannelSecrets: async () => true,
+        askApiKey: async (provider) => {
+          askApiKeyCalls += 1
+          return { kind: 'value', value: `fresh-${provider.name}` }
+        },
+        runChannelFlow: async () => {
+          runChannelFlowCalls += 1
+          return { kind: 'value', value: { discordBotToken: 'fresh-discord' } }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    expect(askApiKeyCalls).toBe(0)
+    expect(runChannelFlowCalls).toBe(0)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing' })
+    expect(result.reuseExistingChannel).toBe(true)
+    expect(result.channelSecrets).toEqual({})
   })
 
   test('start-over discards the existing checkpoint without seeding', async () => {
@@ -1441,9 +1489,10 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
 
   test('sanitizes a stale provider out before the resume prompt sees it', async () => {
     // given: a checkpoint whose provider no longer exists in the live catalog
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
     const stale = {
       version: 1 as const,
-      cwd: '/agent',
+      cwd,
       updatedAt: 'now',
       vendorId: 'made-up-vendor',
       providerId: 'made-up-provider',
@@ -1453,7 +1502,7 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
 
     let seen: ReturnType<typeof checkpointFromSelections> | undefined
     await collectWizardInputs(
-      '/agent',
+      cwd,
       basePrompts({
         confirmResumeCheckpoint: async (checkpoint) => {
           seen = checkpoint
