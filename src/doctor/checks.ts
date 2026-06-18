@@ -210,7 +210,19 @@ function configValid(): DoctorCheck {
     applies: (ctx) => ctx.hasAgentFolder,
     async run(ctx) {
       const result = validateConfig(ctx.cwd)
-      if (result.ok) return { status: 'ok', message: 'typeclaw.json valid; mounts accessible' }
+      if (result.ok) {
+        if (result.warnings && result.warnings.length > 0) {
+          return {
+            status: 'warning',
+            message: `typeclaw.json valid; ${result.warnings.length} docker.file.append warning(s):\n${result.warnings.join('\n')}`,
+            fix: {
+              description:
+                'Review the docker.file.append entries above; unsafe lines are stripped from the Dockerfile on start.',
+            },
+          }
+        }
+        return { status: 'ok', message: 'typeclaw.json valid; mounts accessible' }
+      }
       return {
         status: 'error',
         message: result.reason,

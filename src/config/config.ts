@@ -1200,14 +1200,18 @@ export function validateConfig(cwd: string, options: ValidateConfigOptions = {})
   const parsed = parseConfigJson(raw, { migrate: true, persistTarget: cwd })
   if (!parsed.ok) return parsed
 
-  const allowUnsafeAppend = process.env[ALLOW_UNSAFE_DOCKER_APPEND_ENV] === '1'
+  // Append lines are advisory here — never fatal. The Dockerfile renderer
+  // (renderCustomDockerfileLines) is the enforcement boundary: it STRIPS unsafe
+  // lines so the container still comes up, and a bad line written by the
+  // in-container agent can never brick `typeclaw start`. We surface the same
+  // strip/warn decisions as warnings so the operator sees them pre-build.
   const warnings: string[] = []
   const appendLines = parsed.config.docker.file.append
   for (let i = 0; i < appendLines.length; i++) {
     const check = validateDockerfileAppendLine(appendLines[i]!)
     if (!check.ok) {
-      if (check.kind === 'semantic' && allowUnsafeAppend) continue
-      return { ok: false, reason: `docker.file.append[${i}] ${check.reason}` }
+      warnings.push(`docker.file.append[${i}] will be stripped on start — ${check.reason}`)
+      continue
     }
     if (check.warning) warnings.push(`docker.file.append[${i}] ${check.warning}`)
   }
@@ -1316,12 +1320,6 @@ export function validateMount(mount: Mount, cwd: string): ValidateConfigResult {
 
   return { ok: true }
 }
-
-// Host env (not config) on purpose: an in-container agent can edit its own
-// typeclaw.json but cannot set the env of the host `typeclaw start` that runs
-// this gate, so it can never waive its own footgun. Only relaxes SEMANTIC
-// blocks; structural blocks always fire (they break Dockerfile generation).
-const ALLOW_UNSAFE_DOCKER_APPEND_ENV = 'TYPECLAW_ALLOW_UNSAFE_DOCKER_APPEND'
 
 // FROM/ENTRYPOINT/CMD/MAINTAINER are intentionally excluded — see the
 // structural blocks in validateDockerfileAppendLine for why.
@@ -1450,9 +1448,13 @@ export function validateDockerfileAppendLine(line: string): AppendLineCheck {
     }
   }
   if (!ALLOWED_APPEND_INSTRUCTIONS.has(instruction)) {
+    // Reason is intentionally input-free: this string is forwarded verbatim into
+    // operator-facing warnings (classifyDockerfileAppend -> dockerfileWarnings),
+    // and the offending token is user-controlled — echoing it could leak a
+    // secret/token-like first word from a malformed line into start/doctor output.
     return {
       ok: false,
-      reason: `does not begin with a recognized Dockerfile instruction (got "${instruction}")`,
+      reason: 'does not begin with a recognized Dockerfile instruction',
       kind: 'structural',
     }
   }

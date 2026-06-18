@@ -86,6 +86,7 @@ export const restartCommand = defineCommand({
     }
     startSpin.stop('Started.')
 
+    reportConfigWarnings(started.dockerfileWarnings)
     console.log(renderStartSuccess(started))
   },
 })

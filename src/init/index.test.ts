@@ -2036,6 +2036,7 @@ describe('defaultRunHatching', () => {
         alreadyRunning: false,
         autoUpgrade: { kind: 'skipped-already-running' },
         skippedPlugins: [],
+        dockerfileWarnings: [],
       }
     }
     return { fn, calls }

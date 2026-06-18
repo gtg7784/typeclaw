@@ -77,6 +77,7 @@ export const startCommand = defineCommand({
     }
     s.stop(result.alreadyRunning ? 'Already running.' : 'Started.')
 
+    reportConfigWarnings(result.dockerfileWarnings)
     console.log(renderStartSuccess(result))
   },
 })
