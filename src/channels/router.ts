@@ -5,6 +5,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
+import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
@@ -573,6 +574,10 @@ type LiveSession = {
   key: ChannelKey
   keyId: string
   session: AgentSession
+  // The session's creation-time thinking level, captured once. A later escalated
+  // turn moves `session.thinkingLevel` to `high`, so the live getter can't be the
+  // reset target — this preserves the real default across the session's lifetime.
+  turnThinkingDefault: AgentSession['thinkingLevel']
   sessionId: string
   dispose: () => Promise<void>
   hooks: HookBus | undefined
@@ -1659,6 +1664,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         key,
         keyId,
         session: created.session,
+        turnThinkingDefault: created.session.thinkingLevel,
         sessionId: created.sessionId,
         dispose: created.dispose,
         hooks: created.hooks,
@@ -2395,8 +2401,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
-        const retrievalContext = await fireSessionTurnStart(live, composeRetrievalQuery(batch))
+        const retrievalQuery = composeRetrievalQuery(batch)
+        const retrievalContext = await fireSessionTurnStart(live, retrievalQuery)
         const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
+        applyTurnThinkingLevel(live.session, retrievalQuery, live.turnThinkingDefault)
         live.promptInFlight = true
         try {
           await live.session.prompt(promptText)

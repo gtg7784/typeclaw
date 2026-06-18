@@ -1,4 +1,5 @@
 import type { AgentSession } from '@/agent'
+import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
 import { promptWithFallback, resolveFallbackChain } from '@/agent/model-fallback'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { getConfig } from '@/config'
@@ -234,6 +235,12 @@ async function runPromptOnce(
       const retrievalContext = { results: '' }
       if (created.hooks && turnEvent !== undefined) {
         await created.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: job.prompt, retrievalContext })
+      }
+      // Cron sessions are created fresh per fallback attempt, so the live getter
+      // is still the creation-time default here — safe to read without a separate
+      // captured field. The test-fake path omits `.session`; skip it then.
+      if (created.session !== undefined) {
+        applyTurnThinkingLevel(created.session, job.prompt, created.session.thinkingLevel)
       }
       // Bridge the CronSession wrapper into the AgentSession surface the
       // fallback helper expects:

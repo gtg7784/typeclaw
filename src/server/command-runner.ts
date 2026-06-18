@@ -5,6 +5,7 @@ import {
   type CreateSessionResult,
   type SessionOrigin,
 } from '@/agent'
+import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
 import type { ChannelRouter } from '@/channels/router'
 import type { McpManager } from '@/mcp'
 import type { PermissionService } from '@/permissions'
@@ -431,6 +432,7 @@ export async function runPromptForCommand(args: {
       retrievalContext.results.length > 0
         ? `${renderTurnTimeAnchor()}\n\n${args.text}\n\n${retrievalContext.results}`
         : `${renderTurnTimeAnchor()}\n\n${args.text}`
+    applyTurnThinkingLevel(session, args.text, session.thinkingLevel)
     try {
       await session.prompt(turnText)
     } finally {
