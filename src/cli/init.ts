@@ -1429,7 +1429,7 @@ async function runDiscordFlow(): Promise<StepResult<CollectedInputs['channelSecr
     [
       'https://discord.com/developers/applications',
       'New Application → Bot tab → Reset Token.',
-      'Enable the MESSAGE CONTENT intent.',
+      'Under Privileged Gateway Intents, enable MESSAGE CONTENT and GUILD MEMBERS.',
     ].join('\n'),
     'Get a Discord bot token',
   )
