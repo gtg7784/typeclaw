@@ -175,6 +175,11 @@ type QueuedPrompt = {
 
 type SessionState = {
   session: AgentSession
+  // The session's creation-time thinking level, captured once. An escalated turn
+  // moves `session.thinkingLevel` to `high`, so neither turn-driving path (drain
+  // loop, no-stream fallback) can use the live getter as the reset target — both
+  // read this captured default instead.
+  turnThinkingDefault: AgentSession['thinkingLevel']
   sessionFileId: string
   origin: SessionOrigin
   sessionManager: { getSessionFile: () => string | undefined } | undefined
@@ -519,6 +524,7 @@ export function createServer({
 
             const state: SessionState = {
               session,
+              turnThinkingDefault: session.thinkingLevel,
               sessionFileId,
               origin,
               sessionManager,
@@ -783,7 +789,7 @@ export function createServer({
                 retrievalContext.results.length > 0
                   ? `${renderTurnTimeAnchor()}\n\n${msg.text}\n\n${retrievalContext.results}`
                   : `${renderTurnTimeAnchor()}\n\n${msg.text}`
-              applyTurnThinkingLevel(state.session, msg.text, state.session.thinkingLevel)
+              applyTurnThinkingLevel(state.session, msg.text, state.turnThinkingDefault)
               await state.session.prompt(turnText)
               send(ws, doneMessage(state))
             } catch (err) {
@@ -1066,9 +1072,6 @@ async function drain(
   state.draining = true
   const fireIdle = makeIdleHookCaller(state)
   const { fireTurnStart, fireTurnEnd } = makeTurnHookCallers(state, agentDir)
-  // Capture before the loop: a prior escalated turn moves the live getter to
-  // `high`, so re-reading per-iteration would lose the real per-session default.
-  const turnThinkingDefault = state.session.thinkingLevel
   try {
     while (state.drainQueue.length > 0) {
       const item = state.drainQueue.shift()
@@ -1091,7 +1094,7 @@ async function drain(
           retrievalContext.results.length > 0
             ? `${renderTurnTimeAnchor()}\n\n${item.text}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${item.text}`
-        applyTurnThinkingLevel(state.session, item.text, turnThinkingDefault)
+        applyTurnThinkingLevel(state.session, item.text, state.turnThinkingDefault)
         await state.session.prompt(turnText)
         send(ws, doneMessage(state))
       } catch (err) {

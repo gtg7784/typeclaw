@@ -482,6 +482,39 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     expect(session.abortCalls).toBe(1)
     ws.close()
   })
+
+  test('attention escalation bumps to high then resets to the captured default', async () => {
+    // The fallback path must reset from the session's CREATION-time level, not the
+    // live getter — otherwise the first escalated turn poisons the second turn's
+    // reset target. Enhance the fake with a real thinkingLevel getter that tracks
+    // setThinkingLevel so the second turn observes the moved value, exposing a
+    // bug if the production code reads the getter instead of the captured default.
+    const session = createFakeSession()
+    const thinkingCalls: string[] = []
+    let currentLevel = 'low'
+    Object.defineProperty(session, 'thinkingLevel', { get: () => currentLevel, configurable: true })
+    ;(session as unknown as { setThinkingLevel: (l: string) => void }).setThinkingLevel = (level) => {
+      thinkingCalls.push(level)
+      currentLevel = level
+    }
+
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'ultrathink, do it properly' }))
+    await waitForState(() => session.promptCalls.length === 1)
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'add a comment' }))
+    await waitForState(() => session.promptCalls.length === 2)
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    expect(thinkingCalls).toEqual(['high', 'low'])
+    ws.close()
+  })
 })
 
 describe('createServer restart handling', () => {
