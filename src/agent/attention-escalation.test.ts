@@ -21,7 +21,33 @@ describe('detectAttentionEscalation — positive (explicit effort)', () => {
 })
 
 describe('detectAttentionEscalation — positive (frustration / dissatisfaction)', () => {
-  const escalating: readonly string[] = ['wtf', 'what are you doing', '뭐하는 거야', 'que merda', 'apa-apaan']
+  const escalating: readonly string[] = [
+    'wtf',
+    'what are you doing',
+    'this is fucking broken',
+    'bullshit',
+    'this is garbage',
+    '뭐하는 거야',
+    '씨발',
+    '존나',
+    '존나 짜증나',
+    '병신같네',
+    '我操',
+    '卧槽',
+    '草泥马',
+    '我靠',
+    '靠北',
+    '垃圾代码',
+    'くそ',
+    'ふざけんな',
+    'esto es una mierda',
+    'que merda',
+    'это бред',
+    'هذا هراء',
+    'apa-apaan',
+    'goddamn it',
+    'dammit',
+  ]
 
   for (const text of escalating) {
     test(`detects: ${JSON.stringify(text)}`, () => {
@@ -52,6 +78,26 @@ describe('detectAttentionEscalation — negative', () => {
     'serious refactor',
     'i need serious help here',
     'a series of tests',
+    'abs workout',
+    'great jobs',
+    'position update',
+    'copy the file',
+    'racing game',
+    'compose a message',
+    'i can cut this',
+    'the tabs are aligned',
+    'subscribe now',
+    '操作系统',
+    '操作步骤',
+    '草稿',
+    '起草文档',
+    '可靠的方案',
+    '依靠',
+    '废物利用很好',
+    'damnation is a word',
+    'scrap the old code',
+    'the condemnation',
+    'reassign the task',
     '',
     'ok',
   ]
