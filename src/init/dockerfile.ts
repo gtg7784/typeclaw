@@ -1,3 +1,4 @@
+import { validateDockerfileAppendLine } from '@/config/config'
 import type { DockerfileConfig, DockerfileFeatureToggle } from '@/config/config'
 import {
   CLAUDE_CREDENTIALS_FILE_NAME,
@@ -1700,10 +1701,57 @@ RUN ${aptCacheMount(buildKit)}apt-get update \\
 `
 }
 
+// Render-time enforcement is the security boundary: this is the sole bottleneck
+// where docker.file.append entries reach the generated Dockerfile, so unsafe
+// lines are STRIPPED here (never spliced into the build) rather than blocking
+// `typeclaw start`. docker.file.append is untrusted input even when the
+// in-container agent writes it — a bad line (e.g. the decode-and-exec footgun
+// that bricked a real build) becomes ineffective, not fatal. Validation
+// elsewhere only warns; this is what guarantees the line never runs.
 function renderCustomDockerfileLines(lines: string[]): string {
-  if (lines.length === 0) return ''
-  return `# Custom lines from typeclaw.json#docker.file.append.
-${lines.join('\n')}
+  const { kept, strippedCount } = classifyDockerfileAppend(lines)
+  if (kept.length === 0 && strippedCount === 0) return ''
+  // Durable, payload-free record so a stripped line isn't a silent no-op: the
+  // operator sees the Dockerfile itself note the count (full reasons surface as
+  // startup warnings). Never echo the stripped content — it may carry secrets.
+  const strippedNote =
+    strippedCount > 0
+      ? `# typeclaw stripped ${strippedCount} unsafe docker.file.append line(s); see startup warnings and typeclaw.json.
+`
+      : ''
+  if (kept.length === 0) return strippedNote ? `${strippedNote}\n` : ''
+  return `${strippedNote}# Custom lines from typeclaw.json#docker.file.append.
+${kept.join('\n')}
 
 `
+}
+
+export type DockerfileAppendClassification = {
+  kept: string[]
+  warnings: string[]
+  strippedCount: number
+}
+
+// Single source of truth for "what happens to each docker.file.append line",
+// reusing the config-layer classifier (validateDockerfileAppendLine). Both the
+// renderer (enforcement: drops unsafe lines) and refreshDockerfile (reporting:
+// surfaces warnings to the user) call this so the two never drift. Warn-but-
+// allow lines (curl|bash, remote ADD) are KEPT but produce a warning; structural
+// and semantic blocks are stripped with a warning.
+export function classifyDockerfileAppend(lines: string[]): DockerfileAppendClassification {
+  const kept: string[] = []
+  const warnings: string[] = []
+  let strippedCount = 0
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    const check = validateDockerfileAppendLine(line)
+    if (!check.ok) {
+      strippedCount++
+      warnings.push(`docker.file.append[${i}] stripped — ${check.reason}`)
+      continue
+    }
+    if (check.warning) warnings.push(`docker.file.append[${i}] ${check.warning}`)
+    kept.push(line)
+  }
+  return { kept, warnings, strippedCount }
 }

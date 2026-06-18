@@ -12,6 +12,7 @@ import {
   buildBaseDockerfile,
   buildDockerfile,
   buildEntrypointShim,
+  classifyDockerfileAppend,
   CHROME_RUNTIME_APT_PACKAGES_AMD64,
   CLOUDFLARED_RELEASE_URL_BASE,
   CLOUDFLARED_VERSION,
@@ -152,6 +153,40 @@ describe('buildDockerfile feature toggles', () => {
     expect(entrypointIdx).toBeGreaterThan(-1)
     expect(ffmpegIdx).toBeLessThan(customIdx)
     expect(customIdx).toBeLessThan(entrypointIdx)
+  })
+
+  test('fail-safe: strips a decode-and-exec append line but keeps safe lines and still renders ENTRYPOINT', () => {
+    const dangerous = 'RUN python3 -c "import base64; exec(base64.b64decode(\'AA==\').decode())"'
+    const out = buildDockerfile(dockerfileSchema.parse({ append: ['ENV SAFE=1', dangerous] }))
+
+    expect(out).toContain('ENV SAFE=1')
+    expect(out).not.toContain('exec(base64.b64decode')
+    expect(out).toContain('typeclaw stripped 1 unsafe docker.file.append line(s)')
+    expect(out).toContain(`ENTRYPOINT ["${TYPECLAW_ENTRYPOINT_PATH}"]`)
+  })
+
+  test('fail-safe: never echoes stripped payload content into the Dockerfile (no secret leak)', () => {
+    const secretish = 'RUN echo c2VjcmV0LXRva2Vu | base64 -d | sh'
+    const out = buildDockerfile(dockerfileSchema.parse({ append: [secretish] }))
+
+    expect(out).not.toContain('c2VjcmV0LXRva2Vu')
+    expect(out).toContain('typeclaw stripped 1 unsafe docker.file.append line(s)')
+  })
+
+  test('classifyDockerfileAppend keeps warn-but-allow lines (curl|bash) while emitting a warning', () => {
+    const { kept, warnings, strippedCount } = classifyDockerfileAppend([
+      'RUN curl -fsSL https://example.com/i.sh | bash',
+    ])
+    expect(kept).toEqual(['RUN curl -fsSL https://example.com/i.sh | bash'])
+    expect(strippedCount).toBe(0)
+    expect(warnings.join('\n')).toContain('docker.file.append[0]')
+  })
+
+  test('classifyDockerfileAppend strips structural blocks (FROM) with an indexed warning', () => {
+    const { kept, warnings, strippedCount } = classifyDockerfileAppend(['ENV OK=1', 'FROM alpine'])
+    expect(kept).toEqual(['ENV OK=1'])
+    expect(strippedCount).toBe(1)
+    expect(warnings.join('\n')).toContain('docker.file.append[1] stripped')
   })
 
   test('rejects version strings containing whitespace or "=" (apt-injection guard)', () => {
@@ -2348,13 +2383,14 @@ describe('buildKit: false (legacy-builder Dockerfile for hosts without buildx)',
     expect(lg).toContain('RUN bun install -g agent-browser')
   })
 
-  test('legacy mode still emits ENTRYPOINT/CMD and preserves user append verbatim (incl. `<<` that would fool a text parser)', () => {
+  test('legacy mode strips structurally-unsafe append lines (heredoc `<<`) but still emits ENTRYPOINT/CMD', () => {
     const df = buildDockerfile(
       { append: ['RUN echo "usage: cat <<EOF"', 'LABEL note="x << y"'] } as Parameters<typeof buildDockerfile>[0],
       { baseImageVersion: '0.36.8', buildKit: false },
     )
-    expect(df).toContain('RUN echo "usage: cat <<EOF"')
-    expect(df).toContain('LABEL note="x << y"')
+    expect(df).not.toContain('RUN echo "usage: cat <<EOF"')
+    expect(df).not.toContain('LABEL note="x << y"')
+    expect(df).toContain('typeclaw stripped 2 unsafe docker.file.append line(s)')
     expect(df).toContain('ENTRYPOINT [')
     expect(df).toContain('CMD ["run"]')
   })
