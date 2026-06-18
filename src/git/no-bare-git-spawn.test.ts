@@ -4,11 +4,13 @@ import { join } from 'node:path'
 
 const COMMITTER_FILES = [
   'src/bundled-plugins/backup/runner.ts',
+  'src/bundled-plugins/backup/index.ts',
   'src/bundled-plugins/memory/dreaming.ts',
   'src/git/system-commit.ts',
   'src/git/reconcile-ignored.ts',
   'src/doctor/commit.ts',
   'src/agent/git-nudge.ts',
+  'src/bundled-plugins/guard/policies/uncommitted-changes.ts',
   'src/dreams/git.ts',
 ] as const
 
