@@ -5,6 +5,7 @@ export const GITIGNORE_FILE = '.gitignore'
 // Match scope for the untrack reconciler (src/git/reconcile-ignored.ts): when a
 // tracked file later matches one of these, start() removes it from the index.
 export const TRULY_IGNORED_PATTERNS = [
+  '.gitstore/',
   '.env',
   '.env.local',
   'secrets.json',
@@ -28,8 +29,9 @@ export const SYSTEM_MANAGED_ROOTS = ['sessions/', 'memory/', 'channels/', 'todo/
 export function buildGitignore(config: GitignoreConfig = { append: [] }): string {
   const customEntries = renderCustomGitignoreEntries(config.append)
 
-  return `${customEntries}# Truly ignored: secrets, runtime junk, the agent's free-write zone, and
-# regenerated-on-every-start system files. Never enter git history.
+  return `${customEntries}# Truly ignored: secrets, runtime junk, the agent's free-write zone, the
+# relocated monorepo-member git DB, and regenerated-on-every-start system files.
+# Never enter git history.
 #
 # Dockerfile is rewritten from the typeclaw CLI template on every \`typeclaw
 # start\` (see src/init/dockerfile.ts), so tracking it would only produce

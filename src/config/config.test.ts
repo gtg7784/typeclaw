@@ -430,6 +430,18 @@ describe('sandboxSchema', () => {
   })
 })
 
+describe('composeSchema', () => {
+  test('defaults compose hints when omitted', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.compose).toEqual({ exclude: false, monorepo: false })
+  })
+
+  test('accepts the monorepo host-stage hint', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, compose: { monorepo: true } })
+    expect(parsed.compose).toEqual({ exclude: false, monorepo: true })
+  })
+})
+
 describe('getSandboxWritablePathSpecs', () => {
   test('folds symlinks[].to into the writable specs after writablePaths', () => {
     const parsed = configSchema.parse({

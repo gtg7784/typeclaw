@@ -979,6 +979,7 @@ describe('scaffold', () => {
 
     const gitignore = await readFile(join(root, '.gitignore'), 'utf8')
     expect(gitignore).toContain('.env')
+    expect(gitignore).toContain('.gitstore/')
     expect(gitignore).toContain('sessions/')
     expect(gitignore).toContain('memory/')
     expect(gitignore).toMatch(/^workspace\/$/m)
@@ -997,6 +998,14 @@ describe('scaffold', () => {
     expect(systemManagedHeader).toBeGreaterThan(-1)
     expect(typeclawIdx).toBeGreaterThan(trulyIgnoredHeader)
     expect(typeclawIdx).toBeLessThan(systemManagedHeader)
+  })
+
+  test('gitignores relocated gitstore before system-managed roots', () => {
+    const gitignore = buildGitignore({ append: [] })
+    const gitstoreIdx = gitignore.indexOf('\n.gitstore/\n')
+    const systemManagedHeader = gitignore.indexOf('# System-managed:')
+    expect(gitstoreIdx).toBeGreaterThan(-1)
+    expect(gitstoreIdx).toBeLessThan(systemManagedHeader)
   })
 
   test('buildGitignore includes custom entries from git.ignore.append before managed entries', () => {
