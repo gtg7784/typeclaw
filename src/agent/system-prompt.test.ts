@@ -28,11 +28,14 @@ describe('delivering reports and documents', () => {
   test('routes report/PDF/document requests to the typeclaw-render-pdf skill', () => {
     expect(DEFAULT_SYSTEM_PROMPT).toContain('## Delivering reports and documents')
     expect(DEFAULT_SYSTEM_PROMPT).toContain('typeclaw-render-pdf')
-    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/produce a polished file/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/Produce a polished file only when/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/Do \*\*not\*\* treat the bare word "report" as enough/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/routine operational updates, daily stats, user trends/i)
   })
 
   test('states the summary is a pointer, never the deliverable', () => {
     expect(DEFAULT_SYSTEM_PROMPT).toMatch(/summary[\s\S]*?never the deliverable/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/only after a deliverable was actually requested/i)
   })
 
   test('forbids hand-rolling a PDF with an ad-hoc library', () => {

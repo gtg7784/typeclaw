@@ -300,7 +300,7 @@ describe('renderSessionOrigin', () => {
   )
 
   test.each(['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const)(
-    'attachment-capable channel origin (%s) defaults report/PDF requests to a PDF attachment',
+    'attachment-capable channel origin (%s) defaults explicit deliverables to PDF attachments',
     (adapter) => {
       const out = renderSessionOrigin({
         kind: 'channel',
@@ -309,14 +309,17 @@ describe('renderSessionOrigin', () => {
         chat: 'C0',
         thread: null,
       })
-      expect(out).toMatch(/Ship reports as a PDF by default/i)
-      expect(out).toMatch(/the user asks for a report, document, brief, or "the report"/i)
+      expect(out).toMatch(/Ship explicit deliverables as PDFs/i)
+      expect(out).toMatch(/clearly asks for a PDF\/file\/export\/attachment/i)
+      expect(out).toMatch(/Do not treat the bare word "report" as enough/i)
+      expect(out).toMatch(/routine daily stats/i)
       expect(out).toContain('research-<slug>.md')
       expect(out).toContain('typeclaw-render-pdf')
       expect(out).toMatch(/channel_send\(\{ \.\.\., attachments:/)
       expect(out).toMatch(/do not paste\s+the full markdown into chat/i)
+      expect(out).toMatch(/inline text is right for routine updates/i)
       expect(out).toMatch(/`<summary>`[\s\S]*?NOT the deliverable/i)
-      expect(out).toMatch(/ad-hoc library \(jsPDF, pdfkit/i)
+      expect(out).toMatch(/ad-hoc library[\s\S]*?jsPDF, pdfkit/i)
       expect(out).toMatch(/do not attach the raw `\.md`/i)
     },
   )
@@ -333,7 +336,7 @@ describe('renderSessionOrigin', () => {
       chat: 'pr:7',
       thread: null,
     })
-    expect(out).not.toMatch(/Ship reports as a PDF by default/i)
+    expect(out).not.toMatch(/Ship explicit deliverables as PDFs/i)
     expect(out).not.toContain('typeclaw-render-pdf')
   })
 

@@ -538,16 +538,19 @@ function renderMembershipSummary(
 function renderResearchReportDeliveryGuidance(platformInfo: PlatformInfo): string[] {
   if (!platformInfo.supportsAttachments) return []
   return [
-    `**Ship reports as a PDF by default.** ${platformInfo.displayName} accepts file`,
-    'attachments. When the user asks for a report, document, brief, or "the report", or when a',
-    '`researcher` subagent returns `research-<slug>.md` in `<report>`, render the',
-    'markdown with `typeclaw-render-pdf` and deliver via',
+    `**Ship explicit deliverables as PDFs.** ${platformInfo.displayName} accepts file`,
+    'attachments. When the user clearly asks for a PDF/file/export/attachment, a standalone',
+    'document/brief, or when a `researcher` subagent returns `research-<slug>.md` in',
+    '`<report>`, render the markdown with `typeclaw-render-pdf` and deliver via',
     '`channel_send({ ..., attachments: [{ path, filename }] })` plus a 1–2 line',
-    'summary. A `researcher` `<summary>` is a teaser, NOT the deliverable. Never',
-    'use an ad-hoc library (jsPDF, pdfkit, raw-text dump); it breaks markdown/CJK.',
+    'summary. Do not treat the bare word "report" as enough: routine daily stats,',
+    'user trends, status reports, and other operational updates should stay inline',
+    'unless the user asks for a downloadable/exported artifact. A `researcher`',
+    '`<summary>` is a teaser, NOT the deliverable. Never use an ad-hoc library',
+    '(jsPDF, pdfkit, raw-text dump); it breaks markdown/CJK.',
     "For Korean/Japanese/Chinese, follow the skill's CJK guidance and never ship",
     'tofu boxes. Do not paste the full markdown into chat; do not attach the raw `.md`',
-    'unless explicitly asked; inline text is only for short content.',
+    'unless explicitly asked; inline text is right for routine updates.',
     '',
   ]
 }
