@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { type AgentGit, resolveAgentGit } from '@/git/resolve-agent-git'
+
 export const COMMIT_TIMEOUT_MS = 30_000
 export const NETWORK_TIMEOUT_MS = 60_000
 
@@ -64,9 +66,10 @@ type PushPlan = ActivePushPlan | { kind: 'skip' }
 export async function runBackup(options: BackupRunnerOptions, deps: BackupRunnerDeps): Promise<BackupResult> {
   const { cwd, pushToOrigin } = options
 
-  if (!existsSync(join(cwd, '.git'))) return { ok: true, kind: 'no-repo' }
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return { ok: true, kind: 'no-repo' }
 
-  const status = await deps.gitSpawn(['status', '--porcelain=v1', '--untracked-files=all'], {
+  const status = await deps.gitSpawn([...repo.gitArgs, 'status', '--porcelain=v1', '--untracked-files=all'], {
     cwd,
     timeoutMs: COMMIT_TIMEOUT_MS,
   })
@@ -76,23 +79,32 @@ export async function runBackup(options: BackupRunnerOptions, deps: BackupRunner
   if (dirty.length === 0 && force.length === 0) return { ok: true, kind: 'clean' }
 
   if (dirty.length > 0) {
-    const add = await deps.gitSpawn(['add', '--', ...dirty], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+    const add = await deps.gitSpawn([...repo.gitArgs, 'add', '--', ...dirty], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
     if (add.exitCode !== 0) return { ok: false, kind: 'commit-failed', reason: `git add failed: ${shortErr(add)}` }
   }
   if (force.length > 0) {
     const present = force.filter((p) => existsSync(join(cwd, p)))
     if (present.length > 0) {
-      const addF = await deps.gitSpawn(['add', '-f', '--', ...present], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+      const addF = await deps.gitSpawn([...repo.gitArgs, 'add', '-f', '--', ...present], {
+        cwd,
+        timeoutMs: COMMIT_TIMEOUT_MS,
+      })
       if (addF.exitCode !== 0) {
         return { ok: false, kind: 'commit-failed', reason: `git add -f failed: ${shortErr(addF)}` }
       }
     }
   }
 
-  const stagedCheck = await deps.gitSpawn(['diff', '--cached', '--quiet'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+  const stagedCheck = await deps.gitSpawn([...repo.gitArgs, 'diff', '--cached', '--quiet'], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
   if (stagedCheck.exitCode === 0) return { ok: true, kind: 'clean' }
 
-  const diffstat = await deps.gitSpawn(['diff', '--cached', '--stat'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+  const diffstat = await deps.gitSpawn([...repo.gitArgs, 'diff', '--cached', '--stat'], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
   const message = await deps.pickCommitMessage({
     status: status.stdout.slice(0, 4096),
     diffstat: diffstat.stdout.slice(0, 4096),
@@ -106,14 +118,17 @@ export async function runBackup(options: BackupRunnerOptions, deps: BackupRunner
   // one-cycle-behind churn. Re-status, filter to `sessions/` additions
   // only (don't accidentally stage user work that arrived during the
   // window), and force-add anything new.
-  const reStatus = await deps.gitSpawn(['status', '--porcelain=v1', '--untracked-files=all'], {
+  const reStatus = await deps.gitSpawn([...repo.gitArgs, 'status', '--porcelain=v1', '--untracked-files=all'], {
     cwd,
     timeoutMs: COMMIT_TIMEOUT_MS,
   })
   if (reStatus.exitCode === 0) {
     const lateForce = filterForceAdd(parsePorcelain(reStatus.stdout)).filter((p) => existsSync(join(cwd, p)))
     if (lateForce.length > 0) {
-      const lateAdd = await deps.gitSpawn(['add', '-f', '--', ...lateForce], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+      const lateAdd = await deps.gitSpawn([...repo.gitArgs, 'add', '-f', '--', ...lateForce], {
+        cwd,
+        timeoutMs: COMMIT_TIMEOUT_MS,
+      })
       if (lateAdd.exitCode !== 0) {
         return { ok: false, kind: 'commit-failed', reason: `git add -f (post-message) failed: ${shortErr(lateAdd)}` }
       }
@@ -121,16 +136,19 @@ export async function runBackup(options: BackupRunnerOptions, deps: BackupRunner
   }
 
   const safeMessage = sanitizeCommitMessage(message)
-  const commit = await deps.gitSpawn(['commit', '-m', safeMessage], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+  const commit = await deps.gitSpawn([...repo.gitArgs, 'commit', '-m', safeMessage], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
   if (commit.exitCode !== 0)
     return { ok: false, kind: 'commit-failed', reason: `git commit failed: ${shortErr(commit)}` }
 
   if (!pushToOrigin) return { ok: true, kind: 'committed' }
 
-  const plan = await resolvePushPlan(cwd, deps)
+  const plan = await resolvePushPlan(cwd, deps, repo)
   if (plan.kind === 'skip') return { ok: true, kind: 'committed' }
 
-  return pushWithRecovery(cwd, deps, plan)
+  return pushWithRecovery(cwd, deps, repo, plan)
 }
 
 // `@{upstream}` resolution failing was previously treated as "no push" — but a
@@ -140,11 +158,14 @@ export async function runBackup(options: BackupRunnerOptions, deps: BackupRunner
 // branch": then we push AND set the upstream in one shot, and every later run
 // takes the plain-upstream path. No remote / detached HEAD stays commit-only
 // (a legitimate offline state), so it returns `skip` rather than diagnosing.
-async function resolvePushPlan(cwd: string, deps: BackupRunnerDeps): Promise<PushPlan> {
-  const upstream = await deps.gitSpawn(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], {
-    cwd,
-    timeoutMs: COMMIT_TIMEOUT_MS,
-  })
+async function resolvePushPlan(cwd: string, deps: BackupRunnerDeps, repo: AgentGit): Promise<PushPlan> {
+  const upstream = await deps.gitSpawn(
+    [...repo.gitArgs, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+    {
+      cwd,
+      timeoutMs: COMMIT_TIMEOUT_MS,
+    },
+  )
   if (upstream.exitCode === 0 && upstream.stdout.trim().length > 0) {
     return { kind: 'upstream', upstreamRef: upstream.stdout.trim() }
   }
@@ -153,13 +174,19 @@ async function resolvePushPlan(cwd: string, deps: BackupRunnerDeps): Promise<Pus
   // would guess a destination the operator never configured. `get-url` (not
   // `get-url --push`) is enough here — we only need to know origin EXISTS and
   // is named `origin`; the push targets `origin` by name regardless of pushurl.
-  const origin = await deps.gitSpawn(['remote', 'get-url', 'origin'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+  const origin = await deps.gitSpawn([...repo.gitArgs, 'remote', 'get-url', 'origin'], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
   if (origin.exitCode !== 0 || origin.stdout.trim().length === 0) return { kind: 'skip' }
 
   // `symbolic-ref --short HEAD` fails on a detached HEAD (no branch to set an
   // upstream for); `rev-parse --abbrev-ref HEAD` would have returned the literal
   // "HEAD" and we'd have tried to push a branch named HEAD. Skip cleanly.
-  const branch = await deps.gitSpawn(['symbolic-ref', '--short', 'HEAD'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+  const branch = await deps.gitSpawn([...repo.gitArgs, 'symbolic-ref', '--short', 'HEAD'], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
   if (branch.exitCode !== 0 || branch.stdout.trim().length === 0) return { kind: 'skip' }
 
   return { kind: 'set-upstream', remote: 'origin', branch: branch.stdout.trim() }
@@ -169,13 +196,18 @@ async function resolvePushPlan(cwd: string, deps: BackupRunnerDeps): Promise<Pus
 // non-fast-forward recovery: fetch, rebase onto the intended remote branch,
 // re-push. Keeping one helper stops the set-upstream path from silently becoming
 // a weaker duplicate that skips recovery.
-async function pushWithRecovery(cwd: string, deps: BackupRunnerDeps, plan: ActivePushPlan): Promise<BackupResult> {
-  const pushArgs = pushArgsFor(plan)
+async function pushWithRecovery(
+  cwd: string,
+  deps: BackupRunnerDeps,
+  repo: AgentGit,
+  plan: ActivePushPlan,
+): Promise<BackupResult> {
+  const pushArgs = [...repo.gitArgs, ...pushArgsFor(plan)]
   const rebaseRef = plan.kind === 'upstream' ? plan.upstreamRef : `${plan.remote}/${plan.branch}`
   // In the set-upstream case there is no tracking ref yet, so a bare `git fetch`
   // has no configured remote to default to — fetch the same remote we rebase
   // onto. The upstream case keeps bare `fetch` (its tracking config resolves it).
-  const fetchArgs = plan.kind === 'upstream' ? ['fetch'] : ['fetch', plan.remote]
+  const fetchArgs = [...repo.gitArgs, ...(plan.kind === 'upstream' ? ['fetch'] : ['fetch', plan.remote])]
   const pushedKind: BackupResult = { ok: true, kind: plan.kind === 'upstream' ? 'pushed' : 'pushed-set-upstream' }
   // Credentials ride ONLY on the network calls (push/fetch). The rebase is
   // local (it replays onto an already-fetched remote-tracking ref), so it runs
@@ -202,9 +234,9 @@ async function pushWithRecovery(cwd: string, deps: BackupRunnerDeps, plan: Activ
     return { ok: false, kind: 'push-failed', reason: `git fetch failed: ${shortErr(fetch)}` }
   }
 
-  const rebase = await deps.gitSpawn(['rebase', rebaseRef], { cwd, timeoutMs: NETWORK_TIMEOUT_MS })
+  const rebase = await deps.gitSpawn([...repo.gitArgs, 'rebase', rebaseRef], { cwd, timeoutMs: NETWORK_TIMEOUT_MS })
   if (rebase.exitCode !== 0) {
-    await deps.gitSpawn(['rebase', '--abort'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+    await deps.gitSpawn([...repo.gitArgs, 'rebase', '--abort'], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
     await maybeDiagnose(deps, {
       cwd,
       stage: 'rebase',

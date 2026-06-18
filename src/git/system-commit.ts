@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolveAgentGit } from './resolve-agent-git'
 
 // Commits TypeClaw-owned tracked files (.gitignore, package.json,
 // typeclaw.json) if any are dirty in git. Skips silently when the agent
@@ -24,10 +23,11 @@ export async function commitSystemFile(cwd: string, file: string | readonly stri
 
   const bun = getBunAsync()
   if (!bun) return
-  if (!existsSync(join(cwd, '.git'))) return
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return
 
   const status = bun.spawn({
-    cmd: ['git', 'status', '--porcelain', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'status', '--porcelain', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -36,11 +36,11 @@ export async function commitSystemFile(cwd: string, file: string | readonly stri
   const dirty = (await new Response(status.stdout).text()).trim().length > 0
   if (!dirty) return
 
-  const add = bun.spawn({ cmd: ['git', 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const add = bun.spawn({ cmd: ['git', ...repo.gitArgs, 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
   if ((await add.exited) !== 0) return
 
   const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', message, '--only', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -69,10 +69,11 @@ export function commitSystemFileSync(cwd: string, file: string | readonly string
 
   const bun = getBunSync()
   if (!bun) return
-  if (!existsSync(join(cwd, '.git'))) return
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return
 
   const status = bun.spawnSync({
-    cmd: ['git', 'status', '--porcelain', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'status', '--porcelain', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -80,11 +81,16 @@ export function commitSystemFileSync(cwd: string, file: string | readonly string
   if (status.exitCode !== 0) return
   if (new TextDecoder().decode(status.stdout).trim().length === 0) return
 
-  const add = bun.spawnSync({ cmd: ['git', 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const add = bun.spawnSync({
+    cmd: ['git', ...repo.gitArgs, 'add', '--', ...files],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   if (add.exitCode !== 0) return
 
   bun.spawnSync({
-    cmd: ['git', 'commit', '-m', message, '--only', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',

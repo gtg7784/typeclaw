@@ -106,6 +106,22 @@ describe('renderGitNudge', () => {
     expect(text).toContain('- src/bar.ts')
   })
 
+  test('passes gitstore args to status reader when .gitstore is present', async () => {
+    await mkdir(join(agentDir, '.gitstore'))
+    let captured: readonly string[] = []
+    const deps: GitNudgeDeps = {
+      readStatus: async (_agentDir, gitArgs) => {
+        captured = gitArgs
+        return ['src/foo.ts']
+      },
+    }
+
+    const text = await renderGitNudge(agentDir, deps)
+
+    expect(text).toContain('- src/foo.ts')
+    expect(captured).toEqual(['--git-dir', join(agentDir, '.gitstore'), '--work-tree', agentDir])
+  })
+
   test('drops paths under sessions/ and memory/ from the nudge', async () => {
     await mkdir(join(agentDir, '.git'))
     const deps: GitNudgeDeps = {

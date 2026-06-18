@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolveAgentGit } from '@/git/resolve-agent-git'
 
 import type { CommitOutcome, FixAttempt } from './types'
 
@@ -23,13 +22,15 @@ export async function commitAutoFixes(opts: CommitOptions): Promise<CommitOutcom
     return { kind: 'skipped', reason: 'auto-fixes reported no changed paths' }
   }
 
-  if (!existsSync(join(opts.cwd, '.git'))) {
+  const repo = resolveAgentGit(opts.cwd)
+  if (!repo) {
     return { kind: 'skipped', reason: 'agent folder is not a git repo (.git missing)' }
   }
 
   const spawnGit = opts.spawnGit ?? defaultSpawnGit
+  const git = (args: string[]): Promise<GitResult> => spawnGit([...repo.gitArgs, ...args], opts.cwd)
 
-  const filter = await filterCommittable(spawnGit, opts.cwd, requested)
+  const filter = await filterCommittable(git, requested)
   if (filter.kind === 'failed') return filter
   const pathsStaged = filter.paths
   if (pathsStaged.length === 0) {
@@ -39,18 +40,18 @@ export async function commitAutoFixes(opts: CommitOptions): Promise<CommitOutcom
     }
   }
 
-  const add = await spawnGit(['add', '--', ...pathsStaged], opts.cwd)
+  const add = await git(['add', '--', ...pathsStaged])
   if (add.exitCode !== 0) {
     return { kind: 'failed', reason: `git add failed: ${add.stderr.trim() || `exit ${add.exitCode}`}` }
   }
 
   const message = buildCommitMessage(opts.attempts)
-  const commit = await spawnGit(['commit', '-m', message, '--only', '--', ...pathsStaged], opts.cwd)
+  const commit = await git(['commit', '-m', message, '--only', '--', ...pathsStaged])
   if (commit.exitCode !== 0) {
     return { kind: 'failed', reason: `git commit failed: ${commit.stderr.trim() || `exit ${commit.exitCode}`}` }
   }
 
-  const sha = await spawnGit(['rev-parse', 'HEAD'], opts.cwd)
+  const sha = await git(['rev-parse', 'HEAD'])
   const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : ''
   return { kind: 'committed', commitSha, pathsStaged }
 }
@@ -68,13 +69,12 @@ export async function commitAutoFixes(opts: CommitOptions): Promise<CommitOutcom
 // Surface that as { kind: 'failed' } so the user sees the real cause instead
 // of a misleading 'all paths are gitignored' message.
 async function filterCommittable(
-  spawnGit: SpawnGit,
-  cwd: string,
+  spawnGit: (args: string[]) => Promise<GitResult>,
   paths: string[],
 ): Promise<{ kind: 'ok'; paths: string[] } | { kind: 'failed'; reason: string }> {
   const out: string[] = []
   for (const p of paths) {
-    const status = await spawnGit(['status', '--porcelain', '--', p], cwd)
+    const status = await spawnGit(['status', '--porcelain', '--', p])
     if (status.exitCode !== 0) {
       return {
         kind: 'failed',

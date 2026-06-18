@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -1349,8 +1350,9 @@ function vector(values: Record<number, number>): Float32Array {
 }
 
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> {
+  const gitArgs = existsSync(join(cwd, '.gitstore')) ? ['--git-dir', join(cwd, '.gitstore'), '--work-tree', cwd] : []
   const proc = Bun.spawn({
-    cmd: ['git', ...args],
+    cmd: ['git', ...gitArgs, ...args],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -1372,6 +1374,10 @@ async function initRepo(cwd: string): Promise<void> {
   await writeFile(join(cwd, '.gitignore'), 'memory/\n')
   await runGit(cwd, ['add', '.gitignore'])
   await runGit(cwd, ['commit', '-qm', 'init'])
+}
+
+async function relocateGitStore(cwd: string): Promise<void> {
+  await rename(join(cwd, '.git'), join(cwd, '.gitstore'))
 }
 
 async function trackedFiles(cwd: string): Promise<string[]> {
@@ -1438,6 +1444,18 @@ describe('commitMemorySnapshot', () => {
 
     expect(await trackedFiles(agentDir)).toEqual(['memory/skills/release-checklist/SKILL.md'])
     expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/skills/release-checklist/SKILL.md'])
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('commits Korean memory artifacts through a relocated gitstore', async () => {
+    await initRepo(agentDir)
+    await relocateGitStore(agentDir)
+    await writeFile(streamFile('2026-04-27'), fragmentLine('korean', '사용자 선호', '사용자는 한국어 메모를 남겼다'))
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual(['memory/streams/2026-04-27.jsonl'])
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 1 fragment /)
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 })

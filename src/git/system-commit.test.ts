@@ -1,15 +1,20 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { commitSystemFile, commitSystemFileSync } from './system-commit'
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const gitArgs = existsSync(join(cwd, '.gitstore')) ? ['--git-dir', join(cwd, '.gitstore'), '--work-tree', cwd] : []
+  const proc = Bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
   await proc.exited
   return (await new Response(proc.stdout).text()).trim()
+}
+
+async function relocateGitStore(cwd: string): Promise<void> {
+  await rename(join(cwd, '.git'), join(cwd, '.gitstore'))
 }
 
 async function gitInit(cwd: string): Promise<void> {
@@ -68,6 +73,25 @@ describe('commitSystemFile (async)', () => {
       await writeFile(join(dir, 'typeclaw.json'), '{}\n')
       await commitSystemFile(dir, 'typeclaw.json', 'msg')
       expect(existsSync(join(dir, '.git'))).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('commits a dirty tracked file through a relocated gitstore', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sys-commit-async-gitstore-'))
+    try {
+      await gitInit(dir)
+      await writeFile(join(dir, 'typeclaw.json'), '{"message":"안녕"}\n')
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await relocateGitStore(dir)
+      await writeFile(join(dir, 'typeclaw.json'), '{"message":"안녕하세요"}\n')
+
+      await commitSystemFile(dir, 'typeclaw.json', 'update typeclaw.json')
+
+      expect(await runGit(dir, ['log', '-1', '--format=%s'])).toBe('update typeclaw.json')
+      expect(await runGit(dir, ['show', 'HEAD:typeclaw.json'])).toBe('{"message":"안녕하세요"}')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

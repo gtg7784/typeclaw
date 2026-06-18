@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,9 +9,14 @@ import { buildGitignore } from '@/init/gitignore'
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from './reconcile-ignored'
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const gitArgs = existsSync(join(cwd, '.gitstore')) ? ['--git-dir', join(cwd, '.gitstore'), '--work-tree', cwd] : []
+  const proc = Bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
   await proc.exited
   return (await new Response(proc.stdout).text()).trim()
+}
+
+async function relocateGitStore(cwd: string): Promise<void> {
+  await rename(join(cwd, '.git'), join(cwd, '.gitstore'))
 }
 
 async function gitInit(cwd: string): Promise<void> {
@@ -146,6 +152,26 @@ describe('untrackTrulyIgnoredFiles', () => {
 
       expect(untracked).toContain('scratch/note.txt')
       expect(await isTracked(dir, 'scratch/note.txt')).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('untracks files through a relocated gitstore', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await relocateGitStore(dir)
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+
+      expect(untracked).toContain('public/review.json')
+      expect(await isTracked(dir, 'public/review.json')).toBe(false)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -355,6 +381,29 @@ describe('commitGitignoreWithUntracks', () => {
       expect(committed).toBe(false)
       expect(await runGit(dir, ['diff', '--cached', '--name-only'])).toContain('sessions/history.jsonl')
       expect(await isTracked(dir, 'sessions/history.jsonl')).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('commits .gitignore and untracks through a relocated gitstore', async () => {
+    const dir = await makeRepo()
+    try {
+      await gitInit(dir)
+      await mkdir(join(dir, 'public'))
+      await writeFile(join(dir, 'public', 'review.json'), '{}\n')
+      await writeFile(join(dir, '.gitignore'), 'old\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await relocateGitStore(dir)
+
+      await writeFile(join(dir, '.gitignore'), buildGitignore())
+      const { untracked } = await untrackTrulyIgnoredFiles(dir)
+      const committed = await commitGitignoreWithUntracks(dir, '.gitignore', untracked, 'Untrack newly-ignored files')
+
+      expect(committed).toBe(true)
+      expect(await runGit(dir, ['status', '--porcelain'])).toBe('')
+      expect(await isTracked(dir, 'public/review.json')).toBe(false)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
