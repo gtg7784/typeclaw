@@ -189,6 +189,16 @@ describe('buildDockerfile feature toggles', () => {
     expect(warnings.join('\n')).toContain('docker.file.append[1] stripped')
   })
 
+  test('classifyDockerfileAppend warning never echoes the offending token from a malformed line (no secret leak)', () => {
+    const secretishFirstToken = 'sk-live-abc123secret do-something'
+    const { kept, warnings, strippedCount } = classifyDockerfileAppend([secretishFirstToken])
+    expect(kept).toEqual([])
+    expect(strippedCount).toBe(1)
+    const joined = warnings.join('\n')
+    expect(joined).not.toContain('sk-live-abc123secret')
+    expect(joined).toContain('does not begin with a recognized Dockerfile instruction')
+  })
+
   test('rejects version strings containing whitespace or "=" (apt-injection guard)', () => {
     expect(() => dockerfileSchema.parse({ gh: '2.40.0 curl' })).toThrow(/must not contain whitespace/)
     expect(() => dockerfileSchema.parse({ tmux: '3.3a=evil' })).toThrow(/must not contain whitespace/)

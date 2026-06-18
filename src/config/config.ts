@@ -1448,9 +1448,13 @@ export function validateDockerfileAppendLine(line: string): AppendLineCheck {
     }
   }
   if (!ALLOWED_APPEND_INSTRUCTIONS.has(instruction)) {
+    // Reason is intentionally input-free: this string is forwarded verbatim into
+    // operator-facing warnings (classifyDockerfileAppend -> dockerfileWarnings),
+    // and the offending token is user-controlled — echoing it could leak a
+    // secret/token-like first word from a malformed line into start/doctor output.
     return {
       ok: false,
-      reason: `does not begin with a recognized Dockerfile instruction (got "${instruction}")`,
+      reason: 'does not begin with a recognized Dockerfile instruction',
       kind: 'structural',
     }
   }
