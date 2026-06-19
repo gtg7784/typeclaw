@@ -53,9 +53,11 @@ export function classifyInbound(
       authorIsBot: false,
       isBotMention,
       // Webex Mercury only exposes parentId inline, not the parent author. When
-      // the reply auto-mentions the bot we can identify it as bot-directed;
-      // otherwise leave the parent unattributed instead of guessing.
-      replyToBotMessageId: event.parentId !== undefined && isBotMention ? event.parentId : null,
+      // the reply has a structured bot mention we can identify it as bot-directed;
+      // otherwise leave the parent unattributed instead of guessing. Alias matches
+      // are mention-equivalent for engagement, but they do not prove the parent
+      // is bot-authored; enrichment fetches the parent and attributes it.
+      replyToBotMessageId: event.parentId !== undefined && structuredBotMention ? event.parentId : null,
       mentionsOthers,
       replyToOtherMessageId: null,
       isDm,

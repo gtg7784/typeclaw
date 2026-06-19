@@ -73,6 +73,21 @@ describe('enrichWebexMessageReference', () => {
     expect(enriched.replyToBotMessageId).toBeNull()
   })
 
+
+  test('classifies an alias-addressed reply to a non-bot parent as directed at the parent author', async () => {
+    const aliasAddressedReply = { ...inbound, text: '타이피야 확인해줘', isBotMention: true }
+    const enriched = await enrichWebexMessageReference({
+      inbound: aliasAddressedReply,
+      parentId: 'parent',
+      botPersonId: 'bot-1',
+      client: { getMessage: parentFrom('user-2') },
+    })
+
+    expect(enriched.isBotMention).toBe(true)
+    expect(enriched.replyToBotMessageId).toBeNull()
+    expect(enriched.replyToOtherMessageId).toBe('parent')
+  })
+
   test('attributes a bot-authored parent even when its text is empty', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
