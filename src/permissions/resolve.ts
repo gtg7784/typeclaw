@@ -58,12 +58,12 @@ function matchesChannel(rule: Extract<MatchRule, { kind: 'channel' }>, origin: M
 }
 
 // DM and group buckets are inferred from the workspace/chat shape of the
-// inbound origin. Different adapters mark DMs differently — Slack uses an
-// `@dm` workspace marker today, Discord uses a `dm` workspace marker, and
+// inbound origin. Different adapters mark DMs differently — Slack and Webex
+// use an `@dm` workspace marker, Discord uses a `dm` workspace marker, and
 // KakaoTalk preserves group/open/dm explicitly in its workspace field. We
 // keep the heuristic narrow: a rule that says `slack:dm/*` matches only when
-// the origin's workspace is `@dm` (Slack) or `dm` (Discord). KakaoTalk uses
-// the workspace prefix itself.
+// the origin's workspace is `@dm` (Slack/Webex) or `dm` (Discord). KakaoTalk
+// uses the workspace prefix itself.
 function matchesBucket(
   bucket: 'dm' | 'group' | 'open' | 'square',
   origin: Extract<MatchableOrigin, { kind: 'channel' }>,
@@ -85,6 +85,7 @@ function matchesBucket(
   if (platform === 'slack') return origin.workspace === '@dm'
   if (platform === 'discord') return origin.workspace === 'dm' || origin.workspace === '@dm'
   if (platform === 'telegram') return origin.workspace === 'dm' || origin.workspace.startsWith('@')
+  if (platform === 'webex') return origin.workspace === '@dm'
   return false
 }
 

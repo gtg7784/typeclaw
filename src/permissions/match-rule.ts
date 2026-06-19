@@ -50,8 +50,12 @@ export type ParseMatchRuleResult = { ok: true; value: MatchRule } | { ok: false;
 // run and emit typo suggestions like `autor:` -> `author:`. If we tightened
 // this to `author:` only, the JSON schema would reject typos with a generic
 // "did not match pattern" error and the user would lose the actionable hint.
-export const MATCH_RULE_REGEX_SOURCE =
-  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|line|kakao|github):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
+//
+// The platform alternation is derived from PLATFORMS so a newly added
+// platform can never validate at the parser but be rejected by this schema
+// regex (the bug that shipped when 'webex' was added to PLATFORMS but not
+// here).
+export const MATCH_RULE_REGEX_SOURCE = `^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(${PLATFORMS.join('|')}):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$`
 
 export function parseMatchRule(input: string): ParseMatchRuleResult {
   if (input !== input.trim() || input.length === 0) {
