@@ -178,9 +178,18 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer({ registry })
 
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_a', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    // Regression: a fixed setTimeout raced the subscribe round-trip under CI
+    // load — the emit fired before the server wired its session subscriber, the
+    // event was dropped, and the test hung to the 30s timeout. Gate on onSubscribed.
+    void subscribed.promise.then(() => {
       session.emit({
         type: 'message_update',
         assistantMessageEvent: { type: 'thinking_delta', delta: 'Should I ' },
@@ -193,7 +202,7 @@ describe('streamLive — live session events', () => {
         type: 'message_update',
         assistantMessageEvent: { type: 'thinking_end', content: 'Should I read the file?' },
       })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
@@ -210,14 +219,23 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer({ registry })
 
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_a', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    // Same subscribe-round-trip race as the thinking_delta test above: gate the
+    // emit on onSubscribed rather than a fixed timeout so the server's session
+    // subscriber is wired before the one-shot thinking_end fires.
+    void subscribed.promise.then(() => {
       session.emit({
         type: 'message_update',
         assistantMessageEvent: { type: 'thinking_end', content: 'one-shot thought' },
       })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
