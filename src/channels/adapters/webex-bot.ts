@@ -235,7 +235,12 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         logger.info(`[webex-bot] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
       }
-      const payload = await enrichWebexMessageReference({ client, inbound: verdict.payload, parentId: event.parentId })
+      const payload = await enrichWebexMessageReference({
+        client,
+        inbound: verdict.payload,
+        parentId: event.parentId,
+        botPersonId: botSnapshot?.id ?? null,
+      })
       logger.info(
         `[webex-bot] routed id=${event.id} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
       )
