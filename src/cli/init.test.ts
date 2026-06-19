@@ -1360,7 +1360,7 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
     expect(serialized).not.toContain('llmAuth')
   })
 
-  test('prompts to resume when a checkpoint exists and seeds prior answers', async () => {
+  test('resume auto-skips every checkpoint-covered choice prompt, not just the upstream ones', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
     const existing = checkpointFromSelections({
       cwd,
@@ -1374,8 +1374,9 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
 
     let confirmCalls = 0
     let vendorCalls = 0
-    let modelInitial: string | undefined
-    await collectWizardInputs(
+    let modelCalls = 0
+    let channelCalls = 0
+    const result = await collectWizardInputs(
       cwd,
       basePrompts({
         confirmResumeCheckpoint: async () => {
@@ -1387,9 +1388,13 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
           vendorCalls += 1
           return { kind: 'value', value: 'fireworks' as KnownProviderVendorId }
         },
-        pickModel: async (_options, _providerId, initial) => {
-          modelInitial = initial
+        pickModel: async () => {
+          modelCalls += 1
           return { kind: 'value', value: fireworksModel }
+        },
+        pickChannel: async () => {
+          channelCalls += 1
+          return { kind: 'value', value: 'none' }
         },
       }),
       { checkpointStore: store },
@@ -1397,7 +1402,200 @@ describe('collectWizardInputs wizard-answer checkpoint', () => {
 
     expect(confirmCalls).toBe(1)
     expect(vendorCalls).toBe(0)
-    expect(modelInitial).toBe(FIREWORKS_REF)
+    expect(modelCalls).toBe(0)
+    expect(channelCalls).toBe(0)
+    // The seeded model still drives the result even though no prompt fired.
+    expect(result.model).toBe(fireworksModel)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing' })
+    expect(result.channelChoice).toBe('none')
+  })
+
+  test('resume stops interactively at the first un-checkpointed step (model saved, channel not)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
+    const existing = checkpointFromSelections({
+      cwd,
+      vendorId: 'fireworks',
+      providerId: 'fireworks',
+      modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+    })
+    const { store } = inMemoryStore(existing)
+
+    let modelCalls = 0
+    let channelCalls = 0
+    let channelInitialWasUndefined = false
+    const result = await collectWizardInputs(
+      cwd,
+      basePrompts({
+        confirmResumeCheckpoint: async () => 'resume',
+        readExistingApiKey: async () => 'sk_existing',
+        pickModel: async () => {
+          modelCalls += 1
+          return { kind: 'value', value: fireworksModel }
+        },
+        pickChannel: async (initial) => {
+          channelCalls += 1
+          channelInitialWasUndefined = initial === undefined
+          return { kind: 'value', value: 'none' }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    // given the model is checkpoint-covered but channelChoice is not:
+    expect(modelCalls).toBe(0) // model auto-skipped
+    expect(channelCalls).toBe(1) // channel prompt fired for real
+    expect(channelInitialWasUndefined).toBe(true) // no saved choice to pre-fill
+    expect(result.model).toBe(fireworksModel)
+  })
+
+  test('resume does NOT auto-skip the api-key prompt when no key is on disk', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
+    const existing = checkpointFromSelections({
+      cwd,
+      vendorId: 'fireworks',
+      providerId: 'fireworks',
+      modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+      channelChoice: 'none',
+    })
+    const { store } = inMemoryStore(existing)
+
+    let askApiKeyCalls = 0
+    const result = await collectWizardInputs(
+      cwd,
+      basePrompts({
+        confirmResumeCheckpoint: async () => 'resume',
+        readExistingApiKey: async () => null, // key value is never checkpointed
+        askApiKey: async () => {
+          askApiKeyCalls += 1
+          return { kind: 'value', value: 'sk_freshly_entered' }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    expect(askApiKeyCalls).toBe(1) // secret entry still required
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_freshly_entered' })
+  })
+
+  test('backing out of the first interactive prompt ends replay and re-shows the seeded prior step', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
+    // channelChoice is intentionally NOT checkpointed, so pick-channel is the
+    // first genuinely interactive step after the auto-skipped model.
+    const existing = checkpointFromSelections({
+      cwd,
+      vendorId: 'fireworks',
+      providerId: 'fireworks',
+      modelRef: FIREWORKS_REF as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+    })
+    const { store } = inMemoryStore(existing)
+
+    let channelCalls = 0
+    let modelCalls = 0
+    const result = await collectWizardInputs(
+      cwd,
+      basePrompts({
+        confirmResumeCheckpoint: async () => 'resume',
+        readExistingApiKey: async () => 'sk_existing',
+        pickModel: async () => {
+          modelCalls += 1
+          return { kind: 'value', value: fireworksModel }
+        },
+        pickChannel: async () => {
+          channelCalls += 1
+          // First call (real prompt, model already auto-skipped) backs once;
+          // that must re-render pick-model as a real prompt (replay now off),
+          // so on the second pick-channel call we commit.
+          return channelCalls === 1 ? { kind: 'back' } : { kind: 'value', value: 'none' }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    // model was auto-skipped on the forward pass, then re-prompted after the
+    // back from pick-channel (proving replay ended on the interactive prompt).
+    expect(modelCalls).toBe(1)
+    expect(channelCalls).toBe(2)
+    expect(result.channelChoice).toBe('none')
+  })
+
+  test('resume auto-skips the whole vision sub-flow when it was checkpointed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-init-resume-'))
+    const zaiTextOnly: ModelOption = {
+      providerId: 'zai',
+      providerName: 'Z.AI',
+      modelId: 'glm-4.6',
+      modelName: 'GLM-4.6',
+      ref: 'zai/glm-4.6',
+      contextWindow: 200000,
+      reasoning: true,
+      curated: true,
+      supportsVision: false,
+    }
+    const openaiVision: ModelOption = {
+      providerId: 'openai',
+      providerName: 'OpenAI',
+      modelId: 'gpt-5.4-nano',
+      modelName: 'GPT-5.4 Nano',
+      ref: 'openai/gpt-5.4-nano',
+      contextWindow: 128000,
+      reasoning: false,
+      curated: true,
+      supportsVision: true,
+    }
+    const existing = checkpointFromSelections({
+      cwd,
+      vendorId: 'zai',
+      providerId: 'zai',
+      modelRef: zaiTextOnly.ref as Parameters<typeof checkpointFromSelections>[0]['modelRef'],
+      authMethod: 'api-key',
+      visionVendorId: 'openai',
+      visionProviderId: 'openai',
+      visionModelRef: openaiVision.ref as Parameters<typeof checkpointFromSelections>[0]['visionModelRef'],
+      visionAuthMethod: 'api-key',
+      channelChoice: 'none',
+    })
+    const { store } = inMemoryStore(existing)
+
+    const fired: string[] = []
+    const result = await collectWizardInputs(
+      cwd,
+      basePrompts({
+        loadCatalog: async () => ({ options: [zaiTextOnly, openaiVision], source: 'curated' }),
+        confirmResumeCheckpoint: async () => 'resume',
+        readExistingApiKey: async () => 'sk_existing',
+        pickModel: async () => {
+          fired.push('pick-model')
+          return { kind: 'value', value: zaiTextOnly }
+        },
+        pickVisionVendor: async () => {
+          fired.push('pick-vision-vendor')
+          return { kind: 'value', value: 'openai' }
+        },
+        pickVisionProviderVariant: async () => {
+          fired.push('pick-vision-provider-variant')
+          return { kind: 'value', value: 'openai' as KnownProviderId }
+        },
+        pickVisionModel: async () => {
+          fired.push('pick-vision-model')
+          return { kind: 'value', value: openaiVision }
+        },
+        pickChannel: async () => {
+          fired.push('pick-channel')
+          return { kind: 'value', value: 'none' }
+        },
+      }),
+      { checkpointStore: store },
+    )
+
+    // No choice prompt fires: model, the entire vision sub-flow, and channel
+    // were all checkpoint-covered and auto-skipped.
+    expect(fired).toEqual([])
+    expect(result.model.ref).toBe(zaiTextOnly.ref)
+    expect(result.vision?.model.ref).toBe(openaiVision.ref)
+    expect(result.vision?.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing' })
   })
 
   test('resume reuses existing provider and channel secrets without credential prompts', async () => {
