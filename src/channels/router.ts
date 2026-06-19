@@ -4940,15 +4940,20 @@ export type ReplyRenderMode = 'native' | 'quote'
 // holds for Discord (`message_reference` rides on the text send, file uploads
 // land bare) and KakaoTalk. Slack's primitive is `thread`, not a per-message
 // reply, so it stays quote; GitHub's PR-review reply already rides on `thread`.
-// Webex is uniform: both `sendMessage` and `uploadFile` accept `parentId`, so it
-// is native for every shape (the per-shape conditional is moot for it).
 //
 // KakaoTalk is `native` here even though its reply payload can fail to resolve
 // at send time — the adapter degrades to the blockquote fallback itself using
 // `replyTo.source`, so the router still routes it down the native branch.
-const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'discord-bot', 'kakaotalk', 'webex-bot'])
+const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'discord-bot', 'kakaotalk'])
+
+// Webex's `parentId` rides on both `sendMessage` and `uploadFile`, so a reply is
+// native for every shape — including attachment-only, which the text-gated set
+// above cannot express. Special-cased before the text gate so the router sets
+// `replyTo` (not a blockquote) even when the reply carries no text.
+const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex-bot'])
 
 export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
+  if (NATIVE_REPLY_EVERY_SHAPE_ADAPTERS.has(msg.adapter)) return 'native'
   const hasText = normalizeSendText(msg.text) !== undefined
   if (hasText && NATIVE_REPLY_TEXT_ADAPTERS.has(msg.adapter)) return 'native'
   return 'quote'
