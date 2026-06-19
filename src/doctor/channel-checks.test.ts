@@ -68,6 +68,7 @@ describe('buildChannelChecks', () => {
       'channel.slack-bot.credentials',
       'channel.discord-bot.credentials',
       'channel.telegram-bot.credentials',
+      'channel.webex-bot.credentials',
       'channel.line.credentials',
       'channel.kakaotalk.credentials',
       'channel.github.credentials',
@@ -160,6 +161,20 @@ describe('buildChannelChecks', () => {
       const result = await runCheck('channel.telegram-bot.credentials', ctxFor(cwd))
       expect(result.status).toBe('warning')
       expect(result.message).toContain('TELEGRAM_BOT_TOKEN')
+    })
+
+    test('webex-bot warns when WEBEX_BOT_TOKEN is missing', async () => {
+      const cwd = makeTmpAgentDir({ 'webex-bot': {} })
+      const result = await runCheck('channel.webex-bot.credentials', ctxFor(cwd))
+      expect(result.status).toBe('warning')
+      expect(result.message).toContain('WEBEX_BOT_TOKEN')
+    })
+
+    test('webex-bot passes when token lives in secrets.json', async () => {
+      const cwd = makeTmpAgentDir({ 'webex-bot': {} })
+      writeChannelsSecrets(cwd, { 'webex-bot': { token: { value: 'webex-tok' } } })
+      const result = await runCheck('channel.webex-bot.credentials', ctxFor(cwd))
+      expect(result.status).toBe('ok')
     })
 
     test('process.env wins over empty .env entry', async () => {
