@@ -1,6 +1,14 @@
 import { z } from 'zod'
 
-export const ADAPTER_IDS = ['discord-bot', 'github', 'line', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
+export const ADAPTER_IDS = [
+  'discord-bot',
+  'github',
+  'line',
+  'kakaotalk',
+  'slack-bot',
+  'telegram-bot',
+  'webex-bot',
+] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
@@ -262,6 +270,12 @@ export const channelsSchema = z
     kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
+    // Webex bots receive messages in real time over a Mercury WebSocket
+    // (agent-messenger's WebexBotListener), the same persistent-socket model
+    // as slack-bot (Socket Mode) and discord-bot (Gateway) — no public
+    // webhook URL required. Single bot-token auth; config shape is the
+    // standard adapterSchema (engagement + history + enabled).
+    'webex-bot': adapterSchema.optional(),
   })
   .default({})
 

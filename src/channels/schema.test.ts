@@ -8,6 +8,7 @@ describe('channelsSchema', () => {
     expect(parsed['discord-bot']).toBeUndefined()
     expect(parsed['slack-bot']).toBeUndefined()
     expect(parsed['telegram-bot']).toBeUndefined()
+    expect(parsed['webex-bot']).toBeUndefined()
     expect(parsed.kakaotalk).toBeUndefined()
   })
 
@@ -16,10 +17,11 @@ describe('channelsSchema', () => {
       'discord-bot': {},
       'slack-bot': {},
       'telegram-bot': {},
+      'webex-bot': {},
       line: {},
       kakaotalk: {},
     })
-    for (const id of ['discord-bot', 'slack-bot', 'telegram-bot', 'line', 'kakaotalk'] as const) {
+    for (const id of ['discord-bot', 'slack-bot', 'telegram-bot', 'webex-bot', 'line', 'kakaotalk'] as const) {
       expect(parsed[id]?.enabled).toBe(true)
       expect(parsed[id]?.engagement.trigger).toEqual(['mention', 'reply', 'dm'])
       expect(parsed[id]?.engagement.stickiness).toEqual({

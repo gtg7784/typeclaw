@@ -123,6 +123,16 @@ describe('runAddChannel', () => {
     expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
+  test('adds webex-bot config + secrets.json#channels.webex-bot', async () => {
+    await runAddChannel({ cwd: root, channel: 'webex-bot', webexBotToken: 'webex-secret' })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['webex-bot']).toEqual({})
+    const channels = await readSecretsChannels()
+    expect(channels['webex-bot']).toEqual({ token: { value: 'webex-secret' } })
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
+  })
+
   test('adds kakaotalk as an empty block (no allow field) and runs auth runner', async () => {
     const authCalls: string[] = []
     await runAddChannel({
