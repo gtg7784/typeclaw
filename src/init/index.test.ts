@@ -1519,14 +1519,21 @@ describe('hasExistingOAuthCredentials', () => {
   })
 
   test('returns false for providers without OAuth support', async () => {
-    await seedProviders({ openai: { type: 'oauth', access_token: 'tok-x' } })
+    await seedProviders({ openai: { type: 'oauth', access: 'tok-x' } })
     expect(await hasExistingOAuthCredentials(root, 'openai')).toBe(false)
     expect(await hasExistingOAuthCredentials(root, 'fireworks')).toBe(false)
   })
 
-  test('returns true when the OAuth slot has a non-empty access_token', async () => {
-    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: 'tok-fresh', refresh_token: 'r' } })
+  test('returns true for the real pi-ai oauth shape persisted by the login runner', async () => {
+    await seedProviders({
+      'openai-codex': { type: 'oauth', access: 'tok-fresh', refresh: 'r', expires: 1, accountId: 'acct' },
+    })
     expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(true)
+  })
+
+  test('returns false for the codex auth.json shape (access_token instead of access)', async () => {
+    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: 'tok-fresh', refresh_token: 'r' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
   })
 
   test('returns false when the slot is api_key-shaped instead of oauth', async () => {
@@ -1534,15 +1541,15 @@ describe('hasExistingOAuthCredentials', () => {
     expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
   })
 
-  test('returns false when access_token is missing', async () => {
+  test('returns false when access is missing', async () => {
     await seedProviders({ 'openai-codex': { type: 'oauth' } })
     expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
   })
 
-  test('returns false when access_token is empty or whitespace', async () => {
-    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: '' } })
+  test('returns false when access is empty or whitespace', async () => {
+    await seedProviders({ 'openai-codex': { type: 'oauth', access: '' } })
     expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
-    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: '   ' } })
+    await seedProviders({ 'openai-codex': { type: 'oauth', access: '   ' } })
     expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
   })
 
@@ -1551,7 +1558,7 @@ describe('hasExistingOAuthCredentials', () => {
     // a sanity check rather than a mismatch case — but the test pins the
     // behavior so a future provider whose oauthProviderId diverges from
     // its id can't silently break this code path.
-    await seedProviders({ anthropic: { type: 'oauth', access_token: 'ant-tok' } })
+    await seedProviders({ anthropic: { type: 'oauth', access: 'ant-tok' } })
     expect(await hasExistingOAuthCredentials(root, 'anthropic')).toBe(true)
   })
 })

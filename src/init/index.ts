@@ -865,18 +865,19 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
 // browser login entirely instead of dragging them through a second OAuth
 // flow.
 //
-// Mirrors `readExistingProviderApiKey`'s contract — returns `false` when:
-//   - The provider has no OAuth support (`oauthProviderId === null`)
-//   - The file doesn't exist
-//   - The slot exists but has the wrong shape (api-key instead of oauth, or
-//     missing access_token)
-//   - The token is empty / whitespace
+// Mirrors `readExistingProviderApiKey`'s contract — returns `false` when the
+// provider has no OAuth support, the file is missing, the slot is api-key
+// shaped, or the access token is absent/blank.
 //
-// We do NOT validate the token's freshness here. A stale access_token still
-// counts as "exists" — pi-ai's secrets store handles refresh on first use,
-// and surfacing an "expired token" check at init-time would require a
-// network call we'd rather not run during a wizard. The runtime will fall
-// back to OAuth login on use if refresh fails; that's a separate UX path.
+// The token lives under `access` — pi-ai's secrets.json shape (`{ type:
+// 'oauth', access, refresh, expires, accountId }`), the same field
+// `export-codex-auth-file.ts` reads. NOT `access_token`: that key belongs to
+// the unrelated `~/.codex/auth.json` export (`{ tokens: { access_token } }`).
+// Reading `access_token` here silently returned false for every real
+// credential, re-running the browser login on resume instead of reusing it.
+//
+// Freshness is intentionally not checked: pi-ai refreshes on first use, and a
+// network call mid-wizard isn't worth it.
 export async function hasExistingOAuthCredentials(root: string, providerId: KnownProviderId): Promise<boolean> {
   const provider = KNOWN_PROVIDERS[providerId]
   if (provider.oauthProviderId === null) return false
@@ -885,8 +886,8 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
   const credential = providers[provider.oauthProviderId]
   if (credential === undefined) return false
   if (credential.type !== 'oauth') return false
-  const accessToken = (credential as { access_token?: unknown }).access_token
-  return typeof accessToken === 'string' && accessToken.trim().length > 0
+  const access = (credential as { access?: unknown }).access
+  return typeof access === 'string' && access.trim().length > 0
 }
 
 // Detects whether the requested channel already has usable credentials in
