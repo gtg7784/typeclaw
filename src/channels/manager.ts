@@ -284,6 +284,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         token,
         logger,
+        selfAliasesRef: () => router.getSelfAliases(),
       })
     }
     return null

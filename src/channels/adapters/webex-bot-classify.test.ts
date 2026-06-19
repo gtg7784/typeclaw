@@ -53,6 +53,15 @@ describe('classifyInbound', () => {
     expect(verdict.payload.text).toBe('확인 부탁해요')
   })
 
+  test('marks alias-only messages as bot mentions', () => {
+    const verdict = classifyInbound(message({ text: '타이피야 확인해줘' }), config, 'bot-1', ['타이피', 'typeey'])
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+  })
+
   test('marks mentionsOthers when only another person is mentioned', () => {
     const verdict = classifyInbound(message({ mentionedPeople: ['user-2'] }), config, 'bot-1')
 

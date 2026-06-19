@@ -726,6 +726,30 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     await mgr.stop()
   })
 
+  test('forwards selfAliasesRef to the webex adapter so alias-only inbounds engage like mentions', async () => {
+    cfg['webex-bot'] = enabledAdapterCfg()
+    let captured: { selfAliasesRef?: () => readonly string[] } | undefined
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      aliasesRef: () => ['타이피', 'typeey'],
+      env: { WEBEX_BOT_TOKEN: 'webex-token' },
+      createWebexAdapter: (opts) => {
+        captured = opts
+        return makeFakeAdapter()
+      },
+    })
+
+    await mgr.start()
+
+    expect(captured?.selfAliasesRef).toBeDefined()
+    const aliases = captured!.selfAliasesRef!()
+    expect(aliases).toContain('타이피')
+    expect(aliases).toContain('typeey')
+
+    await mgr.stop()
+  })
+
   test('forwards selfAliasesRef to the slack adapter so the classifier can anchor threads on alias-only inbounds', async () => {
     // given: a manager wired with `aliasesRef` returning ["모모", "momo"]
     //   AND a `createSlackAdapter` test seam that captures the options the
