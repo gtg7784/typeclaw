@@ -693,6 +693,27 @@ describe('decideEngagement (solo-human fallback)', () => {
     expect(resolveEffectiveHumans(2, { humans: 1, bots: 1, fetchedAt: 0, truncated: false }, 120_000)).toBe(2)
   })
 
+  test('fresh complete membership overrides a stale duplicate participant and engages the solo human', () => {
+    // Both participant rows are the SAME human under two keys (a legacy
+    // email-keyed entry plus the platform-id inbound), so the raw count looks
+    // like 2; a complete fresh membership read knows it is really 1 and wins.
+    const ledger = new StickyLedger()
+    const duplicatedSameHuman: readonly ChannelParticipant[] = [
+      participant('alice@example.com', 20_000),
+      participant('alice', 20_000),
+    ]
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'Typeey Hi' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 20_000,
+      participants: duplicatedSameHuman,
+      membership: { humans: 1, bots: 1, fetchedAt: 20_000, truncated: false, humanMemberIds: ['alice'] },
+    })
+    expect(decision).toBe('engage')
+  })
+
   test('large truncated channels observe even with one persisted human', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({

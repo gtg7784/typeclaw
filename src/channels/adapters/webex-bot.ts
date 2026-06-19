@@ -7,7 +7,12 @@ import type {
   WebexPerson,
 } from 'agent-messenger/webexbot'
 
-import type { MembershipResolver, MembershipResolverFailure, MembershipResolverResult } from '@/channels/membership'
+import {
+  MEMBERSHIP_ENUMERATION_CAP,
+  type MembershipResolver,
+  type MembershipResolverFailure,
+  type MembershipResolverResult,
+} from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
@@ -123,6 +128,7 @@ export function createWebexMembershipResolver(deps: {
   client: Pick<WebexBotClient, 'listMemberships'>
   logger: WebexBotAdapterLogger
   historyCallback: HistoryCallback
+  botPersonIdRef: () => string | null
   now?: () => number
 }): MembershipResolver {
   const now = deps.now ?? Date.now
@@ -130,10 +136,29 @@ export function createWebexMembershipResolver(deps: {
     if (key.adapter !== 'webex-bot') return { kind: 'permanent' } satisfies MembershipResolverFailure
     if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
     try {
-      const memberships: WebexMembership[] = await deps.client.listMemberships(key.chat, { max: 100 })
-      const total = Math.max(0, memberships.length)
-      const bots = 1
-      return { humans: Math.max(0, total - bots), bots, fetchedAt: now(), truncated: true }
+      const memberships: WebexMembership[] = await deps.client.listMemberships(key.chat, {
+        max: MEMBERSHIP_ENUMERATION_CAP,
+      })
+      // Below the cap the enumeration is complete and authoritative, so it must
+      // NOT be marked truncated: `resolveEffectiveHumans` only trusts a fresh
+      // untruncated read over persisted speakers, and the `Math.max()` truncated
+      // path lets a stale/legacy email-keyed participant double-count the same
+      // human and silence the solo-human fallback.
+      const truncated = memberships.length >= MEMBERSHIP_ENUMERATION_CAP
+      // WebexMembership has no bot/person type field, so only the self bot can be
+      // classified; peer bots count as humans here (they still reach the agent
+      // via mention/reply/sticky triggers regardless of this count).
+      const botPersonId = deps.botPersonIdRef()
+      const humanMemberIds: string[] = []
+      let bots = 0
+      for (const member of memberships) {
+        if (botPersonId !== null && member.personId === botPersonId) bots++
+        else humanMemberIds.push(member.personId)
+      }
+      if (truncated) {
+        return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated }
+      }
+      return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated, humanMemberIds }
     } catch (err) {
       deps.logger.warn(`[webex-bot] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
       return await deriveMembershipFromHistory({
@@ -221,7 +246,12 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
   }
 
   const historyCallback = createWebexHistoryCallback({ client, logger, botPersonIdRef: () => botPerson?.id ?? null })
-  const membershipResolver = createWebexMembershipResolver({ client, logger, historyCallback })
+  const membershipResolver = createWebexMembershipResolver({
+    client,
+    logger,
+    historyCallback,
+    botPersonIdRef: () => botPerson?.id ?? null,
+  })
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger, fetchImpl })
 

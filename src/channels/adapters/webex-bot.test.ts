@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { WebexBotListener } from 'agent-messenger/webexbot'
 
+import { MEMBERSHIP_ENUMERATION_CAP } from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import { channelsSchema } from '@/channels/schema'
 import type { OutboundMessage } from '@/channels/types'
@@ -115,6 +116,7 @@ describe('webex history and membership', () => {
       },
       logger: logger(),
       historyCallback: history,
+      botPersonIdRef: () => 'bot-1',
       now: () => 123,
     })
 
@@ -130,7 +132,8 @@ describe('webex history and membership', () => {
       humans: 2,
       bots: 1,
       fetchedAt: 123,
-      truncated: true,
+      truncated: false,
+      humanMemberIds: ['user-1', 'user-2'],
     })
     fail = true
     await expect(
@@ -138,6 +141,30 @@ describe('webex history and membership', () => {
     ).resolves.toEqual({
       humans: 1,
       bots: 1,
+      fetchedAt: 123,
+      truncated: true,
+    })
+  })
+
+  test('marks membership truncated and omits humanMemberIds when the read hits the enumeration cap', async () => {
+    const members = Array.from({ length: MEMBERSHIP_ENUMERATION_CAP }, (_, i) => membership(`user-${i}`))
+    const resolver = createWebexMembershipResolver({
+      client: { listMemberships: async () => members },
+      logger: logger(),
+      historyCallback: createWebexHistoryCallback({
+        client: { listMessages: async () => [] },
+        logger: logger(),
+        botPersonIdRef: () => 'bot-1',
+      }),
+      botPersonIdRef: () => 'bot-1',
+      now: () => 123,
+    })
+
+    await expect(
+      resolver({ adapter: 'webex-bot', workspace: 'room-1', chat: 'room-1', thread: null }),
+    ).resolves.toEqual({
+      humans: MEMBERSHIP_ENUMERATION_CAP,
+      bots: 0,
       fetchedAt: 123,
       truncated: true,
     })
