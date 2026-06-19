@@ -1,5 +1,6 @@
 import type { WebexBotListenerEventMap } from 'agent-messenger/webexbot'
 
+import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
@@ -15,6 +16,7 @@ export function classifyInbound(
   event: WebexInboundMessage,
   _config: ChannelAdapterConfig,
   botPersonId: string | null,
+  selfAliases: readonly string[] = [],
 ): InboundClassification {
   if (botPersonId !== null && event.personId === botPersonId) {
     return { kind: 'drop', reason: 'self_author' }
@@ -28,7 +30,9 @@ export function classifyInbound(
   }
 
   const isDm = event.roomType === 'direct'
-  const isBotMention = event.mentionedPeople.includes(botPersonId) || event.mentionedGroups.includes('all')
+  const structuredBotMention = event.mentionedPeople.includes(botPersonId) || event.mentionedGroups.includes('all')
+  const aliasMatched = !structuredBotMention && matchesAnyAlias(text, selfAliases)
+  const isBotMention = structuredBotMention || aliasMatched
   const mentionsOthers = event.mentionedPeople.length > 0 && !event.mentionedPeople.includes(botPersonId)
   const ts = Date.parse(event.created)
 
@@ -49,9 +53,11 @@ export function classifyInbound(
       authorIsBot: false,
       isBotMention,
       // Webex Mercury only exposes parentId inline, not the parent author. When
-      // the reply auto-mentions the bot we can identify it as bot-directed;
-      // otherwise leave the parent unattributed instead of guessing.
-      replyToBotMessageId: event.parentId !== undefined && isBotMention ? event.parentId : null,
+      // the reply has a structured bot mention we can identify it as bot-directed;
+      // otherwise leave the parent unattributed instead of guessing. Alias matches
+      // are mention-equivalent for engagement, but they do not prove the parent
+      // is bot-authored; enrichment fetches the parent and attributes it.
+      replyToBotMessageId: event.parentId !== undefined && structuredBotMention ? event.parentId : null,
       mentionsOthers,
       replyToOtherMessageId: null,
       isDm,

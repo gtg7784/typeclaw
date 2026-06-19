@@ -55,6 +55,7 @@ export type WebexBotAdapterOptions = {
   createClient?: WebexBotClientFactory
   createListener?: WebexBotListenerFactory
   listenerOptions?: Omit<WebexBotListenerOptions, 'ignoreSelfMessages'>
+  selfAliasesRef?: () => readonly string[]
 }
 
 export type WebexBotAdapter = {
@@ -230,7 +231,12 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
     try {
       const tag = await formatChannelTag(event.roomId)
       logger.info(`[webex-bot] inbound id=${event.id} author=${event.personEmail} ${tag} text_len=${event.text.length}`)
-      const verdict = classifyInbound(event, options.configRef(), botSnapshot?.id ?? null)
+      const verdict = classifyInbound(
+        event,
+        options.configRef(),
+        botSnapshot?.id ?? null,
+        options.selfAliasesRef?.() ?? [],
+      )
       if (verdict.kind === 'drop') {
         logger.info(`[webex-bot] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
