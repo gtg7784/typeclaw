@@ -69,42 +69,74 @@ export type WebexBotAdapter = {
   isConnected: () => boolean
 }
 
+export type WebexOutboundFile = { content: Blob; filename: string }
+export type WebexFileReader = (path: string) => Promise<WebexOutboundFile>
+
+// Webex resolves any `parentId` to the thread root, so threading a reply and
+// replying to a specific message land in the same thread. `replyTo` (the native
+// quote anchor the router sets in native mode) is the more precise target, so it
+// wins over `msg.thread` when present — both `sendMessage` and `uploadFile`
+// accept `parentId`, so attachment replies thread natively too (unlike
+// Discord/Telegram, where uploads land bare).
+//
+// `uploadFile` carries `text` + `parentId` in one multipart POST, so a
+// text+single-file message is one call (Slack's `initial_comment` shape). With
+// multiple files the first upload carries the text and every upload carries the
+// parentId; remaining uploads are bare so the text is not duplicated.
 export function createOutboundCallback(deps: {
-  client: Pick<WebexBotClient, 'sendMessage'>
+  client: Pick<WebexBotClient, 'sendMessage' | 'uploadFile'>
   logger: WebexBotAdapterLogger
   formatChannelTag: (chat: string) => Promise<string>
+  readFile?: WebexFileReader
+  resolvePath?: (path: string) => string
 }): OutboundCallback {
-  const { client, logger, formatChannelTag } = deps
+  const { client, logger, formatChannelTag, resolvePath } = deps
+  const readFile = deps.readFile ?? defaultReadFile
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'webex-bot') return { ok: false, error: `unknown adapter: ${msg.adapter}` }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
     if (text === '' && attachments.length === 0) return { ok: false, error: 'message has neither text nor attachments' }
-    if (text === '' && attachments.length > 0) {
-      return { ok: false, error: 'webex-bot does not support outbound file attachments' }
-    }
 
     const tag = await formatChannelTag(msg.chat)
-    if (attachments.length > 0) {
-      logger.warn(
-        `[webex-bot] dropping ${attachments.length} outbound attachment(s) for ${tag}: agent-messenger webexbot has no upload API`,
-      )
-    }
-    if (msg.thread !== null && msg.thread !== undefined) {
-      logger.warn(
-        `[webex-bot] sending thread reply to room root for ${tag}: WebexBotClient.sendMessage has no parentId option`,
-      )
-    }
+    const parentId = msg.replyTo?.externalMessageId ?? msg.thread ?? undefined
+    logger.info(
+      `[webex-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${parentId !== undefined ? ` parent=${parentId}` : ''}`,
+    )
+
     try {
-      const sent = await client.sendMessage(msg.chat, text, { markdown: true })
+      if (attachments.length > 0) {
+        for (const [index, attachment] of attachments.entries()) {
+          const path = resolvePath ? resolvePath(attachment.path) : attachment.path
+          const file = await readFile(path)
+          if (attachment.filename !== undefined) file.filename = attachment.filename
+          const carriesText = index === 0 && text !== ''
+          const sent = await client.uploadFile(msg.chat, file, {
+            markdown: true,
+            ...(carriesText ? { text } : {}),
+            ...(parentId !== undefined ? { parentId } : {}),
+          })
+          logger.info(`[webex-bot] uploaded id=${sent.id} filename=${file.filename} ${tag}`)
+        }
+        return { ok: true }
+      }
+
+      const sent = await client.sendMessage(msg.chat, text, {
+        markdown: true,
+        ...(parentId !== undefined ? { parentId } : {}),
+      })
       logger.info(`[webex-bot] sent id=${sent.id} ${tag}`)
       return { ok: true }
     } catch (err) {
       const message = describe(err)
-      logger.error(`[webex-bot] sendMessage failed: ${message}`)
+      logger.error(`[webex-bot] outbound failed: ${message}`)
       return { ok: false, error: message }
     }
   }
+}
+
+async function defaultReadFile(path: string): Promise<WebexOutboundFile> {
+  return { content: Bun.file(path), filename: path.split('/').pop() ?? 'attachment' }
 }
 
 export function createWebexHistoryCallback(deps: {

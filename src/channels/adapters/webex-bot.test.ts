@@ -30,38 +30,172 @@ function logger(): WebexBotAdapterLogger & { lines: string[] } {
 }
 
 describe('webex outbound', () => {
-  test('sends markdown messages and warns when thread/attachments are unsupported', async () => {
-    const calls: Array<{ roomId: string; text: string; markdown?: boolean }> = []
-    const log = logger()
-    const cb = createOutboundCallback({
+  function outboundClient() {
+    const sends: Array<{ roomId: string; text: string; markdown?: boolean; parentId?: string }> = []
+    const uploads: Array<{ roomId: string; filename: string; text?: string; parentId?: string }> = []
+    return {
+      sends,
+      uploads,
       client: {
-        sendMessage: async (roomId, text, options) => {
-          calls.push({ roomId, text, markdown: options?.markdown })
+        sendMessage: async (
+          roomId: string,
+          text: string,
+          options?: { markdown?: boolean; parentId?: string; files?: string[] },
+        ) => {
+          sends.push({ roomId, text, markdown: options?.markdown, parentId: options?.parentId })
           return webexMessage({ id: 'sent', text })
         },
+        uploadFile: async (
+          roomId: string,
+          file: { content: Blob; filename: string },
+          options?: { text?: string; markdown?: boolean; parentId?: string },
+        ) => {
+          uploads.push({ roomId, filename: file.filename, text: options?.text, parentId: options?.parentId })
+          return webexMessage({ id: `up-${uploads.length}` })
+        },
       },
-      logger: log,
-      formatChannelTag: async () => 'room=Room(room-1)',
-    })
+    }
+  }
 
-    const result = await cb(outbound({ text: '**hello**', thread: 'parent', attachments: [{ path: '/tmp/a.txt' }] }))
+  test('sends a markdown message with no parentId for a non-threaded reply', async () => {
+    const { sends, uploads, client } = outboundClient()
+    const cb = createOutboundCallback({ client, logger: logger(), formatChannelTag: async () => 'room=Room(room-1)' })
+
+    // given: Korean body to keep the markdown path script-agnostic
+    const result = await cb(outbound({ text: '**안녕하세요**' }))
 
     expect(result).toEqual({ ok: true })
-    expect(calls).toEqual([{ roomId: 'room-1', text: '**hello**', markdown: true }])
-    expect(log.lines.some((line) => line.includes('dropping 1 outbound attachment'))).toBe(true)
-    expect(log.lines.some((line) => line.includes('thread reply to room root'))).toBe(true)
+    expect(sends).toEqual([{ roomId: 'room-1', text: '**안녕하세요**', markdown: true, parentId: undefined }])
+    expect(uploads).toEqual([])
   })
 
-  test('rejects attachment-only messages', async () => {
+  test('threads a text reply under msg.thread via parentId', async () => {
+    const { sends, client } = outboundClient()
+    const cb = createOutboundCallback({ client, logger: logger(), formatChannelTag: async () => 'room=room-1' })
+
+    await cb(outbound({ text: 'hi', thread: 'root-1' }))
+
+    expect(sends).toEqual([{ roomId: 'room-1', text: 'hi', markdown: true, parentId: 'root-1' }])
+  })
+
+  test('prefers replyTo over msg.thread for the parentId anchor', async () => {
+    const { sends, client } = outboundClient()
+    const cb = createOutboundCallback({ client, logger: logger(), formatChannelTag: async () => 'room=room-1' })
+
+    await cb(outbound({ text: 'hi', thread: 'root-1', replyTo: { externalMessageId: 'msg-7' } }))
+
+    expect(sends[0]?.parentId).toBe('msg-7')
+  })
+
+  test('uploads a text+file message in one call carrying text and parentId', async () => {
+    const { sends, uploads, client } = outboundClient()
     const cb = createOutboundCallback({
-      client: { sendMessage: async () => webexMessage({ id: 'unused' }) },
+      client,
       logger: logger(),
       formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    const result = await cb(outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }] }))
+
+    expect(result).toEqual({ ok: true })
+    expect(sends).toEqual([])
+    expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' }])
+  })
+
+  test('uploads multiple files with text only on the first, parentId on all', async () => {
+    const { uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    await cb(
+      outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }, { path: '/tmp/b.txt' }] }),
+    )
+
+    expect(uploads).toEqual([
+      { roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' },
+      { roomId: 'room-1', filename: 'b.txt', text: undefined, parentId: 'root-1' },
+    ])
+  })
+
+  test('uploads an attachment-only message with no text', async () => {
+    const { uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    const result = await cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt' }] }))
+
+    expect(result).toEqual({ ok: true })
+    expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: undefined, parentId: undefined }])
+  })
+
+  test('honors an explicit attachment filename over the path basename', async () => {
+    const { uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async () => ({ content: new Blob(['data']), filename: 'from-disk.bin' }),
+    })
+
+    await cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt', filename: 'report.pdf' }] }))
+
+    expect(uploads[0]?.filename).toBe('report.pdf')
+  })
+
+  test('resolves attachment paths through resolvePath before reading', async () => {
+    const read: string[] = []
+    const cb = createOutboundCallback({
+      client: outboundClient().client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      resolvePath: (p) => p.replace('/agent/', '/host/mounts/agent/'),
+      readFile: async (path) => {
+        read.push(path)
+        return { content: new Blob(['data']), filename: 'a.txt' }
+      },
+    })
+
+    await cb(outbound({ text: '', attachments: [{ path: '/agent/a.txt' }] }))
+
+    expect(read).toEqual(['/host/mounts/agent/a.txt'])
+  })
+
+  test('returns ok false when an upload fails', async () => {
+    const cb = createOutboundCallback({
+      client: {
+        sendMessage: async () => webexMessage({ id: 'unused' }),
+        uploadFile: async () => Promise.reject(new Error('upload boom')),
+      },
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async () => ({ content: new Blob(['data']), filename: 'a.txt' }),
     })
 
     await expect(cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt' }] }))).resolves.toEqual({
       ok: false,
-      error: 'webex-bot does not support outbound file attachments',
+      error: 'upload boom',
+    })
+  })
+
+  test('rejects a message with neither text nor attachments', async () => {
+    const cb = createOutboundCallback({
+      client: outboundClient().client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+    })
+
+    await expect(cb(outbound({ text: '' }))).resolves.toEqual({
+      ok: false,
+      error: 'message has neither text nor attachments',
     })
   })
 })

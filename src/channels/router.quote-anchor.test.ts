@@ -332,8 +332,8 @@ describe('resolveReplyRenderMode', () => {
     expect(resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
   })
 
-  test('Discord and KakaoTalk with text use the native reply primitive', () => {
-    for (const adapter of ['discord-bot', 'kakaotalk'] as const) {
+  test('Discord, KakaoTalk, and Webex with text use the native reply primitive', () => {
+    for (const adapter of ['discord-bot', 'kakaotalk', 'webex-bot'] as const) {
       expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
     }
   })
