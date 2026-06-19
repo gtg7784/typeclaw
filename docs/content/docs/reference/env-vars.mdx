@@ -67,6 +67,7 @@ Both follow the same rules: trailing slashes are stripped; a non-http(s) value f
 | `SLACK_APP_TOKEN`    | [`slack-bot`](/docs/reference/slack-bot)       | `appToken` |
 | `DISCORD_BOT_TOKEN`  | [`discord-bot`](/docs/reference/discord-bot)   | `token`    |
 | `TELEGRAM_BOT_TOKEN` | [`telegram-bot`](/docs/reference/telegram-bot) | `token`    |
+| `WEBEX_BOT_TOKEN`    | [`webex-bot`](/docs/reference/webex-bot)       | `token`    |
 | `GITHUB_TOKEN`       | [`github`](/docs/reference/github)             | PAT path   |
 
 [KakaoTalk](/docs/reference/kakaotalk) does not have an env-wins path — credentials live exclusively in `secrets.json#channels.kakaotalk` because the renewal cron needs the structured per-account record.
