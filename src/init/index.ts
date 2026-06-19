@@ -199,6 +199,7 @@ export type InitOptions = {
   slackBotToken?: string
   slackAppToken?: string
   telegramBotToken?: string
+  webexBotToken?: string
   // When reusing existing channel credentials from a pre-init `secrets.json`,
   // the CLI passes `with<Adapter>: true` without a corresponding token so the
   // scaffolded `typeclaw.json` wires the adapter while `writeSecrets` leaves
@@ -207,6 +208,7 @@ export type InitOptions = {
   withDiscord?: boolean
   withSlack?: boolean
   withTelegram?: boolean
+  withWebex?: boolean
   withKakaotalk?: boolean
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
@@ -243,9 +245,11 @@ export async function runInit({
   slackBotToken,
   slackAppToken,
   telegramBotToken,
+  webexBotToken,
   withDiscord,
   withSlack,
   withTelegram,
+  withWebex,
   withKakaotalk = false,
   withGithub = false,
   runKakaotalkAuth,
@@ -314,6 +318,7 @@ export async function runInit({
   const wantsDiscord = withDiscord ?? (discordBotToken !== undefined && discordBotToken !== '')
   const wantsSlack = withSlack ?? (slackBotToken !== undefined && slackBotToken !== '')
   const wantsTelegram = withTelegram ?? (telegramBotToken !== undefined && telegramBotToken !== '')
+  const wantsWebex = withWebex ?? (webexBotToken !== undefined && webexBotToken !== '')
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     model,
@@ -323,6 +328,7 @@ export async function runInit({
     withDiscord: wantsDiscord,
     withSlack: wantsSlack,
     withTelegram: wantsTelegram,
+    withWebex: wantsWebex,
     withKakaotalk,
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
@@ -338,6 +344,7 @@ export async function runInit({
     slackBotToken,
     slackAppToken,
     telegramBotToken,
+    webexBotToken,
   })
   emit({ step: 'scaffold', phase: 'done' })
 
@@ -398,6 +405,7 @@ export async function runInit({
   if (wantsDiscord) configuredChannels.push('discord-bot')
   if (wantsSlack) configuredChannels.push('slack-bot')
   if (wantsTelegram) configuredChannels.push('telegram-bot')
+  if (wantsWebex) configuredChannels.push('webex-bot')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
   if (withGithub) configuredChannels.push('github')
 
@@ -551,6 +559,7 @@ export type ScaffoldOptions = {
   withDiscord?: boolean
   withSlack?: boolean
   withTelegram?: boolean
+  withWebex?: boolean
   withKakaotalk?: boolean
 }
 
@@ -583,6 +592,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withDiscord) channels['discord-bot'] = {}
   if (options.withSlack) channels['slack-bot'] = {}
   if (options.withTelegram) channels['telegram-bot'] = {}
+  if (options.withWebex) channels['webex-bot'] = {}
   if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
   // No default `member` match is seeded. A fresh chat agent starts with every
@@ -796,6 +806,7 @@ export async function writeSecrets(
     slackBotToken,
     slackAppToken,
     telegramBotToken,
+    webexBotToken,
   }: {
     model?: ModelRef | string
     // Omitted on the OAuth path — credentials live in secrets.json via the OAuth runner.
@@ -806,6 +817,7 @@ export async function writeSecrets(
     slackBotToken?: string
     slackAppToken?: string
     telegramBotToken?: string
+    webexBotToken?: string
   },
 ): Promise<void> {
   const providerId = providerForModelRef(model)
@@ -838,6 +850,9 @@ export async function writeSecrets(
   }
   if (telegramBotToken !== undefined && telegramBotToken !== '') {
     channelTokens['telegram-bot'] = { token: { value: telegramBotToken } }
+  }
+  if (webexBotToken !== undefined && webexBotToken !== '') {
+    channelTokens['webex-bot'] = { token: { value: webexBotToken } }
   }
   if (Object.keys(channelTokens).length === 0) return
 
@@ -909,7 +924,7 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'line' | 'kakaotalk' | 'github',
+  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'line' | 'kakaotalk' | 'github',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -920,6 +935,8 @@ export async function hasExistingChannelSecrets(
       return hasSecretField(channels['slack-bot'], 'botToken') && hasSecretField(channels['slack-bot'], 'appToken')
     case 'telegram':
       return hasSecretField(channels['telegram-bot'], 'token')
+    case 'webex':
+      return hasSecretField(channels['webex-bot'], 'token')
     case 'github':
       // GitHub credentials alone are not enough to scaffold a working
       // channel: typeclaw.json#channels.github also needs webhookUrl and
@@ -1014,7 +1031,7 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 // scaffold-test cases above demonstrates how easy it is to lose a single
 // behavior under a mode flag.
 
-export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'line' | 'kakaotalk' | 'github'
+export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'webex-bot' | 'line' | 'kakaotalk' | 'github'
 
 // Public adapter names match the typeclaw.json `channels.*` keys exactly.
 // The CLI takes these as the optional positional arg, the picker shows
@@ -1024,6 +1041,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'slack-bot',
   'discord-bot',
   'telegram-bot',
+  'webex-bot',
   'line',
   'kakaotalk',
   'github',
@@ -1053,6 +1071,7 @@ export type AddChannelOptions = {
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'webex-bot'; webexBotToken: string }
   | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
   | {
@@ -1166,6 +1185,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       return { botToken: options.slackBotToken, appToken: options.slackAppToken }
     case 'telegram-bot':
       return { token: options.telegramBotToken }
+    case 'webex-bot':
+      return { token: options.webexBotToken }
     case 'line':
       // LINE auth writes its structured account block directly to
       // secrets.json#channels.line before config mutation.
@@ -1449,7 +1470,7 @@ async function appendChannelSecrets(cwd: string, channel: ChannelKind, tokens: C
 
 export type SetChannelTokensResult = { ok: true } | { ok: false; reason: string }
 
-type BotTokenAdapter = 'discord-bot' | 'slack-bot' | 'telegram-bot'
+type BotTokenAdapter = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'webex-bot'
 
 // Required credential fields per adapter. Used post-merge to refuse a
 // rotation that would leave the adapter half-configured — e.g. rotating
@@ -1460,6 +1481,7 @@ const REQUIRED_CHANNEL_FIELDS: Record<BotTokenAdapter, readonly string[]> = {
   'discord-bot': ['token'],
   'slack-bot': ['botToken', 'appToken'],
   'telegram-bot': ['token'],
+  'webex-bot': ['token'],
 }
 
 // Preserve a user-authored `{ env: 'CUSTOM_NAME' }` rebinding when rotating

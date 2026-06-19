@@ -31,6 +31,11 @@ describe('parseMatchRule — accepted forms', () => {
     { input: 'discord:9999', expected: { kind: 'channel', platform: 'discord', workspace: '9999' } },
     { input: 'discord:dm/*', expected: { kind: 'channel', platform: 'discord', bucket: 'dm' } },
     { input: 'telegram:42', expected: { kind: 'channel', platform: 'telegram', workspace: '42' } },
+    {
+      input: 'webex:* author:person-uuid',
+      expected: { kind: 'channel', platform: 'webex', author: 'person-uuid' },
+    },
+    { input: 'webex:dm/*', expected: { kind: 'channel', platform: 'webex', bucket: 'dm' } },
     { input: 'kakao:dm/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'dm' } },
     { input: 'kakao:group/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'group' } },
     { input: 'kakao:open/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'open' } },

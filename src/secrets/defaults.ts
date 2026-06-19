@@ -19,6 +19,7 @@ export const CHANNEL_FIELD_ENV = {
   'discord-bot': { token: 'DISCORD_BOT_TOKEN' },
   'slack-bot': { botToken: 'SLACK_BOT_TOKEN', appToken: 'SLACK_APP_TOKEN' },
   'telegram-bot': { token: 'TELEGRAM_BOT_TOKEN' },
+  'webex-bot': { token: 'WEBEX_BOT_TOKEN' },
 } as const satisfies Record<string, Record<string, string>>
 
 export type KnownAdapterId = keyof typeof CHANNEL_FIELD_ENV

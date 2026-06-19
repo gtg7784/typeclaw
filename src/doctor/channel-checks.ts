@@ -28,6 +28,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     slackBotCredentials(),
     discordBotCredentials(),
     telegramBotCredentials(),
+    webexBotCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
     githubCredentials(),
@@ -62,6 +63,16 @@ function telegramBotCredentials(): DoctorCheck {
     description: 'telegram-bot adapter has TELEGRAM_BOT_TOKEN',
     applies: (ctx) => ctx.hasAgentFolder,
     run: (ctx) => runTokenAdapterCheck(ctx, 'telegram-bot', ['TELEGRAM_BOT_TOKEN']),
+  }
+}
+
+function webexBotCredentials(): DoctorCheck {
+  return {
+    name: 'channel.webex-bot.credentials',
+    category: 'channels',
+    description: 'webex-bot adapter has WEBEX_BOT_TOKEN',
+    applies: (ctx) => ctx.hasAgentFolder,
+    run: (ctx) => runTokenAdapterCheck(ctx, 'webex-bot', ['WEBEX_BOT_TOKEN']),
   }
 }
 
@@ -216,7 +227,7 @@ function githubWebhookDelivery(): DoctorCheck {
 
 async function runTokenAdapterCheck(
   ctx: CheckContext,
-  adapter: Extract<AdapterId, 'slack-bot' | 'discord-bot' | 'telegram-bot'>,
+  adapter: Extract<AdapterId, 'slack-bot' | 'discord-bot' | 'telegram-bot' | 'webex-bot'>,
   envNames: readonly string[],
 ): Promise<CheckResult> {
   const channels = readDeclaredChannels(ctx)
@@ -297,6 +308,7 @@ function fieldNameForEnv(adapter: AdapterId, envName: string): string | undefine
     'slack-bot': ['botToken', 'appToken'],
     'discord-bot': ['token'],
     'telegram-bot': ['token'],
+    'webex-bot': ['token'],
   }
   const fields = candidates[adapter]
   if (!fields) return undefined

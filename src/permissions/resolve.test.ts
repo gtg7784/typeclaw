@@ -38,6 +38,20 @@ const kakaoGroup: MatchableOrigin = {
   workspace: '@kakao-group',
   chat: 'G_X',
 }
+const webexDm: MatchableOrigin = {
+  kind: 'channel',
+  adapter: 'webex-bot',
+  workspace: '@dm',
+  chat: 'ROOM_X',
+  lastInboundAuthorId: 'person-uuid',
+}
+const webexRoom: MatchableOrigin = {
+  kind: 'channel',
+  adapter: 'webex-bot',
+  workspace: 'ROOM_X',
+  chat: 'ROOM_X',
+  lastInboundAuthorId: 'person-uuid',
+}
 
 const TUI: MatchRule = { kind: 'tui' }
 const CRON: MatchRule = { kind: 'cron' }
@@ -52,6 +66,8 @@ const SLACK_DM_BUCKET: MatchRule = { kind: 'channel', platform: 'slack', bucket:
 const DISCORD_GUILD: MatchRule = { kind: 'channel', platform: 'discord', workspace: '9999' }
 const LINE_SQUARE_BUCKET: MatchRule = { kind: 'channel', platform: 'line', bucket: 'square' }
 const KAKAO_GROUP_BUCKET: MatchRule = { kind: 'channel', platform: 'kakao', bucket: 'group' }
+const WEBEX_DM_BUCKET: MatchRule = { kind: 'channel', platform: 'webex', bucket: 'dm' }
+const WEBEX_AUTHOR: MatchRule = { kind: 'channel', platform: 'webex', author: 'person-uuid' }
 
 describe('matchesOrigin — keyword scopes', () => {
   test('tui rule matches tui origin only', () => {
@@ -125,6 +141,16 @@ describe('matchesOrigin — channel coordinates', () => {
   test('kakao group bucket matches the @kakao-group workspace prefix', () => {
     expect(matchesOrigin(KAKAO_GROUP_BUCKET, kakaoGroup)).toBe(true)
     expect(matchesOrigin(KAKAO_GROUP_BUCKET, { ...kakaoGroup, workspace: '@kakao-dm' })).toBe(false)
+  })
+
+  test('webex:dm bucket matches the @dm workspace marker, not a group room', () => {
+    expect(matchesOrigin(WEBEX_DM_BUCKET, webexDm)).toBe(true)
+    expect(matchesOrigin(WEBEX_DM_BUCKET, webexRoom)).toBe(false)
+  })
+
+  test('webex author qualifier matches the personId (lastInboundAuthorId)', () => {
+    expect(matchesOrigin(WEBEX_AUTHOR, webexDm)).toBe(true)
+    expect(matchesOrigin(WEBEX_AUTHOR, { ...webexDm, lastInboundAuthorId: 'other-uuid' })).toBe(false)
   })
 
   test('platform mismatch on channel rule against channel origin', () => {

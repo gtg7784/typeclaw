@@ -1,0 +1,395 @@
+import { WebexBotClient, WebexBotListener } from 'agent-messenger/webexbot'
+import type {
+  WebexBotListenerOptions,
+  WebexBotListenerEventMap,
+  WebexMembership,
+  WebexMessage,
+  WebexPerson,
+} from 'agent-messenger/webexbot'
+
+import type { MembershipResolver, MembershipResolverFailure, MembershipResolverResult } from '@/channels/membership'
+import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
+import type { ChannelRouter } from '@/channels/router'
+import type { ChannelAdapterConfig } from '@/channels/schema'
+import type {
+  ChannelHistoryMessage,
+  ChannelSelfIdentityResolver,
+  FetchAttachmentCallback,
+  FetchHistoryArgs,
+  FetchHistoryResult,
+  HistoryCallback,
+  OutboundCallback,
+  OutboundMessage,
+  ResolvedChannelNames,
+  SendResult,
+} from '@/channels/types'
+
+import { createWebexChannelNameResolver } from './webex-bot-channel-resolver'
+import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-bot-classify'
+import { enrichWebexMessageReference } from './webex-bot-reference'
+
+export type WebexBotAdapterLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+}
+
+const consoleLogger: WebexBotAdapterLogger = {
+  info: (m) => console.log(m),
+  warn: (m) => console.warn(m),
+  error: (m) => console.error(m),
+}
+
+export type WebexBotClientFactory = () => WebexBotClient
+export type WebexBotListenerFactory = (
+  client: Pick<WebexBotClient, 'getToken'>,
+  options: WebexBotListenerOptions,
+) => WebexBotListener
+
+export type WebexBotAdapterOptions = {
+  router: ChannelRouter
+  configRef: () => ChannelAdapterConfig
+  token: string
+  logger?: WebexBotAdapterLogger
+  fetchImpl?: typeof fetch
+  createClient?: WebexBotClientFactory
+  createListener?: WebexBotListenerFactory
+  listenerOptions?: Omit<WebexBotListenerOptions, 'ignoreSelfMessages'>
+}
+
+export type WebexBotAdapter = {
+  start: () => Promise<void>
+  stop: () => Promise<void>
+  isConnected: () => boolean
+}
+
+export function createOutboundCallback(deps: {
+  client: Pick<WebexBotClient, 'sendMessage'>
+  logger: WebexBotAdapterLogger
+  formatChannelTag: (chat: string) => Promise<string>
+}): OutboundCallback {
+  const { client, logger, formatChannelTag } = deps
+  return async (msg: OutboundMessage): Promise<SendResult> => {
+    if (msg.adapter !== 'webex-bot') return { ok: false, error: `unknown adapter: ${msg.adapter}` }
+    const text = msg.text ?? ''
+    const attachments = msg.attachments ?? []
+    if (text === '' && attachments.length === 0) return { ok: false, error: 'message has neither text nor attachments' }
+    if (text === '' && attachments.length > 0) {
+      return { ok: false, error: 'webex-bot does not support outbound file attachments' }
+    }
+
+    const tag = await formatChannelTag(msg.chat)
+    if (attachments.length > 0) {
+      logger.warn(
+        `[webex-bot] dropping ${attachments.length} outbound attachment(s) for ${tag}: agent-messenger webexbot has no upload API`,
+      )
+    }
+    if (msg.thread !== null && msg.thread !== undefined) {
+      logger.warn(
+        `[webex-bot] sending thread reply to room root for ${tag}: WebexBotClient.sendMessage has no parentId option`,
+      )
+    }
+    try {
+      const sent = await client.sendMessage(msg.chat, text, { markdown: true })
+      logger.info(`[webex-bot] sent id=${sent.id} ${tag}`)
+      return { ok: true }
+    } catch (err) {
+      const message = describe(err)
+      logger.error(`[webex-bot] sendMessage failed: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
+export function createWebexHistoryCallback(deps: {
+  client: Pick<WebexBotClient, 'listMessages'>
+  logger: WebexBotAdapterLogger
+  botPersonIdRef: () => string | null
+}): HistoryCallback {
+  return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
+    try {
+      const messages = await deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) })
+      return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, deps.botPersonIdRef())).reverse() }
+    } catch (err) {
+      const message = describe(err)
+      deps.logger.warn(`[webex-bot] history fetch failed: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
+export function createWebexMembershipResolver(deps: {
+  client: Pick<WebexBotClient, 'listMemberships'>
+  logger: WebexBotAdapterLogger
+  historyCallback: HistoryCallback
+  now?: () => number
+}): MembershipResolver {
+  const now = deps.now ?? Date.now
+  return async (key): Promise<MembershipResolverResult> => {
+    if (key.adapter !== 'webex-bot') return { kind: 'permanent' } satisfies MembershipResolverFailure
+    if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
+    try {
+      const memberships: WebexMembership[] = await deps.client.listMemberships(key.chat, { max: 100 })
+      const total = Math.max(0, memberships.length)
+      const bots = 1
+      return { humans: Math.max(0, total - bots), bots, fetchedAt: now(), truncated: true }
+    } catch (err) {
+      deps.logger.warn(`[webex-bot] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
+      return await deriveMembershipFromHistory({
+        fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
+        now,
+      })
+    }
+  }
+}
+
+const WEBEX_ATTACHMENT_HOSTS = new Set(['webexapis.com', 'api.ciscospark.com'])
+
+export function createFetchAttachmentCallback(deps: {
+  token: string
+  logger: WebexBotAdapterLogger
+  fetchImpl?: typeof fetch
+}): FetchAttachmentCallback {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  return async ({ ref, filename }) => {
+    let url: URL
+    try {
+      url = new URL(ref)
+    } catch {
+      return { ok: false, error: `invalid Webex file URL: ${ref}` }
+    }
+    // The bearer token must never leave over plaintext: an allowlisted host
+    // on http:// would still leak the credential, so gate on https before the
+    // host check.
+    if (url.protocol !== 'https:') {
+      return { ok: false, error: `Webex file URL must use https: ${url.protocol}//${url.hostname}` }
+    }
+    if (!isAllowedWebexFileHost(url.hostname)) {
+      return { ok: false, error: `not a Webex file URL: ${url.hostname}` }
+    }
+    try {
+      const res = await fetchImpl(url.toString(), { headers: { Authorization: `Bearer ${deps.token}` } })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        const message = `webex file fetch ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`
+        deps.logger.error(`[webex-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
+        return { ok: false, error: message }
+      }
+      const buffer = Buffer.from(await res.arrayBuffer())
+      const inferredFilename = filename ?? url.pathname.split('/').pop() ?? 'attachment'
+      const contentType = res.headers.get('content-type') ?? undefined
+      return {
+        ok: true,
+        buffer,
+        filename: inferredFilename,
+        ...(contentType !== undefined ? { mimetype: contentType } : {}),
+        size: buffer.length,
+      }
+    } catch (err) {
+      const message = describe(err)
+      deps.logger.error(`[webex-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
+export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBotAdapter {
+  const logger = options.logger ?? consoleLogger
+  const createClient = options.createClient ?? (() => new WebexBotClient())
+  const createListener =
+    options.createListener ?? ((client, listenerOptions) => new WebexBotListener(client, listenerOptions))
+  const client = createClient()
+  const fetchImpl = options.fetchImpl ?? fetch
+  let listener: WebexBotListener | null = null
+  let botPerson: WebexPerson | null = null
+  let connected = false
+  let started = false
+  let inflightInbounds = 0
+  let stopWaiters: Array<() => void> = []
+
+  const channelResolver = createWebexChannelNameResolver({ client })
+  const selfIdentityResolver: ChannelSelfIdentityResolver = () =>
+    botPerson !== null ? { id: botPerson.id, username: botPerson.emails[0] ?? botPerson.displayName } : null
+
+  const formatChannelTag = async (chat: string): Promise<string> => {
+    const names = await channelResolver({ adapter: 'webex-bot', workspace: chat, chat, thread: null }).catch(
+      (): ResolvedChannelNames => ({}),
+    )
+    const label = names.chatName ?? null
+    return label === null || label === chat ? `room=${chat}` : `room=${label}(${chat})`
+  }
+
+  const historyCallback = createWebexHistoryCallback({ client, logger, botPersonIdRef: () => botPerson?.id ?? null })
+  const membershipResolver = createWebexMembershipResolver({ client, logger, historyCallback })
+  const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
+  const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger, fetchImpl })
+
+  const handleMessage = async (event: WebexInboundMessage): Promise<void> => {
+    inflightInbounds++
+    const botSnapshot = botPerson
+    try {
+      const tag = await formatChannelTag(event.roomId)
+      logger.info(`[webex-bot] inbound id=${event.id} author=${event.personEmail} ${tag} text_len=${event.text.length}`)
+      const verdict = classifyInbound(event, options.configRef(), botSnapshot?.id ?? null)
+      if (verdict.kind === 'drop') {
+        logger.info(`[webex-bot] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
+        return
+      }
+      const payload = await enrichWebexMessageReference({
+        client,
+        inbound: verdict.payload,
+        parentId: event.parentId,
+        botPersonId: botSnapshot?.id ?? null,
+      })
+      logger.info(
+        `[webex-bot] routed id=${event.id} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
+      )
+      await options.router.route(payload)
+    } catch (err) {
+      logger.error(`[webex-bot] handleInbound failed: ${describe(err)}`)
+    } finally {
+      inflightInbounds--
+      if (inflightInbounds === 0 && stopWaiters.length > 0) {
+        const waiters = stopWaiters
+        stopWaiters = []
+        for (const w of waiters) w()
+      }
+    }
+  }
+
+  return {
+    async start(): Promise<void> {
+      if (started) return
+      started = true
+      try {
+        await client.login({ token: options.token })
+        botPerson = await client.testAuth()
+        logger.info(`[webex-bot] authenticated as ${botPerson.displayName} (${botPerson.id})`)
+      } catch (err) {
+        started = false
+        botPerson = null
+        logger.error(`[webex-bot] login failed: ${describe(err)}`)
+        throw err
+      }
+
+      listener = createListener(client, { ...options.listenerOptions, ignoreSelfMessages: true })
+      let listenerConnected = false
+      let listenerStartupError: Error | null = null
+      listener.on('connected', () => {
+        listenerConnected = true
+        connected = true
+      })
+      listener.on('disconnected', (reason) => {
+        connected = false
+        logger.warn(`[webex-bot] disconnected: ${reason}`)
+      })
+      listener.on('error', (err) => {
+        const error = err instanceof Error ? err : new Error(String(err))
+        if (!listenerConnected && listenerStartupError === null) listenerStartupError = error
+        logger.error(`[webex-bot] listener error: ${describe(error)}`)
+      })
+      listener.on('message_created', (event: WebexBotListenerEventMap['message_created'][0]) => {
+        void handleMessage(event)
+      })
+
+      options.router.registerOutbound('webex-bot', outboundCallback)
+      options.router.registerChannelNameResolver('webex-bot', channelResolver)
+      options.router.registerSelfIdentity('webex-bot', selfIdentityResolver)
+      options.router.registerHistory('webex-bot', historyCallback)
+      options.router.registerFetchAttachment('webex-bot', fetchAttachmentCallback)
+      options.router.registerMembership('webex-bot', membershipResolver)
+
+      const rollbackStart = (reason: string, cause: Error): never => {
+        options.router.unregisterOutbound('webex-bot', outboundCallback)
+        options.router.unregisterChannelNameResolver('webex-bot', channelResolver)
+        options.router.unregisterSelfIdentity('webex-bot', selfIdentityResolver)
+        options.router.unregisterHistory('webex-bot', historyCallback)
+        options.router.unregisterFetchAttachment('webex-bot', fetchAttachmentCallback)
+        options.router.unregisterMembership('webex-bot', membershipResolver)
+        listener?.stop()
+        listener = null
+        botPerson = null
+        connected = false
+        started = false
+        logger.error(`[webex-bot] ${reason}: ${describe(cause)}`)
+        throw cause
+      }
+
+      try {
+        await listener.start()
+      } catch (err) {
+        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
+      }
+      if (!listenerConnected) {
+        rollbackStart(
+          'listener start failed silently',
+          listenerStartupError ?? new Error('listener.start() returned without emitting connected'),
+        )
+      }
+    },
+
+    async stop(): Promise<void> {
+      if (!started) return
+      started = false
+      options.router.unregisterOutbound('webex-bot', outboundCallback)
+      options.router.unregisterChannelNameResolver('webex-bot', channelResolver)
+      options.router.unregisterSelfIdentity('webex-bot', selfIdentityResolver)
+      options.router.unregisterHistory('webex-bot', historyCallback)
+      options.router.unregisterFetchAttachment('webex-bot', fetchAttachmentCallback)
+      options.router.unregisterMembership('webex-bot', membershipResolver)
+      listener?.stop()
+      listener = null
+      connected = false
+      if (inflightInbounds > 0) {
+        await new Promise<void>((resolve) => {
+          stopWaiters.push(resolve)
+        })
+      }
+      botPerson = null
+    },
+
+    isConnected(): boolean {
+      return started && botPerson !== null && connected
+    },
+  }
+}
+
+function mapWebexHistoryMessage(msg: WebexMessage, botPersonId: string | null): ChannelHistoryMessage {
+  const attachments = (msg.files ?? []).map((ref, index) => ({ id: index + 1, kind: 'file' as const, ref }))
+  const body = msg.text ?? msg.markdown ?? msg.html ?? ''
+  const text = attachments.length === 0 ? body : body === '' ? '[Webex attachment]' : `${body}\n[Webex attachment]`
+  const ts = Date.parse(msg.created)
+  return {
+    externalMessageId: msg.id,
+    authorId: msg.personId,
+    authorName: msg.personEmail,
+    text,
+    ts: Number.isFinite(ts) ? ts : 0,
+    isBot: botPersonId !== null && msg.personId === botPersonId,
+    replyToBotMessageId: msg.parentId ?? null,
+    ...(attachments.length > 0 ? { attachments } : {}),
+  }
+}
+
+function isAllowedWebexFileHost(hostname: string): boolean {
+  return WEBEX_ATTACHMENT_HOSTS.has(hostname) || hostname.endsWith('.webexcontent.com')
+}
+
+function clampLimit(requested: number, max: number): number {
+  if (!Number.isFinite(requested) || requested <= 0) return max
+  return Math.min(Math.floor(requested), max)
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function dropHint(reason: InboundDropReason): string {
+  switch (reason) {
+    case 'empty_content':
+      return ' (message had no text and no files)'
+    case 'pre_connect':
+    case 'self_author':
+      return ''
+  }
+}

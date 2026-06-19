@@ -43,6 +43,16 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(result.applied.sort()).toEqual(['DISCORD_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_BOT_TOKEN'])
   })
 
+  test('injects webex-bot.token into WEBEX_BOT_TOKEN', () => {
+    writeSecretsV2({ channels: { 'webex-bot': { token: 'webex-tok' } } })
+    const env: NodeJS.ProcessEnv = {}
+
+    const result = hydrateChannelEnvFromSecrets({ agentDir: root, env })
+
+    expect(env['WEBEX_BOT_TOKEN']).toBe('webex-tok')
+    expect(result.applied).toEqual(['WEBEX_BOT_TOKEN'])
+  })
+
   test('env wins: existing env value is preserved and file value is skipped', () => {
     writeSecretsV2({ channels: { 'discord-bot': { token: 'from-secrets' } } })
     const env: NodeJS.ProcessEnv = { DISCORD_BOT_TOKEN: 'from-env-file' }

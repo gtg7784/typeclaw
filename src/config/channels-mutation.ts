@@ -7,7 +7,15 @@ import { SecretsBackend } from '@/secrets'
 const CONFIG_FILE = 'typeclaw.json'
 const SECRETS_FILE = 'secrets.json'
 
-export const CHANNEL_KINDS = ['slack-bot', 'discord-bot', 'telegram-bot', 'line', 'kakaotalk', 'github'] as const
+export const CHANNEL_KINDS = [
+  'slack-bot',
+  'discord-bot',
+  'telegram-bot',
+  'webex-bot',
+  'line',
+  'kakaotalk',
+  'github',
+] as const
 
 export type ChannelKind = (typeof CHANNEL_KINDS)[number]
 

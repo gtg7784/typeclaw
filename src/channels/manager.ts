@@ -14,6 +14,7 @@ import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaot
 import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
+import { createWebexBotAdapter, type WebexBotAdapter } from './adapters/webex-bot'
 import type { GithubTokenBridge } from './github-token-bridge'
 import {
   createChannelRouter,
@@ -71,6 +72,7 @@ export type ChannelManagerOptions = {
   createLineAdapter?: typeof createLineAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
+  createWebexAdapter?: typeof createWebexBotAdapter
   // Wake-up gate: forwarded to the router, which calls
   // `permissions.has(origin, 'channel.respond')` BEFORE creating a
   // session for any inbound. Optional here to keep direct manager-level
@@ -132,6 +134,7 @@ type AnyAdapter =
   | KakaotalkAdapter
   | SlackBotAdapter
   | TelegramBotAdapter
+  | WebexBotAdapter
 
 // Credential signature is the comparison key for credential-rotation
 // detection on reload. Discord and Telegram each use a single bot token;
@@ -168,6 +171,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createLine = options.createLineAdapter ?? createLineAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
+  const createWebex = options.createWebexAdapter ?? createWebexBotAdapter
 
   const live = new Map<AdapterId, AdapterEntry>()
   const perAdapterSerial = new Map<AdapterId, Promise<unknown>>()
@@ -266,6 +270,16 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const token = env.TELEGRAM_BOT_TOKEN
       if (token === undefined || token.trim() === '') return null
       return createTelegramAdapter({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        token,
+        logger,
+      })
+    }
+    if (name === 'webex-bot') {
+      const token = env.WEBEX_BOT_TOKEN
+      if (token === undefined || token.trim() === '') return null
+      return createWebex({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         token,
@@ -461,6 +475,7 @@ const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'line' | 'github'>, rea
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
+  'webex-bot': ['WEBEX_BOT_TOKEN'],
 }
 
 function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsKakaoCredentialStore {

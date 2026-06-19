@@ -1,0 +1,71 @@
+---
+title: Webex bot
+description: Real-time Mercury WebSocket adapter — bot token setup, capabilities, and limits
+icon: MessageCircle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **Mercury WebSocket** (no public URL required) — the same persistent-socket model as `slack-bot` (Socket Mode) and `discord-bot` (gateway). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+
+## Auth
+
+One token, stored in [`secrets.json`](/docs/reference/secrets-json):
+
+| Field                      | Value                                                         |
+| -------------------------- | ------------------------------------------------------------- |
+| `channels.webex-bot.token` | Webex bot access token (from developer.webex.com/my-apps/new) |
+
+CLI: `typeclaw channel add webex-bot` (interactive), `typeclaw channel set webex-bot` (rotate).
+
+<Callout type="info" title="No public URL">
+  The bot registers a WDM device and opens an outbound Mercury WebSocket, so it receives events in real time without a
+  reachable webhook URL — it works behind firewalls and on a laptop.
+</Callout>
+
+## Capabilities
+
+| Feature                 | Supported | Notes                                                                                                        |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------ |
+| Outbound messages       | yes       | Sent as Webex markdown                                                                                       |
+| Reactions               | no        | The Webex bot API exposes no message-reaction endpoint                                                       |
+| Typing indicator        | no        | Webex has no bot typing API                                                                                  |
+| Channel-name resolution | yes       | Resolves room titles via the Spaces API                                                                      |
+| Self identity           | yes       | From `testAuth` (the bot's own person record)                                                                |
+| History                 | partial   | Single page (newest-first, reversed); the Webex messages API exposes no pagination cursor                    |
+| Attachments             | inbound   | Inbound files are fetchable via `channel_fetch_attachment`; outbound file upload is not supported by the SDK |
+| Threading               | no        | `sendMessage` has no `parentId`; thread replies post to the room root (logged as a warning)                  |
+| Membership              | partial   | The membership API can't split bot/human counts; group reports humans = total − 1, bots = 1                  |
+
+## Config
+
+```json
+{
+  "channels": {
+    "webex-bot": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `webex-bot`. Credentials live in [`secrets.json#channels.webex-bot`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)

@@ -12,6 +12,7 @@
     "slack-bot",
     "discord-bot",
     "telegram-bot",
+    "webex-bot",
     "github",
     "line",
     "kakaotalk",

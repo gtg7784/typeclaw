@@ -42,6 +42,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
+  'webex-bot': 'Webex',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
   github: 'GitHub',
@@ -104,7 +105,7 @@ const addSub = defineCommand({
 // is included here but routed through its own prompt path because it has
 // three independent secrets (PAT or App private key + webhook secret) and a
 // structural auth-type flip is forbidden during rotation.
-const SETTABLE_ADAPTERS = ['slack-bot', 'discord-bot', 'telegram-bot', 'github'] as const
+const SETTABLE_ADAPTERS = ['slack-bot', 'discord-bot', 'telegram-bot', 'webex-bot', 'github'] as const
 type SettableAdapter = (typeof SETTABLE_ADAPTERS)[number]
 
 const setSub = defineCommand({
@@ -651,6 +652,9 @@ async function runSet(cwd: string, adapter: SettableAdapter): Promise<void> {
     case 'telegram-bot':
       await runSetTelegram(cwd)
       break
+    case 'webex-bot':
+      await runSetWebex(cwd)
+      break
     case 'slack-bot':
       await runSetSlack(cwd)
       break
@@ -678,6 +682,16 @@ async function runSetTelegram(cwd: string): Promise<void> {
     process.exit(1)
   }
   await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS['telegram-bot'], 'credentials updated')
+}
+
+async function runSetWebex(cwd: string): Promise<void> {
+  const token = await promptWebexToken()
+  const result = await setChannelSecrets(cwd, 'webex-bot', { token })
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS['webex-bot'], 'credentials updated')
 }
 
 type SlackSetChoice = 'bot' | 'app' | 'both'
@@ -778,6 +792,7 @@ type CollectedCredentials =
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'webex-bot'; webexBotToken: string }
   | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
   | {
@@ -804,6 +819,8 @@ async function collectCredentials(
     }
     case 'telegram-bot':
       return { channel, telegramBotToken: await promptTelegramToken() }
+    case 'webex-bot':
+      return { channel, webexBotToken: await promptWebexToken() }
     case 'line': {
       const login = await promptLineLogin(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)
       return {
@@ -1204,6 +1221,25 @@ async function promptTelegramToken(): Promise<string> {
           ? undefined
           : 'Bot token must look like "<digits>:<secret>" (from @BotFather)'
         : 'Token is required',
+  })
+  if (isCancel(token)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return token
+}
+
+async function promptWebexToken(): Promise<string> {
+  note(
+    [
+      'Create a bot at https://developer.webex.com/my-apps/new/bot.',
+      'Copy the Bot Access Token from the bot settings page.',
+    ].join('\n'),
+    'Get a Webex bot token',
+  )
+  const token = await password({
+    message: 'Webex bot access token',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
   })
   if (isCancel(token)) {
     cancel('Aborted.')

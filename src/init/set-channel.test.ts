@@ -82,6 +82,16 @@ describe('setChannelSecrets', () => {
     expect(secrets.channels?.['telegram-bot']).toEqual({ token: { value: '222:new' } })
   })
 
+  test('rotates webex-bot token in place', async () => {
+    await runAddChannel({ cwd: root, channel: 'webex-bot', webexBotToken: 'old-webex' })
+
+    const result = await setChannelSecrets(root, 'webex-bot', { token: 'new-webex' })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    expect(secrets.channels?.['webex-bot']).toEqual({ token: { value: 'new-webex' } })
+  })
+
   test('refuses to rotate a channel that was never added', async () => {
     const result = await setChannelSecrets(root, 'discord-bot', { token: 'new' })
 

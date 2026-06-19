@@ -37,6 +37,14 @@ function Line({ className }: IconProps) {
   )
 }
 
+function Webex({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className={className}>
+      <path d="M12 0a5.36 5.36 0 0 0-5.157 3.876 6.76 6.76 0 0 1 1.64-.205c.7 0 1.375.106 2.01.302A3.06 3.06 0 0 1 12 2.297a3.062 3.062 0 0 1 3.06 3.061c0 .9.27 1.737.733 2.434a6.74 6.74 0 0 1 .813 3.214c0 .19-.009.378-.025.564a3.06 3.06 0 0 1 1.297-.288 3.06 3.06 0 0 1 1.51.398A6.74 6.74 0 0 0 21 11.006c0-1.184-.305-2.297-.84-3.266a3.04 3.04 0 0 1-.387-1.49A3.06 3.06 0 0 1 22.835 3.19 5.36 5.36 0 0 0 18.643 1.2 5.34 5.34 0 0 0 12 0zM5.358 5.97a3.062 3.062 0 0 0-3.06 3.06c0 .9-.27 1.738-.733 2.434A6.74 6.74 0 0 0 .75 14.68c0 1.183.305 2.296.84 3.265.246.446.387.957.387 1.49a3.06 3.06 0 0 0 5.252 2.14 5.34 5.34 0 0 0 4.77 1.18 5.36 5.36 0 0 0 4.193-3.876 6.76 6.76 0 0 1-1.64.205c-.7 0-1.375-.106-2.01-.302a3.06 3.06 0 0 1-1.508.265 3.062 3.062 0 0 1-2.847-3.052c0-.9-.27-1.737-.733-2.434a6.74 6.74 0 0 1-.813-3.214c0-.19.009-.378.025-.564a3.06 3.06 0 0 1-1.297.288 3.06 3.06 0 0 1-1.51-.398c.016-.186.025-.374.025-.564 0-.533.141-1.044.387-1.49a3.06 3.06 0 0 0-2.435-1.41z" />
+    </svg>
+  )
+}
+
 function SlackBrand({ className }: IconProps) {
   const Icon = Slack as unknown as ComponentType<SVGProps<SVGSVGElement>>
   return <Icon className={className} strokeWidth={1.8} aria-hidden />
@@ -63,6 +71,7 @@ export const CHANNELS: ChannelDef[] = [
   { name: 'Slack', Icon: SlackBrand, branded: true, href: '/docs/reference/slack-bot' },
   { name: 'Discord', Icon: Discord, branded: true, href: '/docs/reference/discord-bot' },
   { name: 'Telegram', Icon: Telegram, branded: true, href: '/docs/reference/telegram-bot' },
+  { name: 'Webex', Icon: Webex, branded: true, href: '/docs/reference/webex-bot' },
   { name: 'LINE', Icon: Line, branded: true, href: '/docs/reference/line' },
   { name: 'KakaoTalk', Icon: KakaoTalk, branded: true, href: '/docs/reference/kakaotalk' },
   { name: 'GitHub', Icon: GithubBrand, branded: true, href: '/docs/reference/github' },

@@ -22,7 +22,7 @@
 
 ## Channels — one agent, many inboxes
 
-- 📨 **Supported channels** — Slack, Discord, Telegram, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
+- 📨 **Supported channels** — Slack, Discord, Telegram, Webex, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
 - ✅ **Pull-request review** — treats a GitHub PR as a conversation, reviewing as a participant, with guards against claiming a verdict it didn't actually post and against leaving a PR stranded
 
 ## Web & research — reads the web like a person
@@ -121,7 +121,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bu
 
 ## Acknowledgments
 
-- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `line`, `kakaotalk`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
+- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `line`, `kakaotalk`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
 - **Subagent architecture** is inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by [@code-yeongyu](https://github.com/code-yeongyu). Thanks for the shape that made this clean.
 
 ## License
