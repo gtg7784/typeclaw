@@ -532,6 +532,15 @@ export async function collectWizardInputs(
   let pendingBackOrigin: StepId | null = null
   let oauthCredentialsSaved = false
 
+  // One-shot replay of checkpoint answers: while active, choice steps whose
+  // answer was seeded auto-advance (running their normal tail) instead of
+  // re-prompting. The first interactive prompt or any Back ends the replay
+  // (cleared in `onResult`), so back-navigation behaves like a fresh wizard.
+  // Secret-entry steps are never in `resumeCovered`, so a checkpointed
+  // `authMethod` still drops to its key/login prompt when nothing is on disk.
+  const resumeReplay = { active: false }
+  const resumeCovered = new Set<StepId>()
+
   // Resume saved wizard answers from a prior unfinished init. `--reset` skips
   // this entirely (the user asked to re-answer everything). Route through the
   // shared detectInitProgress() predicate so init/start/restart classify a
@@ -555,6 +564,8 @@ export async function collectWizardInputs(
       if (decision === 'resume') {
         seedWizardState(state, sanitized)
         step = resumeStep(state)
+        resumeReplay.active = true
+        for (const covered of resumeCoveredSteps(state)) resumeCovered.add(covered)
       } else {
         await checkpointStore.clear(cwd)
       }
@@ -571,6 +582,11 @@ export async function collectWizardInputs(
   }
 
   const onResult = <T>(currentStep: StepId, result: StepResult<T>): StepResult<T> => {
+    // Any Back, or any non-auto (interactive) answer, ends the resume replay:
+    // from here on the user is driving, so downstream seeded steps prompt
+    // normally. Synthesized auto-skips keep replay alive and, as before, leave
+    // `pendingBackOrigin` untouched so they never affect double-back abort.
+    if (result.kind === 'back' || !result.auto) resumeReplay.active = false
     if (result.kind === 'back') {
       if (pendingBackOrigin === currentStep) abort()
       pendingBackOrigin = currentStep
@@ -578,6 +594,16 @@ export async function collectWizardInputs(
       pendingBackOrigin = null
     }
     return result
+  }
+
+  // Synthesize a step's seeded answer as an auto-advance result during resume
+  // replay, so the step runs its normal tail (state assignment, on-disk
+  // credential reconstruction, routing) without re-prompting. Returns
+  // undefined when replay is off, this step isn't checkpoint-covered, or the
+  // value is unset — callers fall back to the real prompt.
+  const resumeSkip = <T>(currentStep: StepId, value: T | undefined): StepResult<T> | undefined => {
+    if (!resumeReplay.active || !resumeCovered.has(currentStep) || value === undefined) return undefined
+    return { kind: 'value', value, auto: true }
   }
 
   const readExistingApiKey = async (providerId: KnownProviderId): Promise<string | null> => {
@@ -725,7 +751,11 @@ export async function collectWizardInputs(
       }
 
       case 'pick-model': {
-        const result = onResult(step, await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref))
+        const result = onResult(
+          step,
+          resumeSkip(step, state.model) ??
+            (await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref)),
+        )
         if (result.kind === 'back') {
           step = stepBeforeModel(state)
           break
@@ -758,7 +788,11 @@ export async function collectWizardInputs(
 
       case 'pick-vision-vendor': {
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
-        const result = onResult(step, await prompts.pickVisionVendor(visionOptions, state.visionVendorId))
+        const result: StepResult<KnownProviderVendorId | 'skip'> = onResult(
+          step,
+          resumeSkip<KnownProviderVendorId | 'skip'>(step, state.visionVendorId) ??
+            (await prompts.pickVisionVendor(visionOptions, state.visionVendorId)),
+        )
         if (result.kind === 'back') {
           step = stepBeforeVision(state)
           break
@@ -789,7 +823,8 @@ export async function collectWizardInputs(
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
         const result = onResult(
           step,
-          await prompts.pickVisionProviderVariant(state.visionVendorId!, visionOptions, state.visionProviderId),
+          resumeSkip(step, state.visionProviderId) ??
+            (await prompts.pickVisionProviderVariant(state.visionVendorId!, visionOptions, state.visionProviderId)),
         )
         if (result.kind === 'back') {
           step = 'pick-vision-vendor'
@@ -810,7 +845,8 @@ export async function collectWizardInputs(
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
         const result = onResult(
           step,
-          await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref),
+          resumeSkip(step, state.visionModel) ??
+            (await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref)),
         )
         if (result.kind === 'back') {
           step = 'pick-vision-provider-variant'
@@ -902,7 +938,10 @@ export async function collectWizardInputs(
       }
 
       case 'pick-channel': {
-        const result: StepResult<ChannelChoice> = onResult(step, await prompts.pickChannel(state.channelChoice))
+        const result: StepResult<ChannelChoice> = onResult(
+          step,
+          resumeSkip(step, state.channelChoice) ?? (await prompts.pickChannel(state.channelChoice)),
+        )
         if (result.kind === 'back') {
           step = stepBeforePickChannel(state)
           break
@@ -1035,6 +1074,21 @@ function resumeStep(state: WizardState): StepId {
   if (state.providerId !== undefined) return 'reuse-existing-key'
   if (state.vendorId !== undefined) return 'pick-provider-variant'
   return 'pick-vendor'
+}
+
+// Choice steps whose seeded answer lets resume replay auto-advance them. Only
+// non-secret picks the checkpoint actually carries — never `enter-api-key` /
+// `enter-vision-api-key` (key values aren't checkpointed) and never the
+// reuse-* / channel-flow steps (those reconstruct from disk or collect secrets,
+// so they must run their own logic, not replay a stored answer).
+function resumeCoveredSteps(state: WizardState): StepId[] {
+  const covered: StepId[] = []
+  if (state.model !== undefined) covered.push('pick-model')
+  if (state.visionVendorId !== undefined) covered.push('pick-vision-vendor')
+  if (state.visionProviderId !== undefined) covered.push('pick-vision-provider-variant')
+  if (state.visionModel !== undefined) covered.push('pick-vision-model')
+  if (state.channelChoice !== undefined) covered.push('pick-channel')
+  return covered
 }
 
 function projectCheckpoint(cwd: string, state: WizardState): WizardAnswerCheckpointV1 {
