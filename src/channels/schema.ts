@@ -7,6 +7,7 @@ export const ADAPTER_IDS = [
   'kakaotalk',
   'slack-bot',
   'telegram-bot',
+  'webex',
   'webex-bot',
 ] as const
 
@@ -270,6 +271,7 @@ export const channelsSchema = z
     kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
+    webex: adapterSchema.optional(),
     // Webex bots receive messages in real time over a Mercury WebSocket
     // (agent-messenger's WebexBotListener), the same persistent-socket model
     // as slack-bot (Socket Mode) and discord-bot (Gateway) — no public
