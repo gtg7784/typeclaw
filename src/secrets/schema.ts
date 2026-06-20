@@ -93,6 +93,18 @@ const kakaoEncryptedPasswordSchema = z
   })
   .strict()
 
+export const webexEncryptedPasswordSchema = z
+  .object({
+    v: z.literal(1),
+    alg: z.literal('AES-256-GCM'),
+    kid: z.string(),
+    iv: z.string(),
+    ciphertext: z.string(),
+    authTag: z.string(),
+    createdAt: z.string(),
+  })
+  .strict()
+
 export const kakaoAccountRecordSchema = z.object({
   account_id: z.string(),
   oauth_token: z.string(),
@@ -111,6 +123,26 @@ export const kakaoAccountRecordSchema = z.object({
 })
 
 export type KakaoEncryptedPassword = z.infer<typeof kakaoEncryptedPasswordSchema>
+
+export const webexAccountRecordSchema = z.object({
+  account_id: z.string(),
+  access_token: z.string(),
+  refresh_token: z.string(),
+  expires_at: z.number(),
+  device_url: z.string().optional(),
+  user_id: z.string().optional(),
+  client_id: z.string().optional(),
+  client_secret: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  email: z.string().optional(),
+  encryptedPassword: webexEncryptedPasswordSchema.optional(),
+})
+
+export const webexChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), webexAccountRecordSchema),
+})
 
 export const kakaoPendingLoginRecordSchema = z.object({
   device_uuid: z.string(),
@@ -133,6 +165,7 @@ export const channelsSchema = z
     'telegram-bot': telegramBotChannelSchema.optional(),
     line: lineChannelBlockSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
+    webex: webexChannelBlockSchema.optional(),
   })
   .catchall(z.unknown())
 
@@ -158,6 +191,8 @@ export type LineChannelBlock = z.infer<typeof lineChannelBlockSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
 export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
 export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
+export type WebexAccountRecord = z.infer<typeof webexAccountRecordSchema>
+export type WebexChannelBlock = z.infer<typeof webexChannelBlockSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
