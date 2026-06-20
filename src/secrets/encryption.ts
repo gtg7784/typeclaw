@@ -33,6 +33,7 @@ export type EncryptedEnvelope = {
 export type EncryptionContext = {
   containerName: string
   accountId: string
+  purpose?: string
 }
 
 export class EncryptionError extends Error {
@@ -112,5 +113,8 @@ export function decrypt(envelope: EncryptedEnvelope, key: Buffer, context: Encry
 // Changing this format breaks decryption of every previously-stored ciphertext.
 // See the module-header threat-model comment for the binding rationale.
 function buildAad(context: EncryptionContext): Buffer {
-  return Buffer.from(`typeclaw:kakaotalk-password:v1:${context.containerName}:${context.accountId}`, 'utf8')
+  return Buffer.from(
+    `typeclaw:${context.purpose ?? 'kakaotalk-password'}:v1:${context.containerName}:${context.accountId}`,
+    'utf8',
+  )
 }

@@ -57,6 +57,23 @@ describe('AES-256-GCM secrets encryption', () => {
     expect(() => decrypt(envelope, key, { containerName: 'kakao', accountId: 'acc-2' })).toThrow(EncryptionError)
   })
 
+  test('round-trips a purpose-scoped Webex password envelope', () => {
+    const key = generateKey()
+    const context = { containerName: 'agent', accountId: 'webex-user', purpose: 'webex-password' }
+    const envelope = encrypt('webex-secret', key, context)
+
+    expect(decrypt(envelope, key, context)).toBe('webex-secret')
+  })
+
+  test('omitted purpose preserves KakaoTalk AAD while separating other purposes', () => {
+    const key = generateKey()
+    const legacyContext = { containerName: 'kakao', accountId: 'acc-1' }
+    const envelope = encrypt('legacy-secret', key, legacyContext)
+
+    expect(decrypt(envelope, key, legacyContext)).toBe('legacy-secret')
+    expect(() => decrypt(envelope, key, { ...legacyContext, purpose: 'webex-password' })).toThrow(EncryptionError)
+  })
+
   test('tampered ciphertext fails authentication', () => {
     const key = generateKey()
     const ctx = { containerName: 'c', accountId: 'a' }
