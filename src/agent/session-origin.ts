@@ -156,6 +156,7 @@ const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
     supportsReactions: false,
     supportsAttachments: true,
   },
+  webex: { displayName: 'Webex', mentionMode: 'angle-id', supportsReactions: false, supportsAttachments: true },
   'webex-bot': { displayName: 'Webex', mentionMode: 'angle-id', supportsReactions: false, supportsAttachments: false },
   line: { displayName: 'LINE', mentionMode: 'alias', supportsReactions: false, supportsAttachments: false },
   kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias', supportsReactions: false, supportsAttachments: true },

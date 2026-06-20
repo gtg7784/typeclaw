@@ -7,6 +7,7 @@ const ADAPTER_TO_PLATFORM: Record<AdapterId, Platform> = {
   'discord-bot': 'discord',
   github: 'github',
   'telegram-bot': 'telegram',
+  webex: 'webex',
   'webex-bot': 'webex',
   line: 'line',
   kakaotalk: 'kakao',
