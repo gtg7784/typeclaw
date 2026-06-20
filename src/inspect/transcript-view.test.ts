@@ -47,6 +47,22 @@ class FakeTerminal implements Terminal {
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 10))
 
+// Polls accumulated terminal writes until the replay render has flushed the
+// expected content. Replaces a fixed `flush()` for the content-asserting tests:
+// a 10ms sleep raced the async pi-tui render under parallel CI load, feeding esc
+// before the frame painted so the asserted text/timestamp was absent.
+async function waitForFrame(
+  terminal: FakeTerminal,
+  predicate: (frame: string) => boolean,
+  timeoutMs = 5000,
+): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (predicate(terminal.writes.join(''))) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
 describe('componentFor', () => {
   test('assistant text becomes a Markdown block', () => {
     const ev: InspectEvent = { cat: 'assistant', ts: 1, text: '# hi\n\nbody' }
@@ -245,7 +261,7 @@ describe('createTranscriptView run()', () => {
 
     // when: the viewer replays and we dismiss it
     const runPromise = view.run()
-    await flush()
+    await waitForFrame(terminal, (frame) => frame.includes('first thought') && frame.includes('second thought'))
     terminal.feed('\x1b')
     await runPromise
 
@@ -302,7 +318,7 @@ describe('createTranscriptView run()', () => {
 
     // when: the viewer tails the live run (which overflows the 2-entry window)
     const runPromise = view.run()
-    await flush()
+    await waitForFrame(terminal, (frame) => frame.includes(`thought ${count - 1}`))
     terminal.feed('\x1b')
     await runPromise
 
