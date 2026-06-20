@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { decodeCodexAccessTokenExpiryMs, emitCodexAuthJson } from './codex-auth-json'
+import { decodeCodexAccessTokenExpiryMs, emitCodexAuthJson, isDecodableJwt } from './codex-auth-json'
 
 function makeJwt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
@@ -9,7 +9,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe('emitCodexAuthJson', () => {
-  test('emits the modern tokens-only shape with trailing newline', () => {
+  test('emits the tokens shape with id_token and a trailing newline', () => {
     const out = emitCodexAuthJson({
       type: 'oauth',
       access: 'access-1',
@@ -19,8 +19,48 @@ describe('emitCodexAuthJson', () => {
 
     expect(out.endsWith('\n')).toBe(true)
     expect(JSON.parse(out)).toEqual({
-      tokens: { access_token: 'access-1', refresh_token: 'refresh-1' },
+      tokens: { id_token: 'access-1', access_token: 'access-1', refresh_token: 'refresh-1' },
     })
+  })
+
+  test('emits a real captured id_token when the credential carries one', () => {
+    const out = emitCodexAuthJson({
+      type: 'oauth',
+      access: 'access-1',
+      refresh: 'refresh-1',
+      expires: 123,
+      idToken: 'id-token-1',
+    } as never)
+
+    const parsed = JSON.parse(out) as { tokens: Record<string, unknown> }
+    expect(parsed.tokens.id_token).toBe('id-token-1')
+    expect(parsed.tokens.access_token).toBe('access-1')
+  })
+
+  test('accepts a snake_case id_token field on the credential', () => {
+    const out = emitCodexAuthJson({
+      type: 'oauth',
+      access: 'access-1',
+      refresh: 'refresh-1',
+      expires: 123,
+      id_token: 'id-token-snake',
+    } as never)
+
+    const parsed = JSON.parse(out) as { tokens: Record<string, unknown> }
+    expect(parsed.tokens.id_token).toBe('id-token-snake')
+  })
+
+  test('falls back to access when the captured id_token is empty', () => {
+    const out = emitCodexAuthJson({
+      type: 'oauth',
+      access: 'access-1',
+      refresh: 'refresh-1',
+      expires: 123,
+      idToken: '',
+    } as never)
+
+    const parsed = JSON.parse(out) as { tokens: Record<string, unknown> }
+    expect(parsed.tokens.id_token).toBe('access-1')
   })
 
   test('includes account_id when accountId is set on the credential', () => {
@@ -33,7 +73,12 @@ describe('emitCodexAuthJson', () => {
     } as never)
 
     expect(JSON.parse(out)).toEqual({
-      tokens: { access_token: 'access-1', refresh_token: 'refresh-1', account_id: 'acct-abc' },
+      tokens: {
+        id_token: 'access-1',
+        access_token: 'access-1',
+        refresh_token: 'refresh-1',
+        account_id: 'acct-abc',
+      },
     })
   })
 
@@ -104,5 +149,26 @@ describe('decodeCodexAccessTokenExpiryMs', () => {
     expect(decodeCodexAccessTokenExpiryMs(stringExp)).toBeNull()
     const infinityExp = makeJwt({ exp: Number.POSITIVE_INFINITY })
     expect(decodeCodexAccessTokenExpiryMs(infinityExp)).toBeNull()
+  })
+})
+
+describe('isDecodableJwt', () => {
+  test('true for a decodable JWT even without an exp claim', () => {
+    expect(isDecodableJwt(makeJwt({ sub: 'x' }))).toBe(true)
+  })
+
+  test('false for a non-empty non-JWT string', () => {
+    expect(isDecodableJwt('not-a-jwt')).toBe(false)
+    expect(isDecodableJwt('only.two')).toBe(false)
+    expect(isDecodableJwt('a.b.c.d')).toBe(false)
+  })
+
+  test('false when the payload segment is not valid base64 JSON', () => {
+    expect(isDecodableJwt('a.!!!.c')).toBe(false)
+  })
+
+  test('false when the payload is valid base64 JSON but not an object', () => {
+    const arrayPayload = `${Buffer.from('h').toString('base64url')}.${Buffer.from('[1,2]').toString('base64url')}.sig`
+    expect(isDecodableJwt(arrayPayload)).toBe(false)
   })
 })

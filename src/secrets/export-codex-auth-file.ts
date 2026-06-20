@@ -11,7 +11,7 @@ import {
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-import { decodeCodexAccessTokenExpiryMs, emitCodexAuthJson } from './codex-auth-json'
+import { decodeCodexAccessTokenExpiryMs, emitCodexAuthJson, isDecodableJwt } from './codex-auth-json'
 import type { ProviderCredential, Providers } from './schema'
 import { SecretsBackend } from './storage'
 
@@ -86,6 +86,13 @@ export function exportCodexAuthFileIfApplicable(options: ExportCodexAuthFileOpti
 // missing JWT, undecodable exp), we return true. That's the "we have a
 // valid credential, the file is unusable, replace it" fallback case (B1
 // and B6 in the design doc).
+//
+// A file missing a usable `id_token` is unusable too, regardless of how
+// fresh its access token is: codex rejects the whole auth.json with
+// `missing field id_token` before any model call. This guard runs BEFORE
+// the newer-wins expiry compare so a pre-fix TypeClaw-emitted file (valid,
+// possibly fresher access token, but no id_token) is always rewritten —
+// the path that self-heals already-broken agents on restart.
 function shouldOverwrite(
   targetPath: string,
   credential: ProviderCredential & { expires?: unknown; access?: unknown },
@@ -105,6 +112,8 @@ function shouldOverwrite(
     return true
   }
 
+  if (!onDiskHasUsableIdToken(parsed)) return true
+
   const onDiskAccess = readOnDiskAccessToken(parsed)
   if (onDiskAccess === null) return true
 
@@ -116,11 +125,25 @@ function shouldOverwrite(
 }
 
 function readOnDiskAccessToken(parsed: unknown): string | null {
+  return readOnDiskToken(parsed, 'access_token')
+}
+
+// codex parses `tokens.id_token` as a JWT, so a value that is absent, empty,
+// or not a decodable JWT is unusable — codex rejects the whole auth.json on
+// load. Validate decodability (not just presence) so a file with a non-empty
+// but malformed id_token, even alongside a fresh access token, is treated as
+// stale and rewritten rather than preserved by the newer-wins compare.
+function onDiskHasUsableIdToken(parsed: unknown): boolean {
+  const idToken = readOnDiskToken(parsed, 'id_token')
+  return idToken !== null && isDecodableJwt(idToken)
+}
+
+function readOnDiskToken(parsed: unknown, field: 'access_token' | 'id_token'): string | null {
   if (typeof parsed !== 'object' || parsed === null) return null
   const tokens = (parsed as Record<string, unknown>)['tokens']
   if (typeof tokens !== 'object' || tokens === null) return null
-  const access = (tokens as Record<string, unknown>)['access_token']
-  return typeof access === 'string' && access.length > 0 ? access : null
+  const value = (tokens as Record<string, unknown>)[field]
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 // Resolution order for the credential's expiry:
