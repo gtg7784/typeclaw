@@ -29,6 +29,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     discordBotCredentials(),
     telegramBotCredentials(),
     webexBotCredentials(),
+    webexUserCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
     githubCredentials(),
@@ -73,6 +74,32 @@ function webexBotCredentials(): DoctorCheck {
     description: 'webex-bot adapter has WEBEX_BOT_TOKEN',
     applies: (ctx) => ctx.hasAgentFolder,
     run: (ctx) => runTokenAdapterCheck(ctx, 'webex-bot', ['WEBEX_BOT_TOKEN']),
+  }
+}
+
+function webexUserCredentials(): DoctorCheck {
+  return {
+    name: 'channel.webex.credentials',
+    category: 'channels',
+    description: 'webex adapter has a current account with an access token in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'webex')) {
+        return { status: 'skipped', message: 'webex not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.webex
+      if (!hasCurrentAccountToken(block)) {
+        return {
+          status: 'warning',
+          message: 'webex has no current account access_token in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add webex` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: 'webex has a current account access_token' }
+    },
   }
 }
 
@@ -324,6 +351,22 @@ function isSecretShape(value: unknown): value is { value?: string; env?: string 
   const hasValue = typeof obj['value'] === 'string'
   const hasEnv = typeof obj['env'] === 'string'
   return hasValue || hasEnv
+}
+
+function hasCurrentAccountToken(block: unknown): boolean {
+  if (!isObjectRecord(block)) return false
+  const current = (block as { currentAccount?: unknown }).currentAccount
+  if (typeof current !== 'string' || current.length === 0) return false
+  const accounts = (block as { accounts?: unknown }).accounts
+  if (!isObjectRecord(accounts)) return false
+  const account = accounts[current]
+  if (!isObjectRecord(account)) return false
+  const token = (account as { access_token?: unknown }).access_token
+  return typeof token === 'string' && token.length > 0
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function readDeclaredChannels(ctx: CheckContext): ChannelsConfig | null {

@@ -10,6 +10,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'discord-bot': 'Discord',
   github: 'GitHub',
   'telegram-bot': 'Telegram',
+  webex: 'Webex (User)',
   'webex-bot': 'Webex',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',

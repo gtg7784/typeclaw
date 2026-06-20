@@ -11,6 +11,7 @@ export const CHANNEL_KINDS = [
   'slack-bot',
   'discord-bot',
   'telegram-bot',
+  'webex',
   'webex-bot',
   'line',
   'kakaotalk',
@@ -186,7 +187,7 @@ function buildDetail(kind: ChannelKind, channelConfig: unknown, secretsBlock: un
     const repos = isObjectRecord(channelConfig) && Array.isArray(channelConfig.repos) ? channelConfig.repos.length : 0
     return { detail: `${repos} repo${repos === 1 ? '' : 's'}` }
   }
-  if (kind === 'line' || kind === 'kakaotalk') {
+  if (kind === 'line' || kind === 'kakaotalk' || kind === 'webex') {
     if (!isObjectRecord(secretsBlock)) return {}
     const accounts = isObjectRecord(secretsBlock.accounts) ? Object.keys(secretsBlock.accounts).length : 0
     const current = typeof secretsBlock.currentAccount === 'string' ? secretsBlock.currentAccount : undefined
