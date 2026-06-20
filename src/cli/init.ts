@@ -66,6 +66,7 @@ import {
   validateApiKey,
   type KeyValidationResult,
 } from '@/init/validate-api-key'
+import { runWebexBootstrap } from '@/init/webex-auth'
 
 import { fuzzyMatch } from './fuzzy-filter'
 import { buildOAuthCallbacks } from './oauth-callbacks'
@@ -215,6 +216,8 @@ export const init = defineCommand({
       telegramBotToken,
       kakaotalkEmail,
       kakaotalkPassword,
+      webexEmail,
+      webexPassword,
       github: githubCredentials,
     } = channelSecrets
     const modelMeta = customModelMetaFromOption(model)
@@ -233,8 +236,10 @@ export const init = defineCommand({
     const reuseSlack = reuseExistingChannel && channelChoice === 'slack'
     const reuseTelegram = reuseExistingChannel && channelChoice === 'telegram'
     const reuseKakaotalk = reuseExistingChannel && channelChoice === 'kakaotalk'
+    const reuseWebex = reuseExistingChannel && channelChoice === 'webex'
     const reuseGithub = reuseExistingChannel && channelChoice === 'github'
     const wantsKakaotalk = (kakaotalkEmail !== undefined && kakaotalkPassword !== undefined) || reuseKakaotalk
+    const wantsWebex = (webexEmail !== undefined && webexPassword !== undefined) || reuseWebex
     const wantsGithub = githubCredentials !== undefined || reuseGithub
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
@@ -273,6 +278,17 @@ export const init = defineCommand({
                           onPasscode: (code) => log.info(`Confirm this passcode on your phone: ${code}`),
                         },
                       }),
+                  }),
+            }
+          : {}),
+        ...(wantsWebex
+          ? {
+              withWebexUser: true,
+              ...(reuseWebex
+                ? {}
+                : {
+                    runWebexAuth: ({ cwd: agentDir }) =>
+                      runWebexBootstrap({ email: webexEmail!, password: webexPassword!, agentDir }),
                   }),
             }
           : {}),
@@ -384,7 +400,7 @@ interface WizardState {
   channelReuseExisting?: boolean
 }
 
-type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'github' | 'none'
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'kakaotalk' | 'github' | 'none'
 
 interface CollectedInputs {
   model: ModelOption
@@ -404,6 +420,8 @@ interface CollectedInputs {
     slackBotToken?: string
     slackAppToken?: string
     telegramBotToken?: string
+    webexEmail?: string
+    webexPassword?: string
     kakaotalkEmail?: string
     kakaotalkPassword?: string
     // Structured (auth union + webhook + repo allowlist) rather than flat
@@ -1114,6 +1132,8 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
       return 'Discord'
     case 'telegram':
       return 'Telegram'
+    case 'webex':
+      return 'Webex (User)'
     case 'kakaotalk':
       return 'KakaoTalk'
     case 'github':
@@ -1455,6 +1475,7 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
       { value: 'slack', label: 'Slack' },
       { value: 'discord', label: 'Discord' },
       { value: 'telegram', label: 'Telegram' },
+      { value: 'webex', label: 'Webex (User)' },
       { value: 'kakaotalk', label: 'KakaoTalk' },
       { value: 'github', label: 'GitHub' },
       { value: 'none', label: 'Skip — no channel right now' },
@@ -1480,6 +1501,8 @@ async function runChannelFlow(
       return runSlackFlow()
     case 'telegram':
       return runTelegramFlow()
+    case 'webex':
+      return runWebexUserFlow()
     case 'github':
       return runGithubFlow(cwd)
   }
@@ -1546,6 +1569,43 @@ async function runKakaotalkFlow(): Promise<StepResult<CollectedInputs['channelSe
     }
     pwd = input
     return value({ kakaotalkEmail: email, kakaotalkPassword: pwd })
+  }
+}
+
+async function runWebexUserFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  type SubStep = 'email' | 'password'
+  let sub: SubStep = 'email'
+  let email: string | undefined
+
+  note(
+    [
+      'Logs in headlessly with your Webex email/password.',
+      'SSO/MFA accounts are not supported. Messages will be sent and received under this account.',
+    ].join('\n'),
+    'About to log in to Webex',
+  )
+
+  while (true) {
+    if (sub === 'email') {
+      const input = await text({
+        message: 'Webex email',
+        ...(email !== undefined ? { initialValue: email } : {}),
+        validate: (v) => (v && v.length > 0 ? undefined : 'Email is required'),
+      })
+      if (isCancel(input)) return back()
+      email = input
+      sub = 'password'
+      continue
+    }
+    const input = await password({
+      message: 'Webex password',
+      validate: (v) => (v && v.length > 0 ? undefined : 'Password is required'),
+    })
+    if (isCancel(input)) {
+      sub = 'email'
+      continue
+    }
+    return value({ webexEmail: email, webexPassword: input })
   }
 }
 
@@ -1834,6 +1894,9 @@ function reportProgress(
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
+      case 'webex-auth':
+        s.stop(reportWebexAuth(event.result))
+        break
       case 'github-webhooks':
         s.stop(formatEagerGithubWebhookInstallResult(event.result))
         break
@@ -1895,6 +1958,11 @@ function preflightFailureGuidance(result: Extract<DockerAvailability, { ok: fals
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
   if (result.ok) return 'KakaoTalk credentials saved to secrets.json.'
   return `KakaoTalk login failed: ${result.reason}`
+}
+
+function reportWebexAuth(result: { ok: true } | { ok: false; reason: string }): string {
+  if (result.ok) return 'Webex credentials saved to secrets.json.'
+  return `Webex login failed: ${result.reason}`
 }
 
 // Hatching launches the container and foregrounds the TUI, so it steals stdin
@@ -1976,6 +2044,7 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   'oauth-login': 'Waiting for browser login...',
   scaffold: 'Laying the egg...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
+  'webex-auth': 'Logging in to Webex...',
   'github-webhooks': 'Installing GitHub repository webhooks...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',
