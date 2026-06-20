@@ -6,6 +6,7 @@ import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
 import { SecretsBackend } from '@/secrets/storage'
+import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 import type { Stream } from '@/stream'
 
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
@@ -14,6 +15,7 @@ import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaot
 import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
+import { createWebexAdapter, type WebexAdapter } from './adapters/webex'
 import { createWebexBotAdapter, type WebexBotAdapter } from './adapters/webex-bot'
 import type { GithubTokenBridge } from './github-token-bridge'
 import {
@@ -72,7 +74,8 @@ export type ChannelManagerOptions = {
   createLineAdapter?: typeof createLineAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
-  createWebexAdapter?: typeof createWebexBotAdapter
+  createWebexAdapter?: typeof createWebexAdapter
+  createWebexBotAdapter?: typeof createWebexBotAdapter
   // Wake-up gate: forwarded to the router, which calls
   // `permissions.has(origin, 'channel.respond')` BEFORE creating a
   // session for any inbound. Optional here to keep direct manager-level
@@ -134,6 +137,7 @@ type AnyAdapter =
   | KakaotalkAdapter
   | SlackBotAdapter
   | TelegramBotAdapter
+  | WebexAdapter
   | WebexBotAdapter
 
 // Credential signature is the comparison key for credential-rotation
@@ -171,7 +175,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createLine = options.createLineAdapter ?? createLineAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
-  const createWebex = options.createWebexAdapter ?? createWebexBotAdapter
+  const createWebex = options.createWebexAdapter ?? createWebexAdapter
+  const createWebexBot = options.createWebexBotAdapter ?? createWebexBotAdapter
 
   const live = new Map<AdapterId, AdapterEntry>()
   const perAdapterSerial = new Map<AdapterId, Promise<unknown>>()
@@ -197,6 +202,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
     if (name === 'line') return buildLineSignature(options.agentDir)
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
+    if (name === 'webex') return buildWebexSignature(options.agentDir)
     if (name === 'github') return buildGithubSignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
@@ -252,6 +258,15 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         credentialsStore: createContainerKakaoCredentialStore(options.agentDir, env),
       })
     }
+    if (name === 'webex') {
+      return createWebex({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsStore: createContainerWebexCredentialStore(options.agentDir, env),
+      })
+    }
     if (name === 'github') {
       const secrets = readGithubSecrets(options.agentDir)
       if (secrets === null) return null
@@ -279,7 +294,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     if (name === 'webex-bot') {
       const token = env.WEBEX_BOT_TOKEN
       if (token === undefined || token.trim() === '') return null
-      return createWebex({
+      return createWebexBot({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         token,
@@ -458,7 +473,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
             await runSerially(name, () => stopAdapter(name))
             stopped.push(name)
           } else if (signature !== current.credentialSignature) {
-            const reason = name === 'kakaotalk' || name === 'line' ? 'credential rotation' : 'token rotation'
+            const reason =
+              name === 'kakaotalk' || name === 'line' || name === 'webex' ? 'credential rotation' : 'token rotation'
             restartRequired.push(`${name} (${reason})`)
           }
         }
@@ -469,14 +485,44 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 }
 
-// Token-based adapters only. KakaoTalk's and LINE's credentials live in
+// Token-based adapters only. Personal-account credentials live in
 // secrets.json#channels.<adapter>, not in env, so they go through
-// buildKakaotalkSignature / buildLineSignature instead.
-const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'line' | 'github'>, readonly string[]> = {
+// structured-block signatures instead.
+const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'line' | 'github' | 'webex'>, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
   'webex-bot': ['WEBEX_BOT_TOKEN'],
+}
+
+function createContainerWebexCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsWebexCredentialStore {
+  const hostdUrl = env.TYPECLAW_HOSTD_URL
+  const restartToken = env.TYPECLAW_HOSTD_TOKEN
+  const containerName = env.TYPECLAW_CONTAINER_NAME
+  if (!hostdUrl || !restartToken || !containerName) {
+    throw new Error('Webex credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
+  }
+  return new SecretsWebexCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostdUrl,
+    restartToken,
+    containerName,
+  })
+}
+
+function buildWebexSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.webex
+    if (!isWebexCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.webex'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.webex@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`secrets.json#channels.webex (${describe(err)})`] }
+  }
 }
 
 function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsKakaoCredentialStore {
@@ -577,6 +623,15 @@ function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<str
 }
 
 function isLineCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
+}
+
+function isWebexCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('accounts' in value)) return false
   const accounts = value.accounts

@@ -734,7 +734,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
       channelsConfigRef: () => cfg,
       aliasesRef: () => ['타이피', 'typeey'],
       env: { WEBEX_BOT_TOKEN: 'webex-token' },
-      createWebexAdapter: (opts) => {
+      createWebexBotAdapter: (opts) => {
         captured = opts
         return makeFakeAdapter()
       },
