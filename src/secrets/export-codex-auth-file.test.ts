@@ -89,9 +89,14 @@ describe('exportCodexAuthFileIfApplicable', () => {
       const target = join(home, '.codex', 'auth.json')
       expect(existsSync(target)).toBe(true)
       const parsed = JSON.parse(readFileSync(target, 'utf8')) as {
-        tokens: { access_token: string; refresh_token: string; account_id?: string }
+        tokens: { id_token: string; access_token: string; refresh_token: string; account_id?: string }
       }
-      expect(parsed.tokens).toEqual({ access_token: 'access-1', refresh_token: 'refresh-1', account_id: 'acct-1' })
+      expect(parsed.tokens).toEqual({
+        id_token: 'access-1',
+        access_token: 'access-1',
+        refresh_token: 'refresh-1',
+        account_id: 'acct-1',
+      })
     })
   })
 
@@ -114,7 +119,9 @@ describe('exportCodexAuthFileIfApplicable', () => {
       const freshAccess = makeJwt({ exp: 3_000_000_000 })
       writeFileSync(
         join(home, '.codex', 'auth.json'),
-        JSON.stringify({ tokens: { access_token: freshAccess, refresh_token: 'codex-refreshed' } }),
+        JSON.stringify({
+          tokens: { id_token: freshAccess, access_token: freshAccess, refresh_token: 'codex-refreshed' },
+        }),
       )
       const result = exportCodexAuthFileIfApplicable({
         codexCliEnabled: true,
@@ -163,7 +170,7 @@ describe('exportCodexAuthFileIfApplicable', () => {
       const tied = makeJwt({ exp: 2_000_000_000 })
       writeFileSync(
         join(home, '.codex', 'auth.json'),
-        JSON.stringify({ tokens: { access_token: tied, refresh_token: 'on-disk' } }),
+        JSON.stringify({ tokens: { id_token: tied, access_token: tied, refresh_token: 'on-disk' } }),
       )
       const result = exportCodexAuthFileIfApplicable({
         codexCliEnabled: true,
@@ -175,6 +182,50 @@ describe('exportCodexAuthFileIfApplicable', () => {
         tokens: { refresh_token: string }
       }
       expect(after.tokens.refresh_token).toBe('on-disk')
+    })
+  })
+
+  test('pre-fix file: tokens lack id_token but access ties/beats stored cred → overwrite (self-heal)', async () => {
+    await withHome((home) => {
+      mkdirSync(join(home, '.codex'), { recursive: true })
+      const fresher = makeJwt({ exp: 2_100_000_000 })
+      writeFileSync(
+        join(home, '.codex', 'auth.json'),
+        JSON.stringify({ tokens: { access_token: fresher, refresh_token: 'pre-fix' } }),
+      )
+      const result = exportCodexAuthFileIfApplicable({
+        codexCliEnabled: true,
+        providers: oauthProviders({ refresh: 'healed', expires: 2_000_000_000_000 }),
+        homeDir: home,
+      })
+      expect(result.action).toBe('wrote')
+      const after = JSON.parse(readFileSync(join(home, '.codex', 'auth.json'), 'utf8')) as {
+        tokens: { id_token: string; refresh_token: string }
+      }
+      expect(after.tokens.refresh_token).toBe('healed')
+      expect(after.tokens.id_token.length).toBeGreaterThan(0)
+    })
+  })
+
+  test('on-disk id_token is a non-empty non-JWT but access ties/beats stored cred → overwrite (self-heal)', async () => {
+    await withHome((home) => {
+      mkdirSync(join(home, '.codex'), { recursive: true })
+      const fresher = makeJwt({ exp: 2_100_000_000 })
+      writeFileSync(
+        join(home, '.codex', 'auth.json'),
+        JSON.stringify({ tokens: { id_token: 'not-a-jwt', access_token: fresher, refresh_token: 'malformed-id' } }),
+      )
+      const result = exportCodexAuthFileIfApplicable({
+        codexCliEnabled: true,
+        providers: oauthProviders({ refresh: 'healed', expires: 2_000_000_000_000 }),
+        homeDir: home,
+      })
+      expect(result.action).toBe('wrote')
+      const after = JSON.parse(readFileSync(join(home, '.codex', 'auth.json'), 'utf8')) as {
+        tokens: { id_token: string; refresh_token: string }
+      }
+      expect(after.tokens.refresh_token).toBe('healed')
+      expect(after.tokens.id_token.length).toBeGreaterThan(0)
     })
   })
 
@@ -261,7 +312,9 @@ describe('exportCodexAuthFileIfApplicable', () => {
       const fresherAccess = makeJwt({ exp: 3_000_000_000 })
       writeFileSync(
         join(home, '.codex', 'auth.json'),
-        JSON.stringify({ tokens: { access_token: fresherAccess, refresh_token: 'codex-current' } }),
+        JSON.stringify({
+          tokens: { id_token: fresherAccess, access_token: fresherAccess, refresh_token: 'codex-current' },
+        }),
       )
       const staleCred: Providers = {
         'openai-codex': {
@@ -357,7 +410,9 @@ describe('exportCodexAuthFileIfApplicable', () => {
       const fresherAccess = makeJwt({ exp: 3_000_000_000 })
       writeFileSync(
         persistPath,
-        JSON.stringify({ tokens: { access_token: fresherAccess, refresh_token: 'codex-rotated' } }),
+        JSON.stringify({
+          tokens: { id_token: fresherAccess, access_token: fresherAccess, refresh_token: 'codex-rotated' },
+        }),
       )
 
       // when: exporter runs with an older typeclaw-side credential.
