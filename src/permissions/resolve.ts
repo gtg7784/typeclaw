@@ -90,7 +90,7 @@ function webexPersonRef(value: string): string | null {
   const decoded = decodeWebexId(value)
   if (decoded === null) return value.includes('@') ? value.toLowerCase() : value
   if (decoded.type !== 'PEOPLE') return null
-  return decoded.trailing.includes('@') ? decoded.trailing.toLowerCase() : decoded.trailing
+  return decoded.uuid.includes('@') ? decoded.uuid.toLowerCase() : decoded.uuid
 }
 
 // DM and group buckets are inferred from the workspace/chat shape of the
