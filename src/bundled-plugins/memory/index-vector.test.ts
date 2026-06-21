@@ -233,6 +233,139 @@ describe('vector session.turn.start hook', () => {
     expect(hybridSearchMock).not.toHaveBeenCalled()
   })
 
+  test('a system-infrastructure subagent turn skips retrieval entirely (no embed, no hybrid search)', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'a body')
+    const exports = await bootVectorPlugin(16384)
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    // given: a memory-logger-style subagent — spawned by a `system` origin, its
+    // userPrompt is the static framing block, not a user message
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'memory-logger',
+      parentSessionId: 'ses_parent',
+      spawnedByOrigin: { kind: 'system' as const, component: 'memory-logger' },
+    }
+
+    const retrievalContext = { results: '' }
+    await hook(
+      {
+        sessionId: 'ses_logger',
+        agentDir,
+        userPrompt: 'Read the transcript past the watermark',
+        origin,
+        retrievalContext,
+      },
+      ctx,
+    )
+
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(retrievalContext.results).toBe('')
+  })
+
+  test('a directly-system-origin turn skips retrieval entirely', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'a body')
+    const exports = await bootVectorPlugin(16384)
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    const origin = { kind: 'system' as const, component: 'backup' }
+
+    const retrievalContext = { results: '' }
+    await hook({ sessionId: 'ses_backup', agentDir, userPrompt: 'whatever', origin, retrievalContext }, ctx)
+
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(retrievalContext.results).toBe('')
+  })
+
+  test('a user-delegated subagent turn still runs retrieval', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'a body')
+    const exports = await bootVectorPlugin(16384)
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    // given: a researcher-style subagent spawned by a user TUI turn, not `system`
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'researcher',
+      parentSessionId: 'ses_parent',
+      spawnedByOrigin: { kind: 'tui' as const, sessionId: 'ses_parent' },
+    }
+
+    const retrievalContext = { results: '' }
+    await hook({ sessionId: 'ses_research', agentDir, userPrompt: 'find the auth flow', origin, retrievalContext }, ctx)
+
+    expect(hybridSearchMock).toHaveBeenCalledWith(
+      'find the auth flow',
+      expect.anything(),
+      agentDir,
+      10,
+      expect.any(Function),
+    )
+    expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
+  })
+
+  test('the dreaming cron subagent skips retrieval (cron parent, internal job id)', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'first-topic', 'First Topic', 'a body')
+    const exports = await bootVectorPlugin(16384)
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    // given: the real dreaming origin — a subagent spawned by the memory plugin's
+    // own cron job, so its parent is `cron`/`__plugin_memory_dreaming`, NOT `system`
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'dreaming',
+      parentSessionId: 'ses_cron',
+      spawnedByOrigin: {
+        kind: 'cron' as const,
+        jobId: '__plugin_memory_dreaming',
+        jobKind: 'prompt' as const,
+      },
+    }
+
+    const retrievalContext = { results: '' }
+    await hook(
+      { sessionId: 'ses_dream', agentDir, userPrompt: 'consolidate the daily stream', origin, retrievalContext },
+      ctx,
+    )
+
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+    expect(retrievalContext.results).toBe('')
+  })
+
+  test('a user-scheduled cron subagent still runs retrieval (not the dreaming job id)', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'a body')
+    const exports = await bootVectorPlugin(16384)
+    const hook = exports.hooks!['session.turn.start']!
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
+    // given: a user-scheduled cron subagent — real delegated work, distinct job id
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'researcher',
+      parentSessionId: 'ses_cron',
+      spawnedByOrigin: {
+        kind: 'cron' as const,
+        jobId: 'user-nightly-digest',
+        jobKind: 'prompt' as const,
+      },
+    }
+
+    const retrievalContext = { results: '' }
+    await hook({ sessionId: 'ses_user_cron', agentDir, userPrompt: 'summarize today', origin, retrievalContext }, ctx)
+
+    expect(hybridSearchMock).toHaveBeenCalledWith(
+      'summarize today',
+      expect.anything(),
+      agentDir,
+      10,
+      expect.any(Function),
+    )
+    expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
+  })
+
   test('a failing hybrid search is caught: the turn yields empty memory instead of throwing', async () => {
     // given: two over-budget shards (index mode) and a hybridSearch that rejects,
     // simulating a runtime embed/store failure (OOM, corrupt DB, model crash)
