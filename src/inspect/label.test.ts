@@ -71,6 +71,31 @@ describe('originLabel', () => {
     ).toBe('Slack T0123/C0ABC')
   })
 
+  test('webex channel origin with a resolved room title renders it', () => {
+    expect(
+      originLabel({
+        kind: 'channel',
+        adapter: 'webex',
+        workspace: '@dm',
+        chat: 'Y2lzY29zcGFyazovL3VzL1JPT00vZTM1NGY2YjAtMmMyZS0xMWYxLTlmNGYtZmI5NzVmM2ViZWZi',
+        chatName: 'Eng Standup',
+        thread: null,
+      }),
+    ).toBe('Webex @dm/Eng Standup')
+  })
+
+  test('webex channel origin without a title decodes the base64 room id to its uuid ref', () => {
+    expect(
+      originLabel({
+        kind: 'channel',
+        adapter: 'webex-bot',
+        workspace: '@dm',
+        chat: 'Y2lzY29zcGFyazovL3VzL1JPT00vZTM1NGY2YjAtMmMyZS0xMWYxLTlmNGYtZmI5NzVmM2ViZWZi',
+        thread: null,
+      }),
+    ).toBe('Webex @dm/e354f6b0-2c2e-11f1-9f4f-fb975f3ebefb')
+  })
+
   test('channel origin with unknown adapter renders adapter id verbatim', () => {
     expect(
       originLabel({
