@@ -1,3 +1,4 @@
+import { toRef } from '@/channels/adapters/webex-id-ref'
 import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import type { AdapterId } from '@/channels/schema'
 import type { ChannelSelfIdentity, ReactionRef } from '@/channels/types'
@@ -631,6 +632,12 @@ function renderSelfMention(platformInfo: PlatformInfo, self: ChannelSelfIdentity
   }
 }
 
+const WEBEX_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot'])
+
+function readableChannelId(adapter: AdapterId, id: string): string {
+  return WEBEX_ADAPTERS.has(adapter) ? toRef(id) : id
+}
+
 function renderConversationLine(origin: {
   adapter: AdapterId
   workspace: string
@@ -643,8 +650,13 @@ function renderConversationLine(origin: {
   if (!hasChat && !hasWorkspace) return null
 
   const chatPrefix = origin.adapter === 'slack-bot' ? '#' : ''
-  const chatLabel = hasChat ? `**${chatPrefix}${origin.chatName!}** (${origin.chat})` : `\`${origin.chat}\``
-  const workspaceLabel = hasWorkspace ? `**${origin.workspaceName!}** (${origin.workspace})` : `\`${origin.workspace}\``
+  // The parenthetical/backtick id is a human-and-model disambiguator, NOT the
+  // send target — tools source the canonical room id from the JSON origin block,
+  // which stays raw. So decode webex base64 blobs to their readable ref here.
+  const chatId = readableChannelId(origin.adapter, origin.chat)
+  const workspaceId = readableChannelId(origin.adapter, origin.workspace)
+  const chatLabel = hasChat ? `**${chatPrefix}${origin.chatName!}** (${chatId})` : `\`${chatId}\``
+  const workspaceLabel = hasWorkspace ? `**${origin.workspaceName!}** (${workspaceId})` : `\`${workspaceId}\``
 
   return `Conversation: ${chatLabel} in ${workspaceLabel}.`
 }

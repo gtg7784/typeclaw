@@ -646,6 +646,41 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('"chat": "C0DEPLOY"')
   })
 
+  test('webex channel origin decodes the room ref in prose but keeps the raw id in the origin JSON', () => {
+    // base64url of ciscospark://us/ROOM/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    const roomId = 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl'
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'webex',
+      workspace: roomId,
+      workspaceName: 'Engineering',
+      chat: roomId,
+      chatName: 'Standup',
+      thread: null,
+    })
+    // prose conversation line shows the decoded ref, not the base64 blob
+    expect(out).toContain('**Standup** (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)')
+    expect(out).toContain('**Engineering** (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)')
+    // the canonical origin JSON block keeps the raw base64 id the model copies into tool calls
+    expect(out).toContain(`"chat": ${JSON.stringify(roomId)}`)
+    expect(out).toContain(`"workspace": ${JSON.stringify(roomId)}`)
+  })
+
+  test('webex prose decodes the room ref even when no chatName is resolved', () => {
+    // base64url of ciscospark://us/ROOM/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    const roomId = 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl'
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'webex',
+      workspace: roomId,
+      workspaceName: 'Engineering',
+      chat: roomId,
+      thread: null,
+    })
+    expect(out).toContain('`aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`')
+    expect(out).toContain(`"chat": ${JSON.stringify(roomId)}`)
+  })
+
   test('channel origin uses # prefix for Slack channels, bare name for Discord', () => {
     const slackOut = renderSessionOrigin({
       kind: 'channel',
