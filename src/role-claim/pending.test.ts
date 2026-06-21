@@ -189,4 +189,30 @@ describe('formatClaimMatchRule', () => {
       }),
     ).toBe('slack:* author:U_ALICE')
   })
+
+  test('webex: emits the decoded uuid ref, not the opaque base64 personId', () => {
+    // authorId base64 of ciscospark://us/PEOPLE/12345678-1234-1234-1234-1234567890ab
+    expect(
+      formatClaimMatchRule({
+        adapter: 'webex',
+        workspace: '@dm',
+        chat: 'ROOM_X',
+        isDm: true,
+        authorId: 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS8xMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWI=',
+      }),
+    ).toBe('webex:* author:12345678-1234-1234-1234-1234567890ab')
+  })
+
+  test('webex: a legacy person id decodes to the email ref', () => {
+    // authorId base64 of ciscospark://us/PEOPLE/alice@example.com
+    expect(
+      formatClaimMatchRule({
+        adapter: 'webex-bot',
+        workspace: '@dm',
+        chat: 'ROOM_X',
+        isDm: true,
+        authorId: 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hbGljZUBleGFtcGxlLmNvbQ==',
+      }),
+    ).toBe('webex:* author:alice@example.com')
+  })
 })

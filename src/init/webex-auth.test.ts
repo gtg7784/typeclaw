@@ -6,7 +6,13 @@ import { join } from 'node:path'
 import { createKeyStore } from '@/secrets/keys'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 
+// Spread the real module so other consumers loading `agent-messenger/webex`
+// (e.g. webex-id-ref's `decodeWebexId` re-export) still resolve — bun's
+// `mock.module` is process-global, so a partial mock would strip every other
+// export for the rest of the suite.
+const realWebex = await import('agent-messenger/webex')
 mock.module('agent-messenger/webex', () => ({
+  ...realWebex,
   loginWithPassword: async () => {
     throw new Error('test must inject loginWithPassword')
   },

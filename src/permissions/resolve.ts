@@ -1,3 +1,4 @@
+import { decodeWebexId } from '@/channels/adapters/webex-id-ref'
 import type { AdapterId } from '@/channels/schema'
 
 import type { MatchRule, Platform } from './match-rule'
@@ -54,8 +55,42 @@ function matchesChannel(rule: Extract<MatchRule, { kind: 'channel' }>, origin: M
     if (rule.chat !== undefined && rule.chat !== origin.chat) return false
   }
 
-  if (rule.author !== undefined && rule.author !== origin.lastInboundAuthorId) return false
+  if (rule.author !== undefined && !matchesAuthor(rule.platform, rule.author, origin.lastInboundAuthorId)) return false
   return true
+}
+
+// Webex person ids are base64(`ciscospark://<cluster>/PEOPLE/<uuid-or-email>`),
+// so a hand-authored or claim-generated rule may carry the raw base64 id, its
+// decoded ref (UUID for modern accounts, email for legacy Hydra accounts), and
+// the inbound may arrive as either. We compare on the decoded PERSON ref when
+// BOTH sides decode to a PEOPLE id, and otherwise fall back to raw equality —
+// so `author:<uuid>`, `author:<legacy-email>`, and the legacy `author:<base64>`
+// all match the same human. A value that decodes to a non-PERSON type (e.g. a
+// room id pasted into `author:`) never normalizes, so it can only ever raw-
+// match — a room uuid can never satisfy an author rule.
+function matchesAuthor(platform: Platform, ruleAuthor: string, inboundAuthorId: string | undefined): boolean {
+  if (inboundAuthorId === undefined) return false
+  if (ruleAuthor === inboundAuthorId) return true
+  if (platform !== 'webex') return false
+  // Both sides must resolve to a real PERSON ref. `webexPersonRef` returns null
+  // for any non-PEOPLE id, and null === null would otherwise let two different
+  // room/message ids satisfy an `author:` rule — so require both non-null.
+  const ruleRef = webexPersonRef(ruleAuthor)
+  const inboundRef = webexPersonRef(inboundAuthorId)
+  return ruleRef !== null && inboundRef !== null && ruleRef === inboundRef
+}
+
+// Returns the comparable person identity for a Webex `author:` value: the
+// decoded trailing ref when the value is a base64 PEOPLE id, or the value
+// itself when it is already a ref (bare uuid/email). Returns null for anything
+// that decodes to a non-PERSON Webex id, so two different resource types can
+// never be coerced into matching. Emails are lower-cased so case variation in
+// a legacy-account ref does not silently deny a grant.
+function webexPersonRef(value: string): string | null {
+  const decoded = decodeWebexId(value)
+  if (decoded === null) return value.includes('@') ? value.toLowerCase() : value
+  if (decoded.type !== 'PEOPLE') return null
+  return decoded.uuid.includes('@') ? decoded.uuid.toLowerCase() : decoded.uuid
 }
 
 // DM and group buckets are inferred from the workspace/chat shape of the

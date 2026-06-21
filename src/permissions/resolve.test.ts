@@ -153,6 +153,55 @@ describe('matchesOrigin — channel coordinates', () => {
     expect(matchesOrigin(WEBEX_AUTHOR, { ...webexDm, lastInboundAuthorId: 'other-uuid' })).toBe(false)
   })
 
+  // base64 of ciscospark://us/PEOPLE/12345678-1234-1234-1234-1234567890ab
+  const PERSON_BASE64 = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS8xMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWI='
+  const PERSON_UUID = '12345678-1234-1234-1234-1234567890ab'
+  // base64 of ciscospark://us/PEOPLE/alice@example.com (legacy Hydra account)
+  const LEGACY_BASE64 = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hbGljZUBleGFtcGxlLmNvbQ=='
+  // base64 of ciscospark://us/ROOM/12345678-1234-1234-1234-1234567890ab (same uuid as PERSON)
+  const ROOM_SAME_UUID = 'Y2lzY29zcGFyazovL3VzL1JPT00vMTIzNDU2NzgtMTIzNC0xMjM0LTEyMzQtMTIzNDU2Nzg5MGFi'
+
+  const webexBase64Origin: MatchableOrigin = { ...webexDm, lastInboundAuthorId: PERSON_BASE64 }
+
+  test('webex author: a uuid-ref rule matches an inbound carrying the raw base64 personId', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: PERSON_UUID }
+    expect(matchesOrigin(rule, webexBase64Origin)).toBe(true)
+  })
+
+  test('webex author: a raw base64 rule still matches a raw base64 inbound (back-compat)', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: PERSON_BASE64 }
+    expect(matchesOrigin(rule, webexBase64Origin)).toBe(true)
+  })
+
+  test('webex author: a raw base64 rule matches a uuid-ref inbound (both normalize)', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: PERSON_BASE64 }
+    expect(matchesOrigin(rule, { ...webexDm, lastInboundAuthorId: PERSON_UUID })).toBe(true)
+  })
+
+  test('webex author: a legacy email-ref rule matches the legacy base64 inbound, case-insensitively', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: 'Alice@Example.com' }
+    expect(matchesOrigin(rule, { ...webexDm, lastInboundAuthorId: LEGACY_BASE64 })).toBe(true)
+  })
+
+  test('webex author: a room id sharing the person uuid never satisfies an author rule (fail-closed)', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: PERSON_UUID }
+    expect(matchesOrigin(rule, { ...webexDm, lastInboundAuthorId: ROOM_SAME_UUID })).toBe(false)
+  })
+
+  test('webex author: two DIFFERENT non-person ids must not collide via null normalization', () => {
+    // both decode to non-PEOPLE ids → webexPersonRef returns null for each;
+    // the matcher must not treat null === null as a match.
+    // ROOM_OTHER = base64 of ciscospark://us/ROOM/99999999-9999-9999-9999-999999999999
+    const ROOM_OTHER = 'Y2lzY29zcGFyazovL3VzL1JPT00vOTk5OTk5OTktOTk5OS05OTk5LTk5OTktOTk5OTk5OTk5OTk5'
+    const rule: MatchRule = { kind: 'channel', platform: 'webex', author: ROOM_SAME_UUID }
+    expect(matchesOrigin(rule, { ...webexDm, lastInboundAuthorId: ROOM_OTHER })).toBe(false)
+  })
+
+  test('non-webex author matching is unchanged: slack does not decode or normalize', () => {
+    const rule: MatchRule = { kind: 'channel', platform: 'slack', workspace: 'T0123', author: PERSON_UUID }
+    expect(matchesOrigin(rule, { ...slackChat, lastInboundAuthorId: PERSON_BASE64 })).toBe(false)
+  })
+
   test('platform mismatch on channel rule against channel origin', () => {
     expect(matchesOrigin(SLACK_ANY, discordChat)).toBe(false)
   })
