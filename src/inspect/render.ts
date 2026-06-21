@@ -1,6 +1,6 @@
 import { styleText } from 'node:util'
 
-import { originLabel } from './label'
+import { originLabel, readableId } from './label'
 import type { InspectEvent } from './types'
 
 export type RenderOptions = {
@@ -120,8 +120,10 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
 }
 
 function renderInboundBody(event: Extract<InspectEvent, { cat: 'inbound' }>, opts: RenderOptions): string {
-  const coord = `${event.adapter}:${event.workspace}/${event.chat}${event.thread === null ? '' : `#${event.thread}`}`
-  const who = event.authorName !== '' ? event.authorName : event.authorId
+  const workspace = readableId(event.adapter, event.workspace)
+  const chat = readableId(event.adapter, event.chat)
+  const coord = `${event.adapter}:${workspace}/${chat}${event.thread === null ? '' : `#${event.thread}`}`
+  const who = event.authorName !== '' ? event.authorName : readableId(event.adapter, event.authorId)
   const decisionTag = tint(opts, decisionColor(event.decision), `[${event.decision}]`)
   const text = truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
   return `${decisionTag} ${tint(opts, 'dim', coord)} ${who}: ${text}`

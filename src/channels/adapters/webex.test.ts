@@ -202,6 +202,41 @@ describe('createWebexAdapter', () => {
     expect(listener.stopped).toBe(true)
     expect(r.unregistered).toContain('outbound:webex')
   })
+
+  test('inbound/routed logs decode the base64 room and message ids', async () => {
+    // base64url of ciscospark://us/ROOM/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    const roomId = 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl'
+    // base64url of ciscospark://us/MESSAGE/99999999-8888-7777-6666-555555555555
+    const msgId = 'Y2lzY29zcGFyazovL3VzL01FU1NBR0UvOTk5OTk5OTktODg4OC03Nzc3LTY2NjYtNTU1NTU1NTU1NTU1'
+    const log = logger()
+    const listener = new FakeListener()
+    const adapter = createWebexAdapter({
+      router: router(),
+      configRef: () => config,
+      logger: log,
+      selfAliasesRef: () => ['typeclaw'],
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () =>
+        ({
+          login: async () => {},
+          testAuth: async () => ({ id: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
+          listMemberships: async () => [],
+          listMessages: async () => [],
+          sendMessage: async () => ({ id: 'sent' }),
+          uploadFile: async () => ({ id: 'uploaded' }),
+        }) as unknown as ReturnType<NonNullable<Parameters<typeof createWebexAdapter>[0]['createClient']>>,
+      createListener: () => listener as unknown as WebexListener,
+    })
+
+    await adapter.start()
+    listener.emit('message_created', inbound({ id: msgId, roomId, text: 'hello typeclaw' }))
+    await adapter.stop()
+
+    const inboundLine = log.lines.find((l) => l.includes('inbound id='))
+    expect(inboundLine).toContain('id=99999999-8888-7777-6666-555555555555')
+    expect(inboundLine).toContain('room=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    expect(inboundLine).not.toContain('Y2lz')
+  })
 })
 
 describe('createWebexHistoryCallback reply attribution', () => {

@@ -158,6 +158,30 @@ describe('renderEvent (plain, no color)', () => {
     )
   })
 
+  test('inbound webex event decodes base64 room/person ids in the coord and author fallback', () => {
+    const ev: InspectEvent = {
+      cat: 'inbound',
+      ts: dateMs('15:08:42'),
+      adapter: 'webex',
+      // base64url of ciscospark://us/ROOM/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+      workspace: 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl',
+      chat: 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl',
+      thread: null,
+      // base64url of ciscospark://us/PEOPLE/11111111-2222-3333-4444-555555555555
+      authorId: 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS8xMTExMTExMS0yMjIyLTMzMzMtNDQ0NC01NTU1NTU1NTU1NTU',
+      authorName: '',
+      authorIsBot: false,
+      isDm: false,
+      isBotMention: true,
+      text: 'hello',
+      externalMessageId: 'm1',
+      decision: 'engage',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe(
+      'HH:MM:SS  inbound    [engage] webex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee 11111111-2222-3333-4444-555555555555: hello',
+    )
+  })
+
   test('inbound observe shows [observe] tag', () => {
     const ev: InspectEvent = {
       cat: 'inbound',
