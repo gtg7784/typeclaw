@@ -134,6 +134,32 @@ describe('createWebexAdapter', () => {
     ])
   })
 
+  test('auth log decodes the base64 personId to its readable ref', async () => {
+    // base64url of ciscospark://us/PEOPLE/b278882e-b28b-4cc4-b08b-4b08db7369db
+    const personId = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9iMjc4ODgyZS1iMjhiLTRjYzQtYjA4Yi00YjA4ZGI3MzY5ZGI'
+    const log = logger()
+    const adapter = createWebexAdapter({
+      router: router(),
+      configRef: () => config,
+      logger: log,
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () =>
+        ({
+          login: async () => {},
+          testAuth: async () => ({ id: personId, emails: ['typeey@example.com'], displayName: 'Typeey' }),
+          listMemberships: async () => [],
+          listMessages: async () => [],
+          sendMessage: async () => ({ id: 'sent' }),
+          uploadFile: async () => ({ id: 'uploaded' }),
+        }) as unknown as ReturnType<NonNullable<Parameters<typeof createWebexAdapter>[0]['createClient']>>,
+      createListener: () => new FakeListener() as unknown as WebexListener,
+    })
+
+    await adapter.start()
+
+    expect(log.lines).toContain('info:[webex] authenticated as Typeey (b278882e-b28b-4cc4-b08b-4b08db7369db)')
+  })
+
   test('missing account throws the documented error', async () => {
     const adapter = createWebexAdapter({
       router: router(),

@@ -34,6 +34,7 @@ import type { WebexAccountRecord } from '@/secrets/schema'
 
 import { createWebexChannelNameResolver } from './webex-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-classify'
+import { toRef } from './webex-id-ref'
 import { enrichWebexMessageReference } from './webex-reference'
 
 export type WebexAdapterLogger = {
@@ -347,7 +348,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
         currentToken = account.access_token
         await client.login({ token: account.access_token, deviceUrl: account.device_url, tokenType: 'password' })
         botPerson = await client.testAuth()
-        logger.info(`[webex] authenticated as ${botPerson.displayName} (${botPerson.id})`)
+        logger.info(`[webex] authenticated as ${botPerson.displayName} (${toRef(botPerson.id)})`)
       } catch (err) {
         started = false
         currentToken = null
