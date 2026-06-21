@@ -85,7 +85,8 @@ function matchesAuthor(platform: Platform, ruleAuthor: string, inboundAuthorId: 
 // itself when it is already a ref (bare uuid/email). Returns null for anything
 // that decodes to a non-PERSON Webex id, so two different resource types can
 // never be coerced into matching. Emails are lower-cased so case variation in
-// a legacy-account ref does not silently deny a grant.
+// a legacy-account ref does not silently deny a grant. Keep this for backward
+// compatibility with pre-migration rules that still carry blob-form ids.
 function webexPersonRef(value: string): string | null {
   const decoded = decodeWebexId(value)
   if (decoded === null) return value.includes('@') ? value.toLowerCase() : value

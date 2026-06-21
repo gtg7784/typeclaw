@@ -15,7 +15,6 @@
 // typeclaw.json by hand; the claim flow is deliberately broad because
 // re-claiming on every new chat would be tedious for the common case.
 
-import { toRef } from '@/channels/adapters/webex-id-ref'
 import type { ChannelKey } from '@/channels/types'
 
 export type PartialChannelOrigin = {
@@ -42,9 +41,8 @@ const ADAPTER_TO_PLATFORM: Record<
 
 export function formatClaimMatchRule(origin: PartialChannelOrigin): string {
   const platform = ADAPTER_TO_PLATFORM[origin.adapter]
-  // Webex personIds are an opaque base64 blob; emit the readable decoded ref
-  // (UUID, or email for legacy accounts) so the persisted rule is editable by
-  // hand. The matcher normalizes both forms, so this stays back-compatible.
-  const author = platform === 'webex' ? toRef(origin.authorId) : origin.authorId
+  // Webex authorIds are stored as decoded refs (UUID, or email for legacy
+  // accounts). The matcher still normalizes older blob-form rules/inbounds.
+  const author = origin.authorId
   return `${platform}:* author:${author}`
 }

@@ -9,13 +9,17 @@ const config = channelsSchema.parse({ webex: {} }).webex!
 function message(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMessage {
   return {
     id: 'msg-1',
+    ref: 'msg-1',
     roomId: 'room-1',
+    roomRef: 'room-1',
     personId: 'user-1',
+    personRef: 'user-1',
     personEmail: 'user@example.com',
     text: 'hello',
     created: '2026-01-01T00:00:00.000Z',
     roomType: 'group',
     mentionedPeople: [],
+    mentionedPeopleRefs: [],
     mentionedGroups: [],
     files: [],
     raw: {} as WebexInboundMessage['raw'],
@@ -25,7 +29,7 @@ function message(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMess
 
 describe('classifyInbound for Webex user channel', () => {
   test('drops self-authored messages', () => {
-    expect(classifyInbound(message({ personId: 'self-1' }), config, 'self-1')).toEqual({
+    expect(classifyInbound(message({ personId: 'self-blob', personRef: 'self-1' }), config, 'self-1')).toEqual({
       kind: 'drop',
       reason: 'self_author',
     })
@@ -40,7 +44,11 @@ describe('classifyInbound for Webex user channel', () => {
   })
 
   test('routes structured mentions', () => {
-    const verdict = classifyInbound(message({ mentionedPeople: ['self-1'] }), config, 'self-1')
+    const verdict = classifyInbound(
+      message({ mentionedPeople: ['self-blob'], mentionedPeopleRefs: ['self-1'] }),
+      config,
+      'self-1',
+    )
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')

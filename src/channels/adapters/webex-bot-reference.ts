@@ -15,16 +15,16 @@ import { resolveWebexBodyText } from './webex-format'
 export async function enrichWebexMessageReference(args: {
   client: Pick<WebexBotClient, 'getMessage'>
   inbound: InboundMessage
-  parentId?: string
+  parentRef?: string
   botPersonId: string | null
 }): Promise<InboundMessage> {
-  if (args.parentId === undefined || args.parentId === '') return args.inbound
+  if (args.parentRef === undefined || args.parentRef === '') return args.inbound
   try {
-    const parent = await args.client.getMessage(args.parentId)
-    const attributed = attributeReply(args.inbound, parent.id, parent.personId, args.botPersonId)
+    const parent = await args.client.getMessage(args.parentRef)
+    const attributed = attributeReply(args.inbound, parent.ref, parent.personRef, args.botPersonId)
     const source: QuoteAnchorSource = {
       adapter: 'webex-bot',
-      authorId: parent.personId,
+      authorId: parent.personRef,
       authorName: parent.personEmail,
       text: resolveWebexBodyText(parent),
     }

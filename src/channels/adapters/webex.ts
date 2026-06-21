@@ -35,7 +35,6 @@ import type { WebexAccountRecord } from '@/secrets/schema'
 import { createWebexChannelNameResolver } from './webex-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-classify'
 import { resolveWebexBodyText } from './webex-format'
-import { toRef } from './webex-id-ref'
 import { enrichWebexMessageReference } from './webex-reference'
 
 export type WebexAdapterLogger = {
@@ -108,7 +107,7 @@ export function createOutboundCallback(deps: {
     const tag = await formatChannelTag(msg.chat)
     const parentId = msg.replyTo?.externalMessageId ?? msg.thread ?? undefined
     logger.info(
-      `[webex] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${parentId !== undefined ? ` parent=${toRef(parentId)}` : ''}`,
+      `[webex] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${parentId !== undefined ? ` parent=${parentId}` : ''}`,
     )
 
     try {
@@ -122,13 +121,13 @@ export function createOutboundCallback(deps: {
             ...(carriesText ? { text } : {}),
             ...(parentId !== undefined ? { parentId } : {}),
           })
-          logger.info(`[webex] uploaded id=${toRef(sent.id)} filename=${file.filename} ${tag}`)
+          logger.info(`[webex] uploaded id=${sent.ref} filename=${file.filename} ${tag}`)
         }
         return { ok: true }
       }
 
       const sent = await client.sendMessage(msg.chat, text, parentId !== undefined ? { parentId } : undefined)
-      logger.info(`[webex] sent id=${toRef(sent.id)} ${tag}`)
+      logger.info(`[webex] sent id=${sent.ref} ${tag}`)
       return { ok: true }
     } catch (err) {
       const message = describe(err)
@@ -150,7 +149,7 @@ export function createWebexHistoryCallback(deps: {
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     try {
       const messages = await deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) })
-      const authorById = new Map(messages.map((m) => [m.id, m.personId]))
+      const authorById = new Map(messages.map((m) => [m.ref, m.personRef]))
       const botPersonId = deps.botPersonIdRef()
       return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, botPersonId, authorById)).reverse() }
     } catch (err) {
@@ -189,17 +188,15 @@ export function createWebexMembershipResolver(deps: {
       const humanMemberIds: string[] = []
       let bots = 0
       for (const member of memberships) {
-        if (botPersonId !== null && member.personId === botPersonId) bots++
-        else humanMemberIds.push(member.personId)
+        if (botPersonId !== null && member.personRef === botPersonId) bots++
+        else humanMemberIds.push(member.personRef)
       }
       if (truncated) {
         return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated }
       }
       return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated, humanMemberIds }
     } catch (err) {
-      deps.logger.warn(
-        `[webex] membership room=${toRef(key.chat)} failed: ${describe(err)}; deriving from recent history`,
-      )
+      deps.logger.warn(`[webex] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
       return await deriveMembershipFromHistory({
         fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
         now,
@@ -277,22 +274,22 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
 
   const channelResolver = createWebexChannelNameResolver({ client })
   const selfIdentityResolver: ChannelSelfIdentityResolver = () =>
-    botPerson !== null ? { id: botPerson.id, username: botPerson.emails[0] ?? botPerson.displayName } : null
+    botPerson !== null ? { id: botPerson.ref, username: botPerson.emails[0] ?? botPerson.displayName } : null
 
   const formatChannelTag = async (chat: string): Promise<string> => {
     const names = await channelResolver({ adapter: 'webex', workspace: chat, chat, thread: null }).catch(
       (): ResolvedChannelNames => ({}),
     )
     const label = names.chatName ?? null
-    return label === null || label === chat ? `room=${toRef(chat)}` : `room=${label}(${toRef(chat)})`
+    return label === null || label === chat ? `room=${chat}` : `room=${label}(${chat})`
   }
 
-  const historyCallback = createWebexHistoryCallback({ client, logger, botPersonIdRef: () => botPerson?.id ?? null })
+  const historyCallback = createWebexHistoryCallback({ client, logger, botPersonIdRef: () => botPerson?.ref ?? null })
   const membershipResolver = createWebexMembershipResolver({
     client,
     logger,
     historyCallback,
-    botPersonIdRef: () => botPerson?.id ?? null,
+    botPersonIdRef: () => botPerson?.ref ?? null,
   })
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
   const fetchAttachmentCallback = createFetchAttachmentCallback({ tokenRef: () => currentToken, logger, fetchImpl })
@@ -301,28 +298,26 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
     inflightInbounds++
     const botSnapshot = botPerson
     try {
-      const tag = await formatChannelTag(event.roomId)
-      logger.info(
-        `[webex] inbound id=${toRef(event.id)} author=${event.personEmail} ${tag} text_len=${event.text.length}`,
-      )
+      const tag = await formatChannelTag(event.roomRef)
+      logger.info(`[webex] inbound id=${event.ref} author=${event.personEmail} ${tag} text_len=${event.text.length}`)
       const verdict = classifyInbound(
         event,
         options.configRef(),
-        botSnapshot?.id ?? null,
+        botSnapshot?.ref ?? null,
         options.selfAliasesRef?.() ?? [],
       )
       if (verdict.kind === 'drop') {
-        logger.info(`[webex] dropped id=${toRef(event.id)} reason=${verdict.reason}${dropHint(verdict.reason)}`)
+        logger.info(`[webex] dropped id=${event.ref} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
       }
       const payload = await enrichWebexMessageReference({
         client,
         inbound: verdict.payload,
-        parentId: event.parentId,
-        botPersonId: botSnapshot?.id ?? null,
+        parentRef: event.parentRef,
+        botPersonId: botSnapshot?.ref ?? null,
       })
       logger.info(
-        `[webex] routed id=${toRef(event.id)} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
+        `[webex] routed id=${event.ref} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
       )
       await options.router.route(payload)
     } catch (err) {
@@ -349,7 +344,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
         currentToken = account.access_token
         await client.login({ token: account.access_token, deviceUrl: account.device_url, tokenType: 'password' })
         botPerson = await client.testAuth()
-        logger.info(`[webex] authenticated as ${botPerson.displayName} (${toRef(botPerson.id)})`)
+        logger.info(`[webex] authenticated as ${botPerson.displayName} (${botPerson.ref})`)
       } catch (err) {
         started = false
         currentToken = null
@@ -455,20 +450,20 @@ function mapWebexHistoryMessage(
   const text = attachments.length === 0 ? body : body === '' ? '[Webex attachment]' : `${body}\n[Webex attachment]`
   const ts = Date.parse(msg.created)
   return {
-    externalMessageId: msg.id,
-    authorId: msg.personId,
+    externalMessageId: msg.ref,
+    authorId: msg.personRef,
     authorName: msg.personEmail,
     text,
     ts: Number.isFinite(ts) ? ts : 0,
-    isBot: botPersonId !== null && msg.personId === botPersonId,
+    isBot: botPersonId !== null && msg.personRef === botPersonId,
     // Webex history carries parentId but not the parent's author, so a bare
     // parentId cannot prove the reply targeted the agent. Only attribute it to
     // the bot when the parent (resolved from the same history batch) was
     // bot-authored — mirrors the live enrichWebexMessageReference rule and
     // avoids marking human-authored threaded parents as replies to the agent.
     replyToBotMessageId:
-      botPersonId !== null && msg.parentId !== undefined && authorById.get(msg.parentId) === botPersonId
-        ? msg.parentId
+      botPersonId !== null && msg.parentRef !== undefined && authorById.get(msg.parentRef) === botPersonId
+        ? msg.parentRef
         : null,
     ...(attachments.length > 0 ? { attachments } : {}),
   }

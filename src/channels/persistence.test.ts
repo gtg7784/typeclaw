@@ -16,6 +16,8 @@ async function tempDir(): Promise<string> {
 }
 
 const silentLogger = { info: () => {}, warn: () => {}, error: () => {} }
+const roomBlob = 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl'
+const roomRef = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 
 describe('loadChannelSessions', () => {
   test('returns empty list when file is missing', async () => {
@@ -24,7 +26,7 @@ describe('loadChannelSessions', () => {
     expect(out).toEqual([])
   })
 
-  test('loads a v4 file without clobbering lastInboundAt', async () => {
+  test('loads a v5 file without clobbering lastInboundAt', async () => {
     const dir = await tempDir()
     const path = channelsSessionsPath(dir)
     await mkdir(join(dir, 'channels'), { recursive: true })
@@ -40,12 +42,99 @@ describe('loadChannelSessions', () => {
         participants: [],
       },
     ]
-    await writeFile(path, JSON.stringify({ version: 4, sessions: records }))
+    await writeFile(path, JSON.stringify({ version: 5, sessions: records }))
 
     const out = await loadChannelSessions(dir, silentLogger)
 
     expect(out).toHaveLength(1)
     expect(out[0]?.lastInboundAt).toBe(1234)
+  })
+
+  test('migrates v4 Webex room ids to refs and leaves existing refs unchanged', async () => {
+    const dir = await tempDir()
+    const path = channelsSessionsPath(dir)
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 4,
+        sessions: [
+          record({ adapter: 'webex', workspace: roomBlob, chat: roomBlob, thread: roomBlob, sessionId: 'blob' }),
+          record({ adapter: 'webex-bot', workspace: roomRef, chat: roomRef, thread: null, sessionId: 'ref' }),
+        ],
+      }),
+    )
+
+    const out = await loadChannelSessions(dir, silentLogger)
+
+    expect(out.map((r) => [r.adapter, r.workspace, r.chat, r.thread, r.sessionId])).toEqual([
+      ['webex', roomRef, roomRef, roomRef, 'blob'],
+      ['webex-bot', roomRef, roomRef, null, 'ref'],
+    ])
+  })
+
+  test('dedupes v4 Webex collisions by newest inbound time, then session pointer', async () => {
+    const dir = await tempDir()
+    const path = channelsSessionsPath(dir)
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 4,
+        sessions: [
+          record({
+            adapter: 'webex',
+            workspace: roomBlob,
+            chat: roomBlob,
+            thread: null,
+            sessionId: 'old',
+            lastInboundAt: 1,
+          }),
+          record({
+            adapter: 'webex',
+            workspace: roomRef,
+            chat: roomRef,
+            thread: null,
+            sessionId: 'new',
+            lastInboundAt: 2,
+          }),
+          record({ adapter: 'webex-bot', workspace: roomBlob, chat: roomBlob, thread: null, lastInboundAt: 3 }),
+          record({
+            adapter: 'webex-bot',
+            workspace: roomRef,
+            chat: roomRef,
+            thread: null,
+            sessionFile: 'kept.jsonl',
+            lastInboundAt: 3,
+          }),
+        ],
+      }),
+    )
+
+    const out = await loadChannelSessions(dir, silentLogger)
+
+    expect(out).toHaveLength(2)
+    expect(out.find((r) => r.adapter === 'webex')?.sessionId).toBe('new')
+    expect(out.find((r) => r.adapter === 'webex-bot')?.sessionFile).toBe('kept.jsonl')
+  })
+
+  test('does not rewrite non-Webex v4 records', async () => {
+    const dir = await tempDir()
+    const path = channelsSessionsPath(dir)
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 4,
+        sessions: [record({ adapter: 'discord-bot', workspace: roomBlob, chat: roomBlob, thread: roomBlob })],
+      }),
+    )
+
+    const out = await loadChannelSessions(dir, silentLogger)
+
+    expect(out[0]?.workspace).toBe(roomBlob)
+    expect(out[0]?.chat).toBe(roomBlob)
+    expect(out[0]?.thread).toBe(roomBlob)
   })
 
   for (const version of [2, 3]) {
@@ -76,7 +165,7 @@ describe('loadChannelSessions', () => {
 
       expect(out).toEqual([])
       expect(warns[0]).toContain(`version ${version} not supported`)
-      expect(warns[0]).toContain('expected 4')
+      expect(warns[0]).toContain('expected 5')
     })
   }
 
@@ -95,17 +184,17 @@ describe('loadChannelSessions', () => {
     const dir = await tempDir()
     const path = channelsSessionsPath(dir)
     await mkdir(join(dir, 'channels'), { recursive: true })
-    await writeFile(path, JSON.stringify({ version: 5, sessions: [] }))
+    await writeFile(path, JSON.stringify({ version: 6, sessions: [] }))
     const warns: string[] = []
     const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
     expect(out).toEqual([])
-    expect(warns[0]).toContain('version 5 not supported')
-    expect(warns[0]).toContain('expected 4')
+    expect(warns[0]).toContain('version 6 not supported')
+    expect(warns[0]).toContain('expected 5')
   })
 })
 
 describe('saveChannelSessions', () => {
-  test('persists records as a v4 file with stable structure', async () => {
+  test('persists records as a v5 file with stable structure', async () => {
     const dir = await tempDir()
     const records: ChannelSessionRecord[] = [
       {
@@ -121,7 +210,7 @@ describe('saveChannelSessions', () => {
     await saveChannelSessions(dir, records, silentLogger)
     const raw = await readFile(channelsSessionsPath(dir), 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.version).toBe(4)
+    expect(parsed.version).toBe(5)
     expect(parsed.sessions).toHaveLength(1)
     expect(parsed.sessions[0].sessionId).toBe('ses_abc')
     expect(parsed.sessions[0].sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')
@@ -199,4 +288,31 @@ describe('findRecord', () => {
     const found = findRecord(records, { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
     expect(found?.sessionId).toBe('s1')
   })
+
+  test('falls back to normalized Webex room refs on exact miss', () => {
+    const records: ChannelSessionRecord[] = [
+      { adapter: 'webex', workspace: roomBlob, chat: roomBlob, thread: null, sessionId: 's1', participants: [] },
+    ]
+    const found = findRecord(records, { adapter: 'webex', workspace: roomRef, chat: roomRef, thread: null })
+    expect(found?.sessionId).toBe('s1')
+  })
+
+  test('does not normalize non-Webex fallback matches', () => {
+    const records: ChannelSessionRecord[] = [
+      { adapter: 'discord-bot', workspace: roomBlob, chat: roomBlob, thread: null, sessionId: 's1', participants: [] },
+    ]
+    const found = findRecord(records, { adapter: 'discord-bot', workspace: roomRef, chat: roomRef, thread: null })
+    expect(found).toBeUndefined()
+  })
 })
+
+function record(overrides: Partial<ChannelSessionRecord>): ChannelSessionRecord {
+  return {
+    adapter: 'discord-bot',
+    workspace: 'g1',
+    chat: 'c1',
+    thread: null,
+    participants: [],
+    ...overrides,
+  }
+}

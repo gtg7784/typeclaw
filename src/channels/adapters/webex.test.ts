@@ -37,13 +37,17 @@ function account(overrides: Partial<WebexAccountRecord> = {}): WebexAccountRecor
 function inbound(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMessage {
   return {
     id: 'msg-1',
+    ref: 'msg-1',
     roomId: 'room-1',
+    roomRef: 'room-1',
     personId: 'user-1',
+    personRef: 'user-1',
     personEmail: 'user@example.com',
     text: 'hello typeclaw',
     created: '2026-01-01T00:00:00.000Z',
     roomType: 'group',
     mentionedPeople: [],
+    mentionedPeopleRefs: [],
     mentionedGroups: [],
     files: [],
     raw: {} as WebexInboundMessage['raw'],
@@ -111,7 +115,7 @@ describe('createWebexAdapter', () => {
       createClient: () =>
         ({
           login: async (opts: unknown) => calls.push(opts),
-          testAuth: async () => ({ id: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
+          testAuth: async () => ({ id: 'self-blob', ref: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
           listMemberships: async () => [],
           listMessages: async () => [],
           sendMessage: async () => ({ id: 'sent' }),
@@ -134,7 +138,7 @@ describe('createWebexAdapter', () => {
     ])
   })
 
-  test('auth log decodes the base64 personId to its readable ref', async () => {
+  test('auth log prints the bot person ref', async () => {
     // base64url of ciscospark://us/PEOPLE/b278882e-b28b-4cc4-b08b-4b08db7369db
     const personId = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9iMjc4ODgyZS1iMjhiLTRjYzQtYjA4Yi00YjA4ZGI3MzY5ZGI'
     const log = logger()
@@ -146,7 +150,12 @@ describe('createWebexAdapter', () => {
       createClient: () =>
         ({
           login: async () => {},
-          testAuth: async () => ({ id: personId, emails: ['typeey@example.com'], displayName: 'Typeey' }),
+          testAuth: async () => ({
+            id: personId,
+            ref: 'b278882e-b28b-4cc4-b08b-4b08db7369db',
+            emails: ['typeey@example.com'],
+            displayName: 'Typeey',
+          }),
           listMemberships: async () => [],
           listMessages: async () => [],
           sendMessage: async () => ({ id: 'sent' }),
@@ -183,7 +192,7 @@ describe('createWebexAdapter', () => {
       createClient: () =>
         ({
           login: async () => {},
-          testAuth: async () => ({ id: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
+          testAuth: async () => ({ id: 'self-blob', ref: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
           listMemberships: async () => [],
           listMessages: async () => [],
           sendMessage: async () => ({ id: 'sent' }),
@@ -203,7 +212,7 @@ describe('createWebexAdapter', () => {
     expect(r.unregistered).toContain('outbound:webex')
   })
 
-  test('inbound/routed logs decode the base64 room and message ids', async () => {
+  test('inbound/routed logs print event refs', async () => {
     // base64url of ciscospark://us/ROOM/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
     const roomId = 'Y2lzY29zcGFyazovL3VzL1JPT00vYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVl'
     // base64url of ciscospark://us/MESSAGE/99999999-8888-7777-6666-555555555555
@@ -219,7 +228,7 @@ describe('createWebexAdapter', () => {
       createClient: () =>
         ({
           login: async () => {},
-          testAuth: async () => ({ id: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
+          testAuth: async () => ({ id: 'self-blob', ref: 'self-1', emails: ['self@example.com'], displayName: 'Self' }),
           listMemberships: async () => [],
           listMessages: async () => [],
           sendMessage: async () => ({ id: 'sent' }),
@@ -229,7 +238,16 @@ describe('createWebexAdapter', () => {
     })
 
     await adapter.start()
-    listener.emit('message_created', inbound({ id: msgId, roomId, text: 'hello typeclaw' }))
+    listener.emit(
+      'message_created',
+      inbound({
+        id: msgId,
+        ref: '99999999-8888-7777-6666-555555555555',
+        roomId,
+        roomRef: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        text: 'hello typeclaw',
+      }),
+    )
     await adapter.stop()
 
     const inboundLine = log.lines.find((l) => l.includes('inbound id='))
@@ -242,10 +260,13 @@ describe('createWebexAdapter', () => {
 describe('createWebexHistoryCallback reply attribution', () => {
   const message = (over: Partial<WebexMessage>): WebexMessage => ({
     id: 'm',
+    ref: 'm',
     roomId: 'room-1',
+    roomRef: 'room-1',
     roomType: 'group',
     text: 'hi',
     personId: 'p',
+    personRef: 'p',
     personEmail: 'p@example.com',
     created: '2026-01-01T00:00:00.000Z',
     files: [],
@@ -265,21 +286,42 @@ describe('createWebexHistoryCallback reply attribution', () => {
   }
 
   test('leaves replyToBotMessageId null when the threaded parent was authored by a human', async () => {
-    const parent = message({ id: 'parent-1', personId: 'human-1' })
-    const child = message({ id: 'child-1', personId: 'human-2', parentId: 'parent-1' })
+    const parent = message({ id: 'parent-blob', ref: 'parent-1', personId: 'human-blob-1', personRef: 'human-1' })
+    const child = message({
+      id: 'child-blob',
+      ref: 'child-1',
+      personId: 'human-blob-2',
+      personRef: 'human-2',
+      parentId: 'parent-blob',
+      parentRef: 'parent-1',
+    })
     const history = await historyOf([parent, child], 'bot-1')
     expect(history.find((m) => m.externalMessageId === 'child-1')?.replyToBotMessageId).toBeNull()
   })
 
   test('attributes replyToBotMessageId when the threaded parent was authored by the bot', async () => {
-    const parent = message({ id: 'parent-1', personId: 'bot-1' })
-    const child = message({ id: 'child-1', personId: 'human-2', parentId: 'parent-1' })
+    const parent = message({ id: 'parent-blob', ref: 'parent-1', personId: 'bot-blob', personRef: 'bot-1' })
+    const child = message({
+      id: 'child-blob',
+      ref: 'child-1',
+      personId: 'human-blob-2',
+      personRef: 'human-2',
+      parentId: 'parent-blob',
+      parentRef: 'parent-1',
+    })
     const history = await historyOf([parent, child], 'bot-1')
     expect(history.find((m) => m.externalMessageId === 'child-1')?.replyToBotMessageId).toBe('parent-1')
   })
 
   test('leaves replyToBotMessageId null when the threaded parent is outside the fetched batch', async () => {
-    const child = message({ id: 'child-1', personId: 'human-2', parentId: 'parent-unknown' })
+    const child = message({
+      id: 'child-blob',
+      ref: 'child-1',
+      personId: 'human-blob-2',
+      personRef: 'human-2',
+      parentId: 'parent-unknown-blob',
+      parentRef: 'parent-unknown',
+    })
     const history = await historyOf([child], 'bot-1')
     expect(history.find((m) => m.externalMessageId === 'child-1')?.replyToBotMessageId).toBeNull()
   })
