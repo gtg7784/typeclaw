@@ -43,7 +43,7 @@ describe('webex outbound', () => {
           options?: { markdown?: boolean; parentId?: string; files?: string[] },
         ) => {
           sends.push({ roomId, text, markdown: options?.markdown, parentId: options?.parentId })
-          return webexMessage({ id: 'sent', text })
+          return webexMessage({ id: 'sent-blob', ref: 'sent', text })
         },
         uploadFile: async (
           roomId: string,
@@ -51,7 +51,7 @@ describe('webex outbound', () => {
           options?: { text?: string; markdown?: boolean; parentId?: string },
         ) => {
           uploads.push({ roomId, filename: file.filename, text: options?.text, parentId: options?.parentId })
-          return webexMessage({ id: `up-${uploads.length}` })
+          return webexMessage({ id: `up-${uploads.length}-blob`, ref: `up-${uploads.length}` })
         },
       },
     }
@@ -206,8 +206,22 @@ describe('webex history and membership', () => {
     const cb = createWebexHistoryCallback({
       client: {
         listMessages: async () => [
-          webexMessage({ id: 'new', text: 'new', personId: 'user-2', created: '2026-01-02T00:00:00Z' }),
-          webexMessage({ id: 'old', text: 'old', personId: 'bot-1', created: '2026-01-01T00:00:00Z' }),
+          webexMessage({
+            id: 'new-blob',
+            ref: 'new',
+            text: 'new',
+            personId: 'user-2-blob',
+            personRef: 'user-2',
+            created: '2026-01-02T00:00:00Z',
+          }),
+          webexMessage({
+            id: 'old-blob',
+            ref: 'old',
+            text: 'old',
+            personId: 'bot-blob',
+            personRef: 'bot-1',
+            created: '2026-01-01T00:00:00Z',
+          }),
         ],
       },
       logger: logger(),
@@ -237,7 +251,12 @@ describe('webex history and membership', () => {
 
   test('resolves direct and group membership, falling back to history on failure', async () => {
     const history = createWebexHistoryCallback({
-      client: { listMessages: async () => [webexMessage({ personId: 'user-1' }), webexMessage({ personId: 'bot-1' })] },
+      client: {
+        listMessages: async () => [
+          webexMessage({ personId: 'user-1-blob', personRef: 'user-1' }),
+          webexMessage({ personId: 'bot-blob', personRef: 'bot-1' }),
+        ],
+      },
       logger: logger(),
       botPersonIdRef: () => 'bot-1',
     })
@@ -389,9 +408,9 @@ describe('webex lifecycle', () => {
       'fetchAttachment',
       'membership',
     ])
-    expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1', username: 'bot@example.com' })
+    expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-ref-1', username: 'bot@example.com' })
 
-    listener.emit('message_created', inbound({ mentionedPeople: ['bot-1'] }))
+    listener.emit('message_created', inbound({ mentionedPeople: ['bot-blob'], mentionedPeopleRefs: ['bot-ref-1'] }))
     await router.waitForRoutes(1)
     expect(router.routes[0]?.externalMessageId).toBe('msg-1')
 
@@ -400,7 +419,7 @@ describe('webex lifecycle', () => {
     expect(router.unregistered).toEqual(router.registered)
   })
 
-  test('auth log decodes the base64 personId to its readable ref', async () => {
+  test('auth log prints the bot person ref', async () => {
     const personId = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9iMjc4ODgyZS1iMjhiLTRjYzQtYjA4Yi00YjA4ZGI3MzY5ZGI'
     const log = logger()
     const adapter = createWebexBotAdapter({
@@ -413,6 +432,7 @@ describe('webex lifecycle', () => {
           ...fakeClient(),
           testAuth: async () => ({
             id: personId,
+            ref: 'b278882e-b28b-4cc4-b08b-4b08db7369db',
             emails: ['typeey@example.com'],
             displayName: 'Typeey',
             orgId: 'org-1',
@@ -533,15 +553,17 @@ function fakeClient() {
     getToken: () => 'token-1',
     testAuth: async () => ({
       id: 'bot-1',
+      ref: 'bot-ref-1',
       emails: ['bot@example.com'],
       displayName: 'Bot',
       orgId: 'org-1',
       type: 'bot',
       created: '',
     }),
-    sendMessage: async () => webexMessage({ id: 'sent' }),
+    sendMessage: async () => webexMessage({ id: 'sent-blob', ref: 'sent' }),
     getSpace: async () => ({
-      id: 'room-1',
+      id: 'room-blob-1',
+      ref: 'room-1',
       title: 'Room',
       type: 'group',
       isLocked: false,
@@ -551,7 +573,7 @@ function fakeClient() {
     }),
     listMessages: async () => [],
     listMemberships: async () => [],
-    getMessage: async () => webexMessage({ id: 'parent', text: 'parent' }),
+    getMessage: async () => webexMessage({ id: 'parent-blob', ref: 'parent', text: 'parent' }),
   } as unknown as ReturnType<NonNullable<Parameters<typeof createWebexBotAdapter>[0]['createClient']>>
 }
 
@@ -562,13 +584,17 @@ function outbound(overrides: Partial<OutboundMessage> = {}): OutboundMessage {
 function inbound(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMessage {
   return {
     id: 'msg-1',
+    ref: 'msg-1',
     roomId: 'room-1',
+    roomRef: 'room-1',
     personId: 'user-1',
+    personRef: 'user-1',
     personEmail: 'user@example.com',
     text: 'hello',
     created: '2026-01-01T00:00:00Z',
     roomType: 'group',
     mentionedPeople: [],
+    mentionedPeopleRefs: [],
     mentionedGroups: [],
     files: [],
     raw: {} as WebexInboundMessage['raw'],
@@ -583,10 +609,13 @@ function webexMessage(overrides: Partial<ReturnType<typeof webexMessageShape>> =
 function webexMessageShape() {
   return {
     id: 'msg-1',
+    ref: 'msg-1',
     roomId: 'room-1',
+    roomRef: 'room-1',
     roomType: 'group' as const,
     text: 'hello',
     personId: 'user-1',
+    personRef: 'user-1',
     personEmail: 'user@example.com',
     created: '2026-01-01T00:00:00Z',
   }
@@ -596,7 +625,9 @@ function membership(personId: string) {
   return {
     id: `m-${personId}`,
     roomId: 'room-1',
+    roomRef: 'room-1',
     personId,
+    personRef: personId,
     personEmail: `${personId}@example.com`,
     personDisplayName: personId,
     isModerator: false,

@@ -9,13 +9,17 @@ const config = channelsSchema.parse({ 'webex-bot': {} })['webex-bot']!
 function message(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMessage {
   return {
     id: 'msg-1',
+    ref: 'msg-1',
     roomId: 'room-1',
+    roomRef: 'room-1',
     personId: 'user-1',
+    personRef: 'user-1',
     personEmail: 'user@example.com',
     text: 'hello',
     created: '2026-01-01T00:00:00.000Z',
     roomType: 'group',
     mentionedPeople: [],
+    mentionedPeopleRefs: [],
     mentionedGroups: [],
     files: [],
     raw: {} as WebexInboundMessage['raw'],
@@ -25,7 +29,7 @@ function message(overrides: Partial<WebexInboundMessage> = {}): WebexInboundMess
 
 describe('classifyInbound', () => {
   test('drops self-authored messages', () => {
-    expect(classifyInbound(message({ personId: 'bot-1' }), config, 'bot-1')).toEqual({
+    expect(classifyInbound(message({ personId: 'bot-blob', personRef: 'bot-1' }), config, 'bot-1')).toEqual({
       kind: 'drop',
       reason: 'self_author',
     })
@@ -41,7 +45,12 @@ describe('classifyInbound', () => {
 
   test('routes structured bot and group mentions without parsing the Korean body', () => {
     const verdict = classifyInbound(
-      message({ text: '확인 부탁해요', mentionedPeople: ['bot-1'], mentionedGroups: ['all'] }),
+      message({
+        text: '확인 부탁해요',
+        mentionedPeople: ['bot-blob'],
+        mentionedPeopleRefs: ['bot-1'],
+        mentionedGroups: ['all'],
+      }),
       config,
       'bot-1',
     )
@@ -63,7 +72,11 @@ describe('classifyInbound', () => {
   })
 
   test('marks mentionsOthers when only another person is mentioned', () => {
-    const verdict = classifyInbound(message({ mentionedPeople: ['user-2'] }), config, 'bot-1')
+    const verdict = classifyInbound(
+      message({ mentionedPeople: ['user-2-blob'], mentionedPeopleRefs: ['user-2'] }),
+      config,
+      'bot-1',
+    )
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')

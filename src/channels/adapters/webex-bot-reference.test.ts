@@ -24,11 +24,14 @@ const inbound: InboundMessage = {
 
 function parentFrom(personId: string, text = 'parent text') {
   return async () => ({
-    id: 'parent',
-    roomId: 'room-1',
+    id: 'parent-blob',
+    ref: 'parent',
+    roomId: 'room-blob-1',
+    roomRef: 'room-1',
     roomType: 'group' as const,
     text,
-    personId,
+    personId: `${personId}-blob`,
+    personRef: personId,
     personEmail: `${personId}@example.com`,
     created: '',
   })
@@ -38,7 +41,7 @@ describe('enrichWebexMessageReference', () => {
   test('adds reply reference context from parent message', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('user-2', 'parent text') },
     })
@@ -52,7 +55,7 @@ describe('enrichWebexMessageReference', () => {
   test('marks a reply to a bot-authored parent as bot-directed (no structured mention)', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('bot-1') },
     })
@@ -64,7 +67,7 @@ describe('enrichWebexMessageReference', () => {
   test('marks a reply to a non-bot parent as directed at another author', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('user-2') },
     })
@@ -77,7 +80,7 @@ describe('enrichWebexMessageReference', () => {
     const aliasAddressedReply = { ...inbound, text: '타이피야 확인해줘', isBotMention: true }
     const enriched = await enrichWebexMessageReference({
       inbound: aliasAddressedReply,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('user-2') },
     })
@@ -90,7 +93,7 @@ describe('enrichWebexMessageReference', () => {
   test('attributes a bot-authored parent even when its text is empty', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('bot-1', '') },
     })
@@ -103,7 +106,7 @@ describe('enrichWebexMessageReference', () => {
     const preAttributed = { ...inbound, replyToBotMessageId: 'already' }
     const enriched = await enrichWebexMessageReference({
       inbound: preAttributed,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: { getMessage: parentFrom('user-2') },
     })
@@ -115,7 +118,7 @@ describe('enrichWebexMessageReference', () => {
   test('swallows parent fetch failures', async () => {
     const enriched = await enrichWebexMessageReference({
       inbound,
-      parentId: 'parent',
+      parentRef: 'parent',
       botPersonId: 'bot-1',
       client: {
         getMessage: async () => {
