@@ -399,6 +399,34 @@ describe('webex lifecycle', () => {
     expect(router.unregistered).toEqual(router.registered)
   })
 
+  test('auth log decodes the base64 personId to its readable ref', async () => {
+    const personId = 'Y2lzY29zcGFyazovL3VzL1BFT1BMRS9iMjc4ODgyZS1iMjhiLTRjYzQtYjA4Yi00YjA4ZGI3MzY5ZGI'
+    const log = logger()
+    const adapter = createWebexBotAdapter({
+      router: new FakeRouter().value,
+      configRef: () => config,
+      token: 'token-1',
+      logger: log,
+      createClient: () =>
+        ({
+          ...fakeClient(),
+          testAuth: async () => ({
+            id: personId,
+            emails: ['typeey@example.com'],
+            displayName: 'Typeey',
+            orgId: 'org-1',
+            type: 'bot',
+            created: '',
+          }),
+        }) as ReturnType<typeof fakeClient>,
+      createListener: () => new FakeListener().value,
+    })
+
+    await adapter.start()
+
+    expect(log.lines).toContain('info:[webex-bot] authenticated as Typeey (b278882e-b28b-4cc4-b08b-4b08db7369db)')
+  })
+
   test('rolls back registrations when listener start fails', async () => {
     const listener = new FakeListener({ failStart: true })
     const router = new FakeRouter()

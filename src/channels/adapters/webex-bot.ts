@@ -32,6 +32,7 @@ import type {
 import { createWebexChannelNameResolver } from './webex-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-bot-classify'
 import { enrichWebexMessageReference } from './webex-bot-reference'
+import { toRef } from './webex-id-ref'
 
 export type WebexBotAdapterLogger = {
   info: (msg: string) => void
@@ -332,7 +333,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       try {
         await client.login({ token: options.token })
         botPerson = await client.testAuth()
-        logger.info(`[webex-bot] authenticated as ${botPerson.displayName} (${botPerson.id})`)
+        logger.info(`[webex-bot] authenticated as ${botPerson.displayName} (${toRef(botPerson.id)})`)
       } catch (err) {
         started = false
         botPerson = null
