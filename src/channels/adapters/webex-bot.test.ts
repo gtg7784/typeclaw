@@ -57,15 +57,16 @@ describe('webex outbound', () => {
     }
   }
 
-  test('sends a markdown message with no parentId for a non-threaded reply', async () => {
+  test('sends a plain-text message with no parentId for a non-threaded reply', async () => {
     const { sends, uploads, client } = outboundClient()
     const cb = createOutboundCallback({ client, logger: logger(), formatChannelTag: async () => 'room=Room(room-1)' })
 
-    // given: Korean body to keep the markdown path script-agnostic
+    // given: Korean body to keep the path script-agnostic
     const result = await cb(outbound({ text: '**안녕하세요**' }))
 
     expect(result).toEqual({ ok: true })
-    expect(sends).toEqual([{ roomId: 'room-1', text: '**안녕하세요**', markdown: true, parentId: undefined }])
+    // markdown is omitted so Webex's E2E path does not render verbatim HTML
+    expect(sends).toEqual([{ roomId: 'room-1', text: '**안녕하세요**', markdown: undefined, parentId: undefined }])
     expect(uploads).toEqual([])
   })
 
@@ -75,7 +76,7 @@ describe('webex outbound', () => {
 
     await cb(outbound({ text: 'hi', thread: 'root-1' }))
 
-    expect(sends).toEqual([{ roomId: 'room-1', text: 'hi', markdown: true, parentId: 'root-1' }])
+    expect(sends).toEqual([{ roomId: 'room-1', text: 'hi', markdown: undefined, parentId: 'root-1' }])
   })
 
   test('prefers replyTo over msg.thread for the parentId anchor', async () => {

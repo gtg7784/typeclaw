@@ -2,6 +2,8 @@ import type { WebexClient } from 'agent-messenger/webex'
 
 import type { InboundMessage, QuoteAnchorSource } from '@/channels/types'
 
+import { resolveWebexBodyText } from './webex-format'
+
 // Webex Mercury delivers only the parent message id inline, not its author,
 // so the classifier cannot tell whether a reply targets the bot. We fetch the
 // parent here (already needed for the quote anchor) and use its author to set
@@ -24,7 +26,7 @@ export async function enrichWebexMessageReference(args: {
       adapter: 'webex',
       authorId: parent.personId,
       authorName: parent.personEmail,
-      text: parent.text ?? parent.markdown ?? parent.html ?? '',
+      text: resolveWebexBodyText(parent),
     }
     if (source.text.trim() === '') return attributed
     return { ...attributed, referenceContext: { kind: 'reply', sources: [source] } }

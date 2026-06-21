@@ -34,6 +34,7 @@ import type { WebexAccountRecord } from '@/secrets/schema'
 
 import { createWebexChannelNameResolver } from './webex-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-classify'
+import { resolveWebexBodyText } from './webex-format'
 import { toRef } from './webex-id-ref'
 import { enrichWebexMessageReference } from './webex-reference'
 
@@ -118,7 +119,6 @@ export function createOutboundCallback(deps: {
           if (attachment.filename !== undefined) file.filename = attachment.filename
           const carriesText = index === 0 && text !== ''
           const sent = await client.uploadFile(msg.chat, file, {
-            markdown: true,
             ...(carriesText ? { text } : {}),
             ...(parentId !== undefined ? { parentId } : {}),
           })
@@ -127,10 +127,7 @@ export function createOutboundCallback(deps: {
         return { ok: true }
       }
 
-      const sent = await client.sendMessage(msg.chat, text, {
-        markdown: true,
-        ...(parentId !== undefined ? { parentId } : {}),
-      })
+      const sent = await client.sendMessage(msg.chat, text, parentId !== undefined ? { parentId } : undefined)
       logger.info(`[webex] sent id=${sent.id} ${tag}`)
       return { ok: true }
     } catch (err) {
@@ -450,7 +447,7 @@ function mapWebexHistoryMessage(
   authorById: ReadonlyMap<string, string>,
 ): ChannelHistoryMessage {
   const attachments = (msg.files ?? []).map((ref, index) => ({ id: index + 1, kind: 'file' as const, ref }))
-  const body = msg.text ?? msg.markdown ?? msg.html ?? ''
+  const body = resolveWebexBodyText(msg)
   const text = attachments.length === 0 ? body : body === '' ? '[Webex attachment]' : `${body}\n[Webex attachment]`
   const ts = Date.parse(msg.created)
   return {
