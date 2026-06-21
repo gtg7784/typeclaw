@@ -436,7 +436,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         event.chat_id,
       )
       logger.info(
-        `[kakaotalk] inbound log_id=${event.log_id} author=${event.author_id} ${inboundTag} type=${event.message_type} text_len=${event.message.length}`,
+        `[kakaotalk] inbound log_id=${event.log_id} author=${event.author_name ?? event.author_id} ${inboundTag} type=${event.message_type} text_len=${event.message.length}`,
       )
 
       // Ack the message BEFORE classify/route so the sender's unread "1"

@@ -852,6 +852,43 @@ describe('createKakaotalkAdapter — author name resolution', () => {
     await router.stop()
   })
 
+  test('inbound log prefers author_name over the opaque author_id', async () => {
+    const lines: string[] = []
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      logger: { info: (m) => lines.push(m), warn: () => {}, error: () => {} },
+    })
+    client.chats = [groupChat('111', 4)]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L42',
+      author_id: 222,
+      author_name: 'Alice',
+      message: 'hello',
+      message_type: 1,
+      attachment: null,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    const inboundLine = lines.find((l) => l.includes('inbound log_id='))
+    expect(inboundLine).toContain('author=Alice')
+    expect(inboundLine).not.toContain('author=222')
+
+    await adapter.stop()
+    await router.stop()
+  })
+
   test('falls back to GETMEM when event.author_name is null', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
