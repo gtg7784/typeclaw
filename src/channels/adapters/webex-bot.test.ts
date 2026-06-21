@@ -624,6 +624,7 @@ function webexMessageShape() {
 function membership(personId: string) {
   return {
     id: `m-${personId}`,
+    ref: `m-${personId}`,
     roomId: 'room-1',
     roomRef: 'room-1',
     personId,
