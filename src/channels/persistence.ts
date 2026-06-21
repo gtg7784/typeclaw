@@ -3,10 +3,11 @@ import { dirname, join } from 'node:path'
 
 import type { ChannelParticipant } from '@/agent/session-origin'
 
+import { toRef } from './adapters/webex-id-ref'
 import type { AdapterId } from './schema'
 import type { ChannelKey } from './types'
 
-const FILE_VERSION = 4
+const FILE_VERSION = 5
 
 // `sessionFile` is the basename (not the full path) of the JSONL transcript
 // for this (adapter, workspace, chat, thread) tuple. pi-coding-agent writes
@@ -31,6 +32,11 @@ export type ChannelSessionRecord = {
 
 type FileV4 = {
   version: 4
+  sessions: ChannelSessionRecord[]
+}
+
+type FileV5 = {
+  version: 5
   sessions: ChannelSessionRecord[]
 }
 
@@ -74,9 +80,14 @@ export async function loadChannelSessions(
   }
   const version = (parsed as { version?: unknown }).version
   if (version === FILE_VERSION) {
+    const file = parsed as FileV5
+    if (!Array.isArray(file.sessions)) return []
+    return dedupe(file.sessions.filter(isValidRecord))
+  }
+  if (version === 4) {
     const file = parsed as FileV4
     if (!Array.isArray(file.sessions)) return []
-    return file.sessions.filter(isValidRecord)
+    return dedupeNewest(file.sessions.filter(isValidRecord).map(migrateV4Record))
   }
   logger.warn(`[channels] ${path} version ${String(version)} not supported (expected ${FILE_VERSION}); ignored`)
   return []
@@ -88,7 +99,7 @@ export async function saveChannelSessions(
   logger: ChannelSessionsLogger = consoleLogger,
 ): Promise<void> {
   const path = channelsSessionsPath(agentDir)
-  const payload: FileV4 = { version: FILE_VERSION, sessions: dedupe(sessions) }
+  const payload: FileV5 = { version: FILE_VERSION, sessions: dedupe(sessions) }
   try {
     await mkdir(dirname(path), { recursive: true })
     const tmp = `${path}.tmp`
@@ -103,7 +114,17 @@ export async function saveChannelSessions(
 function dedupe(sessions: readonly ChannelSessionRecord[]): ChannelSessionRecord[] {
   const seen = new Map<string, ChannelSessionRecord>()
   for (const s of sessions) {
-    seen.set(`${s.adapter}:${s.workspace}:${s.chat}:${s.thread ?? ''}`, s)
+    seen.set(recordKey(s), s)
+  }
+  return Array.from(seen.values())
+}
+
+function dedupeNewest(sessions: readonly ChannelSessionRecord[]): ChannelSessionRecord[] {
+  const seen = new Map<string, ChannelSessionRecord>()
+  for (const s of sessions) {
+    const key = recordKey(s)
+    const existing = seen.get(key)
+    if (existing === undefined || shouldReplaceRecord(existing, s)) seen.set(key, s)
   }
   return Array.from(seen.values())
 }
@@ -112,13 +133,54 @@ export function findRecord(
   sessions: readonly ChannelSessionRecord[],
   key: ChannelKey,
 ): ChannelSessionRecord | undefined {
-  return sessions.find(
+  const exact = sessions.find(
     (s) =>
       s.adapter === key.adapter &&
       s.workspace === key.workspace &&
       s.chat === key.chat &&
       (s.thread ?? null) === (key.thread ?? null),
   )
+  if (exact !== undefined) return exact
+
+  // Compat insurance for legacy Webex records that may still be held in memory
+  // or loaded from hand-written/session-origin data with blob-form room ids.
+  if (!isWebexAdapter(key.adapter)) return undefined
+  return sessions.find(
+    (s) =>
+      s.adapter === key.adapter &&
+      toRef(s.workspace) === toRef(key.workspace) &&
+      toRef(s.chat) === toRef(key.chat) &&
+      (s.thread ?? null) === (key.thread ?? null),
+  )
+}
+
+function migrateV4Record(record: ChannelSessionRecord): ChannelSessionRecord {
+  if (!isWebexAdapter(record.adapter)) return record
+  return {
+    ...record,
+    workspace: toRef(record.workspace),
+    chat: toRef(record.chat),
+    thread: record.thread === null ? null : toRef(record.thread),
+  }
+}
+
+function recordKey(record: ChannelSessionRecord): string {
+  return `${record.adapter}:${record.workspace}:${record.chat}:${record.thread ?? ''}`
+}
+
+function shouldReplaceRecord(existing: ChannelSessionRecord, next: ChannelSessionRecord): boolean {
+  const existingAt = existing.lastInboundAt ?? Number.NEGATIVE_INFINITY
+  const nextAt = next.lastInboundAt ?? Number.NEGATIVE_INFINITY
+  if (nextAt !== existingAt) return nextAt > existingAt
+  return !hasSessionPointer(existing) && hasSessionPointer(next)
+}
+
+function hasSessionPointer(record: ChannelSessionRecord): boolean {
+  return record.sessionId !== undefined || record.sessionFile !== undefined
+}
+
+function isWebexAdapter(adapter: AdapterId): boolean {
+  return adapter === 'webex' || adapter === 'webex-bot'
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
