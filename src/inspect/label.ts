@@ -51,10 +51,10 @@ function renderWorkspace(origin: Extract<MinimalSessionOrigin, { kind: 'channel'
   return readableId(origin.adapter, origin.workspace)
 }
 
-// Webex room/workspace ids are base64 `ciscospark://` blobs that read as
-// gibberish in the picker. With no resolved title, decode to the trailing ref
-// (a UUID) so the row is at least skimmable; non-Webex ids pass through.
-function readableId(adapter: string, id: string): string {
+// Webex room/workspace/person ids are base64 `ciscospark://` blobs that read as
+// gibberish. With no resolved title, decode to the trailing ref (a UUID) so the
+// row is at least skimmable; non-Webex ids pass through.
+export function readableId(adapter: string, id: string): string {
   return WEBEX_ADAPTERS.has(adapter) ? toRef(id) : id
 }
 
