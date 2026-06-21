@@ -169,8 +169,7 @@ type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 const reauthSub = defineCommand({
   meta: {
     name: 'reauth',
-    description:
-      're-authenticate a channel adapter (currently only `kakaotalk`). Use after a stale-token 401 or to rotate the saved password.',
+    description: `re-authenticate a channel adapter (${REAUTHABLE_ADAPTERS.join(', ')}). Use after a stale-token 401 or to rotate the saved password.`,
   },
   args: {
     adapter: {
