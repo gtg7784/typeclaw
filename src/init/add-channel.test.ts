@@ -133,6 +133,39 @@ describe('runAddChannel', () => {
     expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
+  test('adds webex user as an empty block and runs auth runner before config mutation', async () => {
+    const authCalls: string[] = []
+    await runAddChannel({
+      cwd: root,
+      channel: 'webex',
+      runWebexAuth: async ({ cwd }) => {
+        authCalls.push(cwd)
+        return { ok: true }
+      },
+    })
+
+    expect(authCalls).toEqual([root])
+    const cfg = await readConfig()
+    expect(cfg.channels?.webex).toEqual({})
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
+  })
+
+  test('aborts and leaves typeclaw.json + secrets.json untouched when webex auth fails', async () => {
+    const beforeConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    const beforeSecrets = await readFile(join(root, 'secrets.json'), 'utf8')
+
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'webex',
+        runWebexAuth: async () => ({ ok: false, reason: 'bad password' }),
+      }),
+    ).rejects.toThrow(/bad password/)
+
+    expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).toBe(beforeConfig)
+    expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(beforeSecrets)
+  })
+
   test('adds kakaotalk as an empty block (no allow field) and runs auth runner', async () => {
     const authCalls: string[] = []
     await runAddChannel({

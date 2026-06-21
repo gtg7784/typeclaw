@@ -84,6 +84,7 @@ export type InitStep =
   | 'oauth-login'
   | 'scaffold'
   | 'kakaotalk-auth'
+  | 'webex-auth'
   | 'github-webhooks'
   | 'install'
   | 'dockerfile'
@@ -91,6 +92,7 @@ export type InitStep =
   | 'hatching'
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
+export type WebexAuthResult = { ok: true } | { ok: false; reason: string }
 
 // Structured credential block for the GitHub channel adapter. Mirrors the
 // shape `runAddChannel({ channel: 'github', ... })` consumes so the wizard
@@ -126,6 +128,8 @@ export type InitStepEvent =
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
+  | { step: 'webex-auth'; phase: 'start' }
+  | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
   | { step: 'github-webhooks'; phase: 'start' }
   | { step: 'github-webhooks'; phase: 'done'; result: EagerGithubWebhookInstallResult }
   | { step: 'install'; phase: 'start' }
@@ -154,6 +158,7 @@ export type HatchRunner = (options: {
 }) => Promise<HatchingResult>
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
+export type WebexAuthRunner = (options: { cwd: string }) => Promise<WebexAuthResult>
 
 export type LineAuthResult = { ok: true } | { ok: false; reason: string }
 export type LineAuthRunner = (options: { cwd: string }) => Promise<LineAuthResult>
@@ -209,9 +214,11 @@ export type InitOptions = {
   withSlack?: boolean
   withTelegram?: boolean
   withWebex?: boolean
+  withWebexUser?: boolean
   withKakaotalk?: boolean
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
+  runWebexAuth?: WebexAuthRunner
   // Structured GitHub credentials collected by the wizard. When omitted and
   // `withGithub` is true, the existing secrets.json#channels.github block is
   // reused as-is (the wizard's "reuse existing credentials" path).
@@ -250,9 +257,11 @@ export async function runInit({
   withSlack,
   withTelegram,
   withWebex,
+  withWebexUser = false,
   withKakaotalk = false,
   withGithub = false,
   runKakaotalkAuth,
+  runWebexAuth,
   githubCredentials,
   githubFetchImpl,
   onProgress,
@@ -329,6 +338,7 @@ export async function runInit({
     withSlack: wantsSlack,
     withTelegram: wantsTelegram,
     withWebex: wantsWebex,
+    withWebexUser,
     withKakaotalk,
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
@@ -360,6 +370,15 @@ export async function runInit({
       // The user can re-run `typeclaw init` after fixing the auth issue;
       // the scaffold/Dockerfile work above is idempotent.
       throw new Error(`KakaoTalk authentication failed: ${result.reason}`)
+    }
+  }
+
+  if (withWebexUser && runWebexAuth !== undefined) {
+    emit({ step: 'webex-auth', phase: 'start' })
+    const result = await runWebexAuth({ cwd })
+    emit({ step: 'webex-auth', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`Webex authentication failed: ${result.reason}`)
     }
   }
 
@@ -406,6 +425,7 @@ export async function runInit({
   if (wantsSlack) configuredChannels.push('slack-bot')
   if (wantsTelegram) configuredChannels.push('telegram-bot')
   if (wantsWebex) configuredChannels.push('webex-bot')
+  if (withWebexUser) configuredChannels.push('webex')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
   if (withGithub) configuredChannels.push('github')
 
@@ -560,6 +580,7 @@ export type ScaffoldOptions = {
   withSlack?: boolean
   withTelegram?: boolean
   withWebex?: boolean
+  withWebexUser?: boolean
   withKakaotalk?: boolean
 }
 
@@ -593,6 +614,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withSlack) channels['slack-bot'] = {}
   if (options.withTelegram) channels['telegram-bot'] = {}
   if (options.withWebex) channels['webex-bot'] = {}
+  if (options.withWebexUser) channels.webex = {}
   if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
   // No default `member` match is seeded. A fresh chat agent starts with every
@@ -936,7 +958,7 @@ export async function hasExistingChannelSecrets(
     case 'telegram':
       return hasSecretField(channels['telegram-bot'], 'token')
     case 'webex':
-      return hasSecretField(channels['webex-bot'], 'token')
+      return hasCurrentWebexAccount(channels.webex)
     case 'github':
       // GitHub credentials alone are not enough to scaffold a working
       // channel: typeclaw.json#channels.github also needs webhookUrl and
@@ -995,6 +1017,20 @@ function hasSecretField(slot: unknown, field: string): boolean {
   return false
 }
 
+function hasCurrentWebexAccount(block: unknown): boolean {
+  if (!isObjectRecord(block)) return false
+  const current = (block as { currentAccount?: unknown }).currentAccount
+  if (typeof current !== 'string' || current.length === 0) return false
+  const accounts = (block as { accounts?: unknown }).accounts
+  if (!isObjectRecord(accounts)) return false
+  const account = accounts[current]
+  if (!isObjectRecord(account)) return false
+  const token = (account as { access_token?: unknown }).access_token
+  const email = (account as { email?: unknown }).email
+  const encryptedPassword = (account as { encryptedPassword?: unknown }).encryptedPassword
+  return typeof token === 'string' && token.length > 0 && typeof email === 'string' && isObjectRecord(encryptedPassword)
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -1031,7 +1067,15 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 // scaffold-test cases above demonstrates how easy it is to lose a single
 // behavior under a mode flag.
 
-export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'webex-bot' | 'line' | 'kakaotalk' | 'github'
+export type ChannelKind =
+  | 'discord-bot'
+  | 'slack-bot'
+  | 'telegram-bot'
+  | 'webex'
+  | 'webex-bot'
+  | 'line'
+  | 'kakaotalk'
+  | 'github'
 
 // Public adapter names match the typeclaw.json `channels.*` keys exactly.
 // The CLI takes these as the optional positional arg, the picker shows
@@ -1041,13 +1085,14 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'slack-bot',
   'discord-bot',
   'telegram-bot',
+  'webex',
   'webex-bot',
   'line',
   'kakaotalk',
   'github',
 ]
 
-export type AddChannelStep = 'line-auth' | 'kakaotalk-auth' | 'config' | 'secrets' | 'github-webhooks'
+export type AddChannelStep = 'line-auth' | 'kakaotalk-auth' | 'webex-auth' | 'config' | 'secrets' | 'github-webhooks'
 
 export type AddChannelStepEvent =
   | { step: 'config'; phase: 'start' }
@@ -1056,6 +1101,8 @@ export type AddChannelStepEvent =
   | { step: 'line-auth'; phase: 'done'; result: LineAuthResult }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
+  | { step: 'webex-auth'; phase: 'start' }
+  | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
   | { step: 'secrets'; phase: 'start' }
   | { step: 'secrets'; phase: 'done' }
   | { step: 'github-webhooks'; phase: 'start' }
@@ -1072,6 +1119,7 @@ export type AddChannelOptions = {
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex-bot'; webexBotToken: string }
+  | { channel: 'webex'; runWebexAuth: WebexAuthRunner }
   | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
   | {
@@ -1111,6 +1159,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     const result = await options.runKakaotalkAuth({ cwd: options.cwd })
     emit({ step: 'kakaotalk-auth', phase: 'done', result })
     if (!result.ok) throw new Error(`KakaoTalk authentication failed: ${result.reason}`)
+  }
+
+  if (options.channel === 'webex') {
+    emit({ step: 'webex-auth', phase: 'start' })
+    const result = await options.runWebexAuth({ cwd: options.cwd })
+    emit({ step: 'webex-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`Webex authentication failed: ${result.reason}`)
   }
 
   emit({ step: 'config', phase: 'start' })
@@ -1187,6 +1242,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       return { token: options.telegramBotToken }
     case 'webex-bot':
       return { token: options.webexBotToken }
+    case 'webex':
+      return {}
     case 'line':
       // LINE auth writes its structured account block directly to
       // secrets.json#channels.line before config mutation.

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
-import { kakaoChannelBlockSchema, lineChannelBlockSchema } from '@/secrets/schema'
+import { kakaoChannelBlockSchema, lineChannelBlockSchema, webexChannelBlockSchema } from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
 import { isWindows } from '@/shared'
 
@@ -450,19 +450,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   const handleSecretsPatch = async (req: {
     containerName: string
-    patch: { channels: { kakaotalk: unknown } | { line: unknown } }
+    patch: { channels: { kakaotalk: unknown } | { line: unknown } | { webex: unknown } }
   }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
       const cwd = cwds.get(req.containerName)
       if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
       const channelsPatch = req.patch?.channels
-      // Exactly one personal-account channel block per patch. KakaoTalk and
-      // LINE both write their structured account block through this RPC; the
+      // Exactly one personal-account channel block per patch. KakaoTalk, LINE,
+      // and Webex write their structured account block through this RPC; the
       // key present in the patch selects which block to validate and merge.
       const patch =
         'line' in channelsPatch
           ? { key: 'line' as const, parsed: lineChannelBlockSchema.safeParse(channelsPatch.line) }
-          : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
+          : 'webex' in channelsPatch
+            ? { key: 'webex' as const, parsed: webexChannelBlockSchema.safeParse(channelsPatch.webex) }
+            : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
       if (!patch.parsed.success) {
         return { ok: false, reason: patch.parsed.error.issues.map((issue) => issue.message).join('; ') }
       }

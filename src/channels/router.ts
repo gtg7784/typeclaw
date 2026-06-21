@@ -4772,6 +4772,7 @@ function formatAuthorReference(adapter: AdapterId, authorId: string, authorName:
     case 'github':
       return displayName.startsWith('@') ? displayName : `@${displayName}`
     case 'telegram-bot':
+    case 'webex':
     case 'webex-bot':
     case 'line':
     case 'kakaotalk':
@@ -4950,7 +4951,7 @@ const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'discord-
 // native for every shape — including attachment-only, which the text-gated set
 // above cannot express. Special-cased before the text gate so the router sets
 // `replyTo` (not a blockquote) even when the reply carries no text.
-const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex-bot'])
+const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot'])
 
 export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
   if (NATIVE_REPLY_EVERY_SHAPE_ADAPTERS.has(msg.adapter)) return 'native'

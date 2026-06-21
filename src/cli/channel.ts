@@ -29,10 +29,13 @@ import {
   type GithubTunnelProvider,
   type KakaotalkAuthResult,
   type LineAuthResult,
+  type WebexAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
+import { runWebexBootstrap } from '@/init/webex-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import { displayQR } from './qr'
@@ -42,6 +45,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
+  webex: 'Webex (User)',
   'webex-bot': 'Webex',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
@@ -159,7 +163,7 @@ const setSub = defineCommand({
   },
 })
 
-const REAUTHABLE_ADAPTERS = ['line', 'kakaotalk'] as const
+const REAUTHABLE_ADAPTERS = ['line', 'kakaotalk', 'webex'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
 const reauthSub = defineCommand({
@@ -433,6 +437,9 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
     case 'kakaotalk':
       await runKakaotalkReauth(cwd)
       return
+    case 'webex':
+      await runWebexReauth(cwd)
+      return
   }
 }
 
@@ -476,6 +483,22 @@ async function runKakaotalkReauth(cwd: string): Promise<void> {
   await maybePromptReauthRefresh(cwd, 'kakaotalk')
 }
 
+async function runWebexReauth(cwd: string): Promise<void> {
+  const existingEmail = await readExistingWebexEmail(cwd)
+  const creds = await promptWebexCredentials({ defaultEmail: existingEmail })
+
+  const s = spinner()
+  s.start('Logging in to Webex...')
+  const result = await runWebexBootstrap({ email: creds.email, password: creds.password, agentDir: cwd })
+  if (!result.ok) {
+    s.stop(`Webex login failed: ${result.reason}`)
+    process.exit(1)
+  }
+  s.stop('Webex credentials refreshed in secrets.json.')
+
+  await maybePromptReauthRefresh(cwd, 'webex')
+}
+
 async function readExistingKakaotalkEmail(cwd: string): Promise<string | undefined> {
   try {
     const store = new SecretsKakaoCredentialStore({ mode: 'host', secretsPath: `${cwd}/secrets.json` })
@@ -483,6 +506,16 @@ async function readExistingKakaotalkEmail(cwd: string): Promise<string | undefin
     return account?.email ?? undefined
   } catch {
     // First-time reauth or a brand-new agent dir: no account yet, prompt from scratch.
+    return undefined
+  }
+}
+
+async function readExistingWebexEmail(cwd: string): Promise<string | undefined> {
+  try {
+    const store = new SecretsWebexCredentialStore({ mode: 'host', secretsPath: `${cwd}/secrets.json` })
+    const account = await store.getAccountWithRenewalFields()
+    return account?.email ?? undefined
+  } catch {
     return undefined
   }
 }
@@ -580,16 +613,47 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
     process.exit(0)
   }
 
-  const selected = await select<ChannelKind>({
+  type PickerValue = Exclude<ChannelKind, 'webex' | 'webex-bot'> | 'webex-family'
+  const webexModes = available.filter((kind): kind is 'webex' | 'webex-bot' => kind === 'webex' || kind === 'webex-bot')
+  const options: Array<{ value: PickerValue; label: string }> = []
+  for (const kind of available) {
+    if (kind === 'webex' || kind === 'webex-bot') {
+      if (!options.some((option) => option.value === 'webex-family'))
+        options.push({ value: 'webex-family', label: 'Webex' })
+      continue
+    }
+    options.push({ value: kind, label: CHANNEL_LABELS[kind] })
+  }
+
+  const selected = await select<PickerValue>({
     message: 'Pick a channel to add',
-    options: available.map((kind) => ({ value: kind, label: CHANNEL_LABELS[kind] })),
-    initialValue: available[0],
+    options,
+    initialValue: options[0]?.value,
   })
   if (isCancel(selected)) {
     cancel('Aborted.')
     process.exit(0)
   }
-  return selected
+  if (selected !== 'webex-family') return selected
+  if (webexModes.length === 1) return webexModes[0]!
+  const allWebexOptions: Array<{ value: 'webex' | 'webex-bot'; label: string }> = [
+    {
+      value: 'webex',
+      label: 'User (ID/PW) — receives all messages, no @mention needed (recommended)',
+    },
+    { value: 'webex-bot', label: 'Bot (Token) — only sees @mentions in group spaces' },
+  ]
+  const webexOptions = allWebexOptions.filter((option) => webexModes.includes(option.value))
+  const mode = await select<'webex' | 'webex-bot'>({
+    message: 'Which Webex mode?',
+    options: webexOptions,
+    initialValue: webexModes[0],
+  })
+  if (isCancel(mode)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return mode
 }
 
 function isSettableAdapter(value: string): value is SettableAdapter {
@@ -792,6 +856,7 @@ type CollectedCredentials =
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'webex'; runWebexAuth: (options: { cwd: string }) => Promise<WebexAuthResult> }
   | { channel: 'webex-bot'; webexBotToken: string }
   | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
@@ -819,6 +884,14 @@ async function collectCredentials(
     }
     case 'telegram-bot':
       return { channel, telegramBotToken: await promptTelegramToken() }
+    case 'webex': {
+      const creds = await promptWebexCredentials()
+      return {
+        channel,
+        runWebexAuth: ({ cwd: agentDir }) =>
+          runWebexBootstrap({ email: creds.email, password: creds.password, agentDir }),
+      }
+    }
     case 'webex-bot':
       return { channel, webexBotToken: await promptWebexToken() }
     case 'line': {
@@ -1283,6 +1356,36 @@ async function promptKakaotalkCredentials(
   return { email, password: pwd }
 }
 
+async function promptWebexCredentials(
+  opts: { defaultEmail?: string } = {},
+): Promise<{ email: string; password: string }> {
+  note(
+    [
+      'Logs in headlessly with your Webex email/password.',
+      'SSO/MFA accounts are not supported. Messages will be sent and received under this account.',
+    ].join('\n'),
+    'About to log in to Webex',
+  )
+  const email = await text({
+    message: 'Webex email',
+    ...(opts.defaultEmail !== undefined ? { initialValue: opts.defaultEmail, placeholder: opts.defaultEmail } : {}),
+    validate: (value) => (value && value.length > 0 ? undefined : 'Email is required'),
+  })
+  if (isCancel(email)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const pwd = await password({
+    message: 'Webex password',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Password is required'),
+  })
+  if (isCancel(pwd)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return { email, password: pwd }
+}
+
 type LinePromptResult =
   | { method: 'qr'; callbacks: { onQRUrl: (url: string) => Promise<void>; onPincode: (pin: string) => void } }
   | {
@@ -1452,6 +1555,9 @@ function reportProgress(
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
+      case 'webex-auth':
+        s.stop(reportWebexAuth(event.result))
+        break
       case 'config':
         s.stop('Updated typeclaw.json.')
         break
@@ -1468,6 +1574,7 @@ function reportProgress(
 const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'line-auth': 'Logging in to LINE...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
+  'webex-auth': 'Logging in to Webex...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
   'github-webhooks': 'Installing GitHub repository webhooks...',
@@ -1476,6 +1583,11 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
   if (result.ok) return 'KakaoTalk credentials saved to secrets.json.'
   return `KakaoTalk login failed: ${result.reason}`
+}
+
+function reportWebexAuth(result: WebexAuthResult): string {
+  if (result.ok) return 'Webex credentials saved to secrets.json.'
+  return `Webex login failed: ${result.reason}`
 }
 
 function reportLineAuth(result: LineAuthResult): string {
