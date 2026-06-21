@@ -6,7 +6,7 @@ import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
-import { definePlugin, type SpawnSubagentOptions } from '@/plugin'
+import { buildPluginCronGlobalId, definePlugin, type SpawnSubagentOptions } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
@@ -57,6 +57,13 @@ const DEFAULT_MIN_IDLE_DELTA_LINES = 3
 // The scheduler has no catchup for missed fires; a daily default would starve
 // sporadic agents entirely. Operators can override via `memory.dreaming.schedule`.
 const DEFAULT_DREAMING_SCHEDULE = '*/30 * * * *'
+
+// Local key of the dreaming cron job (registered under `cronJobs.dreaming`) and
+// the global id the scheduler stamps on its `parentOrigin.jobId`. Derived
+// through the same builder the registry uses so the registration site and the
+// infra-turn discriminator below cannot drift to different ids.
+const DREAMING_CRON_KEY = 'dreaming'
+const DREAMING_CRON_JOB_ID = buildPluginCronGlobalId('memory', DREAMING_CRON_KEY)
 
 // memory-retrieval's ceiling, enforced by the orchestration layer (see
 // `awaitWithSubagentTimeout` in @/agent/subagents). 30s is sized for the
@@ -167,6 +174,35 @@ const defaultDeps: MemoryPluginDeps = {
   openAppendVectorStore: (agentDir) => VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db')),
 }
 
+// TypeClaw-owned infrastructure subagents (memory-logger, dreaming, backup) run
+// the agent over their OWN fixed instruction prompt, not a user message. Their
+// `userPrompt` is the static framing block buildInitialPrompt produces — feeding
+// it into hybridSearch keyword-mines the subagent's own prose ("Read the
+// transcript past the watermark…"), retrieves nothing useful, and embeds a
+// ~560-token query that trips the 512-token bound warning on every spawn. None
+// of these subagents consume injected long-term memory the way a conversational
+// turn does, so per-turn retrieval is pure waste here. This is the same class of
+// "don't mine framing prose" bug PR #340 fixed for memory-retrieval, applied to
+// the subagent turn-start path.
+//
+// Two provenance shapes carry infra work, because the two infra subagents are
+// spawned differently:
+//   - memory-logger / backup: spawned directly with a `system` parent origin.
+//   - dreaming: spawned by the memory plugin's own CRON job, so its parent
+//     origin is `cron` (jobId `__plugin_memory_dreaming`), NOT `system` — the
+//     cron consumer stamps a `cron` parentOrigin so the subagent resolves to the
+//     right role (src/cron/consumer.ts). It must be matched by its specific job
+//     id, not by "any cron subagent": a user-SCHEDULED cron subagent is real
+//     delegated work and keeps memory.
+function isInternalInfraTurn(origin: SessionOrigin | undefined): boolean {
+  if (origin === undefined) return false
+  if (origin.kind === 'system') return true
+  if (origin.kind !== 'subagent') return false
+  const spawnedBy = origin.spawnedByOrigin
+  if (spawnedBy?.kind === 'system') return true
+  return spawnedBy?.kind === 'cron' && spawnedBy.jobId === DREAMING_CRON_JOB_ID
+}
+
 // Builds the per-turn user-prompt memory block for a vector agent. Non-channel
 // turns always use top-K hybrid search, regardless of total shard size. Repeated
 // retrieved excerpts de-duplicate across turns, and an empty retrieval falls back
@@ -184,6 +220,7 @@ async function renderVectorTurnMemory(
   deps: MemoryPluginDeps,
   logger?: { info: (msg: string) => void },
 ): Promise<string> {
+  if (isInternalInfraTurn(event.origin)) return ''
   const plan = await loadMemoryInjectionPlan(event.agentDir, { injectionBudgetBytes })
   const isChannel = event.origin?.kind === 'channel'
   if (plan.mode === 'direct' && isChannel) {
@@ -431,7 +468,7 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           memory_search: createMemorySearchTool(),
         },
         cronJobs: {
-          dreaming: {
+          [DREAMING_CRON_KEY]: {
             schedule: dreamingSchedule,
             kind: 'prompt' as const,
             prompt: '(internal: dreaming consolidation; user prompt is built by the dreaming subagent handler)',
