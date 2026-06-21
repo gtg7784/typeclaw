@@ -103,7 +103,7 @@ export function createOutboundCallback(deps: {
     const tag = await formatChannelTag(msg.chat)
     const parentId = msg.replyTo?.externalMessageId ?? msg.thread ?? undefined
     logger.info(
-      `[webex-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${parentId !== undefined ? ` parent=${parentId}` : ''}`,
+      `[webex-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${parentId !== undefined ? ` parent=${toRef(parentId)}` : ''}`,
     )
 
     try {
@@ -117,13 +117,13 @@ export function createOutboundCallback(deps: {
             ...(carriesText ? { text } : {}),
             ...(parentId !== undefined ? { parentId } : {}),
           })
-          logger.info(`[webex-bot] uploaded id=${sent.id} filename=${file.filename} ${tag}`)
+          logger.info(`[webex-bot] uploaded id=${toRef(sent.id)} filename=${file.filename} ${tag}`)
         }
         return { ok: true }
       }
 
       const sent = await client.sendMessage(msg.chat, text, parentId !== undefined ? { parentId } : undefined)
-      logger.info(`[webex-bot] sent id=${sent.id} ${tag}`)
+      logger.info(`[webex-bot] sent id=${toRef(sent.id)} ${tag}`)
       return { ok: true }
     } catch (err) {
       const message = describe(err)
@@ -190,7 +190,9 @@ export function createWebexMembershipResolver(deps: {
       }
       return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated, humanMemberIds }
     } catch (err) {
-      deps.logger.warn(`[webex-bot] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
+      deps.logger.warn(
+        `[webex-bot] membership room=${toRef(key.chat)} failed: ${describe(err)}; deriving from recent history`,
+      )
       return await deriveMembershipFromHistory({
         fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
         now,
@@ -272,7 +274,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       (): ResolvedChannelNames => ({}),
     )
     const label = names.chatName ?? null
-    return label === null || label === chat ? `room=${chat}` : `room=${label}(${chat})`
+    return label === null || label === chat ? `room=${toRef(chat)}` : `room=${label}(${toRef(chat)})`
   }
 
   const historyCallback = createWebexHistoryCallback({ client, logger, botPersonIdRef: () => botPerson?.id ?? null })
@@ -290,7 +292,9 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
     const botSnapshot = botPerson
     try {
       const tag = await formatChannelTag(event.roomId)
-      logger.info(`[webex-bot] inbound id=${event.id} author=${event.personEmail} ${tag} text_len=${event.text.length}`)
+      logger.info(
+        `[webex-bot] inbound id=${toRef(event.id)} author=${event.personEmail} ${tag} text_len=${event.text.length}`,
+      )
       const verdict = classifyInbound(
         event,
         options.configRef(),
@@ -298,7 +302,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         options.selfAliasesRef?.() ?? [],
       )
       if (verdict.kind === 'drop') {
-        logger.info(`[webex-bot] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
+        logger.info(`[webex-bot] dropped id=${toRef(event.id)} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
       }
       const payload = await enrichWebexMessageReference({
@@ -308,7 +312,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         botPersonId: botSnapshot?.id ?? null,
       })
       logger.info(
-        `[webex-bot] routed id=${event.id} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
+        `[webex-bot] routed id=${toRef(event.id)} ${tag} mention=${payload.isBotMention} reply=${payload.replyToBotMessageId !== null}`,
       )
       await options.router.route(payload)
     } catch (err) {
