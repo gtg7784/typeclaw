@@ -1,7 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { basename, join, resolve } from 'node:path'
 
 import {
   config,
@@ -34,7 +33,7 @@ import { hostLocaleIsCjk } from '@/shared/host-locale'
 import { isWindows } from '@/shared/platform'
 import { createTui } from '@/tui'
 
-import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
+import { resolveBaseImageVersion, resolveTypeclawSpec, typeclawCheckoutRoot } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { CONFIG_FILE, findAgentDir, isInitialized } from './find-agent-dir'
 import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
@@ -58,7 +57,6 @@ export { CONFIG_FILE, findAgentDir, isInitialized }
 
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'
-const TYPECLAW_PACKAGE = 'typeclaw'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
@@ -717,52 +715,13 @@ function buildPackageJson(root: string, name: string, platform: NodeJS.Platform)
   }
 }
 
-// Prefer the registry-style range (`^X.Y.Z`) when typeclaw is itself an
-// installed package — that's what lets `bun install` in the agent resolve
-// typeclaw from npm. Fall back to the local checkout for dev contributors
-// running `bun run src/cli/index.ts init` from the repo: `link:typeclaw` on
-// native Windows (a `bun link` registration that bun's installer symlinks
-// rather than copying — `file:` would copy the whole checkout incl `.git/`
-// and EPERM, the #899 path), `file:<rel>` on POSIX (works today, keeps the
-// same-path mirror mount in start.ts).
-function resolveTypeclawSpec(agentRoot: string, platform: NodeJS.Platform = process.platform): string {
-  const scaffoldVersion = resolveScaffoldVersion()
-  if (scaffoldVersion !== null) return scaffoldVersion
-  if (isWindows(platform)) return `link:${TYPECLAW_PACKAGE}`
-  const typeclawRoot = findTypeclawRoot()
-  return typeclawRoot ? `file:${toFileSpec(relative(agentRoot, typeclawRoot))}` : 'file:../typeclaw'
-}
-
 async function maybeLinkWindowsDevTypeclaw(
   platform: NodeJS.Platform,
   runBunLink: RunBunLink | undefined,
 ): Promise<void> {
-  if (resolveScaffoldVersion() !== null) return
-  const typeclawRoot = findTypeclawRoot()
+  const typeclawRoot = typeclawCheckoutRoot()
   if (typeclawRoot === null) return
   await linkWindowsDevTypeclaw(typeclawRoot, { platform, ...(runBunLink !== undefined ? { runBunLink } : {}) })
-}
-
-function toFileSpec(rel: string): string {
-  if (rel === '') return '.'
-  // bun/npm accept POSIX-style paths in file: specifiers; normalize separators.
-  return rel.split(/[\\/]/).join('/')
-}
-
-function findTypeclawRoot(): string | null {
-  try {
-    let dir = dirname(fileURLToPath(import.meta.url))
-    const root = resolve('/')
-    while (dir !== root) {
-      const pkgPath = join(dir, 'package.json')
-      if (existsSync(pkgPath)) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string }
-        if (pkg.name === 'typeclaw') return dir
-      }
-      dir = dirname(dir)
-    }
-  } catch {}
-  return null
 }
 
 export async function writeDockerAssets(root: string): Promise<DockerAssetsResult> {
