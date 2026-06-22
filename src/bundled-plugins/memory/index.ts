@@ -392,12 +392,22 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         return currentSize - baseline >= bufferBytes
       }
 
-      const shouldSkipIdleSpawn = async (sessionId: string, transcriptPath: string): Promise<boolean> => {
-        if (minIdleDeltaLines === 0) return false
+      // Carries the measured line count so the caller can reserve it as the new
+      // baseline BEFORE the detached fireMemoryLogger settles its own deferred
+      // baseline write. The gate awaits real fs reads, so two idle timers can be
+      // in flight at once; without the eager reservation both gates read the same
+      // stale baseline and each queues a spawn, over-firing memory-logger. The
+      // deferred set in fireMemoryLogger stays the final exact baseline.
+      const decideIdleSpawn = async (
+        sessionId: string,
+        transcriptPath: string,
+      ): Promise<{ skip: true } | { skip: false; lineBaseline?: number }> => {
+        if (minIdleDeltaLines === 0) return { skip: false }
         const currentLines = await readLineCount(transcriptPath)
-        if (currentLines === 0) return false
+        if (currentLines === 0) return { skip: false }
         const baseline = linesAtLastRun.get(sessionId) ?? 0
-        return currentLines - baseline < minIdleDeltaLines
+        if (currentLines - baseline < minIdleDeltaLines) return { skip: true }
+        return { skip: false, lineBaseline: currentLines }
       }
 
       const runMemoryRetrieval = async (event: {
@@ -508,11 +518,18 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             const timer = setTimeout(() => {
               idleTimers.delete(sessionId)
               void (async () => {
-                if (transcriptPath !== undefined && (await shouldSkipIdleSpawn(sessionId, transcriptPath))) {
+                const decision =
+                  transcriptPath !== undefined
+                    ? await decideIdleSpawn(sessionId, transcriptPath)
+                    : { skip: false as const }
+                if (decision.skip) {
                   ctx.logger.info(
                     `memory-logger idle skip ${sessionId} (delta below minIdleDeltaLines=${minIdleDeltaLines})`,
                   )
                   return
+                }
+                if (decision.lineBaseline !== undefined) {
+                  linesAtLastRun.set(sessionId, decision.lineBaseline)
                 }
                 void fireMemoryLogger(sessionId, 'idle')
               })()
