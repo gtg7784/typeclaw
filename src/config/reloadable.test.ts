@@ -319,7 +319,7 @@ function shouldRecurse(path: string): boolean {
   return path === 'docker' || path === 'git' || path === 'permissions'
 }
 
-// `thinkingLevel` is an optional top-level field: absent from a bare-`{}` parse
-// (so it never shows up in the enumerated default-config paths) but classified
-// in FIELD_EFFECTS, exactly like the roles virtual paths.
-const KNOWN_OPTIONAL_PATHS = new Set<string>(['roles.match', 'roles.permissions', 'thinkingLevel'])
+// `roles.match` / `roles.permissions` are optional virtual paths: absent from a
+// bare-`{}` parse (so they never show up in the enumerated default-config
+// paths) but classified in FIELD_EFFECTS.
+const KNOWN_OPTIONAL_PATHS = new Set<string>(['roles.match', 'roles.permissions'])

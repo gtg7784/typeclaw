@@ -8,6 +8,8 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
+import { configSchema, type Models, type ResolvedProfile } from '@/config'
+import type { ModelRef } from '@/config/providers'
 import { createHookBus, type PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
 
@@ -21,6 +23,7 @@ import {
   formatRestartNotice,
   formatRestartNoticeOriginating,
   getBundledSkillsDir,
+  resolveSessionThinkingLevel,
   subscribeRestartNotice,
 } from './index'
 import { LiveSubagentRegistry } from './live-subagents'
@@ -1585,5 +1588,35 @@ describe('subscribeRestartNotice', () => {
         : ''
     expect(originatorContent).toContain('**Your very next reply must briefly confirm the restart completed**')
     expect(siblingAContent).toContain('Do not acknowledge or reply to this notice unless a human directly')
+  })
+})
+
+describe('resolveSessionThinkingLevel', () => {
+  const REF = 'openai/gpt-5.4-nano' as ModelRef
+  const parseModels = (models: Record<string, unknown>): Models => configSchema.parse({ models }).models
+  const resolvedWith = (thinkingLevel?: ResolvedProfile['thinkingLevel']): Pick<ResolvedProfile, 'thinkingLevel'> => ({
+    ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+  })
+
+  test('the profile`s own level wins over the default profile`s', () => {
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'medium' } })
+    expect(resolveSessionThinkingLevel(models, resolvedWith('off'), REF)).toBe('off')
+  })
+
+  test('a profile without its own level inherits the default profile`s', () => {
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'high' }, fast: REF })
+    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined), REF)).toBe('high')
+  })
+
+  test('falls through to the SDK default when neither the profile nor default declares one', () => {
+    const models = parseModels({ default: REF })
+    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined), REF)).toBeUndefined()
+  })
+
+  test('an unknown profile that fell back to default uses the default profile`s level', () => {
+    // `resolveProfile` for an unknown name returns the default profile, so the
+    // resolved.thinkingLevel IS the default's — exercised here directly.
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'xhigh' } })
+    expect(resolveSessionThinkingLevel(models, resolvedWith('xhigh'), REF)).toBe('xhigh')
   })
 })

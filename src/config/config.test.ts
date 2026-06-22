@@ -39,7 +39,7 @@ const onWindows = isWindows()
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 const VALID_MODEL_2 = 'openai/gpt-5.4-nano'
 
-function parseModels(models: Record<string, string | string[]>): Models {
+function parseModels(models: Record<string, unknown>): Models {
   return configSchema.parse({ models }).models
 }
 
@@ -52,49 +52,88 @@ function modelRefList(...values: string[]): ModelRef[] {
   return values.map(modelRef)
 }
 
+function profileEntry(...values: string[]): { refs: ModelRef[] } {
+  return { refs: values.map(modelRef) }
+}
+
 describe('configSchema models field', () => {
-  test('defaults to { default: [<DEFAULT_MODEL_REF>] } when omitted', () => {
+  test('defaults to { default: { refs: [<DEFAULT_MODEL_REF>] } } when omitted', () => {
     const parsed = configSchema.parse({})
-    expect(parsed.models).toEqual({ default: modelRefList('openai/gpt-5.4-nano') })
+    expect(parsed.models).toEqual({ default: profileEntry('openai/gpt-5.4-nano') })
   })
 
   test('normalises a single-ref string input to a one-element array', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.models).toEqual({ default: modelRefList(VALID_MODEL) })
+    expect(parsed.models).toEqual({ default: profileEntry(VALID_MODEL) })
   })
 
   test('accepts multiple profiles in either shape and normalises both', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL, fast: [VALID_MODEL_2], deep: VALID_MODEL, vision: VALID_MODEL_2 },
     })
-    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL))
-    expect(parsed.models.fast).toEqual(modelRefList(VALID_MODEL_2))
-    expect(parsed.models.deep).toEqual(modelRefList(VALID_MODEL))
-    expect(parsed.models.vision).toEqual(modelRefList(VALID_MODEL_2))
+    expect(parsed.models.default).toEqual(profileEntry(VALID_MODEL))
+    expect(parsed.models.fast).toEqual(profileEntry(VALID_MODEL_2))
+    expect(parsed.models.deep).toEqual(profileEntry(VALID_MODEL))
+    expect(parsed.models.vision).toEqual(profileEntry(VALID_MODEL_2))
   })
 
   test('accepts a fallback chain as an array', () => {
     const parsed = configSchema.parse({
       models: { default: [VALID_MODEL, VALID_MODEL_2] },
     })
-    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL, VALID_MODEL_2))
+    expect(parsed.models.default).toEqual(profileEntry(VALID_MODEL, VALID_MODEL_2))
   })
 
   test('accepts user-defined profile names alongside well-known ones', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL, 'cheap-batch': VALID_MODEL_2 },
     })
-    expect(parsed.models['cheap-batch']).toEqual(modelRefList(VALID_MODEL_2))
+    expect(parsed.models['cheap-batch']).toEqual(profileEntry(VALID_MODEL_2))
   })
 
   test('accepts custom model refs for known providers', () => {
     const parsed = configSchema.parse({ models: { default: 'openai/gpt-6-live' } })
-    expect(parsed.models.default).toEqual(modelRefList('openai/gpt-6-live'))
+    expect(parsed.models.default).toEqual(profileEntry('openai/gpt-6-live'))
   })
 
   test('accepts custom model refs inside fallback chains', () => {
     const parsed = configSchema.parse({ models: { default: [VALID_MODEL_2, 'openai/gpt-6-live'] } })
-    expect(parsed.models.default).toEqual(modelRefList(VALID_MODEL_2, 'openai/gpt-6-live'))
+    expect(parsed.models.default).toEqual(profileEntry(VALID_MODEL_2, 'openai/gpt-6-live'))
+  })
+
+  test('accepts a rich profile object with model + thinkingLevel', () => {
+    const parsed = configSchema.parse({ models: { default: { model: VALID_MODEL, thinkingLevel: 'high' } } })
+    expect(parsed.models.default).toEqual({ refs: modelRefList(VALID_MODEL), thinkingLevel: 'high' })
+  })
+
+  test('accepts a rich profile object with a models chain + thinkingLevel', () => {
+    const parsed = configSchema.parse({
+      models: { default: { models: [VALID_MODEL, VALID_MODEL_2], thinkingLevel: 'off' } },
+    })
+    expect(parsed.models.default).toEqual({ refs: modelRefList(VALID_MODEL, VALID_MODEL_2), thinkingLevel: 'off' })
+  })
+
+  test('a rich profile object without thinkingLevel normalises to just refs', () => {
+    const parsed = configSchema.parse({ models: { default: { model: VALID_MODEL } } })
+    expect(parsed.models.default).toEqual(profileEntry(VALID_MODEL))
+  })
+
+  test('rejects a rich profile object with both model and models', () => {
+    expect(() => configSchema.parse({ models: { default: { model: VALID_MODEL, models: VALID_MODEL_2 } } })).toThrow(
+      /only one of/i,
+    )
+  })
+
+  test('rejects a rich profile object with neither model nor models', () => {
+    expect(() => configSchema.parse({ models: { default: { thinkingLevel: 'high' } } })).toThrow(/must specify/i)
+  })
+
+  test('rejects a rich profile object with an unknown extra key', () => {
+    expect(() => configSchema.parse({ models: { default: { model: VALID_MODEL, bogus: 1 } } })).toThrow()
+  })
+
+  test('rejects an unknown thinkingLevel inside a rich profile', () => {
+    expect(() => configSchema.parse({ models: { default: { model: VALID_MODEL, thinkingLevel: 'turbo' } } })).toThrow()
   })
 
   test('rejects models map without default', () => {
@@ -129,29 +168,29 @@ describe('configSchema models field', () => {
     const parsed = configSchema.parse({
       models: { default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'] },
     })
-    expect(parsed.models.default).toEqual(modelRefList('openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'))
+    expect(parsed.models.default).toEqual(profileEntry('openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'))
   })
 })
 
-describe('configSchema thinkingLevel field', () => {
-  test('is undefined when omitted (defers to the per-provider/SDK default)', () => {
-    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.thinkingLevel).toBeUndefined()
+describe('thinkingLevel is per-profile, not a top-level field', () => {
+  test('top-level `thinkingLevel` is no longer a typed config field', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } }) as Record<string, unknown>
+    expect('thinkingLevel' in parsed).toBe(false)
   })
 
-  test('accepts every supported level', () => {
-    for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const) {
-      const parsed = configSchema.parse({ models: { default: VALID_MODEL }, thinkingLevel: level })
-      expect(parsed.thinkingLevel).toBe(level)
-    }
+  test('a stray top-level `thinkingLevel` falls into catchall (treated as plugin config), not a typed field', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, thinkingLevel: 'high' }) as Record<
+      string,
+      unknown
+    >
+    // Preserved by `.catchall` but no longer a first-class field — the runtime
+    // never reads it; per-profile `models.<profile>.thinkingLevel` is the path.
+    expect(extractPluginConfigs(parsed).thinkingLevel).toBe('high')
   })
 
-  test('rejects an unknown level', () => {
-    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, thinkingLevel: 'turbo' })).toThrow()
-  })
-
-  test('is classified applied (live-reloadable, no restart)', () => {
-    expect(FIELD_EFFECTS.thinkingLevel).toBe('applied')
+  test('is not classified in FIELD_EFFECTS (the per-profile level rides `models`)', () => {
+    expect('thinkingLevel' in FIELD_EFFECTS).toBe(false)
+    expect(FIELD_EFFECTS.models).toBe('applied')
   })
 })
 
@@ -291,6 +330,29 @@ describe('resolveProfile', () => {
     const result = resolveProfile(chain, 'deep')
     expect(result.refs).toEqual(modelRefList(VALID_MODEL, VALID_MODEL_2))
     expect(result.fellBackToDefault).toBe(true)
+  })
+
+  test('exposes the requested profile`s own thinkingLevel', () => {
+    const withThinking = parseModels({
+      default: VALID_MODEL,
+      fast: { model: VALID_MODEL_2, thinkingLevel: 'off' },
+    })
+    expect(resolveProfile(withThinking, 'fast').thinkingLevel).toBe('off')
+  })
+
+  test('a profile without its own thinkingLevel reports undefined (caller inherits the default)', () => {
+    const withThinking = parseModels({
+      default: { model: VALID_MODEL, thinkingLevel: 'high' },
+      fast: VALID_MODEL_2,
+    })
+    expect(resolveProfile(withThinking, 'fast').thinkingLevel).toBeUndefined()
+  })
+
+  test('falling back to default surfaces the default profile`s thinkingLevel', () => {
+    const withThinking = parseModels({ default: { model: VALID_MODEL, thinkingLevel: 'high' } })
+    const result = resolveProfile(withThinking, 'deep')
+    expect(result.fellBackToDefault).toBe(true)
+    expect(result.thinkingLevel).toBe('high')
   })
 })
 
