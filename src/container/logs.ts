@@ -1,6 +1,6 @@
 import { supportsColor } from './log-colors'
 import { makeLogTimestampReformatter, type TimestampReformatter } from './log-timestamps'
-import { containerExists, containerNameFromCwd, getBun } from './shared'
+import { containerExists, containerNameFromCwd, getBun, resolveDockerBinary } from './shared'
 
 export type LogsPlan = {
   containerName: string
@@ -39,6 +39,17 @@ export async function logs({
 
   const plan = planLogs(cwd, { follow, tail })
 
+  // Resolve docker before inspecting: containerExists collapses a missing
+  // docker binary into `false`, so deferring this would surface the misleading
+  // "Container … not found" instead of the real "Docker is not installed" on a
+  // host where docker isn't on PATH (cf. shell.ts). resolveDockerBinary also
+  // recovers the stale-Windows-PATH case where Bun.which misses (#1007).
+  const dockerBinary = resolveDockerBinary()
+  if (dockerBinary === null) {
+    return { ok: false, reason: 'Docker is not installed (docker not found on PATH).' }
+  }
+  const cmd = buildDockerLogsCmd(plan, dockerBinary)
+
   try {
     if (!(await containerExists(plan.containerName))) {
       return { ok: false, reason: `Container ${plan.containerName} not found. Run \`typeclaw start\` first.` }
@@ -47,7 +58,7 @@ export async function logs({
     // stdin:'ignore' — `docker logs` never reads stdin, and letting the child
     // hold the TTY breaks the viewer's raw-mode keypress listener (esc/q/ctrl-c
     // stop reaching it, freezing the logs view with no way out).
-    const proc = bun.spawn({ cmd: buildDockerLogsCmd(plan), cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({ cmd, cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
 
     // `docker logs -f` never exits on its own; aborting the signal must kill it
     // so the pumps' stream readers end. Escalate to SIGKILL if SIGTERM is
@@ -112,8 +123,12 @@ export function parseTailValue(raw: string): { ok: true; value: string } | { ok:
 }
 
 // Exported so `compose/logs.ts` builds the exact same `docker logs` argv shape.
-export function buildDockerLogsCmd(plan: LogsPlan): string[] {
-  const cmd = ['docker', 'logs', '--timestamps']
+// Takes the already-resolved docker binary path (from resolveDockerBinary) as
+// the argv head so a stale Windows PATH still spawns — passing a bare 'docker'
+// throws ENOENT on the #1007 case. Callers resolve the binary and handle the
+// missing-docker error before getting here.
+export function buildDockerLogsCmd(plan: LogsPlan, dockerBinary: string): string[] {
+  const cmd = [dockerBinary, 'logs', '--timestamps']
   if (plan.tail !== undefined) cmd.push('--tail', plan.tail)
   if (plan.follow) cmd.push('-f')
   cmd.push(plan.containerName)

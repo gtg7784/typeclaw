@@ -70,9 +70,11 @@ describe('parseTailValue', () => {
 })
 
 describe('buildDockerLogsCmd', () => {
+  const dockerBinary = '/usr/bin/docker'
+
   test('builds the base argv when follow is false', () => {
-    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false })).toEqual([
-      'docker',
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false }, dockerBinary)).toEqual([
+      '/usr/bin/docker',
       'logs',
       '--timestamps',
       'coder',
@@ -80,8 +82,8 @@ describe('buildDockerLogsCmd', () => {
   })
 
   test('appends -f before the container name when follow is true', () => {
-    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true })).toEqual([
-      'docker',
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true }, dockerBinary)).toEqual([
+      '/usr/bin/docker',
       'logs',
       '--timestamps',
       '-f',
@@ -90,12 +92,12 @@ describe('buildDockerLogsCmd', () => {
   })
 
   test('omits --tail when the field is absent so docker uses its default ("all")', () => {
-    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false })).not.toContain('--tail')
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false }, dockerBinary)).not.toContain('--tail')
   })
 
   test('inserts --tail <value> before -f when both are set', () => {
-    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true, tail: '50' })).toEqual([
-      'docker',
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true, tail: '50' }, dockerBinary)).toEqual([
+      '/usr/bin/docker',
       'logs',
       '--timestamps',
       '--tail',
@@ -106,14 +108,19 @@ describe('buildDockerLogsCmd', () => {
   })
 
   test('passes the "all" sentinel through unchanged', () => {
-    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false, tail: 'all' })).toEqual([
-      'docker',
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false, tail: 'all' }, dockerBinary)).toEqual([
+      '/usr/bin/docker',
       'logs',
       '--timestamps',
       '--tail',
       'all',
       'coder',
     ])
+  })
+
+  test('uses the resolved absolute binary path as argv head so a stale Windows PATH still spawns (#1007)', () => {
+    const winPath = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false }, winPath)[0]).toBe(winPath)
   })
 })
 

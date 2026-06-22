@@ -1,7 +1,7 @@
 import { buildDockerLogsCmd, containerExists } from '@/container'
 import { supportsColor } from '@/container/log-colors'
 import { makeLogTimestampReformatter, type TimestampReformatter } from '@/container/log-timestamps'
-import { getBun } from '@/container/shared'
+import { getBun, resolveDockerBinary } from '@/container/shared'
 
 import { discoverAgents, type AgentEntry } from './discover'
 
@@ -74,6 +74,17 @@ export async function composeLogs({
 }: ComposeLogsOptions): Promise<ComposeLogsResult> {
   const agents = discoverAgents(rootCwd)
 
+  // Resolve docker BEFORE probing containers: containerExists collapses a
+  // missing docker binary into `false`, so every agent would be classified
+  // "container not running" and the empty-attached early return would exit 0 —
+  // masking the real "docker not on PATH" cause (the stale-Windows-PATH case
+  // #1007 covers for start/init). Resolving first surfaces it correctly.
+  const dockerBinary = resolveDockerBinary()
+  if (dockerBinary === null) {
+    err.write('compose: docker not found on PATH\n')
+    return { agents, attached: [], missing: agents, exitCode: 1 }
+  }
+
   const liveness = await Promise.all(
     agents.map(async (a) => ({ agent: a, exists: await containerExists(a.containerName) })),
   )
@@ -95,11 +106,14 @@ export async function composeLogs({
   const useColor = supportsColor(out)
 
   const procs = attached.map((agent) => {
-    const cmd = buildDockerLogsCmd({
-      containerName: agent.containerName,
-      follow,
-      ...(tail !== undefined ? { tail } : {}),
-    })
+    const cmd = buildDockerLogsCmd(
+      {
+        containerName: agent.containerName,
+        follow,
+        ...(tail !== undefined ? { tail } : {}),
+      },
+      dockerBinary,
+    )
     const proc = bun.spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
     return { agent, proc }
   })
