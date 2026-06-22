@@ -23,6 +23,7 @@ import {
   NETWORK_BLOCK_IPV4_NETS,
   NETWORK_BLOCK_IPV6_NETS,
   TRANSFORMERS_VERSION,
+  TYPECLAW_CLI_ENTRY,
   TYPECLAW_ENTRYPOINT_PATH,
 } from './dockerfile'
 
@@ -1409,8 +1410,9 @@ describe('network egress entrypoint shim', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
     expect(shim).toMatch(
-      /!= "1" \];? then\s+link_persistent_home_files\s+link_configured_symlinks\s+start_xvfb\s+exec bun run typeclaw "\$@"/,
+      /!= "1" \];? then\s+link_persistent_home_files\s+link_configured_symlinks\s+start_xvfb\s+exec bun run \/agent\/node_modules\/typeclaw\/src\/cli\/index\.ts "\$@"/,
     )
+    expect(shim).toContain(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
   })
 
   test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
@@ -1500,7 +1502,7 @@ describe('network egress entrypoint shim', () => {
   test('drops NET_ADMIN from bounding+inheritable+ambient sets before exec-ing (matches setpriv(1) warning)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain(
-      'exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"',
+      `exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run ${TYPECLAW_CLI_ENTRY} "$@"`,
     )
   })
 
@@ -1512,7 +1514,7 @@ describe('network egress entrypoint shim', () => {
     expect(offBranchEnd).toBeGreaterThan(-1)
     const offBranch = shim.slice(0, offBranchEnd)
     const offStartXvfbIdx = offBranch.lastIndexOf('start_xvfb\n')
-    const offExecIdx = offBranch.search(/exec bun run typeclaw "\$@"/)
+    const offExecIdx = offBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
     expect(offStartXvfbIdx).toBeGreaterThan(-1)
     expect(offExecIdx).toBeGreaterThan(offStartXvfbIdx)
 
@@ -1561,8 +1563,8 @@ describe('network egress entrypoint shim', () => {
     expect(offBranchEnd).toBeGreaterThan(-1)
     const offBranch = shim.slice(0, offBranchEnd)
     expect(offBranch).not.toContain('iptables -A OUTPUT')
-    expect(offBranch).toMatch(/exec bun run typeclaw "\$@"/)
-    expect(offBranch).not.toMatch(/exec setpriv [^\n]*-- bun run typeclaw/)
+    expect(offBranch).toContain(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
+    expect(offBranch).not.toMatch(/exec setpriv [^\n]*-- bun run/)
   })
 
   test('per-agent Dockerfile wires ENTRYPOINT to the shim path, not directly to bun run', () => {
@@ -1714,7 +1716,7 @@ describe('network egress entrypoint shim', () => {
     expect(offBranchEnd).toBeGreaterThan(-1)
     const offBranch = shim.slice(0, offBranchEnd)
     const offLinkIdx = offBranch.lastIndexOf('link_persistent_home_files\n')
-    const offExecIdx = offBranch.search(/exec bun run typeclaw "\$@"/)
+    const offExecIdx = offBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
     expect(offLinkIdx).toBeGreaterThan(-1)
     expect(offExecIdx).toBeGreaterThan(offLinkIdx)
 
@@ -1784,7 +1786,7 @@ exec "$@"
     )
 
     // Fake `bun` that records its argv and the value of $DISPLAY, then
-    // exits 0. Stands in for the real \`bun run typeclaw "$@"\` exec at
+    // exits 0. Stands in for the real \`bun run <cli-entry> "$@"\` exec at
     // the end of the shim.
     await writeShellScript(
       join(bindir, 'bun'),
@@ -1937,7 +1939,7 @@ exec "$@"
     await mkdir(bin, { recursive: true })
     await symlinkHostBinaries(bin, ['mkdir', 'ln', 'readlink'])
     // Fake `bun`: pass `-e <script>` through to the real bun (link_configured_symlinks
-    // needs a real JSON parser + fs), but turn the final `bun run typeclaw` exec
+    // needs a real JSON parser + fs), but turn the final `bun run <cli-entry>` exec
     // into a no-op so the shim ends cleanly without launching the agent.
     await writeShellScript(join(bin, 'bun'), `#!/bin/sh\nif [ "$1" = "-e" ]; then exec ${realBun} "$@"; fi\nexit 0\n`)
     await writeShellScript(
