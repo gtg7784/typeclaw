@@ -130,6 +130,24 @@ function describePayload(payload: unknown): string {
   return typeof payload
 }
 
+// Per-spawn override wins over the subagent's declared profile; absent override
+// keeps the declared profile. Both may be undefined (no profile → createSession
+// resolves `default`).
+export function resolveSubagentProfile(
+  subagent: SubagentShared<any>,
+  options: CreateSessionForSubagentOptions | undefined,
+): string | undefined {
+  return options?.profileOverride ?? subagent.profile
+}
+
+function profileFromPayload(payload: unknown): string | undefined {
+  if (payload !== null && typeof payload === 'object') {
+    const value = (payload as { profile?: unknown }).profile
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return undefined
+}
+
 export type CreateSessionForSubagentResult = {
   session: AgentSession
   dispose?: () => Promise<void>
@@ -160,6 +178,12 @@ export type CreateSessionForSubagentOptions = {
   // wiring hooks without permissions would inject the GitHub token yet leave the
   // sandbox OFF — strictly weaker than the plugin-subagent branch this matches.
   permissions?: PermissionService
+  // Per-spawn model-profile override, resolved by `invokeSubagent` from the
+  // validated payload's `profile` field. Wins over the subagent's declared
+  // `profile`, letting a single spawn run a worker on a different model tier
+  // (e.g. operator on `deep`) without a second subagent. Unknown profile names
+  // fall back to `default` via resolveProfile, the same as a declared profile.
+  profileOverride?: string
 }
 export type CreateSessionForSubagent = (
   subagent: Subagent<any>,
@@ -180,7 +204,9 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     customTools: subagent.customTools ?? [],
     ...(options?.plugins !== undefined ? { plugins: options.plugins } : {}),
     ...(options?.permissions !== undefined ? { permissions: options.permissions } : {}),
-    ...(subagent.profile !== undefined ? { profile: subagent.profile } : {}),
+    ...(resolveSubagentProfile(subagent, options) !== undefined
+      ? { profile: resolveSubagentProfile(subagent, options) }
+      : {}),
     ...(subagent.toolResultBudget !== undefined ? { toolResultBudget: subagent.toolResultBudget } : {}),
     ...(subagent.bashPolicy !== undefined ? { bashPolicy: subagent.bashPolicy } : {}),
   })
@@ -255,11 +281,13 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
 
   const validatedPayload = validateSubagentPayload(name, subagent, options.payload)
   const createSessionForSubagent = options.createSessionForSubagent ?? defaultCreateSessionForSubagent
+  const profileOverride = profileFromPayload(validatedPayload)
   const sessionOptions: CreateSessionForSubagentOptions = {
     name,
     ...(options.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
     ...(options.spawnedByRole !== undefined ? { spawnedByRole: options.spawnedByRole } : {}),
     ...(options.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
+    ...(profileOverride !== undefined ? { profileOverride } : {}),
   }
 
   const runSession: RunSession = async (override) => {

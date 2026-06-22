@@ -111,4 +111,10 @@ describe('operatorPayloadSchema', () => {
     const result = operatorPayloadSchema.safeParse({ requestId: 'bg_t1', futureField: 42 })
     expect(result.success).toBe(true)
   })
+
+  test('accepts an optional `profile` override (lets a spawn run operator on a stronger model tier)', () => {
+    const result = operatorPayloadSchema.safeParse({ requestId: 'bg_t1', prompt: 'fix the build', profile: 'deep' })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.profile).toBe('deep')
+  })
 })

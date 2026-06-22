@@ -135,6 +135,61 @@ describe('invokeSubagent', () => {
     expect(calls.disposed).toBe(1)
   })
 
+  test('a `profile` field in the validated payload is threaded to createSessionForSubagent as profileOverride', async () => {
+    // given
+    const captured: { profileOverride?: string }[] = []
+    const registry = {
+      worker: {
+        systemPrompt: 'X',
+        profile: 'default',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      } satisfies Subagent,
+    }
+
+    // when
+    await invokeSubagent('worker', {
+      registry,
+      createSessionForSubagent: async (_subagent, options) => {
+        captured.push({ profileOverride: options?.profileOverride })
+        return fakeSession().session
+      },
+      agentDir: '/agent',
+      userPrompt: 'do the thing',
+      payload: { prompt: 'do the thing', profile: 'deep' },
+    })
+
+    // then
+    expect(captured).toHaveLength(1)
+    expect(captured[0]!.profileOverride).toBe('deep')
+  })
+
+  test('no `profile` in the payload leaves profileOverride undefined (subagent keeps its declared profile)', async () => {
+    // given
+    const captured: { profileOverride?: string }[] = []
+    const registry = {
+      worker: {
+        systemPrompt: 'X',
+        profile: 'default',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      } satisfies Subagent,
+    }
+
+    // when
+    await invokeSubagent('worker', {
+      registry,
+      createSessionForSubagent: async (_subagent, options) => {
+        captured.push({ profileOverride: options?.profileOverride })
+        return fakeSession().session
+      },
+      agentDir: '/agent',
+      userPrompt: 'do the thing',
+      payload: { prompt: 'do the thing' },
+    })
+
+    // then
+    expect(captured[0]!.profileOverride).toBeUndefined()
+  })
+
   test('handler receives validated payload and runs runSession when called', async () => {
     // given
     const { session, calls } = fakeSession()

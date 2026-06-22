@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { z } from 'zod'
+
 import type { PermissionService } from '@/permissions'
 import { createStream } from '@/stream'
 
@@ -583,6 +585,69 @@ describe('createSpawnSubagentTool — role inheritance', () => {
     const details = result.details as { ok: boolean }
     expect(details.ok).toBe(true)
     expect(capturedOptions?.spawnedByRole).toBeUndefined()
+  })
+})
+
+describe('createSpawnSubagentTool — per-spawn profile override', () => {
+  test('forwards the `profile` tool param to createSessionForSubagent as profileOverride', async () => {
+    // given a subagent whose schema accepts the profile field
+    const session = stubSession()
+    let capturedOptions: CreateSessionForSubagentOptions | undefined
+    const registry: SubagentRegistry = {
+      worker: {
+        systemPrompt: 'X',
+        visibility: 'public',
+        profile: 'default',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      },
+    }
+    const { tool } = fixedSpawn({
+      registry,
+      createSession: async (_subagent, options) => {
+        capturedOptions = options
+        return session
+      },
+    })
+
+    // when
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'worker', prompt: 'fix the build', profile: 'deep' },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    // then
+    expect((result.details as { ok: boolean }).ok).toBe(true)
+    expect(capturedOptions?.profileOverride).toBe('deep')
+  })
+
+  test('omitting `profile` leaves profileOverride undefined (subagent keeps its declared profile)', async () => {
+    // given
+    const session = stubSession()
+    let capturedOptions: CreateSessionForSubagentOptions | undefined
+    const registry: SubagentRegistry = {
+      worker: {
+        systemPrompt: 'X',
+        visibility: 'public',
+        profile: 'default',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      },
+    }
+    const { tool } = fixedSpawn({
+      registry,
+      createSession: async (_subagent, options) => {
+        capturedOptions = options
+        return session
+      },
+    })
+
+    // when
+    await tool.execute('call_1', { subagent_type: 'worker', prompt: 'fix the build' }, undefined, undefined, ctx)
+
+    // then
+    expect(capturedOptions?.profileOverride).toBeUndefined()
   })
 })
 

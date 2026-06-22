@@ -88,6 +88,12 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
             'NOTE: background mode from subagents is only available when that subagent is explicitly enabled to drain child results; otherwise use sync spawns batched in one turn instead.',
         }),
       ),
+      profile: Type.Optional(
+        Type.String({
+          description:
+            'Model profile to run this spawn on, overriding the subagent\'s default tier for this one task. Use "deep" for hard work that needs stronger reasoning (gnarly bugs, non-obvious refactors, failures that resisted a quick fix); omit (or "default") for routine work. Resolves against the configured model profiles; an unknown name falls back to default. Most useful on `operator` — leave it off unless the task clearly warrants a heavier model.',
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params): Promise<ToolReturn> {
@@ -122,6 +128,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       const background = params.run_in_background === true
       const payload: Record<string, unknown> = { requestId: taskId, prompt: params.prompt }
       if (params.description !== undefined) payload.description = params.description
+      if (params.profile !== undefined) payload.profile = params.profile
 
       const startedAt = now()
       const spawnedByRole = permissions?.resolveRole(origin)
