@@ -47,6 +47,7 @@ import {
 import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
 
 const PACKAGE_FILE = 'package.json'
+const DEV_SOURCE_CONTAINER_PATH = '/agent/node_modules/typeclaw'
 const BUN_LOCK_FILE = 'bun.lock'
 const DEPENDENCY_FILES = [PACKAGE_FILE, BUN_LOCK_FILE] as const
 const ENV_FILE = '.env'
@@ -75,6 +76,9 @@ export type PlanStartOptions = {
   hostdControl?: HostDaemonControl
   publishHost?: string
   tuiToken?: string | null
+  // Defaults to `process.platform`; tests inject it to exercise the native-
+  // Windows dev-source mount branch without running on a Windows host.
+  platform?: NodeJS.Platform
 }
 
 export type HostDaemonControl = {
@@ -524,6 +528,7 @@ export async function planStart({
   hostdControl,
   publishHost = '127.0.0.1',
   tuiToken = null,
+  platform = process.platform,
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -660,8 +665,10 @@ export async function planStart({
 
   runArgs.push(...dockerBindMount({ src: cwd, dst: '/agent' }))
 
-  if (shouldMirrorDevSource(devSourcePath, cwd)) {
+  if (shouldMirrorDevSource(devSourcePath, cwd, platform)) {
     runArgs.push(...dockerBindMount({ src: devSourcePath, dst: devSourcePath, readonly: true }))
+  } else if (shouldMountWindowsDevSource(devSourcePath, platform)) {
+    runArgs.push(...dockerBindMount({ src: devSourcePath, dst: DEV_SOURCE_CONTAINER_PATH, readonly: true }))
   }
 
   for (const mount of mounts) {
@@ -915,22 +922,34 @@ async function detectDevSource(cwd: string): Promise<string | null> {
   }
 }
 
-// Dev mode: node_modules/typeclaw is a symlink to an absolute host path outside
-// /agent. The mirror mount bind-mounts that path at the SAME path inside the
-// (Linux) container so the symlink resolves. That only works when the host path
-// is itself a valid Linux container path — true on POSIX, false on native
+// POSIX dev mode: node_modules/typeclaw is a symlink to an absolute host path
+// outside /agent. The mirror mount bind-mounts that path at the SAME path inside
+// the (Linux) container so the symlink resolves. That only works when the host
+// path is itself a valid Linux container path — true on POSIX, false on native
 // Windows where devSourcePath is `C:\...` (not an absolute Linux path, so it
-// cannot be a container mount `dst`, and the in-container symlink would point at
-// a Windows path regardless). Native-Windows dev-mode (file:/link: typeclaw dep)
-// needs the deferred symlink/junction translation in #899; until then we skip
-// the mirror mount rather than emit an invalid `dst`. End users install typeclaw
-// from npm (a registry spec, not file:), so they never hit this path.
+// cannot be a same-path container mount `dst`). Native Windows takes the
+// `shouldMountWindowsDevSource` branch instead (mount the checkout directly over
+// the in-container node_modules path). End users install typeclaw from npm (a
+// registry spec, not file:), so they never hit either dev path.
 export function shouldMirrorDevSource(
   devSourcePath: string | null,
   cwd: string,
   platform: NodeJS.Platform = process.platform,
 ): devSourcePath is string {
   return devSourcePath !== null && !devSourcePath.startsWith(cwd) && !isWindows(platform)
+}
+
+// Native-Windows dev mode (#899): the host's `C:\...` checkout cannot be
+// same-path mirror-mounted into a Linux container. Instead, bind-mount the
+// checkout directly over the standard resolution path `/agent/node_modules/
+// typeclaw` inside the container, so Node/Bun resolve typeclaw from source
+// regardless of how the host materialized node_modules/typeclaw (a junction,
+// per prepareWindowsDevJunction).
+export function shouldMountWindowsDevSource(
+  devSourcePath: string | null,
+  platform: NodeJS.Platform = process.platform,
+): devSourcePath is string {
+  return devSourcePath !== null && isWindows(platform)
 }
 
 // True when the agent's package.json declares typeclaw via `file:` or
