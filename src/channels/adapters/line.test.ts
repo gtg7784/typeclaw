@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { LineChat, LineListenerEventMap, LineMessage, LineProfile, LineSendResult } from 'agent-messenger/line'
+import type {
+  LineAccountCredentials,
+  LineChat,
+  LineListenerEventMap,
+  LineMessage,
+  LineProfile,
+  LineSendResult,
+} from 'agent-messenger/line'
 
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage, OutboundMessage } from '@/channels/types'
@@ -259,6 +266,184 @@ describe('createLineAdapter lifecycle', () => {
       credentialsStore: { load: async () => ({ current_account: null, accounts: {} }), getAccount: async () => null },
     })
     await expect(adapter.start()).rejects.toThrow(/no LINE account/)
+  })
+})
+
+describe('createLineAdapter token refresh', () => {
+  function expiringToken(expSecondsFromNow: number, nowMs: number): string {
+    const b64 = (obj: Record<string, unknown>): string => Buffer.from(JSON.stringify(obj)).toString('base64url')
+    const exp = Math.floor(nowMs / 1000) + expSecondsFromNow
+    return `${b64({ alg: 'HS256' })}.${b64({ exp })}.sig`
+  }
+
+  function storeWithAccount(authToken: string) {
+    const saved: LineAccountCredentials[] = []
+    const account: LineAccountCredentials = {
+      account_id: 'U_self',
+      auth_token: authToken,
+      device: 'DESKTOPMAC',
+      created_at: '',
+      updated_at: '',
+    }
+    return {
+      saved,
+      store: {
+        load: async () => ({ current_account: 'U_self', accounts: { U_self: account } }),
+        getAccount: async () => account,
+        setAccount: async (next: LineAccountCredentials) => {
+          saved.push(next)
+        },
+      },
+    }
+  }
+
+  test('refreshes a near-expiry token at startup and persists the new token', async () => {
+    const nowMs = 1_781_000_000_000
+    const { saved, store } = storeWithAccount(expiringToken(60, nowMs))
+    const client = fakeClient({
+      ensureFreshAuthToken: async () => 'fresh-token',
+    })
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      client,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+      now: () => nowMs,
+    })
+
+    await adapter.start()
+
+    expect(saved).toHaveLength(1)
+    expect(saved[0]!.auth_token).toBe('fresh-token')
+    expect(saved[0]!.account_id).toBe('U_self')
+    await adapter.stop()
+  })
+
+  test('persists a token delivered via the onTokenUpdate event', async () => {
+    const nowMs = 1_781_000_000_000
+    const { saved, store } = storeWithAccount(expiringToken(60 * 60 * 24 * 30, nowMs))
+    let tokenListener: ((t: string) => void) | undefined
+    const client = fakeClient({
+      onTokenUpdate: (listener) => {
+        tokenListener = listener
+      },
+    })
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      client,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+      now: () => nowMs,
+    })
+
+    await adapter.start()
+    expect(tokenListener).toBeDefined()
+    tokenListener!('rotated-token')
+    await waitFor(() => saved.length > 0)
+
+    expect(saved.at(-1)!.auth_token).toBe('rotated-token')
+    await adapter.stop()
+  })
+
+  test('retries persistence with the same token after a failed write', async () => {
+    const nowMs = 1_781_000_000_000
+    const account: LineAccountCredentials = {
+      account_id: 'U_self',
+      auth_token: expiringToken(60 * 60 * 24 * 30, nowMs),
+      device: 'DESKTOPMAC',
+      created_at: '',
+      updated_at: '',
+    }
+    const saved: LineAccountCredentials[] = []
+    let failNext = true
+    const store = {
+      load: async () => ({ current_account: 'U_self', accounts: { U_self: account } }),
+      getAccount: async () => account,
+      setAccount: async (next: LineAccountCredentials) => {
+        if (failNext) {
+          failNext = false
+          throw new Error('secrets-patch failed: hostd unreachable')
+        }
+        saved.push(next)
+      },
+    }
+    let tokenListener: ((t: string) => void) | undefined
+    const client = fakeClient({
+      onTokenUpdate: (listener) => {
+        tokenListener = listener
+      },
+    })
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      client,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+      now: () => nowMs,
+    })
+
+    await adapter.start()
+
+    tokenListener!('rotated-token')
+    await waitFor(() => failNext === false)
+    expect(saved).toHaveLength(0)
+
+    tokenListener!('rotated-token')
+    await waitFor(() => saved.length > 0)
+    expect(saved.at(-1)!.auth_token).toBe('rotated-token')
+    await adapter.stop()
+  })
+
+  test('a refresh failure at startup is non-fatal', async () => {
+    const nowMs = 1_781_000_000_000
+    const { saved, store } = storeWithAccount(expiringToken(60, nowMs))
+    const client = fakeClient({
+      ensureFreshAuthToken: async () => {
+        throw new Error('refresh endpoint 500')
+      },
+    })
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      client,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+      now: () => nowMs,
+    })
+
+    await expect(adapter.start()).resolves.toBeUndefined()
+    expect(saved).toHaveLength(0)
+    await adapter.stop()
+  })
+
+  test('a client without the refresh surface starts cleanly (SDK version skew)', async () => {
+    const nowMs = 1_781_000_000_000
+    const { saved, store } = storeWithAccount(expiringToken(60, nowMs))
+    const client = fakeClient()
+
+    const adapter = createLineAdapter({
+      router: makeRouterStub(() => {}),
+      configRef: () => ({}) as ChannelAdapterConfig,
+      logger: SILENT,
+      client,
+      listenerFactory: () => new FakeListener(),
+      credentialsStore: store,
+      now: () => nowMs,
+    })
+
+    await expect(adapter.start()).resolves.toBeUndefined()
+    expect(saved).toHaveLength(0)
+    await adapter.stop()
   })
 })
 
