@@ -10,7 +10,6 @@ const EXIT_DELAY_MS = 500
 export type CreateRestartToolOptions = {
   containerName: string
   exit?: (code: number) => void
-  socketPath?: string
   hostdUrl?: string
   hostdToken?: string
   // Optional so unit tests and ad-hoc tool construction keep working without
@@ -72,7 +71,6 @@ export type { ContainerRestartingBroadcast } from '@/agent/restart'
 export function createRestartTool({
   containerName,
   exit,
-  socketPath,
   hostdUrl,
   hostdToken,
   stream,
@@ -121,7 +119,6 @@ export function createRestartTool({
         containerName,
         build,
         originatingSessionId,
-        ...(socketPath !== undefined ? { socketPath } : {}),
         ...(hostdUrl !== undefined ? { hostdUrl } : {}),
         ...(hostdToken !== undefined ? { hostdToken } : {}),
         ...(ackTimeoutMs !== undefined ? { ackTimeoutMs } : {}),
