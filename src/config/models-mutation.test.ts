@@ -13,6 +13,7 @@ import {
   listRegisteredModelRefs,
   removeProfile,
   setProfile,
+  setThinkingLevel,
 } from './models-mutation'
 
 let root: string
@@ -371,6 +372,13 @@ describe('auto-commit on success', () => {
     expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: remove fast')
   })
 
+  test('setThinkingLevel commits typeclaw.json with a "model: set thinkingLevel" subject', async () => {
+    await initGit(root)
+    const result = setThinkingLevel(root, 'high')
+    expect(result.ok).toBe(true)
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: set thinkingLevel high')
+  })
+
   test('no-ops when the folder is not a git repo (mutation-check anchor for the commit call)', async () => {
     const before = await readFile(join(root, 'typeclaw.json'), 'utf8')
     const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
@@ -384,5 +392,38 @@ describe('auto-commit on success', () => {
     const result = setProfile(root, 'default', 'mystery/model')
     expect(result.ok).toBe(false)
     expect(await runGit(root, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+})
+
+describe('setThinkingLevel', () => {
+  async function readThinkingLevel(): Promise<string | undefined> {
+    const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    return (JSON.parse(raw) as { thinkingLevel?: string }).thinkingLevel
+  }
+
+  test('writes the level to typeclaw.json', async () => {
+    const result = setThinkingLevel(root, 'high')
+    expect(result.ok).toBe(true)
+    expect(await readThinkingLevel()).toBe('high')
+  })
+
+  test('overwrites an existing level', async () => {
+    setThinkingLevel(root, 'low')
+    const result = setThinkingLevel(root, 'xhigh')
+    expect(result.ok).toBe(true)
+    expect(await readThinkingLevel()).toBe('xhigh')
+  })
+
+  test('passing undefined clears the field (reverts to SDK default)', async () => {
+    setThinkingLevel(root, 'medium')
+    const result = setThinkingLevel(root, undefined)
+    expect(result.ok).toBe(true)
+    expect(await readThinkingLevel()).toBeUndefined()
+  })
+
+  test('preserves the models block', async () => {
+    const before = await readModels()
+    setThinkingLevel(root, 'high')
+    expect(await readModels()).toEqual(before)
   })
 })

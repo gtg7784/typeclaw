@@ -1,13 +1,17 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { autocomplete, cancel, intro, isCancel, log, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import type { CustomModelMeta } from '@/config'
+import type { CustomModelMeta, ThinkingLevel } from '@/config'
 import {
   addProfile,
   listModelProfiles,
   listRegisteredModelRefs,
   removeProfile,
   setProfile,
+  setThinkingLevel,
 } from '@/config/models-mutation'
 import {
   isKnownModelRef,
@@ -51,6 +55,11 @@ const setSub = defineCommand({
       description: 'write even when the target provider has no credentials configured',
       required: false,
     },
+    thinking: {
+      type: 'string',
+      description: 'reasoning effort (off|minimal|low|medium|high|xhigh); applies globally to new sessions',
+      required: false,
+    },
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
@@ -58,6 +67,24 @@ const setSub = defineCommand({
     const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
+
+    // Gather every interactive/flag input BEFORE any write, so cancelling a
+    // later prompt (e.g. the thinking-level select) aborts the whole command
+    // without having already mutated typeclaw.json. Non-interactive (`--thinking`)
+    // resolves the level from the flag; an interactive run (no flag, no explicit
+    // ref) offers the prompt; explicit-ref scripted calls leave the level alone.
+    const interactive = args.ref === undefined && args.thinking === undefined
+    let thinking: { level: ThinkingLevel | undefined } | undefined
+    if (args.thinking !== undefined) {
+      const parsed = parseThinkingArg(args.thinking)
+      if (!parsed.ok) {
+        console.error(errorLine(parsed.reason))
+        process.exit(1)
+      }
+      thinking = { level: parsed.level }
+    } else if (interactive) {
+      thinking = await pickThinkingLevel(cwd)
+    }
 
     const result = setProfile(cwd, profile, picked.ref, {
       force: args.force === true,
@@ -67,6 +94,14 @@ const setSub = defineCommand({
       console.error(errorLine(result.reason))
       process.exit(1)
     }
+    if (thinking !== undefined) {
+      const tlResult = setThinkingLevel(cwd, thinking.level)
+      if (!tlResult.ok) {
+        console.error(errorLine(tlResult.reason))
+        process.exit(1)
+      }
+    }
+
     done({
       title: c.green(`Profile "${profile}" set.`),
       details: `${profile} → ${picked.ref}`,
@@ -230,6 +265,50 @@ async function pickProfileName(): Promise<string> {
     process.exit(0)
   }
   return choice
+}
+
+const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+const KEEP_THINKING_SENTINEL = '__keep__'
+
+export type ParsedThinkingArg = { ok: true; level: ThinkingLevel | undefined } | { ok: false; reason: string }
+
+export function parseThinkingArg(raw: string): ParsedThinkingArg {
+  const value = raw.trim().toLowerCase()
+  if (value === 'default' || value === 'unset' || value === 'none') return { ok: true, level: undefined }
+  if ((THINKING_LEVELS as string[]).includes(value)) return { ok: true, level: value as ThinkingLevel }
+  return {
+    ok: false,
+    reason: `Invalid --thinking "${raw}". Use one of: ${THINKING_LEVELS.join(', ')}, or "default" to clear.`,
+  }
+}
+
+async function pickThinkingLevel(cwd: string): Promise<{ level: ThinkingLevel | undefined } | undefined> {
+  const current = readThinkingLevel(cwd)
+  const choice = await select<string>({
+    message: 'Reasoning effort for new sessions',
+    options: [
+      { value: KEEP_THINKING_SENTINEL, label: 'keep current', hint: current ?? 'SDK default (medium)' },
+      ...THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+      { value: 'default', label: 'clear', hint: 'defer to the SDK default' },
+    ],
+    initialValue: KEEP_THINKING_SENTINEL,
+  })
+  if (isCancel(choice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  if (choice === KEEP_THINKING_SENTINEL) return undefined
+  if (choice === 'default') return { level: undefined }
+  return { level: choice as ThinkingLevel }
+}
+
+function readThinkingLevel(cwd: string): ThinkingLevel | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: ThinkingLevel }
+    return parsed.thinkingLevel
+  } catch {
+    return undefined
+  }
 }
 
 async function pickModelRef(cwd: string): Promise<PickedModelRef> {
