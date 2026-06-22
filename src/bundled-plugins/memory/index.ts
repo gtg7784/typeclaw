@@ -353,7 +353,11 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             const currentSize = await readSize(parentTranscriptPath)
             const currentLines = await readLineCount(parentTranscriptPath)
             bytesAtLastRun.set(sessionId, currentSize)
-            linesAtLastRun.set(sessionId, currentLines)
+            // Monotonic: never regress below a baseline the idle gate already
+            // reserved. readLineCount returns 0 on a read error or a
+            // missing/truncated file, so an unconditional set could undo the
+            // eager reservation and reopen the over-fire window this fix closes.
+            linesAtLastRun.set(sessionId, Math.max(linesAtLastRun.get(sessionId) ?? 0, currentLines))
             ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
             try {
               await raceSpawn(ctx.spawnSubagent('memory-logger', payload, spawnOptions), spawnTimeoutMs)
