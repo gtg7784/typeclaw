@@ -1,4 +1,4 @@
-import { containerNameFromCwd, getBun, inspectContainer, type ContainerState } from './shared'
+import { containerNameFromCwd, dockerCmd, getBun, inspectContainer, type ContainerState } from './shared'
 
 export type ShellPlan = {
   containerName: string
@@ -10,6 +10,7 @@ export type ShellResult = { ok: true; containerName: string; exitCode: number } 
 type ShellDeps = {
   inspect?: (name: string) => Promise<ContainerState>
   spawn?: InteractiveSpawn
+  resolveDocker?: () => string | null
 }
 
 type InteractiveSpawn = (options: {
@@ -30,6 +31,15 @@ export async function shell(
 
   const { containerName, shell: plannedShell } = planShell(cwd, { shell: shellPath })
 
+  // Resolve docker before inspecting: inspectContainer collapses a missing
+  // docker binary into { exists: false }, so deferring this check would
+  // surface the misleading "Container … not found" instead of the real
+  // "Docker is not installed" on a host without docker on PATH.
+  const cmd = dockerCmd(['exec', '-it', containerName, plannedShell], deps.resolveDocker)
+  if (cmd === null) {
+    return { ok: false, reason: 'Docker is not installed (docker not found on PATH).' }
+  }
+
   try {
     const state = await (deps.inspect ?? inspectContainer)(containerName)
     if (!state.exists) {
@@ -40,7 +50,7 @@ export async function shell(
     }
 
     const proc = spawn({
-      cmd: ['docker', 'exec', '-it', containerName, plannedShell],
+      cmd,
       cwd,
       stdin: 'inherit',
       stdout: 'inherit',

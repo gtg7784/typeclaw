@@ -11,16 +11,27 @@ export type DockerExec = (
 export const defaultDockerExec: DockerExec = async (args, options) => {
   const bun = getBun()
   if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
-  // Bun.spawn throws synchronously with code 'ENOENT' when docker isn't on
-  // $PATH (rather than returning a non-zero exit). Two overloads (pipe vs
-  // inherit) so each spawn call site has the literal stdout/stderr type
-  // attached — that's what lets `new Response(proc.stdout)` typecheck on
-  // the piped path. `signal` is forwarded to Bun.spawn so callers can bound
-  // long-running docker subcommands (e.g. `docker logs` on a stuck daemon).
+  // Resolve `docker` to an absolute path before spawning. Bun.spawn() resolves
+  // a bare command name through Bun.which() internally, but Windows PATH/PATHEXT
+  // resolution has a string of historical bugs (oven-sh/bun#16070, #11182,
+  // #29636) that make `cmd: ['docker', …]` throw ENOENT even when Docker
+  // Desktop is installed and docker.exe is on %PATH% — surfacing as the
+  // misleading "Docker is not installed." on a machine that has Docker.
+  // dockerCmd() goes through Bun.which(), which reliably honors PATHEXT and
+  // returns the full docker.exe path; it returns null only when docker is
+  // genuinely absent from PATH, which maps to the binary-missing sentinel.
+  const cmd = dockerCmd(args)
+  if (cmd === null) return { exitCode: -1, stdout: '', stderr: DOCKER_NOT_FOUND_STDERR }
+  // Two overloads (pipe vs inherit) so each spawn call site has the literal
+  // stdout/stderr type attached — that's what lets `new Response(proc.stdout)`
+  // typecheck on the piped path. `signal` is forwarded to Bun.spawn so callers
+  // can bound long-running docker subcommands (e.g. `docker logs` on a stuck
+  // daemon). The ENOENT catch stays as a safety net for the race where the
+  // binary disappears between resolution and spawn.
   if (options?.inheritStdio) {
     try {
       const proc = bun.spawn({
-        cmd: ['docker', ...args],
+        cmd,
         cwd: options.cwd,
         stdout: 'inherit',
         stderr: 'inherit',
@@ -36,7 +47,7 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
   }
   try {
     const proc = bun.spawn({
-      cmd: ['docker', ...args],
+      cmd,
       cwd: options?.cwd,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -54,10 +65,28 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
   }
 }
 
-// Sentinel stderr from defaultDockerExec when Bun.spawn throws ENOENT.
+// Sentinel stderr from defaultDockerExec when docker can't be resolved/spawned.
 // checkDockerAvailable matches on this exact string to distinguish
 // "binary missing" from "daemon down".
 export const DOCKER_NOT_FOUND_STDERR = 'docker: command not found in $PATH'
+
+// Resolves the `docker` binary to an absolute path via Bun.which(), which —
+// unlike a bare `cmd: ['docker']` handed to Bun.spawn() — reliably honors
+// Windows PATHEXT and returns e.g. C:\…\docker.exe. On POSIX the resolved path
+// equals what the bare name would have found. Returns null when docker is not
+// on PATH, which callers translate into the binary-missing sentinel.
+export function resolveDockerBinary(): string | null {
+  return getBun()?.which('docker') ?? null
+}
+
+// Builds the argv for a docker invocation with the binary resolved to an
+// absolute path (see resolveDockerBinary). Returns null when docker is absent
+// from PATH. The resolver is injectable so callers and tests stay deterministic
+// without depending on a real docker install.
+export function dockerCmd(args: string[], resolveBinary: () => string | null = resolveDockerBinary): string[] | null {
+  const binary = resolveBinary()
+  return binary === null ? null : [binary, ...args]
+}
 
 // Collapse a multi-line `docker` CLI stderr into a single readable clause
 // suitable for inline `reason:` strings. The motivating case is `compose
@@ -299,8 +328,10 @@ function sanitizeContainerName(name: string): string {
 export async function imageExists(tag: string): Promise<boolean> {
   const bun = getBun()
   if (!bun) return false
+  const cmd = dockerCmd(['image', 'inspect', tag])
+  if (cmd === null) return false
   const proc = bun.spawn({
-    cmd: ['docker', 'image', 'inspect', tag],
+    cmd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -323,8 +354,10 @@ export type ContainerState = { exists: false } | { exists: true; running: boolea
 export async function inspectContainer(name: string): Promise<ContainerState> {
   const bun = getBun()
   if (!bun) return { exists: false }
+  const cmd = dockerCmd(['inspect', '--format', '{{.State.Running}}', name])
+  if (cmd === null) return { exists: false }
   const proc = bun.spawn({
-    cmd: ['docker', 'inspect', '--format', '{{.State.Running}}', name],
+    cmd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -333,6 +366,6 @@ export async function inspectContainer(name: string): Promise<ContainerState> {
   return { exists: true, running: out === 'true' }
 }
 
-export function getBun(): { spawn: typeof Bun.spawn } | undefined {
-  return (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+export function getBun(): { spawn: typeof Bun.spawn; which: typeof Bun.which } | undefined {
+  return (globalThis as { Bun?: { spawn: typeof Bun.spawn; which: typeof Bun.which } }).Bun
 }

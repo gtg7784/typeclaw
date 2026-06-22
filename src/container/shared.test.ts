@@ -13,6 +13,7 @@ import {
   containerNameFromCwd,
   DOCKER_NOT_FOUND_STDERR,
   dockerBindMount,
+  dockerCmd,
   type DockerExec,
   imageTagFromCwd,
   isContainerNameConflict,
@@ -172,6 +173,24 @@ describe('checkDockerAvailable', () => {
     await checkDockerAvailable(exec)
 
     expect(calls).toEqual([['info', '--format', '{{.ServerVersion}}']])
+  })
+})
+
+describe('dockerCmd', () => {
+  test('prepends the resolved docker binary path to the args', () => {
+    const cmd = dockerCmd(['info', '--format', '{{.ServerVersion}}'], () => '/usr/local/bin/docker')
+
+    expect(cmd).toEqual(['/usr/local/bin/docker', 'info', '--format', '{{.ServerVersion}}'])
+  })
+
+  test('resolves to the absolute .exe path on Windows rather than leaving PATHEXT to Bun.spawn', () => {
+    const cmd = dockerCmd(['info'], () => 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe')
+
+    expect(cmd).toEqual(['C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe', 'info'])
+  })
+
+  test('returns null when docker is not on PATH', () => {
+    expect(dockerCmd(['info'], () => null)).toBeNull()
   })
 })
 
