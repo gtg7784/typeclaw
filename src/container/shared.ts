@@ -108,6 +108,27 @@ export async function buildxAvailable(exec: DockerExec = defaultDockerExec): Pro
   return (await exec(['buildx', 'version'])).exitCode === 0
 }
 
+export type BindMountSpec = { src: string; dst: string; readonly?: boolean }
+
+// Emits `--mount type=bind,...` argv for a host->container bind mount, used in
+// place of the legacy `-v src:dst[:ro]` form. The `-v` short form splits on
+// `:`, which collides with a Windows drive letter (`C:\agent` parses as host
+// `C` + path `\agent`); `--mount`'s `key=value` CSV has no such ambiguity and
+// fails loud on an unknown/missing key instead of silently creating a phantom
+// host dir. Src is resolved to an absolute path because `--mount` (unlike `-v`)
+// rejects relative sources. A literal comma in a path would break the CSV;
+// it's rejected here rather than silently mis-parsed (paths with commas are
+// pathological and were never supported by the `-v` form either).
+export function dockerBindMount({ src, dst, readonly }: BindMountSpec): [string, string] {
+  const absSrc = resolve(src)
+  if (absSrc.includes(',') || dst.includes(',')) {
+    throw new Error(`bind mount path contains a comma, which docker --mount cannot express: ${absSrc} -> ${dst}`)
+  }
+  const fields = [`type=bind`, `src=${absSrc}`, `dst=${dst}`]
+  if (readonly) fields.push('readonly')
+  return ['--mount', fields.join(',')]
+}
+
 export function containerNameFromCwd(cwd: string): string {
   return sanitizeContainerName(basename(resolve(cwd)))
 }
