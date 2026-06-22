@@ -498,7 +498,7 @@ export async function defaultRunHatching({
     // the preferred port, otherwise we'd connect to the wrong service.
     const hostPort = launch.hostPort
 
-    await waitForAgentFn(`http://127.0.0.1:${hostPort}`, { timeoutMs: 30_000 })
+    await waitForAgentFn(`http://127.0.0.1:${hostPort}`, { timeoutMs: hatchingReadinessTimeoutMs() })
 
     if (configuredChannels !== undefined && configuredChannels.length > 0) {
       const url = buildTuiUrl(hostPort, launch.tuiToken)
@@ -542,6 +542,20 @@ function buildTuiUrl(hostPort: number, token: string | null): string {
   const url = new URL(`ws://127.0.0.1:${hostPort}`)
   if (token !== null) url.searchParams.set('token', token)
   return url.toString()
+}
+
+// Cold-boot readiness budget for the first `typeclaw init`. The image was just
+// unpacked and the agent folder (incl. a large node_modules) is bind-mounted
+// into the container, so the very first server boot is markedly slower than
+// subsequent `typeclaw start`s — plugin loading reads hundreds of files off a
+// cold mount before Bun.serve() binds the port. On Windows Docker Desktop that
+// mount crosses into the WSL2 VM and is slower still; during the warmup window
+// Docker Desktop's port proxy may accept then immediately reset connections
+// ("socket connection was closed unexpectedly"), which is why a too-short budget
+// fails the first run even though an immediate retry (warm caches) succeeds.
+// Give Windows a generous budget; keep other platforms tighter.
+export function hatchingReadinessTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return isWindows(platform) ? 120_000 : 60_000
 }
 
 // Probe the server's plain HTTP fallback (non-upgrade requests get a 200 with

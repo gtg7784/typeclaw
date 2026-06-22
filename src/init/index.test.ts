@@ -18,6 +18,7 @@ import {
   hasExistingChannelSecrets,
   hasExistingOAuthCredentials,
   type HatchingResult,
+  hatchingReadinessTimeoutMs,
   type HatchRunner,
   initGitRepo,
   type InitStepEvent,
@@ -103,6 +104,21 @@ async function readSecrets(root: string): Promise<{
     channels?: Record<string, Record<string, unknown>>
   }
 }
+
+describe('hatchingReadinessTimeoutMs', () => {
+  test('gives Windows a larger cold-boot budget than other platforms', () => {
+    const windows = hatchingReadinessTimeoutMs('win32')
+    const linux = hatchingReadinessTimeoutMs('linux')
+    const mac = hatchingReadinessTimeoutMs('darwin')
+    expect(windows).toBeGreaterThan(linux)
+    expect(linux).toBe(mac)
+  })
+
+  test('budgets are generous enough to outlast a slow first boot (>= 60s, Windows >= 120s)', () => {
+    expect(hatchingReadinessTimeoutMs('linux')).toBeGreaterThanOrEqual(60_000)
+    expect(hatchingReadinessTimeoutMs('win32')).toBeGreaterThanOrEqual(120_000)
+  })
+})
 
 describe('runInit', () => {
   test('runs scaffold, install, dockerfile, git, and hatching steps in order', async () => {
