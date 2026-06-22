@@ -13,6 +13,7 @@ import {
   defaultCreateSessionForSubagent,
   invokeSubagent,
   isSubagentTimeoutError,
+  resolveSubagentProfile,
   type Subagent as InternalSubagent,
   type SubagentConsumer,
   type SubagentRegistry,
@@ -409,7 +410,9 @@ export async function startAgent({
               allowBackgroundFromSubagent,
             }
           : {}),
-        ...(entry.pluginSubagent.profile !== undefined ? { profile: entry.pluginSubagent.profile } : {}),
+        ...(resolveSubagentProfile(entry.pluginSubagent, subagentOptions) !== undefined
+          ? { profile: resolveSubagentProfile(entry.pluginSubagent, subagentOptions) }
+          : {}),
         ...(entry.pluginSubagent.toolResultBudget !== undefined
           ? { toolResultBudget: entry.pluginSubagent.toolResultBudget }
           : {}),

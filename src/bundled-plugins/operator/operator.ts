@@ -57,6 +57,7 @@ export const operatorPayloadSchema = z
     requestId: z.string().optional(),
     prompt: z.string().optional(),
     description: z.string().optional(),
+    profile: z.string().optional(),
   })
   .passthrough()
 
