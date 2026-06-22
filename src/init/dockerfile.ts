@@ -125,6 +125,18 @@ export const CLOUDFLARED_RELEASE_URL_BASE = 'https://github.com/cloudflare/cloud
 
 export const TYPECLAW_ENTRYPOINT_PATH = '/usr/local/bin/typeclaw-entrypoint'
 
+// The installed TypeClaw CLI entry, executed directly by the container
+// entrypoint. `package.json#bin.typeclaw` points at `src/cli/index.ts` and the
+// package ships `src`, so this path exists for both the registry install and a
+// `file:`/linked dev install (where node_modules/typeclaw is the repo). Running
+// it directly bypasses `bun run typeclaw`'s script/`.bin` resolution — which
+// breaks when the agent folder was installed on a Windows host: the hoisted
+// linker writes Windows-native `.bin/typeclaw` shims that aren't valid Linux
+// executables once the folder is bind-mounted into the container, so
+// `bun run typeclaw` finds no usable bin, falls back to treating `typeclaw` as
+// a path, and resolves `/agent/typeclaw.json` (`Cannot run json files`).
+export const TYPECLAW_CLI_ENTRY = '/agent/node_modules/typeclaw/src/cli/index.ts'
+
 // IPv4 networks the container is forbidden to egress to when
 // `network.blockInternal` is true. Loopback (127/8) is NOT here — loopback
 // traffic uses the `lo` interface, which the shim's first ACCEPT rule
@@ -157,9 +169,10 @@ export const NETWORK_BLOCK_IPV6_NETS = ['fc00::/7', 'fe80::/10', 'ff00::/8', '::
 // modes, picked at boot time from `$TYPECLAW_NETWORK_BLOCK_INTERNAL`:
 //
 //   off (env unset or != "1"): no rules installed, no setpriv. Just exec
-//   `bun run typeclaw "$@"`. Identical observable behavior to a container
-//   without this feature. This is the opt-out path for users who set
-//   `network.blockInternal: false` in their `typeclaw.json`.
+//   the TypeClaw CLI entry directly (see TYPECLAW_CLI_ENTRY). Identical
+//   observable behavior to a container without this feature. This is the
+//   opt-out path for users who set `network.blockInternal: false` in their
+//   `typeclaw.json`.
 //
 //   on (default, env = "1" via `network.blockInternal: true`): walks IPv4 +
 //   IPv6 block lists and installs
@@ -515,7 +528,7 @@ if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
   link_persistent_home_files
   link_configured_symlinks
   start_xvfb
-  exec bun run typeclaw "$@"
+  exec bun run ${TYPECLAW_CLI_ENTRY} "$@"
 fi
 
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -562,7 +575,7 @@ ${ipv6Rules.join('\n')}
 link_persistent_home_files
 link_configured_symlinks
 start_xvfb
-exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
+exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run ${TYPECLAW_CLI_ENTRY} "$@"
 `
 }
 
