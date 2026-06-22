@@ -43,6 +43,7 @@ import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaota
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
 import { toKakaoPlainText } from './kakaotalk-format'
+import { createKakaoMembershipResolver } from './kakaotalk-membership'
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
@@ -368,6 +369,11 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
 
   const channelResolver = createKakaoChannelResolver({ client, logger })
   const authorResolver = createKakaoAuthorResolver({ client, logger })
+  const membershipResolver = createKakaoMembershipResolver({
+    client,
+    selfUserIdRef: () => selfUserId,
+    logger,
+  })
 
   const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
     const names = await channelResolver
@@ -658,6 +664,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       options.router.registerChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.registerHistory('kakaotalk', historyCallback)
       options.router.registerFetchAttachment('kakaotalk', fetchAttachmentCallback)
+      options.router.registerMembership('kakaotalk', membershipResolver)
     },
 
     async stop(): Promise<void> {
@@ -667,6 +674,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       options.router.unregisterChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.unregisterHistory('kakaotalk', historyCallback)
       options.router.unregisterFetchAttachment('kakaotalk', fetchAttachmentCallback)
+      options.router.unregisterMembership('kakaotalk', membershipResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
