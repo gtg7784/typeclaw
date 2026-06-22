@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync, realpathSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -11,7 +11,15 @@ import { buildGitignore } from '@/init/gitignore'
 import { isWindows } from '@/shared'
 
 import type { DockerExec } from './shared'
-import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, shouldMirrorDevSource, start } from './start'
+import {
+  commitSystemFile,
+  planStart,
+  refreshDockerfile,
+  refreshGitignore,
+  shouldMirrorDevSource,
+  shouldMountWindowsDevSource,
+  start,
+} from './start'
 
 type ParsedBindMount = { src: string; dst: string; readonly: boolean }
 
@@ -433,6 +441,21 @@ describe('shouldMirrorDevSource', () => {
   })
 })
 
+describe('shouldMountWindowsDevSource', () => {
+  test('mounts the checkout over the in-container node_modules path on Windows', () => {
+    expect(shouldMountWindowsDevSource('C:\\src\\typeclaw', 'win32')).toBe(true)
+  })
+
+  test('does NOT mount on POSIX (the same-path mirror branch handles those)', () => {
+    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', 'linux')).toBe(false)
+    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', 'darwin')).toBe(false)
+  })
+
+  test('does NOT mount when there is no dev source', () => {
+    expect(shouldMountWindowsDevSource(null, 'win32')).toBe(false)
+  })
+})
+
 describe('planStart mounts', () => {
   test('emits no mount flags when typeclaw.json is missing', async () => {
     await writeDockerfile(root)
@@ -441,6 +464,68 @@ describe('planStart mounts', () => {
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(bindMounts(plan.runArgs).filter((m) => m.dst.startsWith('/agent/mounts/'))).toHaveLength(0)
+  })
+
+  test('mounts a Windows dev-mode checkout over /agent/node_modules/typeclaw', async () => {
+    const checkout = await mkdtemp(join(tmpdir(), 'typeclaw-dev-src-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: `file:${checkout}` })
+      await writeTypeclawConfig(root)
+
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'win32' })
+
+      expect(hasBindMount(plan.runArgs, { src: checkout, dst: '/agent/node_modules/typeclaw', readonly: true })).toBe(
+        true,
+      )
+    } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
+  test('does NOT add the node_modules/typeclaw mount on POSIX (same-path mirror handles dev source)', async () => {
+    const checkout = await mkdtemp(join(tmpdir(), 'typeclaw-dev-src-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: `file:${checkout}` })
+      await writeTypeclawConfig(root)
+
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'linux' })
+
+      expect(bindMounts(plan.runArgs).some((m) => m.dst === '/agent/node_modules/typeclaw')).toBe(false)
+    } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
+  test('resolves a Windows link:typeclaw dev source via the bun global link', async () => {
+    const globalDir = await mkdtemp(join(tmpdir(), 'typeclaw-bun-global-'))
+    const checkout = await mkdtemp(join(tmpdir(), 'typeclaw-dev-src-'))
+    const savedGlobalDir = process.env.BUN_INSTALL_GLOBAL_DIR
+    try {
+      // given: `bun link` registered the checkout at <global>/node_modules/typeclaw
+      await mkdir(join(globalDir, 'node_modules'), { recursive: true })
+      await symlink(checkout, join(globalDir, 'node_modules', 'typeclaw'))
+      process.env.BUN_INSTALL_GLOBAL_DIR = globalDir
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: 'link:typeclaw' })
+      await writeTypeclawConfig(root)
+
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'win32' })
+
+      expect(
+        hasBindMount(plan.runArgs, {
+          src: realpathSync(checkout),
+          dst: '/agent/node_modules/typeclaw',
+          readonly: true,
+        }),
+      ).toBe(true)
+    } finally {
+      if (savedGlobalDir === undefined) delete process.env.BUN_INSTALL_GLOBAL_DIR
+      else process.env.BUN_INSTALL_GLOBAL_DIR = savedGlobalDir
+      await rm(globalDir, { recursive: true, force: true })
+      await rm(checkout, { recursive: true, force: true })
+    }
   })
 
   test('emits no mount flags when mounts array is empty', async () => {
