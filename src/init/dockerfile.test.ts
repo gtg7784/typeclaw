@@ -1004,9 +1004,17 @@ describe('transformers native-deps layer (sharp + onnxruntime linux binaries)', 
     expect(out).toContain('"@img/sharp-libvips-linux-${SHARP_ARCH}@1.2.4"')
   })
 
-  test('layer resolves SHARP_ARCH from $TARGETARCH (arm64 -> arm64, else x64) with an amd64 fallback so a bare `docker build` without buildx stays deterministic', () => {
-    const out = buildDockerfile()
-    expect(out).toContain('SHARP_ARCH="$(if [ "${TARGETARCH:-amd64}" = "arm64" ]; then echo arm64; else echo x64; fi)"')
+  test('layer resolves SHARP_ARCH from the real install arch via `uname -m` (aarch64/arm64 -> arm64, x86_64/amd64 -> x64), failing closed on unknown machines — NOT from the build arg `$TARGETARCH`, whose `:-amd64` default silently seeded x64 sharp packages on arm64 hosts built without buildx and crashed `typeclaw --help` with "Could not load the sharp module using the linux-arm64 runtime"', () => {
+    for (const out of [
+      buildDockerfile(),
+      buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' }),
+      buildBaseDockerfile(),
+    ]) {
+      expect(out).toContain(
+        'SHARP_ARCH="$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; x86_64|amd64) echo x64 ;; *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; esac)"',
+      )
+      expect(out).not.toContain('${TARGETARCH:-amd64}')
+    }
   })
 
   test('versioned (base-image) form installs the same native-deps set — drift guard so GHCR-base agents whose base image predates this fix still get linux sharp binaries seeded by the per-agent layer', () => {
