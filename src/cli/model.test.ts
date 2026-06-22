@@ -3,9 +3,10 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { scaffold, writeSecrets } from '@/init'
 import type { ModelOption } from '@/init/models-dev'
 
-import { resolveExplicitRef } from './model'
+import { parseThinkingArg, resolveExplicitRef } from './model'
 
 const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
@@ -52,6 +53,26 @@ describe('resolveExplicitRef carries catalog metadata for non-interactive set/ad
     const picked = await resolveExplicitRef('fireworks/unknown-model', catalogWith(liveOption))
     expect(picked.ref).toBe('fireworks/unknown-model')
     expect(picked.meta).toBeUndefined()
+  })
+})
+
+describe('parseThinkingArg', () => {
+  test('accepts every supported level, case-insensitively', () => {
+    for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const) {
+      expect(parseThinkingArg(level.toUpperCase())).toEqual({ ok: true, level })
+    }
+  })
+
+  test('treats default/unset/none as a clear (undefined level)', () => {
+    expect(parseThinkingArg('default')).toEqual({ ok: true, level: undefined })
+    expect(parseThinkingArg('unset')).toEqual({ ok: true, level: undefined })
+    expect(parseThinkingArg('none')).toEqual({ ok: true, level: undefined })
+  })
+
+  test('rejects an unknown value with a helpful reason', () => {
+    const result = parseThinkingArg('turbo')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/off, minimal, low, medium, high, xhigh/)
   })
 })
 
@@ -170,5 +191,61 @@ describe('typeclaw model list migrates a pre-0.20.0 v1 secrets.json on first hos
     expect(stderr).not.toMatch(/migration/i)
     const untouched = JSON.parse(await readFile(join(cwd, 'secrets.json'), 'utf8'))
     expect(untouched.version).toBe(1)
+  })
+})
+
+describe('typeclaw model set validates the thinking level before mutating the profile', () => {
+  let cwd: string
+  const ORIGINAL_REF = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-model-set-thinking-'))
+    await scaffold(cwd, { model: ORIGINAL_REF })
+    await writeSecrets(cwd, { model: ORIGINAL_REF, apiKey: 'fw_test' })
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  async function readDefaultRef(): Promise<unknown> {
+    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { models?: { default?: unknown } }
+    return parsed.models?.default
+  }
+
+  // Regression: an invalid --thinking must abort BEFORE setProfile writes, so
+  // the profile is never left mutated by a command that reports failure.
+  test('an invalid --thinking aborts without writing the profile', async () => {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'default', 'openai/gpt-5.4-nano', '--thinking', 'bogus', '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toMatch(/Invalid --thinking/)
+    expect(await readDefaultRef()).toBe(ORIGINAL_REF)
+    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: unknown }
+    expect(parsed.thinkingLevel).toBeUndefined()
+  })
+
+  test('a valid --thinking writes both the profile and the level', async () => {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'default', 'openai/gpt-5.4-nano', '--thinking', 'high', '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const exitCode = await proc.exited
+
+    expect(exitCode).toBe(0)
+    expect(await readDefaultRef()).toBe('openai/gpt-5.4-nano')
+    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: unknown }
+    expect(parsed.thinkingLevel).toBe('high')
   })
 })
