@@ -225,13 +225,13 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    "Read the transcript past the watermark. Decide whether anything in it justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, an in-transcript change-of-mind, or a correction the user made to the agent. Sometimes the answer is zero fragments; sometimes more than one. Do not read memory/topics/ — cross-shard reasoning is dreaming's job. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.",
+    'Read the transcript past the watermark and apply the system-prompt rules; most runs yield zero or one fragment.',
     '',
-    "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
+    "Per-fragment provenance: each fragment's `entry=` anchors that fragment's own evidence, not the latest entry you evaluated.",
     '',
-    'Watermark: every `append` call must include the `latestEntryId` argument. Ensure the final `append` call uses the latest transcript entry you evaluated, regardless of whether it anchored a fragment. If you evaluated transcript entries but found zero fragments, call the watermark-advance tool with `{ source: "' +
+    'Every `append` must include `latestEntryId` (the latest entry evaluated, regardless of anchors). With zero fragments, call the watermark-advance tool with `{ source: "' +
       payload.parentSessionId +
-      '", latestEntryId: "<latestEntryId>" }` instead of writing a fake fragment.',
+      '", latestEntryId: "<latestEntryId>" }` instead of a fake fragment.',
   )
   return lines.join('\n')
 }
