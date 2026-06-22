@@ -254,11 +254,16 @@ export async function start({
     // image to a fresh container build.
     const upgrade = await autoUpgrade(cwd)
     const upgradeCommitMessage = commitMessageForAutoUpgrade(upgrade)
-    // A relink to `link:typeclaw` (native-Windows dev) needs the checkout
-    // registered with `bun link` BEFORE the forced install, exactly as init's
-    // maybeLinkWindowsDevTypeclaw does — otherwise ensureDeps can't resolve the
-    // link: spec. No-op off Windows (linkWindowsDevTypeclaw returns null).
-    if (upgrade.kind === 'relinked-to-local' && upgrade.to.startsWith('link:')) {
+    // Any agent on a `link:typeclaw` spec (native-Windows dev) needs the
+    // checkout registered with `bun link` BEFORE ensureDeps, exactly as init's
+    // maybeLinkWindowsDevTypeclaw does — otherwise bun can't resolve the link:
+    // spec. We gate on the EFFECTIVE on-disk spec, not the transition outcome:
+    // a prior start that wrote `link:` but failed/interrupted before
+    // registering would otherwise leave the next start (which sees the spec
+    // already local → skipped-dev-mode) reaching ensureDeps unregistered.
+    // `bun link` is idempotent, so re-running it on every link: start is safe
+    // and self-heals that gap. No-op off Windows (linkWindowsDevTypeclaw → null).
+    if ((await readTypeclawDepSpec(cwd))?.startsWith('link:') === true) {
       const checkout = typeclawCheckoutRoot()
       if (checkout !== null) {
         await linkWindowsDevTypeclaw(checkout, { platform, ...(runBunLink !== undefined ? { runBunLink } : {}) })
@@ -1082,14 +1087,18 @@ export function shouldMountWindowsDevSource(
 // users (`^X.Y.Z`, `~X.Y.Z`, exact pins) pay nothing because their
 // install path is already cache-correct.
 async function hasLocallyLinkedTypeclawDep(cwd: string): Promise<boolean> {
+  const spec = await readTypeclawDepSpec(cwd)
+  return spec !== null && (spec.startsWith('file:') || spec.startsWith('link:'))
+}
+
+async function readTypeclawDepSpec(cwd: string): Promise<string | null> {
   try {
     const raw = await readFile(join(cwd, PACKAGE_FILE), 'utf8')
     const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> }
     const spec = pkg.dependencies?.typeclaw
-    if (typeof spec !== 'string') return false
-    return spec.startsWith('file:') || spec.startsWith('link:')
+    return typeof spec === 'string' ? spec : null
   } catch {
-    return false
+    return null
   }
 }
 

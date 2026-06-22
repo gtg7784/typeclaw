@@ -3948,9 +3948,9 @@ describe('start autoUpgrade integration', () => {
     expect(ensureCalls).toEqual([{ force: true }])
   })
 
-  test('relinked-to-local (link:) on win32 runs bun link BEFORE the forced install, no forceBunUpdate', async () => {
+  test('win32 link:typeclaw agent runs bun link BEFORE the forced install, no forceBunUpdate', async () => {
     await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writePackageJson(root, { typeclaw: 'link:typeclaw' })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const order: string[] = []
@@ -3981,9 +3981,42 @@ describe('start autoUpgrade integration', () => {
     expect(order).toEqual(['bun-link', 'ensureDeps:force=true'])
   })
 
-  test('relinked-to-local (link:) does NOT run bun link off-Windows', async () => {
+  test('win32 self-heals an interrupted relink: link: spec already on disk still runs bun link before install', async () => {
+    // A prior start wrote `link:typeclaw` but its bun link failed, so reconcile
+    // now sees a local spec and returns skipped-dev-mode (no transition). The
+    // guard must STILL register the link before install, keyed on the on-disk
+    // spec rather than the outcome.
     await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writePackageJson(root, { typeclaw: 'link:typeclaw' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const order: string[] = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      platform: 'win32',
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => ({ kind: 'skipped-dev-mode' }),
+      runBunLink: async () => {
+        order.push('bun-link')
+      },
+      ensureDeps: async () => {
+        order.push('ensureDeps')
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    // The point: bun link runs before ensureDeps even with no reconcile
+    // transition, so the link: spec is registered before install.
+    expect(order).toEqual(['bun-link', 'ensureDeps'])
+  })
+
+  test('link:typeclaw agent does NOT run bun link off-Windows', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: 'link:typeclaw' })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     let linkCalled = false
@@ -3993,7 +4026,7 @@ describe('start autoUpgrade integration', () => {
       platform: 'linux',
       exec,
       allocatePort: deterministicAllocator,
-      autoUpgrade: async () => ({ kind: 'relinked-to-local', from: '^0.1.0', to: 'link:typeclaw' }),
+      autoUpgrade: async () => ({ kind: 'skipped-dev-mode' }),
       runBunLink: async () => {
         linkCalled = true
       },
