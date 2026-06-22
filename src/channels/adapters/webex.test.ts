@@ -325,4 +325,18 @@ describe('createWebexHistoryCallback reply attribution', () => {
     const history = await historyOf([child], 'bot-1')
     expect(history.find((m) => m.externalMessageId === 'child-1')?.replyToBotMessageId).toBeNull()
   })
+
+  test('fails fast when listMessages hangs past the cold-start timeout', async () => {
+    const cb = createWebexHistoryCallback({
+      client: { listMessages: () => new Promise<WebexMessage[]>(() => {}) },
+      logger: logger(),
+      botPersonIdRef: () => 'bot-1',
+      timeoutMs: 20,
+    })
+    const start = Date.now()
+    const res = await cb({ chat: 'room-1', thread: null, limit: 50 })
+    const elapsed = Date.now() - start
+    expect(res.ok).toBe(false)
+    expect(elapsed).toBeLessThan(500)
+  })
 })

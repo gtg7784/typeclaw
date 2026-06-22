@@ -249,6 +249,19 @@ describe('webex history and membership', () => {
     await expect(cb({ chat: 'room-1', thread: null, limit: 10 })).resolves.toEqual({ ok: false, error: 'down' })
   })
 
+  test('fails fast when listMessages hangs past the cold-start timeout', async () => {
+    const cb = createWebexHistoryCallback({
+      client: { listMessages: () => new Promise<ReturnType<typeof webexMessage>[]>(() => {}) },
+      logger: logger(),
+      botPersonIdRef: () => 'bot-1',
+      timeoutMs: 20,
+    })
+    const start = Date.now()
+    const res = await cb({ chat: 'room-1', thread: null, limit: 10 })
+    expect(res.ok).toBe(false)
+    expect(Date.now() - start).toBeLessThan(500)
+  })
+
   test('resolves direct and group membership, falling back to history on failure', async () => {
     const history = createWebexHistoryCallback({
       client: {
