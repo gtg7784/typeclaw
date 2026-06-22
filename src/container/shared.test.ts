@@ -454,12 +454,21 @@ describe('buildxAvailable', () => {
 })
 
 describe('dockerBindMount', () => {
+  // dockerBindMount resolve()s its src to absolute. A POSIX literal like
+  // `/srv/x` is left untouched on POSIX but rewritten to `<drive>:\srv\x` on
+  // Windows, so any assertion comparing against the literal diverges there.
+  // Build the fixture from an already-absolute, platform-native path so
+  // resolve() is a no-op and the expected string matches on every OS.
+  const absSrc = (...segments: string[]): string =>
+    isWindows() ? `C:\\${segments.join('\\')}` : `/${segments.join('/')}`
+
   test('emits a single --mount argv pair (src never collides with the dst separator)', () => {
-    // given an absolute POSIX source
-    const args = dockerBindMount({ src: '/srv/agent', dst: '/agent' })
+    // given an already-absolute, platform-native source
+    const src = absSrc('srv', 'agent')
+    const args = dockerBindMount({ src, dst: '/agent' })
 
     // then the whole spec is one argv element — no `:`-splitting like `-v`
-    expect(args).toEqual(['--mount', 'type=bind,src=/srv/agent,dst=/agent'])
+    expect(args).toEqual(['--mount', `type=bind,src=${src},dst=/agent`])
   })
 
   test('keeps a colon-bearing absolute source intact instead of splitting on it (the Windows drive-letter case)', () => {
@@ -477,10 +486,11 @@ describe('dockerBindMount', () => {
   })
 
   test('appends the readonly field only when readonly is true', () => {
-    expect(dockerBindMount({ src: '/srv/x', dst: '/opt/models', readonly: true })[1]).toBe(
-      'type=bind,src=/srv/x,dst=/opt/models,readonly',
+    const src = absSrc('srv', 'x')
+    expect(dockerBindMount({ src, dst: '/opt/models', readonly: true })[1]).toBe(
+      `type=bind,src=${src},dst=/opt/models,readonly`,
     )
-    expect(dockerBindMount({ src: '/srv/x', dst: '/agent', readonly: false })[1]).not.toContain('readonly')
+    expect(dockerBindMount({ src, dst: '/agent', readonly: false })[1]).not.toContain('readonly')
   })
 
   test('resolves a relative source to an absolute path (docker --mount rejects relative src)', () => {

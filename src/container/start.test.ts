@@ -8,6 +8,7 @@ import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
+import { isWindows } from '@/shared'
 
 import type { DockerExec } from './shared'
 import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, shouldMirrorDevSource, start } from './start'
@@ -319,19 +320,22 @@ describe('planStart', () => {
     }
   })
 
-  test('adds a mirror mount for the typeclaw source when dependency is a file: spec outside cwd', async () => {
-    const typeclawRepo = await mkdtemp(join(tmpdir(), 'typeclaw-repo-'))
-    try {
-      await writeDockerfile(root)
-      await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
+  test.skipIf(isWindows())(
+    'adds a mirror mount for the typeclaw source when dependency is a file: spec outside cwd',
+    async () => {
+      const typeclawRepo = await mkdtemp(join(tmpdir(), 'typeclaw-repo-'))
+      try {
+        await writeDockerfile(root)
+        await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
 
-      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+        const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-      expect(hasBindMount(plan.runArgs, { src: typeclawRepo, dst: typeclawRepo, readonly: true })).toBe(true)
-    } finally {
-      await rm(typeclawRepo, { recursive: true, force: true })
-    }
-  })
+        expect(hasBindMount(plan.runArgs, { src: typeclawRepo, dst: typeclawRepo, readonly: true })).toBe(true)
+      } finally {
+        await rm(typeclawRepo, { recursive: true, force: true })
+      }
+    },
+  )
 
   test('skips mirror mount when typeclaw file: spec points inside the agent folder', async () => {
     await writeDockerfile(root)
