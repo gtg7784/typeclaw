@@ -353,7 +353,11 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             const currentSize = await readSize(parentTranscriptPath)
             const currentLines = await readLineCount(parentTranscriptPath)
             bytesAtLastRun.set(sessionId, currentSize)
-            linesAtLastRun.set(sessionId, currentLines)
+            // Monotonic: never regress below a baseline the idle gate already
+            // reserved. readLineCount returns 0 on a read error or a
+            // missing/truncated file, so an unconditional set could undo the
+            // eager reservation and reopen the over-fire window this fix closes.
+            linesAtLastRun.set(sessionId, Math.max(linesAtLastRun.get(sessionId) ?? 0, currentLines))
             ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
             try {
               await raceSpawn(ctx.spawnSubagent('memory-logger', payload, spawnOptions), spawnTimeoutMs)
@@ -392,12 +396,22 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         return currentSize - baseline >= bufferBytes
       }
 
-      const shouldSkipIdleSpawn = async (sessionId: string, transcriptPath: string): Promise<boolean> => {
-        if (minIdleDeltaLines === 0) return false
+      // Reserves the new baseline ATOMICALLY with the gate read — the
+      // read-decide-reserve sequence has no await between reading
+      // linesAtLastRun and writing it back, so two idle timers whose
+      // readLineCount awaits settle close together cannot both observe the same
+      // stale baseline and both accept a spawn. The gate awaits real fs reads,
+      // so without this in-continuation reservation the second timer over-fires
+      // memory-logger. The deferred (monotonic) set in fireMemoryLogger stays
+      // the final exact baseline.
+      const decideIdleSpawn = async (sessionId: string, transcriptPath: string): Promise<{ skip: boolean }> => {
+        if (minIdleDeltaLines === 0) return { skip: false }
         const currentLines = await readLineCount(transcriptPath)
-        if (currentLines === 0) return false
+        if (currentLines === 0) return { skip: false }
         const baseline = linesAtLastRun.get(sessionId) ?? 0
-        return currentLines - baseline < minIdleDeltaLines
+        if (currentLines - baseline < minIdleDeltaLines) return { skip: true }
+        linesAtLastRun.set(sessionId, Math.max(baseline, currentLines))
+        return { skip: false }
       }
 
       const runMemoryRetrieval = async (event: {
@@ -508,7 +522,11 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             const timer = setTimeout(() => {
               idleTimers.delete(sessionId)
               void (async () => {
-                if (transcriptPath !== undefined && (await shouldSkipIdleSpawn(sessionId, transcriptPath))) {
+                const decision =
+                  transcriptPath !== undefined
+                    ? await decideIdleSpawn(sessionId, transcriptPath)
+                    : { skip: false as const }
+                if (decision.skip) {
                   ctx.logger.info(
                     `memory-logger idle skip ${sessionId} (delta below minIdleDeltaLines=${minIdleDeltaLines})`,
                   )
