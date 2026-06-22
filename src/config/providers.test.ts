@@ -450,39 +450,22 @@ describe('isOpenAiFamilyRef', () => {
 })
 
 describe('defaultThinkingLevelForRef', () => {
-  test('OpenAI api-key models default to low', () => {
-    expect(defaultThinkingLevelForRef('openai/gpt-5.4-nano')).toBe('low')
-    expect(defaultThinkingLevelForRef('openai/gpt-5.4-mini')).toBe('low')
-    expect(defaultThinkingLevelForRef('openai/gpt-5.4')).toBe('low')
-    expect(defaultThinkingLevelForRef('openai/gpt-5.5')).toBe('low')
-  })
-
-  test('OpenAI Codex (ChatGPT Plus/Pro OAuth) models also default to low', () => {
-    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.4-mini')).toBe('low')
-    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.4')).toBe('low')
-    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.5')).toBe('low')
+  test('OpenAI-family models no longer pin low; they defer to the SDK default', () => {
+    expect(defaultThinkingLevelForRef('openai/gpt-5.4-nano')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('openai/gpt-5.5')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.4')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.5')).toBeUndefined()
   })
 
   test('non-OpenAI providers defer to the SDK default (returns undefined)', () => {
-    expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-7')).toBeUndefined()
     expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-8')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('anthropic/claude-sonnet-4-6')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('anthropic/claude-haiku-4-5')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')).toBeUndefined()
     expect(defaultThinkingLevelForRef('zai/glm-4.6')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('zai-coding/glm-5.1')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('minimax/MiniMax-M3')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-flash')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('deepseek/deepseek-v4-pro')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('moonshot/kimi-k2.7-code')).toBeUndefined()
     expect(defaultThinkingLevelForRef('moonshot/kimi-k2.5')).toBeUndefined()
-    expect(defaultThinkingLevelForRef('moonshot-coding/kimi-for-coding')).toBeUndefined()
   })
 
-  test('every known model ref is classified (no provider falls through unhandled)', () => {
+  test('every known model ref defers to the SDK default (no family is pinned)', () => {
     for (const ref of listKnownModelRefs()) {
-      const level = defaultThinkingLevelForRef(ref)
-      expect(level === 'low' || level === undefined, `${ref} returned unexpected ${String(level)}`).toBe(true)
+      expect(defaultThinkingLevelForRef(ref), `${ref} should defer to the SDK default`).toBeUndefined()
     }
   })
 })

@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from '@mariozechner/pi-agent-core'
 import type { KnownApi, Model } from '@mariozechner/pi-ai'
 
 // Authentication mechanism a provider supports. `api-key` reads a static key
@@ -979,24 +980,15 @@ function knownProviderForModelRef(ref: string): KnownProviderId | null {
   return null
 }
 
-// Per-provider default for pi-coding-agent's `thinkingLevel` knob. Returning
-// `undefined` defers to the SDK default (`medium`); returning a level pins it
-// to that value at session-creation time.
-//
-// OpenAI-family providers (`openai`, `openai-codex`) pin to `low`: GPT-5.x at
-// `medium` pads reasoning tokens on routine tool-driven turns (code edits,
-// channel replies, cron prompts) with no observable quality delta on this
-// codebase's workloads. Applies to every session that resolves to a GPT model
-// regardless of profile, so the saving is uniform.
-//
-// Anthropic, GLM, and Kimi don't share the padding behavior, so they keep the
-// SDK default.
 export function isOpenAiFamilyRef(ref: KnownModelRef | ModelRef | string): boolean {
   return vendorForProviderId(providerForModelRef(ref)) === 'openai'
 }
 
-export function defaultThinkingLevelForRef(ref: KnownModelRef | ModelRef | string): 'low' | undefined {
-  if (isOpenAiFamilyRef(ref)) return 'low'
+// Returning `undefined` defers to pi-coding-agent's SDK default (`medium`);
+// returning a level pins it at session-creation time. No family is pinned: the
+// prior OpenAI `low` pin was dropped so GPT-5.x reasons at SDK strength like
+// every other vendor.
+export function defaultThinkingLevelForRef(_ref: KnownModelRef | ModelRef | string): ThinkingLevel | undefined {
   return undefined
 }
 
