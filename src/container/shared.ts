@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
-import { basename, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
+import { basename, resolve, win32 } from 'node:path'
+
+import { isWindows } from '@/shared'
 
 export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
 
@@ -70,13 +73,78 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
 // "binary missing" from "daemon down".
 export const DOCKER_NOT_FOUND_STDERR = 'docker: command not found in $PATH'
 
-// Resolves the `docker` binary to an absolute path via Bun.which(), which —
-// unlike a bare `cmd: ['docker']` handed to Bun.spawn() — reliably honors
-// Windows PATHEXT and returns e.g. C:\…\docker.exe. On POSIX the resolved path
-// equals what the bare name would have found. Returns null when docker is not
-// on PATH, which callers translate into the binary-missing sentinel.
-export function resolveDockerBinary(): string | null {
-  return getBun()?.which('docker') ?? null
+export type DockerBinaryProbes = {
+  which?: (command: string) => string | null
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+  exists?: (path: string) => boolean
+}
+
+// Resolves the `docker` binary to an absolute path. First via Bun.which(),
+// which — unlike a bare `cmd: ['docker']` handed to Bun.spawn() — reliably
+// honors Windows PATHEXT and returns e.g. C:\…\docker.exe. On POSIX the
+// resolved path equals what the bare name would have found.
+//
+// When Bun.which() finds nothing on Windows we fall back to Docker Desktop's
+// known install locations: its installer registers docker.exe on the SYSTEM
+// PATH, so a shell/process started before the install (or with a customized
+// PATH) inherits a stale PATH where Bun.which can't see docker even though the
+// binary exists and the engine is running — the real-world "Docker is not
+// installed" report on a machine with a working Docker. Probing these paths
+// fixes detection without a reinstall or PATH edit. The MS-Store packaged
+// build is deliberately NOT probed: its binary lives in ACL-locked
+// WindowsApps and can't be executed by a child process anyway.
+//
+// Returns null when docker is genuinely absent, which callers translate into
+// the binary-missing sentinel. Probes are injectable so tests stay
+// deterministic without depending on a real docker install or host platform.
+export function resolveDockerBinary(probes: DockerBinaryProbes = {}): string | null {
+  const which = probes.which ?? ((command: string) => getBun()?.which(command) ?? null)
+  const fromPath = which('docker')
+  if (fromPath !== null) return fromPath
+
+  const platform = probes.platform ?? process.platform
+  if (!isWindows(platform)) return null
+
+  const exists = probes.exists ?? existsSync
+  for (const candidate of windowsDockerCandidates(probes.env ?? process.env)) {
+    if (exists(candidate)) return candidate
+  }
+  return null
+}
+
+// Real, child-process-executable docker.exe locations across the common
+// Windows install methods, most-canonical first. All are confirmed real
+// binaries or executable shims (not ACL-locked WindowsApps Store stubs).
+// Probe order prefers Docker Desktop, then package-manager Docker, then the
+// standalone CLI, then the Rancher Desktop alternative runtime. An
+// arbitrary `--installation-dir` install can't be enumerated and is left to
+// Bun.which/PATH.
+function windowsDockerCandidates(env: NodeJS.ProcessEnv): string[] {
+  const candidates: string[] = []
+  // win32.join (not the host-default join) so the probe builds backslash paths
+  // regardless of the host the resolver runs/tests on.
+  const add = (root: string | undefined, ...segments: string[]): void => {
+    if (root) candidates.push(win32.join(root, ...segments))
+  }
+  // ProgramW6432 covers a 32-bit Bun seeing the WOW64-redirected ProgramFiles.
+  const programFiles = env.ProgramW6432 ?? env.ProgramFiles ?? 'C:\\Program Files'
+  const programData = env.ProgramData ?? 'C:\\ProgramData'
+
+  // Docker Desktop: all-users, per-user, and the installer symlink dir.
+  add(programFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe')
+  add(env.LOCALAPPDATA, 'Programs', 'DockerDesktop', 'resources', 'bin', 'docker.exe')
+  add(programData, 'DockerDesktop', 'version-bin', 'docker.exe')
+  // Docker Desktop pre-3.3.1 layout (resources\docker.exe, no \bin).
+  add(programFiles, 'Docker', 'Docker', 'resources', 'docker.exe')
+  // Chocolatey and Scoop shims (executable redirectors, on PATH after install).
+  add(programData, 'chocolatey', 'bin', 'docker.exe')
+  add(env.USERPROFILE, 'scoop', 'shims', 'docker.exe')
+  // Standalone Docker CLI binary (Windows Server / manual `Expand-Archive`).
+  add(programFiles, 'Docker', 'docker.exe')
+  // Rancher Desktop's bundled Moby docker CLI (note the doubled `resources`).
+  add(programFiles, 'Rancher Desktop', 'resources', 'resources', 'win32', 'bin', 'docker.exe')
+  return candidates
 }
 
 // Builds the argv for a docker invocation with the binary resolved to an
