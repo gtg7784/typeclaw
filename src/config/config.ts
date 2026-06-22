@@ -481,15 +481,17 @@ export type SandboxConfig = z.infer<typeof sandboxSchema>
 
 // Host-stage `typeclaw compose` knobs. `exclude: true` skips this agent during
 // compose discovery (same effect as parking it under an `_`-prefixed dir, but
-// without renaming the folder). The container never reads this block — it's a
-// pure compose CLI hint, so omitting it keeps the agent in every compose
-// operation. Namespaced under `compose` so future compose-only settings have a
-// home without crowding the top level.
+// without renaming the folder). `monorepo` is a host-stage scaffolding hint.
+// The container never reads this block — it's a pure compose CLI hint, so
+// omitting it keeps the agent in every compose operation. Namespaced under
+// `compose` so future compose-only settings have a home without crowding the
+// top level.
 export const composeSchema = z
   .object({
     exclude: z.boolean().default(false),
+    monorepo: z.boolean().default(false),
   })
-  .default({ exclude: false })
+  .default({ exclude: false, monorepo: false })
 
 export type ComposeConfig = z.infer<typeof composeSchema>
 

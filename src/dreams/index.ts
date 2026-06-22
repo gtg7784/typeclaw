@@ -39,7 +39,12 @@ export async function listDreams(
 ): Promise<DreamEntry[]> {
   const repo = await resolveGitRepo(agentDir, spawnGit)
   if (!repo.ok) return []
-  const commits = await readDreamCommitLog(repo.root, opts.limit !== undefined ? { limit: opts.limit } : {}, spawnGit)
+  const commits = await readDreamCommitLog(
+    repo.root,
+    opts.limit !== undefined ? { limit: opts.limit } : {},
+    spawnGit,
+    repo.gitArgs,
+  )
   return commits.map((commit) => {
     const subject = parseDreamSubject(commit.subject)
     return {
@@ -58,7 +63,7 @@ export async function listDreams(
 export async function hydrateDream(agentDir: string, entry: DreamEntry, spawnGit?: SpawnGit): Promise<DreamEntry> {
   const repo = await resolveGitRepo(agentDir, spawnGit)
   if (!repo.ok) return entry
-  const show = await readDreamCommitShow(repo.root, entry.sha, spawnGit)
+  const show = await readDreamCommitShow(repo.root, entry.sha, spawnGit, repo.gitArgs)
   if (show === null) return entry
   return { ...entry, detail: parseDreamDetail(show.nameStatus, show.patch) }
 }
@@ -80,7 +85,7 @@ export async function runDreams(opts: RunDreamsOptions): Promise<RunDreamsResult
   const entries = await listDreams(opts.agentDir, opts.limit !== undefined ? { limit: opts.limit } : {}, opts.spawnGit)
   const renderOpts: RenderOptions = { color: opts.color }
 
-  if (opts.json) return runJson(opts, repo.root, entries)
+  if (opts.json) return runJson(opts, repo.root, repo.gitArgs, entries)
 
   if (entries.length === 0) {
     opts.stdout('No dreams yet. The dreaming subagent commits here after it consolidates memory.')
@@ -115,16 +120,26 @@ async function runInteractiveLoop(
   }
 }
 
-async function runJson(opts: RunDreamsOptions, root: string, entries: DreamEntry[]): Promise<RunDreamsResult> {
+async function runJson(
+  opts: RunDreamsOptions,
+  root: string,
+  gitArgs: readonly string[],
+  entries: DreamEntry[],
+): Promise<RunDreamsResult> {
   for (const entry of entries) {
-    const final = opts.details ? await hydrateEntryFromRoot(root, entry, opts.spawnGit) : entry
+    const final = opts.details ? await hydrateEntryFromRoot(root, gitArgs, entry, opts.spawnGit) : entry
     opts.stdout(JSON.stringify(toJsonShape(final)))
   }
   return { ok: true, exitCode: 0 }
 }
 
-async function hydrateEntryFromRoot(root: string, entry: DreamEntry, spawnGit?: SpawnGit): Promise<DreamEntry> {
-  const show = await readDreamCommitShow(root, entry.sha, spawnGit)
+async function hydrateEntryFromRoot(
+  root: string,
+  gitArgs: readonly string[],
+  entry: DreamEntry,
+  spawnGit?: SpawnGit,
+): Promise<DreamEntry> {
+  const show = await readDreamCommitShow(root, entry.sha, spawnGit, gitArgs)
   if (show === null) return entry
   return { ...entry, detail: parseDreamDetail(show.nameStatus, show.patch) }
 }

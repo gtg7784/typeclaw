@@ -37,6 +37,12 @@ async function makeRepo(): Promise<string> {
   return dir
 }
 
+async function makeGitstoreRepo(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'autobackup-runner-gitstore-'))
+  await mkdir(join(dir, '.gitstore'))
+  return dir
+}
+
 const baseDeps = (spawn: GitSpawn, message = 'chore: test'): BackupRunnerDeps => ({
   gitSpawn: spawn,
   pickCommitMessage: async () => message,
@@ -56,6 +62,26 @@ describe('runBackup', () => {
     const { spawn } = makeSpawn(() => okResult(''))
     const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn))
     expect(result).toEqual({ ok: true, kind: 'clean' })
+  })
+
+  test('threads gitstore args into representative git calls', async () => {
+    const cwd = await makeGitstoreRepo()
+    const prefix = ['--git-dir', join(cwd, '.gitstore'), '--work-tree', cwd]
+    const { spawn, calls } = makeSpawn((args) => {
+      const command = args[prefix.length]
+      if (command === 'status') return okResult(' M notes.md\n')
+      if (command === 'diff' && args[prefix.length + 2] === '--quiet') return failResult('', 1)
+      if (command === 'commit') return okResult()
+      if (command === 'rev-parse') return failResult('no upstream', 128)
+      if (command === 'remote') return failResult('No such remote', 2)
+      return okResult()
+    })
+
+    const result = await runBackup({ cwd, pushToOrigin: true }, baseDeps(spawn, '백업: 메모 저장'))
+
+    expect(result).toEqual({ ok: true, kind: 'committed' })
+    expect(calls.find((c) => c.args.includes('status'))?.args.slice(0, prefix.length)).toEqual(prefix)
+    expect(calls.find((c) => c.args.includes('commit'))?.args.slice(0, prefix.length)).toEqual(prefix)
   })
 
   test('skips committing memory/-prefixed paths but stages other dirty paths', async () => {

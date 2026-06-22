@@ -60,6 +60,26 @@ describe('checkUncommittedChangesAdvice', () => {
     expect(textOf(result)).toBe('wrote 3 lines')
   })
 
+  test('relocated .gitstore agent: still warns and threads --git-dir/--work-tree into status', async () => {
+    // given: a monorepo member whose git db lives in .gitstore, not .git
+    await mkdir(join(agentDir, '.gitstore'))
+    let receivedGitArgs: readonly string[] | undefined
+    const deps: UncommittedChangesDeps = {
+      readStatus: async (_dir, gitArgs) => {
+        receivedGitArgs = gitArgs
+        return ['src/foo.ts']
+      },
+    }
+    const result = textResult('wrote 3 lines')
+
+    // when: a file-touching tool runs
+    await checkUncommittedChangesAdvice({ tool: 'write', agentDir, result, deps })
+
+    // then: the guard fires and passes the relocated git args to the status reader
+    expect(textOf(result)).toContain('uncommittedChanges')
+    expect(receivedGitArgs).toEqual(['--git-dir', join(agentDir, '.gitstore'), '--work-tree', agentDir])
+  })
+
   test('does nothing when the worktree is clean', async () => {
     await mkdir(join(agentDir, '.git'))
     const result = textResult('wrote 3 lines')

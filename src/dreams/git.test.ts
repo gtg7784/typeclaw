@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -18,6 +18,10 @@ async function commit(cwd: string, subject: string): Promise<void> {
   await git(['commit', '-m', subject], cwd)
 }
 
+async function relocateGitStore(cwd: string): Promise<void> {
+  await rename(join(cwd, '.git'), join(cwd, '.gitstore'))
+}
+
 beforeEach(async () => {
   repo = await mkdtemp(join(tmpdir(), 'typeclaw-dreams-git-'))
   await git(['init', '-q', '-b', 'main'], repo)
@@ -31,13 +35,11 @@ afterEach(async () => {
 })
 
 describe('resolveGitRepo', () => {
-  it('resolves the repo root from a subdirectory', async () => {
-    const sub = join(repo, 'memory', 'topics')
-    await mkdir(sub, { recursive: true })
+  it('resolves the repo root from an agent git directory', async () => {
     await writeFile(join(repo, 'README.md'), '# x\n')
     await commit(repo, 'init')
 
-    const res = await resolveGitRepo(sub)
+    const res = await resolveGitRepo(repo)
     expect(res.ok).toBe(true)
     // Resolve the root through git from both the subdirectory and the repo
     // root, then compare. Routing both sides through git applies the same
@@ -46,7 +48,31 @@ describe('resolveGitRepo', () => {
     // without depending on realpathSync matching git's normalization per-OS.
     const fromRoot = await resolveGitRepo(repo)
     expect(fromRoot.ok).toBe(true)
-    if (res.ok && fromRoot.ok) expect(res.root).toBe(fromRoot.root)
+    if (res.ok && fromRoot.ok) {
+      expect(res.root).toBe(fromRoot.root)
+      expect(res.gitArgs).toEqual([])
+    }
+  })
+
+  it('does not walk up into a parent monorepo when the agent has no git layout', async () => {
+    const child = join(repo, 'agents', 'bot')
+    await mkdir(child, { recursive: true })
+    await writeFile(join(repo, 'README.md'), '# parent\n')
+    await commit(repo, 'init parent')
+
+    const res = await resolveGitRepo(child)
+
+    expect(res).toEqual({ ok: false, reason: 'not-a-repo' })
+  })
+
+  it('resolves a relocated gitstore at the agent directory', async () => {
+    await writeFile(join(repo, 'README.md'), '# x\n')
+    await commit(repo, 'init')
+    await relocateGitStore(repo)
+
+    const res = await resolveGitRepo(repo)
+
+    expect(res).toEqual({ ok: true, root: repo, gitArgs: ['--git-dir', join(repo, '.gitstore'), '--work-tree', repo] })
   })
 
   it('reports not-a-repo outside any git tree', async () => {
@@ -76,6 +102,20 @@ describe('readDreamCommitLog', () => {
       expect(c.sha).toMatch(/^[0-9a-f]{40}$/)
       expect(c.committedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     }
+  })
+
+  it('lists dream commits from a relocated gitstore', async () => {
+    await mkdir(join(repo, 'memory', 'streams'), { recursive: true })
+    await writeFile(join(repo, 'memory', 'streams', '2026-06-14.jsonl'), '안녕\n')
+    await commit(repo, 'dream: 1 fragment 🌙')
+    await relocateGitStore(repo)
+
+    const resolved = await resolveGitRepo(repo)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    const commits = await readDreamCommitLog(resolved.root, {}, undefined, resolved.gitArgs)
+
+    expect(commits.map((c) => c.subject)).toEqual(['dream: 1 fragment 🌙'])
   })
 
   it('honors the limit', async () => {
@@ -124,6 +164,22 @@ describe('readDreamCommitShow', () => {
     expect(show).not.toBeNull()
     expect(show?.nameStatus).toContain('memory/topics/deploy.md')
     expect(show?.patch).toContain('+## Deploy')
+  })
+
+  it('returns name-status and patch from a relocated gitstore', async () => {
+    await mkdir(join(repo, 'memory', 'topics'), { recursive: true })
+    await writeFile(join(repo, 'memory', 'topics', 'deploy.md'), '## 배포\n\n본문\n')
+    await commit(repo, 'dream: 1 fragment 🧠')
+    await relocateGitStore(repo)
+    const resolved = await resolveGitRepo(repo)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+
+    const head = await readDreamCommitLog(resolved.root, {}, undefined, resolved.gitArgs)
+    const show = await readDreamCommitShow(resolved.root, head[0]!.sha, undefined, resolved.gitArgs)
+
+    expect(show?.nameStatus).toContain('memory/topics/deploy.md')
+    expect(show?.patch).toContain('+## 배포')
   })
 })
 

@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolveAgentGit } from '@/git/resolve-agent-git'
 
 const MAX_LISTED_PATHS = 10
 
@@ -9,15 +8,16 @@ const MAX_LISTED_PATHS = 10
 const RUNTIME_OWNED_PREFIXES = ['sessions/', 'memory/']
 
 export type GitNudgeDeps = {
-  readStatus: (agentDir: string) => Promise<readonly string[] | null>
+  readStatus: (agentDir: string, gitArgs: readonly string[]) => Promise<readonly string[] | null>
 }
 
 // Returns "" (not a placeholder string) when there is nothing to nudge about.
 // The empty case must add zero bytes to the system prompt so cache prefixes
 // stay identical to a clean-worktree agent folder.
 export async function renderGitNudge(agentDir: string, deps: GitNudgeDeps = defaultDeps): Promise<string> {
-  if (!existsSync(join(agentDir, '.git'))) return ''
-  const status = await deps.readStatus(agentDir)
+  const repo = resolveAgentGit(agentDir)
+  if (!repo) return ''
+  const status = await deps.readStatus(agentDir, repo.gitArgs)
   if (status === null) return ''
   const dirty = filterAgentOwned(status)
   if (dirty.length === 0) return ''
@@ -66,12 +66,12 @@ function filterAgentOwned(paths: readonly string[]): string[] {
 
 // Mirrors the spawn pattern in `src/container/start.ts` `commitSystemFile`.
 const defaultDeps: GitNudgeDeps = {
-  async readStatus(agentDir) {
+  async readStatus(agentDir, gitArgs) {
     const bun = getBun()
     if (!bun) return null
     try {
       const proc = bun.spawn({
-        cmd: ['git', 'status', '--porcelain=v1'],
+        cmd: ['git', ...gitArgs, 'status', '--porcelain=v1'],
         cwd: agentDir,
         stdout: 'pipe',
         stderr: 'pipe',

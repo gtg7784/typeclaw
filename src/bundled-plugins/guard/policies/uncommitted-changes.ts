@@ -1,6 +1,4 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-
+import { resolveAgentGit } from '@/git/resolve-agent-git'
 import type { ContentPart, ToolResult } from '@/plugin'
 
 export const GUARD_UNCOMMITTED_CHANGES = 'uncommittedChanges'
@@ -13,7 +11,7 @@ const WARNING_TEXT =
   '\n\n[guard:uncommittedChanges] The worktree has uncommitted changes. Commit (or stash) them when this task is done — leaving stale changes around between turns risks losing work and confusing future commits.'
 
 export type UncommittedChangesDeps = {
-  readStatus: (agentDir: string) => Promise<readonly string[] | null>
+  readStatus: (agentDir: string, gitArgs: readonly string[]) => Promise<readonly string[] | null>
 }
 
 export async function checkUncommittedChangesAdvice(options: {
@@ -24,10 +22,11 @@ export async function checkUncommittedChangesAdvice(options: {
 }): Promise<void> {
   const { tool, agentDir, result } = options
   if (!FILE_TOUCHING_TOOLS.has(tool)) return
-  if (!existsSync(join(agentDir, '.git'))) return
+  const repo = resolveAgentGit(agentDir)
+  if (!repo) return
 
   const deps = options.deps ?? defaultDeps
-  const status = await deps.readStatus(agentDir)
+  const status = await deps.readStatus(agentDir, repo.gitArgs)
   if (status === null) return
 
   const dirty = status.filter((p) => !RUNTIME_OWNED_PREFIXES.some((prefix) => p.startsWith(prefix)))
@@ -59,12 +58,12 @@ function appendAdviceToContent(content: ContentPart[], advice: string): void {
 }
 
 const defaultDeps: UncommittedChangesDeps = {
-  async readStatus(agentDir) {
+  async readStatus(agentDir, gitArgs) {
     const bun = getBun()
     if (!bun) return null
     try {
       const proc = bun.spawn({
-        cmd: ['git', 'status', '--porcelain=v1'],
+        cmd: ['git', ...gitArgs, 'status', '--porcelain=v1'],
         cwd: agentDir,
         stdout: 'pipe',
         stderr: 'pipe',

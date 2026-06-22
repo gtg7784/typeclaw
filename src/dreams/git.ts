@@ -1,5 +1,7 @@
+import { resolveAgentGit } from '@/git/resolve-agent-git'
+
 export type GitResult = { exitCode: number; stdout: string; stderr: string }
-export type SpawnGit = (args: string[], cwd: string) => Promise<GitResult>
+export type SpawnGit = (args: readonly string[], cwd: string) => Promise<GitResult>
 
 export type RawCommit = {
   sha: string
@@ -8,16 +10,22 @@ export type RawCommit = {
   subject: string
 }
 
-export type ResolveRepoResult = { ok: true; root: string } | { ok: false; reason: 'not-a-repo' | 'git-failed' }
+export type ResolveRepoResult =
+  | { ok: true; root: string; gitArgs: readonly string[] }
+  | { ok: false; reason: 'not-a-repo' | 'git-failed' }
 
 const FIELD_SEP = '\x1f'
 const RECORD_SEP = '\x1e'
 
 export async function resolveGitRepo(cwd: string, spawnGit: SpawnGit = defaultSpawnGit): Promise<ResolveRepoResult> {
-  const res = await spawnGit(['rev-parse', '--show-toplevel'], cwd)
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return { ok: false, reason: 'not-a-repo' }
+  if (repo.kind === 'gitstore') return { ok: true, root: cwd, gitArgs: repo.gitArgs }
+
+  const res = await spawnGit([...repo.gitArgs, 'rev-parse', '--show-toplevel'], cwd)
   if (res.exitCode === 0) {
     const root = res.stdout.trim()
-    if (root.length > 0) return { ok: true, root }
+    if (root.length > 0) return { ok: true, root, gitArgs: repo.gitArgs }
     return { ok: false, reason: 'git-failed' }
   }
   if (/not a git repository/i.test(res.stderr)) return { ok: false, reason: 'not-a-repo' }
@@ -30,6 +38,7 @@ export async function readDreamCommitLog(
   root: string,
   opts: { limit?: number } = {},
   spawnGit: SpawnGit = defaultSpawnGit,
+  gitArgs: readonly string[] = [],
 ): Promise<RawCommit[]> {
   // --grep is only a cheap pre-filter: it matches ANY line of the commit
   // message, so a non-dream commit with a `dream: ...` body line slips
@@ -39,7 +48,7 @@ export async function readDreamCommitLog(
   // result below the requested count.
   const args = ['log', '--grep=^dream: ', `--format=%H${FIELD_SEP}%h${FIELD_SEP}%cI${FIELD_SEP}%s${RECORD_SEP}`]
 
-  const res = await spawnGit(args, root)
+  const res = await spawnGit([...gitArgs, ...args], root)
   if (res.exitCode !== 0) return []
   const dreams = parseLogOutput(res.stdout).filter((c) => c.subject.startsWith(DREAM_SUBJECT_PREFIX))
   if (opts.limit !== undefined && opts.limit > 0) return dreams.slice(0, opts.limit)
@@ -62,10 +71,14 @@ export async function readDreamCommitShow(
   root: string,
   sha: string,
   spawnGit: SpawnGit = defaultSpawnGit,
+  gitArgs: readonly string[] = [],
 ): Promise<{ nameStatus: string; patch: string } | null> {
-  const nameStatus = await spawnGit(['show', '--no-color', '--find-renames', '--format=', '--name-status', sha], root)
+  const nameStatus = await spawnGit(
+    [...gitArgs, 'show', '--no-color', '--find-renames', '--format=', '--name-status', sha],
+    root,
+  )
   if (nameStatus.exitCode !== 0) return null
-  const patch = await spawnGit(['show', '--no-color', '--format=', '--unified=0', sha], root)
+  const patch = await spawnGit([...gitArgs, 'show', '--no-color', '--format=', '--unified=0', sha], root)
   if (patch.exitCode !== 0) return null
   return { nameStatus: nameStatus.stdout, patch: patch.stdout }
 }

@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import { z } from 'zod'
 
 import { withGitLock } from '@/git/mutex'
+import { type AgentGit, resolveAgentGit } from '@/git/resolve-agent-git'
 import { defineTool, lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
@@ -751,26 +752,27 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
 async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return
-  if (!existsSync(join(cwd, '.git'))) return
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return
 
-  await clearSkipWorktree(bun, cwd)
+  await clearSkipWorktree(bun, cwd, repo)
 
   // `git add -- foo bar/` fails with exit 128 if any pathspec matches no
   // path on disk. Filter to existing paths before passing them in.
   const presentPaths = SNAPSHOT_PATHS.filter((p) => existsSync(join(cwd, p)))
   if (presentPaths.length === 0) {
-    await applySkipWorktree(bun, cwd)
+    await applySkipWorktree(bun, cwd, repo)
     return
   }
 
   const add = bun.spawn({
-    cmd: ['git', 'add', '-f', '--', ...presentPaths],
+    cmd: ['git', ...repo.gitArgs, 'add', '-f', '--', ...presentPaths],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
   if ((await add.exited) !== 0) {
-    await applySkipWorktree(bun, cwd)
+    await applySkipWorktree(bun, cwd, repo)
     return
   }
 
@@ -779,33 +781,33 @@ async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   // fails outright when `bar/` matches no tracked file, even if `foo` is
   // staged.
   const stagedNames = bun.spawn({
-    cmd: ['git', 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS],
+    cmd: ['git', ...repo.gitArgs, 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
   const stagedRaw = await new Response(stagedNames.stdout).text()
   if ((await stagedNames.exited) !== 0) {
-    await applySkipWorktree(bun, cwd)
+    await applySkipWorktree(bun, cwd, repo)
     return
   }
   const staged = stagedRaw.split('\0').filter((p) => p.length > 0)
   if (staged.length === 0) {
-    await applySkipWorktree(bun, cwd)
+    await applySkipWorktree(bun, cwd, repo)
     return
   }
 
-  const message = await buildCommitMessage(bun, cwd, staged)
+  const message = await buildCommitMessage(bun, cwd, staged, undefined, repo.gitArgs)
 
   const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', message, '--only', '--', ...staged],
+    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...staged],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
   await commit.exited
 
-  await applySkipWorktree(bun, cwd)
+  await applySkipWorktree(bun, cwd, repo)
 }
 
 // Pool of emojis sampled into every dream commit. The pool is small and
@@ -837,19 +839,25 @@ export async function buildCommitMessage(
   cwd: string,
   staged: string[],
   emojiPicker: () => DreamEmoji = pickDreamEmoji,
+  gitArgs: readonly string[] = [],
 ): Promise<string> {
-  const summary = await buildDreamSummary(bun, cwd, staged)
+  const summary = await buildDreamSummary(bun, cwd, staged, gitArgs)
   return `dream: ${summary} ${emojiPicker()}`
 }
 
 const STREAM_FILE_RELATIVE = /^memory\/(?:streams\/)?\d{4}-\d{2}-\d{2}\.jsonl$/
 const SKILL_FILE_RELATIVE = /^memory\/skills\/([^/]+)\/SKILL\.md$/
 
-async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, staged: string[]): Promise<string> {
+async function buildDreamSummary(
+  bun: { spawn: typeof Bun.spawn },
+  cwd: string,
+  staged: string[],
+  gitArgs: readonly string[] = [],
+): Promise<string> {
   // numstat: `<added>\t<deleted>\t<path>` per line. Use NUL-terminated so paths
   // with whitespace round-trip; -z switches the record separator to NUL.
   const numstat = bun.spawn({
-    cmd: ['git', 'diff', '--cached', '--numstat', '-z', '--', ...staged],
+    cmd: ['git', ...gitArgs, 'diff', '--cached', '--numstat', '-z', '--', ...staged],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -874,7 +882,7 @@ async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, 
 
   // Newly-added muscle-memory skills (status A). Refinements (status M) are
   // not announced — they ride under the fragment count.
-  const newSkills = await listNewlyAddedSkills(bun, cwd, staged)
+  const newSkills = await listNewlyAddedSkills(bun, cwd, staged, gitArgs)
 
   const parts: string[] = []
   if (fragmentLines > 0) {
@@ -903,9 +911,10 @@ async function listNewlyAddedSkills(
   bun: { spawn: typeof Bun.spawn },
   cwd: string,
   staged: string[],
+  gitArgs: readonly string[] = [],
 ): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', 'diff', '--cached', '--name-status', '-z', '--', ...staged],
+    cmd: ['git', ...gitArgs, 'diff', '--cached', '--name-status', '-z', '--', ...staged],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -927,9 +936,13 @@ async function listNewlyAddedSkills(
   return names.filter((n) => n.length > 0)
 }
 
-async function listTrackedSnapshotFiles(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<string[]> {
+async function listTrackedSnapshotFiles(
+  bun: { spawn: typeof Bun.spawn },
+  cwd: string,
+  repo: AgentGit,
+): Promise<string[]> {
   const ls = bun.spawn({
-    cmd: ['git', 'ls-files', '-z', '--', ...SNAPSHOT_PATHS],
+    cmd: ['git', ...repo.gitArgs, 'ls-files', '-z', '--', ...SNAPSHOT_PATHS],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -939,11 +952,11 @@ async function listTrackedSnapshotFiles(bun: { spawn: typeof Bun.spawn }, cwd: s
   return raw.split('\0').filter((p) => p.length > 0)
 }
 
-async function clearSkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<void> {
-  const files = await listTrackedSnapshotFiles(bun, cwd)
+async function clearSkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string, repo: AgentGit): Promise<void> {
+  const files = await listTrackedSnapshotFiles(bun, cwd, repo)
   if (files.length === 0) return
   const proc = bun.spawn({
-    cmd: ['git', 'update-index', '--no-skip-worktree', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'update-index', '--no-skip-worktree', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -951,11 +964,11 @@ async function clearSkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string):
   await proc.exited
 }
 
-async function applySkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<void> {
-  const files = await listTrackedSnapshotFiles(bun, cwd)
+async function applySkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string, repo: AgentGit): Promise<void> {
+  const files = await listTrackedSnapshotFiles(bun, cwd, repo)
   if (files.length === 0) return
   const proc = bun.spawn({
-    cmd: ['git', 'update-index', '--skip-worktree', '--', ...files],
+    cmd: ['git', ...repo.gitArgs, 'update-index', '--skip-worktree', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',

@@ -1,9 +1,10 @@
-import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { SYSTEM_MANAGED_ROOTS, TRULY_IGNORED_PATTERNS } from '@/init/gitignore'
+
+import { type AgentGit, resolveAgentGit } from './resolve-agent-git'
 
 export type UntrackResult = { untracked: string[] }
 
@@ -26,7 +27,8 @@ export async function untrackTrulyIgnoredFiles(
 
   const bun = getBun()
   if (!bun) return empty
-  if (!existsSync(join(cwd, '.git'))) return empty
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return empty
 
   const patterns = [...TRULY_IGNORED_PATTERNS, ...customAppend]
   let excludeDir: string | null = null
@@ -35,11 +37,11 @@ export async function untrackTrulyIgnoredFiles(
     const excludeFile = join(excludeDir, 'exclude')
     await writeFile(excludeFile, `${patterns.join('\n')}\n`)
 
-    const candidates = await listTrackedIgnored(bun, cwd, excludeFile)
+    const candidates = await listTrackedIgnored(bun, cwd, repo.gitArgs, excludeFile)
     const removable = candidates.filter((path) => !isSystemManaged(path))
     if (removable.length === 0) return empty
 
-    const removed = await gitRmCached(bun, cwd, removable)
+    const removed = await gitRmCached(bun, cwd, repo.gitArgs, removable)
     return { untracked: removed }
   } catch {
     return empty
@@ -76,6 +78,7 @@ export type CommitGitignoreDeps = {
   commitAtomic?: (
     bun: BunLike,
     cwd: string,
+    repo: AgentGit,
     gitignoreFile: string,
     untracked: readonly string[],
     message: string,
@@ -91,39 +94,41 @@ export async function commitGitignoreWithUntracks(
 ): Promise<boolean> {
   const bun = getBun()
   if (!bun) return false
-  if (!existsSync(join(cwd, '.git'))) return false
+  const repo = resolveAgentGit(cwd)
+  if (!repo) return false
   if (untracked.length === 0) return false
 
   const commitAtomic = deps.commitAtomic ?? commitViaTempIndex
-  if (!(await run(bun, cwd, ['add', '--', gitignoreFile]))) return false
-  if (await commitAtomic(bun, cwd, gitignoreFile, untracked, message)) return true
-  return await commitRealIndexIfExactlyOurs(bun, cwd, gitignoreFile, untracked, message)
+  if (!(await run(bun, cwd, repo.gitArgs, ['add', '--', gitignoreFile]))) return false
+  if (await commitAtomic(bun, cwd, repo, gitignoreFile, untracked, message)) return true
+  return await commitRealIndexIfExactlyOurs(bun, cwd, repo.gitArgs, gitignoreFile, untracked, message)
 }
 
 async function commitViaTempIndex(
   bun: BunLike,
   cwd: string,
+  repo: AgentGit,
   gitignoreFile: string,
   untracked: readonly string[],
   message: string,
 ): Promise<boolean> {
   let indexDir: string | null = null
   try {
-    const parent = (await capture(bun, cwd, ['rev-parse', '--verify', 'HEAD'])).trim()
+    const parent = (await capture(bun, cwd, repo.gitArgs, ['rev-parse', '--verify', 'HEAD'])).trim()
     if (parent.length === 0) return false
 
     indexDir = await mkdtemp(join(tmpdir(), 'typeclaw-untrack-idx-'))
     const env = { ...process.env, GIT_INDEX_FILE: join(indexDir, 'index') }
-    if (!(await run(bun, cwd, ['read-tree', parent], env))) return false
-    if (!(await run(bun, cwd, ['add', '--', gitignoreFile], env))) return false
-    if (!(await forceRemove(bun, cwd, untracked, env))) return false
+    if (!(await run(bun, cwd, repo.gitArgs, ['read-tree', parent], env))) return false
+    if (!(await run(bun, cwd, repo.gitArgs, ['add', '--', gitignoreFile], env))) return false
+    if (!(await forceRemove(bun, cwd, repo.gitArgs, untracked, env))) return false
 
-    const tree = (await capture(bun, cwd, ['write-tree'], env)).trim()
+    const tree = (await capture(bun, cwd, repo.gitArgs, ['write-tree'], env)).trim()
     if (tree.length === 0) return false
-    const commit = (await capture(bun, cwd, ['commit-tree', tree, '-p', parent, '-m', message])).trim()
+    const commit = (await capture(bun, cwd, repo.gitArgs, ['commit-tree', tree, '-p', parent, '-m', message])).trim()
     if (commit.length === 0) return false
 
-    return await run(bun, cwd, ['update-ref', '-m', message, 'HEAD', commit, parent])
+    return await run(bun, cwd, repo.gitArgs, ['update-ref', '-m', message, 'HEAD', commit, parent])
   } catch {
     return false
   } finally {
@@ -134,11 +139,12 @@ async function commitViaTempIndex(
 async function commitRealIndexIfExactlyOurs(
   bun: BunLike,
   cwd: string,
+  gitArgs: readonly string[],
   gitignoreFile: string,
   untracked: readonly string[],
   message: string,
 ): Promise<boolean> {
-  const staged = (await capture(bun, cwd, ['diff', '--cached', '--name-only', '-z']))
+  const staged = (await capture(bun, cwd, gitArgs, ['diff', '--cached', '--name-only', '-z']))
     .split('\0')
     .filter((entry) => entry.length > 0)
   if (staged.length === 0) return false
@@ -146,7 +152,7 @@ async function commitRealIndexIfExactlyOurs(
   const expected = new Set([gitignoreFile, ...untracked])
   if (staged.length !== expected.size || !staged.every((path) => expected.has(path))) return false
 
-  return await run(bun, cwd, ['commit', '-m', message])
+  return await run(bun, cwd, gitArgs, ['commit', '-m', message])
 }
 
 // Hardcoded fail-closed guard: even if a custom git.ignore.append pattern
@@ -157,9 +163,14 @@ function isSystemManaged(path: string): boolean {
   return SYSTEM_MANAGED_ROOTS.some((root) => path === root.replace(/\/$/, '') || path.startsWith(root))
 }
 
-async function listTrackedIgnored(bun: BunLike, cwd: string, excludeFile: string): Promise<string[]> {
+async function listTrackedIgnored(
+  bun: BunLike,
+  cwd: string,
+  gitArgs: readonly string[],
+  excludeFile: string,
+): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', 'ls-files', '-z', '-c', '-i', '--exclude-from', excludeFile],
+    cmd: ['git', ...gitArgs, 'ls-files', '-z', '-c', '-i', '--exclude-from', excludeFile],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -169,9 +180,9 @@ async function listTrackedIgnored(bun: BunLike, cwd: string, excludeFile: string
   return raw.split('\0').filter((entry) => entry.length > 0)
 }
 
-async function gitRmCached(bun: BunLike, cwd: string, files: string[]): Promise<string[]> {
+async function gitRmCached(bun: BunLike, cwd: string, gitArgs: readonly string[], files: string[]): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', 'rm', '--cached', '-q', '--', ...files],
+    cmd: ['git', ...gitArgs, 'rm', '--cached', '-q', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -182,22 +193,40 @@ async function gitRmCached(bun: BunLike, cwd: string, files: string[]): Promise<
 
 type GitEnv = Record<string, string | undefined>
 
-async function run(bun: BunLike, cwd: string, args: string[], env?: GitEnv): Promise<boolean> {
-  const proc = bun.spawn({ cmd: ['git', ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+async function run(
+  bun: BunLike,
+  cwd: string,
+  gitArgs: readonly string[],
+  args: readonly string[],
+  env?: GitEnv,
+): Promise<boolean> {
+  const proc = bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
   return (await proc.exited) === 0
 }
 
-async function capture(bun: BunLike, cwd: string, args: string[], env?: GitEnv): Promise<string> {
-  const proc = bun.spawn({ cmd: ['git', ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+async function capture(
+  bun: BunLike,
+  cwd: string,
+  gitArgs: readonly string[],
+  args: readonly string[],
+  env?: GitEnv,
+): Promise<string> {
+  const proc = bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
   if ((await proc.exited) !== 0) return ''
   return await new Response(proc.stdout).text()
 }
 
 // --force-remove drops the index entry regardless of the file existing on disk;
 // the NUL-delimited stdin form is safe for paths with spaces/newlines.
-async function forceRemove(bun: BunLike, cwd: string, files: readonly string[], env: GitEnv): Promise<boolean> {
+async function forceRemove(
+  bun: BunLike,
+  cwd: string,
+  gitArgs: readonly string[],
+  files: readonly string[],
+  env: GitEnv,
+): Promise<boolean> {
   const proc = bun.spawn({
-    cmd: ['git', 'update-index', '-z', '--force-remove', '--stdin'],
+    cmd: ['git', ...gitArgs, 'update-index', '-z', '--force-remove', '--stdin'],
     cwd,
     env,
     stdin: new TextEncoder().encode(files.join('\0')),
