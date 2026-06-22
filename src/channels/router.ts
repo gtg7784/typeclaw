@@ -1608,10 +1608,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
       const participants = (resolvedRecord?.participants ?? []) as ChannelParticipant[]
       const membershipFetch = warmMembership(key)
-      const resolvedNames = await resolveChannelNames(key)
-      logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
-      const membership = await membershipForPrompt(key, membershipFetch)
-      logger.info(`[channels] ${keyId}: ensureLive resolved-membership`)
+      // Independent platform lookups — overlap so the chain pays max(), not sum().
+      const [resolvedNames, membership] = await Promise.all([
+        resolveChannelNames(key),
+        membershipForPrompt(key, membershipFetch),
+      ])
+      logger.info(`[channels] ${keyId}: ensureLive resolved-names-and-membership`)
       // The session-creation origin is what the resource loader sees when it
       // renders the role/permissions block into the system prompt. It must
       // include the triggering author so author-scoped roles
@@ -1674,7 +1676,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       } else {
         mappings = [persistedRecord]
       }
-      await persist()
+      // Kick off the mapping write now but don't block on it — the disk write is
+      // independent of the synchronous `live` build below and the cold-start
+      // network prefetch, so we overlap it. Every exit path below MUST settle
+      // `persistPromise` (the immediate .catch is only an unhandled-rejection
+      // guard; write errors are still surfaced by awaiting it later).
+      const persistPromise = persist()
+      void persistPromise.catch(() => {})
 
       const live: LiveSession = {
         key,
@@ -1791,16 +1799,33 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           `[channels] ${keyId}: discarding session created across a teardown (gen ${generation} → ${liveGeneration})`,
         )
         await tearDownLive(live)
+        // Settle the in-flight mapping write before bailing — preserves the
+        // pre-overlap contract that a persist failure fails ensureLive.
+        await persistPromise
         throw new StaleLiveSessionError(keyId)
       }
+      // Install before the slow prefetch so a concurrent teardown/shutdown can
+      // see and dispose this session during the network fetch.
       liveSessions.set(keyId, live)
 
       if (isColdStart) {
         const adapterConfig = options.configForAdapter(key.adapter)
-        if (adapterConfig) {
-          await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
-          logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
+        // Overlap the disk mapping-write with the network history prefetch —
+        // they are independent. allSettled lets a persist failure take priority
+        // (and unwind the install) even if prefetch also rejects.
+        const prefetchPromise = adapterConfig
+          ? prefetchChannelContext(live, adapterConfig, triggeringMessageId)
+          : Promise.resolve()
+        const [persistResult, prefetchResult] = await Promise.allSettled([persistPromise, prefetchPromise])
+        if (persistResult.status === 'rejected') {
+          if (liveSessions.get(keyId) === live) liveSessions.delete(keyId)
+          if (!live.destroyed) await tearDownLive(live)
+          throw persistResult.reason
         }
+        if (prefetchResult.status === 'rejected') throw prefetchResult.reason
+        if (adapterConfig) logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
+      } else {
+        await persistPromise
       }
 
       // Snapshot the rendered base context size now, after prefetch and before

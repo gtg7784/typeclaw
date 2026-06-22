@@ -400,21 +400,21 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound())
     await router.__testing!.flushDebounce(KEY)
 
-    // then phase logs appear in order: begin → resolved-names → resolved-membership
+    // then phase logs appear in order: begin → resolved-names-and-membership
     //   → session-created → done. The bracketing is what makes a stuck phase
     //   visible from logs alone (begin without done == hung at that phase).
+    //   Name and membership resolution share one log because they now run
+    //   concurrently — separate ordered markers would misrepresent the timing.
     const phaseLogs = logs
       .filter((l) => l.startsWith('info:[channels]') && l.includes('ensureLive'))
       .map((l) => l.replace(/^.*ensureLive /, ''))
     const beginIdx = phaseLogs.findIndex((p) => p.startsWith('begin'))
-    const namesIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names'))
-    const membershipIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-membership'))
+    const resolvedIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names-and-membership'))
     const createdIdx = phaseLogs.findIndex((p) => p.startsWith('session-created'))
     const doneIdx = phaseLogs.findIndex((p) => p.startsWith('done'))
     expect(beginIdx).toBeGreaterThanOrEqual(0)
-    expect(namesIdx).toBeGreaterThan(beginIdx)
-    expect(membershipIdx).toBeGreaterThan(namesIdx)
-    expect(createdIdx).toBeGreaterThan(membershipIdx)
+    expect(resolvedIdx).toBeGreaterThan(beginIdx)
+    expect(createdIdx).toBeGreaterThan(resolvedIdx)
     expect(doneIdx).toBeGreaterThan(createdIdx)
     expect(phaseLogs[beginIdx]).toContain('cold-start')
     expect(phaseLogs[doneIdx]).toContain('cold-start')
