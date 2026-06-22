@@ -130,9 +130,7 @@ If taught content contains several distinct facts, write one topic per fragment,
 
 Use a simple decision rule. If a candidate clearly fails durability, actionability, or evidence, skip. If it clearly passes all three, capture. If it passes only because the user explicitly taught it, keep the taught substance and apply the source/scope/poisoning boundaries. Do not require the fragment to predict a future behavior change; implication is optional when the usefulness is obvious.
 
-The same triad governs people facts, in any language. "Jisoo owns the billing migration and prefers async design docs before calls" passes (durable role + working preference that changes future coordination). "민지는 결제 담당이고 PR은 오전에 보는 걸 선호해" ("Minji owns payments and prefers to review PRs in the morning") is the same shape — capture one compact fragment about Minji's responsibility and review preference. "Jisoo used to work with Omar" or "Mina joined the chat and seemed funny" fail (social history / one-off impression with no future operational consequence) — skip.
-
-The same triad governs channel/environment facts, in any language. "#incidents is the team's production-outage coordination channel; messages there are time-sensitive and expect a fast ack" passes (durable channel role + urgency norm that changes future prioritization). "#배포-공지 채널은 배포 일정·완료 공지만 올리는 곳이고, 토론은 #개발 채널에서 한다" ("#deploy-announcements is only for deployment schedules and completion notices; discussion happens in #dev") is the same shape — capture one compact fragment about the channel convention. "I am currently in Slack thread 172..." or "Mina joined #incidents" fail (live channel/thread context and membership churn are re-derivable or transient) — skip.
+The same triad governs people and channel/environment facts alike, in any language; each captures as one compact fragment. Passes: "Jisoo owns the billing migration and prefers async design docs before calls" (durable role + working preference); "민지는 결제 담당이고 PR은 오전에 보는 걸 선호해" ("Minji owns payments, reviews PRs in the morning"); "#incidents is the team's production-outage channel — messages there are time-sensitive" (durable channel role + urgency norm); "#배포-공지 채널은 배포 일정·완료 공지만 올리는 곳이고, 토론은 #개발 채널에서 한다" ("#deploy-announcements is for deploy notices only; discussion happens in #dev"). Fails — skip: "Jisoo used to work with Omar" or "Mina joined #incidents" (social history / membership churn); "Mina seemed funny" (one-off impression); "I am currently in Slack thread 172..." (live, re-derivable context).
 
 Skip these anti-patterns:
 
@@ -227,13 +225,13 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    "Read the transcript past the watermark. Decide whether anything in it justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, an in-transcript change-of-mind, or a correction the user made to the agent. Sometimes the answer is zero fragments; sometimes more than one. Do not read memory/topics/ — cross-shard reasoning is dreaming's job. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.",
+    'Read the transcript past the watermark and apply the system-prompt rules; most runs yield zero or one fragment.',
     '',
-    "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
+    "Per-fragment provenance: each fragment's `entry=` anchors that fragment's own evidence, not the latest entry you evaluated.",
     '',
-    'Watermark: every `append` call must include the `latestEntryId` argument. Ensure the final `append` call uses the latest transcript entry you evaluated, regardless of whether it anchored a fragment. If you evaluated transcript entries but found zero fragments, call the watermark-advance tool with `{ source: "' +
+    'Every `append` must include `latestEntryId` (the latest entry evaluated, regardless of anchors). With zero fragments, call the watermark-advance tool with `{ source: "' +
       payload.parentSessionId +
-      '", latestEntryId: "<latestEntryId>" }` instead of writing a fake fragment.',
+      '", latestEntryId: "<latestEntryId>" }` instead of a fake fragment.',
   )
   return lines.join('\n')
 }

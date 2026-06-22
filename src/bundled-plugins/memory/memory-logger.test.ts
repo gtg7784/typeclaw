@@ -192,7 +192,7 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
 
   test('demonstrates channel/environment capture in a non-English (Korean) example', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('#배포-공지')
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/the same triad governs channel\/environment facts, in any language/i)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/people and channel\/environment facts alike, in any language/i)
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Mina joined #incidents|Slack thread 172/)
   })
 
