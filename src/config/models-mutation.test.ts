@@ -13,7 +13,7 @@ import {
   listRegisteredModelRefs,
   removeProfile,
   setProfile,
-  setThinkingLevel,
+  setProfileThinkingLevel,
 } from './models-mutation'
 
 let root: string
@@ -372,11 +372,11 @@ describe('auto-commit on success', () => {
     expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: remove fast')
   })
 
-  test('setThinkingLevel commits typeclaw.json with a "model: set thinkingLevel" subject', async () => {
+  test('setProfileThinkingLevel commits typeclaw.json with a per-profile subject', async () => {
     await initGit(root)
-    const result = setThinkingLevel(root, 'high')
+    const result = setProfileThinkingLevel(root, 'default', 'high')
     expect(result.ok).toBe(true)
-    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: set thinkingLevel high')
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: set thinkingLevel high for default')
   })
 
   test('no-ops when the folder is not a git repo (mutation-check anchor for the commit call)', async () => {
@@ -395,35 +395,63 @@ describe('auto-commit on success', () => {
   })
 })
 
-describe('setThinkingLevel', () => {
-  async function readThinkingLevel(): Promise<string | undefined> {
+describe('setProfileThinkingLevel', () => {
+  async function readProfileRaw(profile: string): Promise<unknown> {
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
-    return (JSON.parse(raw) as { thinkingLevel?: string }).thinkingLevel
+    return (JSON.parse(raw) as { models?: Record<string, unknown> }).models?.[profile]
   }
 
-  test('writes the level to typeclaw.json', async () => {
-    const result = setThinkingLevel(root, 'high')
+  test('promotes a bare-ref profile to a rich object carrying the level', async () => {
+    const before = await readProfileRaw('default')
+    expect(typeof before).toBe('string')
+    const result = setProfileThinkingLevel(root, 'default', 'high')
     expect(result.ok).toBe(true)
-    expect(await readThinkingLevel()).toBe('high')
+    expect(await readProfileRaw('default')).toEqual({ models: before, thinkingLevel: 'high' })
   })
 
-  test('overwrites an existing level', async () => {
-    setThinkingLevel(root, 'low')
-    const result = setThinkingLevel(root, 'xhigh')
+  test('overwrites an existing per-profile level, preserving the refs', async () => {
+    setProfileThinkingLevel(root, 'default', 'low')
+    const refs = (await readProfileRaw('default')) as { models: unknown }
+    const result = setProfileThinkingLevel(root, 'default', 'xhigh')
     expect(result.ok).toBe(true)
-    expect(await readThinkingLevel()).toBe('xhigh')
+    expect(await readProfileRaw('default')).toEqual({ models: refs.models, thinkingLevel: 'xhigh' })
   })
 
-  test('passing undefined clears the field (reverts to SDK default)', async () => {
-    setThinkingLevel(root, 'medium')
-    const result = setThinkingLevel(root, undefined)
+  test('passing undefined collapses the profile back to its bare ref', async () => {
+    const bare = await readProfileRaw('default')
+    setProfileThinkingLevel(root, 'default', 'medium')
+    const result = setProfileThinkingLevel(root, 'default', undefined)
     expect(result.ok).toBe(true)
-    expect(await readThinkingLevel()).toBeUndefined()
+    expect(await readProfileRaw('default')).toEqual(bare)
   })
 
-  test('preserves the models block', async () => {
-    const before = await readModels()
-    setThinkingLevel(root, 'high')
-    expect(await readModels()).toEqual(before)
+  test('targets only the named profile, leaving siblings untouched', async () => {
+    setProfile(root, 'fast', 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    const fastBefore = await readProfileRaw('fast')
+    setProfileThinkingLevel(root, 'default', 'high')
+    expect(await readProfileRaw('fast')).toEqual(fastBefore)
+  })
+
+  test('rejects a profile that does not exist yet', () => {
+    const result = setProfileThinkingLevel(root, 'nonexistent', 'high')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('not found')
+  })
+
+  test('rejects an empty profile name', () => {
+    const result = setProfileThinkingLevel(root, '   ', 'high')
+    expect(result.ok).toBe(false)
+  })
+
+  test('setting a level then re-setting the ref preserves the level', async () => {
+    setProfileThinkingLevel(root, 'default', 'high')
+    setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
+    expect(await readProfileRaw('default')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'high' })
+  })
+
+  test('setProfile with an explicit thinkingLevel writes both atomically', async () => {
+    setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' }, thinkingLevel: 'low' })
+    expect(await readProfileRaw('default')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'low' })
   })
 })

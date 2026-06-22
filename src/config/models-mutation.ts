@@ -31,6 +31,9 @@ export type ModelProfileEntry = {
   // dereference `refs[0]`. The chain itself is exposed as `refs`.
   ref: ModelRef
   refs: ModelRef[]
+  // The profile's own reasoning-effort override, or undefined when it inherits
+  // the `default` profile's level (which is itself the de-facto global default).
+  thinkingLevel?: ThinkingLevel
   providerId: KnownProviderId
   // Credential status for every provider referenced by the chain. The chain's
   // overall status is `available` only when every entry resolves; otherwise
@@ -53,14 +56,15 @@ export type ModelMutationResult = { ok: true } | { ok: false; reason: string }
 export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.env): ModelProfileEntry[] {
   const models = loadConfigSyncOrDefaults(cwd).models
   const out: ModelProfileEntry[] = []
-  for (const [profile, refs] of Object.entries(models)) {
-    const headRef = refs[0]!
+  for (const [profile, entry] of Object.entries(models)) {
+    const headRef = entry.refs[0]!
     const providerId = providerForModelRef(headRef)
-    const missingProviders = uniqueProviders(refs).filter((p) => !hasUsableCredential(cwd, p, env))
+    const missingProviders = uniqueProviders(entry.refs).filter((p) => !hasUsableCredential(cwd, p, env))
     out.push({
       profile,
       ref: headRef,
-      refs,
+      refs: entry.refs,
+      ...(entry.thinkingLevel !== undefined ? { thinkingLevel: entry.thinkingLevel } : {}),
       providerId,
       missingProviders,
       isDefault: profile === 'default',
@@ -123,6 +127,9 @@ export type SetProfileOptions = {
   force?: boolean
   env?: NodeJS.ProcessEnv
   meta?: CustomModelMeta
+  // When set, the profile is written with this reasoning effort alongside its
+  // ref. Omit to leave any existing per-profile level untouched.
+  thinkingLevel?: ThinkingLevel
 }
 
 export function setProfile(
@@ -152,7 +159,7 @@ export function setProfile(
   const existingBefore = readModelsRaw(cwd)
   const verb = existingBefore !== null && trimmed in existingBefore ? 'set' : 'add'
   const customModel = !isKnownModelRef(ref) && options.meta !== undefined ? { ref, meta: options.meta } : undefined
-  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`, customModel)
+  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`, customModel, options.thinkingLevel)
 }
 
 // `add` is just `set` with a uniqueness guard; users who want "update" should
@@ -198,47 +205,41 @@ export function removeProfile(cwd: string, profile: string): ModelMutationResult
   return writeModels(cwd, next, `model: remove ${profile}`)
 }
 
-// Top-level `thinkingLevel` is global (not per-profile), so it gets its own
-// mutation rather than riding the `models` write. Passing `undefined` clears
-// the field, reverting to the SDK default.
-export function setThinkingLevel(cwd: string, level: ThinkingLevel | undefined): ModelMutationResult {
-  const path = join(cwd, CONFIG_FILE)
-  let parsed: Record<string, unknown>
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { ok: false, reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` first.` }
-    }
-    return { ok: false, reason: `Failed to read ${CONFIG_FILE}: ${(error as Error).message}` }
+// Sets (or clears) a profile's reasoning effort without touching its refs.
+// `undefined` collapses the profile back to its bare string/array ref form.
+// The `default` profile's level is the de-facto global default, so
+// `setProfileThinkingLevel(cwd, 'default', level)` is the "global" knob.
+// Rejects a profile that doesn't exist yet — the user must set its model first.
+export function setProfileThinkingLevel(
+  cwd: string,
+  profile: string,
+  level: ThinkingLevel | undefined,
+): ModelMutationResult {
+  const trimmed = profile.trim()
+  if (trimmed.length === 0) {
+    return { ok: false, reason: 'Profile name cannot be empty.' }
   }
-  if (level === undefined) {
-    delete parsed.thinkingLevel
-  } else {
-    parsed.thinkingLevel = level
+  const existing = readModelsRaw(cwd)
+  if (existing === null) {
+    return { ok: false, reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` first.` }
   }
-  const check = configSchema.safeParse(parsed)
-  if (!check.success) {
+  const current = existing[trimmed]
+  if (current === undefined) {
     return {
       ok: false,
-      reason: `thinkingLevel would be invalid: ${check.error.issues.map((i) => i.message).join('; ')}`,
+      reason: `Profile "${trimmed}" not found. Run \`typeclaw model set ${trimmed} <ref>\` to create it first.`,
     }
   }
-  try {
-    writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`)
-  } catch (error) {
-    return { ok: false, reason: `Failed to write ${CONFIG_FILE}: ${(error as Error).message}` }
+  const refs = rawProfileRefs(current)
+  if (refs === undefined) {
+    return { ok: false, reason: `Profile "${trimmed}" has no model to attach a thinking level to.` }
   }
-  const validation = validateConfig(cwd)
-  if (!validation.ok) {
-    return { ok: false, reason: validation.reason }
-  }
-  commitSystemFileSync(
-    cwd,
-    CONFIG_FILE,
-    level === undefined ? 'model: clear thinkingLevel' : `model: set thinkingLevel ${level}`,
-  )
-  return { ok: true }
+  const next: RawModels = { ...existing, [trimmed]: withRawProfileThinkingLevel(refs, level) }
+  const message =
+    level === undefined
+      ? `model: clear thinkingLevel for ${trimmed}`
+      : `model: set thinkingLevel ${level} for ${trimmed}`
+  return writeModels(cwd, next, message)
 }
 
 function writeProfile(
@@ -247,9 +248,15 @@ function writeProfile(
   ref: ModelRef,
   message: string,
   customModel?: { ref: ModelRef; meta: CustomModelMeta },
+  thinkingLevel?: ThinkingLevel,
 ): ModelMutationResult {
   const existing = readModelsRaw(cwd)
-  const next: Record<string, string | string[]> = existing === null ? { default: ref } : { ...existing, [profile]: ref }
+  // Setting refs preserves any existing per-profile thinkingLevel unless the
+  // caller passes a new one. A bare ref stays a bare string/array; it only
+  // becomes a rich object once a thinkingLevel is attached.
+  const previousLevel = thinkingLevel ?? (existing !== null ? rawProfileThinkingLevel(existing[profile]) : undefined)
+  const value = withRawProfileThinkingLevel(ref, previousLevel)
+  const next: RawModels = existing === null ? { default: value } : { ...existing, [profile]: value }
   if (existing === null && profile !== 'default') {
     next.default = ref
   }
@@ -258,7 +265,7 @@ function writeProfile(
 
 function writeModels(
   cwd: string,
-  models: Record<string, string | string[]>,
+  models: RawModels,
   commitMessage: string,
   customModel?: { ref: ModelRef; meta: CustomModelMeta },
 ): ModelMutationResult {
@@ -311,15 +318,37 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// Returns the raw `models` block from disk in its on-disk shape: each value
-// is `string | string[]` (the user-facing schema). Writers preserve whichever
-// shape was already present for profiles they don't touch — converting a
-// hand-authored fallback chain back to a single string would silently drop
-// the fallback.
-function readModelsRaw(cwd: string): Record<string, string | string[]> | null {
+// The on-disk shape of a single `models.<profile>` value: a bare ref string, a
+// fallback-chain array, or a rich object carrying a per-profile thinkingLevel.
+// Mutators read-modify-write this shape so they preserve whichever form the
+// user hand-authored (and the sibling field they aren't touching).
+type RawProfileValue = string | string[] | { model?: string; models?: string | string[]; thinkingLevel?: ThinkingLevel }
+type RawModels = Record<string, RawProfileValue>
+
+function rawProfileRefs(value: RawProfileValue | undefined): string | string[] | undefined {
+  if (value === undefined) return undefined
+  if (typeof value === 'string' || Array.isArray(value)) return value
+  return value.models ?? value.model
+}
+
+function rawProfileThinkingLevel(value: RawProfileValue | undefined): ThinkingLevel | undefined {
+  return value !== undefined && typeof value === 'object' && !Array.isArray(value) ? value.thinkingLevel : undefined
+}
+
+// Re-attaches a thinkingLevel to a ref/chain, collapsing back to the bare
+// string/array form when there's no level so configs stay minimal.
+function withRawProfileThinkingLevel(refs: string | string[], level: ThinkingLevel | undefined): RawProfileValue {
+  return level === undefined ? refs : { models: refs, thinkingLevel: level }
+}
+
+// Returns the raw `models` block from disk in its on-disk shape. Writers
+// preserve whichever shape was already present for profiles they don't touch —
+// converting a hand-authored fallback chain back to a single string, or
+// dropping a per-profile thinkingLevel, would silently lose user intent.
+function readModelsRaw(cwd: string): RawModels | null {
   try {
     const raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
-    const parsed = JSON.parse(raw) as { models?: Record<string, string | string[]> }
+    const parsed = JSON.parse(raw) as { models?: RawModels }
     return parsed.models ?? null
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
