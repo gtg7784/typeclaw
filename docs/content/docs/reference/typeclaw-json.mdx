@@ -8,22 +8,23 @@ JSON Schema–validated. `typeclaw init` scaffolds a `$schema` pointer at `./nod
 
 ## Top-level fields
 
-| Field                   | Type                             | Reload                                       | Concept                                                                                |
-| ----------------------- | -------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `models`                | `Record<string, ref \| ref[]>`   | live                                         | model profile → ref or fallback chain                                                  |
-| `port`                  | `number`                         | restart-required                             | preferred host port; CLI falls back to ephemeral on conflict                           |
-| `mounts`                | `Mount[]`                        | restart-required                             | host files or directories exposed inside the container                                 |
-| `plugins`               | `string[]`                       | restart-required                             | plugin module specifiers                                                               |
-| `alias`                 | `string[]`                       | live                                         | additional names the agent answers to in channels                                      |
-| `channels`              | `Record<adapter, AdapterConfig>` | live                                         | per-adapter config                                                                     |
-| `portForward`           | `{ allow, deny? }`               | restart-required                             | auto port-forward allow/deny lists; default `{ allow: '*' }`                           |
-| `network`               | `NetworkPolicy`                  | restart-required                             | egress filtering                                                                       |
-| `sandbox`               | `SandboxPolicy`                  | restart-required                             | per-tool bwrap sandbox options                                                         |
-| `tunnels`               | `Tunnel[]`                       | restart-required                             | public URLs (see [/concepts/architecture](/docs/concepts/architecture))                |
-| `roles`                 | `Record<name, Role>`             | `match` live, `permissions` restart-required | permission roles (see [/concepts/permissions-model](/docs/concepts/permissions-model)) |
-| `docker.file`           | `DockerFileOptions`              | rebuild via `start`                          | Dockerfile feature toggles + append lines                                              |
-| `docker.runArgs.append` | `string[]`                       | rebuild via `start`                          | extra `docker run` flags                                                               |
-| `git.ignore.append`     | `string[]`                       | rebuild via `start`                          | extra `.gitignore` lines                                                               |
+| Field                   | Type                                                           | Reload                                       | Concept                                                                                |
+| ----------------------- | -------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `models`                | `Record<string, ref \| ref[]>`                                 | live                                         | model profile → ref or fallback chain                                                  |
+| `thinkingLevel`         | `'off' \| 'minimal' \| 'low' \| 'medium' \| 'high' \| 'xhigh'` | live                                         | reasoning effort for new sessions; defers to the SDK default when unset                |
+| `port`                  | `number`                                                       | restart-required                             | preferred host port; CLI falls back to ephemeral on conflict                           |
+| `mounts`                | `Mount[]`                                                      | restart-required                             | host files or directories exposed inside the container                                 |
+| `plugins`               | `string[]`                                                     | restart-required                             | plugin module specifiers                                                               |
+| `alias`                 | `string[]`                                                     | live                                         | additional names the agent answers to in channels                                      |
+| `channels`              | `Record<adapter, AdapterConfig>`                               | live                                         | per-adapter config                                                                     |
+| `portForward`           | `{ allow, deny? }`                                             | restart-required                             | auto port-forward allow/deny lists; default `{ allow: '*' }`                           |
+| `network`               | `NetworkPolicy`                                                | restart-required                             | egress filtering                                                                       |
+| `sandbox`               | `SandboxPolicy`                                                | restart-required                             | per-tool bwrap sandbox options                                                         |
+| `tunnels`               | `Tunnel[]`                                                     | restart-required                             | public URLs (see [/concepts/architecture](/docs/concepts/architecture))                |
+| `roles`                 | `Record<name, Role>`                                           | `match` live, `permissions` restart-required | permission roles (see [/concepts/permissions-model](/docs/concepts/permissions-model)) |
+| `docker.file`           | `DockerFileOptions`                                            | rebuild via `start`                          | Dockerfile feature toggles + append lines                                              |
+| `docker.runArgs.append` | `string[]`                                                     | rebuild via `start`                          | extra `docker run` flags                                                               |
+| `git.ignore.append`     | `string[]`                                                     | rebuild via `start`                          | extra `.gitignore` lines                                                               |
 
 Plugin-owned config blocks live at the top level under their plugin name and are validated by the plugin's own `configSchema`.
 
@@ -42,7 +43,15 @@ Plugin-owned config blocks live at the top level under their plugin name and are
 
 `default` is required. Other profile names are conventional but not enforced. Each value is either a single `<provider>/<model>` ref or a non-empty array forming a fallback chain: on failure, the runtime disposes the failed session and replays the prompt against the next ref.
 
-Provider-family defaults override the SDK's reasoning level at session creation: OpenAI-family refs (`openai/*`, `openai-codex/*`) pin `thinkingLevel: 'low'` because GPT-5.x at the SDK default of `medium` pads reasoning tokens on routine tool-driven turns with no observable quality delta. Anthropic, GLM, and Kimi refs keep the SDK default.
+## `thinkingLevel`
+
+```json
+{
+  "thinkingLevel": "high"
+}
+```
+
+Sets the reasoning effort applied to new sessions, from `off` through `xhigh`. When unset, the runtime defers to pi-coding-agent's SDK default (`medium`) — no provider family is pinned. The value is clamped to each model's capabilities at session creation (e.g. `xhigh` is OpenAI-family-only and clamps down to `high` elsewhere). Live-reloadable: a change lands on the next session without a container restart. An attention-escalation cue in a turn (frustration or an explicit "do it properly" / "ultrathink") still bumps that single turn to maximum effort regardless of this setting.
 
 ## `network`
 

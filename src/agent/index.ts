@@ -439,7 +439,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       : customToolsPreBudget
 
   const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
-  const thinkingLevel = defaultThinkingLevelForRef(activeRef)
+  // User config wins over the per-provider default. Read live so a reloaded
+  // `thinkingLevel` lands on the next session without a container restart.
+  const thinkingLevel = getConfig().thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
   const { session } = await createAgentSession({
     model,
     sessionManager,
