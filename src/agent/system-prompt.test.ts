@@ -81,6 +81,70 @@ describe('agent folder vs project repo', () => {
   })
 })
 
+describe('finishing the job — completion + anti-fabrication steer', () => {
+  // Ported from hermes-agent's TASK_COMPLETION_GUIDANCE: deliverable is a
+  // working artifact backed by real tool output, and the agent must never
+  // substitute fabricated output for a result it could not actually produce.
+  test('the default prompt tells the agent the deliverable is a real artifact, not a description of one', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('## Finishing the job')
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/working artifact backed by real tool output/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/do not stop after writing a stub/i)
+  })
+
+  test('the default prompt forbids fabricating output when the real path is blocked', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Finishing the job')
+    expect(start).toBeGreaterThan(-1)
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 900)
+    expect(section).toMatch(/never substitute .*fabricated output|never fabricate/i)
+    expect(section).toMatch(/report(ing)? .*blocker|say so directly/i)
+  })
+
+  test.each([
+    ['default prompt', DEFAULT_SYSTEM_PROMPT],
+    ['slim prompt', SLIM_SYSTEM_PROMPT],
+  ])(
+    'the %s keeps the anti-fabrication invariant (cron/subagent are where fabrication is most dangerous)',
+    (_name, prompt) => {
+      expect(prompt).toMatch(/never fabricate|fabricated output/i)
+    },
+  )
+
+  // Cache-suffix contract: steering blocks must live in the least-volatile
+  // base prefix, AHEAD of the per-agent identity block, so they never
+  // invalidate cached bytes when IDENTITY.md / SOUL.md change.
+  test('the finishing-the-job steer sits inside the base prompt (no per-agent placeholders)', () => {
+    expect(DEFAULT_SYSTEM_PROMPT.indexOf('## Finishing the job')).toBeLessThan(
+      DEFAULT_SYSTEM_PROMPT.indexOf('You are not pi, not Claude, not ChatGPT.'),
+    )
+  })
+})
+
+describe('parallel tool calls steer', () => {
+  // Ported from hermes-agent's PARALLEL_TOOL_CALL_GUIDANCE (universal, all
+  // models). typeclaw's runtime base prompt never told the model to batch
+  // independent reads/searches; only the orchestration section mentioned
+  // parallel subagent fan-out. This makes the batching steer explicit for the
+  // model's own direct tool calls.
+  test('the default prompt tells the agent to batch independent tool calls into one turn', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('## Parallel tool calls')
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/independent (reads|tool calls|calls)/i)
+    expect(DEFAULT_SYSTEM_PROMPT).toMatch(/single (response|turn)|same (response|turn)/i)
+  })
+
+  test('the parallel steer carves out the dependency exception (serialize only when a later call depends on an earlier result)', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Parallel tool calls')
+    expect(start).toBeGreaterThan(-1)
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 700)
+    expect(section).toMatch(/depend|serialize/i)
+  })
+
+  test('the parallel steer sits inside the cacheable base prefix, ahead of the identity block', () => {
+    expect(DEFAULT_SYSTEM_PROMPT.indexOf('## Parallel tool calls')).toBeLessThan(
+      DEFAULT_SYSTEM_PROMPT.indexOf('You are not pi, not Claude, not ChatGPT.'),
+    )
+  })
+})
+
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
     const now = new Date('2026-01-15T12:00:00+09:00')
