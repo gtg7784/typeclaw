@@ -14,6 +14,7 @@ import {
   configSchema,
   extractPluginConfigs,
   expandMountPath,
+  FIELD_EFFECTS,
   getSandboxWritablePathSpecs,
   loadConfigSync,
   loadConfigSyncOrDefaults,
@@ -129,6 +130,28 @@ describe('configSchema models field', () => {
       models: { default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'] },
     })
     expect(parsed.models.default).toEqual(modelRefList('openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'))
+  })
+})
+
+describe('configSchema thinkingLevel field', () => {
+  test('is undefined when omitted (defers to the per-provider/SDK default)', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.thinkingLevel).toBeUndefined()
+  })
+
+  test('accepts every supported level', () => {
+    for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const) {
+      const parsed = configSchema.parse({ models: { default: VALID_MODEL }, thinkingLevel: level })
+      expect(parsed.thinkingLevel).toBe(level)
+    }
+  })
+
+  test('rejects an unknown level', () => {
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, thinkingLevel: 'turbo' })).toThrow()
+  })
+
+  test('is classified applied (live-reloadable, no restart)', () => {
+    expect(FIELD_EFFECTS.thinkingLevel).toBe('applied')
   })
 })
 

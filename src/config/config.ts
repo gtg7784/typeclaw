@@ -661,6 +661,12 @@ export const modelsSchema = z
 // consumer the `T | undefined` assertion noise.
 export type Models = Record<string, ModelRef[]> & { default: ModelRef[] }
 
+// Mirrors pi-coding-agent's `ThinkingLevel`. Kept as a local enum (rather than
+// importing the SDK type) so the schema owns the canonical value list and zod
+// can validate `typeclaw.json` without a runtime SDK dependency.
+export const thinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -672,6 +678,7 @@ export const configSchema = z
     // not the user-facing input shape.
     models: modelsSchema.default(() => ({ default: [asModelRef(DEFAULT_MODEL_REF)] })) as unknown as z.ZodType<Models>,
     customModels: customModelsSchema,
+    thinkingLevel: thinkingLevelSchema.optional(),
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -880,6 +887,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   $schema: 'ignored',
   models: 'applied',
   customModels: 'applied',
+  thinkingLevel: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
   mcpServers: 'restart-required',
@@ -976,6 +984,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'port',
     'models',
     'customModels',
+    'thinkingLevel',
     'mounts',
     'plugins',
     'alias',
