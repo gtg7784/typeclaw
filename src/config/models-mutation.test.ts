@@ -454,4 +454,16 @@ describe('setProfileThinkingLevel', () => {
     setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' }, thinkingLevel: 'low' })
     expect(await readProfileRaw('default')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'low' })
   })
+
+  test('setProfile with an explicit `thinkingLevel: undefined` clears an existing level', async () => {
+    setProfileThinkingLevel(root, 'default', 'high')
+    setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' }, thinkingLevel: undefined })
+    expect(await readProfileRaw('default')).toBe('openai/gpt-5.4-nano')
+  })
+
+  test('setProfile omitting the thinkingLevel key preserves an existing level', async () => {
+    setProfileThinkingLevel(root, 'default', 'high')
+    setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
+    expect(await readProfileRaw('default')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'high' })
+  })
 })

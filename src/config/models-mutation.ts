@@ -127,8 +127,11 @@ export type SetProfileOptions = {
   force?: boolean
   env?: NodeJS.ProcessEnv
   meta?: CustomModelMeta
-  // When set, the profile is written with this reasoning effort alongside its
-  // ref. Omit to leave any existing per-profile level untouched.
+  // Present key = write this reasoning effort alongside the ref (an explicit
+  // `undefined` clears any existing level). Omit the key entirely to leave an
+  // existing per-profile level untouched. `setProfile` distinguishes the two
+  // via `Object.hasOwn`, so `{ thinkingLevel: undefined }` is a clear, not a
+  // no-op.
   thinkingLevel?: ThinkingLevel
 }
 
@@ -159,7 +162,13 @@ export function setProfile(
   const existingBefore = readModelsRaw(cwd)
   const verb = existingBefore !== null && trimmed in existingBefore ? 'set' : 'add'
   const customModel = !isKnownModelRef(ref) && options.meta !== undefined ? { ref, meta: options.meta } : undefined
-  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`, customModel, options.thinkingLevel)
+  // An explicit `thinkingLevel` key (even `undefined`) overrides the existing
+  // level; an omitted key preserves it. Pass the override as a single-element
+  // tuple so `writeProfile` can tell "clear to undefined" from "don't touch".
+  const thinkingOverride: [ThinkingLevel | undefined] | undefined = Object.hasOwn(options, 'thinkingLevel')
+    ? [options.thinkingLevel]
+    : undefined
+  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`, customModel, thinkingOverride)
 }
 
 // `add` is just `set` with a uniqueness guard; users who want "update" should
@@ -248,14 +257,17 @@ function writeProfile(
   ref: ModelRef,
   message: string,
   customModel?: { ref: ModelRef; meta: CustomModelMeta },
-  thinkingLevel?: ThinkingLevel,
+  // `[level]` overrides (a wrapped `undefined` clears); `undefined` preserves
+  // the existing level. The tuple is what lets an explicit clear win over a
+  // pre-existing level instead of being swallowed by `??`.
+  thinkingOverride?: [ThinkingLevel | undefined],
 ): ModelMutationResult {
   const existing = readModelsRaw(cwd)
-  // Setting refs preserves any existing per-profile thinkingLevel unless the
-  // caller passes a new one. A bare ref stays a bare string/array; it only
-  // becomes a rich object once a thinkingLevel is attached.
-  const previousLevel = thinkingLevel ?? (existing !== null ? rawProfileThinkingLevel(existing[profile]) : undefined)
-  const value = withRawProfileThinkingLevel(ref, previousLevel)
+  // Setting refs keeps a bare ref bare; it only becomes a rich object once a
+  // thinkingLevel is present. An override replaces the level (including a clear
+  // to undefined); otherwise the existing per-profile level is preserved.
+  const level = thinkingOverride !== undefined ? thinkingOverride[0] : rawProfileThinkingLevel(existing?.[profile])
+  const value = withRawProfileThinkingLevel(ref, level)
   const next: RawModels = existing === null ? { default: value } : { ...existing, [profile]: value }
   if (existing === null && profile !== 'default') {
     next.default = ref

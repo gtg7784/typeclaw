@@ -249,6 +249,28 @@ describe('typeclaw model set validates the thinking level before mutating the pr
     expect(await readProfile('default')).toBe(ORIGINAL_REF)
   })
 
+  test('`--thinking default` clears a profile`s existing level (regression: explicit clear must win)', async () => {
+    const set = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'fast', 'openai/gpt-5.4-nano', '--thinking', 'high', '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    expect(await set.exited).toBe(0)
+    expect(await readProfile('fast')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'high' })
+
+    const clear = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'fast', 'openai/gpt-5.4-nano', '--thinking', 'default', '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    expect(await clear.exited).toBe(0)
+    expect(await readProfile('fast')).toBe('openai/gpt-5.4-nano')
+  })
+
   test('`model thinking <level>` sets the default profile`s level without changing its ref', async () => {
     const proc = Bun.spawn({
       cmd: ['bun', CLI_ENTRY, 'model', 'thinking', 'medium'],
