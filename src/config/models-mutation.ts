@@ -3,7 +3,13 @@ import { join } from 'node:path'
 
 import { commitSystemFileSync } from '@/git/system-commit'
 
-import { configSchema, loadConfigSyncOrDefaults, validateConfig, type CustomModelMeta } from './config'
+import {
+  configSchema,
+  loadConfigSyncOrDefaults,
+  validateConfig,
+  type CustomModelMeta,
+  type ThinkingLevel,
+} from './config'
 import {
   KNOWN_PROVIDERS,
   isKnownModelRef,
@@ -190,6 +196,49 @@ export function removeProfile(cwd: string, profile: string): ModelMutationResult
   const next = { ...existing }
   delete next[profile]
   return writeModels(cwd, next, `model: remove ${profile}`)
+}
+
+// Top-level `thinkingLevel` is global (not per-profile), so it gets its own
+// mutation rather than riding the `models` write. Passing `undefined` clears
+// the field, reverting to the SDK default.
+export function setThinkingLevel(cwd: string, level: ThinkingLevel | undefined): ModelMutationResult {
+  const path = join(cwd, CONFIG_FILE)
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` first.` }
+    }
+    return { ok: false, reason: `Failed to read ${CONFIG_FILE}: ${(error as Error).message}` }
+  }
+  if (level === undefined) {
+    delete parsed.thinkingLevel
+  } else {
+    parsed.thinkingLevel = level
+  }
+  const check = configSchema.safeParse(parsed)
+  if (!check.success) {
+    return {
+      ok: false,
+      reason: `thinkingLevel would be invalid: ${check.error.issues.map((i) => i.message).join('; ')}`,
+    }
+  }
+  try {
+    writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`)
+  } catch (error) {
+    return { ok: false, reason: `Failed to write ${CONFIG_FILE}: ${(error as Error).message}` }
+  }
+  const validation = validateConfig(cwd)
+  if (!validation.ok) {
+    return { ok: false, reason: validation.reason }
+  }
+  commitSystemFileSync(
+    cwd,
+    CONFIG_FILE,
+    level === undefined ? 'model: clear thinkingLevel' : `model: set thinkingLevel ${level}`,
+  )
+  return { ok: true }
 }
 
 function writeProfile(

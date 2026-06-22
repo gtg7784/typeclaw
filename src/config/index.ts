@@ -14,6 +14,7 @@ export {
   gitignoreSchema,
   GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE,
   GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
+  thinkingLevelSchema,
   loadConfigSync,
   loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
@@ -45,6 +46,7 @@ export {
   type ParseConfigJsonResult,
   type PortForward,
   type ResolvedProfile,
+  type ThinkingLevel,
   type ValidateConfigResult,
 } from './config'
 export { type KnownModelRef, type KnownProviderId, type ModelRef } from './providers'
