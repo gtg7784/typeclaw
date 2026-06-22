@@ -396,22 +396,22 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         return currentSize - baseline >= bufferBytes
       }
 
-      // Carries the measured line count so the caller can reserve it as the new
-      // baseline BEFORE the detached fireMemoryLogger settles its own deferred
-      // baseline write. The gate awaits real fs reads, so two idle timers can be
-      // in flight at once; without the eager reservation both gates read the same
-      // stale baseline and each queues a spawn, over-firing memory-logger. The
-      // deferred set in fireMemoryLogger stays the final exact baseline.
-      const decideIdleSpawn = async (
-        sessionId: string,
-        transcriptPath: string,
-      ): Promise<{ skip: true } | { skip: false; lineBaseline?: number }> => {
+      // Reserves the new baseline ATOMICALLY with the gate read — the
+      // read-decide-reserve sequence has no await between reading
+      // linesAtLastRun and writing it back, so two idle timers whose
+      // readLineCount awaits settle close together cannot both observe the same
+      // stale baseline and both accept a spawn. The gate awaits real fs reads,
+      // so without this in-continuation reservation the second timer over-fires
+      // memory-logger. The deferred (monotonic) set in fireMemoryLogger stays
+      // the final exact baseline.
+      const decideIdleSpawn = async (sessionId: string, transcriptPath: string): Promise<{ skip: boolean }> => {
         if (minIdleDeltaLines === 0) return { skip: false }
         const currentLines = await readLineCount(transcriptPath)
         if (currentLines === 0) return { skip: false }
         const baseline = linesAtLastRun.get(sessionId) ?? 0
         if (currentLines - baseline < minIdleDeltaLines) return { skip: true }
-        return { skip: false, lineBaseline: currentLines }
+        linesAtLastRun.set(sessionId, Math.max(baseline, currentLines))
+        return { skip: false }
       }
 
       const runMemoryRetrieval = async (event: {
@@ -531,9 +531,6 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
                     `memory-logger idle skip ${sessionId} (delta below minIdleDeltaLines=${minIdleDeltaLines})`,
                   )
                   return
-                }
-                if (decision.lineBaseline !== undefined) {
-                  linesAtLastRun.set(sessionId, decision.lineBaseline)
                 }
                 void fireMemoryLogger(sessionId, 'idle')
               })()
