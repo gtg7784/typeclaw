@@ -45,6 +45,7 @@ export {
   type ParseConfigJsonOptions,
   type ParseConfigJsonResult,
   type PortForward,
+  type ProfileEntry,
   type ResolvedProfile,
   type ThinkingLevel,
   type ValidateConfigResult,

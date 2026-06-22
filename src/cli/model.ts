@@ -11,7 +11,7 @@ import {
   listRegisteredModelRefs,
   removeProfile,
   setProfile,
-  setThinkingLevel,
+  setProfileThinkingLevel,
 } from '@/config/models-mutation'
 import {
   isKnownModelRef,
@@ -57,7 +57,8 @@ const setSub = defineCommand({
     },
     thinking: {
       type: 'string',
-      description: 'reasoning effort (off|minimal|low|medium|high|xhigh); applies globally to new sessions',
+      description:
+        "reasoning effort for THIS profile (off|minimal|low|medium|high|xhigh|default); the `default` profile's level is the de-facto global default",
       required: false,
     },
   },
@@ -83,28 +84,66 @@ const setSub = defineCommand({
       }
       thinking = { level: parsed.level }
     } else if (interactive) {
-      thinking = await pickThinkingLevel(cwd)
+      thinking = await pickProfileThinkingLevel(cwd, profile)
     }
 
     const result = setProfile(cwd, profile, picked.ref, {
       force: args.force === true,
       ...(picked.meta !== undefined ? { meta: picked.meta } : {}),
+      ...(thinking !== undefined ? { thinkingLevel: thinking.level } : {}),
     })
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
     }
-    if (thinking !== undefined) {
-      const tlResult = setThinkingLevel(cwd, thinking.level)
-      if (!tlResult.ok) {
-        console.error(errorLine(tlResult.reason))
-        process.exit(1)
-      }
-    }
 
     done({
       title: c.green(`Profile "${profile}" set.`),
       details: `${profile} → ${picked.ref}`,
+      hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
+    })
+  },
+})
+
+const thinkingSub = defineCommand({
+  meta: {
+    name: 'thinking',
+    description: "set the default profile's reasoning effort (the de-facto global default for new sessions)",
+  },
+  args: {
+    level: {
+      type: 'positional',
+      description:
+        'reasoning effort (off|minimal|low|medium|high|xhigh); or "default" to clear and defer to the SDK default',
+      required: false,
+    },
+  },
+  async run({ args }) {
+    const cwd = ensureAgentDir()
+    let level: ThinkingLevel | undefined
+    if (args.level !== undefined) {
+      const parsed = parseThinkingArg(args.level)
+      if (!parsed.ok) {
+        console.error(errorLine(parsed.reason))
+        process.exit(1)
+      }
+      level = parsed.level
+    } else {
+      const picked = await pickProfileThinkingLevel(cwd, 'default')
+      if (picked === undefined) return
+      level = picked.level
+    }
+    const result = setProfileThinkingLevel(cwd, 'default', level)
+    if (!result.ok) {
+      console.error(errorLine(result.reason))
+      process.exit(1)
+    }
+    done({
+      title: c.green(
+        level === undefined
+          ? "default profile's thinkingLevel cleared."
+          : `default profile's thinkingLevel set to "${level}".`,
+      ),
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
@@ -209,13 +248,21 @@ const listSub = defineCommand({
     const refDisplay = (e: (typeof entries)[number]): string =>
       e.refs.length > 1 ? `${e.ref} ${c.dim(`(+${e.refs.length - 1} fallback)`)}` : e.ref
     const refWidth = Math.max(3, ...entries.map((e) => e.ref.length + (e.refs.length > 1 ? 14 : 0)))
+    // An explicit per-profile level shows as-is; a profile without one inherits
+    // the default profile's level (or the SDK default for `default` itself).
+    const thinkingDisplay = (e: (typeof entries)[number]): string =>
+      e.thinkingLevel !== undefined ? e.thinkingLevel : c.dim(e.isDefault ? 'sdk-default' : 'inherit')
+    const thinkingWidth = Math.max(
+      5,
+      ...entries.map((e) => (e.thinkingLevel ?? (e.isDefault ? 'sdk-default' : 'inherit')).length),
+    )
 
-    const header = `${'PROFILE'.padEnd(profileWidth)}  ${'REF'.padEnd(refWidth)}  PROVIDER  STATUS`
+    const header = `${'PROFILE'.padEnd(profileWidth)}  ${'REF'.padEnd(refWidth)}  ${'THINK'.padEnd(thinkingWidth)}  PROVIDER  STATUS`
     console.log(c.dim(header))
     for (const e of entries) {
       const star = e.isDefault ? c.cyan('*') : ' '
       const status = e.credentialStatus === 'available' ? c.green('ok') : c.yellow('missing-credentials')
-      const line = `${star}${e.profile.padEnd(profileWidth - 1)}  ${refDisplay(e).padEnd(refWidth)}  ${e.providerId.padEnd(12)}  ${status}`
+      const line = `${star}${e.profile.padEnd(profileWidth - 1)}  ${refDisplay(e).padEnd(refWidth)}  ${thinkingDisplay(e).padEnd(thinkingWidth)}  ${e.providerId.padEnd(12)}  ${status}`
       console.log(line)
       if (e.refs.length > 1) {
         for (let i = 1; i < e.refs.length; i++) {
@@ -237,6 +284,7 @@ export const modelCommand = defineCommand({
     add: addSub,
     remove: removeSub,
     list: listSub,
+    thinking: thinkingSub,
   },
 })
 
@@ -282,14 +330,18 @@ export function parseThinkingArg(raw: string): ParsedThinkingArg {
   }
 }
 
-async function pickThinkingLevel(cwd: string): Promise<{ level: ThinkingLevel | undefined } | undefined> {
-  const current = readThinkingLevel(cwd)
+async function pickProfileThinkingLevel(
+  cwd: string,
+  profile: string,
+): Promise<{ level: ThinkingLevel | undefined } | undefined> {
+  const current = readProfileThinkingLevel(cwd, profile)
+  const clearedHint = profile === 'default' ? 'defer to the SDK default' : "inherit the default profile's level"
   const choice = await select<string>({
-    message: 'Reasoning effort for new sessions',
+    message: `Reasoning effort for profile "${profile}"`,
     options: [
-      { value: KEEP_THINKING_SENTINEL, label: 'keep current', hint: current ?? 'SDK default (medium)' },
+      { value: KEEP_THINKING_SENTINEL, label: 'keep current', hint: current ?? clearedHint },
       ...THINKING_LEVELS.map((level) => ({ value: level, label: level })),
-      { value: 'default', label: 'clear', hint: 'defer to the SDK default' },
+      { value: 'default', label: 'clear', hint: clearedHint },
     ],
     initialValue: KEEP_THINKING_SENTINEL,
   })
@@ -302,10 +354,19 @@ async function pickThinkingLevel(cwd: string): Promise<{ level: ThinkingLevel | 
   return { level: choice as ThinkingLevel }
 }
 
-function readThinkingLevel(cwd: string): ThinkingLevel | undefined {
+// Reads a profile's own thinkingLevel straight from disk (rich-object form
+// only — a bare string/array profile has no level). Used to seed the
+// interactive picker's "keep current" hint.
+function readProfileThinkingLevel(cwd: string, profile: string): ThinkingLevel | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: ThinkingLevel }
-    return parsed.thinkingLevel
+    const parsed = JSON.parse(readFileSync(join(cwd, 'typeclaw.json'), 'utf8')) as {
+      models?: Record<string, unknown>
+    }
+    const entry = parsed.models?.[profile]
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      return (entry as { thinkingLevel?: ThinkingLevel }).thinkingLevel
+    }
+    return undefined
   } catch {
     return undefined
   }

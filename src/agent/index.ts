@@ -14,7 +14,14 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
-import { getConfig, resolveModel, resolveProfile } from '@/config'
+import {
+  getConfig,
+  resolveModel,
+  resolveProfile,
+  type Models,
+  type ResolvedProfile,
+  type ThinkingLevel,
+} from '@/config'
 import { defaultThinkingLevelForRef, isOpenAiFamilyRef, providerForModelRef, type ModelRef } from '@/config/providers'
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
@@ -235,6 +242,20 @@ export type CreateSessionResult = {
   dispose: () => Promise<void>
 }
 
+// A session's reasoning effort layers like the model does: the resolved
+// profile's own `thinkingLevel` → the `default` profile's `thinkingLevel`
+// (the de-facto global default, mirroring how `models.default` is the default
+// model) → the per-provider/SDK default for the active ref. When the requested
+// profile was unknown, `resolved` is already the `default` profile, so the
+// first two terms coincide and the expression still does the right thing.
+export function resolveSessionThinkingLevel(
+  models: Models,
+  resolved: Pick<ResolvedProfile, 'thinkingLevel'>,
+  activeRef: ModelRef,
+): ThinkingLevel | undefined {
+  return resolved.thinkingLevel ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
+}
+
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
   const { session } = await createSessionWithDispose(options)
   return session
@@ -439,9 +460,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       : customToolsPreBudget
 
   const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
-  // User config wins over the per-provider default. Read live so a reloaded
-  // `thinkingLevel` lands on the next session without a container restart.
-  const thinkingLevel = getConfig().thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
+  // Read live so a reloaded `models` lands on the next session without a
+  // container restart.
+  const thinkingLevel = resolveSessionThinkingLevel(getConfig().models, resolved, activeRef)
   const { session } = await createAgentSession({
     model,
     sessionManager,

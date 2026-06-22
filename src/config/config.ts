@@ -636,36 +636,75 @@ function asModelRef(value: string): ModelRef {
 // level. `migrateLegacyConfigShape` rewrites that to `models: { default: ... }`
 // on first load (and writes the result back to disk + commits via
 // `persistMigratedConfig`), so every downstream consumer sees the new shape.
-const modelRefOrChainSchema = z
-  .union([
-    singleModelRef,
-    z
-      .array(singleModelRef)
-      .min(1)
-      // Reject exact duplicates in a chain — retrying the same ref after the
-      // same class of failure is almost certainly a config typo, and silently
-      // deduping would mask user intent. Different models from the same
-      // provider (e.g. `["openai/gpt-5.4-nano", "openai/gpt-5.4-mini"]`) are
-      // still valid because they hit distinct upstream endpoints.
-      .refine((arr) => new Set(arr).size === arr.length, {
-        message: 'models chain must not contain duplicate refs',
-      }),
-  ])
-  .transform((value) => (Array.isArray(value) ? value : [value]).map((ref) => asModelRef(ref)))
-export const modelsSchema = z
-  .record(z.string().min(1), modelRefOrChainSchema)
-  .refine((m) => 'default' in m, { message: 'models.default is required' })
-
-// Zod's `z.record(..., refine)` doesn't refine the inferred type. The
-// `default` key is schema-enforced, so we narrow it here to spare every
-// consumer the `T | undefined` assertion noise.
-export type Models = Record<string, ModelRef[]> & { default: ModelRef[] }
-
 // Mirrors pi-coding-agent's `ThinkingLevel`. Kept as a local enum (rather than
 // importing the SDK type) so the schema owns the canonical value list and zod
 // can validate `typeclaw.json` without a runtime SDK dependency.
 export const thinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
 export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>
+
+// Reject exact duplicates in a chain — retrying the same ref after the same
+// class of failure is almost certainly a config typo, and silently deduping
+// would mask user intent. Different models from the same provider (e.g.
+// `["openai/gpt-5.4-nano", "openai/gpt-5.4-mini"]`) are still valid because
+// they hit distinct upstream endpoints.
+const noDuplicateChainRefs = (arr: readonly string[]): boolean => new Set(arr).size === arr.length
+const chainRefinementMessage = { message: 'models chain must not contain duplicate refs' }
+const modelChainInputSchema = z.array(singleModelRef).min(1).refine(noDuplicateChainRefs, chainRefinementMessage)
+
+// A profile value is one of three shapes, all normalised to `ProfileEntry`:
+//   "openai/gpt-5.4-nano"                              single ref
+//   ["refA", "refB"]                                   fallback chain
+//   { models: "refA" | ["refA","refB"], thinkingLevel? }   rich object
+// The rich object couples a per-profile `thinkingLevel` to the model(s); the
+// `models` key mirrors the top-level map name and reads naturally for both a
+// single ref and a chain. `model` is accepted as single-ref sugar but exactly
+// one of `model`/`models` may be present. Legacy string/array forms keep
+// parsing untouched (they normalise to `{ refs, thinkingLevel: undefined }`),
+// so no migration is needed.
+const richProfileSchema = z
+  .object({
+    model: singleModelRef.optional(),
+    models: z.union([singleModelRef, modelChainInputSchema]).optional(),
+    thinkingLevel: thinkingLevelSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.model === undefined && value.models === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'profile must specify `model` or `models`' })
+    }
+    if (value.model !== undefined && value.models !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'profile must specify only one of `model` or `models`' })
+    }
+  })
+
+const profileEntrySchema = z
+  .union([singleModelRef, modelChainInputSchema, richProfileSchema])
+  .transform((value): ProfileEntry => {
+    if (typeof value === 'string' || Array.isArray(value)) {
+      const refs = (Array.isArray(value) ? value : [value]).map((ref) => asModelRef(ref))
+      return { refs }
+    }
+    const refsInput = value.models ?? value.model!
+    const refs = (Array.isArray(refsInput) ? refsInput : [refsInput]).map((ref) => asModelRef(ref))
+    return value.thinkingLevel === undefined ? { refs } : { refs, thinkingLevel: value.thinkingLevel }
+  })
+
+export const modelsSchema = z
+  .record(z.string().min(1), profileEntrySchema)
+  .refine((m) => 'default' in m, { message: 'models.default is required' })
+
+// A model profile after normalisation: its fallback chain (always non-empty)
+// plus an optional reasoning effort. `thinkingLevel` resolution is layered at
+// session creation: profile's own → `default` profile's → SDK default.
+export type ProfileEntry = {
+  refs: ModelRef[]
+  thinkingLevel?: ThinkingLevel
+}
+
+// Zod's `z.record(..., refine)` doesn't refine the inferred type. The
+// `default` key is schema-enforced, so we narrow it here to spare every
+// consumer the `T | undefined` assertion noise.
+export type Models = Record<string, ProfileEntry> & { default: ProfileEntry }
 
 export const configSchema = z
   .object({
@@ -674,11 +713,12 @@ export const configSchema = z
     // `default(() => ...)` ensures every parsed config has at least
     // `models.default`. Direct `.default({ default: ... })` would short-circuit
     // the refinement, so we lean on the lazy thunk form. The default value is
-    // shaped to match the post-transform output (always `ModelRef[]`),
-    // not the user-facing input shape.
-    models: modelsSchema.default(() => ({ default: [asModelRef(DEFAULT_MODEL_REF)] })) as unknown as z.ZodType<Models>,
+    // shaped to match the post-transform output (a `ProfileEntry`), not the
+    // user-facing input shape.
+    models: modelsSchema.default(() => ({
+      default: { refs: [asModelRef(DEFAULT_MODEL_REF)] },
+    })) as unknown as z.ZodType<Models>,
     customModels: customModelsSchema,
-    thinkingLevel: thinkingLevelSchema.optional(),
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -761,27 +801,43 @@ function resolveCustomModelCost(cost: CustomModelMeta['cost']): Model<KnownApi>[
 }
 
 // Resolves a profile name (e.g. `fast`, `deep`, `vision`) to its fallback
-// chain. Unknown profiles fall back to `default` so callers can pass through
-// arbitrary subagent-declared or user-overridden strings without crashing.
-// `refs` is non-empty (the schema guarantees `default` exists and every value
-// is at least one ref). `ref` is the head of the chain — the model the
-// session is created with first. Callers that don't implement fallback can
-// keep reading `ref`; fallback-aware callers iterate `refs`.
+// chain and per-profile thinking level. Unknown profiles fall back to
+// `default` so callers can pass through arbitrary subagent-declared or
+// user-overridden strings without crashing. `refs` is non-empty (the schema
+// guarantees `default` exists and every value is at least one ref). `ref` is
+// the head of the chain — the model the session is created with first.
+// Callers that don't implement fallback can keep reading `ref`; fallback-aware
+// callers iterate `refs`. `thinkingLevel` is the profile's own override (may be
+// undefined, meaning inherit the `default` profile's level — see session
+// creation).
 export type ResolvedProfile = {
   ref: ModelRef
   refs: ModelRef[]
+  thinkingLevel?: ThinkingLevel
   profile: string
   fellBackToDefault: boolean
 }
 
 export function resolveProfile(models: Models, name: string | undefined): ResolvedProfile {
   const requested = name ?? 'default'
-  const refs = models[requested]
-  if (refs !== undefined) {
-    return { ref: refs[0]!, refs, profile: requested, fellBackToDefault: false }
+  const entry = models[requested]
+  if (entry !== undefined) {
+    return {
+      ref: entry.refs[0]!,
+      refs: entry.refs,
+      thinkingLevel: entry.thinkingLevel,
+      profile: requested,
+      fellBackToDefault: false,
+    }
   }
   const fallback = models.default
-  return { ref: fallback[0]!, refs: fallback, profile: 'default', fellBackToDefault: true }
+  return {
+    ref: fallback.refs[0]!,
+    refs: fallback.refs,
+    thinkingLevel: fallback.thinkingLevel,
+    profile: 'default',
+    fellBackToDefault: true,
+  }
 }
 
 // Resolves a mount's `path` field to an absolute host path, mirroring shell
@@ -887,7 +943,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   $schema: 'ignored',
   models: 'applied',
   customModels: 'applied',
-  thinkingLevel: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
   mcpServers: 'restart-required',
@@ -984,7 +1039,6 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'port',
     'models',
     'customModels',
-    'thinkingLevel',
     'mounts',
     'plugins',
     'alias',
