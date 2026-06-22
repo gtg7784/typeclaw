@@ -193,6 +193,7 @@ export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
 export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
 export type WebexAccountRecord = z.infer<typeof webexAccountRecordSchema>
 export type WebexChannelBlock = z.infer<typeof webexChannelBlockSchema>
+export type WebexEncryptedPassword = z.infer<typeof webexEncryptedPasswordSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
