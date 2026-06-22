@@ -208,9 +208,11 @@ describe('typeclaw model set validates the thinking level before mutating the pr
     await rm(cwd, { recursive: true, force: true })
   })
 
-  async function readDefaultRef(): Promise<unknown> {
-    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { models?: { default?: unknown } }
-    return parsed.models?.default
+  async function readProfile(profile: string): Promise<unknown> {
+    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as {
+      models?: Record<string, unknown>
+    }
+    return parsed.models?.[profile]
   }
 
   // Regression: an invalid --thinking must abort BEFORE setProfile writes, so
@@ -228,14 +230,12 @@ describe('typeclaw model set validates the thinking level before mutating the pr
 
     expect(exitCode).not.toBe(0)
     expect(stderr).toMatch(/Invalid --thinking/)
-    expect(await readDefaultRef()).toBe(ORIGINAL_REF)
-    const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: unknown }
-    expect(parsed.thinkingLevel).toBeUndefined()
+    expect(await readProfile('default')).toBe(ORIGINAL_REF)
   })
 
-  test('a valid --thinking writes both the profile and the level', async () => {
+  test('a valid --thinking writes the profile as a rich object with its per-profile level', async () => {
     const proc = Bun.spawn({
-      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'default', 'openai/gpt-5.4-nano', '--thinking', 'high', '--force'],
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'fast', 'openai/gpt-5.4-nano', '--thinking', 'high', '--force'],
       cwd,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -244,8 +244,41 @@ describe('typeclaw model set validates the thinking level before mutating the pr
     const exitCode = await proc.exited
 
     expect(exitCode).toBe(0)
-    expect(await readDefaultRef()).toBe('openai/gpt-5.4-nano')
+    expect(await readProfile('fast')).toEqual({ models: 'openai/gpt-5.4-nano', thinkingLevel: 'high' })
+    // The default profile is untouched and stays in its bare-ref form.
+    expect(await readProfile('default')).toBe(ORIGINAL_REF)
+  })
+
+  test('`model thinking <level>` sets the default profile`s level without changing its ref', async () => {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'thinking', 'medium'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const exitCode = await proc.exited
+
+    expect(exitCode).toBe(0)
+    expect(await readProfile('default')).toEqual({ models: ORIGINAL_REF, thinkingLevel: 'medium' })
     const parsed = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { thinkingLevel?: unknown }
-    expect(parsed.thinkingLevel).toBe('high')
+    // No top-level global field is ever written.
+    expect(parsed.thinkingLevel).toBeUndefined()
+  })
+
+  test('`model thinking <bogus>` exits non-zero without writing', async () => {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'thinking', 'bogus'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toMatch(/Invalid --thinking/)
+    expect(await readProfile('default')).toBe(ORIGINAL_REF)
   })
 })
