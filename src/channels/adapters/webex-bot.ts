@@ -136,14 +136,24 @@ async function defaultReadFile(path: string): Promise<WebexOutboundFile> {
   return { content: Bun.file(path), filename: path.split('/').pop() ?? 'attachment' }
 }
 
+// See webex.ts: the bot client has no AbortSignal either, so a hung listMessages
+// is bounded by a tighter internal deadline than the router's 5s history ceiling.
+const WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS = 2500
+
 export function createWebexHistoryCallback(deps: {
   client: Pick<WebexBotClient, 'listMessages'>
   logger: WebexBotAdapterLogger
   botPersonIdRef: () => string | null
+  timeoutMs?: number
 }): HistoryCallback {
+  const timeoutMs = deps.timeoutMs ?? WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     try {
-      const messages = await deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) })
+      const messages = await raceWithTimeout(
+        deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) }),
+        timeoutMs,
+        '[webex-bot] history fetch',
+      )
       return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, deps.botPersonIdRef())).reverse() }
     } catch (err) {
       const message = describe(err)
@@ -297,6 +307,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         options.configRef(),
         botSnapshot?.ref ?? null,
         options.selfAliasesRef?.() ?? [],
+        botSnapshot?.emails[0] ?? null,
       )
       if (verdict.kind === 'drop') {
         logger.info(`[webex-bot] dropped id=${event.ref} reason=${verdict.reason}${dropHint(verdict.reason)}`)
@@ -449,6 +460,18 @@ function clampLimit(requested: number, max: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  })
+  try {
+    return await Promise.race([work, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
 }
 
 function dropHint(reason: InboundDropReason): string {

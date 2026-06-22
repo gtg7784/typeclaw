@@ -141,14 +141,27 @@ async function defaultReadFile(path: string): Promise<WebexOutboundFile> {
   return { content: Bun.file(path), filename: path.split('/').pop() ?? 'attachment' }
 }
 
+// The Webex REST/internal client offers no AbortSignal, so a hung `listMessages`
+// would otherwise block cold-start prefetch for the router's full 5s history
+// ceiling before degrading. Racing it against a tighter internal deadline lets
+// prefetch fall back to membership-derivation (or skip) seconds sooner, mirroring
+// the cold-fetch fail-fast posture the membership resolver already uses.
+const WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS = 2500
+
 export function createWebexHistoryCallback(deps: {
   client: Pick<WebexClient, 'listMessages'>
   logger: WebexAdapterLogger
   botPersonIdRef: () => string | null
+  timeoutMs?: number
 }): HistoryCallback {
+  const timeoutMs = deps.timeoutMs ?? WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     try {
-      const messages = await deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) })
+      const messages = await raceWithTimeout(
+        deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) }),
+        timeoutMs,
+        '[webex] history fetch',
+      )
       const authorById = new Map(messages.map((m) => [m.ref, m.personRef]))
       const botPersonId = deps.botPersonIdRef()
       return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, botPersonId, authorById)).reverse() }
@@ -305,6 +318,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
         options.configRef(),
         botSnapshot?.ref ?? null,
         options.selfAliasesRef?.() ?? [],
+        botSnapshot?.emails[0] ?? null,
       )
       if (verdict.kind === 'drop') {
         logger.info(`[webex] dropped id=${event.ref} reason=${verdict.reason}${dropHint(verdict.reason)}`)
@@ -480,6 +494,18 @@ function clampLimit(requested: number, max: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  })
+  try {
+    return await Promise.race([work, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
 }
 
 function dropHint(reason: InboundDropReason): string {

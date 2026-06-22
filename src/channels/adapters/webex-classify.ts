@@ -16,13 +16,20 @@ export type InboundClassification =
 // `botPersonRef` is the bot's decoded UUID ref (from WebexPerson.ref), matched
 // against the event's *Ref fields so identity comparison happens entirely in
 // ref-space — the same currency typeclaw now stores as ChannelKey/authorId.
+//
+// `botPersonEmail` is a second self-identity anchor: legacy Hydra accounts can
+// surface the bot's ref as an email on one side (`/people/me`) and a UUID on the
+// other (Mercury event), so a ref-only check leaks the agent's own reply back as
+// a new inbound and burns a full prompt cycle. Matching personEmail closes that
+// echo loop regardless of which side decoded to which form.
 export function classifyInbound(
   event: WebexInboundMessage,
   _config: ChannelAdapterConfig,
   botPersonRef: string | null,
   selfAliases: readonly string[] = [],
+  botPersonEmail: string | null = null,
 ): InboundClassification {
-  if (botPersonRef !== null && event.personRef === botPersonRef) {
+  if (isSelfAuthor(event, botPersonRef, botPersonEmail)) {
     return { kind: 'drop', reason: 'self_author' }
   }
 
@@ -70,6 +77,14 @@ export function classifyInbound(
       ts: Number.isFinite(ts) ? ts : 0,
     },
   }
+}
+
+function isSelfAuthor(event: WebexInboundMessage, botPersonRef: string | null, botPersonEmail: string | null): boolean {
+  if (botPersonRef !== null && event.personRef === botPersonRef) return true
+  if (botPersonEmail !== null && event.personEmail !== '') {
+    return event.personEmail.toLowerCase() === botPersonEmail.toLowerCase()
+  }
+  return false
 }
 
 type SplitInbound = { text: string; attachments: InboundAttachment[] }
