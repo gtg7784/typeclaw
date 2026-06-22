@@ -263,10 +263,21 @@ export async function start({
     // already local → skipped-dev-mode) reaching ensureDeps unregistered.
     // `bun link` is idempotent, so re-running it on every link: start is safe
     // and self-heals that gap. No-op off Windows (linkWindowsDevTypeclaw → null).
+    // True when this is a native-Windows agent on a `link:typeclaw` spec, after
+    // (re)registering its checkout. Forces ensureDeps below: ensureDeps' drift
+    // detector only looks for MISSING dep names, so a stale npm-installed
+    // node_modules/typeclaw left by an interrupted relink would make it skip the
+    // install and leave the agent on the old runtime. Forcing materializes the
+    // link. Off Windows / non-link specs this stays false.
+    let registeredWindowsLink = false
     if ((await readTypeclawDepSpec(cwd))?.startsWith('link:') === true) {
       const checkout = typeclawCheckoutRoot()
       if (checkout !== null) {
-        await linkWindowsDevTypeclaw(checkout, { platform, ...(runBunLink !== undefined ? { runBunLink } : {}) })
+        const linked = await linkWindowsDevTypeclaw(checkout, {
+          platform,
+          ...(runBunLink !== undefined ? { runBunLink } : {}),
+        })
+        registeredWindowsLink = linked !== null
       }
     }
     if (outcomeForcesInstall(upgrade)) {
@@ -322,7 +333,8 @@ export async function start({
     const forceDepsReinstall =
       (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) ||
       pluginReconcile.changed ||
-      outcomeRequiresForceInstall(upgrade)
+      outcomeRequiresForceInstall(upgrade) ||
+      registeredWindowsLink
     const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }

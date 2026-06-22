@@ -4001,17 +4001,53 @@ describe('start autoUpgrade integration', () => {
       runBunLink: async () => {
         order.push('bun-link')
       },
-      ensureDeps: async () => {
-        order.push('ensureDeps')
+      ensureDeps: async (_dir, opts) => {
+        order.push(`ensureDeps:force=${opts?.force === true}`)
         return { ok: true, installed: true }
       },
       ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
-    // The point: bun link runs before ensureDeps even with no reconcile
-    // transition, so the link: spec is registered before install.
-    expect(order).toEqual(['bun-link', 'ensureDeps'])
+    // The point: bun link runs before ensureDeps, AND ensureDeps is forced so a
+    // stale node_modules/typeclaw can't make the relink skip the install.
+    expect(order).toEqual(['bun-link', 'ensureDeps:force=true'])
+  })
+
+  test('win32 interrupted relink with a stale node_modules/typeclaw forces ensureDeps on the retry', async () => {
+    // First start: reconcile rewrites ^0.1.0 → link:typeclaw, then bun link
+    // throws (interrupted). Second start: spec is already link: so reconcile is
+    // skipped-dev-mode, but bun link must re-run AND ensureDeps must be forced
+    // to overwrite the stale npm node_modules/typeclaw with the linked checkout.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: 'link:typeclaw' })
+    await mkdir(join(root, 'node_modules', 'typeclaw'), { recursive: true })
+    await writeFile(
+      join(root, 'node_modules', 'typeclaw', 'package.json'),
+      JSON.stringify({ name: 'typeclaw', version: '0.1.0' }),
+    )
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const order: string[] = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      platform: 'win32',
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => ({ kind: 'skipped-dev-mode' }),
+      runBunLink: async () => {
+        order.push('bun-link')
+      },
+      ensureDeps: async (_dir, opts) => {
+        order.push(`ensureDeps:force=${opts?.force === true}`)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(order).toEqual(['bun-link', 'ensureDeps:force=true'])
   })
 
   test('link:typeclaw agent does NOT run bun link off-Windows', async () => {
