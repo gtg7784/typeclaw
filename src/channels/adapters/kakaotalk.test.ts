@@ -823,6 +823,12 @@ describe('createKakaotalkAdapter — author name resolution', () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    // Intercept route so the engagement turn (and its membership GETMEM read)
+    // never runs — this isolates the author-resolution path under test.
+    const routed: { authorName: string }[] = []
+    router.route = async (event) => {
+      routed.push({ authorName: event.authorName })
+    }
     const adapter = createKakaotalkAdapter({
       router,
       configRef: () => adapterCfg(),
@@ -846,6 +852,7 @@ describe('createKakaotalkAdapter — author name resolution', () => {
     })
     await new Promise((r) => setTimeout(r, 10))
 
+    expect(routed).toEqual([{ authorName: 'Alice' }])
     expect(client.getMembersCalls).toHaveLength(0)
 
     await adapter.stop()
@@ -917,7 +924,10 @@ describe('createKakaotalkAdapter — author name resolution', () => {
     })
     await new Promise((r) => setTimeout(r, 10))
 
-    expect(client.getMembersCalls).toEqual(['111'])
+    // Author resolution falls back to GETMEM for chat 111 (the membership
+    // resolver also reads the roster on engagement, so assert containment
+    // rather than an exact call list).
+    expect(client.getMembersCalls).toContain('111')
 
     await adapter.stop()
     await router.stop()
