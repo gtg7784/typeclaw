@@ -29,6 +29,7 @@ import { splitInboundLine } from './line-attachment'
 import { createLineChannelResolver } from './line-channel-resolver'
 import { classifyInbound } from './line-classify'
 import { toLinePlainText } from './line-format'
+import { LINE_TOKEN_REFRESH_SKEW_MS, nextRefreshDelayMs } from './line-token'
 
 // Structural duck-type of the upstream LineClient class. Declaring this as an
 // interface (rather than reusing the nominal class type) lets test fakes
@@ -41,6 +42,11 @@ export interface LineClient {
   getMessages(chatId: string, options?: { count?: number }): Promise<LineMessage[]>
   sendMessage(chatId: string, text: string): Promise<LineSendResult>
   close(): void
+  // Optional on the structural type: older SDK builds predate the refresh
+  // surface, so the adapter feature-detects both before using them and a
+  // missing method degrades to "no proactive refresh" rather than a crash.
+  ensureFreshAuthToken?: (options?: { skewMs?: number }) => Promise<string | null>
+  onTokenUpdate?: (listener: (authToken: string) => void) => void
 }
 
 export interface LineListener {
@@ -53,6 +59,7 @@ export interface LineListener {
 export type LineCredentialStore = {
   load(): Promise<LineConfig>
   getAccount(id?: string): Promise<LineAccountCredentials | null>
+  setAccount?(account: LineAccountCredentials): Promise<void>
 }
 
 const LineClient = RealLineClient as unknown as new (credManager?: LineCredentialManager) => LineClient
@@ -79,6 +86,7 @@ export type LineAdapterOptions = {
   client?: LineClient
   clientFactory?: (credManager?: LineCredentialManager) => LineClient
   listenerFactory?: (client: LineClient) => LineListener
+  now?: () => number
 }
 
 export type LineAdapter = {
@@ -181,6 +189,14 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
   let started = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null
+  // currentAuthToken tracks the freshest known token for refresh SCHEDULING;
+  // lastPersistedToken is the dedupe marker and only advances after a write to
+  // secrets actually succeeds, so a failed persist can be retried with the same
+  // token instead of being silently swallowed by the dedupe early-return.
+  let currentAuthToken: string | null = null
+  let lastPersistedToken: string | null = null
+  const now = options.now ?? Date.now
 
   const channelResolver = createLineChannelResolver({ client, logger })
 
@@ -198,6 +214,51 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
   })
 
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
+
+  // The SDK's AuthService updates the LIVE client's token in-place and emits this
+  // event; we mirror it into secrets.json so the next container start boots from a
+  // fresh token instead of a dead one. The refresh token (which rotates on use)
+  // stays the SDK FileStorage's responsibility and is never copied here.
+  const persistAuthToken = async (authToken: string): Promise<void> => {
+    currentAuthToken = authToken
+    if (authToken === lastPersistedToken) return
+    const store = options.credentialsStore
+    if (!store?.setAccount) return
+    try {
+      const account = await store.getAccount()
+      if (account === null) return
+      await store.setAccount({ ...account, auth_token: authToken, updated_at: new Date(now()).toISOString() })
+      lastPersistedToken = authToken
+      logger.info('[line] persisted refreshed auth token to secrets')
+    } catch (err) {
+      logger.warn(`[line] failed to persist refreshed auth token: ${describe(err)}`)
+    }
+  }
+
+  const refreshNow = async (): Promise<void> => {
+    if (!client.ensureFreshAuthToken) return
+    try {
+      const token = await client.ensureFreshAuthToken({ skewMs: LINE_TOKEN_REFRESH_SKEW_MS })
+      if (token) await persistAuthToken(token)
+    } catch (err) {
+      logger.warn(`[line] token refresh failed: ${describe(err)}`)
+    }
+  }
+
+  const scheduleRefresh = (): void => {
+    if (refreshTimer !== null) clearTimeout(refreshTimer)
+    if (!client.ensureFreshAuthToken) return
+    const token = currentAuthToken
+    const delay = token ? nextRefreshDelayMs(token, now()) : LINE_TOKEN_REFRESH_SKEW_MS
+    refreshTimer = setTimeout(() => {
+      void (async () => {
+        if (!started) return
+        await refreshNow()
+        if (started) scheduleRefresh()
+      })()
+    }, delay)
+    refreshTimer.unref?.()
+  }
 
   const processInbound = async (event: LinePushMessageEvent): Promise<void> => {
     inflightInbounds++
@@ -255,6 +316,10 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
     async start(): Promise<void> {
       if (started) return
       started = true
+      client.onTokenUpdate?.((authToken) => {
+        void persistAuthToken(authToken)
+      })
+
       try {
         const credentialStore = options.credentialsStore ?? null
         if (credentialStore !== null) {
@@ -262,6 +327,8 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
           if (account === null) {
             throw new Error('no LINE account in secrets.json#channels.line (run typeclaw init to authenticate)')
           }
+          currentAuthToken = account.auth_token
+          lastPersistedToken = account.auth_token
           await client.login(account)
         } else {
           await client.login()
@@ -271,6 +338,9 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
         logger.error(`[line] login failed: ${describe(err)}`)
         throw err
       }
+
+      await refreshNow()
+      scheduleRefresh()
 
       try {
         const profile = await client.getProfile()
@@ -329,6 +399,10 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
     async stop(): Promise<void> {
       if (!started) return
       started = false
+      if (refreshTimer !== null) {
+        clearTimeout(refreshTimer)
+        refreshTimer = null
+      }
       options.router.unregisterOutbound('line', outboundCallback)
       options.router.unregisterChannelNameResolver('line', channelResolver.resolve)
       options.router.unregisterHistory('line', historyCallback)
