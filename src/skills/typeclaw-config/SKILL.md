@@ -93,7 +93,6 @@ Example with mounts:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "openai/gpt-5.4-nano",
   "mounts": [
     { "name": "typeclaw", "path": "~/workspace/typeclaw", "description": "the typeclaw source repo" },
     { "name": "notes", "path": "~/notes", "readOnly": true, "description": "personal notes (read-only)" }
@@ -211,8 +210,7 @@ Default (no `portForward` field at all): forward every LISTEN.
 
 ```json
 {
-  "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "openai/gpt-5.4-nano"
+  "$schema": "./node_modules/typeclaw/typeclaw.schema.json"
 }
 ```
 
@@ -532,7 +530,7 @@ Never echo, log, or commit values from `secrets.json` or `.env`. Both are gitign
 
 1. **Read `typeclaw.json`.** Don't guess from prior conversation — the user may have changed it since you last looked.
 2. Report the `model` field verbatim, plus the human-readable name from the **Allowed models** table.
-3. If `model` is missing from the file, say so and report the default (`openai/gpt-5.4-nano` → GPT-5.4 nano).
+3. If `model` is missing from the file, say so and report the registry default — the entry marked **Default** in the **Allowed models** table.
 
 ## When the user says "switch to <model>"
 
