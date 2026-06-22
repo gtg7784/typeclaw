@@ -27,6 +27,7 @@ import type {
 import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
 import type { TailscaleServeEvent } from './tailscale'
 import { UNVERSIONED_SENTINEL } from './version'
+import type { WebexRenewalCallbacks, WebexRenewalLogEvent } from './webex-renewal-manager'
 
 export type DaemonOptions = {
   exec?: DockerExec
@@ -60,6 +61,10 @@ export type DaemonOptions = {
   // deregister. Omit to disable in tests / when the agent has no kakaotalk
   // channel configured.
   kakaoRenewal?: KakaoRenewalCallbacks
+  // Webex credential renewal capability. Same lifecycle as kakaoRenewal but
+  // ticks hourly because Webex password tokens live ~27h (see
+  // webex-renewal-manager.ts). Omit when the agent has no webex channel.
+  webexRenewal?: WebexRenewalCallbacks
 }
 
 export type RestartPreflight = (input: {
@@ -102,6 +107,7 @@ export type DaemonLogEvent =
   | { kind: 'port-forward-event'; event: PortForwardEvent }
   | { kind: 'tailscale-serve-event'; event: TailscaleServeEvent }
   | KakaoRenewalLogEvent
+  | WebexRenewalLogEvent
 
 export type Daemon = {
   registered: () => string[]
@@ -341,6 +347,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(containerName)
       if (opts.portbroker) await opts.portbroker.stop(containerName, 'fatal-auth').catch(() => {})
       if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(containerName).catch(() => {})
+      if (opts.webexRenewal) await opts.webexRenewal.stop(containerName).catch(() => {})
       await removeRegistrationFile(containerName)
       log({ kind: 'registration-skipped', containerName, reason: `fatal broker auth: ${reason}` })
     })
@@ -376,6 +383,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (opts.kakaoRenewal) {
       opts.kakaoRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
     }
+    if (opts.webexRenewal) {
+      opts.webexRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
+    }
   }
 
   const handleRegister = async (req: RegisterPayload): Promise<RpcResponse> => {
@@ -403,6 +413,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(req.containerName)
       if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
       if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(req.containerName).catch(() => {})
+      if (opts.webexRenewal) await opts.webexRenewal.stop(req.containerName).catch(() => {})
       await removeRegistrationFile(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
@@ -684,6 +695,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         restartTokens.delete(name)
         if (opts.portbroker) await opts.portbroker.stop(name, 'deregistered').catch(() => {})
         if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(name).catch(() => {})
+        if (opts.webexRenewal) await opts.webexRenewal.stop(name).catch(() => {})
         await removeRegistrationFile(name)
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
@@ -712,6 +724,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (opts.kakaoRenewal) {
         const names = Array.from(cwds.keys())
         await Promise.allSettled(names.map((n) => opts.kakaoRenewal!.stop(n)))
+      }
+      if (opts.webexRenewal) {
+        const names = Array.from(cwds.keys())
+        await Promise.allSettled(names.map((n) => opts.webexRenewal!.stop(n)))
       }
       cwds.clear()
       restartTokens.clear()
