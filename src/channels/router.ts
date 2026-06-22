@@ -1179,6 +1179,10 @@ export type CreateChannelRouterOptions = {
   // resumes on the next boot; when absent (cold channel / native slash with no
   // session) it should just bounce the container with no handoff.
   onRestart?: (ctx?: RestartCommandContext) => Promise<string>
+  // Test seam: override the sessions.json writer. Defaults to the disk-backed
+  // saveChannelSessions (which swallows its own I/O errors). Tests inject a
+  // throwing impl to exercise the persist-failure unwind in ensureLive.
+  saveChannelSessions?: (agentDir: string, sessions: readonly ChannelSessionRecord[]) => Promise<void>
 }
 
 export type RestartCommandContext = {
@@ -1356,13 +1360,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     await loadOnce
   }
 
+  const saveSessions = options.saveChannelSessions
+    ? options.saveChannelSessions
+    : (agentDir: string, sessions: readonly ChannelSessionRecord[]): Promise<void> =>
+        saveChannelSessions(agentDir, sessions, logger)
+
   const persist = async (): Promise<void> => {
     if (mappings === null || closing) return
     // Caller awaits `next` un-caught to observe write errors; the chain holds the
     // caught version so one rejection can't poison it or escape as unhandled.
     const next = persistChain.then(async () => {
       if (mappings === null) return
-      await saveChannelSessions(options.agentDir, mappings, logger)
+      await saveSessions(options.agentDir, mappings)
     })
     persistChain = next.catch(() => {})
     await next
@@ -1608,10 +1617,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
       const participants = (resolvedRecord?.participants ?? []) as ChannelParticipant[]
       const membershipFetch = warmMembership(key)
-      const resolvedNames = await resolveChannelNames(key)
-      logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
-      const membership = await membershipForPrompt(key, membershipFetch)
-      logger.info(`[channels] ${keyId}: ensureLive resolved-membership`)
+      // Independent platform lookups — overlap so the chain pays max(), not sum().
+      const [resolvedNames, membership] = await Promise.all([
+        resolveChannelNames(key),
+        membershipForPrompt(key, membershipFetch),
+      ])
+      logger.info(`[channels] ${keyId}: ensureLive resolved-names-and-membership`)
       // The session-creation origin is what the resource loader sees when it
       // renders the role/permissions block into the system prompt. It must
       // include the triggering author so author-scoped roles
@@ -1674,7 +1685,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       } else {
         mappings = [persistedRecord]
       }
-      await persist()
+      // Kick off the mapping write now but don't block on it — the disk write is
+      // independent of the synchronous `live` build below and the cold-start
+      // network prefetch, so we overlap it. Every exit path below MUST settle
+      // `persistPromise` (the immediate .catch is only an unhandled-rejection
+      // guard; write errors are still surfaced by awaiting it later).
+      const persistPromise = persist()
+      void persistPromise.catch(() => {})
 
       const live: LiveSession = {
         key,
@@ -1791,16 +1808,38 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           `[channels] ${keyId}: discarding session created across a teardown (gen ${generation} → ${liveGeneration})`,
         )
         await tearDownLive(live)
+        // Settle the in-flight mapping write before bailing — preserves the
+        // pre-overlap contract that a persist failure fails ensureLive.
+        await persistPromise
         throw new StaleLiveSessionError(keyId)
       }
-      liveSessions.set(keyId, live)
-
       if (isColdStart) {
+        // Install before the slow prefetch so a concurrent teardown/shutdown can
+        // see and dispose this session during the network fetch.
+        liveSessions.set(keyId, live)
         const adapterConfig = options.configForAdapter(key.adapter)
-        if (adapterConfig) {
-          await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
-          logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
+        // Overlap the disk mapping-write with the network history prefetch —
+        // they are independent. allSettled lets a persist failure take priority
+        // (and unwind the install) even if prefetch also rejects.
+        const prefetchPromise = adapterConfig
+          ? prefetchChannelContext(live, adapterConfig, triggeringMessageId)
+          : Promise.resolve()
+        const [persistResult, prefetchResult] = await Promise.allSettled([persistPromise, prefetchPromise])
+        if (persistResult.status === 'rejected') {
+          await unwindInstalledLive(keyId, live)
+          throw persistResult.reason
         }
+        if (prefetchResult.status === 'rejected') {
+          await unwindInstalledLive(keyId, live)
+          throw prefetchResult.reason
+        }
+        if (adapterConfig) logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
+      } else {
+        // Rehydrate has no prefetch to overlap, so settle the mapping write
+        // before installing — a failed persist must fail ensureLive without
+        // leaving a warm session behind for later inbounds to reuse.
+        await persistPromise
+        liveSessions.set(keyId, live)
       }
 
       // Snapshot the rendered base context size now, after prefetch and before
@@ -4049,6 +4088,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     } catch (err) {
       logger.warn(`[channels] dispose failed for ${live.keyId}: ${describe(err)}`)
     }
+  }
+
+  // Roll back an install when a post-install step (persist/prefetch) fails, so a
+  // rejected ensureLive never leaves a warm session behind for later inbounds.
+  const unwindInstalledLive = async (keyId: string, live: LiveSession): Promise<void> => {
+    if (liveSessions.get(keyId) === live) liveSessions.delete(keyId)
+    if (!live.destroyed) await tearDownLive(live)
   }
 
   const runIdleGc = async (): Promise<void> => {

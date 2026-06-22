@@ -13,6 +13,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
 
+import type { ChannelSessionRecord } from './persistence'
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import {
   CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS,
@@ -253,6 +254,7 @@ function makeRouter(
     hooks?: HookBus
     onReload?: () => Promise<string>
     onRestart?: (ctx?: RestartCommandContext) => Promise<string>
+    saveChannelSessions?: (agentDir: string, sessions: readonly ChannelSessionRecord[]) => Promise<void>
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -267,6 +269,7 @@ function makeRouter(
     ...(options.claimHandler !== undefined ? { claimHandler: options.claimHandler } : {}),
     ...(options.onReload !== undefined ? { onReload: options.onReload } : {}),
     ...(options.onRestart !== undefined ? { onRestart: options.onRestart } : {}),
+    ...(options.saveChannelSessions !== undefined ? { saveChannelSessions: options.saveChannelSessions } : {}),
     permissions: options.permissions ?? grantAllPermissions,
     now: () => nowRef.value,
     logger: {
@@ -400,21 +403,21 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound())
     await router.__testing!.flushDebounce(KEY)
 
-    // then phase logs appear in order: begin → resolved-names → resolved-membership
+    // then phase logs appear in order: begin → resolved-names-and-membership
     //   → session-created → done. The bracketing is what makes a stuck phase
     //   visible from logs alone (begin without done == hung at that phase).
+    //   Name and membership resolution share one log because they now run
+    //   concurrently — separate ordered markers would misrepresent the timing.
     const phaseLogs = logs
       .filter((l) => l.startsWith('info:[channels]') && l.includes('ensureLive'))
       .map((l) => l.replace(/^.*ensureLive /, ''))
     const beginIdx = phaseLogs.findIndex((p) => p.startsWith('begin'))
-    const namesIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names'))
-    const membershipIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-membership'))
+    const resolvedIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names-and-membership'))
     const createdIdx = phaseLogs.findIndex((p) => p.startsWith('session-created'))
     const doneIdx = phaseLogs.findIndex((p) => p.startsWith('done'))
     expect(beginIdx).toBeGreaterThanOrEqual(0)
-    expect(namesIdx).toBeGreaterThan(beginIdx)
-    expect(membershipIdx).toBeGreaterThan(namesIdx)
-    expect(createdIdx).toBeGreaterThan(membershipIdx)
+    expect(resolvedIdx).toBeGreaterThan(beginIdx)
+    expect(createdIdx).toBeGreaterThan(resolvedIdx)
     expect(doneIdx).toBeGreaterThan(createdIdx)
     expect(phaseLogs[beginIdx]).toContain('cold-start')
     expect(phaseLogs[doneIdx]).toContain('cold-start')
@@ -8052,6 +8055,32 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(historyCalls).toBe(0)
     expect(sessions[0]!.prompts[0]).not.toContain('should-not-appear')
     expect(sessions[0]!.prompts[0]).not.toContain('## Recent context')
+  })
+
+  test('rehydrate path: a failed mapping write fails ensureLive and leaves no live session', async () => {
+    // given: a pre-existing mapping (forces the rehydrate branch, not cold-start)
+    //   and a sessions.json writer that always throws
+    const dir = await tempDir()
+    await saveChannelSessions(dir, [
+      {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        thread: null,
+        sessionId: 'ses_preexisting',
+        participants: [],
+      },
+    ])
+    const { router } = makeRouter(dir, {
+      saveChannelSessions: async () => {
+        throw new Error('disk full')
+      },
+    })
+
+    // when: an inbound drives ensureLive down the rehydrate path
+    // then: route() rejects on the write failure and nothing is installed
+    await expect(router.route(inbound({ externalMessageId: 'engage', text: 'hi' }))).rejects.toThrow(/disk full/)
+    expect(router.liveCount()).toBe(0)
   })
 
   test('history fetch failure is non-fatal; session still processes the engaging message', async () => {
