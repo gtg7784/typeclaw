@@ -185,6 +185,33 @@ describe('ensureDepsInstalled', () => {
     expect(result).toEqual({ ok: false, reason: 'lockfile is read-only', missing: ['zod'] })
   })
 
+  test('a junction at node_modules/typeclaw satisfies the dep without invoking bun (Windows dev-mode)', async () => {
+    // given: a checkout dir with its own package.json, and node_modules/typeclaw
+    // is a junction/symlink to it — the state prepareWindowsDevJunction leaves.
+    // The real drift detector must see the dep as present so install is skipped.
+    const checkout = join(root, '..', `typeclaw-checkout-${Date.now()}`)
+    await writePackageJson(checkout, { name: 'typeclaw', version: '0.0.0' })
+    await writePackageJson(root, { name: 'agent', dependencies: { typeclaw: 'file:../whatever' } })
+    await mkdir(join(root, 'node_modules'), { recursive: true })
+    await symlink(checkout, join(root, 'node_modules', 'typeclaw'), 'junction')
+
+    let installed = 0
+    try {
+      const result = await ensureDepsInstalled({
+        cwd: root,
+        install: async () => {
+          installed++
+          return { ok: true }
+        },
+      })
+
+      expect(installed).toBe(0)
+      expect(result).toMatchObject({ ok: true, installed: false })
+    } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
   test('returns ok:false when install succeeds but deps are still missing afterward', async () => {
     // given: bun install returns 0, but the missing deps did not actually
     // appear. This is the file:-linked dep silent-no-op case the comment in

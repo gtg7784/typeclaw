@@ -35,6 +35,7 @@ import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
+import { ensureDepsInstalled } from './ensure-deps'
 import { CONFIG_FILE, findAgentDir, isInitialized } from './find-agent-dir'
 import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
@@ -42,6 +43,7 @@ import { buildHatchingPrompt } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
+import { prepareWindowsDevJunction } from './windows-dev-link'
 
 export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
@@ -407,7 +409,12 @@ export async function runInit({
   }
 
   emit({ step: 'install', phase: 'start' })
-  const install = await installRunner(cwd)
+  // Native-Windows dev-mode: junction node_modules/typeclaw to the checkout so
+  // the install step skips bun's source-tree copy (which EPERMs on locked
+  // `.git/` files, the #899 path). When a junction satisfies the dep, route the
+  // install through the drift detector so bun is not re-invoked just to recopy.
+  const devJunction = await prepareWindowsDevJunction(cwd)
+  const install = devJunction ? await ensureDepsInstalled({ cwd, install: installRunner }) : await installRunner(cwd)
   emit({ step: 'install', phase: 'done', result: install })
   if (!install.ok) throw new Error(`Dependency install failed: ${install.reason}`)
 
