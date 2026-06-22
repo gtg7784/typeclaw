@@ -105,7 +105,8 @@ The evidence can be the user's exact words, a command/output pair, a file diff t
 Capture-worthy categories:
 
 - **Explicit operating rules the user just gave the agent.** "Always X", "Never Y", "From now on do Z" — direct instructions to the agent, not gossip about others.
-- **Stable identity/role/tool facts that will keep mattering.** User/project/repo/tool/platform facts. Skip casual employment history, social-graph trivia, and membership churn unless the user says it matters.
+- **Stable identity/role/tool facts that will keep mattering.** User/project/repo/tool/platform facts. Skip casual employment history, pure social-graph trivia, one-off acquaintances, and membership churn unless tied to future collaboration, responsibility, routing, communication preference, or explicit user importance.
+- **Stable collaborator/contact facts.** Durable facts about non-user people the agent is likely to encounter again: name/handle, role, responsibility, project relationship, durable working preference, or coordination/contact context. Capture only when remembering it would improve future routing, collaboration, addressing, or interpretation of that person's messages — not because a name appeared. Keep one introduction to one compact fragment that bundles the person's core durable context (e.g. "Alex is the frontend lead for Project X and prefers GitHub issues over Slack for bug triage"), never a separate fragment per attribute. This is not a contact database: skip people who only passed through once. Third-party facts must come from the user/owner, or from that person describing their own role/preference in normal collaboration; do not persist one participant's reputational claims about another unless the user confirms or operationally relies on them.
 - **Decisions with reasoning.** "We chose X over Y because Z" when future sessions must honor X.
 - **Reproducible workarounds and debugging insights.** A config that worked, flag combination, procedure, root cause, or non-obvious fix.
 - **In-transcript changed minds.** Capture "actually, scratch that" only when the prior position is explicit. Do not compare against \`memory/topics/\`.
@@ -128,17 +129,19 @@ If taught content contains several distinct facts, write one topic per fragment,
 
 Use a simple decision rule. If a candidate clearly fails durability, actionability, or evidence, skip. If it clearly passes all three, capture. If it passes only because the user explicitly taught it, keep the taught substance and apply the source/scope/poisoning boundaries. Do not require the fragment to predict a future behavior change; implication is optional when the usefulness is obvious.
 
+The same triad governs people facts, in any language. "Jisoo owns the billing migration and prefers async design docs before calls" passes (durable role + working preference that changes future coordination). "민지는 결제 담당이고 PR은 오전에 보는 걸 선호해" ("Minji owns payments and prefers to review PRs in the morning") is the same shape — capture one compact fragment about Minji's responsibility and review preference. "Jisoo used to work with Omar" or "Mina joined the chat and seemed funny" fail (social history / one-off impression with no future operational consequence) — skip.
+
 Skip these anti-patterns:
 
 - **Conversational mechanics.** Questions asked, greetings, laughter/reactions, response-time tests, chat flow.
-- **Single-occurrence casual reactions.** Amusement, personality observations, vibes. Wait for recurrence; if it never recurs, it was never memory.
+- **Single-occurrence casual reactions.** Amusement, personality observations, vibes, or impressions of people. Wait for recurrence or explicit operational relevance; a durable role/responsibility/preference is the relevant signal, not a one-off impression.
 - **Group-chat membership events.** Invitations, joins, leaves, renames. Current channel context can supply this and it changes constantly.
-- **Casual social-graph trivia.** Friend/coworker history unless explicitly tied to future work.
+- **Casual social-graph trivia.** "Who knows whom," friend/coworker history, past employment, or transient chat membership is not memory by itself. Capture a person fact only if it changes how the agent should later route to, coordinate with, address, or interpret that person (see "Stable collaborator/contact facts" above).
 - **Latency / performance pings.** "How fast did you respond?" is not memory.
 - **The agent's own first-person observations.** The agent's persona, model confusion, or self-commentary is not memorable to itself.
 - **Re-derivable facts.** Anything obvious from the current system prompt, AGENTS.md, or channel context.
 - **Speculation untethered to a quote.** If no transcript line anchors it, skip.
-- **Multi-fragment expansions of one event.** One event produces at most one fragment. Splitting an intro into "new chat", "new participant", "job", "reaction" is over-writing.
+- **Multi-fragment expansions of one event.** One event produces at most one fragment. A teammate introduction may bundle that person's core durable role/responsibility/preference into one compact fragment, but do not split "new chat", "new participant", "job", "preference", "reaction" into separate memories.
 
 # Verbatim references (store_reference tool)
 

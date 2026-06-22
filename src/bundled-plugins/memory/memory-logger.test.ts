@@ -132,6 +132,36 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(lower).toMatch(/single-occurrence|one event produces at most one fragment/)
   })
 
+  test('declares durable facts about non-user people as a capture-worthy category', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('collaborator/contact facts')
+    expect(lower).toMatch(/role|responsibility/)
+    expect(lower).toMatch(/working preference|communication preference|coordination/)
+    expect(lower).toMatch(/routing|coordinate|address|interpret/)
+  })
+
+  test('keeps a person introduction to one compact fragment instead of one-per-attribute', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/one compact fragment/i)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/do not split .*"new participant".*"reaction"/is)
+  })
+
+  test('guards people capture against group-chat poisoning by requiring user/owner or self-described sourcing', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/third-party facts must come from the user\/owner|describing their own role/)
+    expect(lower).toMatch(/reputational claims about another|one participant's reputational claims/)
+  })
+
+  test('qualifies social-graph trivia so operationally-relevant people facts are no longer blanket-skipped', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('who knows whom')
+    expect(lower).toMatch(/capture a person fact only if it changes how the agent should/)
+  })
+
+  test('demonstrates people capture in a non-English (Korean) example so the rule is not English-bound', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('민지는 결제 담당이고')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/in any language/i)
+  })
+
   test('does not require fragments to articulate a future behavior change', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(
       /does(n't| not) need to articulate.*future agent|no.*Implication.*not required|implication is obvious/i,
