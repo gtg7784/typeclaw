@@ -1,87 +1,99 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { prepareWindowsDevJunction, type SymlinkImpl } from './windows-dev-link'
+import { linkWindowsDevTypeclaw, resolveBunLinkedPackage } from './windows-dev-link'
 
-async function agentDirWith(typeclawSpec: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'tc-win-devlink-'))
-  await writeFile(join(dir, 'package.json'), JSON.stringify({ dependencies: { typeclaw: typeclawSpec } }))
-  return dir
-}
-
-function recordingSymlink(): { impl: SymlinkImpl; calls: { target: string; path: string; type: string }[] } {
-  const calls: { target: string; path: string; type: string }[] = []
-  const impl: SymlinkImpl = async (target, path, type) => {
-    calls.push({ target, path, type })
+// Build a fake bun global-link layout (<globalDir>/node_modules/typeclaw -> checkout)
+// and return both paths plus an env that points resolveBunLinkedPackage at it.
+async function fakeBunLink(): Promise<{
+  globalDir: string
+  checkout: string
+  env: NodeJS.ProcessEnv
+  cleanup: () => Promise<void>
+}> {
+  const globalDir = await mkdtemp(join(tmpdir(), 'tc-bun-global-'))
+  const checkout = await mkdtemp(join(tmpdir(), 'tc-checkout-'))
+  await mkdir(join(globalDir, 'node_modules'), { recursive: true })
+  await symlink(checkout, join(globalDir, 'node_modules', 'typeclaw'))
+  return {
+    globalDir,
+    checkout,
+    env: { BUN_INSTALL_GLOBAL_DIR: globalDir },
+    cleanup: async () => {
+      await rm(globalDir, { recursive: true, force: true })
+      await rm(checkout, { recursive: true, force: true })
+    },
   }
-  return { impl, calls }
 }
 
-describe('prepareWindowsDevJunction', () => {
-  test('creates a junction to the checkout on Windows with a local file: dep', async () => {
-    const dir = await agentDirWith('file:../checkout')
+describe('resolveBunLinkedPackage', () => {
+  test('realpaths the global link entry to the checkout', async () => {
+    const { checkout, env, cleanup } = await fakeBunLink()
     try {
-      const { impl, calls } = recordingSymlink()
-
-      const result = await prepareWindowsDevJunction(dir, { platform: 'win32', symlinkImpl: impl })
-
-      expect(result).toEqual({ created: true, target: join(dir, '..', 'checkout') })
-      expect(calls).toHaveLength(1)
-      expect(calls[0]?.type).toBe('junction')
-      expect(calls[0]?.path).toBe(join(dir, 'node_modules', 'typeclaw'))
-      expect(calls[0]?.target).toBe(join(dir, '..', 'checkout'))
+      expect(resolveBunLinkedPackage('typeclaw', env)).toBe(realpathSync(checkout))
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await cleanup()
     }
   })
 
-  test('is a no-op on POSIX even with a local file: dep', async () => {
-    const dir = await agentDirWith('file:../checkout')
+  test('returns null when the package is not linked', async () => {
+    const globalDir = await mkdtemp(join(tmpdir(), 'tc-bun-global-empty-'))
     try {
-      const { impl, calls } = recordingSymlink()
-
-      const result = await prepareWindowsDevJunction(dir, { platform: 'linux', symlinkImpl: impl })
-
-      expect(result).toBeNull()
-      expect(calls).toHaveLength(0)
+      expect(resolveBunLinkedPackage('typeclaw', { BUN_INSTALL_GLOBAL_DIR: globalDir })).toBeNull()
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(globalDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('linkWindowsDevTypeclaw', () => {
+  test('runs bun link in the checkout and returns the linked target on Windows', async () => {
+    const { checkout, env, cleanup } = await fakeBunLink()
+    try {
+      const linkCalls: string[] = []
+      const result = await linkWindowsDevTypeclaw('/repo/typeclaw', {
+        platform: 'win32',
+        env,
+        runBunLink: async (cwd) => {
+          linkCalls.push(cwd)
+        },
+      })
+
+      expect(linkCalls).toEqual(['/repo/typeclaw'])
+      expect(result).toBe(realpathSync(checkout))
+    } finally {
+      await cleanup()
     }
   })
 
-  test('is a no-op for a registry spec on Windows', async () => {
-    const dir = await agentDirWith('^0.39.1')
-    try {
-      const { impl, calls } = recordingSymlink()
+  test('is a no-op on POSIX (does not run bun link)', async () => {
+    const linkCalls: string[] = []
+    const result = await linkWindowsDevTypeclaw('/repo/typeclaw', {
+      platform: 'linux',
+      runBunLink: async (cwd) => {
+        linkCalls.push(cwd)
+      },
+    })
 
-      const result = await prepareWindowsDevJunction(dir, { platform: 'win32', symlinkImpl: impl })
-
-      expect(result).toBeNull()
-      expect(calls).toHaveLength(0)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    expect(result).toBeNull()
+    expect(linkCalls).toHaveLength(0)
   })
 
-  test('does not recreate an existing node_modules/typeclaw (idempotent re-init)', async () => {
-    const dir = await agentDirWith('file:../checkout')
+  test('falls back to the checkout path when the link target cannot be resolved', async () => {
+    const globalDir = await mkdtemp(join(tmpdir(), 'tc-bun-global-unresolved-'))
     try {
-      const { impl, calls } = recordingSymlink()
-      // given: node_modules/typeclaw already materialized by a prior init
-      await writeFile(join(dir, 'package.json.bak'), '')
-      const { mkdir } = await import('node:fs/promises')
-      await mkdir(join(dir, 'node_modules', 'typeclaw'), { recursive: true })
+      const result = await linkWindowsDevTypeclaw('/repo/typeclaw', {
+        platform: 'win32',
+        env: { BUN_INSTALL_GLOBAL_DIR: globalDir },
+        runBunLink: async () => {},
+      })
 
-      const result = await prepareWindowsDevJunction(dir, { platform: 'win32', symlinkImpl: impl })
-
-      expect(result).toEqual({ created: false, target: join(dir, '..', 'checkout') })
-      expect(calls).toHaveLength(0)
-      expect(existsSync(join(dir, 'node_modules', 'typeclaw'))).toBe(true)
+      expect(result).toBe('/repo/typeclaw')
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      await rm(globalDir, { recursive: true, force: true })
     }
   })
 })

@@ -1,61 +1,64 @@
-import { existsSync } from 'node:fs'
-import { mkdir, readFile, symlink } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { isWindows } from '@/shared/platform'
 
-const PACKAGE_FILE = 'package.json'
 const NODE_MODULES = 'node_modules'
 const TYPECLAW_DEP = 'typeclaw'
 
-export type SymlinkImpl = (target: string, path: string, type: 'junction') => Promise<void>
+export type RunBunLink = (cwd: string) => Promise<void>
 
-export type PrepareWindowsDevJunctionOptions = {
+export type LinkWindowsDevTypeclawOptions = {
   platform?: NodeJS.Platform
-  symlinkImpl?: SymlinkImpl
+  runBunLink?: RunBunLink
+  env?: NodeJS.ProcessEnv
 }
 
-export type WindowsDevJunctionResult = { created: boolean; target: string }
-
-// Resolve the on-disk checkout path a local `file:` typeclaw dep points at, or
-// null when the dep is a registry spec (`^X.Y.Z`) or anything else. Mirrors the
-// `file:` parsing in `detectDevSource` (src/container/start.ts) so init and
-// start agree on what counts as a local dev source.
-export async function resolveLocalFileDepTarget(agentRoot: string): Promise<string | null> {
+// Mirrors Bun's `openGlobalDir` env-var precedence (BUN_INSTALL_GLOBAL_DIR >
+// BUN_INSTALL/install/global > XDG_CACHE_HOME/bun/install/global >
+// homedir/.bun/install/global) so we resolve the same global-link location Bun
+// writes to. The node_modules/<name> entry is a junction (Windows) or symlink
+// (POSIX) whose target is the checkout absolute path; realpathSync resolves both.
+export function resolveBunLinkedPackage(packageName: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const globalDir =
+    env.BUN_INSTALL_GLOBAL_DIR ??
+    (env.BUN_INSTALL ? join(env.BUN_INSTALL, 'install', 'global') : null) ??
+    (env.XDG_CACHE_HOME ? join(env.XDG_CACHE_HOME, 'bun', 'install', 'global') : null) ??
+    join(homedir(), '.bun', 'install', 'global')
   try {
-    const raw = await readFile(join(agentRoot, PACKAGE_FILE), 'utf8')
-    const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> }
-    const spec = pkg.dependencies?.[TYPECLAW_DEP]
-    if (typeof spec !== 'string' || !spec.startsWith('file:')) return null
-    const target = spec.slice('file:'.length)
-    return isAbsolute(target) ? resolve(target) : resolve(agentRoot, target)
+    return realpathSync(join(globalDir, NODE_MODULES, packageName))
   } catch {
     return null
   }
 }
 
-// Native-Windows dev-mode only: materialize <agent>/node_modules/typeclaw as a
-// directory JUNCTION to the local checkout instead of letting `bun install`
-// copy the whole source tree (incl `.git/`) into node_modules — that copy
-// EPERMs on git/Defender-locked `.git` files (the deferred #899 path). A
-// junction needs no admin privilege on Windows (unlike a symlink) and never
-// copies. No-op on POSIX (registry users and dev contributors there are
-// unaffected) and when typeclaw is a registry spec rather than a local file:.
-export async function prepareWindowsDevJunction(
-  agentRoot: string,
-  options: PrepareWindowsDevJunctionOptions = {},
-): Promise<WindowsDevJunctionResult | null> {
+// Native-Windows dev-mode only: register the typeclaw checkout via `bun link` so
+// the agent can depend on it as `link:typeclaw`. `link:` resolves to a
+// symlink/junction that bun's installer SKIPS entirely (no `.folder` verify,
+// no uninstall-before-install, no source-tree copy) — unlike `file:`, which
+// copies the whole checkout incl `.git/` and EPERMs on locked git files (the
+// #899 path). Returns the linked target path (for the container bind-mount) or
+// null when not Windows. POSIX keeps `file:` (registry users use a version spec
+// and never reach here).
+export async function linkWindowsDevTypeclaw(
+  typeclawRoot: string,
+  options: LinkWindowsDevTypeclawOptions = {},
+): Promise<string | null> {
   const platform = options.platform ?? process.platform
   if (!isWindows(platform)) return null
+  const runLink = options.runBunLink ?? defaultRunBunLink
+  await runLink(typeclawRoot)
+  return resolveBunLinkedPackage(TYPECLAW_DEP, options.env ?? process.env) ?? typeclawRoot
+}
 
-  const target = await resolveLocalFileDepTarget(agentRoot)
-  if (target === null) return null
-
-  const junctionPath = join(agentRoot, NODE_MODULES, TYPECLAW_DEP)
-  if (existsSync(junctionPath)) return { created: false, target }
-
-  await mkdir(join(agentRoot, NODE_MODULES), { recursive: true })
-  const makeLink = options.symlinkImpl ?? ((t, p, type) => symlink(t, p, type))
-  await makeLink(target, junctionPath, 'junction')
-  return { created: true, target }
+async function defaultRunBunLink(cwd: string): Promise<void> {
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) throw new Error('bun runtime not available to run `bun link`')
+  const proc = bun.spawn({ cmd: ['bun', 'link'], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const code = await proc.exited
+  if (code !== 0) {
+    const stderr = await new Response(proc.stderr).text()
+    throw new Error(`bun link failed in ${cwd}: ${stderr.trim() || `exited with code ${code}`}`)
+  }
 }
