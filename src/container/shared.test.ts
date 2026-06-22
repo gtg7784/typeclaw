@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { isWindows } from '@/shared'
+
 import {
   buildxAvailable,
   checkDockerAvailable,
@@ -10,6 +12,7 @@ import {
   cleanupRunCorpse,
   containerNameFromCwd,
   DOCKER_NOT_FOUND_STDERR,
+  dockerBindMount,
   type DockerExec,
   imageTagFromCwd,
   isContainerNameConflict,
@@ -447,5 +450,45 @@ describe('buildxAvailable', () => {
   test('false when the buildx plugin is missing (non-zero exit)', async () => {
     const exec: DockerExec = async () => ({ exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' })
     expect(await buildxAvailable(exec)).toBe(false)
+  })
+})
+
+describe('dockerBindMount', () => {
+  test('emits a single --mount argv pair (src never collides with the dst separator)', () => {
+    // given an absolute POSIX source
+    const args = dockerBindMount({ src: '/srv/agent', dst: '/agent' })
+
+    // then the whole spec is one argv element — no `:`-splitting like `-v`
+    expect(args).toEqual(['--mount', 'type=bind,src=/srv/agent,dst=/agent'])
+  })
+
+  test('keeps a colon-bearing absolute source intact instead of splitting on it (the Windows drive-letter case)', () => {
+    // given an already-absolute source containing a colon — the essence of a
+    // Windows drive letter (`C:\...`), which `-v src:dst` would mis-split. Use
+    // an absolute path so resolve() is a no-op and the test is platform-stable.
+    const drivePath = isWindows() ? 'C:\\Users\\me\\agent' : '/srv/a:b'
+    const args = dockerBindMount({ src: drivePath, dst: '/agent' })
+
+    // then the colon stays inside the src= field; dst is a separate CSV key
+    expect(args[0]).toBe('--mount')
+    expect(args[1]?.startsWith('type=bind,')).toBe(true)
+    expect(args[1]).toContain(`src=${drivePath}`)
+    expect(args[1]).toContain('dst=/agent')
+  })
+
+  test('appends the readonly field only when readonly is true', () => {
+    expect(dockerBindMount({ src: '/srv/x', dst: '/opt/models', readonly: true })[1]).toBe(
+      'type=bind,src=/srv/x,dst=/opt/models,readonly',
+    )
+    expect(dockerBindMount({ src: '/srv/x', dst: '/agent', readonly: false })[1]).not.toContain('readonly')
+  })
+
+  test('resolves a relative source to an absolute path (docker --mount rejects relative src)', () => {
+    const args = dockerBindMount({ src: 'rel/dir', dst: '/agent' })
+    expect(args[1]).toContain(`src=${join(process.cwd(), 'rel', 'dir')}`)
+  })
+
+  test('throws on a comma in a path because --mount cannot express it', () => {
+    expect(() => dockerBindMount({ src: '/srv/a,b', dst: '/agent' })).toThrow(/comma/)
   })
 })

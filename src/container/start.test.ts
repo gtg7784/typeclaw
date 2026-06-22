@@ -10,7 +10,31 @@ import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
 
 import type { DockerExec } from './shared'
-import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start } from './start'
+import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, shouldMirrorDevSource, start } from './start'
+
+type ParsedBindMount = { src: string; dst: string; readonly: boolean }
+
+// Parses `--mount type=bind,src=...,dst=...[,readonly]` argv pairs out of a
+// runArgs list so assertions can check bind mounts without hard-coding the
+// CSV field order or the `-v` legacy form.
+function bindMounts(runArgs: readonly string[]): ParsedBindMount[] {
+  const out: ParsedBindMount[] = []
+  for (let i = 0; i < runArgs.length - 1; i++) {
+    if (runArgs[i] !== '--mount') continue
+    const fields = (runArgs[i + 1] ?? '').split(',')
+    if (!fields.includes('type=bind')) continue
+    const src = fields.find((f) => f.startsWith('src='))?.slice(4) ?? ''
+    const dst = fields.find((f) => f.startsWith('dst='))?.slice(4) ?? ''
+    out.push({ src, dst, readonly: fields.includes('readonly') })
+  }
+  return out
+}
+
+function hasBindMount(runArgs: readonly string[], expected: ParsedBindMount): boolean {
+  return bindMounts(runArgs).some(
+    (m) => m.src === expected.src && m.dst === expected.dst && m.readonly === expected.readonly,
+  )
+}
 
 let root: string
 
@@ -154,7 +178,7 @@ describe('planStart', () => {
     expect(plan.runArgs).toContain('127.0.0.1:8973:8973')
     expect(plan.runArgs).toContain('--env-file')
     expect(plan.runArgs).toContain(join(root, '.env'))
-    expect(plan.runArgs).toContain(`${root}:/agent`)
+    expect(hasBindMount(plan.runArgs, { src: root, dst: '/agent', readonly: false })).toBe(true)
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
   })
 
@@ -303,7 +327,7 @@ describe('planStart', () => {
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-      expect(plan.runArgs).toContain(`${typeclawRepo}:${typeclawRepo}:ro`)
+      expect(hasBindMount(plan.runArgs, { src: typeclawRepo, dst: typeclawRepo, readonly: true })).toBe(true)
     } finally {
       await rm(typeclawRepo, { recursive: true, force: true })
     }
@@ -316,7 +340,7 @@ describe('planStart', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    const mirrorMounts = plan.runArgs.filter((a) => a.endsWith(':ro') && !a.includes('/opt/models'))
+    const mirrorMounts = bindMounts(plan.runArgs).filter((m) => m.readonly && m.dst !== '/opt/models')
     expect(mirrorMounts).toHaveLength(0)
   })
 
@@ -326,7 +350,31 @@ describe('planStart', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs.filter((a) => a.endsWith(':ro') && !a.includes('/opt/models'))).toHaveLength(0)
+    expect(bindMounts(plan.runArgs).filter((m) => m.readonly && m.dst !== '/opt/models')).toHaveLength(0)
+  })
+
+  test('every emitted bind mount targets an absolute Linux container path (never a host dst)', async () => {
+    const typeclawRepo = await mkdtemp(join(tmpdir(), 'typeclaw-repo-'))
+    const projectDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
+      await writeTypeclawConfig(root, {
+        mounts: [{ name: 'projects', path: projectDir }],
+        memory: { vector: { enabled: true } },
+      })
+
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+      for (const m of bindMounts(plan.runArgs)) {
+        expect(m.dst.startsWith('/')).toBe(true)
+        expect(m.dst).not.toMatch(/^[A-Za-z]:[\\/]/)
+        expect(m.dst).not.toContain('\\')
+      }
+    } finally {
+      await rm(typeclawRepo, { recursive: true, force: true })
+      await rm(projectDir, { recursive: true, force: true })
+    }
   })
 
   test('reports needsBuild based on imageExists input', async () => {
@@ -362,6 +410,25 @@ describe('planStart', () => {
   })
 })
 
+describe('shouldMirrorDevSource', () => {
+  test('mirrors an out-of-cwd dev source on POSIX hosts', () => {
+    expect(shouldMirrorDevSource('/srv/src/typeclaw', '/srv/agents/coder', 'linux')).toBe(true)
+    expect(shouldMirrorDevSource('/srv/src/typeclaw', '/srv/agents/coder', 'darwin')).toBe(true)
+  })
+
+  test('does NOT mirror on native Windows (a C:\\ host path is not a valid Linux container dst)', () => {
+    expect(shouldMirrorDevSource('C:\\src\\typeclaw', 'C:\\agents\\coder', 'win32')).toBe(false)
+  })
+
+  test('does NOT mirror when there is no dev source', () => {
+    expect(shouldMirrorDevSource(null, '/srv/agents/coder', 'linux')).toBe(false)
+  })
+
+  test('does NOT mirror when the dev source lives inside the agent folder', () => {
+    expect(shouldMirrorDevSource('/srv/agents/coder/vendor/typeclaw', '/srv/agents/coder', 'linux')).toBe(false)
+  })
+})
+
 describe('planStart mounts', () => {
   test('emits no mount flags when typeclaw.json is missing', async () => {
     await writeDockerfile(root)
@@ -369,7 +436,7 @@ describe('planStart mounts', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
+    expect(bindMounts(plan.runArgs).filter((m) => m.dst.startsWith('/agent/mounts/'))).toHaveLength(0)
   })
 
   test('emits no mount flags when mounts array is empty', async () => {
@@ -379,10 +446,10 @@ describe('planStart mounts', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
+    expect(bindMounts(plan.runArgs).filter((m) => m.dst.startsWith('/agent/mounts/'))).toHaveLength(0)
   })
 
-  test('emits a -v flag for each mount, mapping to /agent/mounts/<name>', async () => {
+  test('emits a bind mount for each mount, mapping to /agent/mounts/<name>', async () => {
     const projectDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
     try {
       await writeDockerfile(root)
@@ -391,14 +458,14 @@ describe('planStart mounts', () => {
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-      expect(plan.runArgs).toContain('-v')
-      expect(plan.runArgs).toContain(`${projectDir}:/agent/mounts/projects`)
+      expect(plan.runArgs).toContain('--mount')
+      expect(hasBindMount(plan.runArgs, { src: projectDir, dst: '/agent/mounts/projects', readonly: false })).toBe(true)
     } finally {
       await rm(projectDir, { recursive: true, force: true })
     }
   })
 
-  test('appends :ro suffix when readOnly is true', async () => {
+  test('marks the mount readonly when readOnly is true', async () => {
     const notesDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
     try {
       await writeDockerfile(root)
@@ -407,7 +474,7 @@ describe('planStart mounts', () => {
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-      expect(plan.runArgs).toContain(`${notesDir}:/agent/mounts/notes:ro`)
+      expect(hasBindMount(plan.runArgs, { src: notesDir, dst: '/agent/mounts/notes', readonly: true })).toBe(true)
     } finally {
       await rm(notesDir, { recursive: true, force: true })
     }
@@ -420,8 +487,13 @@ describe('planStart mounts', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    const homeThingMount = `${join(homedir(), 'some-dir')}:/agent/mounts/home-thing`
-    expect(plan.runArgs).toContain(homeThingMount)
+    expect(
+      hasBindMount(plan.runArgs, {
+        src: join(homedir(), 'some-dir'),
+        dst: '/agent/mounts/home-thing',
+        readonly: false,
+      }),
+    ).toBe(true)
   })
 
   test('emits mounts in declared order', async () => {
@@ -439,8 +511,11 @@ describe('planStart mounts', () => {
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-      const mountFlags = plan.runArgs.filter((arg) => arg.includes(':/agent/mounts/'))
-      expect(mountFlags).toEqual([`${a}:/agent/mounts/first`, `${b}:/agent/mounts/second`])
+      const userMounts = bindMounts(plan.runArgs).filter((m) => m.dst.startsWith('/agent/mounts/'))
+      expect(userMounts).toEqual([
+        { src: a, dst: '/agent/mounts/first', readonly: false },
+        { src: b, dst: '/agent/mounts/second', readonly: false },
+      ])
     } finally {
       await rm(a, { recursive: true, force: true })
       await rm(b, { recursive: true, force: true })
@@ -457,9 +532,9 @@ describe('planStart mounts', () => {
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
-      const mountIdx = plan.runArgs.indexOf(`${projectDir}:/agent/mounts/projects`)
-      expect(mountIdx).toBeGreaterThan(-1)
-      expect(mountIdx).toBeLessThan(plan.runArgs.length - 1)
+      const specIdx = plan.runArgs.findIndex((a) => a.includes('dst=/agent/mounts/projects'))
+      expect(specIdx).toBeGreaterThan(-1)
+      expect(specIdx).toBeLessThan(plan.runArgs.length - 1)
     } finally {
       await rm(projectDir, { recursive: true, force: true })
     }
@@ -483,7 +558,7 @@ describe('planStart mounts', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
+    expect(bindMounts(plan.runArgs).filter((m) => m.dst.startsWith('/agent/mounts/'))).toHaveLength(0)
   })
 
   test('throws when a mount name violates the pattern', async () => {
@@ -496,17 +571,21 @@ describe('planStart mounts', () => {
 })
 
 describe('planStart model mount', () => {
-  const modelsMount = `${join(homedir(), '.typeclaw', 'models')}:/opt/models:ro`
+  const modelsMount: ParsedBindMount = {
+    src: join(homedir(), '.typeclaw', 'models'),
+    dst: '/opt/models',
+    readonly: true,
+  }
 
-  test('adds shared model cache mount at /opt/models:ro when memory.vector.enabled', async () => {
+  test('adds shared readonly model cache mount at /opt/models when memory.vector.enabled', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).toContain('-v')
-    expect(plan.runArgs).toContain(modelsMount)
+    expect(plan.runArgs).toContain('--mount')
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(true)
   })
 
   test('sets TYPECLAW_MODEL_CACHE env var to /opt/models when memory.vector.enabled', async () => {
@@ -528,9 +607,9 @@ describe('planStart model mount', () => {
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
-    const mountIdx = plan.runArgs.indexOf(modelsMount)
-    expect(mountIdx).toBeGreaterThan(-1)
-    expect(mountIdx).toBeLessThan(plan.runArgs.length - 1)
+    const specIdx = plan.runArgs.findIndex((a) => a.includes('dst=/opt/models'))
+    expect(specIdx).toBeGreaterThan(-1)
+    expect(specIdx).toBeLessThan(plan.runArgs.length - 1)
   })
 
   test('omits model cache mount and TYPECLAW_MODEL_CACHE when vector is opted out', async () => {
@@ -540,7 +619,7 @@ describe('planStart model mount', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
     expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 
@@ -551,7 +630,7 @@ describe('planStart model mount', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
     expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 
@@ -561,7 +640,7 @@ describe('planStart model mount', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).not.toContain(modelsMount)
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
     expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 })

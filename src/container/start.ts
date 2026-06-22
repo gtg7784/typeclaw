@@ -26,6 +26,7 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
+import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
 import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
@@ -37,6 +38,7 @@ import {
   defaultDockerExec,
   type DockerExec,
   type DockerExecResult,
+  dockerBindMount,
   imageTagFromCwd,
   isContainerNameConflict,
   sanitizeDockerStderr,
@@ -656,18 +658,16 @@ export async function planStart({
     runArgs.push('-e', `TYPECLAW_HOSTD_BROKER_TOKEN=${hostdControl.brokerToken}`)
   }
 
-  runArgs.push('-v', `${cwd}:/agent`)
+  runArgs.push(...dockerBindMount({ src: cwd, dst: '/agent' }))
 
-  // Dev mode: node_modules/typeclaw is a symlink to an absolute host path
-  // outside /agent. Mirror-mount that path so the symlink resolves in-container.
-  if (devSourcePath && !devSourcePath.startsWith(cwd)) {
-    runArgs.push('-v', `${devSourcePath}:${devSourcePath}:ro`)
+  if (shouldMirrorDevSource(devSourcePath, cwd)) {
+    runArgs.push(...dockerBindMount({ src: devSourcePath, dst: devSourcePath, readonly: true }))
   }
 
   for (const mount of mounts) {
     const hostPath = expandMountPath(mount.path, cwd)
     const target = `${MOUNT_TARGET_PREFIX}/${mount.name}`
-    runArgs.push('-v', mount.readOnly ? `${hostPath}:${target}:ro` : `${hostPath}:${target}`)
+    runArgs.push(...dockerBindMount({ src: hostPath, dst: target, readonly: mount.readOnly }))
   }
 
   // Shared model cache mount for embeddings. Gated on vector opt-in: a
@@ -676,7 +676,7 @@ export async function planStart({
   // so mounting an empty cache would only invite a confusing local_files_only
   // miss if something inside the container reached for the model anyway.
   if (agentUsesVector(cwd)) {
-    runArgs.push('-v', `${join(homeRoot(), 'models')}:/opt/models:ro`)
+    runArgs.push(...dockerBindMount({ src: join(homeRoot(), 'models'), dst: '/opt/models', readonly: true }))
     runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
   }
 
@@ -913,6 +913,24 @@ async function detectDevSource(cwd: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+// Dev mode: node_modules/typeclaw is a symlink to an absolute host path outside
+// /agent. The mirror mount bind-mounts that path at the SAME path inside the
+// (Linux) container so the symlink resolves. That only works when the host path
+// is itself a valid Linux container path — true on POSIX, false on native
+// Windows where devSourcePath is `C:\...` (not an absolute Linux path, so it
+// cannot be a container mount `dst`, and the in-container symlink would point at
+// a Windows path regardless). Native-Windows dev-mode (file:/link: typeclaw dep)
+// needs the deferred symlink/junction translation in #899; until then we skip
+// the mirror mount rather than emit an invalid `dst`. End users install typeclaw
+// from npm (a registry spec, not file:), so they never hit this path.
+export function shouldMirrorDevSource(
+  devSourcePath: string | null,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform,
+): devSourcePath is string {
+  return devSourcePath !== null && !devSourcePath.startsWith(cwd) && !isWindows(platform)
 }
 
 // True when the agent's package.json declares typeclaw via `file:` or
