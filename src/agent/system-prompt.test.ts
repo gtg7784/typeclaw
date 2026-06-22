@@ -81,6 +81,112 @@ describe('agent folder vs project repo', () => {
   })
 })
 
+describe('understanding the request — intent-recognition steer', () => {
+  // Fixes TASK RECOGNITION, upstream of the "choose a reasonable default"
+  // ambiguity rule (which only fires AFTER the task is recognized) and the
+  // "finish the job" rule (which only helps ONCE the job is known). The failure
+  // mode: the agent executes the literal SURFACE form of a message instead of
+  // the practical task behind it — answering "yes I can" to a polite imperative,
+  // or a bare status answer when the user obviously wants the fix next.
+  test('the default prompt tells the agent to infer the practical task behind the wording, not the literal speech act', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).toContain('## Understanding the request')
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 1000)
+    expect(section).toMatch(
+      /practical task|what the user (actually )?(needs|wants)|real(?: underlying)? (need|intent)/i,
+    )
+    expect(section).toMatch(/literal|surface|wording/i)
+  })
+
+  // The polite-imperative trap, stated language-agnostically: "can you X?" /
+  // "could you X" / "X would be nice" are requests to DO X, not yes/no
+  // questions — and this holds across languages (this is a multilingual chat
+  // agent). Soften this and the "yes I can" regression reopens.
+  test('the default prompt calls out the polite-imperative trap language-agnostically', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 1200)
+    expect(section).toMatch(/can you|could you|would be (nice|good|great)|capability|polite/i)
+    // Language-agnostic framing — must not be scoped to English phrasing only.
+    expect(section).toMatch(/any language|across languages|regardless of (the )?language|whatever the language/i)
+  })
+
+  // Anti-over-clarification guardrail: intent inference must REDUCE questions,
+  // not add them. A chat agent that interrogates "what did you really mean?" on
+  // every turn is a UX regression. The carve-out: act on the safe conventional
+  // reading; ask only when interpretations materially diverge. This is the
+  // CANONICAL home for the clarifying-question rule — `## How to behave` no
+  // longer duplicates it (the dedupe guard below pins that).
+  test('the default prompt frames intent inference as reducing questions, not adding a clarification ritual', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 1200)
+    expect(section).toMatch(
+      /fewer\b[\s*]*(clarifying )?questions|not.*more questions|reduce.*question|don't (over-?ask|interrogate)|without.*(asking|clarif)/i,
+    )
+    expect(section).toMatch(/reasonable|conventional|safe|likely/i)
+    expect(section).toMatch(/materially change scope|scope, permissions, cost/i)
+  })
+
+  // The action-bias steer ("start in the same turn, don't answer with only a
+  // plan") was merged INTO this section from the former standalone
+  // `## Execution bias` header. Guards both that the steer survived the merge
+  // and that it stays salient as the section's opening line (not buried).
+  test('the action-bias steer is folded into the section and is no longer a separate `## Execution bias` header', () => {
+    expect(DEFAULT_SYSTEM_PROMPT).not.toContain('## Execution bias')
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const opening = DEFAULT_SYSTEM_PROMPT.slice(start, start + 220)
+    expect(opening).toMatch(/start work in the same turn|same turn/i)
+    expect(opening).toMatch(/only a plan|not narration/i)
+  })
+
+  // Dedupe guard: the clarifying-question / reasonable-default rule lives ONLY
+  // in `## Understanding the request` now. `## How to behave` must not carry a
+  // second copy (the redundancy this consolidation removed).
+  test('the clarifying-question rule is not duplicated in `## How to behave`', () => {
+    const behaveStart = DEFAULT_SYSTEM_PROMPT.indexOf('## How to behave')
+    expect(behaveStart).toBeGreaterThan(-1)
+    const behave = DEFAULT_SYSTEM_PROMPT.slice(behaveStart, behaveStart + 700)
+    expect(behave).not.toMatch(/clarifying question/i)
+    expect(behave).not.toMatch(/choose a reasonable default/i)
+  })
+
+  // Scope guard: the helpful next step lives WITHIN the apparent request — the
+  // steer must not license inventing a larger project off a small ask.
+  test('the default prompt bounds the inferred next step to the apparent request (no scope inflation)', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 1400)
+    expect(section).toMatch(
+      /don't (invent|expand|inflate)|not a (larger|bigger) project|within (the )?(apparent|requested) (scope|request)|stay within scope/i,
+    )
+  })
+
+  // Delegation-on-recognition steer (PR #993): recognizing the task includes
+  // recognizing WHO should do it. Heavy/side-effectful execution work belongs
+  // to a subagent (`operator`) so the main conversation stays fast on the
+  // lighter default model, rather than the orchestrator grinding through it
+  // inline. The section names operator and points at the delegation mechanics
+  // rather than restating Mode B/C.
+  test('the default prompt encourages routing heavy execution work to a subagent once the task is recognized', () => {
+    const start = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    const section = DEFAULT_SYSTEM_PROMPT.slice(start, start + 1600)
+    expect(section).toMatch(/delegat|hand (it )?off|spawn|subagent/i)
+    expect(section).toContain('operator')
+    expect(section).toMatch(
+      /responsive|stay (fast|light)|conversation (fast|responsive|light)|keep.*(fast|responsive)/i,
+    )
+  })
+
+  // Cache-suffix contract: like the other steering blocks, this lives in the
+  // least-volatile base prefix, ahead of the per-agent identity block, so it
+  // never invalidates cached bytes when IDENTITY.md / SOUL.md change. It leads
+  // the execution-discipline run: recognize the task BEFORE finishing it.
+  test('the understanding-the-request steer sits in the base prefix, ahead of finishing-the-job and the identity block', () => {
+    const intentIdx = DEFAULT_SYSTEM_PROMPT.indexOf('## Understanding the request')
+    expect(intentIdx).toBeGreaterThan(-1)
+    expect(intentIdx).toBeLessThan(DEFAULT_SYSTEM_PROMPT.indexOf('## Finishing the job'))
+    expect(intentIdx).toBeLessThan(DEFAULT_SYSTEM_PROMPT.indexOf('You are not pi, not Claude, not ChatGPT.'))
+  })
+})
+
 describe('finishing the job — completion + anti-fabrication steer', () => {
   // Ported from hermes-agent's TASK_COMPLETION_GUIDANCE: deliverable is a
   // working artifact backed by real tool output, and the agent must never
