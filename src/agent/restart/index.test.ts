@@ -260,6 +260,30 @@ describe('requestContainerRestart', () => {
     expect(result).toEqual({ ok: true, containerName: 'coder', restartedAt: '2026-01-02T03:04:05.000Z' })
   })
 
+  test('fails explicitly without a hostd HTTP endpoint instead of dialing a dead socket', async () => {
+    // given: no hostdUrl/token and no TYPECLAW_HOSTD_URL/TOKEN in the env
+    const prevUrl = process.env.TYPECLAW_HOSTD_URL
+    const prevToken = process.env.TYPECLAW_HOSTD_TOKEN
+    delete process.env.TYPECLAW_HOSTD_URL
+    delete process.env.TYPECLAW_HOSTD_TOKEN
+
+    try {
+      // when
+      const result = await requestContainerRestart({
+        containerName: 'coder',
+        ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      })
+
+      // then
+      expect(result.ok).toBe(false)
+      expect(result).toMatchObject({ ok: false, containerName: 'coder' })
+      if (!result.ok) expect(result.reason).toContain('host daemon control endpoint unavailable')
+    } finally {
+      if (prevUrl !== undefined) process.env.TYPECLAW_HOSTD_URL = prevUrl
+      if (prevToken !== undefined) process.env.TYPECLAW_HOSTD_TOKEN = prevToken
+    }
+  })
+
   test('forwards build:true in the RPC body', async () => {
     // given
     const requests: unknown[] = []

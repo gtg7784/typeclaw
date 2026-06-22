@@ -1,8 +1,7 @@
 import { basename } from 'node:path'
 
 import { type RestartHandoffOrigin, writeRestartHandoff } from '@/agent/restart-handoff'
-import { send, sendHttp } from '@/hostd/client'
-import { containerSocketPath } from '@/hostd/paths'
+import { sendHttp } from '@/hostd/client'
 import type { Stream } from '@/stream'
 
 const ACK_TIMEOUT_MS = 5_000
@@ -16,7 +15,6 @@ export type ContainerRestartingBroadcast = {
 export type RequestContainerRestartOptions = {
   containerName: string
   build?: boolean
-  socketPath?: string
   hostdUrl?: string
   hostdToken?: string
   ackTimeoutMs?: number
@@ -49,7 +47,6 @@ export type RequestContainerRestartResult =
 export async function requestContainerRestart({
   containerName,
   build,
-  socketPath,
   hostdUrl,
   hostdToken,
   ackTimeoutMs,
@@ -65,10 +62,22 @@ export async function requestContainerRestart({
   const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
   const httpToken = hostdToken ?? process.env.TYPECLAW_HOSTD_TOKEN
   const ackBudget = ackTimeoutMs ?? ACK_TIMEOUT_MS
-  const reply =
-    httpUrl && httpToken
-      ? await sendHttp(request, { timeoutMs: ackBudget, url: httpUrl, token: httpToken })
-      : await send(request, { timeoutMs: ackBudget, socket: socketPath ?? containerSocketPath() })
+
+  // HTTP/TCP is the only container->hostd transport (TYPECLAW_HOSTD_URL/TOKEN,
+  // injected by start.ts via host.docker.internal). There is no Unix-socket
+  // fallback: the host run dir is never bind-mounted, so the old
+  // `/run/typeclaw-host/hostd.sock` dial always silently failed — and on native
+  // Windows the host transport is a named pipe, not a socket. Fail loud here
+  // when the control env is absent (hostd unregistered/disabled).
+  if (!httpUrl || !httpToken) {
+    return {
+      ok: false,
+      containerName,
+      reason:
+        'host daemon control endpoint unavailable (TYPECLAW_HOSTD_URL/TYPECLAW_HOSTD_TOKEN not set); cannot request restart',
+    }
+  }
+  const reply = await sendHttp(request, { timeoutMs: ackBudget, url: httpUrl, token: httpToken })
 
   if (!reply.ok) return { ok: false, containerName, reason: reply.reason }
 
