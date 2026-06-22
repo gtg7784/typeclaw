@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -810,12 +810,22 @@ async function runImageBuild(args: {
 
 type SanitizedDockerConfig = { env: { DOCKER_CONFIG: string }; cleanup: () => Promise<void> }
 
-// Materializes a temp DOCKER_CONFIG dir holding a config.json with the broken
-// credential-helper hooks stripped, while symlinking the user's `contexts/` and
-// `buildx/` subdirs so the current docker context and buildx builder still
-// resolve. Returns null when there's nothing to strip (no creds hooks present),
-// so the caller skips a pointless retry. The dir is removed via the returned
-// cleanup on every build outcome.
+// Materializes a temp DOCKER_CONFIG dir that is a full DEEP COPY of the user's
+// ~/.docker tree with only the broken credential-helper hooks stripped from the
+// copied config.json. Returns null when there's nothing to strip (no creds
+// hooks present), so the caller skips a pointless retry. Cleanup removes the dir
+// on every build outcome.
+//
+// DOCKER_CONFIG is not just credentials: `contexts/` maps the current docker
+// context (e.g. Docker Desktop's `desktop-linux`) to the daemon endpoint, and
+// `buildx/` holds builder instance state. A relocated config missing those
+// makes `docker buildx build` (and `docker build`, which Docker Desktop forwards
+// to `buildx build --builder <currentContext>`) fail with `no builder
+// "desktop-linux" found` — the exact second failure this replaces. The earlier
+// approach symlinked those subdirs, but Windows `fs.symlink` throws EPERM
+// without Developer Mode/admin, so the catch silently produced a config dir with
+// the context/builder state ABSENT. A recursive copy is portable and preserves
+// the full topology; only config.json is overwritten with the sanitized form.
 async function createSanitizedDockerConfig(): Promise<SanitizedDockerConfig | null> {
   const srcDir = dockerConfigDir()
   const raw = await readFile(join(srcDir, 'config.json'), 'utf8').catch(() => null)
@@ -823,15 +833,15 @@ async function createSanitizedDockerConfig(): Promise<SanitizedDockerConfig | nu
   if (sanitized === null) return null
 
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-dockercfg-'))
-  await writeFile(join(dir, 'config.json'), sanitized)
-  for (const sub of ['contexts', 'buildx']) {
-    const from = join(srcDir, sub)
-    if (existsSync(from)) await symlink(from, join(dir, sub)).catch(() => {})
+  const cleanup = (): Promise<void> => rm(dir, { recursive: true, force: true })
+  try {
+    if (existsSync(srcDir)) await cp(srcDir, dir, { recursive: true, dereference: false })
+    await writeFile(join(dir, 'config.json'), sanitized)
+  } catch {
+    await cleanup()
+    return null
   }
-  return {
-    env: { DOCKER_CONFIG: dir },
-    cleanup: () => rm(dir, { recursive: true, force: true }),
-  }
+  return { env: { DOCKER_CONFIG: dir }, cleanup }
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {

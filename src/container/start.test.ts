@@ -1225,7 +1225,15 @@ describe('commitSystemFile', () => {
   })
 })
 
-type RecordedCall = { args: string[]; dockerfileSnapshot: string | null; env?: Record<string, string | undefined> }
+type RecordedCall = {
+  args: string[]
+  dockerfileSnapshot: string | null
+  env?: Record<string, string | undefined>
+  // Snapshot, taken at call time, of whether the build's DOCKER_CONFIG dir has a
+  // `contexts/` subdir. Lets a test assert the sanitized config deep-copied the
+  // docker context state BEFORE runImageBuild's finally removes the temp dir.
+  dockerConfigHasContexts?: boolean
+}
 
 // Matches the image build regardless of frontend: `docker build ...` (legacy)
 // or `docker buildx build ...` (BuildKit). Tests assert on the build call
@@ -1277,7 +1285,9 @@ function fakeDockerExec(scenario: {
         dockerfileSnapshot = null
       }
     }
-    calls.push({ args, dockerfileSnapshot, env: options?.env })
+    const dockerConfig = options?.env?.DOCKER_CONFIG
+    const dockerConfigHasContexts = dockerConfig === undefined ? undefined : existsSync(join(dockerConfig, 'contexts'))
+    calls.push({ args, dockerfileSnapshot, env: options?.env, dockerConfigHasContexts })
 
     if (args[0] === 'image' && args[1] === 'inspect') {
       return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
@@ -1570,12 +1580,16 @@ describe('start (composition)', () => {
   })
 
   test('when a build fails on a missing credential helper, retries the same build under a sanitized DOCKER_CONFIG and succeeds', async () => {
-    // given a host whose ~/.docker/config.json points at a broken cred helper
+    // given a host whose ~/.docker config has a broken cred helper AND a docker
+    // context dir (the desktop-linux context+builder state that a relocated
+    // DOCKER_CONFIG must not lose, or buildx fails with "no builder ... found")
     const dockerCfg = await mkdtemp(join(tmpdir(), 'typeclaw-test-dockercfg-'))
     await writeFile(
       join(dockerCfg, 'config.json'),
-      JSON.stringify({ credsStore: 'desktop', currentContext: 'default' }),
+      JSON.stringify({ credsStore: 'desktop', currentContext: 'desktop-linux' }),
     )
+    await mkdir(join(dockerCfg, 'contexts', 'meta', 'desktop-linux'), { recursive: true })
+    await writeFile(join(dockerCfg, 'contexts', 'meta', 'desktop-linux', 'meta.json'), '{"Name":"desktop-linux"}')
     const prevDockerConfig = process.env.DOCKER_CONFIG
     process.env.DOCKER_CONFIG = dockerCfg
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
@@ -1611,6 +1625,10 @@ describe('start (composition)', () => {
       expect(retry?.args.slice(0, 2)).toEqual(['buildx', 'build'])
       // the retry must NOT point at the user's real config dir
       expect(retry?.env?.DOCKER_CONFIG).not.toBe(dockerCfg)
+      // regression guard: the sanitized dir is a DEEP COPY that preserved the
+      // docker context state, so buildx can still resolve the desktop-linux
+      // builder (the symlink approach silently dropped this on Windows)
+      expect(retry?.dockerConfigHasContexts).toBe(true)
       expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
     } finally {
       if (prevDockerConfig === undefined) delete process.env.DOCKER_CONFIG
