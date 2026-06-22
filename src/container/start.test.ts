@@ -154,6 +154,12 @@ const deterministicAllocator = async (preferred: number): Promise<number> => (pr
 // tests and would slow each one by ~hundreds of ms.
 const noEnsureDeps = async (): Promise<{ ok: true; installed: false }> => ({ ok: true, installed: false })
 
+// The real autoUpgrade detector sees the test runner itself as a LOCAL typeclaw
+// checkout and would relink each agent's package.json — disruptive to tests that
+// aren't about auto-reconcile. Inject this no-op so they stay deterministic
+// regardless of how the suite was launched; reconcile tests inject their own.
+const noAutoUpgrade = async () => ({ kind: 'up-to-date', installedVersion: '0.1.0' }) as const
+
 // Bypasses the post-`docker run` verification window so happy-path tests don't
 // pay the production 1.5s wait. Verification has its own dedicated test file
 // (verify-running.test.ts); start.test.ts only proves start() routes a
@@ -1486,6 +1492,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1507,6 +1514,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1531,6 +1539,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1554,6 +1563,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1576,6 +1586,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1597,6 +1608,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1621,6 +1633,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1649,6 +1662,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1735,6 +1749,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1760,6 +1775,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1787,6 +1803,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1817,6 +1834,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1848,6 +1866,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1876,6 +1895,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -1910,6 +1930,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
     expect(first.ok).toBe(true)
@@ -1922,6 +1943,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
     expect(second.ok).toBe(true)
@@ -1966,6 +1988,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2013,6 +2036,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2047,6 +2071,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2353,6 +2378,7 @@ describe('start (composition)', () => {
         ensureCalls.push(opts)
         return { ok: true, installed: false }
       },
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2382,6 +2408,7 @@ describe('start (composition)', () => {
         ensureCalls.push(opts)
         return { ok: true, installed: false }
       },
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2437,6 +2464,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2467,6 +2495,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2489,6 +2518,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2516,6 +2546,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2577,6 +2608,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2598,6 +2630,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2624,6 +2657,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2651,6 +2685,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2690,6 +2725,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2713,6 +2749,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2738,6 +2775,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2776,6 +2814,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2822,6 +2861,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2850,6 +2890,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2925,6 +2966,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -2990,6 +3032,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3057,6 +3100,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3138,6 +3182,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3198,6 +3243,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3250,6 +3296,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3286,6 +3333,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3317,6 +3365,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3342,6 +3391,7 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3367,6 +3417,7 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3412,6 +3463,7 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3445,6 +3497,7 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 
@@ -3763,6 +3816,7 @@ describe('start autoUpgrade integration', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
       ...bypassVerify,
     })
 

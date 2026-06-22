@@ -30,21 +30,21 @@ export type AutoUpgradeOutcome =
   | { kind: 'exact-pin-respected'; declared: string; cliVersion: string }
   | { kind: 'spec-rewritten'; from: string; to: string; cliVersion: string }
   | { kind: 'reinstall-needed'; from: string; to: string }
+  | { kind: 'relinked-to-local'; from: string; to: string }
 
 export type AutoUpgradeOptions = {
   cwd: string
   // Test seam: lets tests simulate dev-mode (null) and arbitrary release
   // versions without depending on the test runner's actual CLI version.
   scaffoldVersion?: string | null
+  // Test seam: the local spec to relink to in dev-mode, so tests don't depend
+  // on the test runner's actual checkout path.
+  localSpec?: string
 }
 
 export async function autoUpgradeTypeclawDep(options: AutoUpgradeOptions): Promise<AutoUpgradeOutcome> {
   const { cwd } = options
   const scaffold = options.scaffoldVersion !== undefined ? options.scaffoldVersion : resolveScaffoldVersion()
-  if (scaffold === null) return { kind: 'skipped-dev-mode' }
-
-  const cliVersion = stripCaret(scaffold)
-  if (cliVersion === null) return { kind: 'skipped-dev-mode' }
 
   const pkg = await readAgentPackageJson(cwd)
   if (pkg === null) return { kind: 'skipped-no-dep' }
@@ -52,8 +52,32 @@ export async function autoUpgradeTypeclawDep(options: AutoUpgradeOptions): Promi
   const declared = pkg.parsed.dependencies?.[TYPECLAW]
   if (typeof declared !== 'string') return { kind: 'skipped-no-dep' }
 
+  // The CLI runs from a source checkout (scaffold === null): the agent should
+  // track that checkout, not a published version. Relink any registry-range
+  // spec to the local spec (`file:`/`link:`); leave an exact pin (explicit user
+  // override) and an already-local spec alone.
+  if (scaffold === null) {
+    const localSpec = options.localSpec ?? null
+    if (localSpec === null || declared.startsWith('file:') || declared.startsWith('link:')) {
+      return { kind: 'skipped-dev-mode' }
+    }
+    if (classifyDepSpec(declared).kind === 'exact') return { kind: 'skipped-dev-mode' }
+    await writeDepSpec(cwd, pkg.raw, pkg.parsed, localSpec)
+    return { kind: 'relinked-to-local', from: declared, to: localSpec }
+  }
+
+  const cliVersion = stripCaret(scaffold)
+  if (cliVersion === null) return { kind: 'skipped-dev-mode' }
+
   const declaredKind = classifyDepSpec(declared)
   if (declaredKind.kind === 'non-release') {
+    // An installed CLI against a local (`file:`/`link:`) spec: the agent was on
+    // a dev checkout but is now run by an npm CLI — restore the registry range.
+    if (declared.startsWith('file:') || declared.startsWith('link:')) {
+      const newSpec = `^${cliVersion}`
+      await writeDepSpec(cwd, pkg.raw, pkg.parsed, newSpec)
+      return { kind: 'spec-rewritten', from: declared, to: newSpec, cliVersion }
+    }
     return { kind: 'skipped-non-release-spec', declared }
   }
 
@@ -113,6 +137,14 @@ export function outcomeForcesInstall(outcome: AutoUpgradeOutcome): boolean {
   return outcome.kind === 'spec-rewritten' || outcome.kind === 'reinstall-needed'
 }
 
+// A relink to a local `file:`/`link:` spec installs via a forced `bun install`
+// (file deps don't "update"), NOT the `bun update --latest` path above — and it
+// skips version verification, since a local install's version is whatever the
+// checkout declares. start.ts ORs this into its ensureDeps force flag.
+export function outcomeRequiresForceInstall(outcome: AutoUpgradeOutcome): boolean {
+  return outcome.kind === 'relinked-to-local'
+}
+
 // The version we expect to find in node_modules/typeclaw after the
 // auto-upgrade-triggered install completes. Callers use this to verify
 // the install actually moved the on-disk version (not just resolved the
@@ -130,6 +162,8 @@ export function describeAutoUpgrade(outcome: AutoUpgradeOutcome): string {
       return `Upgrading agent typeclaw ${outcome.from} → ${outcome.to} to match CLI`
     case 'reinstall-needed':
       return `Upgrading agent typeclaw ${outcome.from} → ${outcome.to} to match CLI`
+    case 'relinked-to-local':
+      return `Linking agent typeclaw to local checkout (${outcome.to})`
     case 'exact-pin-respected':
       return `Agent typeclaw is exact-pinned to ${outcome.declared}; CLI is ${outcome.cliVersion}. Not upgrading (remove the exact pin to allow auto-upgrade).`
     default:

@@ -18,9 +18,10 @@ import {
   type AutoUpgradeOutcome,
   expectedInstalledAfterUpgrade,
   outcomeForcesInstall,
+  outcomeRequiresForceInstall,
   readInstalledTypeclawVersionFromAgent,
 } from '@/init/auto-upgrade'
-import { resolveBaseImageVersion } from '@/init/cli-version'
+import { resolveBaseImageVersion, resolveTypeclawSpec } from '@/init/cli-version'
 import { buildDockerfile, classifyDockerfileAppend, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -176,7 +177,7 @@ export async function start({
   cliEntry,
   reuseCurrentHostDaemon = false,
   ensureDeps = (dir, opts) => ensureDepsInstalled({ cwd: dir, ...opts }),
-  autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir }),
+  autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir, localSpec: resolveTypeclawSpec(dir) }),
   forceBunUpdate = runBunUpdate,
   readInstalledVersion = readInstalledTypeclawVersionFromAgent,
   verifyRunning = createVerifyRunning({ exec }),
@@ -294,7 +295,10 @@ export async function start({
     // version bump (dir already present) or a removal (stale dir left behind)
     // would otherwise leave bun.lock/node_modules out of sync with the
     // reconciled package.json.
-    const forceDepsReinstall = (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) || pluginReconcile.changed
+    const forceDepsReinstall =
+      (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) ||
+      pluginReconcile.changed ||
+      outcomeRequiresForceInstall(upgrade)
     const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
@@ -511,6 +515,7 @@ export async function start({
 function commitMessageForAutoUpgrade(outcome: AutoUpgradeOutcome): string | null {
   if (outcome.kind === 'spec-rewritten') return `Upgrade typeclaw to ${outcome.to}`
   if (outcome.kind === 'reinstall-needed') return `Upgrade typeclaw to ${outcome.to}`
+  if (outcome.kind === 'relinked-to-local') return `Link typeclaw to local checkout (${outcome.to})`
   return null
 }
 
