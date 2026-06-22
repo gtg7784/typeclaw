@@ -3918,4 +3918,90 @@ describe('start autoUpgrade integration', () => {
     expect(subjects).toContain('Update dependencies')
     expect(subjects.filter((s) => s.startsWith('Upgrade typeclaw'))).toEqual([])
   })
+
+  test('relinked-to-local (file:) forces ensureDeps and never calls forceBunUpdate', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const updateCalls: Array<{ cwd: string; pkg: string }> = []
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => ({ kind: 'relinked-to-local', from: '^0.1.0', to: 'file:../typeclaw' }),
+      forceBunUpdate: async (cwd, pkg) => {
+        updateCalls.push({ cwd, pkg })
+        return { ok: true }
+      },
+      ensureDeps: async (_dir, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(updateCalls).toEqual([])
+    expect(ensureCalls).toEqual([{ force: true }])
+  })
+
+  test('relinked-to-local (link:) on win32 runs bun link BEFORE the forced install, no forceBunUpdate', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const order: string[] = []
+    const updateCalls: string[] = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      platform: 'win32',
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => ({ kind: 'relinked-to-local', from: '^0.1.0', to: 'link:typeclaw' }),
+      runBunLink: async () => {
+        order.push('bun-link')
+      },
+      forceBunUpdate: async () => {
+        updateCalls.push('update')
+        return { ok: true }
+      },
+      ensureDeps: async (_dir, opts) => {
+        order.push(`ensureDeps:force=${opts?.force === true}`)
+        return { ok: true, installed: true }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(updateCalls).toEqual([])
+    expect(order).toEqual(['bun-link', 'ensureDeps:force=true'])
+  })
+
+  test('relinked-to-local (link:) does NOT run bun link off-Windows', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    let linkCalled = false
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      platform: 'linux',
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => ({ kind: 'relinked-to-local', from: '^0.1.0', to: 'link:typeclaw' }),
+      runBunLink: async () => {
+        linkCalled = true
+      },
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(linkCalled).toBe(false)
+  })
 })

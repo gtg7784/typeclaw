@@ -21,14 +21,14 @@ import {
   outcomeRequiresForceInstall,
   readInstalledTypeclawVersionFromAgent,
 } from '@/init/auto-upgrade'
-import { resolveBaseImageVersion, resolveTypeclawSpec } from '@/init/cli-version'
+import { resolveBaseImageVersion, resolveTypeclawSpec, typeclawCheckoutRoot } from '@/init/cli-version'
 import { buildDockerfile, classifyDockerfileAppend, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
-import { resolveBunLinkedPackage } from '@/init/windows-dev-link'
+import { linkWindowsDevTypeclaw, resolveBunLinkedPackage, type RunBunLink } from '@/init/windows-dev-link'
 import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
@@ -134,6 +134,13 @@ export type StartOptions = {
   // function to override the wait window or to bypass verification entirely
   // (e.g. a no-op `async () => ({ ok: true })` for unit tests that don't care).
   verifyRunning?: VerifyRunningFn
+  // Test seam for the native-Windows dev-link step run before ensureDeps when a
+  // local-checkout reconcile emits `link:typeclaw`. Defaults to `bun link` in
+  // the checkout. Mirrors init's `runBunLink` seam.
+  runBunLink?: RunBunLink
+  // Defaults to `process.platform`; tests inject it to exercise the
+  // native-Windows dev-link reconcile path off a non-Windows runner.
+  platform?: NodeJS.Platform
 }
 
 export type HostDaemonStatus =
@@ -181,6 +188,8 @@ export async function start({
   forceBunUpdate = runBunUpdate,
   readInstalledVersion = readInstalledTypeclawVersionFromAgent,
   verifyRunning = createVerifyRunning({ exec }),
+  runBunLink,
+  platform = process.platform,
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -245,6 +254,16 @@ export async function start({
     // image to a fresh container build.
     const upgrade = await autoUpgrade(cwd)
     const upgradeCommitMessage = commitMessageForAutoUpgrade(upgrade)
+    // A relink to `link:typeclaw` (native-Windows dev) needs the checkout
+    // registered with `bun link` BEFORE the forced install, exactly as init's
+    // maybeLinkWindowsDevTypeclaw does — otherwise ensureDeps can't resolve the
+    // link: spec. No-op off Windows (linkWindowsDevTypeclaw returns null).
+    if (upgrade.kind === 'relinked-to-local' && upgrade.to.startsWith('link:')) {
+      const checkout = typeclawCheckoutRoot()
+      if (checkout !== null) {
+        await linkWindowsDevTypeclaw(checkout, { platform, ...(runBunLink !== undefined ? { runBunLink } : {}) })
+      }
+    }
     if (outcomeForcesInstall(upgrade)) {
       const forced = await forceBunUpdate(cwd, 'typeclaw')
       if (!forced.ok) {
@@ -402,6 +421,7 @@ export async function start({
       hostdControl,
       publishHost,
       tuiToken,
+      platform,
     })
 
     let built = false
@@ -477,6 +497,7 @@ export async function start({
         hostdControl,
         publishHost,
         tuiToken,
+        platform,
       })
       run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
     }
