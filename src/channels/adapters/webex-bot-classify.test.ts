@@ -35,6 +35,30 @@ describe('classifyInbound', () => {
     })
   })
 
+  test('drops self-authored messages by email when personRef desyncs from the bot ref', () => {
+    expect(
+      classifyInbound(
+        message({ personRef: 'uuid-from-mercury', personEmail: 'typeey@typeclaw.dev' }),
+        config,
+        'legacy-email-ref',
+        [],
+        'typeey@typeclaw.dev',
+      ),
+    ).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
+  test('self-email match is case-insensitive', () => {
+    expect(
+      classifyInbound(
+        message({ personRef: 'uuid-from-mercury', personEmail: 'TypeEy@TypeClaw.DEV' }),
+        config,
+        'legacy-email-ref',
+        [],
+        'typeey@typeclaw.dev',
+      ),
+    ).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
   test('drops empty messages without files', () => {
     expect(classifyInbound(message({ text: '' }), config, 'bot-1')).toEqual({ kind: 'drop', reason: 'empty_content' })
   })

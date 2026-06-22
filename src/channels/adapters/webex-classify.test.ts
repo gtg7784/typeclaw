@@ -35,6 +35,45 @@ describe('classifyInbound for Webex user channel', () => {
     })
   })
 
+  test('drops self-authored messages by email when personRef desyncs from the bot ref', () => {
+    // Legacy Hydra accounts can surface the bot identity as an email while the
+    // Mercury event carries a UUID personRef (or vice versa), so a ref-only
+    // self-check leaks the agent's own message back as a new inbound. Matching
+    // personEmail against the bot's email closes that echo loop.
+    expect(
+      classifyInbound(
+        message({ personRef: 'uuid-from-mercury', personEmail: 'typeey@typeclaw.dev' }),
+        config,
+        'legacy-email-ref',
+        [],
+        'typeey@typeclaw.dev',
+      ),
+    ).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
+  test('self-email match is case-insensitive', () => {
+    expect(
+      classifyInbound(
+        message({ personRef: 'uuid-from-mercury', personEmail: 'TypeEy@TypeClaw.DEV' }),
+        config,
+        'legacy-email-ref',
+        [],
+        'typeey@typeclaw.dev',
+      ),
+    ).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
+  test('does not drop a human whose email differs from the bot email', () => {
+    const verdict = classifyInbound(
+      message({ personRef: 'human-ref', personEmail: 'human@example.com', text: 'typeclaw hi' }),
+      config,
+      'self-1',
+      ['typeclaw'],
+      'typeey@typeclaw.dev',
+    )
+    expect(verdict.kind).toBe('route')
+  })
+
   test('drops empty messages without files', () => {
     expect(classifyInbound(message({ text: '' }), config, 'self-1')).toEqual({ kind: 'drop', reason: 'empty_content' })
   })

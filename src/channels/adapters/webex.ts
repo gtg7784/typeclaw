@@ -305,6 +305,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
         options.configRef(),
         botSnapshot?.ref ?? null,
         options.selfAliasesRef?.() ?? [],
+        botSnapshot?.emails[0] ?? null,
       )
       if (verdict.kind === 'drop') {
         logger.info(`[webex] dropped id=${event.ref} reason=${verdict.reason}${dropHint(verdict.reason)}`)
