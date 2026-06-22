@@ -370,6 +370,27 @@ function renderChannelOrigin(
       'One verdict, one surface. After submitting the review, use',
       '`skip_response({ reason: "verdict posted as review" })`.',
     )
+
+    // Models reliably address review-comment feedback and then end the turn
+    // WITHOUT resolving the thread — leaving a wall of "open" threads on the PR.
+    // The `resolve_review_thread` flag lives only in the tool description, which
+    // the model reads at call time and routinely skips. The resolve cannot run
+    // in a later turn (a successful reply ends the turn), so a bare ack strands
+    // the thread permanently. Gate on `thread`: a top-level PR/issue comment has
+    // no thread to resolve, and the flag is a no-op there.
+    if (origin.thread !== null) {
+      lines.push(
+        '',
+        '**This is an inline review thread. When your reply acknowledges the',
+        'concern is fixed/addressed, set `resolve_review_thread: true` on that',
+        '`channel_reply` — in the SAME call.** A bare acknowledgement leaves the',
+        'thread open forever: the resolve only runs as part of this reply, never',
+        'in a later turn. It is safe to set by default — the runtime resolves',
+        "only threads you authored and refuses on a human reviewer's thread.",
+        'Leave it unset only when you mean to keep the thread open (partial fix,',
+        'disagreement, mid-discussion).',
+      )
+    }
   }
 
   // Discord renders no GFM tables — a raw `| a | b |` block shows as literal

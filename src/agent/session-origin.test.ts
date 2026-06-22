@@ -205,6 +205,33 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/skip_response/)
   })
 
+  test('github review-thread origin tells the bot to resolve the thread in the same reply', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'pr:7',
+      thread: '12345',
+    })
+    // guards the real failure: agent addresses review-comment feedback and ends
+    // the turn without resolving, leaving threads open forever
+    expect(out).toMatch(/resolve_review_thread: true/)
+    expect(out).toMatch(/same call/i)
+    expect(out).toMatch(/leaves the thread open|open forever/i)
+  })
+
+  test('github top-level (no-thread) origin omits the resolve-thread instruction', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'pr:7',
+      thread: null,
+    })
+    // a top-level PR/issue comment has no thread to resolve; the flag is a no-op
+    expect(out).not.toContain('resolve_review_thread')
+  })
+
   test('discord channel origin tells the bot to emit bare pipe tables, not fenced ones', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
