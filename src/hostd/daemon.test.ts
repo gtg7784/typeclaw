@@ -14,6 +14,7 @@ import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStar
 import type { KakaoRenewalCallbacks, KakaoRenewalStartInput } from './kakao-renewal-manager'
 import { registrationFilePath, registrationsDir, socketPath } from './paths'
 import type { HttpInfoResult, ListResult, VersionResult } from './protocol'
+import type { WebexRenewalCallbacks, WebexRenewalStartInput } from './webex-renewal-manager'
 
 let home: string
 let prev: string | undefined
@@ -908,6 +909,78 @@ describe('startDaemon', () => {
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, kakaoRenewal })
 
     expect(starts).toEqual([{ containerName: 'persistent-kakao', cwd: '/agent/pk' }])
+  })
+
+  test('register invokes webexRenewal.start with the registered container and cwd', async () => {
+    const starts: WebexRenewalStartInput[] = []
+    const webexRenewal: WebexRenewalCallbacks = {
+      start: (input) => {
+        starts.push(input)
+      },
+      stop: async () => {},
+      drain: async () => {},
+    }
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, webexRenewal })
+
+    await send({ kind: 'register', containerName: 'webex-agent', cwd: '/agent/webex' })
+
+    expect(starts).toEqual([{ containerName: 'webex-agent', cwd: '/agent/webex' }])
+  })
+
+  test('deregister awaits webexRenewal.stop for that container', async () => {
+    const stopCalls: string[] = []
+    const webexRenewal: WebexRenewalCallbacks = {
+      start: () => {},
+      stop: async (name) => {
+        stopCalls.push(name)
+      },
+      drain: async () => {},
+    }
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, webexRenewal })
+
+    await send({ kind: 'register', containerName: 'webex-agent', cwd: '/agent/webex' })
+    await send({ kind: 'deregister', containerName: 'webex-agent' })
+
+    expect(stopCalls).toEqual(['webex-agent'])
+  })
+
+  test('daemon.stop() drains webexRenewal across all registered containers', async () => {
+    const stopCalls: string[] = []
+    const webexRenewal: WebexRenewalCallbacks = {
+      start: () => {},
+      stop: async (name) => {
+        stopCalls.push(name)
+      },
+      drain: async () => {},
+    }
+    const d = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, webexRenewal })
+
+    await send({ kind: 'register', containerName: 'a', cwd: '/agent/a' })
+    await send({ kind: 'register', containerName: 'b', cwd: '/agent/b' })
+    await d.stop()
+
+    expect(stopCalls.sort()).toEqual(['a', 'b'])
+  })
+
+  test('boot-time restore invokes webexRenewal.start for persisted registrations whose container is still alive', async () => {
+    const starts: WebexRenewalStartInput[] = []
+    const webexRenewal: WebexRenewalCallbacks = {
+      start: (input) => {
+        starts.push(input)
+      },
+      stop: async () => {},
+      drain: async () => {},
+    }
+    const alive = new Set(['persistent-webex'])
+
+    const d1 = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, webexRenewal })
+    await send({ kind: 'register', containerName: 'persistent-webex', cwd: '/agent/pw', restartToken: 't' })
+    await d1.stop()
+
+    starts.length = 0
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, webexRenewal })
+
+    expect(starts).toEqual([{ containerName: 'persistent-webex', cwd: '/agent/pw' }])
   })
 
   test('HTTP control falls back to an ephemeral port when the preferred port is busy', async () => {

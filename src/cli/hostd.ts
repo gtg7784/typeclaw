@@ -7,6 +7,7 @@ import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
+import { createWebexRenewalManager } from '@/hostd/webex-renewal-manager'
 import { validateRestartDeps, type RestartDepsPreflightResult } from '@/init/restart-deps-preflight'
 
 export const hostdCommand = defineCommand({
@@ -37,6 +38,18 @@ export const hostdCommand = defineCommand({
       },
       shouldRenew: ({ cwd }) => kakaoChannelConfigured(cwd),
     })
+    const webexRenewal = createWebexRenewalManager({
+      onLog: (event) => writeLogLine(formatLog(event)),
+      onRenewalOk: async ({ containerName, cwd }) => {
+        // Restart so the in-memory WebexClient picks up the renewed token from
+        // secrets.json. Without this, the cron writes a fresh token but the
+        // running adapter keeps the old token in its getToken closure and still
+        // 401s on every outbound REST call + KMS key fetch.
+        const result = await hostdRestart({ containerName, cwd })
+        if (!result.ok) throw new Error(result.reason)
+      },
+      shouldRenew: ({ cwd }) => webexChannelConfigured(cwd),
+    })
 
     const daemon = await startDaemon({
       onLog: (e) => writeLogLine(formatLog(e)),
@@ -44,6 +57,7 @@ export const hostdCommand = defineCommand({
       onShutdown: () => process.exit(0),
       portbroker,
       kakaoRenewal,
+      webexRenewal,
       restartPreflight: buildHostdRestartPreflight(cliEntry, version, defaultPreflightDeps),
       restart: hostdRestart,
     })
@@ -53,6 +67,7 @@ export const hostdCommand = defineCommand({
         .stop()
         .then(() => portbroker.drain())
         .then(() => kakaoRenewal.drain())
+        .then(() => webexRenewal.drain())
         .then(() => process.exit(0))
     }
     process.on('SIGTERM', shutdown)
@@ -201,6 +216,22 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] kakao renewal scheduled container restart for ${event.containerName} account=${event.accountId}`
     case 'kakao-renewal-restart-failed':
       return `[hostd] kakao renewal container restart FAILED for ${event.containerName} account=${event.accountId}: ${event.reason}`
+    case 'webex-renewal-tick-start':
+      return `[hostd] webex renewal tick started for ${event.containerName}`
+    case 'webex-renewal-tick-skipped':
+      return `[hostd] webex renewal skipped for ${event.containerName}: ${event.reason}${event.expiresInMs !== undefined ? ` (expires in ${Math.round(event.expiresInMs / 1000 / 60 / 60)}h)` : ''}`
+    case 'webex-renewal-tick-ok':
+      return `[hostd] webex renewal OK for ${event.containerName} account=${event.accountId} (new token expires ${new Date(event.nextExpiresAt).toISOString()})`
+    case 'webex-renewal-tick-reauth-required':
+      return `[hostd] webex renewal REAUTH REQUIRED for ${event.containerName} account=${event.accountId} reason=${event.reason} — ${event.message}`
+    case 'webex-renewal-tick-transient-failure':
+      return `[hostd] webex renewal transient failure for ${event.containerName} account=${event.accountId}: ${event.reason}`
+    case 'webex-renewal-tick-error':
+      return `[hostd] webex renewal ERROR for ${event.containerName}: ${event.error}`
+    case 'webex-renewal-restart-scheduled':
+      return `[hostd] webex renewal scheduled container restart for ${event.containerName} account=${event.accountId}`
+    case 'webex-renewal-restart-failed':
+      return `[hostd] webex renewal container restart FAILED for ${event.containerName} account=${event.accountId}: ${event.reason}`
   }
 }
 
@@ -214,6 +245,15 @@ function kakaoChannelConfigured(cwd: string): boolean {
   try {
     const cfg = loadConfigSync(cwd)
     return cfg.channels?.kakaotalk !== undefined
+  } catch {
+    return false
+  }
+}
+
+function webexChannelConfigured(cwd: string): boolean {
+  try {
+    const cfg = loadConfigSync(cwd)
+    return cfg.channels?.webex !== undefined
   } catch {
     return false
   }
