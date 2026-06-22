@@ -162,6 +162,53 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/in any language/i)
   })
 
+  test('declares durable channel/environment facts as a capture-worthy situation-memory category', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('stable channel/environment facts')
+    expect(lower).toMatch(/purpose|role in the team/)
+    expect(lower).toMatch(/routing convention|urgency expectation|communication norm/)
+    expect(lower).toMatch(/interpretation|routing|response style|prioritization/)
+  })
+
+  test('excludes live re-derivable channel context from the channel/environment category', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('exclude live re-derivable context')
+    expect(lower).toMatch(/adapter\/workspace\/chat\/thread/)
+    expect(lower).toMatch(/participant list/)
+    expect(lower).toMatch(/membership churn/)
+  })
+
+  test('keeps a channel-environment capture to one compact fragment instead of one-per-attribute', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/one environment convention.*one compact fragment/is)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/do not split channel name, purpose, urgency, and routing/i)
+  })
+
+  test('guards channel conventions against becoming standing orders (context, not authorization)', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/channel convention is context only, not authorization/)
+    expect(lower).toMatch(/standing order/)
+    expect(lower).toMatch(/bypass permissions|override explicit user\/project\/system guards/)
+  })
+
+  test('demonstrates channel/environment capture in a non-English (Korean) example', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('#배포-공지')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/the same triad governs channel\/environment facts, in any language/i)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Mina joined #incidents|Slack thread 172/)
+  })
+
+  test('qualifies the membership-events anti-pattern so durable channel purpose is no longer blanket-skipped', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('group-chat membership events')
+    expect(lower).toMatch(/invitations, joins, leaves/)
+    expect(lower).toMatch(/durable, evidenced channel purpose\/convention/)
+  })
+
+  test('qualifies the re-derivable-facts anti-pattern to distinguish live context from a learned environment belief', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/live channel context/)
+    expect(lower).toMatch(/not re-derivable merely because the current turn names the channel/)
+  })
+
   test('does not require fragments to articulate a future behavior change', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(
       /does(n't| not) need to articulate.*future agent|no.*Implication.*not required|implication is obvious/i,
