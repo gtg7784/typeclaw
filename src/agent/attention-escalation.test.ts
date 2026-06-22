@@ -110,9 +110,9 @@ describe('detectAttentionEscalation — negative', () => {
 })
 
 describe('resolveTurnThinkingLevel', () => {
-  test('escalation text bumps to high regardless of session default', () => {
-    expect(resolveTurnThinkingLevel('wtf', 'low')).toBe('high')
-    expect(resolveTurnThinkingLevel('제대로 해', undefined)).toBe('high')
+  test('escalation text bumps to xhigh regardless of session default', () => {
+    expect(resolveTurnThinkingLevel('wtf', 'low')).toBe('xhigh')
+    expect(resolveTurnThinkingLevel('제대로 해', undefined)).toBe('xhigh')
   })
 
   test('normal text falls back to the session default', () => {
@@ -135,10 +135,10 @@ describe('applyTurnThinkingLevel', () => {
     }
   }
 
-  test('escalation turn sets high', () => {
+  test('escalation turn sets xhigh', () => {
     const session = fakeSession()
     applyTurnThinkingLevel(session, 'ultrathink please', 'low')
-    expect(session.calls).toEqual(['high'])
+    expect(session.calls).toEqual(['xhigh'])
   })
 
   test('normal turn resets to the session default', () => {
@@ -157,6 +157,6 @@ describe('applyTurnThinkingLevel', () => {
     const session = fakeSession()
     applyTurnThinkingLevel(session, '뭐하는 거야', 'low')
     applyTurnThinkingLevel(session, 'thanks, looks good', 'low')
-    expect(session.calls).toEqual(['high', 'low'])
+    expect(session.calls).toEqual(['xhigh', 'low'])
   })
 })

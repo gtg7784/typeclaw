@@ -562,9 +562,10 @@ export function detectAttentionEscalation(text: string): boolean {
   return MORPHEME_PATTERNS.some((pattern) => pattern.test(normalized))
 }
 
-// Not `xhigh`: that level is OpenAI-family-only. `high` is universal and
-// `setThinkingLevel` clamps it down per-model, so it's safe to pass unconditionally.
-const ESCALATED_LEVEL: ThinkingLevel = 'high'
+// `xhigh` is the strongest level. It's OpenAI-family-only, but `setThinkingLevel`
+// clamps it per-model (down to `high` on non-OpenAI), so it's safe to pass
+// unconditionally and gives OpenAI models maximum effort on escalation turns.
+const ESCALATED_LEVEL: ThinkingLevel = 'xhigh'
 
 export function resolveTurnThinkingLevel(
   text: string,

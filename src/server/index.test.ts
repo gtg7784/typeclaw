@@ -483,7 +483,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     ws.close()
   })
 
-  test('attention escalation bumps to high then resets to the captured default', async () => {
+  test('attention escalation bumps to xhigh then resets to the captured default', async () => {
     // The fallback path must reset from the session's CREATION-time level, not the
     // live getter — otherwise the first escalated turn poisons the second turn's
     // reset target. Enhance the fake with a real thinkingLevel getter that tracks
@@ -512,7 +512,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
 
-    expect(thinkingCalls).toEqual(['high', 'low'])
+    expect(thinkingCalls).toEqual(['xhigh', 'low'])
     ws.close()
   })
 })

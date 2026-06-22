@@ -1138,7 +1138,7 @@ describe('createCronConsumer count gate', () => {
       } as unknown as AgentSession
     }
 
-    test('bumps thinking level to high on an escalation prompt and to the default otherwise', async () => {
+    test('bumps thinking level to xhigh on an escalation prompt and to the default otherwise', async () => {
       const levelsByJob = new Map<string, string[]>()
       const factory = {
         createSessionForCron: async (job: PromptJob): Promise<CronSession> => {
@@ -1163,7 +1163,7 @@ describe('createCronConsumer count gate', () => {
       publishCron(stream, promptJob('routine', 'post the daily summary'))
       await waitForConsumerIdle(consumer)
 
-      expect(levelsByJob.get('frustrated')).toEqual(['high'])
+      expect(levelsByJob.get('frustrated')).toEqual(['xhigh'])
       expect(levelsByJob.get('routine')).toEqual(['low'])
 
       consumer.stop()
