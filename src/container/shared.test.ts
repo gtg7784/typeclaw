@@ -17,6 +17,7 @@ import {
   type DockerExec,
   imageTagFromCwd,
   isContainerNameConflict,
+  resolveDockerBinary,
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
@@ -191,6 +192,110 @@ describe('dockerCmd', () => {
 
   test('returns null when docker is not on PATH', () => {
     expect(dockerCmd(['info'], () => null)).toBeNull()
+  })
+})
+
+describe('resolveDockerBinary', () => {
+  test('returns the PATH-resolved binary when Bun.which finds it', () => {
+    const result = resolveDockerBinary({
+      which: () => '/usr/local/bin/docker',
+      platform: 'darwin',
+      exists: () => {
+        throw new Error('must not probe the filesystem when PATH resolves')
+      },
+    })
+
+    expect(result).toBe('/usr/local/bin/docker')
+  })
+
+  test('does NOT fall back to filesystem probing on POSIX when PATH misses', () => {
+    let probed = false
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'linux',
+      exists: () => {
+        probed = true
+        return true
+      },
+    })
+
+    expect(result).toBeNull()
+    expect(probed).toBe(false)
+  })
+
+  test('falls back to the all-users Docker Desktop install path on Windows when PATH misses', () => {
+    const expected = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'win32',
+      env: { ProgramFiles: 'C:\\Program Files' },
+      exists: (path) => path === expected,
+    })
+
+    expect(result).toBe(expected)
+  })
+
+  test('falls back to the per-user Docker Desktop install path on Windows', () => {
+    const expected = 'C:\\Users\\me\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'win32',
+      env: { ProgramFiles: 'C:\\Program Files', LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' },
+      exists: (path) => path === expected,
+    })
+
+    expect(result).toBe(expected)
+  })
+
+  test.each([
+    ['Chocolatey shim', 'C:\\ProgramData\\chocolatey\\bin\\docker.exe'],
+    ['Scoop shim', 'C:\\Users\\me\\scoop\\shims\\docker.exe'],
+    ['standalone CLI', 'C:\\Program Files\\Docker\\docker.exe'],
+    ['Rancher Desktop', 'C:\\Program Files\\Rancher Desktop\\resources\\resources\\win32\\bin\\docker.exe'],
+    ['pre-3.3.1 Docker Desktop', 'C:\\Program Files\\Docker\\Docker\\resources\\docker.exe'],
+  ])('falls back to the %s install path on Windows', (_label, expected) => {
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'win32',
+      env: {
+        ProgramFiles: 'C:\\Program Files',
+        ProgramData: 'C:\\ProgramData',
+        LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local',
+        USERPROFILE: 'C:\\Users\\me',
+      },
+      exists: (path) => path === expected,
+    })
+
+    expect(result).toBe(expected)
+  })
+
+  test('prefers Docker Desktop over an also-present Rancher Desktop (probe order)', () => {
+    const dockerDesktop = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
+    const rancher = 'C:\\Program Files\\Rancher Desktop\\resources\\resources\\win32\\bin\\docker.exe'
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'win32',
+      env: { ProgramFiles: 'C:\\Program Files' },
+      exists: (path) => path === dockerDesktop || path === rancher,
+    })
+
+    expect(result).toBe(dockerDesktop)
+  })
+
+  test('returns null on Windows when docker is on neither PATH nor any known install path', () => {
+    const result = resolveDockerBinary({
+      which: () => null,
+      platform: 'win32',
+      env: {
+        ProgramFiles: 'C:\\Program Files',
+        ProgramData: 'C:\\ProgramData',
+        LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local',
+        USERPROFILE: 'C:\\Users\\me',
+      },
+      exists: () => false,
+    })
+
+    expect(result).toBeNull()
   })
 })
 
