@@ -26,6 +26,7 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
+import { resolveBunLinkedPackage } from '@/init/windows-dev-link'
 import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
@@ -47,6 +48,7 @@ import {
 import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
 
 const PACKAGE_FILE = 'package.json'
+const TYPECLAW_PACKAGE = 'typeclaw'
 const DEV_SOURCE_CONTAINER_PATH = '/agent/node_modules/typeclaw'
 const BUN_LOCK_FILE = 'bun.lock'
 const DEPENDENCY_FILES = [PACKAGE_FILE, BUN_LOCK_FILE] as const
@@ -914,7 +916,12 @@ async function detectDevSource(cwd: string): Promise<string | null> {
     const raw = await readFile(join(cwd, PACKAGE_FILE), 'utf8')
     const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> }
     const spec = pkg.dependencies?.typeclaw
-    if (!spec || !spec.startsWith('file:')) return null
+    if (typeof spec !== 'string') return null
+    // Windows dev-mode declares `link:typeclaw` (a `bun link` registration);
+    // the checkout path isn't in the spec, so resolve it from bun's global
+    // link target. POSIX dev-mode declares `file:<rel>` and encodes the path.
+    if (spec.startsWith('link:')) return resolveBunLinkedPackage(TYPECLAW_PACKAGE)
+    if (!spec.startsWith('file:')) return null
     const target = spec.slice('file:'.length)
     return isAbsolute(target) ? resolve(target) : resolve(cwd, target)
   } catch {

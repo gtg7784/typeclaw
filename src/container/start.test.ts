@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync, realpathSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -494,6 +494,36 @@ describe('planStart mounts', () => {
 
       expect(bindMounts(plan.runArgs).some((m) => m.dst === '/agent/node_modules/typeclaw')).toBe(false)
     } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
+  test('resolves a Windows link:typeclaw dev source via the bun global link', async () => {
+    const globalDir = await mkdtemp(join(tmpdir(), 'typeclaw-bun-global-'))
+    const checkout = await mkdtemp(join(tmpdir(), 'typeclaw-dev-src-'))
+    const savedGlobalDir = process.env.BUN_INSTALL_GLOBAL_DIR
+    try {
+      // given: `bun link` registered the checkout at <global>/node_modules/typeclaw
+      await mkdir(join(globalDir, 'node_modules'), { recursive: true })
+      await symlink(checkout, join(globalDir, 'node_modules', 'typeclaw'))
+      process.env.BUN_INSTALL_GLOBAL_DIR = globalDir
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: 'link:typeclaw' })
+      await writeTypeclawConfig(root)
+
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, platform: 'win32' })
+
+      expect(
+        hasBindMount(plan.runArgs, {
+          src: realpathSync(checkout),
+          dst: '/agent/node_modules/typeclaw',
+          readonly: true,
+        }),
+      ).toBe(true)
+    } finally {
+      if (savedGlobalDir === undefined) delete process.env.BUN_INSTALL_GLOBAL_DIR
+      else process.env.BUN_INSTALL_GLOBAL_DIR = savedGlobalDir
+      await rm(globalDir, { recursive: true, force: true })
       await rm(checkout, { recursive: true, force: true })
     }
   })
