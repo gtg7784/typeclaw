@@ -31,11 +31,11 @@ import {
 import { commitSystemFile } from '@/git/system-commit'
 import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
+import { isWindows } from '@/shared/platform'
 import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
-import { ensureDepsInstalled } from './ensure-deps'
 import { CONFIG_FILE, findAgentDir, isInitialized } from './find-agent-dir'
 import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
@@ -43,7 +43,7 @@ import { buildHatchingPrompt } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
-import { prepareWindowsDevJunction } from './windows-dev-link'
+import { linkWindowsDevTypeclaw, type RunBunLink } from './windows-dev-link'
 
 export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
@@ -58,6 +58,7 @@ export { CONFIG_FILE, findAgentDir, isInitialized }
 
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'
+const TYPECLAW_PACKAGE = 'typeclaw'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
@@ -233,6 +234,11 @@ export type InitOptions = {
   runHatching?: HatchRunner
   runBunInstall?: InstallRunner
   dockerExec?: DockerExec
+  // Test seams for the native-Windows dev-mode `bun link` flow. `platform`
+  // defaults to `process.platform`; `runBunLink` defaults to spawning
+  // `bun link` in the typeclaw checkout.
+  platform?: NodeJS.Platform
+  runBunLink?: RunBunLink
   // Production CLI callers (src/cli/init.ts) pass `process.argv[1]` so the
   // hatching step's `start()` call spawns the host daemon and registers the
   // freshly-hatched container — same path `typeclaw start` takes. Tests omit
@@ -271,6 +277,8 @@ export async function runInit({
   runBunInstall: installRunner = runBunInstall,
   dockerExec,
   cliEntry,
+  platform = process.platform,
+  runBunLink,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
 
@@ -342,6 +350,7 @@ export async function runInit({
     withWebex: wantsWebex,
     withWebexUser,
     withKakaotalk,
+    platform,
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
   // their credentials to secrets.json (via the OAuth login step above); writing
@@ -409,12 +418,13 @@ export async function runInit({
   }
 
   emit({ step: 'install', phase: 'start' })
-  // Native-Windows dev-mode: junction node_modules/typeclaw to the checkout so
-  // the install step skips bun's source-tree copy (which EPERMs on locked
-  // `.git/` files, the #899 path). When a junction satisfies the dep, route the
-  // install through the drift detector so bun is not re-invoked just to recopy.
-  const devJunction = await prepareWindowsDevJunction(cwd)
-  const install = devJunction ? await ensureDepsInstalled({ cwd, install: installRunner }) : await installRunner(cwd)
+  // Native-Windows dev-mode emits `link:typeclaw` (see resolveTypeclawSpec);
+  // register the checkout with `bun link` first so the subsequent install
+  // resolves it to a symlink bun SKIPS copying, instead of `file:` copying the
+  // checkout (incl `.git/`) and EPERMing — the #899 path. Registry deps still
+  // install normally. No-op on POSIX / registry installs.
+  await maybeLinkWindowsDevTypeclaw(platform, runBunLink)
+  const install = await installRunner(cwd)
   emit({ step: 'install', phase: 'done', result: install })
   if (!install.ok) throw new Error(`Dependency install failed: ${install.reason}`)
 
@@ -589,6 +599,9 @@ export type ScaffoldOptions = {
   withWebex?: boolean
   withWebexUser?: boolean
   withKakaotalk?: boolean
+  // Defaults to `process.platform`; controls the dev-mode typeclaw spec
+  // (`link:` on Windows, `file:` on POSIX). Tests inject it.
+  platform?: NodeJS.Platform
 }
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
@@ -637,7 +650,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   }
   await writeFile(join(root, CRON_FILE), `${JSON.stringify(cron, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
 
-  const pkg = buildPackageJson(root, basename(root))
+  const pkg = buildPackageJson(root, basename(root), options.platform ?? process.platform)
   await writeFile(join(root, PACKAGE_FILE), `${JSON.stringify(pkg, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
 
   await Promise.all(MARKDOWN_FILES.map((file) => writeFile(join(root, file), '', { flag: 'wx' }).catch(ignoreExists)))
@@ -671,14 +684,14 @@ function addCustomModel(
 // two installs of the same CLI and a skew is silent. Enforced by a guard test
 // in packagejson.test.ts.
 export const AGENT_BROWSER_VERSION = '^0.27.0'
-function buildPackageJson(root: string, name: string): Record<string, unknown> {
+function buildPackageJson(root: string, name: string, platform: NodeJS.Platform): Record<string, unknown> {
   return {
     name,
     private: true,
     type: 'module',
     workspaces: [`${PACKAGES_DIR}/*`],
     dependencies: {
-      typeclaw: resolveTypeclawSpec(root),
+      typeclaw: resolveTypeclawSpec(root, platform),
       'agent-browser': AGENT_BROWSER_VERSION,
       [GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE]: GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
     },
@@ -692,13 +705,28 @@ function buildPackageJson(root: string, name: string): Record<string, unknown> {
 
 // Prefer the registry-style range (`^X.Y.Z`) when typeclaw is itself an
 // installed package — that's what lets `bun install` in the agent resolve
-// typeclaw from npm. Fall back to `file:` against the local checkout for
-// dev contributors running `bun run src/cli/index.ts init` from the repo.
-function resolveTypeclawSpec(agentRoot: string): string {
+// typeclaw from npm. Fall back to the local checkout for dev contributors
+// running `bun run src/cli/index.ts init` from the repo: `link:typeclaw` on
+// native Windows (a `bun link` registration that bun's installer symlinks
+// rather than copying — `file:` would copy the whole checkout incl `.git/`
+// and EPERM, the #899 path), `file:<rel>` on POSIX (works today, keeps the
+// same-path mirror mount in start.ts).
+function resolveTypeclawSpec(agentRoot: string, platform: NodeJS.Platform = process.platform): string {
   const scaffoldVersion = resolveScaffoldVersion()
   if (scaffoldVersion !== null) return scaffoldVersion
+  if (isWindows(platform)) return `link:${TYPECLAW_PACKAGE}`
   const typeclawRoot = findTypeclawRoot()
   return typeclawRoot ? `file:${toFileSpec(relative(agentRoot, typeclawRoot))}` : 'file:../typeclaw'
+}
+
+async function maybeLinkWindowsDevTypeclaw(
+  platform: NodeJS.Platform,
+  runBunLink: RunBunLink | undefined,
+): Promise<void> {
+  if (resolveScaffoldVersion() !== null) return
+  const typeclawRoot = findTypeclawRoot()
+  if (typeclawRoot === null) return
+  await linkWindowsDevTypeclaw(typeclawRoot, { platform, ...(runBunLink !== undefined ? { runBunLink } : {}) })
 }
 
 function toFileSpec(rel: string): string {

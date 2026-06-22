@@ -133,6 +133,62 @@ describe('runInit', () => {
     ])
   })
 
+  test('native-Windows dev init links typeclaw and declares it as link: (no file: copy)', async () => {
+    // given: a real-shaped scaffold dep set. On Windows dev-mode, typeclaw must
+    // be declared link: (which bun symlinks, never copies) while the registry
+    // deps install normally — so `bun install` never processes the local
+    // typeclaw source tree (the .git-copy EPERM the reviewer flagged).
+    const linkCalls: string[] = []
+    const installCalls: string[] = []
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      platform: 'win32',
+      runBunLink: async (cwd) => {
+        linkCalls.push(cwd)
+      },
+      runBunInstall: async (cwd) => {
+        installCalls.push(cwd)
+        return { ok: true }
+      },
+    })
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies.typeclaw).toBe('link:typeclaw')
+    expect(pkg.dependencies['agent-browser']).toBeDefined()
+    expect(pkg.dependencies['typeclaw-gws-multi-account']).toBeDefined()
+    // bun link ran in the typeclaw checkout (the repo root), not the agent dir
+    expect(linkCalls).toEqual([repoRoot])
+    expect(installCalls).toEqual([root])
+  })
+
+  test('POSIX dev init keeps the file: typeclaw spec and does not run bun link', async () => {
+    const linkCalls: string[] = []
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+      platform: 'linux',
+      runBunLink: async (cwd) => {
+        linkCalls.push(cwd)
+      },
+    })
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies.typeclaw?.startsWith('file:')).toBe(true)
+    expect(linkCalls).toHaveLength(0)
+  })
+
   test('hatching runs after git (sees committed agent folder)', async () => {
     const seenAt: Array<{ hasGit: boolean; hasDockerfile: boolean }> = []
     const runHatching: HatchRunner = async ({ cwd }) => {
