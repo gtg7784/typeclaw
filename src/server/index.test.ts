@@ -114,6 +114,9 @@ function createFakeSession(): AgentSession & {
       pendingPromptResolve = null
       pendingPromptReject = null
     },
+    sessionManager: {
+      getLeafEntry: () => undefined,
+    },
     abortCalls: 0,
     disposeCalls: 0,
     promptCalls: [] as string[],
@@ -513,6 +516,44 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitFor((m) => m.type === 'done')
 
     expect(thinkingCalls).toEqual(['xhigh', 'low'])
+    ws.close()
+  })
+
+  test('an aborted question turn does not seed cross-turn escalation', async () => {
+    // given: turn 1 is a question that aborts; turn 2 is also a question. Mode-3
+    // escalation must NOT fire on turn 2, because the aborted turn never produced
+    // a usable assistant turn and must not poison the prior-signal state.
+    const session = createFakeSession()
+    const thinkingCalls: string[] = []
+    let currentLevel: string | undefined
+    let leafStop: string | undefined
+    Object.defineProperty(session, 'thinkingLevel', { get: () => currentLevel, configurable: true })
+    ;(session as unknown as { setThinkingLevel: (l: string) => void }).setThinkingLevel = (level) => {
+      thinkingCalls.push(level)
+      currentLevel = level
+    }
+    ;(session.sessionManager as unknown as { getLeafEntry: () => unknown }).getLeafEntry = () =>
+      leafStop === undefined ? undefined : { type: 'message', message: { role: 'assistant', stopReason: leafStop } }
+
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    leafStop = 'aborted'
+    ws.send(JSON.stringify({ type: 'prompt', text: 'why did the container crash on startup?' }))
+    await waitForState(() => session.promptCalls.length === 1)
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    leafStop = 'stop'
+    ws.send(JSON.stringify({ type: 'prompt', text: 'how do i actually fix this properly now?' }))
+    await waitForState(() => session.promptCalls.length === 2)
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    // then: neither turn escalates — turn 1's question signal was never stored,
+    // so turn 2's lone question has no question-dominant predecessor.
+    expect(thinkingCalls).toEqual([])
     ws.close()
   })
 })

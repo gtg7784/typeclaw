@@ -67,6 +67,10 @@ class FakeSession {
   public prompts: string[] = []
   public aborted = 0
   public disposed = 0
+  public thinkingLevels: string[] = []
+  setThinkingLevel = (level: string): void => {
+    this.thinkingLevels.push(level)
+  }
   public leafEntry: SessionEntry | undefined
   // Additional entries indexed by id for `getEntry` lookups. Walked by
   // `recoverableAssistantText` when the leaf is a toolResult and we need to
@@ -3936,6 +3940,210 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent.some((s) => s.text === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
     expect(logs.some((m) => m.includes('empty_turn_retry attempt=1'))).toBe(true)
     expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+  })
+
+  test('cross-turn escalation: a length-retried non-question turn overwrites the prior question signal', async () => {
+    // given: turn A is a question (seeds the prior signal); turn B is a
+    // NON-question that length-truncates then recovers on retry; turn C is a
+    // question. The completed logical turn B must commit its own (non-question)
+    // signal, so C sees a non-question predecessor and must NOT mode-3 escalate.
+    // Before the pending-commit fix, B's truncated attempt never committed and
+    // A's question signal leaked across B, wrongly escalating C.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a real question, completes cleanly
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('A')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'because of X' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // turn B — a non-question that truncates (length) then replies on retry
+    let bAttempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      bAttempt++
+      if (bAttempt === 1) {
+        sessions[0]!.setAssistantMidTurn('thought-loop output that must not be posted', 'length')
+        return
+      }
+      expect(text).toContain(EMPTY_TURN_RETRY_NUDGE)
+      sessions[0]!.setAssistantText('B')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+    }
+    await router.route(inbound({ text: 'please apply that fix to the staging cluster now.' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn C — a real question; predecessor is B (non-question) → no escalation
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('C')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'sure' })
+    }
+    await router.route(inbound({ text: 'and how do i roll it back if it breaks again?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn C did not escalate (no xhigh) — B overwrote A's question signal.
+    expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
+  })
+
+  test('cross-turn escalation: a provider-error question turn does not seed the next turn', async () => {
+    // given: turn A is a question whose leaf is a provider `error` (diverted to
+    // the error notice, no retry queued); turn B is a question. The failed turn A
+    // must not commit its question signal, so B has no question predecessor and
+    // must NOT mode-3 escalate.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a question that ends on a provider error
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMessage({
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: 'transient upstream blip',
+      } as unknown as Parameters<FakeSession['setAssistantMessage']>[0])
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn B — a question; predecessor A failed, so no escalation
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('B')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+    }
+    await router.route(inbound({ text: 'and how do i actually fix it properly now?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn B did not escalate — A's failed question signal was dropped.
+    expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
+  })
+
+  test('cross-turn escalation: a retry-exhausted fallback question turn does not seed the next turn', async () => {
+    // given: turn A is a question that length-truncates on every attempt until
+    // retries are exhausted and the fallback is posted (no usable reply); turn B
+    // is a question. The fallback turn must not commit A's question signal, so B
+    // has no question predecessor and must NOT mode-3 escalate.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a question that always truncates → retries exhausted → fallback
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn('never-ending loop output', 'length')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn B — a question; predecessor A only produced a fallback → no escalation
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('B')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+    }
+    await router.route(inbound({ text: 'and how do i actually fix it properly now?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn B did not escalate — A's fallback turn never seeded the signal.
+    expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
+  })
+
+  test('cross-turn escalation: a NO_REPLY question turn does not seed the next turn', async () => {
+    // given: turn A is a question the agent deliberately stays silent on
+    // (NO_REPLY — a completed but non-usable turn); turn B is a question. A
+    // silent turn produced no usable reply, so it must not seed escalation.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a question the agent answers with NO_REPLY (no send)
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn B — a question; predecessor A was silent → no escalation
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('B')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+    }
+    await router.route(inbound({ text: 'and how do i actually fix it properly now?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn B did not escalate — a NO_REPLY turn does not seed the signal.
+    expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
+  })
+
+  test('cross-turn escalation: a failed middle turn clears a previously seeded question signal', async () => {
+    // given: clean question A seeds the prior signal; failed question B (provider
+    // error) sits between; question C follows. C must NOT escalate from A — the
+    // failed turn B must CLEAR the prior signal, not merely skip committing, so a
+    // stale question cannot leak across the failed logical turn.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a question, clean reply (seeds the signal)
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('A')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'because of X' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // turn B — a question that fails with a provider error (clears the signal)
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMessage({
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: 'transient upstream blip',
+      } as unknown as Parameters<FakeSession['setAssistantMessage']>[0])
+    }
+    await router.route(inbound({ text: 'is the rollback even possible right now?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn C — a question; A's signal was cleared by B, so no escalation
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('C')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'sure' })
+    }
+    await router.route(inbound({ text: 'and how do i actually fix it properly now?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn C did not escalate — B cleared A's signal (no stale leak).
+    expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
   })
 
   test('empty-turn guard: pure reasoning-loop posts the fallback after retries are exhausted', async () => {
