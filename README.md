@@ -5,6 +5,10 @@
 <h3 align="center">TypeClaw: The agent for perfectionists</h3>
 <p align="center">Crafted in every detail – it behaves in your team's chat and<br />gets sharper the longer it runs. Sandboxed and self-managing.</p>
 
+<p align="center">
+  <a href="https://discord.gg/V4NQnbXpr"><img src="https://img.shields.io/badge/Discord-Chat%20with%20Typeey-5865F2?logo=discord&logoColor=white" alt="Chat with Typeey on Discord" /></a>
+</p>
+
 <br />
 <br />
 
