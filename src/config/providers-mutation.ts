@@ -136,8 +136,8 @@ export function findModelsReferencingProvider(cwd: string, providerId: string): 
   const models = readModelsOrNull(cwd)
   if (models === null) return []
   const out: string[] = []
-  for (const [profile, refs] of Object.entries(models)) {
-    if (refs.some((r) => refTargetsProvider(r, providerId))) out.push(profile)
+  for (const [profile, entry] of Object.entries(models)) {
+    if (entry.refs.some((r) => refTargetsProvider(r, providerId))) out.push(profile)
   }
   return out
 }
@@ -212,8 +212,8 @@ function readEnvKey(env: NodeJS.ProcessEnv, key: string): string | undefined {
 function buildProviderReferenceMap(models: Models | null): Map<string, string[]> {
   const out = new Map<string, string[]>()
   if (models === null) return out
-  for (const [profile, refs] of Object.entries(models)) {
-    for (const ref of refs) {
+  for (const [profile, entry] of Object.entries(models)) {
+    for (const ref of entry.refs) {
       const providerId = safeProviderForRef(ref)
       if (providerId === null) continue
       const existing = out.get(providerId) ?? []
