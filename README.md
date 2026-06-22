@@ -127,6 +127,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bu
 
 - **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `line`, `kakaotalk`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
 - **Subagent architecture** is inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by [@code-yeongyu](https://github.com/code-yeongyu). Thanks for the shape that made this clean.
+- **Question-mark attention escalation** ("Jeff Bezos detection") was suggested by [@kdhfred](https://github.com/kdhfred). Thanks for the idea that turned a wall of `?` into a real signal.
 
 ## License
 

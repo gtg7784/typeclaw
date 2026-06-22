@@ -554,10 +554,158 @@ const MORPHEME_PATTERNS: readonly RegExp[] = []
 
 const MIN_LENGTH = 2
 
-export function detectAttentionEscalation(text: string): boolean {
-  if (text.length < MIN_LENGTH) return false
+// "Jeff Bezos detection": a message that is dense with question marks is a
+// human pressing for a real answer (Bezos was famous for replying to internal
+// mail with a single "?"). We treat three question-shaped patterns as the same
+// budget hint the phrase tables emit — care, not a command. Idea from
+// GitHub @kdhfred.
+//
+// Question punctuation is multilingual: ASCII `?`, fullwidth `？` (U+FF1F),
+// Arabic `؟` (U+061F), and Armenian `՞` (U+055E). The Greek question mark is the
+// ASCII `;`, and `·` (U+00B7) is the Greek ano teleia — both are ambiguous with
+// ordinary punctuation in Latin text, so they only count as question marks when
+// the same message actually contains Greek letters.
+const QUESTION_PUNCT_RE = /[?？\u061F\u055E]/u
+// The Greek question mark is the ASCII semicolon `;` (and its canonical
+// equivalent U+037E). The ano teleia `·` (U+00B7) is the Greek SEMICOLON, not a
+// question mark, so it splits sentences but must never count as a question.
+const GREEK_QUESTION_PUNCT_RE = /[;\u037E]/u
+const GREEK_LETTER_RE = /\p{Script=Greek}/u
+// Armenian writes its question mark `՞` (U+055E) INSIDE the questioned word
+// (e.g. `Ի՞նչ եք անում։`), not as a terminal mark — so it must not split a
+// sentence. We detect it on the chunk body instead, and let the Armenian full
+// stop `։` (U+0589, distinct from ASCII `:`) terminate the sentence.
+const ARMENIAN_INLINE_QUESTION_RE = /\u055E/u
+// `\b` is ASCII-only and meaningless for CJK/Arabic/Hindi, so we count Unicode
+// letters and numbers directly instead of tokenizing on word boundaries.
+const ALNUM_RE = /[\p{L}\p{N}]/gu
+// Terminal punctuation that ends a sentence-like chunk, across scripts.
+const TERMINATOR_SPLIT_RE = /([.!?？\u061F;·。！？\u0589]+)/u
+
+function hasGreek(text: string): boolean {
+  return GREEK_LETTER_RE.test(text)
+}
+
+function isQuestionRun(run: string, greek: boolean): boolean {
+  if (QUESTION_PUNCT_RE.test(run)) return true
+  return greek && GREEK_QUESTION_PUNCT_RE.test(run)
+}
+
+function isQuestionSentence(body: string, terminator: string, greek: boolean): boolean {
+  return isQuestionRun(terminator, greek) || ARMENIAN_INLINE_QUESTION_RE.test(body)
+}
+
+function isQuestionOrSpace(char: string, greek: boolean): boolean {
+  if (/\s/u.test(char)) return true
+  if (QUESTION_PUNCT_RE.test(char)) return true
+  return greek && GREEK_QUESTION_PUNCT_RE.test(char)
+}
+
+function countAlnum(text: string): number {
+  const matches = text.match(ALNUM_RE)
+  return matches === null ? 0 : matches.length
+}
+
+// Mode 1: the whole message is nothing but question marks (and whitespace) —
+// `?`, `???`, `？？`, `؟؟؟`. A trailing `?` on a real sentence, or `?!`, must NOT
+// match here; those are handled (if at all) by the other modes.
+function isQuestionOnlyMessage(normalized: string): boolean {
+  if (normalized.length === 0) return false
+  const greek = hasGreek(normalized)
+  let sawQuestion = false
+  for (const char of normalized) {
+    if (QUESTION_PUNCT_RE.test(char) || (greek && GREEK_QUESTION_PUNCT_RE.test(char))) {
+      sawQuestion = true
+      continue
+    }
+    if (!isQuestionOrSpace(char, greek)) return false
+  }
+  return sawQuestion
+}
+
+type Sentence = { text: string; isQuestion: boolean }
+
+function splitSentences(normalized: string): Sentence[] {
+  const greek = hasGreek(normalized)
+  const parts = normalized.split(TERMINATOR_SPLIT_RE)
+  const sentences: Sentence[] = []
+  for (let i = 0; i < parts.length; i += 2) {
+    const body = parts[i] ?? ''
+    const terminator = parts[i + 1] ?? ''
+    const trimmed = body.trim()
+    if (trimmed.length === 0 && terminator.length === 0) continue
+    if (trimmed.length === 0) continue
+    sentences.push({ text: trimmed, isQuestion: isQuestionSentence(trimmed, terminator, greek) })
+  }
+  return sentences
+}
+
+// Mode 2: a single turn packed with separate questions — "are you …? do you …?
+// what …? how …?". Require 3+ genuine question sentences, each with enough
+// content (>= 3 letters/numbers) so a bare "? ? ?" stays a mode-1 case only.
+const MODE2_MIN_QUESTIONS = 3
+const SENTENCE_MIN_ALNUM = 3
+
+function countContentfulQuestions(sentences: readonly Sentence[]): number {
+  let count = 0
+  for (const sentence of sentences) {
+    if (sentence.isQuestion && countAlnum(sentence.text) >= SENTENCE_MIN_ALNUM) count++
+  }
+  return count
+}
+
+export type QuestionSignal = {
+  endedWithQuestion: boolean
+  questionSentenceCount: number
+  // True when the turn is mostly questions (>= 60% of its sentences), so a
+  // single trailing "?" on an otherwise statement-heavy message is not "dominant".
+  dominant: boolean
+  alnumCount: number
+}
+
+export function getQuestionSignal(text: string): QuestionSignal {
   const normalized = normalize(text)
+  if (normalized.length === 0) {
+    return { endedWithQuestion: false, questionSentenceCount: 0, dominant: false, alnumCount: 0 }
+  }
+  const sentences = splitSentences(normalized)
+  const questionSentenceCount = sentences.reduce((acc, s) => acc + (s.isQuestion ? 1 : 0), 0)
+  const sentenceCount = Math.max(sentences.length, 1)
+  return {
+    endedWithQuestion: sentences.at(-1)?.isQuestion ?? false,
+    questionSentenceCount,
+    dominant: questionSentenceCount >= 1 && questionSentenceCount >= Math.ceil(sentenceCount * 0.6),
+    alnumCount: countAlnum(normalized),
+  }
+}
+
+// Mode 3: the user is interrogating across turns — a question-dominant turn
+// following another question-dominant turn (prev "why …?", current "how …?").
+// A single trailing "?" on consecutive turns is far too common in normal chat,
+// so both turns must be dominant, both must end on a question mark, and both
+// must carry real content (>= 12 letters/numbers) to clear the noise floor.
+const MODE3_MIN_ALNUM = 12
+
+function isSequentialQuestionEscalation(current: QuestionSignal, prior: QuestionSignal | null | undefined): boolean {
+  return Boolean(
+    prior?.dominant &&
+    current.dominant &&
+    prior.endedWithQuestion &&
+    current.endedWithQuestion &&
+    prior.alnumCount >= MODE3_MIN_ALNUM &&
+    current.alnumCount >= MODE3_MIN_ALNUM,
+  )
+}
+
+export function detectAttentionEscalation(text: string, prior?: QuestionSignal | null): boolean {
+  const normalized = normalize(text)
+  // Mode 1 deliberately bypasses MIN_LENGTH: a lone "?" is shorter than the
+  // phrase-table floor but is itself the signal.
+  if (isQuestionOnlyMessage(normalized)) return true
   if (normalized.length < MIN_LENGTH) return false
+  const sentences = splitSentences(normalized)
+  if (countContentfulQuestions(sentences) >= MODE2_MIN_QUESTIONS) return true
+  if (isSequentialQuestionEscalation(getQuestionSignal(text), prior)) return true
   if (ALL_PHRASES.some((phrase) => normalized.includes(phrase))) return true
   return MORPHEME_PATTERNS.some((pattern) => pattern.test(normalized))
 }
@@ -570,8 +718,9 @@ const ESCALATED_LEVEL: ThinkingLevel = 'xhigh'
 export function resolveTurnThinkingLevel(
   text: string,
   sessionDefault: ThinkingLevel | undefined,
+  prior?: QuestionSignal | null,
 ): ThinkingLevel | undefined {
-  return detectAttentionEscalation(text) ? ESCALATED_LEVEL : sessionDefault
+  return detectAttentionEscalation(text, prior) ? ESCALATED_LEVEL : sessionDefault
 }
 
 type ThinkingLevelSettable = {
@@ -585,7 +734,8 @@ export function applyTurnThinkingLevel(
   session: ThinkingLevelSettable,
   text: string,
   sessionDefault: ThinkingLevel | undefined,
+  prior?: QuestionSignal | null,
 ): void {
-  const resolved = resolveTurnThinkingLevel(text, sessionDefault)
+  const resolved = resolveTurnThinkingLevel(text, sessionDefault, prior)
   if (resolved !== undefined) session.setThinkingLevel(resolved)
 }

@@ -8,7 +8,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
-import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
+import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '@/agent/attention-escalation'
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
@@ -165,6 +165,14 @@ type TunnelLogsWs = ServerWebSocket<TunnelLogsWsData>
 type InspectWs = ServerWebSocket<InspectWsData>
 type AnyOwnerWs = Ws | CommandWs
 
+// A turn whose assistant leaf aborted or errored never produced a usable turn,
+// so its question shape must not seed the next turn's cross-turn escalation.
+function tuiTurnLeafFailed(session: AgentSession): boolean {
+  const leaf = session.sessionManager?.getLeafEntry()
+  if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
+  return leaf.message.stopReason === 'aborted' || leaf.message.stopReason === 'error'
+}
+
 type QueuedPrompt = {
   streamMessageId: StreamMessageId
   text: string
@@ -180,6 +188,9 @@ type SessionState = {
   // loop, no-stream fallback) can use the live getter as the reset target — both
   // read this captured default instead.
   turnThinkingDefault: AgentSession['thinkingLevel']
+  // Prior real user turn's question shape, for cross-turn "Jeff Bezos" escalation.
+  // Null until the first user turn; carried turn-to-turn within this session only.
+  lastQuestionSignal: QuestionSignal | null
   sessionFileId: string
   origin: SessionOrigin
   sessionManager: { getSessionFile: () => string | undefined } | undefined
@@ -525,6 +536,7 @@ export function createServer({
             const state: SessionState = {
               session,
               turnThinkingDefault: session.thinkingLevel,
+              lastQuestionSignal: null,
               sessionFileId,
               origin,
               sessionManager,
@@ -789,8 +801,12 @@ export function createServer({
                 retrievalContext.results.length > 0
                   ? `${renderTurnTimeAnchor()}\n\n${msg.text}\n\n${retrievalContext.results}`
                   : `${renderTurnTimeAnchor()}\n\n${msg.text}`
-              applyTurnThinkingLevel(state.session, msg.text, state.turnThinkingDefault)
+              applyTurnThinkingLevel(state.session, msg.text, state.turnThinkingDefault, state.lastQuestionSignal)
               await state.session.prompt(turnText)
+              // A usable turn seeds the next turn's escalation; a failed leaf must
+              // CLEAR the prior signal (not just skip), else an older question
+              // leaks across the failed turn and wrongly escalates the next one.
+              state.lastQuestionSignal = tuiTurnLeafFailed(state.session) ? null : getQuestionSignal(msg.text)
               send(ws, doneMessage(state))
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err)
@@ -1094,8 +1110,14 @@ async function drain(
           retrievalContext.results.length > 0
             ? `${renderTurnTimeAnchor()}\n\n${item.text}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${item.text}`
-        applyTurnThinkingLevel(state.session, item.text, state.turnThinkingDefault)
+        applyTurnThinkingLevel(state.session, item.text, state.turnThinkingDefault, state.lastQuestionSignal)
         await state.session.prompt(turnText)
+        // Only real user turns move the signal: a usable turn seeds it, a failed
+        // leaf CLEARS it (else an older question leaks across the failed turn).
+        // Todo-continuation turns are not user turns, so they leave it untouched.
+        if (item.source !== TODO_CONTINUATION_SOURCE) {
+          state.lastQuestionSignal = tuiTurnLeafFailed(state.session) ? null : getQuestionSignal(item.text)
+        }
         send(ws, doneMessage(state))
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

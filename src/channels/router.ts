@@ -5,7 +5,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
-import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
+import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '@/agent/attention-escalation'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
@@ -578,6 +578,16 @@ type LiveSession = {
   // turn moves `session.thinkingLevel` to `high`, so the live getter can't be the
   // reset target — this preserves the real default across the session's lifetime.
   turnThinkingDefault: AgentSession['thinkingLevel']
+  // Last COMPLETED real user turn's question shape, for cross-turn "Jeff Bezos"
+  // escalation. Read by the next turn; committed from pendingUserTurnSignal only
+  // when a logical turn finishes (no empty-turn retry queued).
+  lastQuestionSignal: QuestionSignal | null
+  // A real user turn's question shape captured at turn start but not yet
+  // committed: a `length`/`aborted` truncation spans the original batch plus
+  // reminder-only retry iterations, so the signal commits to lastQuestionSignal
+  // only when that whole logical turn completes (success or fallback), never
+  // from the truncated attempt and never leaving stale state across the turn.
+  pendingUserTurnSignal: { signal: QuestionSignal } | null
   sessionId: string
   dispose: () => Promise<void>
   hooks: HookBus | undefined
@@ -788,6 +798,12 @@ type LiveSession = {
   // shape as the skip lock. `null` when no disengage has been recorded.
   // Compared by `turnSeq` so a stale value can't leak across turns.
   disengagedTurn: number | null
+  // Stamped with the current `turnSeq` when validateChannelTurn posts the
+  // empty-turn fallback (retry exhaustion). Read by the cross-turn signal commit
+  // so a fallback turn — which produced no usable assistant reply — does not seed
+  // question escalation. Compared by `turnSeq` so a stale value can't leak across
+  // turns.
+  emptyTurnFallbackTurn: number | null
   // Captured by drain() at batch dequeue; read+cleared by send() on the
   // first tool-source send of the turn. The anchor decision (delay
   // threshold + intervening-observed check) is evaluated at SEND time
@@ -1665,6 +1681,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         keyId,
         session: created.session,
         turnThinkingDefault: created.session.thinkingLevel,
+        lastQuestionSignal: null,
+        pendingUserTurnSignal: null,
         sessionId: created.sessionId,
         dispose: created.dispose,
         hooks: created.hooks,
@@ -1722,6 +1740,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         skippedTurn: null,
         skipLockedSendTurn: null,
         disengagedTurn: null,
+        emptyTurnFallbackTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -2398,24 +2417,57 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.skipLockedSendTurn = null
         live.disengagedTurn = null
+        live.emptyTurnFallbackTurn = null
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
         const retrievalQuery = composeRetrievalQuery(batch)
+        // A fresh real-user batch opens a new logical turn. Capture its question
+        // shape as PENDING (committed only once the turn completes below). The
+        // drain is serial and retries are reminder-only, so a prior pending must
+        // already be resolved; a leftover here means a logical turn never
+        // completed — fail closed by discarding it rather than misattributing.
+        if (isRealUserTurn) {
+          live.pendingUserTurnSignal = { signal: getQuestionSignal(retrievalQuery) }
+        }
         const retrievalContext = await fireSessionTurnStart(live, retrievalQuery)
         const promptText = retrievalContext.results.length > 0 ? `${text}\n\n${retrievalContext.results}` : text
-        applyTurnThinkingLevel(live.session, retrievalQuery, live.turnThinkingDefault)
+        applyTurnThinkingLevel(live.session, retrievalQuery, live.turnThinkingDefault, live.lastQuestionSignal)
         live.promptInFlight = true
         try {
           await live.session.prompt(promptText)
           await validateChannelTurn(live, successfulSendsBeforePrompt)
           live.consecutiveAborts = 0
+          // Resolve the pending logical-turn signal on a binary rule: ONLY a
+          // usable assistant reply (real model prose the user saw) seeds the next
+          // turn's escalation. Every other terminal outcome CLEARS lastQuestionSignal
+          // so an older question can't leak across the failed/silent turn:
+          //   - retry queued (`length`/`aborted`, budget left): turn still in
+          //     flight → leave both for the reminder-only iteration that ends it.
+          //   - usable reply → commit the pending signal.
+          //   - provider error / empty-turn fallback / NO_REPLY / skip (no usable
+          //     reply) → clear BOTH (pending and lastQuestionSignal).
+          // A fallback sends via source:'system', which also bumps
+          // successfulChannelSends, so it must be excluded explicitly.
+          const retryQueuedThisTurn = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt
+          const providerErrorThisTurn = assistantLeafStopReason(live.session) === 'error'
+          const fallbackPostedThisTurn = live.emptyTurnFallbackTurn === live.turnSeq
+          const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
+          const usableReplyThisTurn = sentReplyThisTurn && !fallbackPostedThisTurn && !providerErrorThisTurn
+          if (live.pendingUserTurnSignal !== null && !retryQueuedThisTurn) {
+            live.lastQuestionSignal = usableReplyThisTurn ? live.pendingUserTurnSignal.signal : null
+            live.pendingUserTurnSignal = null
+          }
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
           logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.lastSendLeafId = null
+          // A thrown prompt is a non-usable terminal outcome: drop pending AND
+          // clear the prior signal so an older question can't leak across it.
+          live.pendingUserTurnSignal = null
+          live.lastQuestionSignal = null
         } finally {
           live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
@@ -3533,6 +3585,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
     const postEmptyTurnFallback = async (cause: string): Promise<void> => {
       logger.warn(`[channels] ${live.keyId} empty_turn_fallback cause=${cause}`)
+      live.emptyTurnFallbackTurn = live.turnSeq
       const result = await send(
         {
           adapter: live.key.adapter,
