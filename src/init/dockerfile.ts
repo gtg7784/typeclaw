@@ -627,9 +627,18 @@ export const TRANSFORMERS_VERSION = '4.2.0'
 // resolves. A future transformers bump that moves sharp must bump
 // TRANSFORMERS_VERSION, `sharp@`, `@img/sharp-linux-*`, and
 // `@img/sharp-libvips-linux-*` together — mismatched sharp/libvips platform
-// packages are a known failure mode. `$TARGETARCH` is `arm64` or `amd64`; an
-// empty value (bare `docker build` without buildx) falls back to x64 for
-// determinism.
+// packages are a known failure mode.
+//
+// ARCH DETECTION — uname -m, not $TARGETARCH. Deriving the arch from the build
+// arg as `${TARGETARCH:-amd64}` was a footgun: a bare `docker build` without
+// BuildKit/buildx leaves TARGETARCH unset, so the default installed x64 packages
+// even on arm64 hosts. The arm64 platform packages then exist in NEITHER
+// /agent/node_modules/@img NOR /node_modules/@img, so sharp exhausts every
+// candidate and aborts with a clean MODULE_NOT_FOUND ("Could not load the sharp
+// module using the linux-arm64 runtime") the moment any code touches it (e.g.
+// `typeclaw --help`). `uname -m` is the arch that actually runs this `bun add`
+// (and the arch the native code must later load on), correct in every build path
+// including emulated cross-builds. Unknown machines fail the build loudly.
 const LAYER_TRANSFORMERS_INSTALL = `# Layer 7: install @huggingface/transformers with its linux-native binaries.
 # Installs the linux onnxruntime-node addon AND sharp's linux platform packages
 # (@img/sharp-linux-*) into the image's /node_modules so they survive the
@@ -637,7 +646,7 @@ const LAYER_TRANSFORMERS_INSTALL = `# Layer 7: install @huggingface/transformers
 # /agent/node_modules/sharp. The transformers version is pinned EXACT (this
 # bun add has no lockfile) — see src/init/dockerfile.ts for the rationale.
 WORKDIR /
-RUN SHARP_ARCH="$(if [ "\${TARGETARCH:-amd64}" = "arm64" ]; then echo arm64; else echo x64; fi)" \\
+RUN SHARP_ARCH="$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; x86_64|amd64) echo x64 ;; *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; esac)" \\
  && bun add \\
       @huggingface/transformers@${TRANSFORMERS_VERSION} \\
       sharp@0.34.5 \\
