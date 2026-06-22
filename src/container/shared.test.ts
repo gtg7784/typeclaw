@@ -14,10 +14,13 @@ import {
   DOCKER_NOT_FOUND_STDERR,
   dockerBindMount,
   dockerCmd,
+  dockerConfigDir,
   type DockerExec,
   imageTagFromCwd,
   isContainerNameConflict,
+  isMissingDockerCredentialHelper,
   resolveDockerBinary,
+  sanitizeDockerConfigJson,
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
@@ -574,6 +577,85 @@ describe('buildxAvailable', () => {
   test('false when the buildx plugin is missing (non-zero exit)', async () => {
     const exec: DockerExec = async () => ({ exitCode: 1, stdout: '', stderr: 'unknown command "buildx"' })
     expect(await buildxAvailable(exec)).toBe(false)
+  })
+})
+
+describe('isMissingDockerCredentialHelper', () => {
+  test('matches the canonical Windows Docker Desktop helper-not-found build failure', () => {
+    const stderr =
+      'ERROR: failed to build: failed to solve: error getting credentials - err: exec: ' +
+      '"docker-credential-desktop": executable file not found in %PATH%, out: ``'
+    expect(isMissingDockerCredentialHelper(stderr)).toBe(true)
+  })
+
+  test('matches the Linux "executable file not found in $PATH" phrasing', () => {
+    const stderr =
+      'error getting credentials - err: exec: "docker-credential-secretservice": ' +
+      'executable file not found in $PATH'
+    expect(isMissingDockerCredentialHelper(stderr)).toBe(true)
+  })
+
+  test('matches the Windows cmd "is not recognized" phrasing', () => {
+    const stderr =
+      'error getting credentials - err: exec: "docker-credential-desktop.exe": ' +
+      "'docker-credential-desktop' is not recognized as an internal or external command"
+    expect(isMissingDockerCredentialHelper(stderr)).toBe(true)
+  })
+
+  test('does NOT match a genuine private-registry auth failure (no missing helper)', () => {
+    const stderr =
+      'failed to solve: failed to fetch oauth token: unexpected status from GET request ' +
+      'to https://registry.example.com: 401 Unauthorized'
+    expect(isMissingDockerCredentialHelper(stderr)).toBe(false)
+  })
+
+  test('does NOT match an unrelated build error', () => {
+    expect(isMissingDockerCredentialHelper('ERROR: no builder instance found')).toBe(false)
+  })
+})
+
+describe('dockerConfigDir', () => {
+  test('prefers $DOCKER_CONFIG when set', () => {
+    expect(dockerConfigDir({ DOCKER_CONFIG: '/custom/docker' }, '/home/me')).toBe('/custom/docker')
+  })
+
+  test('falls back to <home>/.docker', () => {
+    expect(dockerConfigDir({}, '/home/me')).toBe(join('/home/me', '.docker'))
+  })
+})
+
+describe('sanitizeDockerConfigJson', () => {
+  test('strips credsStore while preserving auths, proxies, and currentContext', () => {
+    const raw = JSON.stringify({
+      credsStore: 'desktop',
+      currentContext: 'orbstack',
+      auths: { 'registry.example.com': { auth: 'base64creds' } },
+      proxies: { default: { httpProxy: 'http://proxy:3128' } },
+    })
+    const out = sanitizeDockerConfigJson(raw)
+    expect(out).not.toBeNull()
+    const parsed = JSON.parse(out as string)
+    expect(parsed.credsStore).toBeUndefined()
+    expect(parsed.currentContext).toBe('orbstack')
+    expect(parsed.auths).toEqual({ 'registry.example.com': { auth: 'base64creds' } })
+    expect(parsed.proxies).toEqual({ default: { httpProxy: 'http://proxy:3128' } })
+  })
+
+  test('strips credHelpers too', () => {
+    const raw = JSON.stringify({ credHelpers: { 'ghcr.io': 'desktop' }, foo: 'bar' })
+    const parsed = JSON.parse(sanitizeDockerConfigJson(raw) as string)
+    expect(parsed.credHelpers).toBeUndefined()
+    expect(parsed.foo).toBe('bar')
+  })
+
+  test('returns null when there is nothing to strip (no creds hooks)', () => {
+    expect(sanitizeDockerConfigJson(JSON.stringify({ currentContext: 'default' }))).toBeNull()
+    expect(sanitizeDockerConfigJson(null)).toBeNull()
+    expect(sanitizeDockerConfigJson('')).toBeNull()
+  })
+
+  test('treats malformed JSON as empty (nothing to strip)', () => {
+    expect(sanitizeDockerConfigJson('{ not json')).toBeNull()
   })
 })
 

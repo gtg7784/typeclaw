@@ -1,15 +1,28 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { basename, resolve, win32 } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, join as joinPath, resolve, win32 } from 'node:path'
 
 import { isWindows } from '@/shared'
 
 export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
 
-export type DockerExec = (
-  args: string[],
-  options?: { cwd?: string; inheritStdio?: boolean; signal?: AbortSignal },
-) => Promise<DockerExecResult>
+export type DockerExecOptions = {
+  cwd?: string
+  inheritStdio?: boolean
+  signal?: AbortSignal
+  // Extra environment for the docker child, merged over process.env. Used to
+  // thread DOCKER_CONFIG when retrying a build under a sanitized config that
+  // strips a broken credential helper (see runImageBuild).
+  env?: Record<string, string | undefined>
+  // Only meaningful with inheritStdio: mirror the child's stderr to the parent
+  // terminal AND capture it into the returned `stderr`. Lets a streamed build
+  // stay visible to the user while start() still inspects stderr to detect the
+  // missing-credential-helper failure and decide whether to retry.
+  captureStderr?: boolean
+}
+
+export type DockerExec = (args: string[], options?: DockerExecOptions) => Promise<DockerExecResult>
 
 export const defaultDockerExec: DockerExec = async (args, options) => {
   const bun = getBun()
@@ -31,14 +44,17 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
   // can bound long-running docker subcommands (e.g. `docker logs` on a stuck
   // daemon). The ENOENT catch stays as a safety net for the race where the
   // binary disappears between resolution and spawn.
+  const env = options?.env ? { ...process.env, ...options.env } : undefined
   if (options?.inheritStdio) {
     try {
+      if (options.captureStderr) return await spawnInheritTeeStderr(bun, cmd, options.cwd, options.signal, env)
       const proc = bun.spawn({
         cmd,
         cwd: options.cwd,
         stdout: 'inherit',
         stderr: 'inherit',
         signal: options.signal,
+        env,
       })
       return { exitCode: await proc.exited, stdout: '', stderr: '' }
     } catch (error) {
@@ -55,6 +71,7 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
       stdout: 'pipe',
       stderr: 'pipe',
       signal: options?.signal,
+      env,
     })
     const exitCode = await proc.exited
     const stdout = await new Response(proc.stdout).text()
@@ -66,6 +83,33 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
     }
     throw error
   }
+}
+
+// Streams a docker child's stdout straight to the parent terminal while teeing
+// stderr to BOTH the terminal and a buffer. A plain `stderr: 'inherit'` would
+// keep the build output live but leave start() blind to the failure reason;
+// piping stderr alone would swallow the user-visible progress. The build path
+// needs both: the user watches the build, and start() inspects the captured
+// stderr to detect a missing credential helper and retry under a sanitized
+// DOCKER_CONFIG.
+async function spawnInheritTeeStderr(
+  bun: NonNullable<ReturnType<typeof getBun>>,
+  cmd: string[],
+  cwd: string | undefined,
+  signal: AbortSignal | undefined,
+  env: NodeJS.ProcessEnv | undefined,
+): Promise<DockerExecResult> {
+  const proc = bun.spawn({ cmd, cwd, stdout: 'inherit', stderr: 'pipe', signal, env })
+  const chunks: Uint8Array[] = []
+  const reader = proc.stderr.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    process.stderr.write(value)
+    chunks.push(value)
+  }
+  const exitCode = await proc.exited
+  return { exitCode, stdout: '', stderr: Buffer.concat(chunks).toString('utf8') }
 }
 
 // Sentinel stderr from defaultDockerExec when docker can't be resolved/spawned.
@@ -203,6 +247,65 @@ export async function checkDockerAvailable(exec: DockerExec = defaultDockerExec)
 // with the legacy `docker build`. Either way the agent image builds.
 export async function buildxAvailable(exec: DockerExec = defaultDockerExec): Promise<boolean> {
   return (await exec(['buildx', 'version'])).exitCode === 0
+}
+
+// Detects the specific failure where Docker's configured credential helper
+// binary (`docker-credential-<name>`, from `credsStore`/`credHelpers` in
+// ~/.docker/config.json) is not on PATH, so docker aborts EVERY registry
+// interaction — including anonymous pulls of the PUBLIC images typeclaw builds
+// from. The canonical Windows case is a broken Docker Desktop install:
+//   error getting credentials - err: exec: "docker-credential-desktop":
+//   executable file not found in %PATH%
+//
+// Kept deliberately narrow (helper token + "credentials" + a not-found phrase)
+// so a genuine private-registry auth failure is NOT mistaken for this and
+// silently retried anonymously. Docker/BuildKit emit these as English Go/CLI
+// runtime strings (not localized user text), so English matching is correct;
+// the not-found phrasings cover Linux (`executable file not found`), Windows
+// (`not recognized` / `cannot find the file`), and generic (`no such file`).
+export function isMissingDockerCredentialHelper(stderr: string): boolean {
+  const text = stderr.toLowerCase()
+  const namesHelper = /docker-credential-[\w.-]+/i.test(stderr)
+  const aboutCredentials = text.includes('getting credentials') || text.includes('credential')
+  const notFound =
+    text.includes('executable file not found') ||
+    text.includes('no such file') ||
+    text.includes('cannot find the file') ||
+    text.includes('not recognized') ||
+    text.includes('not found in %path%') ||
+    text.includes('not found in $path')
+  return namesHelper && aboutCredentials && notFound
+}
+
+type DockerConfigJson = Record<string, unknown> & { credsStore?: unknown; credHelpers?: unknown }
+
+// Resolves the effective Docker config dir the same way the docker CLI does:
+// $DOCKER_CONFIG wins, else ~/.docker.
+export function dockerConfigDir(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+  return env.DOCKER_CONFIG ?? joinPath(home, '.docker')
+}
+
+// Produces the JSON for a sanitized Docker config that drops ONLY the broken
+// credential-helper hooks while preserving everything operationally relevant —
+// inline `auths` (base64 creds for private mirrors), `proxies`, `currentContext`,
+// `HttpHeaders`, plugin/feature flags. An empty `{}` would lose the user's
+// context and proxy setup; copy-and-strip is the safe middle ground. The
+// `contexts/` and `buildx/` subdirs are NOT copied here (they're referenced by
+// path from the sanitized dir via the caller, which symlinks them) — this
+// function only owns config.json's contents. Returns null when there is nothing
+// to strip, signalling the caller to skip the retry entirely.
+export function sanitizeDockerConfigJson(raw: string | null): string | null {
+  let parsed: DockerConfigJson = {}
+  if (raw !== null && raw.trim() !== '') {
+    try {
+      parsed = JSON.parse(raw) as DockerConfigJson
+    } catch {
+      parsed = {}
+    }
+  }
+  if (parsed.credsStore === undefined && parsed.credHelpers === undefined) return null
+  const { credsStore: _credsStore, credHelpers: _credHelpers, ...rest } = parsed
+  return JSON.stringify(rest, null, 2)
 }
 
 export type BindMountSpec = { src: string; dst: string; readonly?: boolean }

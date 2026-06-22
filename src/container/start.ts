@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { agentUsesVector } from '@/bundled-plugins/memory/vector/config'
@@ -39,8 +40,11 @@ import {
   type DockerExec,
   type DockerExecResult,
   dockerBindMount,
+  dockerConfigDir,
   imageTagFromCwd,
   isContainerNameConflict,
+  isMissingDockerCredentialHelper,
+  sanitizeDockerConfigJson,
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
@@ -733,6 +737,16 @@ export async function refreshDockerfile(
 // `docker build`. The user sees one successful `typeclaw start` instead of a
 // buildx-specific dead end. A genuine Dockerfile error fails both paths, so the
 // retry costs at most one extra attempt before the real error surfaces.
+//
+// Layered on top is a credential-helper recovery: typeclaw only pulls PUBLIC
+// images (the BuildKit syntax frontend + the typeclaw-base FROM), but a broken
+// `credsStore`/`credHelpers` in ~/.docker/config.json makes docker abort the
+// pull trying to exec a helper binary that isn't on PATH (the canonical Windows
+// Docker Desktop failure). When a build fails with exactly that signature we
+// retry the SAME build under a sanitized DOCKER_CONFIG that strips only the
+// broken helper hooks — anonymous pulls then succeed and the user's real config
+// is left untouched. This is checked BEFORE the buildx->legacy strip so a
+// cred-helper failure doesn't get misdiagnosed as a buildx problem.
 async function runImageBuild(args: {
   exec: DockerExec
   cwd: string
@@ -741,19 +755,93 @@ async function runImageBuild(args: {
   hasBuildx: boolean
 }): Promise<boolean> {
   const { exec, cwd, imageTag, buildContext, hasBuildx } = args
-  if (hasBuildx) {
-    // `--load` puts the image in the local store so the subsequent `docker run`
-    // finds it. Non-default buildx drivers (docker-container, etc.) export to
-    // the build cache ONLY without it; on the default `docker` driver --load is
-    // already implied, so passing it unconditionally is a safe no-op there.
-    const buildx = await exec(['buildx', 'build', '--load', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
-    if (buildx.exitCode === 0) return true
-    // buildx failed — fall back to the legacy builder against a stripped
-    // Dockerfile so a misconfigured-buildx host still ends up with an image.
-    await refreshDockerfile(cwd, { buildKit: false })
+  const buildArgv = (frontend: 'buildx' | 'legacy'): string[] =>
+    frontend === 'buildx'
+      ? ['buildx', 'build', '--load', '-t', imageTag, buildContext]
+      : ['build', '-t', imageTag, buildContext]
+
+  let sanitizedConfig: SanitizedDockerConfig | null = null
+  const attempt = async (frontend: 'buildx' | 'legacy'): Promise<DockerExecResult> =>
+    exec(buildArgv(frontend), { cwd, inheritStdio: true, captureStderr: true, env: sanitizedConfig?.env })
+
+  try {
+    let frontend: 'buildx' | 'legacy' = hasBuildx ? 'buildx' : 'legacy'
+    let result = await attempt(frontend)
+    if (result.exitCode === 0) return true
+
+    // Same-frontend retry: a broken credential helper aborts the pull before
+    // the builder ever matters, so strip it and retry the identical build.
+    if (sanitizedConfig === null && isMissingDockerCredentialHelper(result.stderr)) {
+      sanitizedConfig = await createSanitizedDockerConfig()
+      if (sanitizedConfig) {
+        result = await attempt(frontend)
+        if (result.exitCode === 0) return true
+      }
+    }
+
+    if (frontend === 'buildx') {
+      // buildx failed for a non-cred reason — fall back to the legacy builder
+      // against a stripped Dockerfile so a misconfigured-buildx host still ends
+      // up with an image. The sanitized config (if any) carries into the retry.
+      await refreshDockerfile(cwd, { buildKit: false })
+      frontend = 'legacy'
+      result = await attempt(frontend)
+      if (result.exitCode === 0) return true
+      if (sanitizedConfig === null && isMissingDockerCredentialHelper(result.stderr)) {
+        sanitizedConfig = await createSanitizedDockerConfig()
+        if (sanitizedConfig) {
+          result = await attempt(frontend)
+          if (result.exitCode === 0) return true
+        }
+      }
+    }
+
+    if (sanitizedConfig !== null) {
+      process.stderr.write(
+        'typeclaw: docker build still failed after retrying public image pulls without the configured ' +
+          'credential helper. Your ~/.docker/config.json credsStore/credHelpers may be broken.\n',
+      )
+    }
+    return false
+  } finally {
+    await sanitizedConfig?.cleanup()
   }
-  const legacy = await exec(['build', '-t', imageTag, buildContext], { cwd, inheritStdio: true })
-  return legacy.exitCode === 0
+}
+
+type SanitizedDockerConfig = { env: { DOCKER_CONFIG: string }; cleanup: () => Promise<void> }
+
+// Materializes a temp DOCKER_CONFIG dir that is a full DEEP COPY of the user's
+// ~/.docker tree with only the broken credential-helper hooks stripped from the
+// copied config.json. Returns null when there's nothing to strip (no creds
+// hooks present), so the caller skips a pointless retry. Cleanup removes the dir
+// on every build outcome.
+//
+// DOCKER_CONFIG is not just credentials: `contexts/` maps the current docker
+// context (e.g. Docker Desktop's `desktop-linux`) to the daemon endpoint, and
+// `buildx/` holds builder instance state. A relocated config missing those
+// makes `docker buildx build` (and `docker build`, which Docker Desktop forwards
+// to `buildx build --builder <currentContext>`) fail with `no builder
+// "desktop-linux" found` — the exact second failure this replaces. The earlier
+// approach symlinked those subdirs, but Windows `fs.symlink` throws EPERM
+// without Developer Mode/admin, so the catch silently produced a config dir with
+// the context/builder state ABSENT. A recursive copy is portable and preserves
+// the full topology; only config.json is overwritten with the sanitized form.
+async function createSanitizedDockerConfig(): Promise<SanitizedDockerConfig | null> {
+  const srcDir = dockerConfigDir()
+  const raw = await readFile(join(srcDir, 'config.json'), 'utf8').catch(() => null)
+  const sanitized = sanitizeDockerConfigJson(raw)
+  if (sanitized === null) return null
+
+  const dir = await mkdtemp(join(tmpdir(), 'typeclaw-dockercfg-'))
+  const cleanup = (): Promise<void> => rm(dir, { recursive: true, force: true })
+  try {
+    if (existsSync(srcDir)) await cp(srcDir, dir, { recursive: true, dereference: false })
+    await writeFile(join(dir, 'config.json'), sanitized)
+  } catch {
+    await cleanup()
+    return null
+  }
+  return { env: { DOCKER_CONFIG: dir }, cleanup }
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {

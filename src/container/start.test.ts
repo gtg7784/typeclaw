@@ -1225,7 +1225,15 @@ describe('commitSystemFile', () => {
   })
 })
 
-type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
+type RecordedCall = {
+  args: string[]
+  dockerfileSnapshot: string | null
+  env?: Record<string, string | undefined>
+  // Snapshot, taken at call time, of whether the build's DOCKER_CONFIG dir has a
+  // `contexts/` subdir. Lets a test assert the sanitized config deep-copied the
+  // docker context state BEFORE runImageBuild's finally removes the temp dir.
+  dockerConfigHasContexts?: boolean
+}
 
 // Matches the image build regardless of frontend: `docker build ...` (legacy)
 // or `docker buildx build ...` (BuildKit). Tests assert on the build call
@@ -1256,6 +1264,10 @@ function fakeDockerExec(scenario: {
   dockerPlatformName?: string
   buildxAvailable?: boolean
   buildxBuildFails?: boolean
+  // Simulate a broken credential helper: build calls fail with the helper-not-
+  // found stderr UNTIL the call is made with DOCKER_CONFIG set in its env (the
+  // sanitized-config retry), at which point the build succeeds.
+  credHelperMissingUntilSanitized?: boolean
 }): {
   exec: DockerExec
   calls: RecordedCall[]
@@ -1273,7 +1285,9 @@ function fakeDockerExec(scenario: {
         dockerfileSnapshot = null
       }
     }
-    calls.push({ args, dockerfileSnapshot })
+    const dockerConfig = options?.env?.DOCKER_CONFIG
+    const dockerConfigHasContexts = dockerConfig === undefined ? undefined : existsSync(join(dockerConfig, 'contexts'))
+    calls.push({ args, dockerfileSnapshot, env: options?.env, dockerConfigHasContexts })
 
     if (args[0] === 'image' && args[1] === 'inspect') {
       return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
@@ -1343,6 +1357,15 @@ function fakeDockerExec(scenario: {
       // builder). The legacy `docker build` retry still succeeds.
       if (scenario.buildxBuildFails && args[0] === 'buildx') {
         return { exitCode: 1, stdout: '', stderr: 'ERROR: no builder instance found' }
+      }
+      if (scenario.credHelperMissingUntilSanitized && options?.env?.DOCKER_CONFIG === undefined) {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr:
+            'ERROR: failed to solve: error getting credentials - err: exec: ' +
+            '"docker-credential-desktop": executable file not found in %PATH%',
+        }
       }
       return { exitCode: 0, stdout: '', stderr: '' }
     }
@@ -1554,6 +1577,64 @@ describe('start (composition)', () => {
     expect(legacy?.dockerfileSnapshot).not.toContain('# syntax=')
     expect(legacy?.dockerfileSnapshot).not.toContain('--mount=type=cache')
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+  })
+
+  test('when a build fails on a missing credential helper, retries the same build under a sanitized DOCKER_CONFIG and succeeds', async () => {
+    // given a host whose ~/.docker config has a broken cred helper AND a docker
+    // context dir (the desktop-linux context+builder state that a relocated
+    // DOCKER_CONFIG must not lose, or buildx fails with "no builder ... found")
+    const dockerCfg = await mkdtemp(join(tmpdir(), 'typeclaw-test-dockercfg-'))
+    await writeFile(
+      join(dockerCfg, 'config.json'),
+      JSON.stringify({ credsStore: 'desktop', currentContext: 'desktop-linux' }),
+    )
+    await mkdir(join(dockerCfg, 'contexts', 'meta', 'desktop-linux'), { recursive: true })
+    await writeFile(join(dockerCfg, 'contexts', 'meta', 'desktop-linux', 'meta.json'), '{"Name":"desktop-linux"}')
+    const prevDockerConfig = process.env.DOCKER_CONFIG
+    process.env.DOCKER_CONFIG = dockerCfg
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: false,
+      container: { exists: false },
+      buildxAvailable: true,
+      credHelperMissingUntilSanitized: true,
+    })
+
+    try {
+      // when start builds the image
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        ...bypassVerify,
+      })
+
+      // then it recovers transparently and the container comes up
+      expect(result.ok).toBe(true)
+      const buildCalls = calls.filter((c) => isBuildCall(c.args))
+      // first build runs without the override and fails on the cred helper
+      expect(buildCalls[0]?.env?.DOCKER_CONFIG).toBeUndefined()
+      // the retry runs the SAME buildx frontend, now pointed at a sanitized dir
+      // (the dir's contents are removed by runImageBuild's cleanup; the sanitize
+      // transform itself is asserted in sanitizeDockerConfigJson's unit tests)
+      const retry = buildCalls.find((c) => c.env?.DOCKER_CONFIG !== undefined)
+      expect(retry).toBeDefined()
+      expect(retry?.args.slice(0, 2)).toEqual(['buildx', 'build'])
+      // the retry must NOT point at the user's real config dir
+      expect(retry?.env?.DOCKER_CONFIG).not.toBe(dockerCfg)
+      // regression guard: the sanitized dir is a DEEP COPY that preserved the
+      // docker context state, so buildx can still resolve the desktop-linux
+      // builder (the symlink approach silently dropped this on Windows)
+      expect(retry?.dockerConfigHasContexts).toBe(true)
+      expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+    } finally {
+      if (prevDockerConfig === undefined) delete process.env.DOCKER_CONFIG
+      else process.env.DOCKER_CONFIG = prevDockerConfig
+      await rm(dockerCfg, { recursive: true, force: true })
+    }
   })
 
   test('start refreshes Dockerfile with custom append lines from typeclaw.json', async () => {
