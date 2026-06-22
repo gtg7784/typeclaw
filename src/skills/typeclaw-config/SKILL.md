@@ -93,6 +93,7 @@ Example with mounts:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
+  "model": "<provider>/<model-id>",
   "mounts": [
     { "name": "typeclaw", "path": "~/workspace/typeclaw", "description": "the typeclaw source repo" },
     { "name": "notes", "path": "~/notes", "readOnly": true, "description": "personal notes (read-only)" }
@@ -210,7 +211,8 @@ Default (no `portForward` field at all): forward every LISTEN.
 
 ```json
 {
-  "$schema": "./node_modules/typeclaw/typeclaw.schema.json"
+  "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
+  "model": "<provider>/<model-id>"
 }
 ```
 
