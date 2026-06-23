@@ -59,6 +59,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     executeCommand: async () => ({ kind: 'no-live-session' }),
     getSelfAliases: () => [],
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
+    injectPrVerdictActivity: () => ({ kind: 'delivered', count: 0 }),
     markTurnSkipped: () => ({ kind: 'no-live-session' }),
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,

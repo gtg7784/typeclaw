@@ -40,6 +40,7 @@ function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): C
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
+    injectPrVerdictActivity: () => ({ kind: 'delivered', count: 0 }),
     markTurnSkipped: () => ({ kind: 'no-live-session' }),
     resumeRestartHandoff: async () => {},
   } as unknown as ChannelRouter

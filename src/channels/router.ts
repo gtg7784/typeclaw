@@ -39,6 +39,7 @@ import {
 import { checkFalseReceipt } from './github-false-receipt'
 import { evaluateRereviewGuard } from './github-rereview-guard'
 import { resetReviewTurn } from './github-review-turn-ledger'
+import { renderPrVerdictStandDownReminder } from './github-verdict-activity'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
   type MembershipCount,
@@ -1067,6 +1068,19 @@ export type ChannelRouter = {
     error?: string
     channelKey?: { adapter: string; workspace: string; chat: string; thread: string | null }
   }) => { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' }
+  // Fan a LANDED formal review verdict out to the OTHER live sessions reviewing
+  // the same PR so they stand down from posting a redundant verdict. Targets every
+  // live github session whose chat is `pr:<prNumber>` in `workspace`, EXCLUDING the
+  // publisher (`sessionId`). Routes by (workspace, prNumber) across all threads —
+  // the duplicate-review fan-out is exactly the per-thread sibling sessions. The
+  // injected reminder is advisory (verdict-only stand-down); the hard idempotency
+  // guards remain the correctness boundary. Returns how many siblings were nudged.
+  injectPrVerdictActivity: (args: {
+    workspace: string
+    prNumber: number
+    verdict: 'APPROVE' | 'REQUEST_CHANGES'
+    sessionId: string
+  }) => { kind: 'delivered'; count: number }
   // Record that the agent invoked `skip_response` during the current turn
   // for the channel session identified by `parentSessionId`. The reason is
   // logged at INFO level inside `validateChannelTurn` (single log line per
@@ -4534,6 +4548,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'no-live-session' }
   }
 
+  const injectPrVerdictActivity = (args: {
+    workspace: string
+    prNumber: number
+    verdict: 'APPROVE' | 'REQUEST_CHANGES'
+    sessionId: string
+  }): { kind: 'delivered'; count: number } => {
+    const chat = `pr:${args.prNumber}`
+    let count = 0
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.key.adapter !== 'github') continue
+      if (live.key.workspace !== args.workspace || live.key.chat !== chat) continue
+      // Self-exclude: the session that just landed the verdict must not be told to
+      // stand down from its own legitimate review.
+      if (live.sessionId === args.sessionId) continue
+      const text = renderPrVerdictStandDownReminder({ prNumber: args.prNumber, verdict: args.verdict })
+      live.pendingSystemReminders.push(text)
+      logger.info(`[channels] ${live.keyId}: pr-verdict stand-down queued pr=${chat} verdict=${args.verdict}`)
+      if (!live.draining) void drain(live)
+      count++
+    }
+    return { kind: 'delivered', count }
+  }
+
   const markTurnSkipped = (args: {
     parentSessionId: string
     reason: string
@@ -4641,6 +4679,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     executeCommand,
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
+    injectPrVerdictActivity,
     markTurnSkipped,
     clearSticky,
     reserveRestartHandoff,

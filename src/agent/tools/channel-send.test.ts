@@ -53,6 +53,7 @@ function fakeRouter(
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
+    injectPrVerdictActivity: () => ({ kind: 'delivered', count: 0 }),
     markTurnSkipped: () => ({ kind: 'no-live-session' }),
     clearSticky: () => ({ keyId: '', cleared: 0 }),
     reserveRestartHandoff: () => null,

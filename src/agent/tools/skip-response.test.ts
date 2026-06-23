@@ -58,6 +58,7 @@ function fakeRouter(
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
+    injectPrVerdictActivity: () => ({ kind: 'delivered', count: 0 }),
     markTurnSkipped: (args) => {
       opts.markCalls?.push({ parentSessionId: args.parentSessionId, reason: args.reason })
       return opts.markResult ?? { kind: 'recorded', keyId: 'discord-bot:g1:c1' }

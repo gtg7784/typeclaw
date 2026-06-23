@@ -11222,3 +11222,101 @@ describe('resumeRestartHandoff', () => {
     expect(originDuringWake.lastInboundAuthorId).toBe('U_OWNER')
   })
 })
+
+describe('injectPrVerdictActivity (PR-keyed verdict liveness)', () => {
+  const WS = 'typeclaw/typeclaw'
+
+  function ghInbound(thread: string | null, over: Partial<InboundMessage> = {}): InboundMessage {
+    return inbound({
+      adapter: 'github',
+      workspace: WS,
+      chat: 'pr:1042',
+      thread,
+      authorId: '931655',
+      authorName: 'devxoul',
+      text: '@typeey please review',
+      isBotMention: true,
+      ...over,
+    })
+  }
+
+  async function spawnTwoSiblingSessions(dir: string) {
+    const { router, sessions } = makeRouter(dir)
+    await router.route(ghInbound(null))
+    await router.__testing!.flushDebounce({ adapter: 'github', workspace: WS, chat: 'pr:1042', thread: null })
+    await router.route(ghInbound('3458942280', { externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce({ adapter: 'github', workspace: WS, chat: 'pr:1042', thread: '3458942280' })
+    return { router, sessions }
+  }
+
+  test('sequential fan-out: a landed verdict stands down the OTHER live pr session, not the publisher', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = await spawnTwoSiblingSessions(dir)
+    expect(sessions).toHaveLength(2)
+    const publisherPrompts = sessions[0]!.prompts.length
+    const siblingPrompts = sessions[1]!.prompts.length
+
+    // when: session 1 (ses_fake_1, thread:null) lands an APPROVE
+    const result = router.injectPrVerdictActivity({
+      workspace: WS,
+      prNumber: 1042,
+      verdict: 'APPROVE',
+      sessionId: 'ses_fake_1',
+    })
+
+    // then: exactly the sibling is nudged; the publisher is excluded
+    expect(result).toEqual({ kind: 'delivered', count: 1 })
+    await waitFor(() => sessions[1]!.prompts.length > siblingPrompts)
+    const reminder = sessions[1]!.prompts.at(-1) ?? ''
+    expect(reminder).toContain('<system-reminder>')
+    expect(reminder).toContain('APPROVE')
+    expect(reminder).toContain('#1042')
+    expect(sessions[0]!.prompts.length).toBe(publisherPrompts)
+  })
+
+  test('publisher-exclusion: a single solo session landing a verdict nudges nobody', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(ghInbound(null))
+    await router.__testing!.flushDebounce({ adapter: 'github', workspace: WS, chat: 'pr:1042', thread: null })
+
+    const result = router.injectPrVerdictActivity({
+      workspace: WS,
+      prNumber: 1042,
+      verdict: 'APPROVE',
+      sessionId: 'ses_fake_1',
+    })
+    expect(result).toEqual({ kind: 'delivered', count: 0 })
+    expect(sessions[0]!.prompts.length).toBe(1)
+  })
+
+  test('scoped by PR: a verdict on a different PR does not touch this PR session', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = await spawnTwoSiblingSessions(dir)
+    const before = sessions.map((s) => s.prompts.length)
+
+    const result = router.injectPrVerdictActivity({
+      workspace: WS,
+      prNumber: 999,
+      verdict: 'APPROVE',
+      sessionId: 'ses_other',
+    })
+    expect(result).toEqual({ kind: 'delivered', count: 0 })
+    expect(sessions.map((s) => s.prompts.length)).toEqual(before)
+  })
+
+  test('scoped by workspace: a same-PR-number verdict in a different repo is ignored', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = await spawnTwoSiblingSessions(dir)
+    const before = sessions.map((s) => s.prompts.length)
+
+    const result = router.injectPrVerdictActivity({
+      workspace: 'other/repo',
+      prNumber: 1042,
+      verdict: 'APPROVE',
+      sessionId: 'ses_other',
+    })
+    expect(result).toEqual({ kind: 'delivered', count: 0 })
+    expect(sessions.map((s) => s.prompts.length)).toEqual(before)
+  })
+})

@@ -28,8 +28,11 @@ import {
   createChannelManager,
   createChannelsReloadable,
   createGithubTokenBridge,
+  createPrVerdictActivityBridge,
   createSubagentCompletionBridge,
+  setReviewObserver,
   type ChannelManager,
+  type PrVerdictActivityBridge,
   type SubagentCompletionBridge,
 } from '@/channels'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
@@ -667,6 +670,22 @@ export async function startAgent({
     router: channelManager.router,
   })
 
+  // Fan a landed formal review verdict out to the sibling sessions reviewing the
+  // same PR so they stand down from a redundant verdict (the per-thread fan-out
+  // duplicate-review fix). The github-cli-auth plugin records the verdict in the
+  // turn-ledger but has no stream access, so the ledger's review observer is the
+  // seam: it publishes onto the broadcast bus here, and the bridge routes it.
+  const prVerdictActivityBridge: PrVerdictActivityBridge = createPrVerdictActivityBridge({
+    stream,
+    router: channelManager.router,
+  })
+  setReviewObserver((review) => {
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'pr.verdict-activity', ...review },
+    })
+  })
+
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
 
   // Two-phase channel restart-resume around adapter startup, to close the race
@@ -863,6 +882,8 @@ export async function startAgent({
     void disposeMaterializedSkills(pluginRuntime)
     tunnelBridge.stop()
     subagentCompletionBridge.stop()
+    prVerdictActivityBridge.stop()
+    setReviewObserver(null)
     await tunnelManager.stop()
     await channelManager.stop()
     await mcpManager?.closeAll()
