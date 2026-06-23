@@ -4946,6 +4946,7 @@ export type { QuoteAnchorSource } from './types'
 function formatAuthorReference(adapter: AdapterId, authorId: string, authorName: string): string {
   const displayName = authorName.trim() !== '' ? authorName.trim() : authorId
   switch (adapter) {
+    case 'slack':
     case 'slack-bot':
     case 'discord-bot':
       return `<@${authorId}>`
