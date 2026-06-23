@@ -13,6 +13,7 @@ import { isWindows } from '@/shared'
 import type { DockerExec } from './shared'
 import {
   commitSystemFile,
+  isPathInsideOrEqual,
   planStart,
   refreshDockerfile,
   refreshGitignore,
@@ -448,17 +449,33 @@ describe('shouldMirrorDevSource', () => {
 })
 
 describe('shouldMountWindowsDevSource', () => {
-  test('mounts the checkout over the in-container node_modules path on Windows', () => {
-    expect(shouldMountWindowsDevSource('C:\\src\\typeclaw', 'win32')).toBe(true)
+  test('mounts an out-of-cwd checkout (e.g. a bun-linked link: source) over the in-container node_modules path on Windows', () => {
+    expect(shouldMountWindowsDevSource('/src/typeclaw', '/agents/coder', 'win32')).toBe(true)
   })
 
   test('does NOT mount on POSIX (the same-path mirror branch handles those)', () => {
-    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', 'linux')).toBe(false)
-    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', 'darwin')).toBe(false)
+    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', '/srv/agents/coder', 'linux')).toBe(false)
+    expect(shouldMountWindowsDevSource('/srv/src/typeclaw', '/srv/agents/coder', 'darwin')).toBe(false)
   })
 
   test('does NOT mount when there is no dev source', () => {
-    expect(shouldMountWindowsDevSource(null, 'win32')).toBe(false)
+    expect(shouldMountWindowsDevSource(null, '/agents/coder', 'win32')).toBe(false)
+  })
+
+  test('does NOT mount when the dev source lives inside the agent folder (already exposed via /agent)', () => {
+    expect(shouldMountWindowsDevSource('/agents/coder/vendor/typeclaw', '/agents/coder', 'win32')).toBe(false)
+  })
+})
+
+describe('isPathInsideOrEqual', () => {
+  test('treats the parent itself and descendants as inside', () => {
+    expect(isPathInsideOrEqual('/srv/agent', '/srv/agent')).toBe(true)
+    expect(isPathInsideOrEqual('/srv/agent/vendor/typeclaw', '/srv/agent')).toBe(true)
+  })
+
+  test('treats siblings and prefix-collision neighbors as outside', () => {
+    expect(isPathInsideOrEqual('/srv/src/typeclaw', '/srv/agent')).toBe(false)
+    expect(isPathInsideOrEqual('/srv/agentX', '/srv/agent')).toBe(false)
   })
 })
 
@@ -1055,6 +1072,34 @@ describe('refreshDockerfile', () => {
       await refreshDockerfile(dir)
 
       // then: no GHCR pin (dev version doesn't exist on GHCR yet) — inline heavy stack on oven/bun
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).not.toContain('ghcr.io/typeclaw/typeclaw-base')
+      expect(written).toContain('FROM oven/bun:1-slim')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('inlines (no GHCR pin) for a link: dev install even when node_modules has a release-shaped version', async () => {
+    // given: a native-Windows link: dev agent where ensureDeps already populated
+    // node_modules/typeclaw with a release-shaped but unpublished version — the
+    // case that would otherwise be rewritten to FROM ...:99.99.99 on start
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-winlink-'))
+    try {
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { typeclaw: 'link:typeclaw' } }),
+      )
+      await mkdir(join(dir, 'node_modules', 'typeclaw'), { recursive: true })
+      await writeFile(
+        join(dir, 'node_modules', 'typeclaw', 'package.json'),
+        JSON.stringify({ name: 'typeclaw', version: '99.99.99' }),
+      )
+
+      // when: refreshDockerfile runs (the path start() takes after ensureDeps)
+      await refreshDockerfile(dir)
+
+      // then: the local-spec gate inlines the heavy stack instead of pinning a nonexistent GHCR tag
       const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
       expect(written).not.toContain('ghcr.io/typeclaw/typeclaw-base')
       expect(written).toContain('FROM oven/bun:1-slim')
