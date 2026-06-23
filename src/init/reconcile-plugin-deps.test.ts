@@ -234,6 +234,111 @@ describe('reconcilePluginDeps', () => {
     }
   })
 
+  test('resolves multiple new bare names concurrently, not serially', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      let inFlight = 0
+      let maxInFlight = 0
+      const resolveLatest = async (name: string): Promise<string> => {
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        inFlight -= 1
+        return `1.0.0-${name}`
+      }
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['typeclaw-plugin-a', 'typeclaw-plugin-b', 'typeclaw-plugin-c'],
+        resolveLatest,
+      })
+      expect(result.changed).toBe(true)
+      // given three new bare names, a serial pass would peak at 1 in flight
+      expect(maxInFlight).toBe(3)
+      const pkg = await readPkg(dir)
+      const deps = pkg.dependencies as Record<string, string>
+      expect(deps['typeclaw-plugin-a']).toBe('1.0.0-typeclaw-plugin-a')
+      expect(deps['typeclaw-plugin-b']).toBe('1.0.0-typeclaw-plugin-b')
+      expect(deps['typeclaw-plugin-c']).toBe('1.0.0-typeclaw-plugin-c')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('skipped order is deterministic regardless of which probe settles first', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      // "zed" resolves quickly, "abc" slowly: settle order is zed-then-abc, but
+      // both are not-found, so skipped must come back sorted (abc before zed).
+      const resolveLatest = async (name: string): Promise<string | null> => {
+        await new Promise((resolve) => setTimeout(resolve, name === 'abc-missing' ? 30 : 5))
+        return null
+      }
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['zed-missing', 'abc-missing'],
+        resolveLatest,
+      })
+      expect(result.changed).toBe(false)
+      expect(result.skipped).toEqual(['abc-missing', 'zed-missing'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a later versioned entry wins over an earlier bare entry for the same name (positional last-wins)', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      // The bare entry queues a registry resolve that settles AFTER the loop;
+      // it must not clobber the explicit 1.2.3 set by the later versioned entry.
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['typeclaw-plugin-foo', 'typeclaw-plugin-foo@1.2.3'],
+        resolveLatest: async () => '9.9.9',
+      })
+      expect(result.changed).toBe(true)
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['typeclaw-plugin-foo']).toBe('1.2.3')
+      expect((pkg.typeclaw as Record<string, unknown>).managedPlugins).toEqual({ 'typeclaw-plugin-foo': '1.2.3' })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a later bare entry wins over an earlier versioned entry for the same name (positional last-wins)', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['typeclaw-plugin-foo@1.2.3', 'typeclaw-plugin-foo'],
+        resolveLatest: async () => '9.9.9',
+      })
+      expect(result.changed).toBe(true)
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['typeclaw-plugin-foo']).toBe('9.9.9')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a later versioned entry suppresses the skip of an earlier not-found bare entry', async () => {
+    const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
+    try {
+      // The earlier bare entry 404s, but the later versioned entry is the last
+      // occurrence and wins: the name must NOT appear in skipped.
+      const result = await reconcilePluginDeps({
+        cwd: dir,
+        plugins: ['typeclaw-plugin-foo', 'typeclaw-plugin-foo@1.2.3'],
+        resolveLatest: async () => null,
+      })
+      expect(result.changed).toBe(true)
+      expect(result.skipped).toEqual([])
+      const pkg = await readPkg(dir)
+      expect((pkg.dependencies as Record<string, string>)['typeclaw-plugin-foo']).toBe('1.2.3')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('propagates a hard resolver failure instead of skipping (network errors still block)', async () => {
     const dir = await makeAgentDir({ name: 'agent', dependencies: {} })
     try {

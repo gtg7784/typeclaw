@@ -104,34 +104,59 @@ type PackageJsonShape = {
 // re-resolve `latest` on every start and silently rewrite package.json when the
 // registry moves — bypassing the pluginAddition security gate, which only fires
 // on a guarded config write.
+//
+// Registry resolution for genuinely-new bare names runs CONCURRENTLY: each
+// `resolveLatest` spawns a `bun pm view` subprocess (a serial pass paid the
+// per-call network round-trip once per new plugin on the cold-start critical
+// path). A hard resolver failure (network/auth, NOT a 404) still rejects the
+// whole pass via Promise.all, preserving the "network errors block start"
+// contract. The `skipped` list is sorted so its order is independent of which
+// concurrent probe settled first.
+//
+// Last-entry-wins is positional, matching the prior serial loop: for a name
+// listed more than once, the LAST entry decides. An explicit/pinned version
+// applied during the loop must therefore survive even if an EARLIER bare entry
+// for the same name resolved from the registry afterward — so the post-await
+// assignment is skipped for any name whose last occurrence was not the bare one.
 async function resolveDesiredManaged(
   plugins: readonly string[],
   previousManaged: Record<string, string>,
   resolveLatest: ResolveLatestVersion,
 ): Promise<{ desired: Record<string, string>; skipped: string[] }> {
   const desired: Record<string, string> = {}
-  const skipped: string[] = []
+  const bareIsLastFor = new Set<string>()
+  const toResolve: string[] = []
   for (const entry of plugins) {
     if (isLocalEntry(entry)) continue
     const { name, versionSpec } = splitPluginEntrySpec(entry)
     if (name.length === 0) continue
     if (versionSpec !== undefined) {
       desired[name] = versionSpec
+      bareIsLastFor.delete(name)
       continue
     }
     const pinned = previousManaged[name]
     if (pinned !== undefined) {
       desired[name] = pinned
+      bareIsLastFor.delete(name)
       continue
     }
-    const resolved = await resolveLatest(name)
-    if (resolved === null) {
+    bareIsLastFor.add(name)
+    if (!toResolve.includes(name)) toResolve.push(name)
+  }
+
+  const resolved = await Promise.all(toResolve.map(async (name) => ({ name, version: await resolveLatest(name) })))
+  const skipped: string[] = []
+  for (const { name, version } of resolved) {
+    if (!bareIsLastFor.has(name)) continue
+    if (version === null) {
       skipped.push(name)
       continue
     }
-    desired[name] = resolved
+    desired[name] = version
   }
-  return { desired: sortKeys(desired), skipped }
+
+  return { desired: sortKeys(desired), skipped: skipped.sort() }
 }
 
 function isLocalEntry(entry: string): boolean {
