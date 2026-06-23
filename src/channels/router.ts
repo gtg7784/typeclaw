@@ -4965,6 +4965,7 @@ function formatAuthorReference(adapter: AdapterId, authorId: string, authorName:
   switch (adapter) {
     case 'slack':
     case 'slack-bot':
+    case 'discord':
     case 'discord-bot':
       return `<@${authorId}>`
     case 'github':

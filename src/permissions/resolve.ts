@@ -6,6 +6,7 @@ import type { MatchRule, Platform } from './match-rule'
 const ADAPTER_TO_PLATFORM: Record<AdapterId, Platform> = {
   slack: 'slack',
   'slack-bot': 'slack',
+  discord: 'discord',
   'discord-bot': 'discord',
   github: 'github',
   'telegram-bot': 'telegram',

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 export const ADAPTER_IDS = [
+  'discord',
   'discord-bot',
   'github',
   'line',
@@ -262,6 +263,7 @@ const githubChannelSchema = adapterSchema.extend({
 // kakaotalk adapter only on dedicated agent accounts you can afford to lose.
 export const channelsSchema = z
   .object({
+    discord: adapterSchema.optional(),
     'discord-bot': adapterSchema.optional(),
     github: githubChannelSchema.optional(),
     // LINE is a personal-account channel like KakaoTalk: plain-text only,
