@@ -114,6 +114,7 @@ export function createOutboundCallback(deps: {
 
     try {
       if (attachments.length > 0) {
+        const uploadedRefs: string[] = []
         for (const [index, attachment] of attachments.entries()) {
           const path = resolvePath ? resolvePath(attachment.path) : attachment.path
           const file = await readFile(path)
@@ -123,9 +124,11 @@ export function createOutboundCallback(deps: {
             ...(carriesText ? { text } : {}),
             ...(parentId !== undefined ? { parentId } : {}),
           })
+          uploadedRefs.push(sent.ref)
           logger.info(`[webex] uploaded id=${sent.ref} filename=${file.filename} ${tag}`)
         }
-        return { ok: true }
+        // First upload carries the text and is the thread parent, so it is the reply anchor.
+        return { ok: true, messageId: uploadedRefs[0], messageIds: uploadedRefs }
       }
 
       const sent = await client.sendMessage(msg.chat, text, parentId !== undefined ? { parentId } : undefined)

@@ -99,7 +99,7 @@ describe('webex outbound', () => {
 
     const result = await cb(outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }] }))
 
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1'] })
     expect(sends).toEqual([])
     expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' }])
   })
@@ -113,10 +113,11 @@ describe('webex outbound', () => {
       readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
     })
 
-    await cb(
+    const result = await cb(
       outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }, { path: '/tmp/b.txt' }] }),
     )
 
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1', 'up-2'] })
     expect(uploads).toEqual([
       { roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' },
       { roomId: 'room-1', filename: 'b.txt', text: undefined, parentId: 'root-1' },
@@ -134,7 +135,7 @@ describe('webex outbound', () => {
 
     const result = await cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt' }] }))
 
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1'] })
     expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: undefined, parentId: undefined }])
   })
 

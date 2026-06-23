@@ -4,10 +4,16 @@ import type { WebexListener, WebexMessage } from 'agent-messenger/webex'
 
 import type { ChannelRouter } from '@/channels/router'
 import { channelsSchema } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundMessage, OutboundMessage } from '@/channels/types'
 import type { WebexAccountRecord } from '@/secrets/schema'
 
-import { createTypingCallback, createWebexAdapter, createWebexHistoryCallback, type WebexAdapterLogger } from './webex'
+import {
+  createOutboundCallback,
+  createTypingCallback,
+  createWebexAdapter,
+  createWebexHistoryCallback,
+  type WebexAdapterLogger,
+} from './webex'
 import type { WebexInboundMessage } from './webex-classify'
 
 const config = channelsSchema.parse({ webex: {} }).webex!
@@ -105,6 +111,129 @@ function router(): ChannelRouter & { routed: InboundMessage[]; registered: strin
     unregisterMembership: (adapter: string) => unregistered.push(`membership:${adapter}`),
   } as unknown as ChannelRouter & { routed: InboundMessage[]; registered: string[]; unregistered: string[] }
 }
+
+function outbound(overrides: Partial<OutboundMessage> = {}): OutboundMessage {
+  return { adapter: 'webex', workspace: 'room-1', chat: 'room-1', text: 'hello', ...overrides }
+}
+
+function webexMessage(overrides: Partial<WebexMessage> = {}): WebexMessage {
+  return {
+    id: 'm',
+    ref: 'm',
+    roomId: 'room-1',
+    roomRef: 'room-1',
+    roomType: 'group',
+    text: 'hi',
+    personId: 'p',
+    personRef: 'p',
+    personEmail: 'p@example.com',
+    created: '2026-01-01T00:00:00.000Z',
+    files: [],
+    ...overrides,
+  }
+}
+
+describe('webex outbound', () => {
+  function outboundClient() {
+    const sends: Array<{ roomId: string; text: string; parentId?: string }> = []
+    const uploads: Array<{ roomId: string; filename: string; text?: string; parentId?: string }> = []
+    return {
+      sends,
+      uploads,
+      client: {
+        sendMessage: async (roomId: string, text: string, options?: { parentId?: string }) => {
+          sends.push({ roomId, text, parentId: options?.parentId })
+          return webexMessage({ ref: 'sent', text })
+        },
+        uploadFile: async (
+          roomId: string,
+          file: { content: Blob; filename: string },
+          options?: { text?: string; parentId?: string },
+        ) => {
+          uploads.push({ roomId, filename: file.filename, text: options?.text, parentId: options?.parentId })
+          return webexMessage({ ref: `up-${uploads.length}` })
+        },
+      },
+    }
+  }
+
+  test('returns the sent message ref as messageId for a plain-text send', async () => {
+    const { client } = outboundClient()
+    const cb = createOutboundCallback({ client, logger: logger(), formatChannelTag: async () => 'room=room-1' })
+
+    const result = await cb(outbound({ text: 'hi' }))
+
+    expect(result).toEqual({ ok: true, messageId: 'sent', messageIds: ['sent'] })
+  })
+
+  test('surfaces the upload ref as the anchor for a text+file send', async () => {
+    const { sends, uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    const result = await cb(outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }] }))
+
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1'] })
+    expect(sends).toEqual([])
+    expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' }])
+  })
+
+  test('lists every upload ref in send order for a multi-file send', async () => {
+    const { uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    const result = await cb(
+      outbound({ text: 'caption', thread: 'root-1', attachments: [{ path: '/tmp/a.txt' }, { path: '/tmp/b.txt' }] }),
+    )
+
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1', 'up-2'] })
+    expect(uploads).toEqual([
+      { roomId: 'room-1', filename: 'a.txt', text: 'caption', parentId: 'root-1' },
+      { roomId: 'room-1', filename: 'b.txt', text: undefined, parentId: 'root-1' },
+    ])
+  })
+
+  test('surfaces the upload ref for an attachment-only send', async () => {
+    const { uploads, client } = outboundClient()
+    const cb = createOutboundCallback({
+      client,
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async (path) => ({ content: new Blob(['data']), filename: path.split('/').pop() ?? 'x' }),
+    })
+
+    const result = await cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt' }] }))
+
+    expect(result).toEqual({ ok: true, messageId: 'up-1', messageIds: ['up-1'] })
+    expect(uploads).toEqual([{ roomId: 'room-1', filename: 'a.txt', text: undefined, parentId: undefined }])
+  })
+
+  test('returns ok false when an upload fails', async () => {
+    const cb = createOutboundCallback({
+      client: {
+        sendMessage: async () => webexMessage({ ref: 'unused' }),
+        uploadFile: async () => Promise.reject(new Error('upload boom')),
+      },
+      logger: logger(),
+      formatChannelTag: async () => 'room=room-1',
+      readFile: async () => ({ content: new Blob(['data']), filename: 'a.txt' }),
+    })
+
+    await expect(cb(outbound({ text: '', attachments: [{ path: '/tmp/a.txt' }] }))).resolves.toEqual({
+      ok: false,
+      error: 'upload boom',
+    })
+  })
+})
 
 describe('createWebexAdapter', () => {
   test('start logs in with account token and wires listener/router callbacks', async () => {
