@@ -35,6 +35,7 @@ import {
   SEND_RATE_WARN_THRESHOLD,
   SEND_RATE_WINDOW_MS,
   SEND_WILLINGNESS_NUDGE,
+  STRANDED_TOOLUSE_CONTINUATION_NUDGE,
   isGraceWorthReusing,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
@@ -4931,10 +4932,12 @@ describe('ChannelRouter channel-turn protocol', () => {
         strandOnUnansweredToolUse()
         return
       }
-      // The retry nudge re-prompts the same logical turn; now the model
-      // finishes its investigation and posts the conclusion it promised, then
-      // ends cleanly (the leaf is the reply, not another stranded toolUse).
-      expect(text).toContain(EMPTY_TURN_RETRY_NUDGE)
+      // The retry re-prompts the same logical turn with the CONTINUATION nudge
+      // (summarize what you already gathered), NOT the budget-exhaustion nudge
+      // (which would invite a fresh investigation). The model then posts the
+      // conclusion it promised and ends cleanly (the leaf is the reply).
+      expect(text).toContain(STRANDED_TOOLUSE_CONTINUATION_NUDGE)
+      expect(text).not.toContain(EMPTY_TURN_RETRY_NUDGE)
       await router.send({
         adapter: 'discord-bot',
         workspace: 'g1',
