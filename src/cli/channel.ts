@@ -1260,10 +1260,18 @@ async function promptSlackTokens(): Promise<{ bot: string; app: string }> {
 async function promptSlackQrDataUrl(): Promise<string> {
   note(
     [
-      'Slack user mode signs in with the QR code data URL from Slack mobile sign-in.',
-      'Messages will be sent and received as this Slack user account.',
+      'Slack user mode signs in as your own account — messages are sent and',
+      'received as this Slack user, not a bot.',
+      '',
+      'Copy the QR image data URL from the Slack desktop app:',
+      '',
+      '1. Click your name (top-left) → "Sign in on mobile".',
+      '2. Right-click the QR code → "Copy Image Address".',
+      '3. Paste it below (a long data:image/png;base64,... string).',
+      '',
+      'Generate a fresh QR each time — the sign-in link expires quickly.',
     ].join('\n'),
-    'About to log in to Slack',
+    'Sign in to Slack (user account)',
   )
   const qrDataUrl = await text({
     message: 'Slack QR data URL (data:image/png;base64,...)',
