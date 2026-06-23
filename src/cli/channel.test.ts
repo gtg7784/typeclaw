@@ -53,16 +53,17 @@ describe('printLinePincode', () => {
 })
 
 describe('familyModeOptions', () => {
-  test('preselects the recommended User mode for Slack when both modes are available', () => {
+  test('preselects the recommended Bot mode for Slack when both modes are available', () => {
     // given both Slack modes are addable (CHANNEL_KINDS lists slack-bot before slack)
     const available = ['slack-bot', 'slack'] as const
 
     // when
     const options = familyModeOptions(SLACK_MODES, available)
 
-    // then the recommended User (QR) option is first, so options[0] is the default
-    expect(options.map((o) => o.value)).toEqual(['slack', 'slack-bot'])
-    expect(options[0]?.value).toBe('slack')
+    // then the recommended Bot (official) option is first, so options[0] is the default —
+    // the QR user session is unofficial, so it must not be the default
+    expect(options.map((o) => o.value)).toEqual(['slack-bot', 'slack'])
+    expect(options[0]?.value).toBe('slack-bot')
   })
 
   test('preselects the recommended User mode for Webex when both modes are available', () => {
