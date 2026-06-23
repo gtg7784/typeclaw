@@ -1594,7 +1594,11 @@ describe('subscribeRestartNotice', () => {
 describe('resolveSessionThinkingLevel', () => {
   const REF = 'openai/gpt-5.4-nano' as ModelRef
   const parseModels = (models: Record<string, unknown>): Models => configSchema.parse({ models }).models
-  const resolvedWith = (thinkingLevel?: ResolvedProfile['thinkingLevel']): Pick<ResolvedProfile, 'thinkingLevel'> => ({
+  const resolvedWith = (
+    thinkingLevel?: ResolvedProfile['thinkingLevel'],
+    profile = 'fast',
+  ): Pick<ResolvedProfile, 'thinkingLevel' | 'profile'> => ({
+    profile,
     ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
   })
 
@@ -1618,5 +1622,25 @@ describe('resolveSessionThinkingLevel', () => {
     // resolved.thinkingLevel IS the default's — exercised here directly.
     const models = parseModels({ default: { model: REF, thinkingLevel: 'xhigh' } })
     expect(resolveSessionThinkingLevel(models, resolvedWith('xhigh'), REF)).toBe('xhigh')
+  })
+
+  test('the deep profile defaults to high without its own level', () => {
+    const models = parseModels({ default: REF, deep: REF })
+    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'deep'), REF)).toBe('high')
+  })
+
+  test('the deep default beats a lower global default', () => {
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'low' }, deep: REF })
+    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'deep'), REF)).toBe('high')
+  })
+
+  test('an explicit deep thinkingLevel overrides the built-in high default', () => {
+    const models = parseModels({ default: REF, deep: { model: REF, thinkingLevel: 'xhigh' } })
+    expect(resolveSessionThinkingLevel(models, resolvedWith('xhigh', 'deep'), REF)).toBe('xhigh')
+  })
+
+  test('the high default is scoped to deep — other profiles are unaffected', () => {
+    const models = parseModels({ default: REF, fast: REF })
+    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'fast'), REF)).toBeUndefined()
   })
 })
