@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -516,6 +516,40 @@ describe('runExecForCommand', () => {
     })
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBe('done\n')
+  })
+
+  // Shebang + chmod are POSIX-only; the local-bin PATH contract is exercised
+  // on Unix where the agent container runs. #899
+  test.skipIf(onWindows)('resolves a bare command from cwd node_modules/.bin', async () => {
+    // given: an executable shim installed only in cwd/node_modules/.bin
+    const cwd = mkdtempSync(join(tmpdir(), 'typeclaw-exec-localbin-'))
+    const binDir = join(cwd, 'node_modules', '.bin')
+    mkdirSync(binDir, { recursive: true })
+    const shim = join(binDir, 'agent-localtool')
+    writeFileSync(shim, '#!/bin/sh\nprintf "localbin:%s\\n" "$1"\n')
+    chmodSync(shim, 0o755)
+
+    // when: the plugin calls it by bare name (no bunx, no path)
+    const controller = new AbortController()
+    const result = await runExecForCommand(['agent-localtool ok'] as unknown as TemplateStringsArray, [], {
+      cwd,
+      signal: controller.signal,
+    })
+
+    // then: it resolves and runs instead of failing with 127
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('localbin:ok\n')
+  })
+
+  test.skipIf(onWindows)('still runs global/absolute commands when cwd has no node_modules/.bin', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'typeclaw-exec-noLocalbin-'))
+    const controller = new AbortController()
+    const result = await runExecForCommand(['echo global-ok'] as unknown as TemplateStringsArray, [], {
+      cwd,
+      signal: controller.signal,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('global-ok\n')
   })
 })
 

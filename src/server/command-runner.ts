@@ -1,3 +1,5 @@
+import { delimiter, join } from 'node:path'
+
 import {
   createSessionWithDispose,
   renderTurnTimeAnchor,
@@ -476,6 +478,24 @@ function resolveSessionIdForOrigin(origin: SessionOrigin): string {
 // hanging visibly past user expectations.
 const EXEC_ABORT_GRACE_MS = 5_000
 
+// Prepend the agent folder's node_modules/.bin to PATH so a documented
+// bare-command call like `ctx.exec`agent-webex auth status`` resolves.
+// Without it the call exits 127: the container PATH excludes
+// node_modules/.bin, so locally-installed package bins (the agent-* CLI
+// surface) don't resolve while globals (git, bunx) do. Prepend matches
+// npm/bun run-script semantics (local bins shadow globals); ctx.exec is a
+// trusted plugin-author surface, so shadowing is acceptable. Per-spawn env
+// (never mutate process.env); skip the trailing delimiter on empty PATH so
+// no empty segment implies a current-directory lookup.
+function buildExecEnv(cwd: string): Record<string, string | undefined> {
+  const localBin = join(cwd, 'node_modules', '.bin')
+  const currentPath = process.env.PATH
+  return {
+    ...process.env,
+    PATH: currentPath ? `${localBin}${delimiter}${currentPath}` : localBin,
+  }
+}
+
 export async function runExecForCommand(
   strings: TemplateStringsArray,
   values: readonly unknown[],
@@ -501,6 +521,7 @@ export async function runExecForCommand(
   const proc = Bun.spawn({
     cmd: ['sh', '-c', cmd],
     cwd: opts.cwd,
+    env: buildExecEnv(opts.cwd),
     stdout: 'pipe',
     stderr: 'pipe',
     detached: true,
