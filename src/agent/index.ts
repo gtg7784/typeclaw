@@ -238,8 +238,9 @@ export type CreateSessionOptions = {
 }
 
 export type CreateSessionResult = {
-  session: AgentSession
+  session: AgentSession & { getAbortReason?: () => string | undefined }
   dispose: () => Promise<void>
+  getAbortReason?: () => string | undefined
 }
 
 // A session's reasoning effort layers like the model does: the resolved
@@ -309,8 +310,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // Tools are wrapped BEFORE the session exists, so the loop guard reaches the
   // abort through this lazily-resolved getter. See `fireLoopAbort` in
   // plugin-tools.ts for why aborting (not throwing) is what stops the loop.
-  const abortHolder: { abort?: () => void } = {}
-  const getAbort: () => (() => void) | undefined = () => abortHolder.abort
+  const abortHolder: { abort?: (reason?: string) => void; reason?: string } = {}
+  const getAbort: () => ((reason?: string) => void) | undefined = () => abortHolder.abort
 
   // Subagent built-in tool refs are dual-routed (see BUILTIN_TOOL_DEFINITION
   // dual-map in plugin-tools.ts): pi-side coding tools go to `tools:` so they
@@ -474,6 +475,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+  const getAbortReason = () => abortHolder.reason
+  const sessionWithAbortReason = Object.assign(session, { getAbortReason })
 
   // Layer the replay sanitizer over pi's convertToLlm so a transcript with an
   // orphaned toolResult (e.g. a torn-down restart turn) can't wedge the session
@@ -490,7 +493,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     }
   }
 
-  abortHolder.abort = () => {
+  abortHolder.abort = (reason?: string) => {
+    if (reason !== undefined) abortHolder.reason = reason
     if (session.agent.signal?.aborted !== true) session.agent.abort()
   }
 
@@ -527,7 +531,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     unsubToolNudge()
     if (materializedSkills) await materializedSkills.dispose()
   }
-  return { session, dispose }
+  return { session: sessionWithAbortReason, dispose, getAbortReason }
 }
 
 // Decides whether the restart tool should write the cross-restart handoff
@@ -851,7 +855,7 @@ export function buildTodoTools(
 function wrapRegistryTools(
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => (() => void) | undefined,
+  getAbort: () => ((reason?: string) => void) | undefined,
 ): ToolDefinition[] {
   if (!plugins) return []
   return plugins.registry.tools.map((t: PluginRegisteredTool) =>
@@ -872,7 +876,7 @@ function wrapSystemAgentTools(
   tools: AgentSessionTools | undefined,
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => (() => void) | undefined,
+  getAbort: () => ((reason?: string) => void) | undefined,
 ): AgentSessionTools | undefined {
   if (!tools || !hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -890,7 +894,7 @@ function wrapSystemTools(
   tools: ToolDefinition[],
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => (() => void) | undefined,
+  getAbort: () => ((reason?: string) => void) | undefined,
 ): ToolDefinition[] {
   if (!hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -913,7 +917,7 @@ function wrapSubagentCustomTools(
   selection: PluginSubagentSelection,
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => (() => void) | undefined,
+  getAbort: () => ((reason?: string) => void) | undefined,
 ): ToolDefinition[] {
   if (!selection.customTools || !plugins) return []
   const logger = makePluginLogger(selection.pluginName)

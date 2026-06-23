@@ -554,7 +554,7 @@ export type CreateSessionForChannel = (params: {
   // `options.originRef`.
   originRef: { current: SessionOrigin | undefined }
 }) => Promise<{
-  session: AgentSession
+  session: ChannelAgentSession
   sessionId: string
   dispose: () => Promise<void>
   hooks?: HookBus
@@ -612,10 +612,12 @@ type ObservedInbound = {
 
 type TimedAttachment = { ts: number; attachment: InboundAttachment }
 
+type ChannelAgentSession = AgentSession & { getAbortReason?: () => string | undefined }
+
 type LiveSession = {
   key: ChannelKey
   keyId: string
-  session: AgentSession
+  session: ChannelAgentSession
   // The session's creation-time thinking level, captured once. A later escalated
   // turn moves `session.thinkingLevel` to `high`, so the live getter can't be the
   // reset target — this preserves the real default across the session's lifetime.
@@ -800,6 +802,10 @@ type LiveSession = {
   // turn can never trigger a nudge on a later one. `null` when no such reply
   // ended this turn.
   lastTerminalReplyAbort: { turnSeq: number; text: string } | null
+  // Stamped by router abort sites and read by `validateChannelTurn` for
+  // reason-specific stranded-toolUse recovery logs. `turnSeq`-stamped so stale
+  // abort provenance from an earlier turn can never leak into a later retry.
+  abortReasonThisTurn: { turnSeq: number; reason: string } | null
   // One-shot output-token budget for the NEXT `session.prompt()` only.
   // `installChannelOutputCap` reads and clears it per stream call, so it
   // overrides the default backstop for exactly one re-prompt. Set by the
@@ -1831,6 +1837,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         emptyTurnRetries: 0,
         willingnessNudges: 0,
         lastTerminalReplyAbort: null,
+        abortReasonThisTurn: null,
         nextPromptMaxTokens: undefined,
         skippedTurn: null,
         skipLockedSendTurn: null,
@@ -2182,6 +2189,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} terminal_after_channel_reply`)
         const replyText = (context.toolCall.arguments as { text?: unknown } | undefined)?.text
         live.lastTerminalReplyAbort = typeof replyText === 'string' ? { turnSeq: live.turnSeq, text: replyText } : null
+        live.abortReasonThisTurn = { turnSeq: live.turnSeq, reason: 'terminal_after_channel_reply' }
         agent.abort()
       }
       return result
@@ -2483,6 +2491,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // forever (and the raised cap stays scoped to the turn that set it).
           live.emptyTurnRetries = 0
           live.willingnessNudges = 0
+          live.abortReasonThisTurn = null
           live.nextPromptMaxTokens = undefined
         } else if (live.lastTurnAuthorId !== null) {
           live.currentTurnEngageReactions = []
@@ -3519,6 +3528,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.policyDeniedToolSendsThisTurn.set(sendKey, count)
         if (count >= MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN) {
           logger.warn(`[channels] ${live.keyId}: aborting turn — ${count} policy-denied channel sends (last: ${code})`)
+          live.abortReasonThisTurn = { turnSeq: live.turnSeq, reason: `policy_denied:${code}` }
           if (live.session.agent.signal?.aborted !== true) live.session.agent.abort()
         }
         return { ok: false, error, code }
@@ -3786,9 +3796,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (leafIsStrandedToolUse(live.session) && live.currentTurnAuthorId !== null) {
           if (live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
             live.emptyTurnRetries++
+            const routerAbortReason =
+              live.abortReasonThisTurn !== null && live.abortReasonThisTurn.turnSeq === live.turnSeq
+                ? live.abortReasonThisTurn.reason
+                : undefined
+            const agentAbortReason =
+              live.session.agent.signal?.aborted === true ? live.session.getAbortReason?.() : undefined
+            const abortReason = routerAbortReason ?? agentAbortReason ?? 'unknown'
             logger.warn(
               `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
-                `cause=stranded_toolUse_after_send`,
+                `cause=stranded_toolUse_after_send abort_reason=${abortReason}`,
             )
             live.pendingSystemReminders.push(STRANDED_TOOLUSE_CONTINUATION_NUDGE)
           } else {
