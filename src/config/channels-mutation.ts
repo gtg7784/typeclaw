@@ -9,6 +9,7 @@ const SECRETS_FILE = 'secrets.json'
 
 export const CHANNEL_KINDS = [
   'slack-bot',
+  'slack',
   'discord-bot',
   'telegram-bot',
   'webex',

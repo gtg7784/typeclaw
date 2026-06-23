@@ -29,10 +29,12 @@ import {
   type GithubTunnelProvider,
   type KakaotalkAuthResult,
   type LineAuthResult,
+  type SlackAuthResult,
   type WebexAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
+import { runSlackBootstrap } from '@/init/slack-auth'
 import { runWebexBootstrap } from '@/init/webex-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
@@ -43,6 +45,7 @@ import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup,
 
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
+  slack: 'Slack (User)',
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
@@ -853,6 +856,11 @@ async function runSetGithub(cwd: string): Promise<void> {
 
 type CollectedCredentials =
   | { channel: 'discord-bot'; discordBotToken: string }
+  | {
+      channel: 'slack'
+      slackQrDataUrl: string
+      runSlackAuth: (options: { cwd: string; qrDataUrl: string }) => Promise<SlackAuthResult>
+    }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex'; runWebexAuth: (options: { cwd: string }) => Promise<WebexAuthResult> }
@@ -880,6 +888,14 @@ async function collectCredentials(
     case 'slack-bot': {
       const slack = await promptSlackTokens()
       return { channel, slackBotToken: slack.bot, slackAppToken: slack.app }
+    }
+    case 'slack': {
+      const qrDataUrl = await promptSlackQrDataUrl()
+      return {
+        channel,
+        slackQrDataUrl: qrDataUrl,
+        runSlackAuth: ({ cwd: agentDir, qrDataUrl }) => runSlackBootstrap({ qrDataUrl, agentDir }),
+      }
     }
     case 'telegram-bot':
       return { channel, telegramBotToken: await promptTelegramToken() }
@@ -1241,6 +1257,26 @@ async function promptSlackTokens(): Promise<{ bot: string; app: string }> {
   return { bot, app }
 }
 
+async function promptSlackQrDataUrl(): Promise<string> {
+  note(
+    [
+      'Slack user mode signs in with the QR code data URL from Slack mobile sign-in.',
+      'Messages will be sent and received as this Slack user account.',
+    ].join('\n'),
+    'About to log in to Slack',
+  )
+  const qrDataUrl = await text({
+    message: 'Slack QR data URL (data:image/png;base64,...)',
+    validate: (value) =>
+      value && value.startsWith('data:image/') ? undefined : 'QR data URL must start with "data:image/"',
+  })
+  if (isCancel(qrDataUrl)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return qrDataUrl
+}
+
 async function promptSlackBotToken(): Promise<string> {
   const botToken = await password({
     message: 'Slack bot token (xoxb-...)',
@@ -1557,6 +1593,9 @@ function reportProgress(
       case 'webex-auth':
         s.stop(reportWebexAuth(event.result))
         break
+      case 'slack-auth':
+        s.stop(reportSlackAuth(event.result))
+        break
       case 'config':
         s.stop('Updated typeclaw.json.')
         break
@@ -1574,6 +1613,7 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'line-auth': 'Logging in to LINE...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
+  'slack-auth': 'Logging in to Slack...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
   'github-webhooks': 'Installing GitHub repository webhooks...',
@@ -1582,6 +1622,11 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
   if (result.ok) return 'KakaoTalk credentials saved to secrets.json.'
   return `KakaoTalk login failed: ${result.reason}`
+}
+
+function reportSlackAuth(result: SlackAuthResult): string {
+  if (result.ok) return 'Slack credentials saved to secrets.json.'
+  return `Slack login failed: ${result.reason}`
 }
 
 function reportWebexAuth(result: WebexAuthResult): string {

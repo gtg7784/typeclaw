@@ -123,6 +123,41 @@ describe('parseSecretsFile (v2 envelope)', () => {
     expect(result.file.channels.kakaotalk).toEqual({ currentAccount: null, accounts: {} })
   })
 
+  test('accepts channels.slack credential block', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        slack: {
+          currentAccount: 'T0123456789',
+          accounts: {
+            T0123456789: {
+              account_id: 'T0123456789',
+              token: 'xoxc-test',
+              cookie: 'xoxd-test',
+              workspace_id: 'T0123456789',
+              workspace_name: 'Acme',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.channels.slack?.accounts.T0123456789?.workspace_name).toBe('Acme')
+  })
+
+  test('rejects malformed channels.slack account block', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: { slack: { currentAccount: 'T0123456789', accounts: { T0123456789: { token: 'xoxc-test' } } } },
+    })
+
+    expect(result.ok).toBe(false)
+  })
+
   test('accepts a kakaotalk account with renewal fields (email + encryptedPassword)', () => {
     const result = parseSecretsFile({
       version: 2,

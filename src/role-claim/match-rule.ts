@@ -29,6 +29,7 @@ const ADAPTER_TO_PLATFORM: Record<
   ChannelKey['adapter'],
   'slack' | 'discord' | 'telegram' | 'webex' | 'kakao' | 'line' | 'github'
 > = {
+  slack: 'slack',
   'slack-bot': 'slack',
   'discord-bot': 'discord',
   github: 'github',

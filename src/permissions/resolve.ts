@@ -4,6 +4,7 @@ import type { AdapterId } from '@/channels/schema'
 import type { MatchRule, Platform } from './match-rule'
 
 const ADAPTER_TO_PLATFORM: Record<AdapterId, Platform> = {
+  slack: 'slack',
   'slack-bot': 'slack',
   'discord-bot': 'discord',
   github: 'github',

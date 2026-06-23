@@ -1,5 +1,5 @@
 import type { PortForward } from '@/config'
-import type { KakaoChannelBlock, LineChannelBlock, WebexChannelBlock } from '@/secrets/schema'
+import type { KakaoChannelBlock, LineChannelBlock, SlackChannelBlock, WebexChannelBlock } from '@/secrets/schema'
 
 export type Request =
   | {
@@ -18,7 +18,13 @@ export type Request =
   | {
       kind: 'secrets-patch'
       containerName: string
-      patch: { channels: { kakaotalk: KakaoChannelBlock } | { line: LineChannelBlock } | { webex: WebexChannelBlock } }
+      patch: {
+        channels:
+          | { kakaotalk: KakaoChannelBlock }
+          | { line: LineChannelBlock }
+          | { webex: WebexChannelBlock }
+          | { slack: SlackChannelBlock }
+      }
     }
   | { kind: 'http-info' }
   | { kind: 'version' }

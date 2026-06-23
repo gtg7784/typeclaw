@@ -5,6 +5,7 @@ export const ADAPTER_IDS = [
   'github',
   'line',
   'kakaotalk',
+  'slack',
   'slack-bot',
   'telegram-bot',
   'webex',
@@ -269,6 +270,7 @@ export const channelsSchema = z
     // token-renewal cron — it persists a long-lived auth token + certificate.
     line: adapterSchema.optional(),
     kakaotalk: adapterSchema.optional(),
+    slack: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
     webex: adapterSchema.optional(),
