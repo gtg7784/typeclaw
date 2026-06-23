@@ -29,6 +29,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     discordBotCredentials(),
     telegramBotCredentials(),
     webexBotCredentials(),
+    slackUserCredentials(),
     webexUserCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
@@ -44,6 +45,32 @@ function slackBotCredentials(): DoctorCheck {
     description: 'slack-bot adapter has SLACK_BOT_TOKEN and SLACK_APP_TOKEN',
     applies: (ctx) => ctx.hasAgentFolder,
     run: (ctx) => runTokenAdapterCheck(ctx, 'slack-bot', ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']),
+  }
+}
+
+function slackUserCredentials(): DoctorCheck {
+  return {
+    name: 'channel.slack.credentials',
+    category: 'channels',
+    description: 'slack adapter has a current account with a token in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'slack')) {
+        return { status: 'skipped', message: 'slack not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.slack
+      if (!hasCurrentAccountTokenField(block, 'token')) {
+        return {
+          status: 'warning',
+          message: 'slack has no current account token in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add slack` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: 'slack has a current account token' }
+    },
   }
 }
 
@@ -90,7 +117,7 @@ function webexUserCredentials(): DoctorCheck {
         return { status: 'skipped', message: 'webex not configured' }
       }
       const block = readChannelsSecrets(ctx)?.webex
-      if (!hasCurrentAccountToken(block)) {
+      if (!hasCurrentAccountTokenField(block, 'access_token')) {
         return {
           status: 'warning',
           message: 'webex has no current account access_token in secrets.json',
@@ -353,7 +380,7 @@ function isSecretShape(value: unknown): value is { value?: string; env?: string 
   return hasValue || hasEnv
 }
 
-function hasCurrentAccountToken(block: unknown): boolean {
+function hasCurrentAccountTokenField(block: unknown, field: string): boolean {
   if (!isObjectRecord(block)) return false
   const current = (block as { currentAccount?: unknown }).currentAccount
   if (typeof current !== 'string' || current.length === 0) return false
@@ -361,7 +388,7 @@ function hasCurrentAccountToken(block: unknown): boolean {
   if (!isObjectRecord(accounts)) return false
   const account = accounts[current]
   if (!isObjectRecord(account)) return false
-  const token = (account as { access_token?: unknown }).access_token
+  const token = account[field]
   return typeof token === 'string' && token.length > 0
 }
 
