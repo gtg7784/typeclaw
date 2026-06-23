@@ -125,6 +125,32 @@ const writeGithubSecrets = async (dir: string): Promise<void> => {
   )
 }
 
+const writeSlackSecrets = async (dir: string): Promise<void> => {
+  await writeFile(
+    join(dir, 'secrets.json'),
+    JSON.stringify({
+      version: 2,
+      providers: {},
+      channels: {
+        slack: {
+          currentAccount: 'T0123456789',
+          accounts: {
+            T0123456789: {
+              account_id: 'T0123456789',
+              token: 'xoxc-test',
+              cookie: 'xoxd-test',
+              workspace_id: 'T0123456789',
+              workspace_name: 'Acme',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        },
+      },
+    }),
+  )
+}
+
 function recordingLogger(): {
   info: (msg: string) => void
   warn: (msg: string) => void
@@ -541,6 +567,33 @@ describe('channel manager — restartAdapter serialization', () => {
 })
 
 describe('channel manager — slack adapter lifecycle', () => {
+  test('starts slack user adapter from secrets using the createSlackUserAdapter seam', async () => {
+    cfg.slack = enabledAdapterCfg()
+    await writeSlackSecrets(agentDir)
+    const fake = makeFakeAdapter()
+    const env: NodeJS.ProcessEnv = {
+      TYPECLAW_HOSTD_URL: 'http://hostd.test',
+      TYPECLAW_HOSTD_TOKEN: 'restart-token',
+      TYPECLAW_CONTAINER_NAME: 'agent',
+    }
+    let constructed = false
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env,
+      createSlackUserAdapter: () => {
+        constructed = true
+        return fake
+      },
+    })
+
+    await mgr.start()
+
+    expect(constructed).toBe(true)
+    expect(fake.startCalls).toBe(1)
+    await mgr.stop()
+  })
+
   test('starts slack adapter when both SLACK_BOT_TOKEN and SLACK_APP_TOKEN are set', async () => {
     cfg['slack-bot'] = enabledAdapterCfg()
     const fake = makeFakeAdapter()
