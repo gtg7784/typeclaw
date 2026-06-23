@@ -658,8 +658,8 @@ export const WEBEX_MODES: ReadonlyArray<FamilyMode<'webex' | 'webex-bot'>> = [
 ]
 
 export const SLACK_MODES: ReadonlyArray<FamilyMode<'slack' | 'slack-bot'>> = [
-  { value: 'slack', label: 'User (QR) — receives all messages, no @mention needed (recommended)' },
-  { value: 'slack-bot', label: 'Bot (Token) — only sees @mentions and DMs' },
+  { value: 'slack', label: 'User (QR) — posts as your own Slack account (recommended)' },
+  { value: 'slack-bot', label: 'Bot (Token) — posts as a Slack app/bot user' },
 ]
 
 // Keep the displayed order (recommended/User first), dropping already-configured
