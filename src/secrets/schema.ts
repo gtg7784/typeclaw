@@ -144,6 +144,21 @@ export const webexChannelBlockSchema = z.object({
   accounts: z.record(z.string(), webexAccountRecordSchema),
 })
 
+export const slackAccountRecordSchema = z.object({
+  account_id: z.string(),
+  token: z.string(),
+  cookie: z.string(),
+  workspace_id: z.string(),
+  workspace_name: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const slackChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), slackAccountRecordSchema),
+})
+
 export const kakaoPendingLoginRecordSchema = z.object({
   device_uuid: z.string(),
   device_type: z.union([z.literal('pc'), z.literal('tablet')]),
@@ -166,6 +181,7 @@ export const channelsSchema = z
     line: lineChannelBlockSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
     webex: webexChannelBlockSchema.optional(),
+    slack: slackChannelBlockSchema.optional(),
   })
   .catchall(z.unknown())
 
@@ -194,6 +210,8 @@ export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
 export type WebexAccountRecord = z.infer<typeof webexAccountRecordSchema>
 export type WebexChannelBlock = z.infer<typeof webexChannelBlockSchema>
 export type WebexEncryptedPassword = z.infer<typeof webexEncryptedPasswordSchema>
+export type SlackAccountRecord = z.infer<typeof slackAccountRecordSchema>
+export type SlackChannelBlock = z.infer<typeof slackChannelBlockSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
