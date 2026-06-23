@@ -1159,6 +1159,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
           ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
         }),
       )
+  // MCP connection is warmed up in the background at boot; gate the catalog
+  // render on that warm-up settling (bounded) so a session created in the
+  // warm-up window still lists connected servers. Kicked off here to overlap
+  // with the self/git/memory I/O above instead of serializing before compose.
+  const mcpReadySettled =
+    mode === 'full' && options.mcpManager !== undefined
+      ? options.mcpManager.whenInitialConnectSettled()
+      : Promise.resolve()
 
   let self = await selfPromise
 
@@ -1187,6 +1195,12 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   const gitNudge = unwrapSettled(gitNudgeResult)
   const memorySection = unwrapSettled(memoryResult)
 
+  let mcpCatalog: string | undefined
+  if (mode === 'full' && options.mcpManager !== undefined) {
+    await mcpReadySettled
+    mcpCatalog = renderMcpCatalog(options.mcpManager.listServers())
+  }
+
   const systemPrompt = composeSystemPrompt({
     mode,
     self,
@@ -1194,9 +1208,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
     ...(options.origin !== undefined ? { origin: options.origin } : {}),
     ...(roleContext !== undefined ? { roleContext } : {}),
-    ...(mode === 'full' && options.mcpManager !== undefined
-      ? { mcpCatalog: renderMcpCatalog(options.mcpManager.listServers()) }
-      : {}),
+    ...(mcpCatalog !== undefined ? { mcpCatalog } : {}),
     gitNudge,
     ...(options.proactiveNextStepNudge === true ? { proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE } : {}),
     memorySection,
