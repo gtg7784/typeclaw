@@ -1249,7 +1249,7 @@ describe('discord-bot createOutboundCallback', () => {
     // when
     const result = await cb(makeMsg({ text: 'hello' }))
     // then
-    expect(result.ok).toBe(true)
+    expect(result).toEqual({ ok: true, messageId: 'm1', messageIds: ['m1'] })
     expect(uploads).toHaveLength(0)
     expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: undefined }])
   })
