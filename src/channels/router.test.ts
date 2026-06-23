@@ -372,23 +372,13 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('condition not met')
 }
 
-async function waitForPersistedLastInboundAt(agentDir: string, expected: number): Promise<void> {
-  // Wall-clock-bounded poll, not iteration-bounded. The original 20-iteration
-  // × 1ms-sleep budget (~20ms total) was tight enough to lose the race
-  // against tmpdir fs persistence under `bun test --parallel` contention.
-  // The persistence chain is route -> flushDebounce -> writeFile(atomic
-  // temp + rename); each fs op can stall hundreds of ms when libuv's
-  // threadpool is saturated across 18 workers. 2s is the same shape every
-  // other waitFor helper in the repo uses (see scripts/require-parallel.ts
-  // for the global-timeout rationale).
-  const deadline = performance.now() + 2_000
-  while (performance.now() < deadline) {
-    const loaded = await loadChannelSessions(agentDir)
-    if (loaded[0]?.lastInboundAt === expected) return
-    await new Promise((resolve) => setTimeout(resolve, 5))
-  }
+async function expectPersistedLastInboundAt(agentDir: string, expected: number): Promise<void> {
+  // No poll: callers always flushDebounce() first, which now awaits the persist
+  // chain, so the lastInboundAt write has already landed on disk. Polling here
+  // was the source of the Windows-CI flake — a tight wall-clock budget racing
+  // tmpdir fs latency.
   const loaded = await loadChannelSessions(agentDir)
-  throw new Error(`lastInboundAt persisted as ${String(loaded[0]?.lastInboundAt)}, expected ${expected}`)
+  expect(loaded[0]?.lastInboundAt).toBe(expected)
 }
 
 const KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
@@ -619,7 +609,7 @@ describe('ChannelRouter session lifecycle', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(sessions).toHaveLength(1)
-    await waitForPersistedLastInboundAt(dir, 1000 + SESSION_FRESHNESS_TTL_MS)
+    await expectPersistedLastInboundAt(dir, 1000 + SESSION_FRESHNESS_TTL_MS)
     const loaded = await loadChannelSessions(dir)
     expect(loaded[0]?.sessionId).toBe('ses_fake_1')
     expect(loaded[0]?.lastInboundAt).toBe(1000 + SESSION_FRESHNESS_TTL_MS)
@@ -754,12 +744,12 @@ describe('ChannelRouter session lifecycle', () => {
 
     await router.route(inbound({ externalMessageId: 'm1' }))
     await router.__testing!.flushDebounce(KEY)
-    await waitForPersistedLastInboundAt(dir, 1000)
+    await expectPersistedLastInboundAt(dir, 1000)
 
     nowRef.value = 2000
     await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
     await router.__testing!.flushDebounce(KEY)
-    await waitForPersistedLastInboundAt(dir, 2000)
+    await expectPersistedLastInboundAt(dir, 2000)
   })
 
   test('stop() flushes the fire-and-forget persist before returning', async () => {

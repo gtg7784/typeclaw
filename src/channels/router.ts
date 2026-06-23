@@ -4658,6 +4658,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         live.firstUnprocessedAt = 0
         await drain(live)
+        // Settle the fire-and-forget `void persist()` from scheduleDebouncedDrain
+        // (the lastInboundAt write). Draining alone doesn't await that promise, so
+        // a test reading sessions.json right after would race the disk write — the
+        // flake that forced wall-clock polling on slow (Windows CI) filesystems.
+        await persistChain
       },
       fireTypingHeartbeat: async (key: ChannelKey, phase: 'tick' | 'stop' = 'tick') => {
         const live = liveSessions.get(channelKeyId(key))
