@@ -368,14 +368,22 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
   }
 }
 
+// WORKAROUND: the SDK's `DiscordMessage` type omits `author.bot`, but the REST
+// API returns it and the client passes the body through unchanged, so it's
+// present at runtime. `=== true` fails closed to human if absent. This flag
+// feeds history-derived membership (deriveMembershipFromHistory), which
+// otherwise miscounts peer bots as humans and inflates effectiveHumans.
+type RawDiscordMessage = DiscordMessage & { author: { bot?: boolean } }
+
 function mapDiscordHistoryMessage(msg: DiscordMessage): ChannelHistoryMessage {
+  const raw = msg as RawDiscordMessage
   return {
     externalMessageId: msg.id,
     authorId: msg.author.id,
     authorName: msg.author.username,
     text: msg.content,
     ts: parseDiscordTimestamp(msg.timestamp),
-    isBot: false,
+    isBot: raw.author.bot === true,
     replyToBotMessageId: null,
   }
 }

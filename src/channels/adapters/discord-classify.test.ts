@@ -1,15 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { DiscordGatewayMessageCreateEvent } from 'agent-messenger/discord'
-
 import { channelsSchema } from '@/channels/schema'
 
-import { classifyInbound } from './discord-classify'
+import { classifyInbound, type RawDiscordMessageCreateEvent } from './discord-classify'
 
 const config = channelsSchema.parse({ discord: {} }).discord!
 const context = { selfUserId: '100000000000000001', selfAliases: ['typeclaw', '타입클로'] }
 
-function event(overrides: Partial<DiscordGatewayMessageCreateEvent> = {}): DiscordGatewayMessageCreateEvent {
+function event(overrides: Partial<RawDiscordMessageCreateEvent> = {}): RawDiscordMessageCreateEvent {
   return {
     type: 'MESSAGE_CREATE',
     id: '400000000000000004',
@@ -74,5 +72,46 @@ describe('classifyInbound (discord user)', () => {
     expect(english.kind === 'route' && english.payload.isBotMention).toBe(true)
     expect(korean.kind === 'route' && korean.payload.isBotMention).toBe(true)
     expect(korean.kind === 'route' && korean.payload.thread).toBeNull()
+  })
+
+  test('flags peer-bot authors and leaves human authors unflagged', () => {
+    const peerBot = classifyInbound(
+      event({ author: { id: '700000000000000007', username: 'peerbot', bot: true } }),
+      config,
+      context,
+    )
+    const human = classifyInbound(event(), config, context)
+
+    expect(peerBot.kind === 'route' && peerBot.payload.authorIsBot).toBe(true)
+    expect(human.kind === 'route' && human.payload.authorIsBot).toBe(false)
+  })
+
+  test('resolves replies to self via the auto-mention array', () => {
+    const replyToSelf = classifyInbound(
+      event({
+        message_reference: { message_id: '800000000000000008' },
+        mentions: [{ id: '100000000000000001', username: 'self' }],
+        content: '확인했어요?',
+      }),
+      config,
+      context,
+    )
+
+    expect(replyToSelf.kind === 'route' && replyToSelf.payload.replyToBotMessageId).toBe('800000000000000008')
+    expect(replyToSelf.kind === 'route' && replyToSelf.payload.replyToOtherMessageId).toBeNull()
+  })
+
+  test('marks replies to other authors as targeting someone else', () => {
+    const replyToOther = classifyInbound(
+      event({
+        message_reference: { message_id: '800000000000000008' },
+        mentions: [{ id: '600000000000000006', username: 'bob' }],
+      }),
+      config,
+      context,
+    )
+
+    expect(replyToOther.kind === 'route' && replyToOther.payload.replyToBotMessageId).toBeNull()
+    expect(replyToOther.kind === 'route' && replyToOther.payload.replyToOtherMessageId).toBe('800000000000000008')
   })
 })
