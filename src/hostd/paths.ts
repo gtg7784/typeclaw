@@ -75,6 +75,10 @@ export function modelsDir(): string {
   return join(homeRoot(), 'models')
 }
 
+export function versionCachePath(): string {
+  return join(homeRoot(), 'version-cache.json')
+}
+
 // Throws on any name that could traverse out of registrationsDir() or
 // confuse the filesystem. Caller's responsibility to handle the error;
 // don't catch-and-ignore — an invalid name is a protocol violation.

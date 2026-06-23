@@ -495,6 +495,22 @@ export const composeSchema = z
 
 export type ComposeConfig = z.infer<typeof composeSchema>
 
+// Host-stage update-checker knob. `enabled: false` turns off the once-a-day
+// "a newer typeclaw is on npm" notice the host CLI prints before a command
+// runs. The container never reads this — the check is a pure host-stage
+// affordance that compares the installed CLI version against the npm registry
+// off the hot path (a detached, throttled background refresh writes a cache
+// under ~/.typeclaw/; every CLI invocation only does a disk read). Env
+// overrides (TYPECLAW_NO_UPDATE_CHECK, NO_UPDATE_NOTIFIER, CI) also disable it
+// without touching config, so this field is the persistent opt-out.
+export const updateCheckSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+  })
+  .default({ enabled: true })
+
+export type UpdateCheckConfig = z.infer<typeof updateCheckSchema>
+
 // Reverse-proxy tunnels expose a container-private port to the public internet
 // via a managed subprocess (cloudflared) or a user-supplied external URL.
 // See AGENTS.md `## Tunnels`. Keeping the enum scoped to what's implemented
@@ -735,6 +751,7 @@ export const configSchema = z
     // here, so a freshly-hatched bot already has its identity wired up.
     alias: z.array(z.string().trim().min(1)).default([]),
     compose: composeSchema,
+    updateCheck: updateCheckSchema,
     channels: channelsSchema,
     portForward: portForwardSchema,
     network: networkSchema,
@@ -951,6 +968,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   plugins: 'restart-required',
   alias: 'applied',
   compose: 'ignored',
+  updateCheck: 'ignored',
   channels: 'applied',
   portForward: 'restart-required',
   network: 'restart-required',
@@ -1045,6 +1063,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'plugins',
     'alias',
     'compose',
+    'updateCheck',
     'channels',
     'portForward',
     'network',

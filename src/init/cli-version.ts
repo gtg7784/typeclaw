@@ -23,7 +23,7 @@ export const CLI_VERSION = cliPkg.version
 
 const NODE_MODULES_SEGMENT = `${join('/', 'node_modules', '/')}`
 
-function isInstalledCli(): boolean {
+export function isInstalledCli(): boolean {
   return CLI_PACKAGE_JSON_PATH.includes(NODE_MODULES_SEGMENT)
 }
 
