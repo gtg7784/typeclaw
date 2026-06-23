@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import { agentUsesVector } from '@/bundled-plugins/memory/vector/config'
 import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config } from '@/config'
@@ -716,7 +716,7 @@ export async function planStart({
 
   if (shouldMirrorDevSource(devSourcePath, cwd, platform)) {
     runArgs.push(...dockerBindMount({ src: devSourcePath, dst: devSourcePath, readonly: true }))
-  } else if (shouldMountWindowsDevSource(devSourcePath, platform)) {
+  } else if (shouldMountWindowsDevSource(devSourcePath, cwd, platform)) {
     runArgs.push(...dockerBindMount({ src: devSourcePath, dst: DEV_SOURCE_CONTAINER_PATH, readonly: true }))
   }
 
@@ -767,8 +767,16 @@ export async function refreshDockerfile(
   opts: { buildKit?: boolean } = {},
 ): Promise<{ changed: boolean; warnings: string[] }> {
   const cfg = await loadTypeclawConfig(cwd)
+  // A local-spec (`file:`/`link:`) dev install must inline the heavy stack: its
+  // unreleased version has no published `typeclaw-base` tag, and
+  // resolveBaseImageVersion prefers node_modules/typeclaw/package.json#version —
+  // which `ensureDeps` has already materialized by the time start() calls this —
+  // so without the gate a release-shaped dev version pins a nonexistent
+  // `FROM ghcr.io/...:<version>`. `null` selects the inline `oven/bun:1-slim`
+  // path. Mirrors the same gate in writeDockerAssets (src/init/index.ts).
+  const devMode = await hasLocallyLinkedTypeclawDep(cwd)
   const next = buildDockerfile(cfg.docker.file, {
-    baseImageVersion: resolveBaseImageVersion(cwd),
+    baseImageVersion: devMode ? null : resolveBaseImageVersion(cwd),
     cjkFontsAuto: hostLocaleIsCjk(),
     buildKit: opts.buildKit,
   })
@@ -1060,6 +1068,18 @@ async function detectDevSource(cwd: string): Promise<string | null> {
   }
 }
 
+// True when `child` is `parent` itself or nested beneath it. Lexical, not
+// realpath-aware — callers pass already-resolved absolute paths. Preferred over
+// `child.startsWith(parent)`, which mis-fires on sibling-prefix collisions
+// (`C:\foo` vs `C:\foobar`), trailing-separator skew, and would treat
+// `/srv/agentX` as inside `/srv/agent`. A dev source already inside the agent
+// folder is reachable through the `/agent` bind mount, so neither dev-source
+// branch should add a second mount for it.
+export function isPathInsideOrEqual(child: string, parent: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
 // POSIX dev mode: node_modules/typeclaw is a symlink to an absolute host path
 // outside /agent. The mirror mount bind-mounts that path at the SAME path inside
 // the (Linux) container so the symlink resolves. That only works when the host
@@ -1074,7 +1094,7 @@ export function shouldMirrorDevSource(
   cwd: string,
   platform: NodeJS.Platform = process.platform,
 ): devSourcePath is string {
-  return devSourcePath !== null && !devSourcePath.startsWith(cwd) && !isWindows(platform)
+  return devSourcePath !== null && !isPathInsideOrEqual(devSourcePath, cwd) && !isWindows(platform)
 }
 
 // Native-Windows dev mode (#899): the host's `C:\...` checkout cannot be
@@ -1082,12 +1102,16 @@ export function shouldMirrorDevSource(
 // checkout directly over the standard resolution path `/agent/node_modules/
 // typeclaw` inside the container, so Node/Bun resolve typeclaw from source
 // regardless of how the host materialized node_modules/typeclaw (a junction,
-// per prepareWindowsDevJunction).
+// per prepareWindowsDevJunction). Like the POSIX branch, skip when the dev
+// source lives inside the agent folder: a `file:./vendor/typeclaw` checkout is
+// already exposed via the `/agent` mount, so a second mount is wrong. A
+// bun-linked (`link:`) checkout legitimately lives outside cwd and still mounts.
 export function shouldMountWindowsDevSource(
   devSourcePath: string | null,
+  cwd: string,
   platform: NodeJS.Platform = process.platform,
 ): devSourcePath is string {
-  return devSourcePath !== null && isWindows(platform)
+  return devSourcePath !== null && !isPathInsideOrEqual(devSourcePath, cwd) && isWindows(platform)
 }
 
 // True when the agent's package.json declares typeclaw via `file:` or

@@ -337,6 +337,10 @@ describe('runInit', () => {
     await runInit({
       cwd: root,
       apiKey: 'fw_test_key',
+      // Pin POSIX: the dev-checkout spec is `file:` on POSIX, `link:` on
+      // Windows (resolveTypeclawSpec). This case asserts the `file:` contract;
+      // the Windows `link:` contract is covered by a sibling test below.
+      platform: 'linux',
       runHatching: okHatch,
       runBunInstall: okInstall,
       dockerExec: okDocker,
@@ -984,7 +988,7 @@ describe('scaffold', () => {
   })
 
   test('writes a private package.json named after the folder with typeclaw as a file: dependency', async () => {
-    await scaffold(root)
+    await scaffold(root, { platform: 'linux' })
 
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
     expect(pkg.name).toBe(basename(root))
@@ -993,6 +997,15 @@ describe('scaffold', () => {
     const deps = pkg.dependencies as Record<string, string>
     expect(deps.typeclaw).toMatch(/^file:/)
     expect(pkg.scripts).toBeUndefined()
+  })
+
+  test('writes typeclaw as a link: dependency on native Windows (#899)', async () => {
+    await scaffold(root, { platform: 'win32' })
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies.typeclaw).toBe('link:typeclaw')
   })
 
   test('package.json declares packages/* as a bun workspace root', async () => {
@@ -1024,7 +1037,7 @@ describe('scaffold', () => {
   })
 
   test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
-    await scaffold(root)
+    await scaffold(root, { platform: 'linux' })
 
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
@@ -1422,11 +1435,41 @@ describe('writeDockerAssets', () => {
   })
 
   test('returns devMode true when typeclaw dep is a file: spec', async () => {
-    await scaffold(root)
+    await scaffold(root, { platform: 'linux' })
 
     const result = await writeDockerAssets(root)
 
     expect(result).toEqual({ ok: true, devMode: true })
+  })
+
+  test('returns devMode true when typeclaw dep is a link: spec (native-Windows dev)', async () => {
+    await scaffold(root, { platform: 'win32' })
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies.typeclaw).toBe('link:typeclaw')
+
+    const result = await writeDockerAssets(root)
+
+    expect(result).toEqual({ ok: true, devMode: true })
+  })
+
+  test('inlines the heavy stack (no ghcr base pin) for a link: dev install whose node_modules version looks release-shaped', async () => {
+    await scaffold(root, { platform: 'win32' })
+    // resolveBaseImageVersion prefers node_modules/typeclaw/package.json#version;
+    // a release-SHAPED but unpublished dev version must NOT become a base-image
+    // pin, since that GHCR tag does not exist.
+    await mkdir(join(root, 'node_modules', 'typeclaw'), { recursive: true })
+    await writeFile(
+      join(root, 'node_modules', 'typeclaw', 'package.json'),
+      `${JSON.stringify({ name: 'typeclaw', version: '99.99.99' }, null, 2)}\n`,
+    )
+
+    const result = await writeDockerAssets(root)
+
+    expect(result).toEqual({ ok: true, devMode: true })
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(dockerfile).not.toContain('ghcr.io/typeclaw/typeclaw-base')
   })
 
   test('returns devMode false when typeclaw dep is a version range', async () => {

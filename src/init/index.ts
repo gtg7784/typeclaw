@@ -728,13 +728,21 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
   try {
     const pkg = await readPackageJson(root)
     const typeclawSpec = pkg.dependencies?.typeclaw ?? ''
-    const devMode = typeclawSpec.startsWith('file:')
+    // Both `file:` (POSIX dev) and `link:` (native-Windows dev, see
+    // resolveTypeclawSpec) are locally-linked checkouts that must inline the
+    // heavy stack on the slim base, since the matching GHCR base tag for an
+    // unreleased dev build does not exist. Mirrors hasLocallyLinkedTypeclawDep.
+    const devMode = typeclawSpec.startsWith('file:') || typeclawSpec.startsWith('link:')
 
     const typeclawConfig = await readTypeclawConfig(root)
     await writeFile(
       join(root, DOCKERFILE),
       buildDockerfile(typeclawConfig.docker.file, {
-        baseImageVersion: resolveBaseImageVersion(root),
+        // A local-spec dev install must inline the heavy stack: its unreleased
+        // version has no published `typeclaw-base` tag, so resolving a base
+        // image version would pin a nonexistent `FROM ghcr.io/...:<version>`.
+        // `null` selects the inline `oven/bun:1-slim` path in buildDockerfile.
+        baseImageVersion: devMode ? null : resolveBaseImageVersion(root),
         cjkFontsAuto: hostLocaleIsCjk(),
       }),
       { flag: 'wx' },
