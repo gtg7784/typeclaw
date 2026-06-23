@@ -86,7 +86,27 @@ export async function writeTodos(agentDir: string, scope: TodoScope, todos: Todo
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-  await rename(tmp, path)
+  await renameWithRetry(tmp, path)
+}
+
+// Windows workaround: rename() onto an existing destination is not atomic and
+// fails transiently (EPERM/EACCES/EBUSY/EEXIST) when another writer or a virus
+// scanner / file indexer momentarily holds the target open — concurrent
+// writeTodos calls onto the same scope file reliably trip this. The retry keeps
+// last-writer-wins instead of rejecting a writer. POSIX rename never hits this.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+
+async function renameWithRetry(from: string, to: string, attempts = 10): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (err) {
+      const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
+      if (attempt >= attempts || typeof code !== 'string' || !RENAME_RETRY_CODES.has(code)) throw err
+      await new Promise((resolve) => setTimeout(resolve, attempt * 10))
+    }
+  }
 }
 
 export function incompleteTodos(todos: readonly Todo[]): Todo[] {

@@ -61,6 +61,13 @@ describe('todo store', () => {
     const result = await readTodos(agentDir, TUI_SCOPE)
     expect([JSON.stringify(a), JSON.stringify(b)]).toContain(JSON.stringify(result))
   })
+
+  test('many concurrent writers all resolve and the survivor is one of them', async () => {
+    const writers = Array.from({ length: 16 }, (_, i) => [{ content: `w${i}`, status: 'pending' } satisfies Todo])
+    await Promise.all(writers.map((todos) => writeTodos(agentDir, TUI_SCOPE, todos)))
+    const result = JSON.stringify(await readTodos(agentDir, TUI_SCOPE))
+    expect(writers.map((w) => JSON.stringify(w))).toContain(result)
+  })
 })
 
 describe('readTodos validation (corrupt / hand-edited files)', () => {
