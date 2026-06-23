@@ -260,7 +260,8 @@ export function createOutboundCallback(deps: {
       if (replyToId !== undefined) sendOptions.reply_to_message_id = replyToId
       const sent = await client.sendMessage(msg.chat, rendered, sendOptions)
       logger.info(`[telegram-bot] sent message_id=${sent.message_id} ${tag}`)
-      return { ok: true }
+      const id = String(sent.message_id)
+      return { ok: true, messageId: id, messageIds: [id] }
     } catch (err) {
       const message = describe(err)
       logger.error(`[telegram-bot] sendMessage failed: ${message}`)
