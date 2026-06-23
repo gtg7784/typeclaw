@@ -5,6 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded runs, but only for PRs. A force-push or quick follow-up
+# commit on a PR otherwise leaves the obsolete run grinding through a full
+# install + typecheck + lint + test for no reason, hogging runner minutes and
+# the concurrency queue.
+#
+# Pushes to `main` must NEVER be superseded: each post-merge run gates
+# `windows-test` and reflects the actual shipped state of main, so every
+# back-to-back merge has to run to completion. `cancel-in-progress: false`
+# alone is NOT enough — GitHub allows only one running + one PENDING run per
+# group, and a newly-queued run cancels the existing pending one regardless of
+# that flag. So the group must be UNIQUE per push run: `github.run_id` gives
+# each push its own group (nothing to collide with), while PRs keep a shared
+# per-PR group so a new commit supersedes the previous run for that same PR.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: typecheck / lint / format / test
@@ -28,6 +45,25 @@ jobs:
           # token contention; a pinned version skips that lookup and goes
           # straight to the release download URL.
           bun-version: 1.3.14
+
+      - name: Cache Bun install cache
+        # setup-bun caches only the Bun BINARY, not downloaded packages, so a
+        # cold runner re-fetches all 674 deps (~821MB) every run — the dominant
+        # cost that grew as the dependency tree did. Cache Bun's global tarball
+        # store (~/.bun/install/cache), NOT node_modules: bun hardlinks packages
+        # from that store into node_modules, so a restored node_modules would be
+        # dangling hardlinks, and platform-specific native builds (sharp,
+        # onnxruntime, @huggingface/transformers) must be linked per-runner from
+        # the tarball anyway. Key on the lockfile hash; restore-keys lets a
+        # changed lockfile reuse the prior cache for everything that didn't move.
+        # A cache hit also sidesteps the flaky api.github.com tarball fetch that
+        # the retry loop below exists for — fewer cold fetches, fewer 504s.
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
 
       - name: Install dependencies
         # GitHub tarball deps (e.g. libsignal-node, pinned via @whiskeysockets/baileys)
@@ -81,8 +117,14 @@ jobs:
     # Windows runner lacks and require a separate triage (#899) first.
     # continue-on-error keeps it informational until the Windows toolchain is
     # proven stable, then it graduates to a required check.
+    # Gated to push (post-merge on main), matching windows-test: while the lane
+    # is advisory (continue-on-error), running a Windows runner on every PR
+    # spends 2x-cost minutes for a check nobody blocks on. Post-merge coverage
+    # still catches Windows toolchain regressions before a release. Drop this
+    # `if` and graduate to a required PR check once the Windows lane is stable.
     name: windows static checks (typecheck / lint / format)
     runs-on: windows-latest
+    if: github.event_name == 'push'
     continue-on-error: true
     env:
       FIREWORKS_API_KEY: dummy
@@ -94,6 +136,17 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      - name: Cache Bun install cache
+        # Same rationale as the `ci` job's cache step. The ${{ runner.os }} key
+        # prefix keeps this Windows cache separate from the Linux one — the
+        # tarball store layout differs per OS and must never cross-contaminate.
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
 
       - name: Install dependencies
         # GitHub tarball deps (e.g. libsignal-node, pinned via @whiskeysockets/baileys)
@@ -146,6 +199,17 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      - name: Cache Bun install cache
+        # Same rationale as the `ci` job's cache step. The ${{ runner.os }} key
+        # prefix keeps this Windows cache separate from the Linux one — the
+        # tarball store layout differs per OS and must never cross-contaminate.
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
 
       - name: Install dependencies
         # GitHub tarball deps (e.g. libsignal-node, pinned via @whiskeysockets/baileys)
