@@ -33,14 +33,7 @@ import {
   type SubagentCompletionBridge,
 } from '@/channels'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
-import {
-  createConfigReloadable,
-  getConfig,
-  loadConfigSync,
-  loadPluginConfigsSync,
-  reloadConfig,
-  withDefaultPlugins,
-} from '@/config'
+import { createConfigReloadable, getConfig, loadConfigBundleSync, reloadConfig, withDefaultPlugins } from '@/config'
 import {
   type CountStore,
   type CronConsumer,
@@ -161,12 +154,11 @@ export async function startAgent({
   const tuiToken = process.env.TYPECLAW_TUI_TOKEN
   const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
 
-  const pluginConfigsByName = loadPluginConfigsSync(cwd)
+  const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
   // Vector agents omit the system-prompt `# Memory` section and inject memory
   // per-turn instead. Derived once here: `memory.vector.enabled` is
   // restart-required, so a single boot read is coherent for the process.
   const suppressSystemMemory = vectorEnabledFromMemoryConfig(pluginConfigsByName.memory)
-  const cwdConfig = loadConfigSync(cwd)
   const githubTokenBridge = createGithubTokenBridge()
   const mcpManager =
     cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
