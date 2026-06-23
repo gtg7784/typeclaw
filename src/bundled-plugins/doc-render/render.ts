@@ -79,7 +79,7 @@ export async function loadCompilerModule(cwd: string = process.cwd()): Promise<N
 }
 
 export async function renderPdf(mainFile: string, outFile: string): Promise<number> {
-  const { existsSync, writeFileSync } = await import('node:fs')
+  const { existsSync } = await import('node:fs')
 
   const fontPaths = FONT_PATHS.filter((p) => existsSync(p))
   const mod = await loadCompilerModule()
@@ -88,7 +88,7 @@ export async function renderPdf(mainFile: string, outFile: string): Promise<numb
     ...(fontPaths.length > 0 ? { fontArgs: [{ fontPaths }] } : {}),
   })
   const pdf = compiler.pdf({ mainFilePath: mainFile })
-  writeFileSync(outFile, Buffer.from(pdf))
+  await Bun.write(outFile, pdf)
   return pdf.length
 }
 
