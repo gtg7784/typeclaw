@@ -29,6 +29,8 @@ import type {
   OutboundMessage,
   ResolvedChannelNames,
   SendResult,
+  TypingCallback,
+  TypingTarget,
 } from '@/channels/types'
 import type { WebexAccountRecord } from '@/secrets/schema'
 
@@ -139,6 +141,47 @@ export function createOutboundCallback(deps: {
 
 async function defaultReadFile(path: string): Promise<WebexOutboundFile> {
   return { content: Bun.file(path), filename: path.split('/').pop() ?? 'attachment' }
+}
+
+// Webex's typing indicator does not auto-expire, so unlike Telegram both phases
+// are load-bearing: 'tick' raises it (re-fired on each router heartbeat) and
+// 'stop' explicitly clears it once the turn ends.
+//
+// The router fires ticks fire-and-forget (`void fireTyping(live, 'tick')`) and
+// relies on adapters with explicit clears to order 'stop' after any in-flight
+// 'tick' — see router.ts stopTypingHeartbeat ("The FIFO inside the slack adapter
+// ensures this clear lands AFTER any in-flight 'tick'"). Without serialization a
+// slow `setTyping(room, true)` could resolve AFTER the `setTyping(room, false)`
+// clear and strand the persistent indicator on. So calls are chained through a
+// per-room FIFO (mirroring createSlackTypingTracker) BEFORE awaiting any slow
+// work, guaranteeing on-the-wire order matches enqueue order.
+//
+// A swallowed error never surfaces to the router — a dropped indicator is
+// cosmetic and must not abort a send or teardown.
+export function createTypingCallback(deps: {
+  client: Pick<WebexClient, 'setTyping'>
+  logger: WebexAdapterLogger
+  formatChannelTag?: (chat: string) => Promise<string>
+}): TypingCallback {
+  const { client, logger, formatChannelTag } = deps
+  const queues = new Map<string, Promise<void>>()
+  return async (target: TypingTarget): Promise<void> => {
+    if (target.adapter !== 'webex') return
+    const typing = target.phase === 'tick'
+    const prev = queues.get(target.chat) ?? Promise.resolve()
+    const next = prev
+      .catch(() => {})
+      .then(() => client.setTyping(target.chat, typing))
+      .catch(async (err: unknown) => {
+        const tag = formatChannelTag ? await formatChannelTag(target.chat) : `room=${target.chat}`
+        logger.warn(`[webex] typing ${tag} phase=${target.phase} failed: ${describe(err)}`)
+      })
+    queues.set(target.chat, next)
+    void next.finally(() => {
+      if (queues.get(target.chat) === next) queues.delete(target.chat)
+    })
+    await next
+  }
 }
 
 // The Webex REST/internal client offers no AbortSignal, so a hung `listMessages`
@@ -305,6 +348,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
     botPersonIdRef: () => botPerson?.ref ?? null,
   })
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
+  const typingCallback = createTypingCallback({ client, logger, formatChannelTag })
   const fetchAttachmentCallback = createFetchAttachmentCallback({ tokenRef: () => currentToken, logger, fetchImpl })
 
   const handleMessage = async (event: WebexInboundMessage): Promise<void> => {
@@ -391,6 +435,8 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
       })
 
       options.router.registerOutbound('webex', outboundCallback)
+      options.router.registerTyping('webex', typingCallback)
+      options.router.setTypingCapability('webex', true)
       options.router.registerChannelNameResolver('webex', channelResolver)
       options.router.registerSelfIdentity('webex', selfIdentityResolver)
       options.router.registerHistory('webex', historyCallback)
@@ -399,6 +445,8 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
 
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('webex', outboundCallback)
+        options.router.unregisterTyping('webex', typingCallback)
+        options.router.setTypingCapability('webex', false)
         options.router.unregisterChannelNameResolver('webex', channelResolver)
         options.router.unregisterSelfIdentity('webex', selfIdentityResolver)
         options.router.unregisterHistory('webex', historyCallback)
@@ -431,6 +479,8 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
       if (!started) return
       started = false
       options.router.unregisterOutbound('webex', outboundCallback)
+      options.router.unregisterTyping('webex', typingCallback)
+      options.router.setTypingCapability('webex', false)
       options.router.unregisterChannelNameResolver('webex', channelResolver)
       options.router.unregisterSelfIdentity('webex', selfIdentityResolver)
       options.router.unregisterHistory('webex', historyCallback)
