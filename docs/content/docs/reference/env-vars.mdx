@@ -6,11 +6,12 @@ icon: Variable
 
 ## Host stage
 
-| Variable             | Read by    | Default       | Effect                                                        |
-| -------------------- | ---------- | ------------- | ------------------------------------------------------------- |
-| `TYPECLAW_HOME`      | hostd, CLI | `~/.typeclaw` | Override the host daemon state directory; primarily for tests |
-| `TYPECLAW_LOG_LEVEL` | CLI        | `info`        | `debug` / `info` / `warn` / `error`                           |
-| `TYPECLAW_DEBUG`     | CLI        | unset         | Anything truthy enables verbose tracing                       |
+| Variable                   | Read by    | Default       | Effect                                                                                                            |
+| -------------------------- | ---------- | ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `TYPECLAW_HOME`            | hostd, CLI | `~/.typeclaw` | Override the host daemon state directory; primarily for tests                                                     |
+| `TYPECLAW_LOG_LEVEL`       | CLI        | `info`        | `debug` / `info` / `warn` / `error`                                                                               |
+| `TYPECLAW_DEBUG`           | CLI        | unset         | Anything truthy enables verbose tracing                                                                           |
+| `TYPECLAW_NO_UPDATE_CHECK` | CLI        | unset         | Anything truthy disables the background "newer typeclaw available" check (also honors `NO_UPDATE_NOTIFIER`, `CI`) |
 
 ## Container stage (set by `typeclaw start`)
 
