@@ -8,11 +8,34 @@
 
 export type ReviewVerdict = 'APPROVE' | 'REQUEST_CHANGES'
 
+export type ReviewObserver = (args: {
+  sessionId: string
+  workspace: string
+  prNumber: number
+  verdict: ReviewVerdict
+}) => void
+
 type PrKey = string
 type ThreadKey = string
 
 const reviewsByPr = new Map<PrKey, Set<ReviewVerdict>>()
 const resolvedThreads = new Set<ThreadKey>()
+
+// A single process-wide observer notified AFTER a verdict is recorded, so the
+// run-side wiring can fan a landed verdict out over the broadcast bus to sibling
+// PR sessions (see github-verdict-activity.ts) WITHOUT giving the github-cli-auth
+// plugin stream access. Registered once at boot from run/index.ts. The ledger
+// stays the single seam where "a formal verdict happened" is known across the
+// plugin/channels boundary, which is why it owns this hook.
+let reviewObserver: ReviewObserver | null = null
+
+export function setReviewObserver(observer: ReviewObserver | null): void {
+  reviewObserver = observer
+}
+
+export function __resetReviewObserverForTest(): void {
+  reviewObserver = null
+}
 
 function prKey(sessionId: string, workspace: string, prNumber: number): PrKey {
   return `${sessionId}::${workspace}::${prNumber}`
@@ -41,6 +64,15 @@ export function recordReview(args: {
   const set = reviewsByPr.get(key) ?? new Set<ReviewVerdict>()
   set.add(args.verdict)
   reviewsByPr.set(key, set)
+  // Notify AFTER the record lands and never let an observer failure corrupt the
+  // ledger write — the false-receipt guard depends on this record being durable.
+  if (reviewObserver !== null) {
+    try {
+      reviewObserver(args)
+    } catch {
+      // swallow: a broken broadcast must not break verdict bookkeeping
+    }
+  }
 }
 
 export function hasReview(args: {

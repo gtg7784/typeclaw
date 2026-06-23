@@ -16,6 +16,12 @@ export {
 } from './router'
 export { createChannelsReloadable } from './reloadable'
 export {
+  createPrVerdictActivityBridge,
+  type PrVerdictActivityBridge,
+  type PrVerdictActivityBridgeOptions,
+} from './pr-verdict-activity-bridge'
+export { setReviewObserver } from './github-review-turn-ledger'
+export {
   createSubagentCompletionBridge,
   type SubagentCompletionBridge,
   type SubagentCompletionBridgeOptions,
