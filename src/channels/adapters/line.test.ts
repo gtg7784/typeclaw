@@ -81,7 +81,7 @@ describe('createOutboundCallback', () => {
       formatChannelTag: tag,
     })
     const res = await cb({ adapter: 'line', workspace: '@line-dm', chat: 'C1', text: '**hi**' } as OutboundMessage)
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, messageId: 'M', messageIds: ['M'] })
     expect(sent).toEqual([{ chat: 'C1', text: 'hi' }])
   })
 

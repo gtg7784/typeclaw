@@ -126,12 +126,12 @@ export function createOutboundCallback(deps: {
         return { ok: false, error: 'line send failed' }
       }
       logger.info(`[line] sent message_id=${result.message_id} ${tag}`)
+      return { ok: true, messageId: result.message_id, messageIds: [result.message_id] }
     } catch (err) {
       const message = describe(err)
       logger.error(`[line] sendMessage failed: ${message}`)
       return { ok: false, error: message }
     }
-    return { ok: true }
   }
 }
 
