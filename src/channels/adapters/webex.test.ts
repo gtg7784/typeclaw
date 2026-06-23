@@ -7,7 +7,7 @@ import { channelsSchema } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 import type { WebexAccountRecord } from '@/secrets/schema'
 
-import { createWebexAdapter, createWebexHistoryCallback, type WebexAdapterLogger } from './webex'
+import { createTypingCallback, createWebexAdapter, createWebexHistoryCallback, type WebexAdapterLogger } from './webex'
 import type { WebexInboundMessage } from './webex-classify'
 
 const config = channelsSchema.parse({ webex: {} }).webex!
@@ -89,6 +89,10 @@ function router(): ChannelRouter & { routed: InboundMessage[]; registered: strin
     },
     registerOutbound: (adapter: string) => registered.push(`outbound:${adapter}`),
     unregisterOutbound: (adapter: string) => unregistered.push(`outbound:${adapter}`),
+    registerTyping: (adapter: string) => registered.push(`typing:${adapter}`),
+    unregisterTyping: (adapter: string) => unregistered.push(`typing:${adapter}`),
+    setTypingCapability: (adapter: string, supported: boolean) =>
+      registered.push(`typing-cap:${adapter}=${String(supported)}`),
     registerChannelNameResolver: (adapter: string) => registered.push(`names:${adapter}`),
     unregisterChannelNameResolver: (adapter: string) => unregistered.push(`names:${adapter}`),
     registerSelfIdentity: (adapter: string) => registered.push(`self:${adapter}`),
@@ -130,6 +134,8 @@ describe('createWebexAdapter', () => {
     expect(adapter.isConnected()).toBe(true)
     expect(r.registered).toEqual([
       'outbound:webex',
+      'typing:webex',
+      'typing-cap:webex=true',
       'names:webex',
       'self:webex',
       'history:webex',
@@ -338,5 +344,116 @@ describe('createWebexHistoryCallback reply attribution', () => {
     const elapsed = Date.now() - start
     expect(res.ok).toBe(false)
     expect(elapsed).toBeLessThan(500)
+  })
+})
+
+describe('createWebexAdapter createTypingCallback', () => {
+  test('phase=tick raises the indicator via setTyping(room, true)', async () => {
+    const calls: Array<{ room: string; typing?: boolean }> = []
+    const cb = createTypingCallback({
+      client: { setTyping: async (room, typing) => void calls.push({ room, typing }) },
+      logger: logger(),
+    })
+
+    await cb({ adapter: 'webex', workspace: 'webex', chat: 'room-1', thread: null, phase: 'tick' })
+
+    expect(calls).toEqual([{ room: 'room-1', typing: true }])
+  })
+
+  test('phase=stop clears the indicator via setTyping(room, false)', async () => {
+    const calls: Array<{ room: string; typing?: boolean }> = []
+    const cb = createTypingCallback({
+      client: { setTyping: async (room, typing) => void calls.push({ room, typing }) },
+      logger: logger(),
+    })
+
+    await cb({ adapter: 'webex', workspace: 'webex', chat: 'room-1', thread: null, phase: 'stop' })
+
+    expect(calls).toEqual([{ room: 'room-1', typing: false }])
+  })
+
+  test('ignores targets for other adapters', async () => {
+    let called = false
+    const cb = createTypingCallback({
+      client: {
+        setTyping: async () => {
+          called = true
+        },
+      },
+      logger: logger(),
+    })
+
+    await cb({ adapter: 'slack-bot', workspace: 'slack', chat: 'C1', thread: null, phase: 'tick' })
+
+    expect(called).toBe(false)
+  })
+
+  test('swallows setTyping failures and logs a warning rather than throwing', async () => {
+    const log = logger()
+    const cb = createTypingCallback({
+      client: {
+        setTyping: async () => {
+          throw new Error('webex 429')
+        },
+      },
+      logger: log,
+    })
+
+    await cb({ adapter: 'webex', workspace: 'webex', chat: 'room-1', thread: null, phase: 'tick' })
+
+    expect(log.lines.some((l) => l.startsWith('warn:[webex] typing') && l.includes('webex 429'))).toBe(true)
+  })
+
+  test('serializes per-room so a slow tick still completes before the stop clear (false applied last)', async () => {
+    // given: a held tick whose setTyping(true) only resolves after stop is fired
+    const completed: boolean[] = []
+    let releaseTick: (() => void) | undefined
+    const tickGate = new Promise<void>((resolve) => {
+      releaseTick = resolve
+    })
+    const cb = createTypingCallback({
+      client: {
+        setTyping: async (_room, typing) => {
+          if (typing === true) await tickGate
+          completed.push(typing === true)
+        },
+      },
+      logger: logger(),
+    })
+
+    // when: tick fires (and stalls), then stop fires before the tick is released
+    const tick = cb({ adapter: 'webex', workspace: 'webex', chat: 'room-1', thread: null, phase: 'tick' })
+    const stop = cb({ adapter: 'webex', workspace: 'webex', chat: 'room-1', thread: null, phase: 'stop' })
+    releaseTick?.()
+    await Promise.all([tick, stop])
+
+    // then: the FIFO ran true before false, so the clear is the last call on the wire
+    expect(completed).toEqual([true, false])
+  })
+
+  test('does not serialize across distinct rooms', async () => {
+    const order: string[] = []
+    let releaseRoomA: (() => void) | undefined
+    const gateA = new Promise<void>((resolve) => {
+      releaseRoomA = resolve
+    })
+    const cb = createTypingCallback({
+      client: {
+        setTyping: async (room) => {
+          if (room === 'room-A') await gateA
+          order.push(room)
+        },
+      },
+      logger: logger(),
+    })
+
+    const a = cb({ adapter: 'webex', workspace: 'webex', chat: 'room-A', thread: null, phase: 'tick' })
+    const b = cb({ adapter: 'webex', workspace: 'webex', chat: 'room-B', thread: null, phase: 'tick' })
+    await b
+    releaseRoomA?.()
+    await a
+
+    // room-B is not blocked behind room-A's stalled call
+    expect(order).toEqual(['room-B', 'room-A'])
   })
 })
