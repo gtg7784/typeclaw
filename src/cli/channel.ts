@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
+import QRCode from 'qrcode'
 
 import { config } from '@/config'
 import {
@@ -25,6 +26,7 @@ import {
   setGithubSecrets,
   type AddChannelStepEvent,
   type ChannelKind,
+  type DiscordAuthResult,
   type GithubCredentialPatch,
   type GithubTunnelProvider,
   type KakaotalkAuthResult,
@@ -32,6 +34,7 @@ import {
   type SlackAuthResult,
   type WebexAuthResult,
 } from '@/init'
+import { runDiscordBootstrap } from '@/init/discord-auth'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
 import { runSlackBootstrap } from '@/init/slack-auth'
@@ -46,6 +49,7 @@ import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup,
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   slack: 'Slack (User)',
+  discord: 'Discord (User)',
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
@@ -615,8 +619,8 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
     process.exit(0)
   }
 
-  type FamilyValue = 'webex-family' | 'slack-family'
-  type FlatKind = Exclude<ChannelKind, 'webex' | 'webex-bot' | 'slack' | 'slack-bot'>
+  type FamilyValue = 'webex-family' | 'slack-family' | 'discord-family'
+  type FlatKind = Exclude<ChannelKind, 'webex' | 'webex-bot' | 'slack' | 'slack-bot' | 'discord' | 'discord-bot'>
   type PickerValue = FlatKind | FamilyValue
   const options: Array<{ value: PickerValue; label: string }> = []
   for (const kind of available) {
@@ -640,15 +644,20 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
   }
   if (selected === 'webex-family') return pickWebexMode(available)
   if (selected === 'slack-family') return pickSlackMode(available)
+  if (selected === 'discord-family') return pickDiscordMode(available)
   return selected
 }
 
-const FAMILY_OF: Partial<Record<ChannelKind, { value: 'webex-family' | 'slack-family'; label: string }>> = {
+const FAMILY_OF: Partial<Record<ChannelKind, { value: FamilyValue; label: string }>> = {
   webex: { value: 'webex-family', label: 'Webex' },
   'webex-bot': { value: 'webex-family', label: 'Webex' },
   slack: { value: 'slack-family', label: 'Slack' },
   'slack-bot': { value: 'slack-family', label: 'Slack' },
+  discord: { value: 'discord-family', label: 'Discord' },
+  'discord-bot': { value: 'discord-family', label: 'Discord' },
 }
+
+type FamilyValue = 'webex-family' | 'slack-family' | 'discord-family'
 
 type FamilyMode<K extends ChannelKind> = { value: K; label: string }
 
@@ -660,6 +669,11 @@ export const WEBEX_MODES: ReadonlyArray<FamilyMode<'webex' | 'webex-bot'>> = [
 export const SLACK_MODES: ReadonlyArray<FamilyMode<'slack' | 'slack-bot'>> = [
   { value: 'slack-bot', label: 'Bot (Token) — posts as a Slack app/bot user (recommended)' },
   { value: 'slack', label: 'User (QR) — posts as your own Slack account; unofficial session, may need re-auth' },
+]
+
+export const DISCORD_MODES: ReadonlyArray<FamilyMode<'discord' | 'discord-bot'>> = [
+  { value: 'discord-bot', label: 'Bot (Token) — posts as a Discord app/bot user (recommended)' },
+  { value: 'discord', label: 'User (QR) — posts as your own Discord account; unofficial session, may need re-auth' },
 ]
 
 // Keep the displayed order (recommended/User first), dropping already-configured
@@ -692,6 +706,21 @@ async function pickSlackMode(available: ReadonlyArray<ChannelKind>): Promise<'sl
   if (options.length === 1) return options[0]!.value
   const mode = await select<'slack' | 'slack-bot'>({
     message: 'Which Slack mode?',
+    options: options.map((o) => ({ value: o.value, label: o.label })),
+    initialValue: options[0]?.value,
+  })
+  if (isCancel(mode)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return mode
+}
+
+async function pickDiscordMode(available: ReadonlyArray<ChannelKind>): Promise<'discord' | 'discord-bot'> {
+  const options = familyModeOptions(DISCORD_MODES, available)
+  if (options.length === 1) return options[0]!.value
+  const mode = await select<'discord' | 'discord-bot'>({
+    message: 'Which Discord mode?',
     options: options.map((o) => ({ value: o.value, label: o.label })),
     initialValue: options[0]?.value,
   })
@@ -899,6 +928,7 @@ async function runSetGithub(cwd: string): Promise<void> {
 }
 
 type CollectedCredentials =
+  | { channel: 'discord'; runDiscordAuth: (options: { cwd: string }) => Promise<DiscordAuthResult> }
   | { channel: 'discord-bot'; discordBotToken: string }
   | {
       channel: 'slack'
@@ -927,6 +957,8 @@ async function collectCredentials(
   lineSpinnerHolder?: LineAuthSpinnerHolder,
 ): Promise<CollectedCredentials> {
   switch (channel) {
+    case 'discord':
+      return { channel, runDiscordAuth: ({ cwd: agentDir }) => runDiscordQrAuth(agentDir) }
     case 'discord-bot':
       return { channel, discordBotToken: await promptDiscordToken() }
     case 'slack-bot': {
@@ -978,6 +1010,20 @@ async function collectCredentials(
       return { channel, ...creds }
     }
   }
+}
+
+async function runDiscordQrAuth(agentDir: string): Promise<DiscordAuthResult> {
+  return await runDiscordBootstrap({ agentDir, onQrUrl: renderDiscordQrToTerminal })
+}
+
+async function renderDiscordQrToTerminal(url: string): Promise<void> {
+  const qr = await QRCode.toString(url, { type: 'terminal', small: true })
+  note(
+    [`Open Discord mobile app → Settings → scan QR.`, '', qr, '', 'Approve the login on your phone to continue.'].join(
+      '\n',
+    ),
+    'Discord QR login',
+  )
 }
 
 async function promptGithubCredentials(cwd: string): Promise<{
@@ -1645,6 +1691,9 @@ function reportProgress(
       case 'webex-auth':
         s.stop(reportWebexAuth(event.result))
         break
+      case 'discord-auth':
+        s.stop(reportDiscordAuth(event.result))
+        break
       case 'slack-auth':
         s.stop(reportSlackAuth(event.result))
         break
@@ -1665,6 +1714,7 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'line-auth': 'Logging in to LINE...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
+  'discord-auth': 'Logging in to Discord...',
   'slack-auth': 'Logging in to Slack...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
@@ -1679,6 +1729,11 @@ function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
 function reportSlackAuth(result: SlackAuthResult): string {
   if (result.ok) return 'Slack credentials saved to secrets.json.'
   return `Slack login failed: ${result.reason}`
+}
+
+function reportDiscordAuth(result: DiscordAuthResult): string {
+  if (result.ok) return 'Discord credentials saved to secrets.json.'
+  return `Discord login failed: ${result.reason}`
 }
 
 function reportWebexAuth(result: WebexAuthResult): string {

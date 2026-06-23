@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { Writable } from 'node:stream'
 
 import {
+  DISCORD_MODES,
   familyModeOptions,
   holderSpinnerControl,
   printLinePincode,
@@ -64,6 +65,19 @@ describe('familyModeOptions', () => {
     // the QR user session is unofficial, so it must not be the default
     expect(options.map((o) => o.value)).toEqual(['slack-bot', 'slack'])
     expect(options[0]?.value).toBe('slack-bot')
+  })
+
+  test('preselects the recommended Bot mode for Discord when both modes are available', () => {
+    // given both Discord modes are addable
+    const available = ['discord-bot', 'discord'] as const
+
+    // when
+    const options = familyModeOptions(DISCORD_MODES, available)
+
+    // then the recommended Bot (official) option is first; the QR user session is
+    // unofficial, so it must not be the default
+    expect(options.map((o) => o.value)).toEqual(['discord-bot', 'discord'])
+    expect(options[0]?.value).toBe('discord-bot')
   })
 
   test('preselects the recommended User mode for Webex when both modes are available', () => {

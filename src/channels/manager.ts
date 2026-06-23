@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
+import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
 import { SecretsSlackCredentialStore } from '@/secrets/slack-store'
@@ -10,6 +11,7 @@ import { SecretsBackend } from '@/secrets/storage'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 import type { Stream } from '@/stream'
 
+import { createDiscordAdapter, type DiscordAdapter } from './adapters/discord'
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createGithubAdapter, type GithubAdapter } from './adapters/github'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
@@ -71,6 +73,7 @@ export type ChannelManagerOptions = {
   createSessionForChannel?: CreateSessionForChannel
   // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
+  createDiscordUserAdapter?: typeof createDiscordAdapter
   createGithubAdapter?: typeof createGithubAdapter
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createLineAdapter?: typeof createLineAdapter
@@ -139,6 +142,7 @@ export type ChannelManager = {
 }
 
 type AnyAdapter =
+  | DiscordAdapter
   | DiscordBotAdapter
   | GithubAdapter
   | LineAdapter
@@ -181,7 +185,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       ? { newestRunningChildSubagentStartedAt: options.newestRunningChildSubagentStartedAt }
       : {}),
   })
-  const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createDiscordBot = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createDiscordUser = options.createDiscordUserAdapter ?? createDiscordAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
   const createLine = options.createLineAdapter ?? createLineAdapter
@@ -217,6 +222,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
     if (name === 'webex') return buildWebexSignature(options.agentDir)
     if (name === 'slack') return buildSlackSignature(options.agentDir)
+    if (name === 'discord') return buildDiscordSignature(options.agentDir)
     if (name === 'github') return buildGithubSignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
@@ -233,7 +239,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     if (name === 'discord-bot') {
       const token = env.DISCORD_BOT_TOKEN
       if (token === undefined || token.trim() === '') return null
-      return createDiscordAdapter({
+      return createDiscordBot({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         token,
@@ -279,6 +285,15 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
         credentialsStore: createContainerSlackCredentialStore(options.agentDir, env),
+      })
+    }
+    if (name === 'discord') {
+      return createDiscordUser({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsStore: createContainerDiscordCredentialStore(options.agentDir, env),
       })
     }
     if (name === 'webex') {
@@ -497,7 +512,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
             stopped.push(name)
           } else if (signature !== current.credentialSignature) {
             const reason =
-              name === 'kakaotalk' || name === 'line' || name === 'webex' || name === 'slack'
+              name === 'kakaotalk' || name === 'line' || name === 'webex' || name === 'slack' || name === 'discord'
                 ? 'credential rotation'
                 : 'token rotation'
             restartRequired.push(`${name} (${reason})`)
@@ -513,11 +528,47 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 // Token-based adapters only. Personal-account credentials live in
 // secrets.json#channels.<adapter>, not in env, so they go through
 // structured-block signatures instead.
-const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'line' | 'github' | 'webex' | 'slack'>, readonly string[]> = {
+const TOKEN_ENV: Record<
+  Exclude<AdapterId, 'kakaotalk' | 'line' | 'github' | 'webex' | 'slack' | 'discord'>,
+  readonly string[]
+> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
   'webex-bot': ['WEBEX_BOT_TOKEN'],
+}
+
+function createContainerDiscordCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsDiscordCredentialStore {
+  const hostdUrl = env.TYPECLAW_HOSTD_URL
+  const restartToken = env.TYPECLAW_HOSTD_TOKEN
+  const containerName = env.TYPECLAW_CONTAINER_NAME
+  if (!hostdUrl || !restartToken || !containerName) {
+    throw new Error('Discord credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
+  }
+  return new SecretsDiscordCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostdUrl,
+    restartToken,
+    containerName,
+  })
+}
+
+function buildDiscordSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.discord
+    if (!isDiscordCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.discord'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.discord@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`secrets.json#channels.discord (${describe(err)})`] }
+  }
 }
 
 function createContainerSlackCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsSlackCredentialStore {
@@ -687,6 +738,15 @@ function isLineCredentialBlock(value: unknown): value is { accounts: Record<stri
 }
 
 function isSlackCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
+}
+
+function isDiscordCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('accounts' in value)) return false
   const accounts = value.accounts

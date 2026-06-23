@@ -61,6 +61,31 @@ describe('parseSecretsFile (v2 envelope)', () => {
     expect(result.file.channels['discord-bot']).toEqual({ token: { env: 'CUSTOM_DISCORD' } })
   })
 
+  test('accepts channels.discord credential block', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        discord: {
+          currentAccount: '100000000000000001',
+          accounts: {
+            '100000000000000001': {
+              account_id: '100000000000000001',
+              token: 'discord-token-test',
+              username: 'alice',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.channels.discord?.currentAccount).toBe('100000000000000001')
+    expect(result.file.channels.discord?.accounts['100000000000000001']?.token).toBe('discord-token-test')
+  })
+
   test('migrates legacy github App auth by stripping the removed installationId field', () => {
     const result = parseSecretsFile({
       version: 2,

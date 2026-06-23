@@ -145,6 +145,7 @@ type PlatformInfo = {
 const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
   slack: { displayName: 'Slack', mentionMode: 'angle-id', supportsReactions: true, supportsAttachments: true },
   'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id', supportsReactions: true, supportsAttachments: true },
+  discord: { displayName: 'Discord', mentionMode: 'angle-id', supportsReactions: true, supportsAttachments: true },
   'discord-bot': {
     displayName: 'Discord',
     mentionMode: 'angle-id',
