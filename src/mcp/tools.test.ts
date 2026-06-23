@@ -179,6 +179,10 @@ function fakeManager(connections: Record<string, McpConnection>): McpManager {
         toolCount: 0,
       }))
     },
+    async ensureConnected(name) {
+      return connections[name]
+    },
+    async whenInitialConnectSettled() {},
     getConnection(name) {
       return connections[name]
     },

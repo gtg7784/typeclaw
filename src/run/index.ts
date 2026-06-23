@@ -48,7 +48,7 @@ import {
   type Scheduler,
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
-import { createMcpManager, type McpConnectResult } from '@/mcp'
+import { createMcpManager } from '@/mcp'
 import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
@@ -162,18 +162,27 @@ export async function startAgent({
   const githubTokenBridge = createGithubTokenBridge()
   const mcpManager =
     cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
+  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
 
-  // These three boot steps have no mutual data dependency, so they run
-  // concurrently instead of as a serial await chain on the cold-start path:
-  //   - MCP connectAll (network; each server has its own connect deadline and
-  //     degrades to {ok:false} on failure, so it never rejects boot)
-  //   - loadPlugins (module imports + I/O; left UNCAUGHT so a bundled/plugin
-  //     security failure still aborts boot, same as before)
-  //   - the vector startup unit (CPU/disk; gated on vector mode, non-fatal)
-  // The vector unit stays internally sequential (index build → embedder warm)
-  // because warmEmbedder shares the embedder module state the index build
-  // initializes.
-  const mcpConnectPromise = mcpManager === null ? Promise.resolve<McpConnectResult[]>([]) : mcpManager.connectAll()
+  // Warm up MCP connections in the BACKGROUND so boot doesn't block on each
+  // server's subprocess spawn + listTools() (worst case the 15s connect
+  // timeout). Tool calls lazily ensureConnected() and the catalog render awaits
+  // whenInitialConnectSettled(), so correctness never depends on this finishing
+  // first. closeAll() below cleans these up if boot aborts.
+  if (mcpManager !== null) {
+    void mcpManager.connectAll().then((results) => {
+      for (const result of results) {
+        if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
+      }
+    })
+  }
+
+  // loadPlugins and the vector startup unit have no mutual data dependency, so
+  // run them concurrently. loadPlugins stays UNCAUGHT so a bundled-plugin or
+  // plugin-security failure still aborts boot; when it does, close the background
+  // MCP warm-up so its servers can't leak — startAgent returns no stop() handler
+  // on this path, so this is the only cleanup chance. closeAll() also closes any
+  // connection the warm-up establishes after shutdown begins.
   const pluginsLoadedPromise = loadPlugins({
     entries: withDefaultPlugins(cwdConfig.plugins),
     agentDir: cwd,
@@ -184,12 +193,14 @@ export async function startAgent({
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   const vectorStartupPromise = suppressSystemMemory ? runVectorStartup(cwd) : Promise.resolve()
-
-  const [pluginsLoaded, mcpResults] = await Promise.all([pluginsLoadedPromise, mcpConnectPromise, vectorStartupPromise])
-  for (const result of mcpResults) {
-    if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
+  let pluginsLoaded: LoadPluginsResult
+  try {
+    const [loaded] = await Promise.all([pluginsLoadedPromise, vectorStartupPromise])
+    pluginsLoaded = loaded
+  } catch (err) {
+    if (mcpManager !== null) await mcpManager.closeAll()
+    throw err
   }
-  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
 
   reloadRegistry.register(
     createConfigReloadable({

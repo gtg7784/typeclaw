@@ -27,7 +27,7 @@ function createListToolsTool(manager: McpManager): Tool<McpListToolsArgs> {
       server: z.string().describe('The MCP server name from the system prompt catalog.'),
     }),
     async execute(args) {
-      const connection = manager.getConnection(args.server)
+      const connection = await manager.ensureConnected(args.server)
       if (connection === undefined) return textResult(unknownServerMessage(manager, args.server))
 
       const tools = await safeListTools(connection)
@@ -51,7 +51,7 @@ function createDescribeTool(manager: McpManager): Tool<McpDescribeArgs> {
     }),
     async execute(args) {
       const resolved = resolveToolArgs(args.server, args.tool)
-      const connection = manager.getConnection(resolved.server)
+      const connection = await manager.ensureConnected(resolved.server)
       if (connection === undefined) return textResult(unknownServerMessage(manager, resolved.server))
 
       const tools = await safeListTools(connection)
@@ -89,7 +89,7 @@ function createCallTool(manager: McpManager): Tool<McpCallArgs> {
     }),
     async execute(args) {
       const resolved = resolveToolArgs(args.server, args.tool)
-      const connection = manager.getConnection(resolved.server)
+      const connection = await manager.ensureConnected(resolved.server)
       if (connection === undefined) return textResult(unknownServerMessage(manager, resolved.server))
 
       const result = await safeCallTool(connection, resolved.tool, args.args ?? {})
@@ -104,9 +104,12 @@ function resolveToolArgs(server: string, tool: string): { server: string; tool: 
 }
 
 function unknownServerMessage(manager: McpManager, server: string): string {
+  // List every configured server, not just connected ones: under lazy connect a
+  // valid server is reached only when ensureConnected returns undefined for a
+  // name that isn't configured at all, so filtering by `connected` here would
+  // report "none" while servers exist.
   const available = manager
     .listServers()
-    .filter((entry) => entry.connected)
     .map((entry) => entry.name)
     .join(', ')
   return `Unknown MCP server ${JSON.stringify(server)}. Available servers: ${available || 'none'}.`
