@@ -696,7 +696,7 @@ export function createOutboundCallback(deps: {
         Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
       )
       logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
-      return { ok: true }
+      return { ok: true, messageId: sent.id, messageIds: [sent.id] }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       logger.error(`[discord-bot] sendMessage failed: ${message}`)

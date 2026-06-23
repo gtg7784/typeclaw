@@ -64,7 +64,7 @@ describe('webex outbound', () => {
     // given: Korean body to keep the path script-agnostic
     const result = await cb(outbound({ text: '**안녕하세요**' }))
 
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, messageId: 'sent', messageIds: ['sent'] })
     // markdown is omitted so Webex's E2E path does not render verbatim HTML
     expect(sends).toEqual([{ roomId: 'room-1', text: '**안녕하세요**', markdown: undefined, parentId: undefined }])
     expect(uploads).toEqual([])

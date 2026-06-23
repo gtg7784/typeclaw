@@ -69,7 +69,10 @@ async function postDiscussionComment(options: {
 }): Promise<SendResult> {
   const discussionId = await fetchDiscussionId(options)
   if (!discussionId.ok) return discussionId
-  const mutation = `mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{id}}}`
+  // databaseId (numeric REST id), NOT the GraphQL node id: the discussion_comment
+  // inbound classifier stamps externalMessageId from the webhook's numeric
+  // comment.id, so the outbound messageId must use the same shape to round-trip.
+  const mutation = `mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{databaseId}}}`
   return await postGraphql(
     options.fetchImpl,
     await options.token(),
@@ -80,6 +83,10 @@ async function postDiscussionComment(options: {
     },
     { authType: options.authType, endpointKind: 'discussion-comment' },
   )
+}
+
+function withMessageId(id: string | undefined): SendResult {
+  return id !== undefined ? { ok: true, messageId: id, messageIds: [id] } : { ok: true }
 }
 
 async function fetchDiscussionId(options: {
@@ -113,8 +120,16 @@ async function postGraphql(
   variables: Record<string, unknown>,
   guidance: { authType: GithubAuthType; endpointKind: OutboundEndpointKind },
 ): Promise<SendResult> {
-  const result = await graphql(fetchImpl, token, query, variables, guidance)
-  return result.ok ? { ok: true } : { ok: false, error: result.error }
+  const result = await graphql<{ addDiscussionComment?: { comment?: { databaseId?: number } | null } | null }>(
+    fetchImpl,
+    token,
+    query,
+    variables,
+    guidance,
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+  const id = result.data.addDiscussionComment?.comment?.databaseId
+  return withMessageId(typeof id === 'number' ? String(id) : undefined)
 }
 
 async function graphql<T>(
@@ -162,7 +177,11 @@ async function postJson(
       headers: githubJsonHeaders(token),
       body: JSON.stringify(payload),
     })
-    if (response.ok) return { ok: true }
+    if (response.ok) {
+      const created = (await response.json().catch(() => null)) as { id?: number | string } | null
+      const id = created?.id
+      return withMessageId(id !== undefined ? String(id) : undefined)
+    }
     const text = await response.text().catch(() => '')
     const baseError = `GitHub API ${response.status}${text !== '' ? `: ${text}` : ''}`
     const decorated = isOutboundPermissionDenial(response.status, text)

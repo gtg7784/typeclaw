@@ -200,6 +200,7 @@ export function createOutboundCallback(deps: {
     const tag = await formatChannelTag(msg.workspace, msg.chat)
     logger.info(`[kakaotalk] outbound ${tag} text_len=${text.length} attachments=${attachments.length}`)
 
+    const logIds: string[] = []
     // KakaoTalk has no shared text-with-file send (Slack's initial_comment) — files first, then text.
     if (attachments.length > 0) {
       let items: AttachmentInput[]
@@ -224,6 +225,7 @@ export function createOutboundCallback(deps: {
           logger.error(`[kakaotalk] sendAttachment status_code=${result.status_code} ${tag}`)
           return { ok: false, error: `kakaotalk attachment send failed with status ${result.status_code}` }
         }
+        logIds.push(result.log_id)
         logger.info(`[kakaotalk] uploaded log_id=${result.log_id} attachments=${items.length} ${tag}`)
       } catch (err) {
         const message = describe(err)
@@ -257,6 +259,7 @@ export function createOutboundCallback(deps: {
           logger.error(`[kakaotalk] sendMessage status_code=${result.status_code} ${tag}`)
           return { ok: false, error: `kakaotalk send failed with status ${result.status_code}` }
         }
+        logIds.push(result.log_id)
         logger.info(`[kakaotalk] sent log_id=${result.log_id} ${tag}`)
       } catch (err) {
         const message = describe(err)
@@ -265,7 +268,11 @@ export function createOutboundCallback(deps: {
       }
     }
 
-    return { ok: true }
+    // The text send is the message an agent replies to, so when both an
+    // attachment and text went out the text log_id (last in `logIds`) is the
+    // anchor; attachment-only sends fall back to the attachment log_id.
+    const anchor = logIds.length > 0 ? logIds[logIds.length - 1] : undefined
+    return { ok: true, messageId: anchor, messageIds: logIds }
   }
 }
 

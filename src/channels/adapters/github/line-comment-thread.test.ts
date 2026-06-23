@@ -173,7 +173,7 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       fakeCtx,
     )
 
-    expect(result.details).toEqual({ ok: true })
+    expect(result.details).toEqual({ ok: true, messageId: '999', messageIds: ['999'] })
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({
       url: 'https://api.github.com/repos/acme/project/pulls/7/comments/555/replies',

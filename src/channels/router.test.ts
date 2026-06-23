@@ -5283,6 +5283,28 @@ describe('ChannelRouter duplicate-send guard', () => {
     expect(second).toEqual({ ok: true })
   })
 
+  test('passes the adapter messageId/messageIds through to the send result', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true, messageId: 'm1', messageIds: ['m1', 'm2'] }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+    expect(result).toEqual({ ok: true, messageId: 'm1', messageIds: ['m1', 'm2'] })
+  })
+
+  test('omits messageId when the adapter does not report one', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+    expect(result).toEqual({ ok: true })
+  })
+
   test('failed delivery does not reserve a dup slot — retry with same text succeeds', async () => {
     const dir = await tempDir()
     let attempts = 0

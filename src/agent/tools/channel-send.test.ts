@@ -94,6 +94,14 @@ describe('createChannelSendTool', () => {
     expect(result.details).toEqual({ ok: true })
   })
 
+  test('surfaces messageId and messageIds from the router result in details', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true, messageId: '1700.0001', messageIds: ['1700.0001', '1700.0002'] })),
+    })
+    const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'hi' })
+    expect(result.details).toEqual({ ok: true, messageId: '1700.0001', messageIds: ['1700.0001', '1700.0002'] })
+  })
+
   test('forwards an optional thread when provided', async () => {
     const captured: { thread: string | null | undefined } = { thread: undefined }
     const tool = createChannelSendTool({

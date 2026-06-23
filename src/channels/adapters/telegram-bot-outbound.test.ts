@@ -112,6 +112,20 @@ describe('telegram-bot createOutboundCallback', () => {
     expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
   })
 
+  test('surfaces the posted message_id (stringified) so the agent can thread follow-ups', async () => {
+    const fake = fakeClient()
+    fake.setSendMessageBehavior(async () => fakeMessage({ message_id: 4242 }))
+    const cb = createOutboundCallback({
+      client: fake.client,
+      logger: silentLogger(),
+      formatChannelTag: async () => 'chat=-100123',
+    })
+
+    const result = await cb(buildOutbound({ text: 'hi' }))
+
+    expect(result).toEqual({ ok: true, messageId: '4242', messageIds: ['4242'] })
+  })
+
   test('renders agent Markdown (**bold**, *italic*, `code`) into MarkdownV2 entities', async () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({

@@ -33,7 +33,7 @@ describe('createGithubOutboundCallback', () => {
       text: 'hello',
     })
 
-    expect(result).toEqual({ ok: true })
+    expect(result).toEqual({ ok: true, messageId: '1', messageIds: ['1'] })
   })
 
   it('posts PR review thread replies through the pull comment replies endpoint', async () => {
@@ -54,7 +54,61 @@ describe('createGithubOutboundCallback', () => {
       text: 'reply',
     })
 
+    expect(result).toEqual({ ok: true, messageId: '2', messageIds: ['2'] })
+  })
+
+  it('omits messageId when the REST response body has no id', async () => {
+    const cb = createGithubOutboundCallback({
+      token: async () => 'tok',
+      authType: 'app',
+      logger,
+      fetchImpl: fakeFetch({
+        'POST https://api.github.com/repos/acme/project/issues/42/comments': { status: 201, body: {} },
+      }),
+    })
+
+    const result = await cb({
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'issue:42',
+      thread: null,
+      text: 'hello',
+    })
+
     expect(result).toEqual({ ok: true })
+  })
+
+  it('surfaces a discussion comment databaseId (numeric) as messageId, matching the inbound shape', async () => {
+    const graphqlFetch = Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const body = String(init?.body ?? '')
+        if (body.includes('addDiscussionComment')) {
+          return new Response(JSON.stringify({ data: { addDiscussionComment: { comment: { databaseId: 987654 } } } }), {
+            status: 200,
+          })
+        }
+        return new Response(JSON.stringify({ data: { repository: { discussion: { id: 'D_kwDO123' } } } }), {
+          status: 200,
+        })
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch
+    const cb = createGithubOutboundCallback({
+      token: async () => 'tok',
+      authType: 'app',
+      logger,
+      fetchImpl: graphqlFetch,
+    })
+
+    const result = await cb({
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'discussion:5',
+      thread: null,
+      text: 'hello',
+    })
+
+    expect(result).toEqual({ ok: true, messageId: '987654', messageIds: ['987654'] })
   })
 
   it('rejects attachments', async () => {
