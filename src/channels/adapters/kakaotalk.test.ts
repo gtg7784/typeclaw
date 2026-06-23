@@ -336,7 +336,7 @@ describe('createKakaotalkAdapter — outbound', () => {
       chat: '111',
       text: 'hello',
     })
-    expect(result.ok).toBe(true)
+    expect(result).toEqual({ ok: true, messageId: 'L1', messageIds: ['L1'] })
     expect(client.sendMessageCalls).toEqual([{ chatId: '111', text: 'hello' }])
 
     await adapter.stop()
