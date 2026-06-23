@@ -1,7 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import { Writable } from 'node:stream'
 
-import { holderSpinnerControl, printLinePincode, printLineQrUrl, type LineAuthSpinnerHolder } from './channel'
+import {
+  familyModeOptions,
+  holderSpinnerControl,
+  printLinePincode,
+  printLineQrUrl,
+  SLACK_MODES,
+  WEBEX_MODES,
+  type LineAuthSpinnerHolder,
+} from './channel'
 
 function captureStream(): { stream: Writable; written: () => string } {
   const chunks: string[] = []
@@ -41,6 +49,42 @@ describe('printLinePincode', () => {
     // then
     expect(written()).toContain('12345678')
     expect(written()).not.toContain('│')
+  })
+})
+
+describe('familyModeOptions', () => {
+  test('preselects the recommended User mode for Slack when both modes are available', () => {
+    // given both Slack modes are addable (CHANNEL_KINDS lists slack-bot before slack)
+    const available = ['slack-bot', 'slack'] as const
+
+    // when
+    const options = familyModeOptions(SLACK_MODES, available)
+
+    // then the recommended User (QR) option is first, so options[0] is the default
+    expect(options.map((o) => o.value)).toEqual(['slack', 'slack-bot'])
+    expect(options[0]?.value).toBe('slack')
+  })
+
+  test('preselects the recommended User mode for Webex when both modes are available', () => {
+    // given
+    const available = ['webex', 'webex-bot'] as const
+
+    // when
+    const options = familyModeOptions(WEBEX_MODES, available)
+
+    // then
+    expect(options[0]?.value).toBe('webex')
+  })
+
+  test('keeps only the still-available mode when one is already configured', () => {
+    // given only the bot mode is left to add
+    const available = ['slack-bot'] as const
+
+    // when
+    const options = familyModeOptions(SLACK_MODES, available)
+
+    // then
+    expect(options.map((o) => o.value)).toEqual(['slack-bot'])
   })
 })
 

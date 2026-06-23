@@ -615,16 +615,18 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
     process.exit(0)
   }
 
-  type PickerValue = Exclude<ChannelKind, 'webex' | 'webex-bot'> | 'webex-family'
-  const webexModes = available.filter((kind): kind is 'webex' | 'webex-bot' => kind === 'webex' || kind === 'webex-bot')
+  type FamilyValue = 'webex-family' | 'slack-family'
+  type FlatKind = Exclude<ChannelKind, 'webex' | 'webex-bot' | 'slack' | 'slack-bot'>
+  type PickerValue = FlatKind | FamilyValue
   const options: Array<{ value: PickerValue; label: string }> = []
   for (const kind of available) {
-    if (kind === 'webex' || kind === 'webex-bot') {
-      if (!options.some((option) => option.value === 'webex-family'))
-        options.push({ value: 'webex-family', label: 'Webex' })
+    const family = FAMILY_OF[kind]
+    if (family !== undefined) {
+      if (!options.some((option) => option.value === family.value))
+        options.push({ value: family.value, label: family.label })
       continue
     }
-    options.push({ value: kind, label: CHANNEL_LABELS[kind] })
+    options.push({ value: kind as FlatKind, label: CHANNEL_LABELS[kind] })
   }
 
   const selected = await select<PickerValue>({
@@ -636,20 +638,62 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
     cancel('Aborted.')
     process.exit(0)
   }
-  if (selected !== 'webex-family') return selected
-  if (webexModes.length === 1) return webexModes[0]!
-  const allWebexOptions: Array<{ value: 'webex' | 'webex-bot'; label: string }> = [
-    {
-      value: 'webex',
-      label: 'User (ID/PW) — receives all messages, no @mention needed (recommended)',
-    },
-    { value: 'webex-bot', label: 'Bot (Token) — only sees @mentions in group spaces' },
-  ]
-  const webexOptions = allWebexOptions.filter((option) => webexModes.includes(option.value))
+  if (selected === 'webex-family') return pickWebexMode(available)
+  if (selected === 'slack-family') return pickSlackMode(available)
+  return selected
+}
+
+const FAMILY_OF: Partial<Record<ChannelKind, { value: 'webex-family' | 'slack-family'; label: string }>> = {
+  webex: { value: 'webex-family', label: 'Webex' },
+  'webex-bot': { value: 'webex-family', label: 'Webex' },
+  slack: { value: 'slack-family', label: 'Slack' },
+  'slack-bot': { value: 'slack-family', label: 'Slack' },
+}
+
+type FamilyMode<K extends ChannelKind> = { value: K; label: string }
+
+export const WEBEX_MODES: ReadonlyArray<FamilyMode<'webex' | 'webex-bot'>> = [
+  { value: 'webex', label: 'User (ID/PW) — receives all messages, no @mention needed (recommended)' },
+  { value: 'webex-bot', label: 'Bot (Token) — only sees @mentions in group spaces' },
+]
+
+export const SLACK_MODES: ReadonlyArray<FamilyMode<'slack' | 'slack-bot'>> = [
+  { value: 'slack', label: 'User (QR) — receives all messages, no @mention needed (recommended)' },
+  { value: 'slack-bot', label: 'Bot (Token) — only sees @mentions and DMs' },
+]
+
+// Keep the displayed order (recommended/User first), dropping already-configured
+// modes. The caller defaults the selection to options[0], so this order — NOT
+// CHANNEL_KINDS order — decides which mode is preselected.
+export function familyModeOptions<K extends ChannelKind>(
+  modes: ReadonlyArray<FamilyMode<K>>,
+  available: ReadonlyArray<ChannelKind>,
+): Array<FamilyMode<K>> {
+  return modes.filter((mode) => available.includes(mode.value))
+}
+
+async function pickWebexMode(available: ReadonlyArray<ChannelKind>): Promise<'webex' | 'webex-bot'> {
+  const options = familyModeOptions(WEBEX_MODES, available)
+  if (options.length === 1) return options[0]!.value
   const mode = await select<'webex' | 'webex-bot'>({
     message: 'Which Webex mode?',
-    options: webexOptions,
-    initialValue: webexModes[0],
+    options: options.map((o) => ({ value: o.value, label: o.label })),
+    initialValue: options[0]?.value,
+  })
+  if (isCancel(mode)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return mode
+}
+
+async function pickSlackMode(available: ReadonlyArray<ChannelKind>): Promise<'slack' | 'slack-bot'> {
+  const options = familyModeOptions(SLACK_MODES, available)
+  if (options.length === 1) return options[0]!.value
+  const mode = await select<'slack' | 'slack-bot'>({
+    message: 'Which Slack mode?',
+    options: options.map((o) => ({ value: o.value, label: o.label })),
+    initialValue: options[0]?.value,
   })
   if (isCancel(mode)) {
     cancel('Aborted.')
