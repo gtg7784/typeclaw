@@ -4,6 +4,8 @@ import { Geist, Geist_Mono } from 'next/font/google'
 
 import { SITE_DESCRIPTION, SITE_KEYWORDS, SITE_NAME, SITE_TITLE, SITE_URL } from '@/lib/seo'
 
+import { AskTypeey } from './_components/ask-typeey'
+
 import './globals.css'
 
 const geistSans = Geist({
@@ -99,6 +101,7 @@ export default function RootLayout({
       <body className={`${geistSans.variable} ${geistMono.variable} flex min-h-screen flex-col antialiased`}>
         <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
         <RootProvider>{children}</RootProvider>
+        <AskTypeey />
       </body>
     </html>
   )
