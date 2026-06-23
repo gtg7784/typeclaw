@@ -29,6 +29,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     discordBotCredentials(),
     telegramBotCredentials(),
     webexBotCredentials(),
+    discordUserCredentials(),
     slackUserCredentials(),
     webexUserCredentials(),
     lineCredentials(),
@@ -81,6 +82,32 @@ function discordBotCredentials(): DoctorCheck {
     description: 'discord-bot adapter has DISCORD_BOT_TOKEN',
     applies: (ctx) => ctx.hasAgentFolder,
     run: (ctx) => runTokenAdapterCheck(ctx, 'discord-bot', ['DISCORD_BOT_TOKEN']),
+  }
+}
+
+function discordUserCredentials(): DoctorCheck {
+  return {
+    name: 'channel.discord.credentials',
+    category: 'channels',
+    description: 'discord adapter has a current account with a token in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'discord')) {
+        return { status: 'skipped', message: 'discord not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.discord
+      if (!hasCurrentAccountTokenField(block, 'token')) {
+        return {
+          status: 'warning',
+          message: 'discord has no current account token in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add discord` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: 'discord has a current account token' }
+    },
   }
 }
 

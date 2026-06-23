@@ -69,6 +69,7 @@ describe('buildChannelChecks', () => {
       'channel.discord-bot.credentials',
       'channel.telegram-bot.credentials',
       'channel.webex-bot.credentials',
+      'channel.discord.credentials',
       'channel.slack.credentials',
       'channel.webex.credentials',
       'channel.line.credentials',
