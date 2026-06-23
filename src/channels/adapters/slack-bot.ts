@@ -845,12 +845,14 @@ export function createOutboundCallback(deps: {
       const chunks = chunkMarkdown(text, SLACK_MARKDOWN_BLOCK_LIMIT)
       const explicitThread = msg.thread !== undefined && msg.thread !== null ? msg.thread : null
       let threadTs: string | null = explicitThread
+      const sentTs: string[] = []
       try {
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i]!
           const options: { thread_ts?: string; blocks?: unknown[] } = { blocks: [buildMarkdownBlock(chunk)] }
           if (threadTs !== null) options.thread_ts = threadTs
           const sent = await client.postMessage(msg.chat, chunk, options)
+          sentTs.push(sent.ts)
           logger.info(
             `[slack-bot] sent ts=${sent.ts} ${tag} chunk=${i + 1}/${chunks.length} blocks=markdown len=${chunk.length}`,
           )
@@ -860,7 +862,7 @@ export function createOutboundCallback(deps: {
           if (threadTs === null && chunks.length > 1) threadTs = sent.ts
         }
         if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.typingThread ?? msg.thread)
-        return { ok: true }
+        return { ok: true, messageId: sentTs[0], messageIds: sentTs }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.error(`[slack-bot] postMessage failed: ${message}`)

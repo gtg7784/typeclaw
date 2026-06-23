@@ -1476,7 +1476,7 @@ describe('slack-bot createOutboundCallback', () => {
     // when
     const result = await cb(makeMsg({ text: 'hello' }))
     // then
-    expect(result.ok).toBe(true)
+    expect(result).toEqual({ ok: true, messageId: 'ts1', messageIds: ['ts1'] })
     expect(uploads).toHaveLength(0)
     expect(posts).toEqual([
       {
@@ -1552,6 +1552,9 @@ describe('slack-bot createOutboundCallback', () => {
       expect(Array.isArray(blocks)).toBe(true)
       expect(blocks?.length).toBe(1)
     }
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messageId).toBe('ts1')
+    expect(result.messageIds).toEqual(posts.map((_, i) => `ts${i + 1}`))
   })
 
   test('oversize text in an existing thread keeps every chunk on that thread', async () => {
