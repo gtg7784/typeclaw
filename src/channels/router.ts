@@ -381,6 +381,23 @@ export const SESSION_FRESHNESS_TTL_MS = 5 * 60 * 1000
 export const SESSION_GRACE_HARD_TTL_MS = 10 * 60 * 1000
 
 /**
+ * Absolute ceiling on how long a running background subagent may pin its parent
+ * channel session against idle GC and stale-rollover. A still-running child defers
+ * teardown because the next inbound otherwise starts a fresh session that has lost
+ * track of the in-flight task and spawns a DUPLICATE child for the same work. The
+ * pin is bounded so a stuck/never-completing child cannot make the session
+ * immortal: past this age the session is GC'd / rolled over anyway, falling back
+ * to the completion-reroute behavior. Measured from the child's start.
+ *
+ * Set above SESSION_IDLE_MS (30m) — not equal — so a child spawned at session
+ * birth still pins the session through its first idle sweep instead of the two
+ * windows coinciding. Comfortably above SESSION_GRACE_HARD_TTL_MS (10m) too:
+ * real research runs can exceed it (an observed run took 9m18s), so the 10m cap
+ * is far too tight to bound the pin.
+ */
+export const SESSION_CHILD_PIN_MAX_MS = 45 * 60 * 1000
+
+/**
  * Cost-aware grace decision for the soft→hard TTL band. Returns true when reusing
  * the (now cache-cold) live session is cheaper than a fresh cold-start.
  *
@@ -1183,6 +1200,16 @@ export type CreateChannelRouterOptions = {
   // saveChannelSessions (which swallows its own I/O errors). Tests inject a
   // throwing impl to exercise the persist-failure unwind in ensureLive.
   saveChannelSessions?: (agentDir: string, sessions: readonly ChannelSessionRecord[]) => Promise<void>
+  // Returns the start time (epoch ms) of the NEWEST still-running background
+  // subagent spawned from `sessionId`, or null when none is running. Lets idle
+  // GC and stale-rollover pin a session whose child is still working (the next
+  // inbound would otherwise spawn a duplicate child), bounded by
+  // SESSION_CHILD_PIN_MAX_MS measured from that start. Newest — not oldest — so a
+  // long-running child that crossed the cap cannot unpin the session while a more
+  // recently spawned child is still inside its own protection window. Production
+  // wiring forwards the LiveSubagentRegistry; omitted (tests, no-subagent setups)
+  // means no pin.
+  newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
 }
 
 export type RestartCommandContext = {
@@ -1239,6 +1266,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const stream = options.stream
   const onReload = options.onReload
   const onRestart = options.onRestart
+  const newestRunningChildSubagentStartedAt = options.newestRunningChildSubagentStartedAt ?? (() => null)
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   // Restart-resume reservations, keyed by channelKeyId. Installed by
@@ -1483,11 +1511,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return membership
   }
 
+  // True while a background child spawned from this session is still running AND
+  // the newest such child is within SESSION_CHILD_PIN_MAX_MS of its start. Using
+  // the newest child keeps the session pinned as long as ANY running child is
+  // still inside its protection window — an older child that already crossed the
+  // cap must not unpin the session out from under a freshly spawned one. Tearing
+  // the session down mid-child lets the next inbound spawn a duplicate child, so
+  // GC/rollover defer to this. `label` only annotates the override log.
+  const isPinnedByRunningChild = (sessionId: string, keyId: string, label: string): boolean => {
+    const childStartedAt = newestRunningChildSubagentStartedAt(sessionId)
+    if (childStartedAt === null) return false
+    const pinnedForMs = now() - childStartedAt
+    if (pinnedForMs <= SESSION_CHILD_PIN_MAX_MS) return true
+    logger.info(
+      `[channels] ${keyId}: ${label} despite running child (newest pinned ${pinnedForMs}ms, past child-pin cap)`,
+    )
+    return false
+  }
+
   const shouldRolloverLive = (live: LiveSession, idleMs: number): boolean => {
     // A session mid-prompt looks idle by lastInboundAt (only bumped on engaged
     // inbounds) while session.prompt() is still in flight; rolling it over aborts
     // that work. The runIdleGc path skips draining sessions for the same reason.
     if (live.draining) return false
+    if (isPinnedByRunningChild(live.sessionId, live.keyId, 'stale-rollover')) return false
     if (idleMs <= SESSION_FRESHNESS_TTL_MS) return false
     if (idleMs > SESSION_GRACE_HARD_TTL_MS) {
       logger.info(`[channels] ${live.keyId}: stale-rollover (live: ${idleMs}ms idle, past grace cap)`)
@@ -1572,7 +1619,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         resumeTarget === undefined &&
         record?.sessionId !== undefined &&
         existing === undefined &&
-        now() - (record.lastInboundAt ?? 0) > SESSION_FRESHNESS_TTL_MS
+        now() - (record.lastInboundAt ?? 0) > SESSION_FRESHNESS_TTL_MS &&
+        // The live session is already gone here, but a background child it spawned
+        // may still be running under its (old) sessionId. Wiping the mapping would
+        // start a fresh session that re-spawns the same child. Keep the mapping so
+        // the reopen continues the same sessionId until the child finishes (or the
+        // pin cap elapses).
+        !isPinnedByRunningChild(record.sessionId, keyId, 'stale-rollover (persisted)')
       ) {
         const idleMs = now() - (record.lastInboundAt ?? 0)
         logger.info(`[channels] ${keyId}: stale-rollover (persisted: ${idleMs}ms idle)`)
@@ -4113,6 +4166,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // waking the drain loop.
       if (live.pendingSystemReminders.length > 0) continue
       if (t - live.lastInboundAt <= SESSION_IDLE_MS) continue
+      if (isPinnedByRunningChild(live.sessionId, live.keyId, 'idle_gc evicting')) continue
       victims.push(live)
     }
     for (const live of victims) {

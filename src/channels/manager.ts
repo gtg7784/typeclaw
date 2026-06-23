@@ -109,6 +109,11 @@ export type ChannelManagerOptions = {
   // unregistered. See CreateChannelRouterOptions.onReload/onRestart.
   onReload?: () => Promise<string>
   onRestart?: (ctx?: RestartCommandContext) => Promise<string>
+  // Forwarded to the router so idle GC and stale-rollover can pin a channel
+  // session whose background subagent is still running (the next inbound would
+  // otherwise spawn a duplicate child). Production wiring (src/run/index.ts)
+  // supplies it from the LiveSubagentRegistry; tests omit it.
+  newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
   // Persistent messenger SDKs usually reconnect themselves, but a host sleep/offline
   // cycle can leave a socket half-dead forever. The manager watches live adapters
   // and restarts one that stays disconnected past this grace period. Test seams are
@@ -168,6 +173,9 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.stream ? { stream: options.stream } : {}),
     ...(options.onReload ? { onReload: options.onReload } : {}),
     ...(options.onRestart ? { onRestart: options.onRestart } : {}),
+    ...(options.newestRunningChildSubagentStartedAt
+      ? { newestRunningChildSubagentStartedAt: options.newestRunningChildSubagentStartedAt }
+      : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
