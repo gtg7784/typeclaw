@@ -8,6 +8,15 @@ import { encodeDiscordReactionRef } from './discord-reactions'
 
 export type DiscordInboundMessageEvent = DiscordGatewayMessageCreateEvent
 
+// WORKAROUND: the USER-token SDK type omits `author.bot` and
+// `message_reference`, but the listener spreads the raw Discord payload
+// (`{ ...d }`), so both fields exist at runtime. Narrow locally instead of
+// augmenting the SDK type globally — do not "simplify" this away.
+export type RawDiscordMessageCreateEvent = DiscordGatewayMessageCreateEvent & {
+  author: { bot?: boolean }
+  message_reference?: { message_id?: string; channel_id?: string; guild_id?: string }
+}
+
 export type InboundDropReason = 'self_author' | 'no_user' | 'empty_content' | 'pre_connect'
 
 export type InboundClassification =
@@ -42,6 +51,12 @@ export function classifyInbound(
   const mentionedUsers = event.mentions ?? []
   const mentionsOthers = mentionedUsers.length > 0 && !mentionedUsers.some((user) => user.id === context.selfUserId)
 
+  const raw = event as RawDiscordMessageCreateEvent
+  const replyToParentId = raw.message_reference?.message_id
+  const replyToBotMessageId =
+    replyToParentId !== undefined && isReplyToSelf(raw, context.selfUserId) ? replyToParentId : null
+  const replyToOtherMessageId = replyToParentId !== undefined && replyToBotMessageId === null ? replyToParentId : null
+
   return {
     kind: 'route',
     payload: {
@@ -55,15 +70,24 @@ export function classifyInbound(
       reactionRef: encodeDiscordReactionRef({ channel: event.channel_id, message: event.id }),
       authorId: event.author.id,
       authorName: event.author.username,
-      authorIsBot: false,
+      authorIsBot: raw.author.bot === true,
       isBotMention: isBotMention || aliasMatched,
-      replyToBotMessageId: null,
+      replyToBotMessageId,
       mentionsOthers,
-      replyToOtherMessageId: null,
+      replyToOtherMessageId,
       isDm,
       ts: parseDiscordTimestamp(event.timestamp),
     },
   }
+}
+
+// `message_reference` carries only the parent id, not its author, so we infer
+// "this reply targets us" from the auto-mention Discord injects into the
+// reply's `mentions` array (same trick as the bot adapter). Named "...Self"
+// because the user-token identity is a Discord user; the payload field stays
+// `replyToBotMessageId` to match the InboundMessage contract.
+function isReplyToSelf(event: RawDiscordMessageCreateEvent, selfUserId: string): boolean {
+  return (event.mentions ?? []).some((m) => m.id === selfUserId)
 }
 
 const GROUP_MENTION_PATTERN = /@(?:everyone|here)/
