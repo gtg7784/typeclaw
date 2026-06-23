@@ -52,7 +52,12 @@ export function createChannelSendTool({
       'For Discord guild channels, workspace is the guild id; for Slack team channels, workspace is ' +
       'the team id (e.g. "T0ACME"). For DMs on either platform, workspace is the literal "@dm". ' +
       'On failure (no adapter registered, or the adapter-level send failed), the call returns ' +
-      '{ ok: false, error }. There is no auto-reply: the only way for an agent to post is via this tool.',
+      '{ ok: false, error }. On success it returns { ok: true } and, when the platform reports it, ' +
+      '`messageId` (the posted message id, e.g. a Slack thread ts or Discord/Telegram message id) plus ' +
+      '`messageIds` (every id in send order when the post was split into multiple messages; `messageId` is ' +
+      'the reply anchor — usually the first message). Pass `messageId` back as `thread` on a later send to ' +
+      'post follow-ups into the same thread. Some adapters do not report an id, in which case both are absent. ' +
+      'There is no auto-reply: the only way for an agent to post is via this tool.',
     parameters: Type.Object({
       adapter: Type.Union(
         ADAPTER_IDS.map((a) => Type.Literal(a)),
@@ -236,7 +241,13 @@ export function createChannelSendTool({
           ),
         )
       }
-      const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
+      const details: { ok: boolean; error?: string; messageId?: string; messageIds?: readonly string[] } = result.ok
+        ? {
+            ok: true,
+            ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+            ...(result.messageIds !== undefined ? { messageIds: result.messageIds } : {}),
+          }
+        : { ok: false, error: result.error }
       // Success wraps the echoed sent text in the strong SYSTEM MESSAGE fence;
       // denials keep the lighter prefix. See channel-reply.ts for the full
       // rationale (PR #481 self-reply loop).

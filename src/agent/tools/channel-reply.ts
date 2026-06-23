@@ -53,7 +53,11 @@ export function createChannelReplyTool({
       'Reply in the current conversation. This is your default way to respond to a channel session — ' +
       'addressing fields (adapter, workspace, chat, thread) are filled in from the session origin, so ' +
       'you only supply the text. To post somewhere else (different chat, break out of the current ' +
-      'thread, etc.), use `channel_send` instead.',
+      'thread, etc.), use `channel_send` instead. ' +
+      'On success the result carries `messageId` (the posted message id) and `messageIds` (every id when ' +
+      'the text was split into multiple posts) when the platform reports them; pass `messageId` as a ' +
+      '`channel_send` `thread` to post follow-ups into the same thread. Some adapters do not report an id, ' +
+      'in which case both are absent.',
     parameters: Type.Object({
       text: Type.Optional(
         Type.String({
@@ -216,10 +220,19 @@ export function createChannelReplyTool({
       // `continue` is read by the router's terminal hook (installChannelReplyTerminalHook),
       // not by this tool — it suppresses the post-reply abort so a multi-step turn
       // keeps going. Success-only: a denied reply never ran, so there is no turn to keep.
-      const details: { ok: boolean; error?: string; continue?: boolean } = result.ok
-        ? keepTurnAlive
-          ? { ok: true, continue: true }
-          : { ok: true }
+      const details: {
+        ok: boolean
+        error?: string
+        continue?: boolean
+        messageId?: string
+        messageIds?: readonly string[]
+      } = result.ok
+        ? {
+            ok: true,
+            ...(keepTurnAlive ? { continue: true } : {}),
+            ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+            ...(result.messageIds !== undefined ? { messageIds: result.messageIds } : {}),
+          }
         : { ok: false, error: result.error }
       // Echo the delivered text back to the model. The adapter classifier
       // drops self-authored messages on the inbound path (`self_author`),

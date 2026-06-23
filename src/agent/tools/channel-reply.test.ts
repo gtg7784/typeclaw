@@ -119,6 +119,24 @@ describe('createChannelReplyTool', () => {
     expect(result.details).toEqual({ ok: true })
   })
 
+  test('surfaces messageId and messageIds from the router result in details', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true, messageId: 'ts1', messageIds: ['ts1', 'ts2'] })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: 'hi' })
+    expect(result.details).toEqual({ ok: true, messageId: 'ts1', messageIds: ['ts1', 'ts2'] })
+  })
+
+  test('combines continue with messageId when a mid-turn ack carries an id', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true, messageId: 'ts9', messageIds: ['ts9'] })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: 'working on it', continue: true })
+    expect(result.details).toEqual({ ok: true, continue: true, messageId: 'ts9', messageIds: ['ts9'] })
+  })
+
   test('passes thread=null verbatim when origin is a channel-root session', async () => {
     const captured: { thread: string | null | undefined } = { thread: undefined }
     const tool = createChannelReplyTool({
