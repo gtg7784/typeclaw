@@ -261,6 +261,31 @@ export const EMPTY_TURN_RETRY_NUDGE = [
   '',
   '---',
 ].join('\n')
+// Reminder-only nudge for the stranded-toolUse-after-send retry. Distinct from
+// EMPTY_TURN_RETRY_NUDGE: that one diagnoses output-budget exhaustion and tells
+// the model to "answer directly", which makes a stranded investigation RE-RUN
+// its tools and strand again. Here the model already sent a `continue: true`
+// status ack and did real tool work; the turn just ended on an unanswered
+// toolUse before final prose. The prior toolUse/toolResult entries are still in
+// this session's branch on the re-prompt, so the recovery is to STOP, read what
+// it already gathered, and reply — not to start the investigation over.
+export const STRANDED_TOOLUSE_CONTINUATION_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your previous turn sent a brief status reply, did some tool work, then ended',
+  'before sending the answer it promised. This is an automated signal from the',
+  'channel router, not a message from anyone in the chat. **Do not acknowledge or',
+  'reply to this notice itself.**',
+  '',
+  'Do NOT start the investigation over. The tool results you already gathered are',
+  'still in this conversation above — read them, summarize what you found, and',
+  'send your reply now via your channel reply tool. Only call more tools if a',
+  'specific fact is genuinely still missing. If you truly have nothing to say,',
+  'reply with `NO_REPLY`.',
+  '',
+  '---',
+].join('\n')
 // Posted to the channel (via the `source:'system'` one-shot bypass) when an
 // empty turn cannot be recovered AND retries are exhausted (or are skipped
 // because the turn thrashed the send path). Replaces the historical silent
@@ -3748,9 +3773,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // unanswered `toolUse` (the post-tool follow-up never produced an
         // assistant message — aborted loop / cancelled stream). The promised
         // work never finished, so the user is left with a bare "checking now…"
-        // and nothing after it. Re-prompt the same logical turn so the model
-        // completes its investigation and actually replies, instead of ending
-        // in silence. On retry-exhaustion post the fallback rather than
+        // and nothing after it. Re-prompt the same logical turn with the
+        // continuation nudge so the model SUMMARIZES the tool results it already
+        // gathered (still in this branch) and replies, instead of re-running the
+        // investigation under EMPTY_TURN_RETRY_NUDGE's "answer directly" framing
+        // and stranding again. On retry-exhaustion post the fallback rather than
         // returning silently — a retry turn that re-sends a status and re-strands
         // on the same no-prose shape must not deadair the user. Any postable
         // pre-tool/mid-turn prose is suppressed here as before (it was narration
@@ -3763,7 +3790,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
               `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
                 `cause=stranded_toolUse_after_send`,
             )
-            live.pendingSystemReminders.push(EMPTY_TURN_RETRY_NUDGE)
+            live.pendingSystemReminders.push(STRANDED_TOOLUSE_CONTINUATION_NUDGE)
           } else {
             await postEmptyTurnFallback('stranded_toolUse_retries_exhausted')
           }
