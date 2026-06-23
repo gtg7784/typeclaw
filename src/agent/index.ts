@@ -244,17 +244,26 @@ export type CreateSessionResult = {
 }
 
 // A session's reasoning effort layers like the model does: the resolved
-// profile's own `thinkingLevel` → the `default` profile's `thinkingLevel`
-// (the de-facto global default, mirroring how `models.default` is the default
-// model) → the per-provider/SDK default for the active ref. When the requested
-// profile was unknown, `resolved` is already the `default` profile, so the
-// first two terms coincide and the expression still does the right thing.
+// profile's own `thinkingLevel` → the built-in `deep` default → the `default`
+// profile's `thinkingLevel` (the de-facto global default) → the per-provider/SDK
+// default for the active ref. When the requested profile was unknown, `resolved`
+// is already the `default` profile, so those terms coincide and the expression
+// still does the right thing.
+//
+// The `deep` `high` default sits ABOVE `models.default.thinkingLevel` on purpose:
+// lowering the global default must not stop the "think hard" profile from
+// thinking hard. `high` (not `xhigh`) because `xhigh` ~doubles latency and token
+// spend for no agentic-quality gain. An explicit `models.deep.thinkingLevel`
+// still wins — it is the first term.
+const DEEP_PROFILE_DEFAULT_THINKING_LEVEL: ThinkingLevel = 'high'
+
 export function resolveSessionThinkingLevel(
   models: Models,
-  resolved: Pick<ResolvedProfile, 'thinkingLevel'>,
+  resolved: Pick<ResolvedProfile, 'thinkingLevel' | 'profile'>,
   activeRef: ModelRef,
 ): ThinkingLevel | undefined {
-  return resolved.thinkingLevel ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
+  const deepDefault = resolved.profile === 'deep' ? DEEP_PROFILE_DEFAULT_THINKING_LEVEL : undefined
+  return resolved.thinkingLevel ?? deepDefault ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
 }
 
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
