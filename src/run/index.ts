@@ -319,6 +319,14 @@ export async function startAgent({
     claimHandler: claimController.claimHandler,
     githubTokenBridge,
     stream,
+    newestRunningChildSubagentStartedAt: (sessionId) =>
+      liveSubagentRegistry
+        .list({ parentSessionId: sessionId })
+        .reduce<number | null>(
+          (newest, child) =>
+            child.status === 'running' && (newest === null || child.startedAt > newest) ? child.startedAt : newest,
+          null,
+        ),
     onReload: async () => {
       const { results } = await reloadRegistry.reloadAll()
       return formatChannelReloadSummary(results)
