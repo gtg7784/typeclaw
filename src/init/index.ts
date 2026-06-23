@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { basename, join } from 'node:path'
 
 import {
   config,
@@ -85,6 +85,7 @@ export type InitStep =
   | 'oauth-login'
   | 'scaffold'
   | 'slack-auth'
+  | 'discord-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
   | 'github-webhooks'
@@ -96,6 +97,7 @@ export type InitStep =
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 export type WebexAuthResult = { ok: true } | { ok: false; reason: string }
 export type SlackAuthResult = { ok: true } | { ok: false; reason: string }
+export type DiscordAuthResult = { ok: true } | { ok: false; reason: string }
 
 // Structured credential block for the GitHub channel adapter. Mirrors the
 // shape `runAddChannel({ channel: 'github', ... })` consumes so the wizard
@@ -133,6 +135,8 @@ export type InitStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
+  | { step: 'discord-auth'; phase: 'start' }
+  | { step: 'discord-auth'; phase: 'done'; result: DiscordAuthResult }
   | { step: 'github-webhooks'; phase: 'start' }
   | { step: 'github-webhooks'; phase: 'done'; result: EagerGithubWebhookInstallResult }
   | { step: 'install'; phase: 'start' }
@@ -214,6 +218,7 @@ export type InitOptions = {
   // the existing slot in `secrets.json#channels` untouched. Defaults below
   // mirror the legacy derivation (`<token> !== undefined && !== ''`).
   withDiscord?: boolean
+  withDiscordUser?: boolean
   withSlack?: boolean
   withTelegram?: boolean
   withWebex?: boolean
@@ -222,6 +227,7 @@ export type InitOptions = {
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   runWebexAuth?: WebexAuthRunner
+  runDiscordAuth?: DiscordAuthRunner
   // Structured GitHub credentials collected by the wizard. When omitted and
   // `withGithub` is true, the existing secrets.json#channels.github block is
   // reused as-is (the wizard's "reuse existing credentials" path).
@@ -262,6 +268,7 @@ export async function runInit({
   telegramBotToken,
   webexBotToken,
   withDiscord,
+  withDiscordUser = false,
   withSlack,
   withTelegram,
   withWebex,
@@ -270,6 +277,7 @@ export async function runInit({
   withGithub = false,
   runKakaotalkAuth,
   runWebexAuth,
+  runDiscordAuth,
   githubCredentials,
   githubFetchImpl,
   onProgress,
@@ -345,6 +353,7 @@ export async function runInit({
     ...(visionModel !== undefined ? { visionModel } : {}),
     ...(visionModelMeta !== undefined ? { visionModelMeta } : {}),
     withDiscord: wantsDiscord,
+    withDiscordUser,
     withSlack: wantsSlack,
     withTelegram: wantsTelegram,
     withWebex: wantsWebex,
@@ -390,6 +399,16 @@ export async function runInit({
     emit({ step: 'webex-auth', phase: 'done', result })
     if (!result.ok) {
       throw new Error(`Webex authentication failed: ${result.reason}`)
+    }
+  }
+
+  if (withDiscordUser) {
+    emit({ step: 'discord-auth', phase: 'start' })
+    const runner = runDiscordAuth ?? defaultDiscordAuthRunner
+    const result = await runner({ cwd })
+    emit({ step: 'discord-auth', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`Discord authentication failed: ${result.reason}`)
     }
   }
 
@@ -439,6 +458,7 @@ export async function runInit({
 
   const configuredChannels: ChannelKind[] = []
   if (wantsDiscord) configuredChannels.push('discord-bot')
+  if (withDiscordUser) configuredChannels.push('discord')
   if (wantsSlack) configuredChannels.push('slack-bot')
   if (wantsTelegram) configuredChannels.push('telegram-bot')
   if (wantsWebex) configuredChannels.push('webex-bot')
@@ -608,6 +628,7 @@ export type ScaffoldOptions = {
   visionModel?: ModelRef | string
   visionModelMeta?: CustomModelMeta
   withDiscord?: boolean
+  withDiscordUser?: boolean
   withSlack?: boolean
   withTelegram?: boolean
   withWebex?: boolean
@@ -645,6 +666,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (Object.keys(customModels).length > 0) config.customModels = customModels
   const channels: Record<string, Record<string, never>> = {}
   if (options.withDiscord) channels['discord-bot'] = {}
+  if (options.withDiscordUser) channels.discord = {}
   if (options.withSlack) channels['slack-bot'] = {}
   if (options.withTelegram) channels['telegram-bot'] = {}
   if (options.withWebex) channels['webex-bot'] = {}
@@ -1086,6 +1108,7 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 // behavior under a mode flag.
 
 export type ChannelKind =
+  | 'discord'
   | 'discord-bot'
   | 'slack'
   | 'slack-bot'
@@ -1103,6 +1126,7 @@ export type ChannelKind =
 export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'slack-bot',
   'slack',
+  'discord',
   'discord-bot',
   'telegram-bot',
   'webex',
@@ -1116,6 +1140,7 @@ export type AddChannelStep =
   | 'line-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
+  | 'discord-auth'
   | 'slack-auth'
   | 'config'
   | 'secrets'
@@ -1130,6 +1155,8 @@ export type AddChannelStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
+  | { step: 'discord-auth'; phase: 'start' }
+  | { step: 'discord-auth'; phase: 'done'; result: DiscordAuthResult }
   | { step: 'slack-auth'; phase: 'start' }
   | { step: 'slack-auth'; phase: 'done'; result: SlackAuthResult }
   | { step: 'secrets'; phase: 'start' }
@@ -1145,6 +1172,7 @@ export type AddChannelOptions = {
   onProgress?: (event: AddChannelStepEvent) => void
 } & (
   | { channel: 'discord-bot'; discordBotToken: string }
+  | { channel: 'discord'; runDiscordAuth: DiscordAuthRunner }
   | { channel: 'slack'; slackQrDataUrl: string; runSlackAuth?: SlackAuthRunner }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
@@ -1167,6 +1195,7 @@ export type AddChannelOptions = {
 )
 
 export type SlackAuthRunner = (options: { cwd: string; qrDataUrl: string }) => Promise<SlackAuthResult>
+export type DiscordAuthRunner = (options: { cwd: string }) => Promise<DiscordAuthResult>
 
 export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   const emit = options.onProgress ?? (() => {})
@@ -1198,6 +1227,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     const result = await options.runWebexAuth({ cwd: options.cwd })
     emit({ step: 'webex-auth', phase: 'done', result })
     if (!result.ok) throw new Error(`Webex authentication failed: ${result.reason}`)
+  }
+
+  if (options.channel === 'discord') {
+    emit({ step: 'discord-auth', phase: 'start' })
+    const result = await options.runDiscordAuth({ cwd: options.cwd })
+    emit({ step: 'discord-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`Discord authentication failed: ${result.reason}`)
   }
 
   if (options.channel === 'slack') {
@@ -1276,6 +1312,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
   switch (options.channel) {
     case 'discord-bot':
       return { token: options.discordBotToken }
+    case 'discord':
+      return {}
     case 'slack-bot':
       return { botToken: options.slackBotToken, appToken: options.slackAppToken }
     case 'slack':
@@ -1303,6 +1341,19 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
 async function defaultSlackAuthRunner(options: { cwd: string; qrDataUrl: string }): Promise<SlackAuthResult> {
   const { runSlackBootstrap } = await import('./slack-auth')
   return await runSlackBootstrap({ agentDir: options.cwd, qrDataUrl: options.qrDataUrl })
+}
+
+async function defaultDiscordAuthRunner(options: { cwd: string }): Promise<DiscordAuthResult> {
+  const [{ runDiscordBootstrap }, QRCode] = await Promise.all([import('./discord-auth'), import('qrcode')])
+  return await runDiscordBootstrap({
+    agentDir: options.cwd,
+    onQrUrl: async (url) => {
+      const qr = await QRCode.default.toString(url, { type: 'terminal', small: true })
+      console.log(
+        ['Open Discord mobile app → Settings → scan QR.', '', qr, '', 'Approve the login on your phone.'].join('\n'),
+      )
+    },
+  })
 }
 
 type ChannelSecrets = Record<string, string>

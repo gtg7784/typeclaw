@@ -87,6 +87,42 @@ describe('runAddChannel', () => {
     expect(cfg.channels?.['discord-bot']).toEqual({})
   })
 
+  test('adds discord user as an empty block and runs QR auth runner before config mutation', async () => {
+    const events: AddChannelStepEvent[] = []
+    const result = await runAddChannel({
+      cwd: root,
+      channel: 'discord',
+      runDiscordAuth: async () => ({ ok: true }),
+      onProgress: (event) => events.push(event),
+    })
+
+    expect(result).toBeUndefined()
+    const cfg = await readConfig()
+    expect(cfg.channels?.discord).toEqual({})
+    expect(events.map((event) => `${event.step}:${event.phase}`)).toEqual([
+      'discord-auth:start',
+      'discord-auth:done',
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+    ])
+  })
+
+  test('aborts and leaves typeclaw.json + secrets.json untouched when discord auth fails', async () => {
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'discord',
+        runDiscordAuth: async () => ({ ok: false, reason: 'scan expired' }),
+      }),
+    ).rejects.toThrow('Discord authentication failed: scan expired')
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.discord).toBeUndefined()
+    expect((await readSecrets()).channels?.discord).toBeUndefined()
+  })
+
   test('saves discord-bot.token to secrets.json#channels without disturbing the Fireworks provider key', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
 
