@@ -15,7 +15,6 @@ import { parseCommand } from '@/commands'
 import { formatBanner } from './banner'
 import { createClient as createClientDefault, type Client } from './client'
 import {
-  formatAssistantHeader,
   formatQueuePanel,
   formatToolEnd,
   formatToolStart,
@@ -251,13 +250,8 @@ export function createTui({
       onReplyDone = null
     }
 
-    // A Markdown block can't carry an ANSI header prefix (it'd be parsed as
-    // markdown), so the assistant turn's boxed header (label + timestamp) is a
-    // separate Text line emitted just above the block when it's first created —
-    // stamped with the first delta's server `ts`.
-    const ensureAssistantBlock = (ts: number | undefined): Markdown => {
+    const ensureAssistantBlock = (): Markdown => {
       if (currentAssistant) return currentAssistant
-      appendHistory(new Text(formatAssistantHeader(ts), 0, 0))
       const md = new Markdown('', 0, 0, markdownTheme)
       currentAssistant = md
       currentAssistantText = ''
@@ -275,7 +269,7 @@ export function createTui({
         }
         case 'text_delta': {
           hideThinking()
-          const block = ensureAssistantBlock(msg.ts)
+          const block = ensureAssistantBlock()
           currentAssistantText += msg.delta
           block.setText(currentAssistantText)
           tui.requestRender()
