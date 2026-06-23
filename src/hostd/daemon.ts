@@ -6,7 +6,12 @@ import { join } from 'node:path'
 import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
-import { kakaoChannelBlockSchema, lineChannelBlockSchema, webexChannelBlockSchema } from '@/secrets/schema'
+import {
+  kakaoChannelBlockSchema,
+  lineChannelBlockSchema,
+  slackChannelBlockSchema,
+  webexChannelBlockSchema,
+} from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
 import { isWindows } from '@/shared'
 
@@ -461,7 +466,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   const handleSecretsPatch = async (req: {
     containerName: string
-    patch: { channels: { kakaotalk: unknown } | { line: unknown } | { webex: unknown } }
+    patch: { channels: { kakaotalk: unknown } | { line: unknown } | { webex: unknown } | { slack: unknown } }
   }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
       const cwd = cwds.get(req.containerName)
@@ -475,7 +480,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           ? { key: 'line' as const, parsed: lineChannelBlockSchema.safeParse(channelsPatch.line) }
           : 'webex' in channelsPatch
             ? { key: 'webex' as const, parsed: webexChannelBlockSchema.safeParse(channelsPatch.webex) }
-            : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
+            : 'slack' in channelsPatch
+              ? { key: 'slack' as const, parsed: slackChannelBlockSchema.safeParse(channelsPatch.slack) }
+              : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
       if (!patch.parsed.success) {
         return { ok: false, reason: patch.parsed.error.issues.map((issue) => issue.message).join('; ') }
       }
