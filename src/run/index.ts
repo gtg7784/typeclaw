@@ -55,7 +55,7 @@ import {
   type Scheduler,
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
-import { createMcpManager } from '@/mcp'
+import { createMcpManager, type McpConnectResult } from '@/mcp'
 import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
@@ -170,14 +170,19 @@ export async function startAgent({
   const githubTokenBridge = createGithubTokenBridge()
   const mcpManager =
     cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
-  if (mcpManager !== null) {
-    const results = await mcpManager.connectAll()
-    for (const result of results) {
-      if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
-    }
-  }
-  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
-  const pluginsLoaded = await loadPlugins({
+
+  // These three boot steps have no mutual data dependency, so they run
+  // concurrently instead of as a serial await chain on the cold-start path:
+  //   - MCP connectAll (network; each server has its own connect deadline and
+  //     degrades to {ok:false} on failure, so it never rejects boot)
+  //   - loadPlugins (module imports + I/O; left UNCAUGHT so a bundled/plugin
+  //     security failure still aborts boot, same as before)
+  //   - the vector startup unit (CPU/disk; gated on vector mode, non-fatal)
+  // The vector unit stays internally sequential (index build → embedder warm)
+  // because warmEmbedder shares the embedder module state the index build
+  // initializes.
+  const mcpConnectPromise = mcpManager === null ? Promise.resolve<McpConnectResult[]>([]) : mcpManager.connectAll()
+  const pluginsLoadedPromise = loadPlugins({
     entries: withDefaultPlugins(cwdConfig.plugins),
     agentDir: cwd,
     configsByName: pluginConfigsByName,
@@ -186,6 +191,13 @@ export async function startAgent({
     hasGithubAppTokenResolver: githubTokenBridge.hasAppTokenResolver,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
+  const vectorStartupPromise = suppressSystemMemory ? runVectorStartup(cwd) : Promise.resolve()
+
+  const [pluginsLoaded, mcpResults] = await Promise.all([pluginsLoadedPromise, mcpConnectPromise, vectorStartupPromise])
+  for (const result of mcpResults) {
+    if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
+  }
+  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
 
   reloadRegistry.register(
     createConfigReloadable({
@@ -224,19 +236,6 @@ export async function startAgent({
   // v2-only parser rejects the file and hydrate below sees no channels. Runs
   // exactly once per folder; a folder already at v2 is a no-op.
   runStartupMigrations(cwd)
-  if (suppressSystemMemory) {
-    await buildStartupVectorIndex(cwd, embed).catch((err) => {
-      console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
-    })
-
-    // Warm the embedder now (even when the index needed no rebuild above, which
-    // skips embed() entirely) so the first channel turn's query embed doesn't
-    // pay the one-time ONNX init on its critical path. Non-fatal: a failure here
-    // degrades to the per-turn lazy load, same as before this step existed.
-    await warmEmbedder().catch((err) => {
-      console.warn(`[vector] embedder warm-up failed: ${err instanceof Error ? err.message : String(err)}`)
-    })
-  }
 
   // Channel adapters read `process.env[TOKEN_ENV]` (see channels/manager.ts).
   // Hydrate fills any unset env var from secrets.json#channels via env-wins:
@@ -901,6 +900,20 @@ export async function startAgent({
     channelManager,
     stop,
   }
+}
+
+async function runVectorStartup(cwd: string): Promise<void> {
+  await buildStartupVectorIndex(cwd, embed).catch((err) => {
+    console.warn(`[vector] startup index build failed: ${err instanceof Error ? err.message : String(err)}`)
+  })
+
+  // Warm the embedder after the index pass (even when the index needed no
+  // rebuild above, which skips embed() entirely) so the first channel turn's
+  // query embed doesn't pay the one-time ONNX init on its critical path.
+  // Non-fatal: a failure here degrades to the per-turn lazy load.
+  await warmEmbedder().catch((err) => {
+    console.warn(`[vector] embedder warm-up failed: ${err instanceof Error ? err.message : String(err)}`)
+  })
 }
 
 function buildLocalTuiUrl(port: number, token: string | null): string {
