@@ -242,7 +242,23 @@ export type SendErrorCode =
   | 'callback-rejected'
   | 'skip-locked'
 
-export type SendResult = { ok: true } | { ok: false; error: string; code?: SendErrorCode }
+// `messageId` is the platform-native id of the posted message (Slack `ts`,
+// Discord snowflake, Telegram `message_id`, Webex/GitHub comment id, KakaoTalk
+// `log_id`, LINE `message_id`). It is the SAME id shape an inbound carries as
+// `externalMessageId`, so an agent can feed it straight back into a follow-up
+// `thread` / `replyTo` to keep posting into one conversation. For a send the
+// adapter splits into multiple posts (long text chunked, or attachments +
+// text), `messageId` is the post a reply should anchor to — usually the FIRST
+// post, but adapter-specific: KakaoTalk uploads files BEFORE the text, so the
+// text post (the message a human replies to) is the anchor even though it is
+// last. `messageIds` always lists every post in send order, so a caller that
+// needs a specific post (rather than the reply anchor) can index it directly.
+// Optional throughout: an adapter whose SDK does not hand back an id (legacy
+// slack/discord user-account adapters) omits both, and callers must treat a
+// missing id as "not available", never as an error.
+export type SendResult =
+  | { ok: true; messageId?: string; messageIds?: readonly string[] }
+  | { ok: false; error: string; code?: SendErrorCode }
 
 export type OutboundCallback = (msg: OutboundMessage) => Promise<SendResult>
 

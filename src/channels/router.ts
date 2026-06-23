@@ -3577,11 +3577,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const snapshot = Array.from(callbacks)
     let lastError: string | undefined
     let delivered = false
+    let messageId: string | undefined
+    let messageIds: readonly string[] | undefined
     try {
       for (const cb of snapshot) {
         const result = await cb(msg)
         if (result.ok) {
           delivered = true
+          messageId = result.messageId
+          messageIds = result.messageIds
           break
         }
         lastError = result.error
@@ -3662,7 +3666,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger[level](`[channels] ${live.keyId} send ${fields}${warn}`)
     }
 
-    return { ok: true }
+    return {
+      ok: true,
+      ...(messageId !== undefined ? { messageId } : {}),
+      ...(messageIds !== undefined ? { messageIds } : {}),
+    }
   }
 
   // The turn ended via the terminal-reply abort. If that reply promised to keep
