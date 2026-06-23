@@ -35,6 +35,19 @@ const discordBotChannelSchema = z.object({
   token: secretFieldSchema.optional(),
 })
 
+export const discordAccountRecordSchema = z.object({
+  account_id: z.string(),
+  token: z.string(),
+  username: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const discordChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), discordAccountRecordSchema),
+})
+
 const telegramBotChannelSchema = z.object({
   token: secretFieldSchema.optional(),
 })
@@ -175,6 +188,7 @@ export const kakaoChannelBlockSchema = z.object({
 export const channelsSchema = z
   .object({
     'slack-bot': slackBotChannelSchema.optional(),
+    discord: discordChannelBlockSchema.optional(),
     'discord-bot': discordBotChannelSchema.optional(),
     github: githubChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
@@ -202,6 +216,8 @@ export type Channels = z.infer<typeof channelsSchema>
 export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
 export type GithubAppAuthBlock = z.infer<typeof githubAppAuthSchema>
 export type GithubSecretsBlock = z.infer<typeof githubChannelSchema>
+export type DiscordAccountRecord = z.infer<typeof discordAccountRecordSchema>
+export type DiscordChannelBlock = z.infer<typeof discordChannelBlockSchema>
 export type LineAccountRecord = z.infer<typeof lineAccountRecordSchema>
 export type LineChannelBlock = z.infer<typeof lineChannelBlockSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
