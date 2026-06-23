@@ -37,25 +37,6 @@ export function withTimestamp(ts: number | undefined, body: string): string {
   return `${formatTimestamp(ts)} ${body}`
 }
 
-// Open-box top rule for an assistant turn. Only a header (no closing rule) so
-// the look survives streaming Markdown whose end is unknown at render time.
-export function formatAssistantHeader(ts: number | undefined): string {
-  const clock = plainTimestamp(ts)
-  const label = `╭─ typeclaw · ${clock} `
-  return colors.accent(`${label}${'─'.repeat(ASSISTANT_HEADER_RULE_WIDTH)}`)
-}
-
-const ASSISTANT_HEADER_RULE_WIDTH = 8
-
-function plainTimestamp(ts: number | undefined): string {
-  if (ts === undefined || ts === 0) return '--:--:--'
-  const d = new Date(ts)
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  const ss = String(d.getSeconds()).padStart(2, '0')
-  return `${hh}:${mm}:${ss}`
-}
-
 export function formatTokenCount(tokens: number): string {
   if (tokens < 1000) return `${tokens}`
   const k = tokens / 1000

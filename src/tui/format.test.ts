@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
-  formatAssistantHeader,
   formatCost,
   formatTimestamp,
   formatTokenCount,
@@ -257,18 +256,6 @@ describe('formatTimestamp', () => {
   test('withTimestamp prefixes the body with the time', () => {
     const ts = new Date(2026, 0, 2, 23, 59, 59).getTime()
     expect(visible(withTimestamp(ts, 'hello'))).toBe('23:59:59 hello')
-  })
-})
-
-describe('formatAssistantHeader', () => {
-  test('renders a typeclaw box header carrying the timestamp', () => {
-    const ts = new Date(2026, 0, 2, 9, 5, 7).getTime()
-    const out = visible(formatAssistantHeader(ts))
-    expect(out).toContain('╭─ typeclaw · 09:05:07')
-  })
-
-  test('falls back to the placeholder clock for undefined ts', () => {
-    expect(visible(formatAssistantHeader(undefined))).toContain('--:--:--')
   })
 })
 
