@@ -27,6 +27,7 @@ export const BUILTIN_COMMAND_NAMES = [
   'usage',
   'update',
   '_hostd',
+  '_update-check',
 ] as const
 
 export type BuiltinCommandName = (typeof BUILTIN_COMMAND_NAMES)[number]

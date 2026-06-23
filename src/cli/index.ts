@@ -39,6 +39,7 @@ const main = defineCommand({
     usage: () => import('./usage').then((m) => m.usageCommand),
     update: () => import('./update').then((m) => m.updateCommand),
     _hostd: () => import('./hostd').then((m) => m.hostdCommand),
+    '_update-check': () => import('./update-check').then((m) => m.updateCheckCommand),
   },
 })
 
@@ -79,6 +80,16 @@ async function runWithPluginDispatch(): Promise<void> {
   const first = argv[0]
 
   runHostStartupMigrationsOnce(first)
+
+  // Disk-only read + detached background refresh; fail-open and never blocks the
+  // command. The suppression check is dependency-free and runs FIRST so a bare
+  // flag or plugin command never imports update-notify (which eagerly loads
+  // @/config). See src/cli/update-suppression.ts and src/cli/update-notify.ts.
+  const { shouldConsiderUpdateNotice } = await import('./update-suppression')
+  if (shouldConsiderUpdateNotice(first)) {
+    const { maybeNotifyUpdate } = await import('./update-notify')
+    await maybeNotifyUpdate(first)
+  }
 
   if (first === '--help' || first === '-h') {
     // citty calls process.exit() after rendering help, so anything we print
