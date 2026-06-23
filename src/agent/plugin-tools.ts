@@ -190,7 +190,7 @@ export type WrapToolOptions = {
   // Resolves the current turn's abort handle. Resolved lazily (not at wrap
   // time) because tools are wrapped BEFORE `createAgentSession` returns the
   // session whose `agent.abort` this points at. See `fireLoopAbort`.
-  getAbort?: () => (() => void) | undefined
+  getAbort?: () => ((reason?: string) => void) | undefined
 }
 
 export type WrapSystemToolOptions = {
@@ -198,7 +198,7 @@ export type WrapSystemToolOptions = {
   sessionId: string
   hooks: HookBus
   getOrigin?: () => SessionOrigin | undefined
-  getAbort?: () => (() => void) | undefined
+  getAbort?: () => ((reason?: string) => void) | undefined
   // When present, the bash builtin is rewritten through the per-tool bwrap
   // sandbox with role-derived path masks. Absent (or no masks for the role)
   // runs bash unchanged — preserving today's behavior for trusted+ and for
@@ -262,7 +262,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
 
       const loopGate = gateLoopGuard(opts.sessionId, opts.toolName, before.args)
       if (loopGate.blockNow) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:block')
         return errorResult(loopGate.message)
       }
 
@@ -283,7 +283,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
 
       const resolved = loopGate.resolve(result)
       if ('deferredBlock' in resolved) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
         return errorResult(resolved.deferredBlock)
       }
       result = resolved.result
@@ -325,7 +325,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       }
       const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
       if (loopGate.blockNow) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:block')
         throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -345,7 +345,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
         throw new Error(resolved.deferredBlock)
       }
       const hookResult = resolved.result
@@ -385,7 +385,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       }
       const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
       if (loopGate.blockNow) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:block')
         throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -405,7 +405,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
         throw new Error(resolved.deferredBlock)
       }
       const hookResult = resolved.result
@@ -460,7 +460,7 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
       const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
       if (loopGate.blockNow) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:block')
         throw new Error(loopGate.message)
       }
       const guardResult = await runFinalWriteGuards({
@@ -511,7 +511,7 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       const result = tmpRedirect !== undefined ? restoreTmpPathInResult(rawResult, tmpRedirect) : rawResult
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
-        fireLoopAbort(opts.getAbort)
+        fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
         throw new Error(resolved.deferredBlock)
       }
       const hookResult = resolved.result
@@ -929,8 +929,8 @@ export function __resetSharedLoopGuardForTests(): void {
 // 'aborted'). We use the signal-only `agent.abort`, never `session.abort`,
 // which would deadlock awaiting the very run this tool call belongs to. See
 // the matching pattern in src/channels/router.ts (policy-denied send cap).
-function fireLoopAbort(getAbort: (() => (() => void) | undefined) | undefined): void {
-  getAbort?.()?.()
+function fireLoopAbort(getAbort: (() => ((reason?: string) => void) | undefined) | undefined, reason: string): void {
+  getAbort?.()?.(reason)
 }
 
 function errorResult(message: string) {

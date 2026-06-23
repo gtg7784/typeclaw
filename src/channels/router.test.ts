@@ -215,6 +215,38 @@ function messageEntry(message: AssistantMessage): SessionEntry {
   }
 }
 
+function strandOnUnansweredToolUse(session: FakeSession, id: string = 'strand'): void {
+  const toolCallId = `tool-${id}`
+  const assistantEntry: SessionEntry = {
+    type: 'message',
+    id: `assistant-${id}`,
+    parentId: null,
+    timestamp: '2026-06-15T06:23:45.000Z',
+    message: {
+      ...assistantMessage(''),
+      content: [{ type: 'toolCall', id: toolCallId, name: 'stream_snapshot', arguments: { limit: 20 } }],
+      stopReason: 'toolUse',
+    },
+  }
+  const toolResultEntry: SessionEntry = {
+    type: 'message',
+    id: `tool-result-${id}`,
+    parentId: assistantEntry.id,
+    timestamp: '2026-06-15T06:23:45.500Z',
+    message: {
+      role: 'toolResult',
+      toolCallId,
+      toolName: 'stream_snapshot',
+      content: [{ type: 'text', text: 'stream events here' }],
+      isError: false,
+      timestamp: 1000,
+    },
+  }
+  session.entriesById.set(assistantEntry.id, assistantEntry)
+  session.entriesById.set(toolResultEntry.id, toolResultEntry)
+  session.leafEntry = toolResultEntry
+}
+
 const baseConfig: ChannelAdapterConfig = {
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
   enabled: true,
@@ -4956,6 +4988,69 @@ describe('ChannelRouter channel-turn protocol', () => {
       'cron.json은 비어 있고, 요약은 플러그인에서 와. 재시작해야 반영돼.',
     ])
     expect(logs.some((m) => m.includes('empty_turn_retry attempt=1'))).toBe(true)
+  })
+
+  test('continue-reply guard: logs policy-denied abort provenance when retrying stranded toolUse', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check it' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      if (attempt === 1) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'checking now' })
+        for (let i = 0; i < MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN; i++) {
+          await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'checking now' })
+        }
+        strandOnUnansweredToolUse(sessions[0]!, 'policy-denied')
+        return
+      }
+      expect(text).toContain(STRANDED_TOOLUSE_CONTINUATION_NUDGE)
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'done' })
+      sessions[0]!.setAssistantText('done')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    const retryLog = logs.find((m) => m.includes('empty_turn_retry') && m.includes('cause=stranded_toolUse_after_send'))
+    expect(retryLog).toContain('abort_reason=policy_denied:duplicate')
+    expect(sent.map((s) => s.text)).toEqual(['checking now', 'done'])
+  })
+
+  test('continue-reply guard: logs unknown abort provenance when no internal abort fired', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check it' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      if (attempt === 1) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'checking now' })
+        strandOnUnansweredToolUse(sessions[0]!, 'unknown-abort-reason')
+        return
+      }
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'done' })
+      sessions[0]!.setAssistantText('done')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    const retryLog = logs.find((m) => m.includes('empty_turn_retry') && m.includes('cause=stranded_toolUse_after_send'))
+    expect(retryLog).toContain('abort_reason=unknown')
+    expect(retryLog).not.toContain('policy_denied:')
+    expect(sent.map((s) => s.text)).toEqual(['checking now', 'done'])
   })
 
   test('continue-reply guard: does NOT re-prompt when the trailing toolUse carries narration and a send landed', async () => {
