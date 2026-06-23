@@ -216,6 +216,28 @@
   }
 }
 
+/* Ask Typeey popover: rises and fades in from the FAB anchored bottom-right. */
+.ask-typeey-panel {
+  animation: ask-typeey-in 200ms ease-out;
+}
+
+@keyframes ask-typeey-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ask-typeey-panel {
+    animation: none;
+  }
+}
+
 /* Shiki dual-theme (defaultColor: false): tokens carry only --shiki-light and
    --shiki-dark vars with no inline base color, so each theme is selected purely
    by CSS. The card div owns the background, so the pre stays transparent. */
