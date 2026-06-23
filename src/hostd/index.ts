@@ -1,6 +1,16 @@
 export { isDaemonReachable, send } from './client'
 export { startDaemon, type Daemon, type DaemonLogEvent, type DaemonOptions } from './daemon'
-export { ensureDirs, homeRoot, lockfilePath, logDir, logfilePath, pidfilePath, runDir, socketPath } from './paths'
+export {
+  ensureDirs,
+  homeRoot,
+  lockfilePath,
+  logDir,
+  logfilePath,
+  pidfilePath,
+  runDir,
+  socketPath,
+  versionCachePath,
+} from './paths'
 export type {
   ListResult,
   Request,
