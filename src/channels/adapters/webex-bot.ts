@@ -123,7 +123,7 @@ export function createOutboundCallback(deps: {
 
       const sent = await client.sendMessage(msg.chat, text, parentId !== undefined ? { parentId } : undefined)
       logger.info(`[webex-bot] sent id=${sent.ref} ${tag}`)
-      return { ok: true }
+      return { ok: true, messageId: sent.ref, messageIds: [sent.ref] }
     } catch (err) {
       const message = describe(err)
       logger.error(`[webex-bot] outbound failed: ${message}`)
