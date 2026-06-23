@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
+
+import { isWindows } from '@/shared/platform'
 
 // Single source of truth for "what version of typeclaw is this agent on,
 // and where does that mean we should pin the base image / write the dep
@@ -32,6 +34,33 @@ function isInstalledCli(): boolean {
 export function resolveScaffoldVersion(): string | null {
   if (!isInstalledCli()) return null
   return `^${CLI_VERSION}`
+}
+
+const TYPECLAW_PACKAGE = 'typeclaw'
+
+// The local typeclaw source checkout this CLI runs from (the dir holding the
+// CLI's own package.json), or null when the CLI is an installed package.
+export function typeclawCheckoutRoot(): string | null {
+  return isInstalledCli() ? null : dirname(CLI_PACKAGE_JSON_PATH)
+}
+
+// The `dependencies.typeclaw` spec a fresh/reconciled agent should declare to
+// track the running CLI: `^X.Y.Z` when the CLI is an installed package, else the
+// local checkout — `link:typeclaw` on native Windows (a `bun link` registration
+// bun symlinks instead of copying; `file:` would copy the whole checkout incl
+// `.git/` and EPERM, the #899 path) and `file:<rel>` on POSIX.
+export function resolveTypeclawSpec(agentRoot: string, platform: NodeJS.Platform = process.platform): string {
+  const scaffoldVersion = resolveScaffoldVersion()
+  if (scaffoldVersion !== null) return scaffoldVersion
+  if (isWindows(platform)) return `link:${TYPECLAW_PACKAGE}`
+  const checkout = typeclawCheckoutRoot()
+  return checkout ? `file:${toFileSpec(relative(agentRoot, checkout))}` : 'file:../typeclaw'
+}
+
+function toFileSpec(rel: string): string {
+  if (rel === '') return '.'
+  // bun/npm accept POSIX-style paths in file: specifiers; normalize separators.
+  return rel.split(/[\\/]/).join('/')
 }
 
 // The version of typeclaw the AGENT will actually run inside the container.

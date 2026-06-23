@@ -91,10 +91,10 @@ describe('autoUpgradeTypeclawDep — skipped outcomes', () => {
     expect(outcome).toEqual({ kind: 'skipped-no-dep' })
   })
 
-  test('returns skipped-non-release-spec for file: / link: / dist-tag / range / glob / github: specs', async () => {
+  test('returns skipped-non-release-spec for dist-tag / range / glob / github: specs', async () => {
+    // file:/link: are intentionally excluded — under an npm CLI they relink to
+    // npm (covered in the reconcile suite), so they are NOT skipped specs.
     for (const spec of [
-      'file:../typeclaw',
-      'link:../typeclaw',
       'latest',
       'workspace:*',
       'npm:typeclaw@0.1.0',
@@ -109,6 +109,51 @@ describe('autoUpgradeTypeclawDep — skipped outcomes', () => {
 
       expect(outcome).toEqual({ kind: 'skipped-non-release-spec', declared: spec })
     }
+  })
+})
+
+describe('autoUpgradeTypeclawDep — local/npm reconcile', () => {
+  test('npm CLI + file: spec → relinks to ^version (spec-rewritten)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: 'file:../typeclaw' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.4.0' })
+
+    expect(outcome).toMatchObject({ kind: 'spec-rewritten', from: 'file:../typeclaw', to: '^0.4.0' })
+    expect((await readPackageJson()).dependencies).toEqual({ typeclaw: '^0.4.0' })
+  })
+
+  test('npm CLI + link: spec → relinks to ^version (spec-rewritten)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: 'link:typeclaw' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.4.0' })
+
+    expect(outcome).toMatchObject({ kind: 'spec-rewritten', to: '^0.4.0' })
+  })
+
+  test('local CLI + npm range → relinks to the local spec (relinked-to-local)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: null, localSpec: 'file:../typeclaw' })
+
+    expect(outcome).toMatchObject({ kind: 'relinked-to-local', from: '^0.1.0', to: 'file:../typeclaw' })
+    expect((await readPackageJson()).dependencies).toEqual({ typeclaw: 'file:../typeclaw' })
+  })
+
+  test('local CLI + spec already matching the local spec → no-op (skipped-dev-mode)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: 'file:../typeclaw' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: null, localSpec: 'file:../typeclaw' })
+
+    expect(outcome).toEqual({ kind: 'skipped-dev-mode' })
+  })
+
+  test('local CLI + exact pin → left untouched (skipped-dev-mode)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '0.1.5' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: null, localSpec: 'file:../typeclaw' })
+
+    expect(outcome).toEqual({ kind: 'skipped-dev-mode' })
+    expect((await readPackageJson()).dependencies).toEqual({ typeclaw: '0.1.5' })
   })
 })
 

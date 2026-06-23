@@ -18,16 +18,17 @@ import {
   type AutoUpgradeOutcome,
   expectedInstalledAfterUpgrade,
   outcomeForcesInstall,
+  outcomeRequiresForceInstall,
   readInstalledTypeclawVersionFromAgent,
 } from '@/init/auto-upgrade'
-import { resolveBaseImageVersion } from '@/init/cli-version'
+import { resolveBaseImageVersion, resolveTypeclawSpec, typeclawCheckoutRoot } from '@/init/cli-version'
 import { buildDockerfile, classifyDockerfileAppend, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 import { reconcilePluginDeps } from '@/init/reconcile-plugin-deps'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
-import { resolveBunLinkedPackage } from '@/init/windows-dev-link'
+import { linkWindowsDevTypeclaw, resolveBunLinkedPackage, type RunBunLink } from '@/init/windows-dev-link'
 import { isWindows } from '@/shared'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
 
@@ -133,6 +134,13 @@ export type StartOptions = {
   // function to override the wait window or to bypass verification entirely
   // (e.g. a no-op `async () => ({ ok: true })` for unit tests that don't care).
   verifyRunning?: VerifyRunningFn
+  // Test seam for the native-Windows dev-link step run before ensureDeps when a
+  // local-checkout reconcile emits `link:typeclaw`. Defaults to `bun link` in
+  // the checkout. Mirrors init's `runBunLink` seam.
+  runBunLink?: RunBunLink
+  // Defaults to `process.platform`; tests inject it to exercise the
+  // native-Windows dev-link reconcile path off a non-Windows runner.
+  platform?: NodeJS.Platform
 }
 
 export type HostDaemonStatus =
@@ -176,10 +184,12 @@ export async function start({
   cliEntry,
   reuseCurrentHostDaemon = false,
   ensureDeps = (dir, opts) => ensureDepsInstalled({ cwd: dir, ...opts }),
-  autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir }),
+  autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir, localSpec: resolveTypeclawSpec(dir) }),
   forceBunUpdate = runBunUpdate,
   readInstalledVersion = readInstalledTypeclawVersionFromAgent,
   verifyRunning = createVerifyRunning({ exec }),
+  runBunLink,
+  platform = process.platform,
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -244,6 +254,32 @@ export async function start({
     // image to a fresh container build.
     const upgrade = await autoUpgrade(cwd)
     const upgradeCommitMessage = commitMessageForAutoUpgrade(upgrade)
+    // Any agent on a `link:typeclaw` spec (native-Windows dev) needs the
+    // checkout registered with `bun link` BEFORE ensureDeps, exactly as init's
+    // maybeLinkWindowsDevTypeclaw does — otherwise bun can't resolve the link:
+    // spec. We gate on the EFFECTIVE on-disk spec, not the transition outcome:
+    // a prior start that wrote `link:` but failed/interrupted before
+    // registering would otherwise leave the next start (which sees the spec
+    // already local → skipped-dev-mode) reaching ensureDeps unregistered.
+    // `bun link` is idempotent, so re-running it on every link: start is safe
+    // and self-heals that gap. No-op off Windows (linkWindowsDevTypeclaw → null).
+    // True when this is a native-Windows agent on a `link:typeclaw` spec, after
+    // (re)registering its checkout. Forces ensureDeps below: ensureDeps' drift
+    // detector only looks for MISSING dep names, so a stale npm-installed
+    // node_modules/typeclaw left by an interrupted relink would make it skip the
+    // install and leave the agent on the old runtime. Forcing materializes the
+    // link. Off Windows / non-link specs this stays false.
+    let registeredWindowsLink = false
+    if ((await readTypeclawDepSpec(cwd))?.startsWith('link:') === true) {
+      const checkout = typeclawCheckoutRoot()
+      if (checkout !== null) {
+        const linked = await linkWindowsDevTypeclaw(checkout, {
+          platform,
+          ...(runBunLink !== undefined ? { runBunLink } : {}),
+        })
+        registeredWindowsLink = linked !== null
+      }
+    }
     if (outcomeForcesInstall(upgrade)) {
       const forced = await forceBunUpdate(cwd, 'typeclaw')
       if (!forced.ok) {
@@ -294,7 +330,11 @@ export async function start({
     // version bump (dir already present) or a removal (stale dir left behind)
     // would otherwise leave bun.lock/node_modules out of sync with the
     // reconciled package.json.
-    const forceDepsReinstall = (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) || pluginReconcile.changed
+    const forceDepsReinstall =
+      (forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))) ||
+      pluginReconcile.changed ||
+      outcomeRequiresForceInstall(upgrade) ||
+      registeredWindowsLink
     const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
@@ -398,6 +438,7 @@ export async function start({
       hostdControl,
       publishHost,
       tuiToken,
+      platform,
     })
 
     let built = false
@@ -473,6 +514,7 @@ export async function start({
         hostdControl,
         publishHost,
         tuiToken,
+        platform,
       })
       run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
     }
@@ -511,6 +553,7 @@ export async function start({
 function commitMessageForAutoUpgrade(outcome: AutoUpgradeOutcome): string | null {
   if (outcome.kind === 'spec-rewritten') return `Upgrade typeclaw to ${outcome.to}`
   if (outcome.kind === 'reinstall-needed') return `Upgrade typeclaw to ${outcome.to}`
+  if (outcome.kind === 'relinked-to-local') return `Link typeclaw to local checkout (${outcome.to})`
   return null
 }
 
@@ -1056,14 +1099,18 @@ export function shouldMountWindowsDevSource(
 // users (`^X.Y.Z`, `~X.Y.Z`, exact pins) pay nothing because their
 // install path is already cache-correct.
 async function hasLocallyLinkedTypeclawDep(cwd: string): Promise<boolean> {
+  const spec = await readTypeclawDepSpec(cwd)
+  return spec !== null && (spec.startsWith('file:') || spec.startsWith('link:'))
+}
+
+async function readTypeclawDepSpec(cwd: string): Promise<string | null> {
   try {
     const raw = await readFile(join(cwd, PACKAGE_FILE), 'utf8')
     const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> }
     const spec = pkg.dependencies?.typeclaw
-    if (typeof spec !== 'string') return false
-    return spec.startsWith('file:') || spec.startsWith('link:')
+    return typeof spec === 'string' ? spec : null
   } catch {
-    return false
+    return null
   }
 }
 
