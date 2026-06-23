@@ -220,7 +220,7 @@ describe('review verdict idempotency guard', () => {
   // done) but GitHub's reviews read still lags, reporting NONE — the exact gap that
   // landed two APPROVEs on PR #691. The resolver returns NONE so these exercise the
   // raw-NONE path the shield is allowed to override.
-  const LAG_WINDOW_MS = 120_000
+  const LAG_WINDOW_MS = 5 * 60_000
   function makeShaGuard(headSha: string | null, now?: () => number) {
     return createApproveIdempotencyGuard({
       resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' }),
@@ -348,7 +348,7 @@ describe('review verdict idempotency guard', () => {
     }
   })
 
-  test('a legitimate re-APPROVE just past the 2-minute window is allowed', async () => {
+  test('a legitimate re-APPROVE just past the 5-minute window is allowed', async () => {
     let clock = 1_000
     const g = makeShaGuard('sha-abc', () => clock)
     await g.guard({ callId: 'a1', workspace: WS, prNumber: 42, verdict: 'APPROVE' })
@@ -356,6 +356,69 @@ describe('review verdict idempotency guard', () => {
     clock += LAG_WINDOW_MS + 1
     const after = await g.guard({ callId: 'a2', workspace: WS, prNumber: 42, verdict: 'APPROVE' })
     expect(after).toBeNull()
+  })
+
+  // The cooldown extension (PR #1042 incident): thread fan-out spread three
+  // same-commit APPROVEs over ~2 minutes, each AFTER GitHub had indexed the
+  // prior ones — so the standing-verdict read no longer returned a bare NONE for
+  // the lag shield to override, yet the redundant verdict still landed. The
+  // cooldown now fires on any same-verdict + same-head land within the window,
+  // regardless of what GitHub's effective read reports, and the window is 5 min.
+  test('blocks a same-commit same-verdict re-APPROVE within the cooldown even when GitHub already reports the standing APPROVED', async () => {
+    // given: an APPROVE landed at sha-abc and GitHub has since indexed it
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'APPROVED' }),
+      resolveHeadSha: async () => 'sha-abc',
+    })
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 50, verdict: 'APPROVE' })
+    await g.release({ callId: 'a1', succeeded: true })
+    // when: a fan-out sibling fires the same verdict on the same head minutes later
+    const dup = await g.guard({ callId: 'a2', workspace: WS, prNumber: 50, verdict: 'APPROVE' })
+    // then: the cooldown blocks the redundant duplicate (Layer 2 already blocks
+    // this standing case too, but the cooldown must independently hold)
+    expect(dup?.block).toBe(true)
+  })
+
+  test('the cooldown window is 5 minutes: a same-commit re-APPROVE blocks at 4m59s and passes at 5m01s', async () => {
+    let clock = 1_000
+    const g = makeShaGuard('sha-abc', () => clock)
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 51, verdict: 'APPROVE' })
+    await g.release({ callId: 'a1', succeeded: true })
+    // just inside the 5-minute window — still blocked
+    clock += 5 * 60_000 - 1_000
+    const inside = await g.guard({ callId: 'a2', workspace: WS, prNumber: 51, verdict: 'APPROVE' })
+    expect(inside?.block).toBe(true)
+    // just outside the 5-minute window — genuine re-review allowed
+    clock += 2_000
+    const outside = await g.guard({ callId: 'a3', workspace: WS, prNumber: 51, verdict: 'APPROVE' })
+    expect(outside).toBeNull()
+  })
+
+  test('cooldown does not block a genuine DISMISSED-then-reapprove on the same commit (35287f99 invariant holds)', async () => {
+    // given: an APPROVE landed at sha-abc
+    let effective: EffectiveVerdict = 'NONE'
+    const g = createApproveIdempotencyGuard({
+      resolveEffectiveApproval: async () => ({ ok: true, effective }),
+      resolveHeadSha: async () => 'sha-abc',
+    })
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 52, verdict: 'APPROVE' })
+    await g.release({ callId: 'a1', succeeded: true })
+    // when: the approval is genuinely dismissed and a fresh re-APPROVE fires on
+    // the SAME commit inside the cooldown window
+    effective = 'DISMISSED'
+    const reapprove = await g.guard({ callId: 'a2', workspace: WS, prNumber: 52, verdict: 'APPROVE' })
+    // then: a real dismissal is a legitimate reason to re-approve — the cooldown
+    // must not strand it (DISMISSED is decisive, not a redundant duplicate)
+    expect(reapprove).toBeNull()
+  })
+
+  test('cooldown allows a flipped verdict on the same commit even within the window', async () => {
+    const g = makeShaGuard('sha-abc')
+    await g.guard({ callId: 'a1', workspace: WS, prNumber: 53, verdict: 'APPROVE' })
+    await g.release({ callId: 'a1', succeeded: true })
+    // a REQUEST_CHANGES after an APPROVE is a real supersession, never a duplicate
+    const flip = await g.guard({ callId: 'a2', workspace: WS, prNumber: 53, verdict: 'REQUEST_CHANGES' })
+    expect(flip).toBeNull()
   })
 
   test('noteLandedReview arms the shield with no prior reservation (backstop path)', async () => {

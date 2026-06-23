@@ -70,25 +70,35 @@ function duplicatesStanding(verdict: ReviewVerdict, effective: EffectiveVerdict)
   return verdict === 'APPROVE' ? effective === 'APPROVED' : effective === 'CHANGES_REQUESTED'
 }
 
+// Whether the duplicate-review cooldown may fire for this GitHub state. Only the
+// AMBIGUOUS states qualify: a bare NONE (read lag) or the SAME standing verdict
+// (post-indexing fan-out). A DISMISSED or the opposite decisive verdict is a real
+// supersession that legitimizes a fresh same-verdict review, so the cooldown is
+// skipped — preserving the 35287f99 invariant against stranding a re-verdict.
+function cooldownApplies(verdict: ReviewVerdict, effective: EffectiveVerdict): boolean {
+  return effective === 'NONE' || duplicatesStanding(verdict, effective)
+}
+
 // How long a reservation may sit before it is treated as abandoned. A normal
 // `gh` review submit completes in seconds; this only guards against a tool.after
 // that never fires (crash mid-command), so it must outlast a slow command yet
 // never strand a PR for long.
 const LEASE_TTL_MS = 5 * 60_000
 
-// How long a just-landed verdict is trusted to explain a GitHub `NONE` as
-// read-after-write lag rather than a genuine absence. GitHub's `/pulls/<n>/reviews`
-// list lags a write by up to ~10s, so a second engagement turn firing in that
-// window reads NONE and would land a duplicate. Observed duplicates were ~10-18s
-// apart originally; a later fan-out incident spread FOUR sequential APPROVEs over
-// ~15s (one channel session per inline review thread), each ~3-7s after the last —
-// well inside the read lag yet beyond a single turn. 120s gives margin for that
-// thread fan-out plus slow API indexing without turning the shield into a human-
-// facing rate limit (a legitimate re-verdict after a new push carries a new head
-// SHA and bypasses this entirely; staying under ~5min avoids blocking genuine
-// re-reviews). This window only shadows a raw NONE on the SAME verdict (+ same or
-// uncertain head) — a DISMISSED/CHANGES_REQUESTED/flipped-verdict all bypass it.
-const RECENT_LANDED_TTL_MS = 120_000
+// How long a just-landed verdict suppresses a redundant same-verdict re-submit on
+// the same head — a duplicate-review cooldown. It started as a narrow lag shield
+// for GitHub's ~10-18s read-after-write lag (the original ~10-18s-apart duplicates
+// on PR #691), but the PR #1042 thread fan-out spread same-commit APPROVEs over ~2
+// minutes — each one AFTER GitHub had already indexed the prior, so the
+// standing-verdict read no longer returned a bare NONE for a lag-only shield to
+// catch, yet the redundant verdict still landed. So the window now also fires when
+// GitHub reports the standing verdict, and is widened to 5 minutes to cover slow
+// sequential fan-out. It only ever shadows the SAME verdict on the SAME (or
+// uncertain) head: a DISMISSED, the opposite decisive verdict, a flipped verdict,
+// and a new-push head all bypass it, so a genuine re-review is never stranded. 5min
+// stays well under the lease TTL and short enough that a deliberate human-driven
+// re-approval of the identical commit is the only thing it can delay.
+const RECENT_LANDED_TTL_MS = 5 * 60_000
 
 type Reservation = {
   key: string
@@ -204,11 +214,23 @@ export function createApproveIdempotencyGuard(deps: {
         return { block: true, reason: duplicateReason(args.verdict) }
       }
 
-      // Layer 3: only a raw NONE from a successful read is ambiguous — it can mean
-      // "no review" or "our just-landed review not yet indexed". A recent same
-      // verdict on the same head resolves it to lag and blocks the duplicate. Any
-      // non-NONE state already decided above, so this never overrides a supersession.
-      if (remote.ok && remote.effective === 'NONE' && recentlyLandedSame(key, args.verdict, headSha, now)) {
+      // Layer 3 — duplicate-review cooldown. A recently-landed SAME verdict on the
+      // SAME (or uncertain) head blocks a redundant re-submit for the window. It
+      // fires on a bare NONE (read-after-write lag, the original shield) AND on the
+      // now-indexed SAME standing verdict (the PR #1042 fan-out, where siblings fired
+      // minutes apart after indexing) — `duplicatesStanding` above already returned
+      // here for that case, so reaching this line on a same-standing-verdict means
+      // only that the lease-released duplicate is being re-tried; either way the
+      // cooldown holds. It must NOT fire on a DISMISSED or the opposite decisive
+      // verdict: those are genuine supersessions, so the cooldown is gated to the
+      // ambiguous states (NONE, or the same standing verdict) and skipped for any
+      // decisive state that contradicts a redundant re-submit. A read error skips it
+      // (fails open) so a transient failure cannot strand a re-verdict.
+      if (
+        remote.ok &&
+        cooldownApplies(args.verdict, remote.effective) &&
+        recentlyLandedSame(key, args.verdict, headSha, now)
+      ) {
         releaseReservation(args.callId, reservation)
         return { block: true, reason: duplicateReason(args.verdict) }
       }
