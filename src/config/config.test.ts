@@ -16,6 +16,7 @@ import {
   expandMountPath,
   FIELD_EFFECTS,
   getSandboxWritablePathSpecs,
+  loadConfigBundleSync,
   loadConfigSync,
   loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
@@ -1172,6 +1173,53 @@ describe('migrateLegacyConfigShape', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
+  })
+
+  describe('loadConfigBundleSync', () => {
+    test('returns the same config and plugin configs as the two standalone loaders', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-bundle-'))
+      try {
+        await writeFile(
+          join(cwd, 'typeclaw.json'),
+          JSON.stringify({
+            models: { default: VALID_MODEL },
+            port: 9100,
+            'standup-log': { channel: 'C123' },
+            memory: { vector: { enabled: true } },
+          }),
+        )
+
+        const bundle = loadConfigBundleSync(cwd)
+
+        expect(bundle.config).toEqual(loadConfigSync(cwd))
+        expect(bundle.pluginConfigs).toEqual(loadPluginConfigsSync(cwd))
+        expect(bundle.pluginConfigs['standup-log']).toEqual({ channel: 'C123' })
+        expect(bundle.pluginConfigs.memory).toEqual({ vector: { enabled: true } })
+      } finally {
+        await rm(cwd, { recursive: true, force: true })
+      }
+    })
+
+    test('returns schema defaults and empty plugin configs when the file is absent', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-bundle-missing-'))
+      try {
+        const bundle = loadConfigBundleSync(cwd)
+        expect(bundle.config).toEqual(configSchema.parse({}))
+        expect(bundle.pluginConfigs).toEqual({})
+      } finally {
+        await rm(cwd, { recursive: true, force: true })
+      }
+    })
+
+    test('throws on invalid JSON (matching loadConfigSync)', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-bundle-badjson-'))
+      try {
+        await writeFile(join(cwd, 'typeclaw.json'), '{ not valid json')
+        expect(() => loadConfigBundleSync(cwd)).toThrow('not valid JSON')
+      } finally {
+        await rm(cwd, { recursive: true, force: true })
+      }
+    })
   })
 
   test('validateConfig also performs the on-disk rewrite', async () => {

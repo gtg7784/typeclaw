@@ -15,6 +15,7 @@ export {
   GWS_MULTI_ACCOUNT_PLUGIN_PACKAGE,
   GWS_MULTI_ACCOUNT_PLUGIN_VERSION,
   thinkingLevelSchema,
+  loadConfigBundleSync,
   loadConfigSync,
   loadConfigSyncOrDefaults,
   loadPluginConfigsSync,

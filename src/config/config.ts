@@ -1129,6 +1129,38 @@ export function loadConfigSync(cwd: string): Config {
   return result.data
 }
 
+// Single-read variant of loadConfigSync + loadPluginConfigsSync for the boot
+// path, which otherwise reads + parses + migrates typeclaw.json twice. Throws on
+// invalid JSON / failed schema parse and returns defaults + `{}` on a missing
+// file, matching loadConfigSync.
+export function loadConfigBundleSync(cwd: string): { config: Config; pluginConfigs: Record<string, unknown> } {
+  let raw: string
+  try {
+    raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return { config: configSchema.parse({}), pluginConfigs: {} }
+  }
+
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`${CONFIG_FILE} is not valid JSON: ${detail}`)
+  }
+
+  const migrated = migrateLegacyConfigShape(json)
+  if (migrated.changed) {
+    persistMigratedConfig(cwd, migrated.json, migrated.applied)
+  }
+
+  const result = configSchema.safeParse(migrated.json)
+  if (!result.success) {
+    throw new Error(`${CONFIG_FILE} is invalid: ${formatZodError(result.error)}`)
+  }
+  return { config: result.data, pluginConfigs: extractPluginConfigs(migrated.json) }
+}
+
 // Strips a `channels.github.eventAllowlist` that deep-equals a value `channel
 // add` / `init` previously seeded verbatim, so the config re-tracks the shipped
 // default. Called from every entry point that reads `typeclaw.json` so the rest
