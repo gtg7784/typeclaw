@@ -2043,6 +2043,7 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   preflight: 'Checking Docker...',
   'oauth-login': 'Waiting for browser login...',
   scaffold: 'Laying the egg...',
+  'slack-auth': 'Logging in to Slack...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
   'github-webhooks': 'Installing GitHub repository webhooks...',

@@ -84,6 +84,7 @@ export type InitStep =
   | 'preflight'
   | 'oauth-login'
   | 'scaffold'
+  | 'slack-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
   | 'github-webhooks'
@@ -94,6 +95,7 @@ export type InitStep =
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 export type WebexAuthResult = { ok: true } | { ok: false; reason: string }
+export type SlackAuthResult = { ok: true } | { ok: false; reason: string }
 
 // Structured credential block for the GitHub channel adapter. Mirrors the
 // shape `runAddChannel({ channel: 'github', ... })` consumes so the wizard
@@ -1085,6 +1087,7 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 
 export type ChannelKind =
   | 'discord-bot'
+  | 'slack'
   | 'slack-bot'
   | 'telegram-bot'
   | 'webex'
@@ -1099,6 +1102,7 @@ export type ChannelKind =
 // when reading typeclaw.json.
 export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'slack-bot',
+  'slack',
   'discord-bot',
   'telegram-bot',
   'webex',
@@ -1108,7 +1112,14 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'github',
 ]
 
-export type AddChannelStep = 'line-auth' | 'kakaotalk-auth' | 'webex-auth' | 'config' | 'secrets' | 'github-webhooks'
+export type AddChannelStep =
+  | 'line-auth'
+  | 'kakaotalk-auth'
+  | 'webex-auth'
+  | 'slack-auth'
+  | 'config'
+  | 'secrets'
+  | 'github-webhooks'
 
 export type AddChannelStepEvent =
   | { step: 'config'; phase: 'start' }
@@ -1119,6 +1130,8 @@ export type AddChannelStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
+  | { step: 'slack-auth'; phase: 'start' }
+  | { step: 'slack-auth'; phase: 'done'; result: SlackAuthResult }
   | { step: 'secrets'; phase: 'start' }
   | { step: 'secrets'; phase: 'done' }
   | { step: 'github-webhooks'; phase: 'start' }
@@ -1132,6 +1145,7 @@ export type AddChannelOptions = {
   onProgress?: (event: AddChannelStepEvent) => void
 } & (
   | { channel: 'discord-bot'; discordBotToken: string }
+  | { channel: 'slack'; slackQrDataUrl: string; runSlackAuth?: SlackAuthRunner }
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex-bot'; webexBotToken: string }
@@ -1151,6 +1165,8 @@ export type AddChannelOptions = {
       fetchImpl?: typeof fetch
     }
 )
+
+export type SlackAuthRunner = (options: { cwd: string; qrDataUrl: string }) => Promise<SlackAuthResult>
 
 export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   const emit = options.onProgress ?? (() => {})
@@ -1182,6 +1198,14 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     const result = await options.runWebexAuth({ cwd: options.cwd })
     emit({ step: 'webex-auth', phase: 'done', result })
     if (!result.ok) throw new Error(`Webex authentication failed: ${result.reason}`)
+  }
+
+  if (options.channel === 'slack') {
+    emit({ step: 'slack-auth', phase: 'start' })
+    const runner = options.runSlackAuth ?? defaultSlackAuthRunner
+    const result = await runner({ cwd: options.cwd, qrDataUrl: options.slackQrDataUrl })
+    emit({ step: 'slack-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`Slack authentication failed: ${result.reason}`)
   }
 
   emit({ step: 'config', phase: 'start' })
@@ -1254,6 +1278,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       return { token: options.discordBotToken }
     case 'slack-bot':
       return { botToken: options.slackBotToken, appToken: options.slackAppToken }
+    case 'slack':
+      return {}
     case 'telegram-bot':
       return { token: options.telegramBotToken }
     case 'webex-bot':
@@ -1272,6 +1298,11 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       // GitHub stores a structured PAT + webhook secret block directly.
       return {}
   }
+}
+
+async function defaultSlackAuthRunner(options: { cwd: string; qrDataUrl: string }): Promise<SlackAuthResult> {
+  const { runSlackBootstrap } = await import('./slack-auth')
+  return await runSlackBootstrap({ agentDir: options.cwd, qrDataUrl: options.qrDataUrl })
 }
 
 type ChannelSecrets = Record<string, string>
