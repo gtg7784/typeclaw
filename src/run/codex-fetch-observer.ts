@@ -42,11 +42,16 @@ export type CodexFetchObserverOptions = {
   // request occupied 901s before Bun's OS socket deadline fired). On expiry the
   // request is aborted with a retryable error, so this also bounds how long a
   // user waits before the retry fires — keeping it low is a UX requirement, not
-  // just a safety net. Default 120_000 ms: across 96 observed requests the
-  // slowest *healthy* (completed) one was 45s and p99 was ~30s, with a clean
-  // gap up to the 901s hang — so 120s is ~2.7x the healthy max (ample headroom
-  // for PoP/TLS outliers) while capping a real hang at ~2min instead of ~15min.
-  // Set to 0 to disable just this timer.
+  // just a safety net. Default 300_000 ms (raised from 120_000): the 120s cap
+  // was tuned against a light-turn sample (slowest healthy ~45s, p99 ~30s) and
+  // aborted heavy reasoning turns that were still legitimately trickling bytes
+  // — PR reviews, the `dreaming` memory consolidation, and long channel threads
+  // routinely run a slow-trickle stream past 2min (observed total_ms=120009 with
+  // body_bytes>700k on otherwise-progressing turns). Those are NOT the silent
+  // hang this timer exists to catch; the sliding `idleMs` (still 120s) already
+  // bounds genuine dead air per-chunk, so the wall-clock ceiling only needs to
+  // stop a never-terminating stream. 300s caps a real hang at ~5min while giving
+  // heavy turns the headroom they need. Set to 0 to disable just this timer.
   overallMs?: number
   // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
   // the wrapper can pass to `clear`. Default: `setTimeout`/`clearTimeout`.
@@ -67,7 +72,7 @@ const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
 const ENV_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
 const DEFAULT_IDLE_MS = 120_000
-const DEFAULT_OVERALL_MS = 120_000
+const DEFAULT_OVERALL_MS = 300_000
 const LOG_PREFIX = '[codex-fetch]'
 
 const defaultScheduler: TimeoutScheduler = {
