@@ -107,6 +107,17 @@ describe('reviewer subagent — load-bearing prompt phrases', () => {
     expect(lower).toContain('never delegate the judgment')
   })
 
+  test('prompt actively encourages parallel scout/explorer delegation for faster reviews (not just permits it)', () => {
+    // Drift guard: the capability existed but went unused because the prompt
+    // framed delegation as a context-saving option, never as the speed default.
+    // Names scout/explorer + ties them to a faster, parallel review.
+    const lower = REVIEWER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('`scout`')
+    expect(lower).toContain('`explorer`')
+    expect(lower).toContain('faster')
+    expect(lower).toContain('in parallel')
+  })
+
   test('prompt still forbids side effects through a delegate (no laundering write access via a subagent)', () => {
     const lower = REVIEWER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('a subagent you spawn cannot do for you')
