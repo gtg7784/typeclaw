@@ -42,6 +42,17 @@ const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
     safe: 'The upstream LLM provider rejected the request as unauthorized. Operators should check the provider API key configuration and `typeclaw logs`.',
   },
   {
+    // Content-policy refusal: OpenAI Codex flags a prompt under its cybersecurity
+    // policy (`code: "cyber_policy"`) and rejects the whole turn with
+    // `invalid_request`. Retrying or failing over to another Codex ref can't help
+    // — it's the same account-wide policy — so this must surface with the operator
+    // action (get the account authorized) rather than collapse to the generic
+    // notice. Common for security-focused PR reviews, where the diff content trips
+    // the filter. The URL is OpenAI's own published enrollment page, safe to echo.
+    match: /\bcyber_policy\b/i,
+    safe: 'The upstream LLM provider (OpenAI Codex) refused the request under its cybersecurity content policy. Operators must enroll the account in OpenAI Trusted Access for Cyber at https://chatgpt.com/cyber, or switch the configured model.',
+  },
+  {
     match: /\b(usage limit|rate limit|rate.?limited|too many requests|429)\b/i,
     safe: 'The upstream LLM provider is rate-limited (usage limit reached). Try again shortly.',
   },
@@ -72,7 +83,7 @@ const THROTTLE_OR_OVERLOAD =
 // status with a quota/billing/auth reason (e.g. `429 insufficient quota`) — the
 // status code alone must not force a pointless failover.
 const NON_FAILOVER_FAULT =
-  /insufficient.*(?:quota|credit|fund|balance)|\bquota\b|billing|payment|account is not active|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|authentication failed|invalid bearer/i
+  /\bcyber_policy\b|insufficient.*(?:quota|credit|fund|balance)|\bquota\b|billing|payment|account is not active|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|authentication failed|invalid bearer/i
 
 export function isThrottleOrOverload(raw: string): boolean {
   if (NON_FAILOVER_FAULT.test(raw)) return false
