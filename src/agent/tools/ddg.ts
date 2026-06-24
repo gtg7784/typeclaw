@@ -13,10 +13,25 @@
 // for the full rationale and AGENTS.md §"Web search" for the original story.
 
 import { curlImpersonate } from './curl-impersonate'
+import { createKeyedSemaphore } from './keyed-semaphore'
+import { type SearchRetryOptions, withSearchRetry } from './search-retry'
 
 export { _setCurlBinaryForTest } from './curl-impersonate'
 
 const DDG_LITE_URL = 'https://lite.duckduckgo.com/lite/'
+
+// Empirically derived: a clean source IP serves DDG-lite at concurrency ~4 but
+// trips a sticky multi-minute CAPTCHA at 5-6 (see keyed-semaphore.ts header).
+// The whole agent egresses from one IP and the scout subagent fans out parallel
+// searches, so 2 sits well under the observed ceiling with headroom for the
+// concurrent membership-style overlap — matching the webex-prefetch-limiter
+// default for the same reason.
+export const DDG_CONCURRENCY = 2
+
+// Process-wide, so the cap spans every session/subagent/cron in this agent.
+const searchLimiter = createKeyedSemaphore({ concurrency: DDG_CONCURRENCY })
+
+const DDG_KEY = 'ddg'
 
 export type DdgResult = {
   title: string
@@ -24,12 +39,32 @@ export type DdgResult = {
   snippet: string
 }
 
+type RetryOverride = Pick<SearchRetryOptions, 'attempts' | 'baseDelayMs' | 'maxDelayMs' | 'sleep'>
+let retryOverride: RetryOverride = {}
+
+// Test-only seam: lets *.test.ts collapse the generous production backoff to
+// zero-delay single-shot retries so CAPTCHA tests don't burn real seconds.
+// Production never calls this — the empty default above is what production sees.
+export function _setSearchRetryForTest(override: RetryOverride | null): void {
+  retryOverride = override ?? {}
+}
+
 export async function ddgSearch(query: string, limit: number, signal?: AbortSignal): Promise<DdgResult[]> {
-  const html = await fetchDdgHtml(query, signal)
-  if (isCaptcha(html)) {
-    throw new DdgCaptchaError()
-  }
-  return parseDdgHtml(html).slice(0, limit)
+  return searchLimiter.run(
+    DDG_KEY,
+    () =>
+      withSearchRetry(
+        async () => {
+          const html = await fetchDdgHtml(query, signal)
+          if (isCaptcha(html)) {
+            throw new DdgCaptchaError()
+          }
+          return parseDdgHtml(html).slice(0, limit)
+        },
+        { ...retryOverride, shouldRetry: (error) => error instanceof DdgCaptchaError, signal },
+      ),
+    signal,
+  )
 }
 
 export class DdgCaptchaError extends Error {

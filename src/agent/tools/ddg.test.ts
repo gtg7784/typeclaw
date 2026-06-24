@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { isWindows } from '@/shared'
 
-import { _setCurlBinaryForTest, fetchDdgHtml, parseDdgHtml } from './ddg'
+import {
+  _setCurlBinaryForTest,
+  _setSearchRetryForTest,
+  DDG_CONCURRENCY,
+  ddgSearch,
+  fetchDdgHtml,
+  parseDdgHtml,
+} from './ddg'
 
 const onWindows = isWindows()
 
@@ -229,5 +236,141 @@ printf '%s' "$RENDERED"
 
     // then
     await expect(promise).rejects.toThrow()
+  })
+})
+
+// Use double-quoted class attrs so the bodies embed cleanly inside the shell
+// fake's single-quoted printf (the lite SERP markup uses single quotes, but the
+// parser accepts either quote style).
+const RESULT_SERP = `<tr><td><a href="https://ok.example/" class="result-link">OK</a></td></tr>`
+const CAPTCHA_SERP = `<form id="challenge-form">Please verify you are a human</form>`
+
+// Emits a per-call body chosen by a counter file, plus the per-request random
+// sentinel round-tripped from `-w` (the primitive rejects output without it).
+function fakeCurlSwitching(scratchDir: string, captchaBody: string, okBody: string): string {
+  const counter = join(scratchDir, 'count')
+  return `
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
+  i=$((i + 1))
+done
+N=$(cat ${counter} 2>/dev/null || echo 0)
+echo $((N + 1)) > ${counter}
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+if [ "$N" -lt 1 ]; then printf '%s' '${captchaBody}'; else printf '%s' '${okBody}'; fi
+printf '%s' "$RENDERED"
+`
+}
+
+describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
+  let scratchDir: string
+
+  beforeEach(() => {
+    scratchDir = mkdtempSync(join(tmpdir(), 'ddg-search-test-'))
+    _setSearchRetryForTest({ attempts: 3, sleep: async () => {} })
+  })
+
+  afterEach(() => {
+    _setCurlBinaryForTest(null)
+    _setSearchRetryForTest(null)
+    rmSync(scratchDir, { recursive: true, force: true })
+  })
+
+  function installFakeBinary(script: string): void {
+    const path = join(scratchDir, 'fake-curl')
+    writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+    chmodSync(path, 0o755)
+    _setCurlBinaryForTest(path)
+  }
+
+  test('retries past a transient CAPTCHA and returns results', async () => {
+    // given: first response is a CAPTCHA, the next is a real SERP
+    installFakeBinary(fakeCurlSwitching(scratchDir, CAPTCHA_SERP, RESULT_SERP))
+
+    // when
+    const results = await ddgSearch('q', 10)
+
+    // then
+    expect(results).toHaveLength(1)
+    expect(results[0]?.url).toBe('https://ok.example/')
+  })
+
+  test('caps concurrent ddgSearch calls at DDG_CONCURRENCY across the process', async () => {
+    // given: a fake binary that records overlap by tracking live invocations
+    const liveFile = join(scratchDir, 'live')
+    const peakFile = join(scratchDir, 'peak')
+    installFakeBinary(`
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
+  i=$((i + 1))
+done
+LIVE=$(cat ${liveFile} 2>/dev/null || echo 0); LIVE=$((LIVE + 1)); echo $LIVE > ${liveFile}
+PEAK=$(cat ${peakFile} 2>/dev/null || echo 0); if [ "$LIVE" -gt "$PEAK" ]; then echo $LIVE > ${peakFile}; fi
+sleep 0.3
+LIVE=$(cat ${liveFile}); echo $((LIVE - 1)) > ${liveFile}
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+printf '%s' '${RESULT_SERP}'
+printf '%s' "$RENDERED"
+`)
+
+    // when: fire 5 searches at once through the shared process-wide limiter
+    await Promise.all(Array.from({ length: 5 }, () => ddgSearch('q', 10)))
+
+    // then: never more than DDG_CONCURRENCY ran the curl spawn simultaneously
+    const peak = Number((await Bun.file(peakFile).text()).trim())
+    expect(peak).toBeLessThanOrEqual(DDG_CONCURRENCY)
+    expect(peak).toBeGreaterThan(0)
+  })
+
+  test('a queued ddgSearch aborted before a slot frees rejects without spawning curl', async () => {
+    // given: a fake binary that records each spawn as its own marker file (so
+    // counting is free of the read-modify-write race a shared counter has) and
+    // blocks on a release file so the DDG_CONCURRENCY admitted calls hold slots
+    const spawnDir = join(scratchDir, 'spawns')
+    const releaseFile = join(scratchDir, 'release')
+    installFakeBinary(`
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
+  i=$((i + 1))
+done
+mkdir -p ${spawnDir}
+: > ${spawnDir}/spawn.$$
+while [ ! -f ${releaseFile} ]; do sleep 0.02; done
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+printf '%s' '${RESULT_SERP}'
+printf '%s' "$RENDERED"
+`)
+
+    const countSpawns = async (): Promise<number> => {
+      if (!existsSync(spawnDir)) return 0
+      const glob = new Bun.Glob('spawn.*')
+      let n = 0
+      for await (const _ of glob.scan({ cwd: spawnDir })) n++
+      return n
+    }
+
+    // when: saturate every slot, then queue one more with a signal and abort it
+    const saturating = Array.from({ length: DDG_CONCURRENCY }, () => ddgSearch('q', 10))
+    while ((await countSpawns()) < DDG_CONCURRENCY) {
+      await Bun.sleep(10)
+    }
+    const controller = new AbortController()
+    const queued = ddgSearch('q', 10, controller.signal)
+    await Bun.sleep(20)
+    controller.abort()
+
+    // then: the queued call rejected and never spawned curl (count stayed at DDG_CONCURRENCY)
+    await expect(queued).rejects.toThrow()
+    expect(await countSpawns()).toBe(DDG_CONCURRENCY)
+
+    // cleanup: release the held slots so the saturating calls finish
+    writeFileSync(releaseFile, 'go', 'utf8')
+    await Promise.all(saturating)
   })
 })
