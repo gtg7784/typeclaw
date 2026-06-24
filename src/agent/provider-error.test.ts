@@ -102,6 +102,19 @@ describe('detectProviderError safeMessage redaction', () => {
     expect(result?.safeMessage).not.toContain('https://')
   })
 
+  test('maps the Codex cyber_policy refusal to a specific notice naming the chatgpt.com/cyber path', () => {
+    // given: the exact body Codex returns when its cybersecurity content policy fires
+    const raw =
+      'Codex error: {"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null},"sequence_number":3}'
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toMatch(/content policy/i)
+    expect(result?.safeMessage).toContain('https://chatgpt.com/cyber')
+    expect(result?.safeMessage).not.toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+  })
+
   test('collapses unknown / malformed-response failures to a generic notice (no raw leak)', () => {
     const raw = 'malformed response: {"id":"resp_abc","debug":"Bearer sk-live-LEAK","body":"<html>500</html>"}'
     const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
@@ -166,6 +179,12 @@ describe('isThrottleOrOverload', () => {
     expect(isThrottleOrOverload('LLM call failed')).toBe(false)
     expect(isThrottleOrOverload('context length exceeded')).toBe(false)
     expect(isThrottleOrOverload('')).toBe(false)
+  })
+
+  test('does NOT match the cyber_policy refusal (a content-policy block surfaces, never fails over)', () => {
+    const raw =
+      'Codex error: {"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}'
+    expect(isThrottleOrOverload(raw)).toBe(false)
   })
 
   test('does NOT false-positive on the substring "529" or unrelated digit runs (anchored codes only)', () => {
