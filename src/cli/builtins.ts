@@ -1,33 +1,7 @@
-// Single source of truth for the top-level `typeclaw` subcommands that the
-// CLI dispatches via citty. Plugin commands MUST NOT shadow these names.
+// Stable, dependency-free re-export of the top-level `typeclaw` subcommand names
+// that the CLI dispatches via citty. Plugin commands MUST NOT shadow these names.
 // `src/cli/index.ts` consumes this for argv interception; `src/plugin/registry.ts`
-// consumes it to reject plugin commands that collide.
-export const BUILTIN_COMMAND_NAMES = [
-  'init',
-  'run',
-  'tui',
-  'start',
-  'stop',
-  'restart',
-  'status',
-  'reload',
-  'logs',
-  'inspect',
-  'dreams',
-  'shell',
-  'compose',
-  'channel',
-  'cron',
-  'tunnel',
-  'role',
-  'provider',
-  'model',
-  'mount',
-  'doctor',
-  'usage',
-  'update',
-  '_hostd',
-  '_update-check',
-] as const
-
-export type BuiltinCommandName = (typeof BUILTIN_COMMAND_NAMES)[number]
+// consumes it to reject plugin commands that collide. The names (and their help
+// descriptions) are defined in `./command-meta`.
+export { BUILTIN_COMMAND_NAMES } from './command-meta'
+export type { BuiltinCommandName } from './command-meta'
