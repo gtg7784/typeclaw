@@ -87,7 +87,7 @@ describe('checkPluginAdditionGuard', () => {
     }
   })
 
-  test('passes through when the acknowledgement is present', async () => {
+  test('an ack flag does NOT bypass — the guard no longer honors acknowledgeGuards', async () => {
     const dir = await makeAgentDir({ plugins: [] })
     try {
       const result = await checkPluginAdditionGuard({
@@ -98,7 +98,7 @@ describe('checkPluginAdditionGuard', () => {
         },
         agentDir: dir,
       })
-      expect(result).toBeUndefined()
+      expect(result?.block).toBe(true)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -321,6 +321,7 @@ const grantAllPermissions: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
   compareRoleSeverity: () => 1,
+  permissionsForRole: () => undefined,
   describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
   replaceRoles: () => {},
 }
@@ -6148,6 +6149,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
       has: (origin) => origin !== undefined && origin.kind === 'channel' && origin.lastInboundAuthorId === 'alice',
       resolveRole: () => 'member',
       compareRoleSeverity: () => undefined,
+      permissionsForRole: () => undefined,
       describe: () => ({ role: 'member', permissions: ['channel.respond'] }),
       replaceRoles: () => {},
     }
@@ -6169,6 +6171,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
       has: () => false,
       resolveRole: () => 'guest',
       compareRoleSeverity: () => undefined,
+      permissionsForRole: () => undefined,
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }
@@ -9057,6 +9060,7 @@ describe('ChannelRouter channel.respond gate', () => {
     },
     resolveRole: () => 'guest',
     compareRoleSeverity: () => undefined,
+    permissionsForRole: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: () => {},
   })
@@ -9285,6 +9289,7 @@ describe('ChannelRouter channel.respond gate', () => {
       has: () => false,
       resolveRole: () => 'guest',
       compareRoleSeverity: () => undefined,
+      permissionsForRole: () => undefined,
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }
@@ -9310,6 +9315,7 @@ describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
     },
     resolveRole: () => 'guest',
     compareRoleSeverity: () => undefined,
+    permissionsForRole: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: () => {},
   })
@@ -9550,6 +9556,7 @@ describe('ChannelRouter role-claim bypass', () => {
     has: () => false,
     resolveRole: () => 'guest',
     compareRoleSeverity: () => undefined,
+    permissionsForRole: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: () => {},
   }
@@ -10620,6 +10627,7 @@ describe('ChannelRouter per-turn live role anchor', () => {
       has: () => true,
       resolveRole: () => 'guest',
       compareRoleSeverity: () => undefined,
+      permissionsForRole: () => [],
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }

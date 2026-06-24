@@ -4,7 +4,16 @@ import path from 'node:path'
 import { parseCronJson, type ParsedCronJob } from '@/cron'
 
 import type { SecuritySeverity } from '../permissions'
-import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
+import type { SecurityBlock } from '../policy'
+
+// True iff the caller may legitimately schedule deferred work that fires as
+// `targetRole` — i.e. `targetRole` grants no permission the caller's own role
+// lacks (capability dominance / permission-subset). The caller supplies this;
+// the production wiring in index.ts compares resolved permission sets, NOT the
+// coarse severity tower (which ranks every custom role equal and would let one
+// custom role launder into another). Fails closed: an unknown caller or target
+// role returns false, so the change is treated as an escalation and blocked.
+export type CanScheduleAs = (targetRole: string | undefined) => boolean
 
 export const GUARD_CRON_PROMOTION = 'cronPromotion'
 // Classified `medium` (silent-attack axis). Originally `high`; reclassified
@@ -18,12 +27,12 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 // audience-leak.
 //
 // Net effect on the role-tower model: owner and trusted both bypass
-// without ack; member and guest still get blocked. The defense for
-// trusted depends on backup-commit review discipline — same tradeoff
-// as `rolePromotion`. Operators who want to keep this at high for
-// trusted can subtract: replace `roles.trusted.permissions[]` with an
-// explicit list that omits `security.bypass.medium`, then add narrower
-// per-guard medium grants as needed.
+// (they carry `security.bypass.medium`); member and guest are gated by
+// the caller-role-aware predicate below. This guard does NOT honor
+// `acknowledgeGuards` — an ack flag from an under-privileged session is
+// ignored. Bypassing is a property of the caller's resolved role, not a
+// tool-arg flag, because an args-level ack would let any member/guest
+// launder itself past the guard (it inspected args, not permissions).
 //
 // Cron is the deferred-execution sibling of `roles`. Every cron job
 // carries a `scheduledByRole` field that the runtime stamps into the
@@ -32,57 +41,64 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 // table"). The `parseCronFile` boot gate rejects entries without
 // `scheduledByRole`, but it accepts any role name the file declares.
 //
-// Concrete breach pattern blocked at `medium`: a `member`-role agent
-// that can `write` `cron.json` authors a brand-new job with
+// Concrete breach pattern blocked: a `member`-role agent that can
+// `write` `cron.json` authors a brand-new job with
 // `"scheduledByRole": "owner"` and a prompt that does whatever the
 // agent's tool surface allows when running as owner. The cron consumer
-// fires it on schedule; the firing session resolves to `owner` because
-// that role name exists in the role table. The agent has laundered
-// itself into owner via the schedule. This guard blocks the first step
-// — member does not carry `bypass.medium`.
+// fires it on schedule; the firing session resolves to `owner`. The
+// agent has laundered itself into owner via the schedule. This guard
+// blocks it because `canScheduleAs('owner')` is false for a member.
 //
 // Same two-step shape as `gitRemoteTainted`: "do a privileged write
 // now, run the privileged thing later." This guard blocks the first
-// step.
+// step. It is the deferred-write analogue of the `spawnedByRole` cap in
+// src/agent/tools/subagent-access.ts: a caller may only commit deferred
+// work that fires at a role it could already act as.
 //
-// What counts as a cron promotion (any of):
-//   1. A new job (by id) was added. The job's `scheduledByRole` is the
-//      privilege grant being introduced; the audit point is the
-//      addition itself, regardless of the role value.
-//   2. An existing job's `scheduledByRole` changed to a different value.
+// What counts as a cron promotion (a finding is raised only when the
+// change introduces deferred authority the caller lacks — i.e. the
+// relevant `scheduledByRole` is NOT schedulable by the caller, where
+// `canScheduleAs(R)` means R's permission set is a SUBSET of the
+// caller's (capability dominance), fail-closed on unknown roles):
+//   1. A new job (by id) was added whose `scheduledByRole` the caller
+//      cannot schedule as. Adding a job at-or-below the caller's own
+//      role grants nothing new and is allowed.
+//   2. An existing job's `scheduledByRole` was raised to a value the
+//      caller cannot schedule as. Lowering it, or a lateral move within
+//      the caller's reach, is allowed.
 //   3. An existing job's EXECUTABLE BODY changed — `kind`, `prompt`,
-//      `command`, `subagent`, or `payload`. Rewriting only the body of
-//      an existing privileged job (leaving `scheduledByRole` untouched)
-//      is the same deferred-laundering attack as job creation: the
-//      cron consumer fires the new body as the stamped role, and the
-//      attacker has co-opted the role without changing it. Oracle
-//      review (PR #305) called this out as a critical bypass of the
-//      first design. The fields chosen are exactly those the cron
-//      consumer uses to decide what executes when a job fires; the
-//      consumer also reads provenance/identity fields (id,
-//      scheduledByRole, scheduledByOrigin) but those are handled
-//      separately or are audit metadata, not executable body.
-//   4. An existing job had `enabled: false` flipped to true (or
-//      unset, which schema-defaults to true). A previously-disabled
-//      privileged job becoming live is a privilege grant in the
-//      same sense as adding the job fresh.
+//      `command`, `subagent`, or `payload` — AND the job fires above
+//      the caller either before or after the change. Rewriting the body
+//      of an already-privileged job is the same deferred-laundering
+//      attack as job creation (Oracle PR #305 critical finding): the
+//      cron consumer fires the new body as the stamped role. Requiring
+//      BOTH old and new roles to be within the caller's reach preserves
+//      that defense — a member cannot rewrite an owner-stamped body even
+//      though `scheduledByRole` is untouched. The fields chosen are
+//      exactly those the cron consumer uses to decide what executes;
+//      provenance/identity fields (id, scheduledByRole,
+//      scheduledByOrigin) are handled separately or are audit metadata.
+//   4. An existing job had `enabled: false` flipped to true while it
+//      fires above the caller (same both-sides reach check as body
+//      changes). Re-enabling a job at-or-below the caller is allowed.
 //
-// What does NOT count (allowed without ack):
+// What does NOT count (allowed):
+//   - Any change (add / role-change / body / re-enable) whose resulting
+//     job fires at or below the caller's own role: it grants the caller
+//     no authority it doesn't already have.
 //   - Removing a job entirely.
 //   - Changing `schedule` or `timezone` on an existing job (cadence
 //     decisions; do not change what runs, only when).
-//   - Setting `enabled: true -> false` (disabling a privileged job is
-//     a privilege REDUCTION; allowed).
-//   - Any change to a job that has no `scheduledByRole` at all (the
-//     schema rejects such jobs at managedConfig before we run, so
-//     this branch is unreachable in practice; the guard treats it as
-//     a non-finding for forward compatibility).
+//   - Setting `enabled: true -> false` (disabling is a REDUCTION).
+//   - A job with no `scheduledByRole` (`undefined`) is treated as NOT
+//     schedulable (fail-closed), so the schema-rejected unset case stays
+//     blocked rather than slipping through as a non-finding.
 //
-// Failure-open is deliberate, same direction as `rolePromotion`: if
-// the existing `cron.json` cannot be read or parsed, every proposed job
-// is treated as new and flagged. The only false positive is "operator
-// authored a fresh `cron.json` with privileged jobs," which they
-// acknowledge in the same call.
+// Failure-closed on caller role: an unknown/incomparable caller role
+// makes `canScheduleAs` return false, so every change is treated as an
+// escalation and blocked. Failure-open on file read is unchanged: if the
+// existing `cron.json` cannot be read or parsed, every proposed job is
+// treated as new and then subjected to the same caller-role check.
 export const GUARD_CRON_PROMOTION_SEVERITY: SecuritySeverity = 'medium'
 
 export type CronPromotionFinding =
@@ -95,8 +111,9 @@ export async function checkCronPromotionGuard(options: {
   tool: string
   args: Record<string, unknown>
   agentDir: string
+  canScheduleAs: CanScheduleAs
 }): Promise<SecurityBlock | undefined> {
-  const { tool, args, agentDir } = options
+  const { tool, args, agentDir, canScheduleAs } = options
   if (tool !== 'write' && tool !== 'edit') return undefined
 
   const rawPath = args.path
@@ -105,8 +122,6 @@ export async function checkCronPromotionGuard(options: {
   const targetPath = path.resolve(agentDir, rawPath)
   const isCronJson = await pathIsCronJson(agentDir, targetPath)
   if (!isCronJson) return undefined
-
-  if (isGuardAcknowledged(args, GUARD_CRON_PROMOTION)) return undefined
 
   const editRefusal = refuseRiskyEdit(tool, args, targetPath)
   if (editRefusal) return editRefusal
@@ -118,7 +133,7 @@ export async function checkCronPromotionGuard(options: {
   if (newJobs === undefined) return undefined
 
   const oldJobs = await readExistingJobs(targetPath)
-  const findings = diffJobs(oldJobs, newJobs)
+  const findings = diffJobs(oldJobs, newJobs, canScheduleAs)
   if (findings.length === 0) return undefined
 
   return {
@@ -208,7 +223,21 @@ async function readExistingJobs(targetPath: string): Promise<readonly ParsedCron
   return result.file.jobs
 }
 
-export function diffJobs(before: readonly ParsedCronJob[], after: readonly ParsedCronJob[]): CronPromotionFinding[] {
+// A finding is a *promotion* only when the change introduces deferred authority
+// the caller could not already wield. `canScheduleAs(R)` is true when R's
+// permission set is a subset of the caller's, so a change that lands (and, for
+// mutations, started) at a role granting nothing the caller lacks is not
+// flagged. The laundering shapes still trip every branch: a member
+// adding/role-changing a job to `owner` fails `canScheduleAs('owner')`,
+// rewriting/re-enabling an already-`owner`-stamped body fails the prior-role
+// check, and a custom role scheduling as a different custom role that carries
+// an extra permission fails the subset check — none are schedulable, so all
+// stay blocked.
+export function diffJobs(
+  before: readonly ParsedCronJob[],
+  after: readonly ParsedCronJob[],
+  canScheduleAs: CanScheduleAs,
+): CronPromotionFinding[] {
   const findings: CronPromotionFinding[] = []
   const beforeById = new Map<string, ParsedCronJob>()
   for (const job of before) beforeById.set(job.id, job)
@@ -217,15 +246,17 @@ export function diffJobs(before: readonly ParsedCronJob[], after: readonly Parse
     const prior = beforeById.get(job.id)
     const newRole = job.scheduledByRole
     if (prior === undefined) {
-      findings.push({
-        kind: 'job-added',
-        id: job.id,
-        scheduledByRole: newRole ?? '<unset>',
-      })
+      if (!canScheduleAs(newRole)) {
+        findings.push({
+          kind: 'job-added',
+          id: job.id,
+          scheduledByRole: newRole ?? '<unset>',
+        })
+      }
       continue
     }
     const oldRole = prior.scheduledByRole
-    if (oldRole !== newRole) {
+    if (oldRole !== newRole && !canScheduleAs(newRole)) {
       findings.push({
         kind: 'role-changed',
         id: job.id,
@@ -233,8 +264,9 @@ export function diffJobs(before: readonly ParsedCronJob[], after: readonly Parse
         to: newRole ?? '<unset>',
       })
     }
+    const withinReach = canScheduleAs(oldRole) && canScheduleAs(newRole)
     const bodyDelta = diffJobBody(prior, job)
-    if (bodyDelta.length > 0) {
+    if (bodyDelta.length > 0 && !withinReach) {
       findings.push({
         kind: 'body-changed',
         id: job.id,
@@ -242,7 +274,7 @@ export function diffJobs(before: readonly ParsedCronJob[], after: readonly Parse
         fields: bodyDelta,
       })
     }
-    if (isPreviouslyDisabled(prior) && !isPreviouslyDisabled(job)) {
+    if (isPreviouslyDisabled(prior) && !isPreviouslyDisabled(job) && !withinReach) {
       findings.push({
         kind: 'enabled-flipped',
         id: job.id,
@@ -329,9 +361,9 @@ function buildBlockReason(tool: string, targetPath: string, findings: readonly C
     }
   }
   return [
-    `Guard \`${GUARD_CRON_PROMOTION}\` blocked ${tool} on ${sanitizeForReason(targetPath)}: this change introduces a deferred privilege grant — ${lines.join('; ')}.`,
-    'Cron jobs carry `scheduledByRole`, which the runtime stamps into the firing session\'s origin. Adding a job (or changing its scheduledByRole) is the same shape as the `rolePromotion` attack but deferred: "schedule a privileged prompt now, the cron consumer runs it as that role later." Even an `owner` operating from TUI must not silently author cron jobs that fire as elevated roles on behalf of a channel message.',
-    `If this is genuinely intentional and the operator explicitly asked for it (not a channel message), retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_CRON_PROMOTION}: true\` in the tool arguments.`,
+    `Guard \`${GUARD_CRON_PROMOTION}\` blocked ${tool} on ${sanitizeForReason(targetPath)}: this change schedules deferred work above your role — ${lines.join('; ')}.`,
+    'Cron jobs carry `scheduledByRole`, which the runtime stamps into the firing session\'s origin. Adding a job, raising its scheduledByRole, or rewriting/re-enabling a job that already fires above your role is the deferred form of the `rolePromotion` attack: "schedule a privileged prompt now, the cron consumer runs it as that role later." A change that fires at or below your own role grants nothing new and is allowed; this block means the resulting (or prior) role outranks yours.',
+    'This cannot be acknowledged away from an under-privileged session. The operator must make the change from a session that already resolves to a role at least as high as the cron job — TUI (owner), or a role granted `security.bypass.medium` — or claim the role out-of-band via `typeclaw role claim`.',
   ].join(' ')
 }
 

@@ -126,6 +126,7 @@ describe('createSubagentCancelTool', () => {
         has: () => false,
         resolveRole: () => 'guest',
         compareRoleSeverity: () => undefined,
+        permissionsForRole: () => undefined,
         describe: () => ({ role: 'guest', permissions: [] }),
         replaceRoles: () => {},
       },
