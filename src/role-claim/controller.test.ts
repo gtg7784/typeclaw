@@ -10,6 +10,7 @@ function makePermissions(): { service: PermissionService; lastReplacement: Roles
     has: () => false,
     resolveRole: () => 'guest',
     compareRoleSeverity: () => undefined,
+    permissionsForRole: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: (roles) => {
       lastReplacement = roles

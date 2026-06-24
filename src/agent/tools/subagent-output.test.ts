@@ -203,6 +203,7 @@ describe('createSubagentOutputTool — permissions', () => {
         has: () => false,
         resolveRole: () => 'guest',
         compareRoleSeverity: () => undefined,
+        permissionsForRole: () => undefined,
         describe: () => ({ role: 'guest', permissions: [] }),
         replaceRoles: () => {},
       },

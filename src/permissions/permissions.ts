@@ -15,6 +15,14 @@ export type PermissionService = {
   // either side and MUST be treated as deny, never allow — mistreating it
   // as allow reopens the privilege-escalation hole this gate closes.
   compareRoleSeverity(a: string, b: string): -1 | 0 | 1 | undefined
+  // Resolved (wildcard-expanded) permission set for a role NAME, or
+  // `undefined` for an unknown role. Unlike `describe`, which takes an
+  // origin, this answers "what can role X do" directly — needed for
+  // capability-dominance checks (e.g. "may the caller schedule deferred
+  // work as role X") that cannot use the coarse `compareRoleSeverity`
+  // tower, since custom roles are arbitrary permission bags with no
+  // inherent ordering. Callers MUST treat `undefined` as deny.
+  permissionsForRole(role: string): readonly string[] | undefined
   // Rebuilds the resolved role table from the given roles config, preserving
   // the same plugin-permission set captured at construction time. Used by
   // the config reloadable so role match-rule edits (typeclaw role claim,
@@ -43,6 +51,7 @@ export const noopPermissionService: PermissionService = {
   has: () => false,
   resolveRole: () => 'guest',
   compareRoleSeverity: () => undefined,
+  permissionsForRole: () => undefined,
   describe: () => ({ role: 'guest', permissions: [] }),
   replaceRoles: () => {},
   replacePluginPermissions: () => {},
@@ -192,6 +201,9 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
       if (aRank < bRank) return -1
       if (aRank > bRank) return 1
       return 0
+    },
+    permissionsForRole(role) {
+      return byName.get(role)?.permissions
     },
     describe(origin) {
       const name = resolveRole(origin)

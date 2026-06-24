@@ -32,6 +32,7 @@ const grantAll: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
   compareRoleSeverity: () => 1,
+  permissionsForRole: () => undefined,
   describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
   replaceRoles: () => {},
 }
@@ -40,6 +41,7 @@ const denyAll: PermissionService = {
   has: () => false,
   resolveRole: () => 'guest',
   compareRoleSeverity: () => undefined,
+  permissionsForRole: () => undefined,
   describe: () => ({ role: 'guest', permissions: [] }),
   replaceRoles: () => {},
 }

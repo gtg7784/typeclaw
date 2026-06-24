@@ -1328,6 +1328,7 @@ const GRANT_ALL_PERMISSIONS: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
   compareRoleSeverity: () => 1,
+  permissionsForRole: () => [CORE_PERMISSIONS.channelRespond],
   describe: () => ({ role: 'owner', permissions: [CORE_PERMISSIONS.channelRespond] }),
   replaceRoles: () => {},
 }

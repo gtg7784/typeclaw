@@ -106,6 +106,24 @@ export default definePlugin({
         const canBypass = (severity: SecuritySeverity, perGuardPerm: string): boolean =>
           can(SEVERITY_PERMISSION[severity]) || can(perGuardPerm)
 
+        // The cron guard blocks deferred work that fires as a role granting
+        // permissions the caller lacks. Capability dominance — target's
+        // permission set must be a SUBSET of the caller's — not the coarse
+        // `compareRoleSeverity` tower: every configured custom role ranks
+        // equal there, so rank `>= 0` would let one custom role schedule as a
+        // different custom role (or `trusted` schedule as a custom role with
+        // an extra grant), laundering permissions the caller never had. Unknown
+        // caller/target role => undefined permissions => fail closed.
+        const callerRole = ctx.permissions.resolveRole(event.origin)
+        const canScheduleAs = (targetRole: string | undefined): boolean => {
+          if (targetRole === undefined) return false
+          const callerPermissions = ctx.permissions.permissionsForRole(callerRole)
+          const targetPermissions = ctx.permissions.permissionsForRole(targetRole)
+          if (callerPermissions === undefined || targetPermissions === undefined) return false
+          const callerSet = new Set(callerPermissions)
+          return targetPermissions.every((permission) => callerSet.has(permission))
+        }
+
         const rolePromotionResult = canBypass(GUARD_ROLE_PROMOTION_SEVERITY, SECURITY_PERMISSIONS.bypassRolePromotion)
           ? undefined
           : withPermissionHint(
@@ -118,7 +136,12 @@ export default definePlugin({
         const cronPromotionResult = canBypass(GUARD_CRON_PROMOTION_SEVERITY, SECURITY_PERMISSIONS.bypassCronPromotion)
           ? undefined
           : withPermissionHint(
-              await checkCronPromotionGuard({ tool: event.tool, args: event.args, agentDir: ctx.agentDir }),
+              await checkCronPromotionGuard({
+                tool: event.tool,
+                args: event.args,
+                agentDir: ctx.agentDir,
+                canScheduleAs,
+              }),
               SECURITY_PERMISSIONS.bypassCronPromotion,
               GUARD_CRON_PROMOTION_SEVERITY,
             )
