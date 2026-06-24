@@ -342,6 +342,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
         const result = await promptPersistentTurnWithFallback({
           refs: resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions)),
           currentRef: activeModelRef,
+          profile: resolveSubagentProfile(subagent, sessionOptions),
           session,
           text: turnText,
           shouldFailover: (err) => isThrottleOrOverload(err.message),

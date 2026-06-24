@@ -2,6 +2,7 @@ import type { ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
+import { modelThrottleCircuit, type ThrottleCircuit } from './throttle-circuit'
 
 export type PersistentTurnAttempt = {
   ref: ModelRef
@@ -28,6 +29,8 @@ export async function promptPersistentTurnWithFallback(opts: {
   text: string
   shouldFailover: (err: Error) => boolean
   setModelForRef: (ref: ModelRef) => Promise<void>
+  profile?: string
+  circuit?: ThrottleCircuit
   beforeAttempt?: (ref: ModelRef) => void
   onAttemptFailed?: (attempt: PersistentTurnAttempt) => void
 }): Promise<PersistentTurnResult> {
@@ -35,10 +38,18 @@ export async function promptPersistentTurnWithFallback(opts: {
   const start = Math.max(0, opts.refs.indexOf(opts.currentRef))
   const attempts: PersistentTurnAttempt[] = []
   let lastError: Error | undefined
+  const circuit = opts.circuit ?? modelThrottleCircuit
   for (let i = start; i < opts.refs.length; i++) {
-    const ref = opts.refs[i]!
+    let ref = opts.refs[i]!
+    let modelSetForAttempt = i === start
+    while (i < opts.refs.length - 1 && circuit.isOpen({ profile: opts.profile, ref })) {
+      i++
+      ref = opts.refs[i]!
+      await opts.setModelForRef(ref)
+      modelSetForAttempt = true
+    }
     const isLast = i === opts.refs.length - 1
-    if (i !== start) await opts.setModelForRef(ref)
+    if (!modelSetForAttempt) await opts.setModelForRef(ref)
     opts.beforeAttempt?.(ref)
     const activity: AttemptActivity = { producedAssistantOutput: false, startedToolExecution: false }
     let softError: Error | undefined
@@ -54,6 +65,7 @@ export async function promptPersistentTurnWithFallback(opts: {
         const attempt: PersistentTurnAttempt = { ref, outcome: 'hard', errorMessage: error.message }
         attempts.push(attempt)
         lastError = error
+        if (opts.shouldFailover(error)) circuit.recordThrottle({ profile: opts.profile, ref })
         if (isLast || !canAdvance(error, activity, opts.shouldFailover)) throw error
         opts.onAttemptFailed?.(attempt)
         continue
@@ -62,6 +74,7 @@ export async function promptPersistentTurnWithFallback(opts: {
         const attempt: PersistentTurnAttempt = { ref, outcome: 'soft', errorMessage: softError.message }
         attempts.push(attempt)
         lastError = softError
+        if (opts.shouldFailover(softError)) circuit.recordThrottle({ profile: opts.profile, ref })
         if (isLast || !canAdvance(softError, activity, opts.shouldFailover)) {
           return { success: false, refUsed: ref, attempts, lastError }
         }
@@ -69,6 +82,7 @@ export async function promptPersistentTurnWithFallback(opts: {
         continue
       }
       attempts.push({ ref, outcome: 'success' })
+      circuit.recordSuccess({ profile: opts.profile, ref })
       return { success: true, refUsed: ref, attempts }
     } finally {
       unsubProvider()
