@@ -21,6 +21,7 @@ import {
   createChannelRouter,
   disengageReactionEmojiFor,
   DUPLICATE_SEND_ERROR,
+  EMPTY_STOP_AFTER_TOOL_WORK_NUDGE,
   EMPTY_TURN_FALLBACK_TEXT,
   EMPTY_TURN_RETRY_NUDGE,
   extractPlainTextChannelToolCallText,
@@ -245,6 +246,60 @@ function strandOnUnansweredToolUse(session: FakeSession, id: string = 'strand'):
   session.entriesById.set(assistantEntry.id, assistantEntry)
   session.entriesById.set(toolResultEntry.id, toolResultEntry)
   session.leafEntry = toolResultEntry
+}
+
+// A bare-empty `stop` leaf whose parentId chain runs back through a web_search
+// tool call to a bounding user entry — the production shape recoverableAssistantText
+// recovers as { text: '', source: 'leaf' } while attemptMadeToolCall still finds
+// the tool work. Pass userId null to drop the bounding user entry and exercise the
+// walk terminating on depth/root instead of a turn boundary.
+function emptyStopAfterToolWork(session: FakeSession, id: string = 'tw', userId: string | null = `user-${id}`): void {
+  const toolCallId = `tool-${id}`
+  if (userId !== null) {
+    session.entriesById.set(userId, {
+      type: 'message',
+      id: userId,
+      parentId: null,
+      timestamp: '2026-06-15T06:23:44.000Z',
+      message: { role: 'user', content: [{ type: 'text', text: 'q' }], timestamp: 1000 },
+    } as unknown as SessionEntry)
+  }
+  const toolCallEntry: SessionEntry = {
+    type: 'message',
+    id: `assistant-toolcall-${id}`,
+    parentId: userId,
+    timestamp: '2026-06-15T06:23:45.000Z',
+    message: {
+      ...assistantMessage(''),
+      content: [{ type: 'toolCall', id: toolCallId, name: 'web_search', arguments: { query: 'x' } }],
+      stopReason: 'toolUse',
+    },
+  }
+  const toolResultEntry: SessionEntry = {
+    type: 'message',
+    id: `tool-result-${id}`,
+    parentId: toolCallEntry.id,
+    timestamp: '2026-06-15T06:23:45.500Z',
+    message: {
+      role: 'toolResult',
+      toolCallId,
+      toolName: 'web_search',
+      content: [{ type: 'text', text: 'junk results' }],
+      isError: false,
+      timestamp: 1000,
+    },
+  }
+  const emptyStopEntry: SessionEntry = {
+    type: 'message',
+    id: `assistant-empty-stop-${id}`,
+    parentId: toolResultEntry.id,
+    timestamp: '2026-06-15T06:23:46.000Z',
+    message: assistantMessage(''),
+  }
+  session.entriesById.set(toolCallEntry.id, toolCallEntry)
+  session.entriesById.set(toolResultEntry.id, toolResultEntry)
+  session.entriesById.set(emptyStopEntry.id, emptyStopEntry)
+  session.leafEntry = emptyStopEntry
 }
 
 const baseConfig: ChannelAdapterConfig = {
@@ -2734,6 +2789,171 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     // then: the arm self-cleared — no retry, historical no_reply
     expect(logs.some((m) => m.includes('cold_start_solo_bare_empty'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+  })
+
+  test('empty-stop-after-tool-work: a bare-empty stop following tool work retries, then the model answers', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // given: a mention (so cold-start is NOT armed) on a group channel
+    await router.route(inbound({ isBotMention: true, text: '부평역에서 포스트타워 마포까지 몇분 걸려?' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // when: the model searches then whiffs an empty completion, then answers on retry
+      if (calls === 1) emptyStopAfterToolWork(sessions[0]!)
+      else sessions[0]!.setAssistantText('1호선 타고 가다 공덕에서 환승, 약 60분이야.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: it retried with the tool-work nudge instead of dropping silently
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sessions[0]!.prompts[1]).toContain(EMPTY_STOP_AFTER_TOOL_WORK_NUDGE)
+    expect(logs.some((m) => m.includes('empty_turn_retry') && m.includes('cause=empty_stop_after_tool_work'))).toBe(
+      true,
+    )
+    expect(sent.map((s) => s.text)).toEqual(['1호선 타고 가다 공덕에서 환승, 약 60분이야.'])
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(false)
+  })
+
+  test('empty-stop-after-tool-work: a bare-empty stop with NO tool work this attempt stays silent', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // given: a mention, model emits a bare-empty stop with no tool call this attempt
+    await router.route(inbound({ isBotMention: true, text: 'hey bot' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('')
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the tool-work threshold is unmet — historical silent no_reply holds
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('empty_stop_after_tool_work'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(sent).toHaveLength(0)
+  })
+
+  test('empty-stop-after-tool-work: an explicit NO_REPLY after tool work stays silent (bare-empty required)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: true, text: 'check this' }))
+    // given: the model did tool work but then DELIBERATELY declined with a NO_REPLY token
+    sessions[0]!.onPrompt = () => {
+      emptyStopAfterToolWork(sessions[0]!)
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: non-empty NO_REPLY is a deliberate decline — not retried
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('empty_stop_after_tool_work'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(sent).toHaveLength(0)
+  })
+
+  test('empty-stop-after-tool-work: a persistent bare-empty stop exhausts to the visible fallback', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: true, text: 'check this' }))
+    sessions[0]!.onPrompt = () => emptyStopAfterToolWork(sessions[0]!)
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_EMPTY_TURN_RETRIES)
+    expect(
+      logs.filter((m) => m.includes('empty_turn_retry') && m.includes('cause=empty_stop_after_tool_work')).length,
+    ).toBe(MAX_EMPTY_TURN_RETRIES)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=empty_stop_after_tool_work_retries_exhausted'))).toBe(
+      true,
+    )
+  })
+
+  test('empty-stop-after-tool-work: once armed, a bare-empty retry that obeys the no-re-run nudge keeps spending budget to fallback', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: true, text: 'check this' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // given: attempt 1 does tool work then whiffs (arms the cause); the retry nudge
+      // says "do not re-run tools", so later attempts whiff bare-empty with no new tools
+      if (calls === 1) emptyStopAfterToolWork(sessions[0]!)
+      else sessions[0]!.setAssistantText('')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the armed cause persists — bare-empty retries keep consuming the budget
+    // and the user gets the visible fallback instead of silent dead air
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_EMPTY_TURN_RETRIES)
+    expect(
+      logs.filter((m) => m.includes('empty_turn_retry') && m.includes('cause=empty_stop_after_tool_work')).length,
+    ).toBe(MAX_EMPTY_TURN_RETRIES)
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes('empty_turn_fallback cause=empty_stop_after_tool_work_retries_exhausted'))).toBe(
+      true,
+    )
+  })
+
+  test('empty-stop-after-tool-work: an armed turn still honors an explicit NO_REPLY escape', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isBotMention: true, text: 'check this' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // given: attempt 1 arms the cause; attempt 2 deliberately declines with NO_REPLY
+      if (calls === 1) emptyStopAfterToolWork(sessions[0]!)
+      else sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the non-empty NO_REPLY escapes the armed retry loop — silence, no fallback
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(
+      logs.filter((m) => m.includes('empty_turn_retry') && m.includes('cause=empty_stop_after_tool_work')).length,
+    ).toBe(1)
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
     expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
   })
 
