@@ -1,30 +1,44 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { __setModelCacheCheckForTests, DIMS } from './embedder'
+import { EMBEDDING_DIMS } from '@/models/embedding-model'
+
 import { estimateTokens, TEXT_TOKEN_BUDGET } from './truncation'
-
-__setModelCacheCheckForTests(() => Promise.resolve())
 
 let lastExtractorInput: string[] | undefined
 let lastExtractorOptions: Record<string, unknown> | undefined
 
-mock.module('@huggingface/transformers', () => ({
-  env: {},
-  pipeline: async () => {
+type EmbedderModule = typeof import('./embedder')
+type TransformersImporter = NonNullable<Parameters<EmbedderModule['__setTransformersImporterForTests']>[0]>
+type TransformersModule = Awaited<ReturnType<TransformersImporter>>
+
+async function freshEmbedderModule(): Promise<EmbedderModule> {
+  const mod = await import(`./embedder?truncation=${crypto.randomUUID()}`)
+  mod.__setModelCacheCheckForTests(() => Promise.resolve())
+  const pipeline = (async () => {
     return (texts: string[], options?: Record<string, unknown>) => {
       lastExtractorInput = texts
       lastExtractorOptions = options
       const count = Array.isArray(texts) ? texts.length : 1
-      return { data: new Float32Array(count * DIMS) }
+      return { data: new Float32Array(count * EMBEDDING_DIMS) }
     }
-  },
-}))
+  }) as TransformersModule['pipeline']
+  mod.__setTransformersImporterForTests(async () => ({
+    env: {} as never,
+    pipeline,
+  }))
+  return mod
+}
 
 const overBudgetText = 'word '.repeat(TEXT_TOKEN_BUDGET * 4)
 
 describe('embedder bounding', () => {
+  beforeEach(() => {
+    lastExtractorInput = undefined
+    lastExtractorOptions = undefined
+  })
+
   test('extracts with mean pooling and normalized embeddings', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['short passage'], 'passage')
 
@@ -33,7 +47,7 @@ describe('embedder bounding', () => {
   })
 
   test('bounds an over-budget passage to the token budget before the extractor sees it', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed([overBudgetText], 'passage')
 
@@ -44,7 +58,7 @@ describe('embedder bounding', () => {
   })
 
   test('passes an in-budget passage through unchanged', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['a short belief sentence'], 'passage')
 
@@ -52,7 +66,7 @@ describe('embedder bounding', () => {
   })
 
   test('bounds an over-budget query too (no silent loss on the retrieval side)', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed([overBudgetText], 'query')
 
@@ -66,6 +80,8 @@ describe('embedder bounding observability', () => {
   const originalWarn = console.warn
 
   beforeEach(() => {
+    lastExtractorInput = undefined
+    lastExtractorOptions = undefined
     warnings = []
     console.warn = (message?: unknown) => {
       warnings.push(String(message))
@@ -77,7 +93,7 @@ describe('embedder bounding observability', () => {
   })
 
   test('warns content-free with the type and count when an input is bounded', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['in budget', overBudgetText], 'query')
 
@@ -90,7 +106,7 @@ describe('embedder bounding observability', () => {
   })
 
   test('does not warn about bounding when every input is within budget', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['short a', 'short b'], 'passage')
 
@@ -105,6 +121,8 @@ describe('embedder batch-size observability', () => {
   const originalInfo = console.info
 
   beforeEach(() => {
+    lastExtractorInput = undefined
+    lastExtractorOptions = undefined
     warnings = []
     notices = []
     console.warn = (message?: unknown) => {
@@ -121,7 +139,7 @@ describe('embedder batch-size observability', () => {
   })
 
   test('logs the total embed size and chunk width at info for a small build', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['short a', 'short b'], 'passage')
 
@@ -131,7 +149,7 @@ describe('embedder batch-size observability', () => {
   })
 
   test('notes a large build is slow but does not warn — chunking removed the OOM risk', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(
       Array.from({ length: 256 }, (_, i) => `passage ${i}`),
@@ -160,7 +178,7 @@ describe('embedder progress observability', () => {
   })
 
   test('reports per-chunk progress for a large build, ending at 100%', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(
       Array.from({ length: 256 }, (_, i) => `passage ${i}`),
@@ -175,7 +193,7 @@ describe('embedder progress observability', () => {
   })
 
   test('does not report per-chunk progress for a small build', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
 
     await embed(['short a', 'short b'], 'passage')
 

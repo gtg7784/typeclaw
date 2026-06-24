@@ -1,34 +1,44 @@
-import { beforeAll, describe, expect, mock, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 
-import { __setModelCacheCheckForTests, DIMS } from './embedder'
+import { EMBEDDING_DIMS } from '@/models/embedding-model'
 
 // Records the size of every onnxruntime forward pass so the test can prove the
 // embed is chunked (bounding peak memory) rather than run as one giant batch.
 const batchSizes: number[] = []
 
-mock.module('@huggingface/transformers', () => ({
-  env: {},
-  pipeline: async () => {
+type EmbedderModule = typeof import('./embedder')
+type TransformersImporter = NonNullable<Parameters<EmbedderModule['__setTransformersImporterForTests']>[0]>
+type TransformersModule = Awaited<ReturnType<TransformersImporter>>
+
+async function freshEmbedderModule(): Promise<EmbedderModule> {
+  const mod = await import(`./embedder?batch=${crypto.randomUUID()}`)
+  mod.__setModelCacheCheckForTests(() => Promise.resolve())
+  const pipeline = (async () => {
     return (texts: string[]) => {
       const count = Array.isArray(texts) ? texts.length : 1
       batchSizes.push(count)
       // Stamp each row's first lane with a running global index so the caller
       // can assert order is preserved across chunk boundaries.
-      const data = new Float32Array(count * DIMS)
+      const data = new Float32Array(count * EMBEDDING_DIMS)
       const base = batchSizes.slice(0, -1).reduce((sum, n) => sum + n, 0)
-      for (let i = 0; i < count; i++) data[i * DIMS] = base + i
+      for (let i = 0; i < count; i++) data[i * EMBEDDING_DIMS] = base + i
       return { data }
     }
-  },
-}))
+  }) as TransformersModule['pipeline']
+  mod.__setTransformersImporterForTests(async () => ({
+    env: {} as never,
+    pipeline,
+  }))
+  return mod
+}
 
 describe('embedder batching', () => {
-  beforeAll(() => {
-    __setModelCacheCheckForTests(() => Promise.resolve())
+  beforeEach(() => {
+    batchSizes.length = 0
   })
 
   test('splits a large input set into bounded forward passes and preserves order', async () => {
-    const { embed } = await import('./embedder')
+    const { embed } = await freshEmbedderModule()
     const inputs = Array.from({ length: 150 }, (_, i) => `passage ${i}`)
 
     const out = await embed(inputs, 'passage')

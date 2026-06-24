@@ -29,6 +29,20 @@ describe('registerXaiOAuthProvider', () => {
     expect(provider?.name).toBe('xAI (Grok)')
     expect(provider?.usesCallbackServer).toBe(true)
   })
+
+  test('re-registers after the registry is cleared while the module-level flag stays true', () => {
+    // given: a first registration sets the module-level `registered` flag true
+    registerXaiOAuthProvider()
+    // when: the registry is cleared out from under us (the `registered` flag is
+    // unaffected — it's module-level state pi-ai's registry can't reach), then
+    // registerXaiOAuthProvider() is called again
+    unregisterOAuthProvider(XAI_OAUTH_PROVIDER_ID)
+    expect(getOAuthProvider(XAI_OAUTH_PROVIDER_ID)).toBeUndefined()
+    registerXaiOAuthProvider()
+    // then: the cleared provider is restored rather than skipped by the flag —
+    // this guards the `&& getOAuthProvider(...)` half of the idempotency check
+    expect(getOAuthProvider(XAI_OAUTH_PROVIDER_ID)?.id).toBe('xai')
+  })
 })
 
 describe('xaiOAuthProvider.getApiKey', () => {

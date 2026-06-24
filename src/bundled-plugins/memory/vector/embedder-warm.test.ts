@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 
 // A controllable transformers fake whose pipeline load can be made to fail on
 // demand, so we can prove getEmbedder/warmEmbedder recover from a transient
@@ -9,14 +9,20 @@ import { describe, expect, mock, test } from 'bun:test'
 let pipelineCalls = 0
 let failNextPipeline = false
 
-mock.module('@huggingface/transformers', () => ({
-  env: {},
-  pipeline: async () => {
-    pipelineCalls += 1
-    if (failNextPipeline) throw new Error('local_files_only: model weights missing')
-    return () => ({ data: new Float32Array(768) })
-  },
-}))
+type EmbedderModule = typeof import('./embedder')
+type TransformersImporter = NonNullable<Parameters<EmbedderModule['__setTransformersImporterForTests']>[0]>
+type TransformersModule = Awaited<ReturnType<TransformersImporter>>
+
+function fakeTransformersModule(): TransformersImporter {
+  return async () => ({
+    env: {} as never,
+    pipeline: (async () => {
+      pipelineCalls += 1
+      if (failNextPipeline) throw new Error('local_files_only: model weights missing')
+      return () => ({ data: new Float32Array(768) })
+    }) as TransformersModule['pipeline'],
+  })
+}
 
 describe('embedder warm-up and retry-safe memoization', () => {
   test('warmEmbedder loads the embedder so a later call reuses the singleton', async () => {
@@ -85,5 +91,6 @@ describe('embedder warm-up and retry-safe memoization', () => {
 async function freshEmbedderModule(): Promise<typeof import('./embedder')> {
   const mod = await import(`./embedder?warm=${crypto.randomUUID()}`)
   mod.__setModelCacheCheckForTests(() => Promise.resolve())
+  mod.__setTransformersImporterForTests(fakeTransformersModule())
   return mod
 }
