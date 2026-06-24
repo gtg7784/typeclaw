@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { isWindows } from '@/shared'
 
 import { isDaemonReachable } from './client'
 import { startDaemon, type Daemon } from './daemon'
-import { socketPath } from './paths'
+import { pidfilePath, socketPath } from './paths'
 import { ensureDaemon } from './spawn'
 
 let home: string
@@ -97,10 +97,43 @@ describe('ensureDaemon', () => {
     })
 
     // Production path requires a real CLI entry; the test invokes with a
-    // dummy path, so spawn fails. The test asserts the failure mode is the
-    // spawn failure (not the drift path).
+    // dummy path, so the spawned child exits immediately. The test asserts the
+    // failure mode is the spawn failure (not the drift path), and that an
+    // EXITED child is reaped — its pidfile must not linger.
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.reason.toLowerCase()).not.toContain('drift')
+    expect(result.reason.toLowerCase()).toContain('exited')
+    expect(existsSync(pidfilePath())).toBe(false)
+  })
+
+  test('adopts a live-but-unreachable child instead of spawning a second daemon', async () => {
+    // given: a previous spawn left a live child that never bound the socket —
+    // simulated by a harmless long-lived process recorded in the pidfile
+    if (isWindows()) return
+    await expectDaemonEndpointGone()
+    const child = Bun.spawn({
+      cmd: [process.execPath, '-e', 'setTimeout(() => {}, 60_000)'],
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    child.unref()
+    try {
+      await mkdir(dirname(pidfilePath()), { recursive: true })
+      await writeFile(pidfilePath(), `${child.pid}\n`)
+
+      // when: ensureDaemon runs while that child is alive but unreachable
+      const result = await ensureDaemon({ cliEntry: '/nonexistent/cli.ts', spawnTimeoutMs: 150 })
+
+      // then: it adopts and polls the existing child (times out), never spawning
+      // a second daemon — the pidfile still points at OUR child, untouched
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('did not become reachable yet')
+      expect(readFileSync(pidfilePath(), 'utf8').trim()).toBe(String(child.pid))
+    } finally {
+      child.kill('SIGKILL')
+    }
   })
 })

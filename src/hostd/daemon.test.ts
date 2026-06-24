@@ -78,6 +78,14 @@ async function daemonEndpointGone(): Promise<boolean> {
   return !existsSync(socketPath())
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 describe('startDaemon', () => {
   test('register tracks a container cwd; list reflects the registration', async () => {
     daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000 })
@@ -837,6 +845,67 @@ describe('startDaemon', () => {
 
     expect(startCalls).toHaveLength(1)
     expect(existsSync(registrationFilePath('flaky'))).toBe(true)
+  })
+
+  test('daemon is reachable before a slow boot-time restore completes', async () => {
+    // given: a persisted registration whose restore probe (docker ps) blocks
+    const d1 = await startDaemon({ exec: fakeExec(new Set(['slow'])), gcIntervalMs: 1_000_000 })
+    await send({ kind: 'register', containerName: 'slow', cwd: '/agent/slow', restartToken: 't' })
+    await d1.stop()
+
+    const release = deferred()
+    const slowExec: DockerExec = async (args) => {
+      if (args[0] === 'ps') {
+        await release.promise
+        return { exitCode: 0, stdout: 'slow\n', stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'unknown command' }
+    }
+
+    daemon = await startDaemon({ exec: slowExec, gcIntervalMs: 1_000_000 })
+
+    // when: restore is still blocked on the docker probe
+    // then: the readiness surface (http-info / list) answers without waiting
+    const info = await send({ kind: 'http-info' }, { timeoutMs: 1_000 })
+    expect(info.ok).toBe(true)
+    const list = await send({ kind: 'list' }, { timeoutMs: 1_000 })
+    expect(list.ok).toBe(true)
+
+    release.resolve()
+  })
+
+  test('register RPC waits for boot-time restore to complete before mutating the registry', async () => {
+    const d1 = await startDaemon({ exec: fakeExec(new Set(['slow'])), gcIntervalMs: 1_000_000 })
+    await send({ kind: 'register', containerName: 'slow', cwd: '/agent/slow', restartToken: 't' })
+    await d1.stop()
+
+    const release = deferred()
+    let probeStarted = false
+    const slowExec: DockerExec = async (args) => {
+      if (args[0] === 'ps') {
+        probeStarted = true
+        await release.promise
+        return { exitCode: 0, stdout: 'slow\n', stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'unknown command' }
+    }
+
+    daemon = await startDaemon({ exec: slowExec, gcIntervalMs: 1_000_000 })
+    await waitFor(() => probeStarted)
+
+    // given: restore is mid-probe; when a register lands, it must not resolve yet
+    let resolved = false
+    const registerPromise = send({ kind: 'register', containerName: 'new', cwd: '/agent/new' }).then((r) => {
+      resolved = true
+      return r
+    })
+    await expectStable(() => resolved, { durationMs: 50, description: 'register gated on restore' })
+    expect(resolved).toBe(false)
+
+    // then: once restore unblocks, the gated register completes
+    release.resolve()
+    const ack = await registerPromise
+    expect(ack.ok).toBe(true)
   })
 
   test('register invokes kakaoRenewal.start with the registered container and cwd', async () => {

@@ -12,7 +12,7 @@ import { send as sendToDaemon } from '@/hostd/client'
 import { ensureModels } from '@/hostd/models'
 import { homeRoot } from '@/hostd/paths'
 import type { HttpInfoResult } from '@/hostd/protocol'
-import { ensureDaemon } from '@/hostd/spawn'
+import { ensureDaemon, type EnsureDaemonResult } from '@/hostd/spawn'
 import {
   autoUpgradeTypeclawDep,
   type AutoUpgradeOutcome,
@@ -1165,7 +1165,7 @@ async function registerWithDaemon({
   hostPort: number
   reuseCurrentHostDaemon: boolean
 }): Promise<PreparedHostDaemonStatus> {
-  const prepared = reuseCurrentHostDaemon ? await useCurrentHostDaemon() : await ensureDaemon({ cliEntry })
+  const prepared = reuseCurrentHostDaemon ? await useCurrentHostDaemon() : await ensureDaemonWithBridgeRetry(cliEntry)
   if (!prepared.ok) return { state: 'unavailable', reason: prepared.reason }
   const token = randomBytes(32).toString('base64url')
   const brokerToken = randomBytes(32).toString('base64url')
@@ -1184,6 +1184,26 @@ async function registerWithDaemon({
     state: 'registered',
     control: { url: `http://${CONTAINER_HOSTD_HOST}:${prepared.httpPort}`, token, brokerToken },
   }
+}
+
+// ensureDaemon spawns the daemon detached and polls for readiness, but a cold
+// daemon can take longer than that internal window to bind its socket. Rather
+// than treat the first not-ready-yet as a hard failure (which would drop the
+// hostd env vars and crash hostd-backed channel adapters on boot), re-probe a
+// few times: the still-booting daemon becomes reachable and ensureDaemon
+// fast-paths through its top-of-function isDaemonReachable() check WITHOUT
+// re-spawning. Bridges the first-boot spawn race; a genuinely dead daemon still
+// surfaces as unavailable after the budget.
+const HOSTD_BRIDGE_RETRIES = 3
+const HOSTD_BRIDGE_RETRY_DELAY_MS = 2_000
+
+async function ensureDaemonWithBridgeRetry(cliEntry: string): Promise<EnsureDaemonResult> {
+  let last = await ensureDaemon({ cliEntry })
+  for (let attempt = 0; !last.ok && attempt < HOSTD_BRIDGE_RETRIES; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, HOSTD_BRIDGE_RETRY_DELAY_MS))
+    last = await ensureDaemon({ cliEntry })
+  }
+  return last
 }
 
 async function useCurrentHostDaemon(): Promise<{ ok: true; httpPort: number } | { ok: false; reason: string }> {
