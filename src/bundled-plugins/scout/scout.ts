@@ -68,6 +68,10 @@ End every response with this exact structure:
 - If the question requires LOCAL information (codebase, files in /agent/, git history, memory), say so explicitly and tell the caller to spawn \`explorer\` instead.
 - If you cannot find what was asked, say so explicitly with what queries you tried and what you DID find.`
 
+// `profile` is dropped, not passed through: scout is a fast-tier specialist, so a
+// parent must not bump it off `fast` via a per-spawn `profile` override (which the
+// `spawn_subagent` tool injects into the payload and `profileFromPayload` would
+// otherwise honor). Other fields still pass through untouched.
 export const scoutPayloadSchema = z
   .object({
     requestId: z.string().optional(),
@@ -75,6 +79,7 @@ export const scoutPayloadSchema = z
     description: z.string().optional(),
   })
   .passthrough()
+  .transform(({ profile: _profile, ...rest }) => rest)
 
 export type ScoutPayload = z.infer<typeof scoutPayloadSchema>
 
