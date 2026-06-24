@@ -997,6 +997,9 @@ describe('startDaemon', () => {
     starts.length = 0
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, kakaoRenewal })
 
+    // Boot-time restore fires kakaoRenewal.start asynchronously; wait for the
+    // start callback rather than racing it right after boot (the Windows CI flake).
+    await waitFor(() => starts.length === 1)
     expect(starts).toEqual([{ containerName: 'persistent-kakao', cwd: '/agent/pk' }])
   })
 
@@ -1069,6 +1072,9 @@ describe('startDaemon', () => {
     starts.length = 0
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, webexRenewal })
 
+    // Boot-time restore fires webexRenewal.start asynchronously; wait for the
+    // start callback rather than racing it right after boot (the Windows CI flake).
+    await waitFor(() => starts.length === 1)
     expect(starts).toEqual([{ containerName: 'persistent-webex', cwd: '/agent/pw' }])
   })
 
