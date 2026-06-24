@@ -5,7 +5,7 @@ import { parseConfigJson } from '@/config'
 import { isBuiltinRoleName, type RoleConfig, type RolesConfig } from '@/permissions'
 
 import type { SecuritySeverity } from '../permissions'
-import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
+import type { SecurityBlock } from '../policy'
 
 export const GUARD_ROLE_PROMOTION = 'rolePromotion'
 // Classified `medium` (silent-attack axis). Originally `high`; reclassified
@@ -87,8 +87,6 @@ export async function checkRolePromotionGuard(options: {
   const targetPath = path.resolve(agentDir, rawPath)
   const isTypeclawJson = await pathIsTypeclawJson(agentDir, targetPath)
   if (!isTypeclawJson) return undefined
-
-  if (isGuardAcknowledged(args, GUARD_ROLE_PROMOTION)) return undefined
 
   const editRefusal = refuseRiskyEdit(tool, args, targetPath)
   if (editRefusal) return editRefusal
@@ -378,7 +376,7 @@ function buildBlockReason(tool: string, targetPath: string, findings: readonly R
   return [
     `Guard \`${GUARD_ROLE_PROMOTION}\` blocked ${tool} on ${sanitizeForReason(targetPath)}: this change is a privilege escalation — ${lines.join('; ')}.`,
     'Granting `owner` / `trusted` (or widening any role) gives the matched actor security-bypass capabilities, cron scheduling, channel respond, and operator-only subagent spawn. Even an operator running from TUI must not silently rewrite the access-control table based on a channel message: the canonical attack is a member-role speaker socially-engineering the agent into adding their own author-id to `roles.owner.match[]`, which the schema check accepts as valid.',
-    `If this is genuinely intentional and the operator explicitly asked for it (not a channel message), retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_ROLE_PROMOTION}: true\` in the tool arguments.`,
+    'This cannot be acknowledged away from an under-privileged session. The operator must make the change from a session that already resolves to `owner`/`trusted` (TUI, or a role granted `security.bypass.medium`), or claim the role out-of-band via `typeclaw role claim`.',
   ].join(' ')
 }
 

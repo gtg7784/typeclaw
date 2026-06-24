@@ -5,7 +5,7 @@ import { parseConfigJson } from '@/config'
 import { splitPluginEntrySpec } from '@/plugin'
 
 import type { SecuritySeverity } from '../permissions'
-import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
+import type { SecurityBlock } from '../policy'
 
 export const GUARD_PLUGIN_ADDITION = 'pluginAddition'
 // Classified `medium` (silent-attack axis), same tier and rationale as
@@ -56,8 +56,6 @@ export async function checkPluginAdditionGuard(options: {
 
   const targetPath = path.resolve(agentDir, rawPath)
   if (!(await pathIsTypeclawJson(agentDir, targetPath))) return undefined
-
-  if (isGuardAcknowledged(args, GUARD_PLUGIN_ADDITION)) return undefined
 
   const editRefusal = refuseRiskyEdit(tool, args, targetPath)
   if (editRefusal) return editRefusal
@@ -205,7 +203,7 @@ function buildBlockReason(tool: string, targetPath: string, findings: readonly P
   return [
     `Guard \`${GUARD_PLUGIN_ADDITION}\` blocked ${tool} on ${sanitizeForReason(targetPath)}: this change introduces a deferred host-code-execution grant — ${lines.join('; ')}.`,
     "Plugin entries in typeclaw.json#plugins are materialized into package.json and installed by the next host `typeclaw start`, where npm lifecycle scripts run as the operator on the host. Even an `owner` operating from TUI must not silently add plugins on behalf of a channel message: the canonical attack is a prompt-injected agent writing a malicious package name into plugins[] so the operator's next start runs its postinstall.",
-    `If this is genuinely intentional and the operator explicitly asked for it (not a channel message), retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_PLUGIN_ADDITION}: true\` in the tool arguments.`,
+    'This cannot be acknowledged away from an under-privileged session. The operator must make the change from a session that already resolves to `owner`/`trusted` (TUI, or a role granted `security.bypass.medium`), or claim the role out-of-band via `typeclaw role claim`.',
   ].join(' ')
 }
 

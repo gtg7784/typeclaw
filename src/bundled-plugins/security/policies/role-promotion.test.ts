@@ -228,7 +228,7 @@ describe('checkRolePromotionGuard — write (the canonical attack)', () => {
     expect(result).toBeUndefined()
   })
 
-  test('passes through when the operator acknowledges the guard', async () => {
+  test('an ack flag does NOT bypass — the guard no longer honors acknowledgeGuards', async () => {
     const agentDir = await makeAgentDir()
     await writeConfig(agentDir, BEFORE_BASELINE)
     const after = {
@@ -247,7 +247,7 @@ describe('checkRolePromotionGuard — write (the canonical attack)', () => {
       },
       agentDir,
     })
-    expect(result).toBeUndefined()
+    expect(result?.block).toBe(true)
   })
 
   test('does not run on non-typeclaw.json paths', async () => {
