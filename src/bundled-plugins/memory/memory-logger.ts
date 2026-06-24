@@ -7,6 +7,7 @@ import { formatLocalDate } from '@/shared'
 import { advanceWatermarkTool, createAppendTool, type FragmentsAppendedHook } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { streamFilePath, streamsDir } from './paths'
+import { listReferenceSlugs } from './references/load-references'
 import { createStoreReferenceTool, type ReferenceStoredHook } from './references/store-reference-tool'
 import { readEvents } from './stream-io'
 import { readLatestWatermark } from './watermark'
@@ -146,9 +147,11 @@ Skip these anti-patterns:
 
 # Verbatim references (store_reference tool)
 
-When the user explicitly asks to remember a verbatim artifact — SQL, code, a runbook, pasted spec — call \`store_reference({ title, body, origin: 'episode', tags: [] })\` with the byte-for-byte body. Do not distill or summarize it. The tool returns a slug; include it in \`append\` as \`references: ['<slug>']\` when writing the session fragment.
+Store a verbatim artifact whenever its memory value depends on the EXACT text — SQL, code blocks, runbooks, pasted specs, config snippets, API payloads, review comments, or command output the user will want reproduced byte-for-byte later. This is not limited to "please remember this": if you are about to write a fragment that summarizes such an artifact, store the artifact too so the exact text survives. Call \`store_reference({ title, body, origin: 'episode', tags: [] })\` with the byte-for-byte body. Do not distill or summarize the body.
 
-If the reference is the only durable content, still write a fragment (topic "verbatim reference stored") naming what was stored and citing the reference, so the reference is linked into the stream.
+\`store_reference\` returns a slug (the file it wrote under \`memory/references/\`). The ONLY valid contents of \`append\`'s \`references\` field are slugs you received back from \`store_reference\` in THIS run. Never put a topic id, PR name/number, stream path, URL, or any invented label in \`references\` — those are not references and will be silently dropped. If you did not call \`store_reference\`, omit \`references\` entirely. To cross-link a related topic, name it in the body prose instead.
+
+If a stored reference is the only durable content, still write a fragment (topic "verbatim reference stored") naming what was stored and citing the returned slug, so the reference is linked into the stream.
 
 References are for artifacts whose exact text matters. A distilled memory fragment should name what the artifact is, who/what it applies to, and why it was retained, while the reference body holds the verbatim material. Do not paste large reference bodies into fragment text.
 
@@ -179,7 +182,7 @@ Recurrence is not duplication. A durable preference, pattern, workaround, or com
 
 # Fragment format
 
-Call \`append\` with \`{topic, body, source, entry, latestEntryId}\` or \`{topic, body, source, entry, latestEntryId, references}\`. The runtime serializes your call into the daily stream; you never write raw JSON. \`source\` is the parent session id. \`topic\` is a short noun phrase. \`entry\` is the specific transcript-entry-id that anchors this fragment's evidence. Each fragment carries its own entry id; do not stamp every fragment with the same latest evaluated id. \`latestEntryId\` is the latest entry evaluated in this run and advances the watermark. \`references\` is optional slugs from \`store_reference\`.
+Call \`append\` with \`{topic, body, source, entry, latestEntryId}\` or \`{topic, body, source, entry, latestEntryId, references}\`. The runtime serializes your call into the daily stream; you never write raw JSON. \`source\` is the parent session id. \`topic\` is a short noun phrase. \`entry\` is the specific transcript-entry-id that anchors this fragment's evidence. Each fragment carries its own entry id; do not stamp every fragment with the same latest evaluated id. \`latestEntryId\` is the latest entry evaluated in this run and advances the watermark. \`references\` is optional and may ONLY contain slugs that \`store_reference\` returned to you in this run; anything else (topic ids, PR names, stream paths, invented labels) is dropped — omit the field if you stored nothing.
 
 **Situational provenance (\`who\` / \`where\`).** Memory is sharper when it remembers who said something and where. Two fields capture this:
 
@@ -297,6 +300,7 @@ export function createMemoryLoggerSubagent(
   const appendTool = createAppendTool({
     onFragmentsAppended: options.onFragmentsAppended,
     originProvider: () => currentOrigin,
+    referenceSlugResolver: (agentDir) => listReferenceSlugs(agentDir),
   })
   const storeReferenceTool = createStoreReferenceTool(options.onReferenceStored)
   const customTools = [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool]
