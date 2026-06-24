@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { AgentSession } from './index'
-import { detectProviderError, subscribeProviderErrors } from './provider-error'
+import { detectProviderError, isThrottleOrOverload, subscribeProviderErrors } from './provider-error'
 
 describe('detectProviderError', () => {
   test('preserves the raw errorMessage on `message` for operator surfaces (logs/TUI)', () => {
@@ -117,6 +117,75 @@ describe('detectProviderError safeMessage redaction', () => {
 
     expect(result?.message).toBe(raw)
     expect(result?.safeMessage).not.toBe(raw)
+  })
+})
+
+describe('isThrottleOrOverload', () => {
+  test('matches the Codex `server_is_overloaded` shape (the production incident)', () => {
+    // given: the exact body Codex returns under per-account 503 throttling
+    const raw =
+      'Codex error: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}'
+
+    expect(isThrottleOrOverload(raw)).toBe(true)
+  })
+
+  test('matches generic overload / capacity signals across providers', () => {
+    expect(isThrottleOrOverload('the model is currently overloaded')).toBe(true)
+    expect(isThrottleOrOverload('503 Service Unavailable')).toBe(true)
+    expect(isThrottleOrOverload('service_unavailable_error')).toBe(true)
+  })
+
+  test('matches rate-limit / 429 signals', () => {
+    expect(isThrottleOrOverload('rate limit exceeded')).toBe(true)
+    expect(isThrottleOrOverload('You are being rate-limited')).toBe(true)
+    expect(isThrottleOrOverload('HTTP 429 Too Many Requests')).toBe(true)
+    expect(isThrottleOrOverload('too many requests, slow down')).toBe(true)
+  })
+
+  test('is case-insensitive', () => {
+    expect(isThrottleOrOverload('SERVER_IS_OVERLOADED')).toBe(true)
+    expect(isThrottleOrOverload('Rate Limit')).toBe(true)
+  })
+
+  test('does NOT match auth failures (401 must surface, not fail over)', () => {
+    expect(isThrottleOrOverload('401 Unauthorized')).toBe(false)
+    expect(isThrottleOrOverload('invalid api key')).toBe(false)
+    expect(isThrottleOrOverload('authentication failed')).toBe(false)
+  })
+
+  test('does NOT match billing / quota failures (a different ref shares the same account problem)', () => {
+    expect(isThrottleOrOverload('insufficient quota')).toBe(false)
+    expect(isThrottleOrOverload('Your account is not active, please check your billing details')).toBe(false)
+    expect(isThrottleOrOverload('payment required')).toBe(false)
+  })
+
+  test('does NOT match generic / unrelated failures', () => {
+    expect(isThrottleOrOverload('malformed response')).toBe(false)
+    expect(isThrottleOrOverload('LLM call failed')).toBe(false)
+    expect(isThrottleOrOverload('context length exceeded')).toBe(false)
+    expect(isThrottleOrOverload('')).toBe(false)
+  })
+
+  test('does NOT false-positive on the substring "529" or unrelated digit runs (anchored codes only)', () => {
+    // 429/503 are the throttle codes; an arbitrary number in prose must not match
+    expect(isThrottleOrOverload('processed 4290 tokens')).toBe(false)
+    expect(isThrottleOrOverload('elapsed 5030ms')).toBe(false)
+  })
+
+  test('a 429 carrying a quota/billing reason is NOT failover-worthy (denylist wins over the status code)', () => {
+    expect(isThrottleOrOverload('Error code: 429 - insufficient quota')).toBe(false)
+    expect(isThrottleOrOverload('429 payment required')).toBe(false)
+    expect(isThrottleOrOverload('429 You exceeded your current quota, please check your billing')).toBe(false)
+  })
+
+  test('a 401/auth error carrying a status code is NOT failover-worthy', () => {
+    expect(isThrottleOrOverload('429 unauthorized: invalid api key')).toBe(false)
+  })
+
+  test('a plain 429/503 with no quota/billing/auth reason still IS failover-worthy', () => {
+    expect(isThrottleOrOverload('Error code: 429 - too many requests')).toBe(true)
+    expect(isThrottleOrOverload('429 rate limit exceeded')).toBe(true)
+    expect(isThrottleOrOverload('503 Service Unavailable')).toBe(true)
   })
 })
 
