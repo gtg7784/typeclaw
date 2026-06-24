@@ -594,6 +594,34 @@ describe('channel manager — slack adapter lifecycle', () => {
     await mgr.stop()
   })
 
+  test('skips slack user adapter (does not throw) when hostd env vars are missing', async () => {
+    // given: secrets present but no TYPECLAW_HOSTD_* (lost first-boot daemon race)
+    cfg.slack = enabledAdapterCfg()
+    await writeSlackSecrets(agentDir)
+    const fake = makeFakeAdapter()
+    const logger = recordingLogger()
+    let constructed = false
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      logger,
+      createSlackUserAdapter: () => {
+        constructed = true
+        return fake
+      },
+    })
+
+    // when: start runs with the hostd-backed adapter unsatisfiable
+    // then: the whole manager must not crash — the adapter is skipped, not thrown
+    await mgr.start()
+
+    expect(constructed).toBe(false)
+    expect(fake.startCalls).toBe(0)
+    expect(logger.messages.some((m) => m.includes('could not be constructed'))).toBe(true)
+    await mgr.stop()
+  })
+
   test('starts slack adapter when both SLACK_BOT_TOKEN and SLACK_APP_TOKEN are set', async () => {
     cfg['slack-bot'] = enabledAdapterCfg()
     const fake = makeFakeAdapter()

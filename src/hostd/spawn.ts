@@ -111,10 +111,46 @@ async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: num
       if (httpPort === null) return { ok: false, reason: 'daemon did not report an HTTP control port' }
       return { ok: true, pid: await readPidQuiet(), spawned: false, httpPort }
     }
+    // A prior spawn attempt can leave a live-but-not-yet-listening child (its
+    // readiness poll timed out without killing it — see spawnDaemonDetached).
+    // Spawning a second daemon would race two processes for the same socket, so
+    // adopt the existing child and poll IT for readiness instead of re-spawning.
+    const existingPid = await livePidfileChild()
+    if (existingPid !== null) {
+      const ready = await pollForReadiness(opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
+      if (ready === null) return { ok: false, reason: 'daemon spawned but did not become reachable yet' }
+      return { ok: true, pid: existingPid, spawned: false, httpPort: ready }
+    }
     return await spawnDaemonDetached(opts)
   } finally {
     await releaseLock(lock.token)
   }
+}
+
+// Reads the pidfile and returns its pid only if that process is still alive
+// (signal 0 = existence check, no signal delivered). Returns null when the
+// pidfile is absent/garbage or the process has exited — i.e. nothing to adopt.
+async function livePidfileChild(): Promise<number | null> {
+  const pid = await readPidQuiet()
+  if (pid <= 0) return null
+  try {
+    process.kill(pid, 0)
+    return pid
+  } catch {
+    return null
+  }
+}
+
+async function pollForReadiness(timeoutMs: number): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await isDaemonReachable()) {
+      const httpPort = await readHttpPort()
+      if (httpPort !== null) return httpPort
+    }
+    await sleep(POLL_INTERVAL_MS)
+  }
+  return null
 }
 
 async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<SpawnAttemptResult> {
@@ -154,26 +190,24 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<SpawnAtte
     return { ok: false, reason: `failed to write daemon pidfile: ${stringify(error)}` }
   }
 
-  const deadline = Date.now() + (opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
-  while (Date.now() < deadline) {
-    if (await isDaemonReachable()) {
-      const httpPort = await readHttpPort()
-      if (httpPort !== null) return { ok: true, pid: proc.pid, spawned: true, httpPort }
-    }
-    await sleep(POLL_INTERVAL_MS)
-  }
+  const httpPort = await pollForReadiness(opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
+  if (httpPort !== null) return { ok: true, pid: proc.pid, spawned: true, httpPort }
 
-  // Daemon failed to come up. Reap the orphan and clean the pidfile so the
-  // next ensureDaemon() doesn't observe a dangling pidfile pointing at our
-  // dead child.
-  try {
-    proc.kill('SIGTERM')
-  } catch {}
-  try {
-    const raw = await readFile(pidfilePath(), 'utf8').catch(() => '')
-    if (raw.trim() === String(proc.pid)) await unlink(pidfilePath())
-  } catch {}
-  return { ok: false, reason: 'daemon spawned but did not become reachable' }
+  // Timed out waiting for readiness. A still-running child is "slow-booting",
+  // not "wedged" — killing it would throw away a daemon that's about to come up
+  // and force every caller into a respawn loop. Only reap a child that already
+  // EXITED (proc.exitCode !== null): that's a genuine failure with a dangling
+  // pidfile to clean. A live-but-not-ready child is left running so the caller
+  // can re-probe it (see registerWithDaemon's retry) — the next ensureDaemon()
+  // fast-paths through isDaemonReachable() once its socket binds.
+  if (proc.exitCode !== null) {
+    try {
+      const raw = await readFile(pidfilePath(), 'utf8').catch(() => '')
+      if (raw.trim() === String(proc.pid)) await unlink(pidfilePath())
+    } catch {}
+    return { ok: false, reason: 'daemon exited before becoming reachable' }
+  }
+  return { ok: false, reason: 'daemon spawned but did not become reachable yet' }
 }
 
 type LockToken = { path: string }

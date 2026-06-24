@@ -285,6 +285,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const gcMisses = new Map<string, number>()
   let stopped = false
   let httpPort = 0
+  // Boot-time restore runs concurrently with the listeners (see the kickoff
+  // below). Declared here so the IPC dispatcher and HTTP handler — both defined
+  // before restore starts — can gate on it; until it's assigned, no registry
+  // RPC has been accepted yet, so resolving immediately is safe.
+  let restoreComplete: Promise<void> | null = null
+  const awaitRestored = (): Promise<void> => restoreComplete ?? Promise.resolve()
 
   const supervisor = opts.restart
     ? buildSupervisor({
@@ -538,16 +544,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const dispatch = async (req: Request): Promise<RpcResponse> => {
     switch (req.kind) {
       case 'register':
+        await awaitRestored()
         return handleRegister(req)
       case 'deregister':
+        await awaitRestored()
         return handleDeregister(req)
       case 'list':
         return handleList()
       case 'status':
+        await awaitRestored()
         return handleStatus(req)
       case 'restart':
+        await awaitRestored()
         return handleRestart(req)
       case 'secrets-patch':
+        await awaitRestored()
         return handleSecretsPatch(req)
       case 'http-info':
         return handleHttpInfo()
@@ -614,11 +625,51 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (rpc.kind !== 'restart' && rpc.kind !== 'secrets-patch') {
       return json({ ok: false, reason: 'http transport only supports restart and secrets-patch' }, 403)
     }
+    // restartTokens is populated by boot-time restore; authorizing before it
+    // completes would reject a valid token as "invalid restart token".
+    await awaitRestored()
     if (restartTokens.get(rpc.containerName) !== token) {
       return json({ ok: false, reason: 'invalid restart token' }, 403)
     }
     return json(rpc.kind === 'restart' ? await handleRestart(rpc) : await handleSecretsPatch(rpc))
   }
+
+  // GC tick distinguishes "container confirmed gone" from "docker call failed":
+  // a `docker ps` blip should not deregister a live container registration, so
+  // we require gcMissesToDeregister consecutive confirmed absences. Boot-time
+  // restore reuses the same probe but with a stricter policy — see
+  // restorePersistedRegistrations.
+  const probeContainerAlive = async (name: string): Promise<'alive' | 'gone' | 'unknown'> => {
+    try {
+      const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
+      if (result.exitCode !== 0) return 'unknown'
+      const names = result.stdout
+        .trim()
+        .split('\n')
+        .filter((s) => s.length > 0)
+      return names.includes(name) ? 'alive' : 'gone'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  // Boot-time restore replays every persisted registration into the in-memory
+  // maps and revives portbroker. It runs N docker-ps probes, so on a cold
+  // daemon it can take seconds — longer than the CLI's spawn-readiness window.
+  // We therefore start it WITHOUT blocking the listeners: the sockets accept
+  // connections immediately (so `isDaemonReachable` succeeds fast and the CLI
+  // injects the hostd env vars), but every handler that reads or mutates the
+  // restored registry awaits `awaitRestored` first. That preserves the original
+  // invariant — no RPC observes a half-restored registry — without coupling
+  // readiness to docker latency. Kicked off BEFORE the HTTP/IPC listeners so no
+  // request can slip past the gate in an unrestored window. A bad file (parse
+  // error, schema mismatch) is logged-and-skipped; one corrupt registration
+  // must not gate recovery.
+  restoreComplete = restorePersistedRegistrations(applyRegistration, log, probeContainerAlive, removeRegistrationFile)
+  // Swallow the rejection on a detached handle so a restore failure never
+  // becomes an unhandledRejection before the first gated handler awaits it.
+  // Handlers await `restoreComplete` directly so they still fail closed.
+  restoreComplete.catch(() => {})
 
   const httpHostname = opts.httpHost ?? '0.0.0.0'
   // Try the stable port first so containers' cached TYPECLAW_HOSTD_URL stays
@@ -648,32 +699,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
   httpPort = httpServer.port ?? 0
   log({ kind: 'daemon-http-listening', host: httpHostname, port: httpPort })
-
-  // GC tick distinguishes "container confirmed gone" from "docker call failed":
-  // a `docker ps` blip should not deregister a live container registration, so
-  // we require gcMissesToDeregister consecutive confirmed absences. Boot-time
-  // restore reuses the same probe but with a stricter policy — see
-  // restorePersistedRegistrations.
-  const probeContainerAlive = async (name: string): Promise<'alive' | 'gone' | 'unknown'> => {
-    try {
-      const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
-      if (result.exitCode !== 0) return 'unknown'
-      const names = result.stdout
-        .trim()
-        .split('\n')
-        .filter((s) => s.length > 0)
-      return names.includes(name) ? 'alive' : 'gone'
-    } catch {
-      return 'unknown'
-    }
-  }
-
-  // Boot-time restore: replay every persisted registration into the in-memory
-  // maps and revive portbroker for it. Runs before the IPC listener so the socket
-  // is never accepting RPCs against a half-restored registry. A bad file
-  // (parse error, schema mismatch) is logged-and-skipped — one corrupt
-  // registration must not gate every other container's recovery.
-  await restorePersistedRegistrations(applyRegistration, log, probeContainerAlive, removeRegistrationFile)
 
   const sockets = new Set<NetSocket>()
   const listener = createServer((socket) => {
@@ -734,6 +759,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       clearInterval(gcTimer)
       await closeSocketServer(listener, sockets)
       httpServer.stop(true)
+      // A stop racing an in-flight boot restore could let a portbroker start
+      // after the teardown loop below already ran, leaking it. Let restore
+      // settle (it never rejects past the detached catch) before tearing down.
+      await (restoreComplete ?? Promise.resolve()).catch(() => {})
       if (opts.portbroker) {
         const names = Array.from(cwds.keys())
         await Promise.allSettled(names.map((n) => opts.portbroker!.stop(n, 'broker-stopped')))
