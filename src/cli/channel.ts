@@ -4,6 +4,7 @@ import { cancel, confirm, intro, isCancel, log, note, password, select, spinner,
 import { defineCommand } from 'citty'
 import QRCode from 'qrcode'
 
+import { githubRequiredPermissionsNote } from '@/channels/adapters/github/permission-guidance'
 import { config } from '@/config'
 import {
   listChannels,
@@ -1039,8 +1040,7 @@ async function promptGithubCredentials(cwd: string): Promise<{
   note(
     [
       'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
-      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-      'Metadata read, and Webhooks read/write (TypeClaw will create and manage the repository webhooks for you).',
+      githubRequiredPermissionsNote(true),
     ].join('\n'),
     'Get GitHub credentials',
   )
@@ -1196,19 +1196,16 @@ async function promptGithubAuthUpdate(currentType: 'pat' | 'app'): Promise<Githu
   if (nextType === 'pat') {
     if (action === 'rotate') {
       note(
-        [
-          'Rotate at https://github.com/settings/personal-access-tokens.',
-          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-          'Metadata read, and Webhooks read/write.',
-        ].join('\n'),
+        ['Rotate at https://github.com/settings/personal-access-tokens.', githubRequiredPermissionsNote(false)].join(
+          '\n',
+        ),
         'Rotate the GitHub PAT',
       )
     } else {
       note(
         [
           'Create a fine-grained PAT at https://github.com/settings/personal-access-tokens.',
-          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-          'Metadata read, and Webhooks read/write.',
+          githubRequiredPermissionsNote(false),
         ].join('\n'),
         'Switch to GitHub PAT auth',
       )
@@ -1236,8 +1233,7 @@ async function promptGithubAuthUpdate(currentType: 'pat' | 'app'): Promise<Githu
   note(
     [
       'Create a GitHub App at https://github.com/settings/apps/new and install it on your repositories.',
-      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-      'Metadata read, and Webhooks read/write.',
+      githubRequiredPermissionsNote(false),
       'Then collect the App ID, generate a private key (.pem), and grab the Installation ID from the URL',
       'of the installation page (https://github.com/settings/installations/<installation-id>).',
     ].join('\n'),
