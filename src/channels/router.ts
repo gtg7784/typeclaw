@@ -2,7 +2,7 @@ import { statSync } from 'node:fs'
 import { basename } from 'node:path'
 
 import type { AssistantMessage } from '@mariozechner/pi-ai'
-import { SessionManager } from '@mariozechner/pi-coding-agent'
+import { type SessionEntry, SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
 import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '@/agent/attention-escalation'
@@ -312,6 +312,32 @@ export const COLD_START_REPLY_NUDGE = [
   'Answer the last user message now via your channel reply tool. If you truly',
   'have nothing to add, call `skip_response({ reason })` (preferred) or end with',
   'exactly `NO_REPLY` so the silence is recorded — do not just end empty.',
+  '',
+  '---',
+].join('\n')
+// Reminder-only nudge for the empty-stop-after-tool-work retry. Distinct from
+// both EMPTY_TURN_RETRY_NUDGE (which misdiagnoses a clean `stop` as output-budget
+// exhaustion and, per its own docstring, makes the model RE-RUN its tools and
+// strand again) and STRANDED_TOOLUSE_CONTINUATION_NUDGE (which assumes a `continue:
+// true` status reply already landed). Here NO send landed, the model gathered real
+// tool results, then the final completion came back as a bare empty `stop` — the
+// Fireworks/gpt empty-completion degeneration. The recovery is to READ the results
+// already in this branch, summarize, and reply — NOT to re-investigate. The
+// trailing NO_REPLY escape is what makes the rare research-then-decline false
+// positive self-correct on the first retry instead of forcing the fallback.
+export const EMPTY_STOP_AFTER_TOOL_WORK_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your previous turn gathered information with your tools, then ended without',
+  'sending any reply — the final completion came back empty. This is an automated',
+  'signal from the channel router, not a message from anyone in the chat. **Do not',
+  'acknowledge or reply to this notice itself.**',
+  '',
+  'Do NOT re-run your tools. The results you already gathered are still in this',
+  'conversation above — read them, summarize what you found, and send your reply',
+  'now via your channel reply tool. Only call more tools if a specific fact is',
+  'genuinely still missing. If you truly have nothing to say, reply with `NO_REPLY`.',
   '',
   '---',
 ].join('\n')
@@ -791,6 +817,14 @@ type LiveSession = {
   // increments it before injecting EMPTY_TURN_RETRY_NUDGE and reads it to decide
   // retry-vs-fallback. See the candidate===null branch.
   emptyTurnRetries: number
+  // Latches once a bare-empty `stop` has been classified as empty-stop-after-tool-work
+  // this logical turn. The recovery nudge tells the model NOT to re-run its tools, so
+  // a compliant retry is expected to land another bare-empty `stop` with NO new tool
+  // call — `attemptMadeToolCall` would then be false and the turn would silently bail
+  // with budget unspent. Once armed, the cause persists for the turn so later bare-empty
+  // stops keep spending the shared retry budget toward the visible fallback. Reset
+  // alongside `emptyTurnRetries` on a real user batch only (anti-reloop discipline).
+  emptyStopAfterToolWorkArmed: boolean
   // Count of continuation nudges spent on the CURRENT logical turn, bounded by
   // MAX_WILLINGNESS_NUDGES. Reset alongside `emptyTurnRetries` only when a real
   // user batch starts (batch.length > 0), NOT on the reminder-only iteration the
@@ -1849,6 +1883,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
         emptyTurnRetries: 0,
+        emptyStopAfterToolWorkArmed: false,
         willingnessNudges: 0,
         lastTerminalReplyAbort: null,
         abortReasonThisTurn: null,
@@ -2504,6 +2539,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // iterations the retry itself queues do not refill the budget and loop
           // forever (and the raised cap stays scoped to the turn that set it).
           live.emptyTurnRetries = 0
+          live.emptyStopAfterToolWorkArmed = false
           live.willingnessNudges = 0
           live.abortReasonThisTurn = null
           live.nextPromptMaxTokens = undefined
@@ -3983,6 +4019,42 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           return
         }
         await postEmptyTurnFallback('cold_start_solo_bare_empty_retries_exhausted')
+        return
+      }
+      // Deliberately AFTER the cold-start guard (that path has its own nudge). A
+      // bare-empty stop that followed real tool work — but landed no send — is the
+      // no-send sibling of the willingness-ack / stranded-toolUse degenerations
+      // above: the model gathered results then emitted an empty completion instead
+      // of the answer. Retry telling it to summarize what it already has; on
+      // exhaustion post the visible fallback rather than stranding the asker on
+      // silence. The cause LATCHES for the logical turn (`emptyStopAfterToolWorkArmed`):
+      // the nudge tells the model not to re-run tools, so a compliant retry lands
+      // another bare-empty stop with NO new tool call — requiring fresh tool work on
+      // every attempt would silently drop exactly that shape with budget unspent.
+      // Once armed, subsequent bare-empty stops keep spending the shared retry budget
+      // toward the fallback. An explicit non-empty NO_REPLY still escapes to silence
+      // (its `trim()` is non-empty, so the first condition fails and it falls through
+      // to no_reply below); a bare-empty stop with no tool work AND never-armed stays
+      // silent too.
+      if (
+        assistantText.trim() === '' &&
+        source === 'leaf' &&
+        (live.emptyStopAfterToolWorkArmed || attemptMadeToolCall(live.session)) &&
+        live.currentTurnAuthorId !== null &&
+        live.successfulChannelSends === successfulSendsBeforePrompt &&
+        live.promptQueue.length === 0
+      ) {
+        live.emptyStopAfterToolWorkArmed = true
+        if (live.emptyTurnRetries < MAX_EMPTY_TURN_RETRIES) {
+          live.emptyTurnRetries++
+          logger.warn(
+            `[channels] ${live.keyId} empty_turn_retry attempt=${live.emptyTurnRetries}/${MAX_EMPTY_TURN_RETRIES} ` +
+              `cause=empty_stop_after_tool_work`,
+          )
+          live.pendingSystemReminders.push(EMPTY_STOP_AFTER_TOOL_WORK_NUDGE)
+          return
+        }
+        await postEmptyTurnFallback('empty_stop_after_tool_work_retries_exhausted')
         return
       }
       const leakedReasoning = !isNoReplySignal(assistantText)
@@ -5569,6 +5641,30 @@ function visibleAssistantText(message: AssistantMessage): string {
 
 function hasToolCall(message: AssistantMessage): boolean {
   return message.content.some((block) => block.type === 'toolCall')
+}
+
+// True when any assistant message in the CURRENT prompt-attempt carries a
+// toolCall block. "This attempt" is bounded by walking the parentId chain back
+// to the first user message — which INCLUDES an injected retry nudge, since
+// that lands as a user-side entry — so each retry is scored on its own tool
+// work, not the original turn's. validateChannelTurn uses this to tell a
+// bare-empty `stop` that followed real tool work (Fireworks/gpt empty-completion
+// degeneration → retry) apart from a bare-empty `stop` that produced nothing
+// from nothing (deliberate silence → honor it). The `source === 'leaf'` +
+// `stopReason: 'stop'` invariant at the call site guarantees any tool called
+// this attempt already returned a toolResult; otherwise the leaf would be
+// `toolUse`, not `stop`. Depth-bounded like the other branch walks so a
+// malformed session can't loop.
+function attemptMadeToolCall(session: AgentSession): boolean {
+  let cursor: SessionEntry | undefined = session.sessionManager.getLeafEntry()
+  for (let depth = 0; depth < 32 && cursor; depth++) {
+    if (cursor.type === 'message') {
+      if (cursor.message.role === 'user') return false
+      if (cursor.message.role === 'assistant' && hasToolCall(cursor.message)) return true
+    }
+    cursor = cursor.parentId ? session.sessionManager.getEntry(cursor.parentId) : undefined
+  }
+  return false
 }
 
 // Lenient on purpose: distilled / smaller models routinely drift off the
