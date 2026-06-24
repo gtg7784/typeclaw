@@ -270,6 +270,14 @@ describe('dispatchPluginCommand', () => {
       stdin,
       stdout,
       stderr,
+      // Stub URL resolution instead of probing real Docker: the live `docker
+      // inspect` is slow and times out on Windows CI. The not-running hint
+      // itself is covered in require-running.test.ts and
+      // container-command-client.test.ts; here we only assert dispatch routes a
+      // container command through the proxy and propagates its error.
+      resolveContainerUrl: async () => ({
+        error: 'Container container-only is not running. Run `typeclaw start` first.',
+      }),
     })
     expect(outcome.kind).toBe('error')
     if (outcome.kind === 'error') {

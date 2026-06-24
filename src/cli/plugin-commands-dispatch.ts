@@ -1,4 +1,4 @@
-import { proxyContainerCommand } from './container-command-client'
+import { proxyContainerCommand, type ContainerProxyOptions } from './container-command-client'
 import { parseArgs, runHostCommand } from './host-command-runner'
 import { renderCommandHelp } from './plugin-command-help'
 import { discoverCommands } from './plugin-commands'
@@ -16,6 +16,11 @@ export type DispatchOptions = {
   stdout?: WritableStream<Uint8Array>
   stderr?: WritableStream<Uint8Array>
   signal?: AbortSignal
+  // Test seam: override container-URL resolution so unit tests exercise the
+  // container dispatch path without spawning a real `docker inspect` (slow and
+  // flaky on Windows CI). Unset in production: proxyContainerCommand falls back
+  // to the live docker probe.
+  resolveContainerUrl?: ContainerProxyOptions['resolveUrl']
 }
 
 export async function dispatchPluginCommand(opts: DispatchOptions): Promise<PluginCommandDispatchOutcome> {
@@ -62,6 +67,7 @@ export async function dispatchPluginCommand(opts: DispatchOptions): Promise<Plug
       stdout,
       stderr,
       abortSignal: signal,
+      resolveUrl: opts.resolveContainerUrl,
     })
     if (!containerResult.ok) {
       return { kind: 'error', exitCode: containerResult.exitCode, message: containerResult.message }
