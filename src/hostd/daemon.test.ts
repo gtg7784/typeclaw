@@ -703,6 +703,11 @@ describe('startDaemon', () => {
 
     daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, restart })
 
+    // status awaits restore; gate on it before asserting list, which is part of
+    // the non-blocking readiness surface and otherwise races the async restore.
+    const restored = await send({ kind: 'status', containerName: 'coder' })
+    expect(restored.ok).toBe(true)
+
     const list = await send({ kind: 'list' })
     expect(list.ok).toBe(true)
     if (!list.ok) return
@@ -723,7 +728,7 @@ describe('startDaemon', () => {
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
   })
 
-  test('boot-time restore tolerates corrupted registration files', async () => {
+  test('boot-time restore tolerates corrupted registration files (asserted after restore completes)', async () => {
     const alive = new Set(['good'])
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000 })
     await send({ kind: 'register', containerName: 'good', cwd: '/agent/good' })
@@ -733,6 +738,14 @@ describe('startDaemon', () => {
     await writeFile(join(registrationsDir(), 'mismatch.json'), JSON.stringify({ containerName: 'other', cwd: '/x' }))
 
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000 })
+
+    // `list` is part of the non-blocking readiness surface and does NOT wait for
+    // restore, so the first list after boot can race the async restore and read a
+    // half-built registry. Gate on a restore-aware RPC (status awaits restore)
+    // before asserting authoritative registry state — otherwise this asserts
+    // scheduler timing, not corrupted-file tolerance.
+    const status = await send({ kind: 'status', containerName: 'good' })
+    expect(status.ok).toBe(true)
 
     const list = await send({ kind: 'list' })
     expect(list.ok).toBe(true)
@@ -766,7 +779,9 @@ describe('startDaemon', () => {
     startCalls.length = 0
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, portbroker })
 
-    expect(startCalls).toHaveLength(1)
+    // Restore applies registrations (and fires portbroker.start) asynchronously;
+    // wait for the broker-start callback rather than racing it right after boot.
+    await waitFor(() => startCalls.length === 1)
     expect(startCalls[0]?.containerName).toBe('with-broker')
     expect(startCalls[0]?.cwd).toBe('/agent/with-broker')
     expect(startCalls[0]?.wsHostPort).toBe(54321)
@@ -805,8 +820,11 @@ describe('startDaemon', () => {
     startCalls.length = 0
     daemon = await startDaemon({ exec: fakeExec(new Set()), gcIntervalMs: 1_000_000, portbroker })
 
+    // Restore runs async; unlinking the gone container's file is its last step,
+    // so waiting on the unlink is the deterministic restore-complete signal here.
+    // A bare existsSync / list right after startDaemon races restore (the CI flake).
+    await waitFor(() => !existsSync(filePath))
     expect(startCalls).toHaveLength(0)
-    expect(existsSync(filePath)).toBe(false)
 
     const list = await send({ kind: 'list' })
     expect(list.ok).toBe(true)
@@ -843,7 +861,9 @@ describe('startDaemon', () => {
     startCalls.length = 0
     daemon = await startDaemon({ exec: flakyExec, gcIntervalMs: 1_000_000, portbroker })
 
-    expect(startCalls).toHaveLength(1)
+    // Restore is async; wait for the broker-start callback (its observable effect)
+    // instead of asserting right after boot, which races the restore.
+    await waitFor(() => startCalls.length === 1)
     expect(existsSync(registrationFilePath('flaky'))).toBe(true)
   })
 
