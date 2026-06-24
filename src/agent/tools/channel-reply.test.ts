@@ -851,7 +851,7 @@ describe('channel_reply resolve_review_thread', () => {
     expect(result.details.ok).toBe(false)
   })
 
-  test('does not attempt resolution when the flag is omitted', async () => {
+  test('does not attempt resolution on an explicit false (thread stays open)', async () => {
     let resolveCalled = false
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true }), {
@@ -863,9 +863,135 @@ describe('channel_reply resolve_review_thread', () => {
       origin: githubThreadOrigin,
     })
 
-    await runTool(tool, { text: 'plain reply' })
+    await runTool(tool, { text: 'plain reply', resolve_review_thread: false })
 
     expect(resolveCalled).toBe(false)
+  })
+})
+
+describe('channel_reply resolve_review_thread required-choice enforcement', () => {
+  test('denies a terminal github review-thread text reply that omits the resolve choice', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Thanks for the context — makes sense.' })
+
+    expect(calls).toHaveLength(0)
+    expect(result.details).toMatchObject({ ok: false })
+    expect((result.details as { error: string }).error).toContain('resolve_review_thread')
+    const rendered = (result.content[0] as { text: string }).text
+    expect(rendered).toContain('channel_reply denied')
+    expect(rendered).not.toContain('posted to')
+  })
+
+  test('proceeds when the resolve choice is an explicit false (thread kept open)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Still looking into this one.', resolve_review_thread: false })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details).toEqual({ ok: true })
+  })
+
+  test('exempts a mid-turn status reply (continue:true) from the required choice', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'On it — checking the diff now.', continue: true })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details).toEqual({ ok: true, continue: true })
+  })
+
+  test('exempts an attachments-only github review-thread reply (no text to acknowledge)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { attachments: [{ path: '/agent/diff.png' }] })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details).toEqual({ ok: true })
+  })
+
+  test('does not require the choice on a github PR reply outside a review thread (thread === null)', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: { adapter: 'github', workspace: 'acme/widgets', chat: 'pr:585', thread: null },
+    })
+
+    const result = await runTool(tool, { text: 'General note on the PR.' })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details).toEqual({ ok: true })
+  })
+
+  test('does not require the choice on a non-github review-thread reply', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: slackThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'done' })
+
+    expect(calls).toHaveLength(1)
+    expect(result.details).toEqual({ ok: true })
+  })
+
+  test('an explicit true still drives the existing resolve-before-post path', async () => {
+    const order: string[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(
+        async () => {
+          order.push('send')
+          return { ok: true }
+        },
+        {
+          resolveReviewThread: async (req) => {
+            order.push(`resolve:${req.rootCommentId}`)
+            return { ok: true }
+          },
+        },
+      ),
+      origin: githubThreadOrigin,
+    })
+
+    const result = await runTool(tool, { text: 'Verified — fix looks solid.', resolve_review_thread: true })
+
+    expect(order).toEqual(['resolve:3343107661', 'send'])
+    expect(result.details).toEqual({ ok: true })
   })
 })
 
@@ -948,7 +1074,10 @@ describe('channel_reply re-review stranding guard', () => {
       origin: githubThreadOrigin,
     })
 
-    const result = await runTool(tool, { text: 'Thanks for the context — makes sense.' })
+    const result = await runTool(tool, {
+      text: 'Thanks for the context — makes sense.',
+      resolve_review_thread: false,
+    })
 
     expect(result.details.ok).toBe(true)
     expect(queried).toBe(false)
