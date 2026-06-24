@@ -75,6 +75,17 @@ function runHostStartupMigrationsOnce(commandName: string | undefined): void {
   }
 }
 
+// Plugin commands are discovered from the agent folder; outside one, discovery
+// yields nothing and no section prints. Shared by the --help and no-command
+// paths so both keep showing plugin commands above the builtin usage table.
+async function printPluginCommandsSection(): Promise<void> {
+  const { renderPluginCommandsSection } = await import('./plugin-command-help')
+  const { discoverCommands } = await import('./plugin-commands')
+  const discovery = await discoverCommands({ cwd: process.cwd() })
+  const section = renderPluginCommandsSection(discovery.commands)
+  if (section !== null) process.stdout.write(`${section}\n\n`)
+}
+
 async function runWithPluginDispatch(): Promise<void> {
   const argv = process.argv.slice(2)
   const first = argv[0]
@@ -91,17 +102,30 @@ async function runWithPluginDispatch(): Promise<void> {
     await maybeNotifyUpdate(first)
   }
 
+  // Top-level help and the no-command case are hand-rendered from the static
+  // command-meta table (see ./help) instead of `runMain(main)`. Routing them
+  // through citty would resolve every lazy `subCommands` thunk just to read the
+  // descriptions for the usage table, importing all 25 command modules (and
+  // their config/docker/agent-messenger graphs) — which made a bare `typeclaw`
+  // slower than running a real subcommand. Per-command help (`typeclaw x --help`)
+  // still goes through citty below, importing only that one command.
   if (first === '--help' || first === '-h') {
-    // citty calls process.exit() after rendering help, so anything we print
-    // AFTER `runMain(main)` is never reached. Print the plugin commands
-    // section first; citty's own help follows and the user reads top-down.
-    const { renderPluginCommandsSection } = await import('./plugin-command-help')
-    const { discoverCommands } = await import('./plugin-commands')
-    const discovery = await discoverCommands({ cwd: process.cwd() })
-    const section = renderPluginCommandsSection(discovery.commands)
-    if (section !== null) process.stdout.write(`${section}\n\n`)
-    await runMain(main)
-    return
+    await printPluginCommandsSection()
+    const { renderTopLevelUsage } = await import('./help')
+    process.stdout.write(`${await renderTopLevelUsage()}\n\n`)
+    process.exit(0)
+  }
+
+  if (first === undefined) {
+    // No plugin discovery here: bare `typeclaw` must stay a pure
+    // E_NO_COMMAND report and never load plugin/config code (discoverCommands
+    // can rewrite typeclaw.json via loadConfigSync). Plugin commands surface
+    // only on explicit top-level help and plugin-command dispatch. Mirror
+    // citty's E_NO_COMMAND: usage to stdout, the message to stderr, exit 1.
+    const { renderTopLevelUsage } = await import('./help')
+    process.stdout.write(`${await renderTopLevelUsage()}\n\n`)
+    process.stderr.write('No command specified.\n')
+    process.exit(1)
   }
 
   if (
