@@ -12,8 +12,10 @@ import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
+import { resolveFallbackChain } from '@/agent/model-fallback'
+import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
-import { detectProviderError } from '@/agent/provider-error'
+import { detectProviderError, isThrottleOrOverload } from '@/agent/provider-error'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
 import { sessionMetaPayload } from '@/agent/session-meta'
@@ -29,7 +31,9 @@ import {
   runIdleContinuation,
 } from '@/agent/todo/continuation-wiring'
 import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
+import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import type { ChannelRouter } from '@/channels/router'
+import { getConfig, resolveModel } from '@/config'
 import { aggregateCronList, type CronJob, type CronListEntry, loadCron } from '@/cron'
 import type { McpManager } from '@/mcp'
 import type { HookBus } from '@/plugin'
@@ -183,6 +187,7 @@ type QueuedPrompt = {
 
 type SessionState = {
   session: AgentSession
+  activeModelRef: ReturnType<typeof resolveFallbackChain>[number]
   // The session's creation-time thinking level, captured once. An escalated turn
   // moves `session.thinkingLevel` to `high`, so neither turn-driving path (drain
   // loop, no-stream fallback) can use the live getter as the reset target — both
@@ -535,6 +540,7 @@ export function createServer({
 
             const state: SessionState = {
               session,
+              activeModelRef: resolveFallbackChain(getConfig().models, undefined)[0]!,
               turnThinkingDefault: session.thinkingLevel,
               lastQuestionSignal: null,
               sessionFileId,
@@ -1111,7 +1117,26 @@ async function drain(
             ? `${renderTurnTimeAnchor()}\n\n${item.text}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${item.text}`
         applyTurnThinkingLevel(state.session, item.text, state.turnThinkingDefault, state.lastQuestionSignal)
-        await state.session.prompt(turnText)
+        const result = await promptPersistentTurnWithFallback({
+          refs: resolveFallbackChain(getConfig().models, undefined),
+          currentModelRef: state.activeModelRef,
+          session: state.session,
+          text: turnText,
+          shouldFailover: (err) => isThrottleOrOverload(err.message),
+          setModelForRef: async (ref) => {
+            await state.session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
+            state.activeModelRef = ref
+          },
+          beforeAttempt: () => {
+            applyTurnThinkingLevel(state.session, item.text, state.turnThinkingDefault, state.lastQuestionSignal)
+          },
+          onAttemptFailed: (attempt) => {
+            logger.warn(
+              `[server] ${state.sessionFileId}: ${attempt.outcome} failure on ${attempt.ref}: ${attempt.errorMessage ?? 'unknown'}; falling back`,
+            )
+          },
+        })
+        if (result.success) state.activeModelRef = result.refUsed
         // Only real user turns move the signal: a usable turn seeds it, a failed
         // leaf CLEARS it (else an older question leaks across the failed turn).
         // Todo-continuation turns are not user turns, so they leave it untouched.

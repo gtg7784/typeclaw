@@ -43,7 +43,9 @@ The `updateCheck` notice is host-stage only — the container never reads it. Ev
 }
 ```
 
-`default` is required. Other profile names are conventional but not enforced. Each value is either a single `<provider>/<model>` ref or a non-empty array forming a fallback chain: on failure, the runtime disposes the failed session and replays the prompt against the next ref.
+`default` is required. Other profile names are conventional but not enforced. Each value is either a single `<provider>/<model>` ref or a non-empty array forming a fallback chain.
+
+The chain advances on failure, but **how** it advances depends on the turn driver. Cron and other batch turns replay the prompt against the next ref on **any** error. Interactive turns (TUI, channels, subagents) only fail over when the active ref is **throttled or overloaded** (`server_is_overloaded`, `429`, `503`, rate-limit) — a one-off fault like a malformed response or a billing/auth error surfaces on the active ref instead of silently switching providers. Interactive failover also will not switch mid-turn once the model has produced output or run a tool, so a partially-completed turn is never duplicated. A repeatedly-throttled ref is skipped for a short cooldown (a per-process circuit breaker) so every turn does not rediscover the same saturated provider. A **single-ref** profile has no fallback to advance to: a throttled turn fails fast with a provider notice rather than stalling on retries.
 
 ### Per-profile reasoning effort
 

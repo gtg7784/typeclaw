@@ -6,8 +6,10 @@ import { type SessionEntry, SessionManager } from '@mariozechner/pi-coding-agent
 
 import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
 import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '@/agent/attention-escalation'
+import { resolveFallbackChain } from '@/agent/model-fallback'
+import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
-import { subscribeProviderErrors } from '@/agent/provider-error'
+import { isThrottleOrOverload, subscribeProviderErrors } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -19,7 +21,9 @@ import {
   runIdleContinuation,
 } from '@/agent/todo/continuation-wiring'
 import { SUBAGENT_OUTPUT_TOOL_NAME } from '@/agent/tools/subagent-output'
+import { promptPersistentTurnWithFallback } from '@/agent/turn-runner'
 import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
+import { getConfig, resolveModel } from '@/config'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
@@ -645,6 +649,7 @@ type LiveSession = {
   key: ChannelKey
   keyId: string
   session: ChannelAgentSession
+  activeModelRef: ReturnType<typeof resolveFallbackChain>[number]
   // The session's creation-time thinking level, captured once. A later escalated
   // turn moves `session.thinkingLevel` to `high`, so the live getter can't be the
   // reset target — this preserves the real default across the session's lifetime.
@@ -1829,6 +1834,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         key,
         keyId,
         session: created.session,
+        activeModelRef: resolveFallbackChain(getConfig().models, undefined)[0]!,
         turnThinkingDefault: created.session.thinkingLevel,
         lastQuestionSignal: null,
         pendingUserTurnSignal: null,
@@ -2619,7 +2625,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         applyTurnThinkingLevel(live.session, retrievalQuery, live.turnThinkingDefault, live.lastQuestionSignal)
         live.promptInFlight = true
         try {
-          await live.session.prompt(promptText)
+          const result = await promptPersistentTurnWithFallback({
+            refs: resolveFallbackChain(getConfig().models, undefined),
+            currentModelRef: live.activeModelRef,
+            session: live.session,
+            text: promptText,
+            shouldFailover: (err) => isThrottleOrOverload(err.message),
+            setModelForRef: async (ref) => {
+              await live.session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
+              live.activeModelRef = ref
+            },
+            beforeAttempt: () => {
+              applyTurnThinkingLevel(live.session, retrievalQuery, live.turnThinkingDefault, live.lastQuestionSignal)
+            },
+            onAttemptFailed: (attempt) => {
+              logger.warn(
+                `[channels] ${live.keyId}: ${attempt.outcome} failure on ${attempt.ref}: ${attempt.errorMessage ?? 'unknown'}; falling back`,
+              )
+            },
+          })
+          if (result.success) live.activeModelRef = result.refUsed
           await validateChannelTurn(live, successfulSendsBeforePrompt)
           live.consecutiveAborts = 0
           // Resolve the pending logical-turn signal on a binary rule: ONLY a

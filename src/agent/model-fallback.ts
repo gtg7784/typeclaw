@@ -71,10 +71,17 @@ export async function promptWithFallback<TRef extends FallbackModelRef>(opts: {
   // Called after each non-final attempt so callers can log the per-attempt
   // failure with their own context (sessionId, channel key, job id, ...).
   onAttemptFailed?: (attempt: FallbackAttempt<TRef>) => void
+  // Gate that decides whether a given failure is worth advancing the chain.
+  // Omitted (cron) means "advance on any error" — the original behavior.
+  // Interactive callers pass `isThrottleOrOverload` so a one-off real error
+  // (billing, malformed response) surfaces on the active ref instead of
+  // silently switching providers.
+  shouldFailover?: (err: Error) => boolean
 }): Promise<FallbackPromptResult<TRef>> {
   if (opts.refs.length === 0) {
     throw new Error('promptWithFallback: refs[] must be non-empty')
   }
+  const failoverGate = opts.shouldFailover ?? (() => true)
   const attempts: FallbackAttempt<TRef>[] = []
   let lastError: Error | undefined
   for (let i = 0; i < opts.refs.length; i++) {
@@ -97,10 +104,11 @@ export async function promptWithFallback<TRef extends FallbackModelRef>(opts: {
         const attempt: FallbackAttempt<TRef> = { ref, outcome: 'hard', errorMessage: error.message }
         attempts.push(attempt)
         lastError = error
-        if (!isLast) opts.onAttemptFailed?.(attempt)
+        const stop = isLast || !failoverGate(error)
+        if (!stop) opts.onAttemptFailed?.(attempt)
         unsub()
         await dispose()
-        if (isLast) {
+        if (stop) {
           return { success: false, refUsed: ref, attempts, session, dispose: async () => {}, lastError }
         }
         continue
@@ -109,10 +117,11 @@ export async function promptWithFallback<TRef extends FallbackModelRef>(opts: {
         const attempt: FallbackAttempt<TRef> = { ref, outcome: 'soft', errorMessage: softError.message }
         attempts.push(attempt)
         lastError = softError
-        if (!isLast) opts.onAttemptFailed?.(attempt)
+        const stop = isLast || !failoverGate(softError)
+        if (!stop) opts.onAttemptFailed?.(attempt)
         unsub()
         await dispose()
-        if (isLast) {
+        if (stop) {
           return { success: false, refUsed: ref, attempts, session, dispose: async () => {}, lastError }
         }
         continue

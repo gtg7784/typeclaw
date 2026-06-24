@@ -778,7 +778,7 @@ describe('startSubagent', () => {
     emit: (event: unknown) => void
   } {
     const calls = { prompt: [] as string[], disposed: 0 }
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     const session = {
       prompt: async (text: string) => {
         calls.prompt.push(text)
@@ -787,9 +787,9 @@ describe('startSubagent', () => {
         calls.disposed += 1
       },
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},
@@ -797,7 +797,9 @@ describe('startSubagent', () => {
     return {
       session,
       calls,
-      emit: (event) => listener?.(event),
+      emit: (event) => {
+        for (const l of listeners) l(event)
+      },
     }
   }
 
@@ -844,19 +846,16 @@ describe('startSubagent', () => {
 
   test('completion captures the final assistant message', async () => {
     // given
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     const session = {
       prompt: async () => {
-        listener?.({
-          type: 'message_end',
-          message: { content: 'Found 42 results.' },
-        })
+        for (const l of listeners) l({ type: 'message_end', message: { content: 'Found 42 results.' } })
       },
       dispose: () => {},
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},
@@ -882,16 +881,16 @@ describe('startSubagent', () => {
   })
 
   function emittingSession(messages: { role?: string; content: unknown }[]): AgentSession {
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     return {
       prompt: async () => {
-        for (const message of messages) listener?.({ type: 'message_end', message })
+        for (const message of messages) for (const l of listeners) l({ type: 'message_end', message })
       },
       dispose: () => {},
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},
@@ -1031,17 +1030,18 @@ describe('startSubagent', () => {
   test('a timeout preserves an already-captured final message so a near-miss result is not discarded', async () => {
     // given: a session that emits a final report, then wedges before settling — the
     // production shape of a researcher that produced its <report> then hit the ceiling
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     const session = {
       prompt: () =>
         new Promise<void>(() => {
-          listener?.({ type: 'message_end', message: { role: 'assistant', content: 'The finished report body.' } })
+          for (const l of listeners)
+            l({ type: 'message_end', message: { role: 'assistant', content: 'The finished report body.' } })
         }),
       dispose: () => {},
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},
@@ -1098,20 +1098,20 @@ describe('startSubagent', () => {
     prompts: string[]
   } {
     const prompts: string[] = []
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     let turnIndex = 0
     const session = {
       prompt: async (text: string) => {
         prompts.push(text)
         const messages = turns[turnIndex] ?? []
         turnIndex++
-        for (const message of messages) listener?.({ type: 'message_end', message })
+        for (const message of messages) for (const l of listeners) l({ type: 'message_end', message })
       },
       dispose: () => {},
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},
@@ -1134,17 +1134,17 @@ describe('startSubagent', () => {
   }
 
   function wedgeAfterEmitting(content: string): AgentSession {
-    let listener: ((event: unknown) => void) | null = null
+    const listeners = new Set<(event: unknown) => void>()
     return {
       prompt: () =>
         new Promise<void>(() => {
-          listener?.({ type: 'message_end', message: { role: 'assistant', content } })
+          for (const l of listeners) l({ type: 'message_end', message: { role: 'assistant', content } })
         }),
       dispose: () => {},
       subscribe: (l: (event: unknown) => void) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       abort: async () => {},

@@ -58,6 +58,27 @@ function toSafeMessage(raw: string): string {
   return GENERIC_SAFE_NOTICE
 }
 
+// Capacity/rate signals worth failing OVER to another model ref (vs. retrying
+// the same one). English-only is correct — these are provider protocol tokens,
+// the explicit system-token exception to the multi-language rule. `\b` anchors
+// `429`/`503` so they don't match digit runs in prose (token counts,
+// elapsed-ms); `\b` is ASCII-safe because these are ASCII-only codes.
+const THROTTLE_OR_OVERLOAD =
+  /overloaded|server_is_overloaded|service.?unavailable|rate.?limit|rate.?limited|too many requests|\b(?:429|503)\b/i
+
+// Account-wide faults that must SURFACE, never fail over: switching refs can't
+// help (same account) and would mask a config error the operator must fix. This
+// is checked BEFORE the throttle match because providers often pair a `429`
+// status with a quota/billing/auth reason (e.g. `429 insufficient quota`) — the
+// status code alone must not force a pointless failover.
+const NON_FAILOVER_FAULT =
+  /insufficient.*(?:quota|credit|fund|balance)|\bquota\b|billing|payment|account is not active|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|authentication failed|invalid bearer/i
+
+export function isThrottleOrOverload(raw: string): boolean {
+  if (NON_FAILOVER_FAULT.test(raw)) return false
+  return THROTTLE_OR_OVERLOAD.test(raw)
+}
+
 export function detectProviderError(message: unknown): DetectedProviderError | null {
   if (typeof message !== 'object' || message === null) return null
   const m = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown }
@@ -81,6 +102,9 @@ export function subscribeProviderErrors(session: AgentSession, onError: Provider
   return session.subscribe((event) => {
     if (event.type !== 'message_end') return
     const detected = detectProviderError(event.message)
-    if (detected !== null) onError(detected)
+    if (detected === null) return
+    const abortRetry = (session as { abortRetry?: unknown }).abortRetry
+    if (isThrottleOrOverload(detected.message) && typeof abortRetry === 'function') abortRetry.call(session)
+    onError(detected)
   })
 }
