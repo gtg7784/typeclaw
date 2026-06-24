@@ -249,3 +249,87 @@ describe('promptWithFallback', () => {
     expect(seen[0]!.promptedWith[0]).toContain('do the thing')
   })
 })
+
+describe('promptWithFallback shouldFailover gate', () => {
+  test('advances to the next ref when the error matches shouldFailover (throttle)', async () => {
+    const created: SessionFake[] = []
+    const result = await promptWithFallback({
+      refs: [REF_A, REF_B],
+      text: 'hello',
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      createSessionForRef: async (ref) => {
+        const { session, fake } = fakeSession({
+          ref,
+          behavior: ref === REF_A ? 'soft-error' : 'success',
+          errorMessage: 'server_is_overloaded',
+        })
+        created.push(fake)
+        return { session, dispose: async () => void (fake.disposed = true) }
+      },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_B)
+    expect(created).toHaveLength(2)
+  })
+
+  test('does NOT advance when the error fails shouldFailover (billing surfaces on ref #1)', async () => {
+    const created: SessionFake[] = []
+    const result = await promptWithFallback({
+      refs: [REF_A, REF_B],
+      text: 'hello',
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      createSessionForRef: async (ref) => {
+        const { session, fake } = fakeSession({ ref, behavior: 'soft-error', errorMessage: 'billing required' })
+        created.push(fake)
+        return { session, dispose: async () => void (fake.disposed = true) }
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(result.attempts).toEqual([{ ref: REF_A, outcome: 'soft', errorMessage: 'billing required' }])
+    expect(result.lastError?.message).toBe('billing required')
+    // only the first session was ever created — no failover attempt
+    expect(created).toHaveLength(1)
+  })
+
+  test('a non-failover hard throw also surfaces without advancing', async () => {
+    const created: SessionFake[] = []
+    const result = await promptWithFallback({
+      refs: [REF_A, REF_B],
+      text: 'hello',
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      createSessionForRef: async (ref) => {
+        const { session, fake } = fakeSession({ ref, behavior: 'throw', errorMessage: 'context length exceeded' })
+        created.push(fake)
+        return { session, dispose: async () => void (fake.disposed = true) }
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(created).toHaveLength(1)
+  })
+
+  test('without shouldFailover, advances on any error (cron behavior unchanged)', async () => {
+    const created: SessionFake[] = []
+    const result = await promptWithFallback({
+      refs: [REF_A, REF_B],
+      text: 'hello',
+      createSessionForRef: async (ref) => {
+        const { session, fake } = fakeSession({
+          ref,
+          behavior: ref === REF_A ? 'soft-error' : 'success',
+          errorMessage: 'billing required',
+        })
+        created.push(fake)
+        return { session, dispose: async () => void (fake.disposed = true) }
+      },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_B)
+    expect(created).toHaveLength(2)
+  })
+})
