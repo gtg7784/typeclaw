@@ -338,7 +338,9 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           retrievalContext.results.length > 0
             ? `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`
-        applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel)
+        applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel, undefined, {
+          allowEscalation: false,
+        })
         const result = await promptPersistentTurnWithFallback({
           refs: resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions)),
           currentModelRef: activeModelRef,
@@ -353,7 +355,9 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
             activeModelRef = ref
           },
           beforeAttempt: () => {
-            applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel)
+            applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel, undefined, {
+              allowEscalation: false,
+            })
           },
           onAttemptFailed: (attempt) => {
             console.warn(

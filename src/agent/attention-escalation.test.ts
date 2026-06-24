@@ -260,6 +260,15 @@ describe('resolveTurnThinkingLevel', () => {
   test('normal text with no session default stays undefined', () => {
     expect(resolveTurnThinkingLevel('add a comment', undefined)).toBeUndefined()
   })
+
+  test('allowEscalation:false pins to the session default even on escalation text', () => {
+    expect(resolveTurnThinkingLevel('wtf', 'low', null, { allowEscalation: false })).toBe('low')
+    expect(resolveTurnThinkingLevel('제대로 해', 'low', null, { allowEscalation: false })).toBe('low')
+  })
+
+  test('allowEscalation:false with no session default stays undefined', () => {
+    expect(resolveTurnThinkingLevel('wtf', undefined, null, { allowEscalation: false })).toBeUndefined()
+  })
 })
 
 describe('applyTurnThinkingLevel', () => {
@@ -296,5 +305,11 @@ describe('applyTurnThinkingLevel', () => {
     applyTurnThinkingLevel(session, '뭐하는 거야', 'low')
     applyTurnThinkingLevel(session, 'thanks, looks good', 'low')
     expect(session.calls).toEqual(['xhigh', 'low'])
+  })
+
+  test('allowEscalation:false keeps an escalation turn at the session default', () => {
+    const session = fakeSession()
+    applyTurnThinkingLevel(session, 'ultrathink please', 'low', null, { allowEscalation: false })
+    expect(session.calls).toEqual(['low'])
   })
 })

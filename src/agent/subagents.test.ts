@@ -190,6 +190,36 @@ describe('invokeSubagent', () => {
     expect(captured[0]!.profileOverride).toBeUndefined()
   })
 
+  test('a payload whose schema strips `profile` leaves profileOverride undefined (fast-tier pin survives a parent override)', async () => {
+    // given: a worker whose schema drops `profile`, exactly like scout/explorer
+    const captured: { profileOverride?: string }[] = []
+    const registry = {
+      worker: {
+        systemPrompt: 'X',
+        profile: 'fast',
+        payloadSchema: z
+          .object({ prompt: z.string().optional() })
+          .passthrough()
+          .transform(({ profile: _profile, ...rest }) => rest),
+      } satisfies Subagent,
+    }
+
+    // when
+    await invokeSubagent('worker', {
+      registry,
+      createSessionForSubagent: async (_subagent, options) => {
+        captured.push({ profileOverride: options?.profileOverride })
+        return fakeSession().session
+      },
+      agentDir: '/agent',
+      userPrompt: 'do the thing',
+      payload: { prompt: 'do the thing', profile: 'deep' },
+    })
+
+    // then
+    expect(captured[0]!.profileOverride).toBeUndefined()
+  })
+
   test('handler receives validated payload and runs runSession when called', async () => {
     // given
     const { session, calls } = fakeSession()

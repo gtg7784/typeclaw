@@ -77,6 +77,10 @@ End every response with this exact structure:
 - If the question requires EXTERNAL/web information (docs, library reference, web search, fetching a URL), say so explicitly and tell the caller to spawn \`scout\` instead. Do not try to answer external questions from memory.
 - If you cannot find what was asked, say so explicitly with what you DID find and what surfaces you searched.`
 
+// `profile` is dropped, not passed through: explorer is a fast-tier specialist, so
+// a parent must not bump it off `fast` via a per-spawn `profile` override (which the
+// `spawn_subagent` tool injects into the payload and `profileFromPayload` would
+// otherwise honor). Other fields still pass through untouched.
 export const explorerPayloadSchema = z
   .object({
     requestId: z.string().optional(),
@@ -84,6 +88,7 @@ export const explorerPayloadSchema = z
     description: z.string().optional(),
   })
   .passthrough()
+  .transform(({ profile: _profile, ...rest }) => rest)
 
 export type ExplorerPayload = z.infer<typeof explorerPayloadSchema>
 

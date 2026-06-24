@@ -132,5 +132,12 @@ describe('explorerPayloadSchema', () => {
   test('passes through unknown fields (forward-compat with future spawn-tool params)', () => {
     const result = explorerPayloadSchema.safeParse({ requestId: 'bg_t1', futureField: 42 })
     expect(result.success).toBe(true)
+    expect((result.data as Record<string, unknown>).futureField).toBe(42)
+  })
+
+  test('drops a parent-supplied profile so explorer cannot be bumped off its fast tier', () => {
+    const result = explorerPayloadSchema.safeParse({ requestId: 'bg_t1', prompt: 'x', profile: 'deep' })
+    expect(result.success).toBe(true)
+    expect(result.data).not.toHaveProperty('profile')
   })
 })
