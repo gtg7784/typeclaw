@@ -1,13 +1,16 @@
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { z } from 'zod'
 
+import { getConfig, resolveModel } from '@/config'
 import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import { applyTurnThinkingLevel } from './attention-escalation'
 import { type AgentSession, createSession, type PluginSessionWiring } from './index'
-import { subscribeProviderErrors } from './provider-error'
+import { resolveFallbackChain } from './model-fallback'
+import { applyModelRuntimeOverrides } from './model-overrides'
+import { isThrottleOrOverload, subscribeProviderErrors } from './provider-error'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
 import {
@@ -18,6 +21,7 @@ import {
 } from './subagent-drain'
 import { renderTurnTimeAnchor } from './system-prompt'
 import type { ToolResultBudget } from './tool-result-budget'
+import { promptPersistentTurnWithFallback } from './turn-runner'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createSession>[0]>['tools']
 
@@ -294,6 +298,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath, backgroundDrain } =
       normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
     let aborted = false
+    let activeModelRef = resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions))[0]!
     let drainWatch: SubagentDrainWatch | undefined
     const requiredBlockTag = REQUIRED_FINAL_BLOCK[name]
     const capture = attachFinalMessageCapture(session, requiredBlockTag, options.onFinalMessageCaptured ?? (() => {}))
@@ -334,7 +339,26 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
             ? `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}\n\n${retrievalContext.results}`
             : `${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`
         applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel)
-        await session.prompt(turnText)
+        const result = await promptPersistentTurnWithFallback({
+          refs: resolveFallbackChain(getConfig().models, resolveSubagentProfile(subagent, sessionOptions)),
+          currentRef: activeModelRef,
+          session,
+          text: turnText,
+          shouldFailover: (err) => isThrottleOrOverload(err.message),
+          setModelForRef: async (ref) => {
+            await session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
+            activeModelRef = ref
+          },
+          beforeAttempt: () => {
+            applyTurnThinkingLevel(session, userPromptForTurn, session.thinkingLevel)
+          },
+          onAttemptFailed: (attempt) => {
+            console.warn(
+              `[subagent] ${name} ${attempt.outcome} failure on ${attempt.ref}: ${attempt.errorMessage ?? 'unknown'}; falling back`,
+            )
+          },
+        })
+        if (result.success) activeModelRef = result.refUsed
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)
