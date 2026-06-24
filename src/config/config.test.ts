@@ -73,8 +73,9 @@ describe('configSchema models field', () => {
       models: { default: VALID_MODEL, fast: [VALID_MODEL_2], deep: VALID_MODEL, vision: VALID_MODEL_2 },
     })
     expect(parsed.models.default).toEqual(profileEntry(VALID_MODEL))
-    expect(parsed.models.fast).toEqual(profileEntry(VALID_MODEL_2))
-    expect(parsed.models.deep).toEqual(profileEntry(VALID_MODEL))
+    // `fast`/`deep` materialize their built-in thinkingLevel; `default`/`vision` do not.
+    expect(parsed.models.fast).toEqual({ ...profileEntry(VALID_MODEL_2), thinkingLevel: 'low' })
+    expect(parsed.models.deep).toEqual({ ...profileEntry(VALID_MODEL), thinkingLevel: 'high' })
     expect(parsed.models.vision).toEqual(profileEntry(VALID_MODEL_2))
   })
 
@@ -341,12 +342,28 @@ describe('resolveProfile', () => {
     expect(resolveProfile(withThinking, 'fast').thinkingLevel).toBe('off')
   })
 
-  test('a profile without its own thinkingLevel reports undefined (caller inherits the default)', () => {
+  test('a profile without its own or a built-in thinkingLevel reports undefined (caller inherits the default)', () => {
     const withThinking = parseModels({
       default: { model: VALID_MODEL, thinkingLevel: 'high' },
-      fast: VALID_MODEL_2,
+      'cheap-batch': VALID_MODEL_2,
     })
-    expect(resolveProfile(withThinking, 'fast').thinkingLevel).toBeUndefined()
+    expect(resolveProfile(withThinking, 'cheap-batch').thinkingLevel).toBeUndefined()
+  })
+
+  test('a well-known profile materializes its built-in thinkingLevel', () => {
+    const models = parseModels({ default: VALID_MODEL, fast: VALID_MODEL_2, deep: VALID_MODEL })
+    expect(resolveProfile(models, 'fast').thinkingLevel).toBe('low')
+    expect(resolveProfile(models, 'deep').thinkingLevel).toBe('high')
+  })
+
+  test('an explicit per-profile thinkingLevel overrides the built-in default', () => {
+    const models = parseModels({
+      default: VALID_MODEL,
+      fast: { model: VALID_MODEL_2, thinkingLevel: 'off' },
+      deep: { model: VALID_MODEL, thinkingLevel: 'medium' },
+    })
+    expect(resolveProfile(models, 'fast').thinkingLevel).toBe('off')
+    expect(resolveProfile(models, 'deep').thinkingLevel).toBe('medium')
   })
 
   test('falling back to default surfaces the default profile`s thinkingLevel', () => {

@@ -707,13 +707,39 @@ const profileEntrySchema = z
     return value.thinkingLevel === undefined ? { refs } : { refs, thinkingLevel: value.thinkingLevel }
   })
 
+// Built-in per-profile `thinkingLevel` defaults, materialized at parse time so
+// resolved config / `typeclaw model list` / prompt dumps show the effective level
+// and users can override per profile. Materialized here (not as a runtime
+// constant) the `deep: 'high'` default rides on the `deep` entry itself, so it
+// still beats a lowered `models.default.thinkingLevel` (resolution reads the
+// profile's own level first). `default` and `vision` carry none — they fall
+// through to the model/SDK default. `high` over `xhigh`: `xhigh` ~doubles latency
+// and spend for no agentic-quality gain.
+const PROFILE_THINKING_LEVEL_DEFAULTS = {
+  fast: 'low',
+  deep: 'high',
+} satisfies Partial<Record<string, ThinkingLevel>>
+
 export const modelsSchema = z
   .record(z.string().min(1), profileEntrySchema)
   .refine((m) => 'default' in m, { message: 'models.default is required' })
+  // Fill only when unset, so an explicit level (including `off`) always wins.
+  .transform((models): Models => {
+    let next: Record<string, ProfileEntry> | undefined
+    for (const [profile, thinkingLevel] of Object.entries(PROFILE_THINKING_LEVEL_DEFAULTS)) {
+      const entry = models[profile]
+      if (entry !== undefined && entry.thinkingLevel === undefined) {
+        next ??= { ...models }
+        next[profile] = { ...entry, thinkingLevel }
+      }
+    }
+    return (next ?? models) as Models
+  })
 
 // A model profile after normalisation: its fallback chain (always non-empty)
 // plus an optional reasoning effort. `thinkingLevel` resolution is layered at
-// session creation: profile's own → `default` profile's → SDK default.
+// session creation: profile's own (incl. built-in per-profile defaults
+// materialized above) → `default` profile's → SDK default.
 export type ProfileEntry = {
   refs: ModelRef[]
   thinkingLevel?: ThinkingLevel

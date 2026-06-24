@@ -8,7 +8,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
-import { configSchema, type Models, type ResolvedProfile } from '@/config'
+import { configSchema, type Models, resolveProfile, type ResolvedProfile, type ThinkingLevel } from '@/config'
 import type { ModelRef } from '@/config/providers'
 import { createHookBus, type PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
@@ -1602,45 +1602,60 @@ describe('resolveSessionThinkingLevel', () => {
     ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
   })
 
+  // Drive resolution through `resolveProfile` so the built-in per-profile
+  // defaults materialized at config-parse time are exercised end-to-end, the
+  // way a real session is created.
+  const resolveLevel = (models: Models, profile: string): ThinkingLevel | undefined =>
+    resolveSessionThinkingLevel(models, resolveProfile(models, profile), REF)
+
   test('the profile`s own level wins over the default profile`s', () => {
     const models = parseModels({ default: { model: REF, thinkingLevel: 'medium' } })
     expect(resolveSessionThinkingLevel(models, resolvedWith('off'), REF)).toBe('off')
   })
 
-  test('a profile without its own level inherits the default profile`s', () => {
-    const models = parseModels({ default: { model: REF, thinkingLevel: 'high' }, fast: REF })
-    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined), REF)).toBe('high')
+  test('a user-defined profile without its own level inherits the default profile`s', () => {
+    const models = parseModels({ default: { model: REF, thinkingLevel: 'high' }, 'cheap-batch': REF })
+    expect(resolveLevel(models, 'cheap-batch')).toBe('high')
   })
 
   test('falls through to the SDK default when neither the profile nor default declares one', () => {
     const models = parseModels({ default: REF })
-    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined), REF)).toBeUndefined()
+    expect(resolveLevel(models, 'default')).toBeUndefined()
   })
 
   test('an unknown profile that fell back to default uses the default profile`s level', () => {
-    // `resolveProfile` for an unknown name returns the default profile, so the
-    // resolved.thinkingLevel IS the default's — exercised here directly.
     const models = parseModels({ default: { model: REF, thinkingLevel: 'xhigh' } })
-    expect(resolveSessionThinkingLevel(models, resolvedWith('xhigh'), REF)).toBe('xhigh')
+    expect(resolveLevel(models, 'does-not-exist')).toBe('xhigh')
+  })
+
+  test('the fast profile defaults to low without its own level', () => {
+    const models = parseModels({ default: REF, fast: REF })
+    expect(resolveLevel(models, 'fast')).toBe('low')
   })
 
   test('the deep profile defaults to high without its own level', () => {
     const models = parseModels({ default: REF, deep: REF })
-    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'deep'), REF)).toBe('high')
+    expect(resolveLevel(models, 'deep')).toBe('high')
   })
 
   test('the deep default beats a lower global default', () => {
     const models = parseModels({ default: { model: REF, thinkingLevel: 'low' }, deep: REF })
-    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'deep'), REF)).toBe('high')
+    expect(resolveLevel(models, 'deep')).toBe('high')
   })
 
   test('an explicit deep thinkingLevel overrides the built-in high default', () => {
     const models = parseModels({ default: REF, deep: { model: REF, thinkingLevel: 'xhigh' } })
-    expect(resolveSessionThinkingLevel(models, resolvedWith('xhigh', 'deep'), REF)).toBe('xhigh')
+    expect(resolveLevel(models, 'deep')).toBe('xhigh')
   })
 
-  test('the high default is scoped to deep — other profiles are unaffected', () => {
-    const models = parseModels({ default: REF, fast: REF })
-    expect(resolveSessionThinkingLevel(models, resolvedWith(undefined, 'fast'), REF)).toBeUndefined()
+  test('an explicit fast thinkingLevel overrides the built-in low default', () => {
+    const models = parseModels({ default: REF, fast: { model: REF, thinkingLevel: 'off' } })
+    expect(resolveLevel(models, 'fast')).toBe('off')
+  })
+
+  test('built-in defaults are scoped to fast/deep — other profiles fall through', () => {
+    const models = parseModels({ default: REF, vision: REF, 'cheap-batch': REF })
+    expect(resolveLevel(models, 'vision')).toBeUndefined()
+    expect(resolveLevel(models, 'cheap-batch')).toBeUndefined()
   })
 })

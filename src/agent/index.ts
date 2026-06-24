@@ -244,26 +244,22 @@ export type CreateSessionResult = {
 }
 
 // A session's reasoning effort layers like the model does: the resolved
-// profile's own `thinkingLevel` → the built-in `deep` default → the `default`
-// profile's `thinkingLevel` (the de-facto global default) → the per-provider/SDK
-// default for the active ref. When the requested profile was unknown, `resolved`
-// is already the `default` profile, so those terms coincide and the expression
-// still does the right thing.
+// profile's own `thinkingLevel` → the `default` profile's `thinkingLevel` (the
+// de-facto global default) → the per-provider/SDK default for the active ref.
+// When the requested profile was unknown, `resolved` is already the `default`
+// profile, so those terms coincide and the expression still does the right thing.
 //
-// The `deep` `high` default sits ABOVE `models.default.thinkingLevel` on purpose:
-// lowering the global default must not stop the "think hard" profile from
-// thinking hard. `high` (not `xhigh`) because `xhigh` ~doubles latency and token
-// spend for no agentic-quality gain. An explicit `models.deep.thinkingLevel`
-// still wins — it is the first term.
-const DEEP_PROFILE_DEFAULT_THINKING_LEVEL: ThinkingLevel = 'high'
-
+// Built-in per-profile defaults (e.g. `fast: 'low'`, `deep: 'high'`) are
+// materialized onto the entry at config-parse time (see PROFILE_THINKING_LEVEL_DEFAULTS
+// in config.ts), so they arrive here as `resolved.thinkingLevel` — the first term.
+// That is why `deep`'s `high` still beats a lowered global default, and why there
+// is no profile special-casing in this function.
 export function resolveSessionThinkingLevel(
   models: Models,
   resolved: Pick<ResolvedProfile, 'thinkingLevel' | 'profile'>,
   activeRef: ModelRef,
 ): ThinkingLevel | undefined {
-  const deepDefault = resolved.profile === 'deep' ? DEEP_PROFILE_DEFAULT_THINKING_LEVEL : undefined
-  return resolved.thinkingLevel ?? deepDefault ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
+  return resolved.thinkingLevel ?? models.default.thinkingLevel ?? defaultThinkingLevelForRef(activeRef)
 }
 
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
