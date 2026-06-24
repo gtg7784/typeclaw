@@ -31,6 +31,7 @@ export async function promptPersistentTurnWithFallback(opts: {
   setModelForRef: (ref: ModelRef) => Promise<void>
   profile?: string
   circuit?: ThrottleCircuit
+  skipEventSubscriptions?: boolean
   beforeAttempt?: (ref: ModelRef) => void
   onAttemptFailed?: (attempt: PersistentTurnAttempt) => void
 }): Promise<PersistentTurnResult> {
@@ -53,10 +54,12 @@ export async function promptPersistentTurnWithFallback(opts: {
     opts.beforeAttempt?.(ref)
     const activity: AttemptActivity = { producedAssistantOutput: false, startedToolExecution: false }
     let softError: Error | undefined
-    const unsubActivity = subscribeAttemptActivity(opts.session, activity)
-    const unsubProvider = subscribeProviderErrors(opts.session, (err) => {
-      if (softError === undefined) softError = new Error(err.message)
-    })
+    const unsubActivity = opts.skipEventSubscriptions ? () => {} : subscribeAttemptActivity(opts.session, activity)
+    const unsubProvider = opts.skipEventSubscriptions
+      ? () => {}
+      : subscribeProviderErrorsIfAvailable(opts.session, (err) => {
+          if (softError === undefined) softError = new Error(err.message)
+        })
     try {
       try {
         await opts.session.prompt(opts.text)
@@ -97,6 +100,8 @@ function canAdvance(error: Error, activity: AttemptActivity, shouldFailover: (er
 }
 
 function subscribeAttemptActivity(session: AgentSession, activity: AttemptActivity): () => void {
+  const subscribe = (session as { subscribe?: unknown }).subscribe
+  if (typeof subscribe !== 'function') return () => {}
   return session.subscribe((event: unknown) => {
     if (!isRecord(event)) return
     if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
@@ -110,6 +115,15 @@ function subscribeAttemptActivity(session: AgentSession, activity: AttemptActivi
       if (assistantMessageEvent.delta.length > 0) activity.producedAssistantOutput = true
     }
   })
+}
+
+function subscribeProviderErrorsIfAvailable(
+  session: AgentSession,
+  onError: Parameters<typeof subscribeProviderErrors>[1],
+): () => void {
+  const subscribe = (session as { subscribe?: unknown }).subscribe
+  if (typeof subscribe !== 'function') return () => {}
+  return subscribeProviderErrors(session, onError)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

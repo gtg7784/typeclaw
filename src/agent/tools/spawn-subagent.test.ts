@@ -22,7 +22,7 @@ type StubSession = AgentSession & { emit: (event: unknown) => void; abortCount: 
 
 function stubSession(): StubSession {
   const calls = { prompt: [] as string[], disposed: 0, abortCount: { n: 0 } }
-  let listener: ((event: unknown) => void) | null = null
+  const listeners = new Set<(event: unknown) => void>()
   const session = {
     prompt: async (text: string) => {
       calls.prompt.push(text)
@@ -32,15 +32,17 @@ function stubSession(): StubSession {
       calls.disposed += 1
     },
     subscribe: (l: (event: unknown) => void) => {
-      listener = l
+      listeners.add(l)
       return () => {
-        listener = null
+        listeners.delete(l)
       }
     },
     abort: async () => {
       calls.abortCount.n += 1
     },
-    emit: (event: unknown) => listener?.(event),
+    emit: (event: unknown) => {
+      for (const l of listeners) l(event)
+    },
     abortCount: calls.abortCount,
   } as unknown as StubSession
   return session

@@ -103,7 +103,8 @@ export function subscribeProviderErrors(session: AgentSession, onError: Provider
     if (event.type !== 'message_end') return
     const detected = detectProviderError(event.message)
     if (detected === null) return
-    if (isThrottleOrOverload(detected.message)) session.abortRetry()
+    const abortRetry = (session as { abortRetry?: unknown }).abortRetry
+    if (isThrottleOrOverload(detected.message) && typeof abortRetry === 'function') abortRetry.call(session)
     onError(detected)
   })
 }

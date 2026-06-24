@@ -345,6 +345,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           profile: resolveSubagentProfile(subagent, sessionOptions),
           session,
           text: turnText,
+          skipEventSubscriptions: true,
           shouldFailover: (err) => isThrottleOrOverload(err.message),
           setModelForRef: async (ref) => {
             await session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
