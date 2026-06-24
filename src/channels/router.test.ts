@@ -8368,6 +8368,26 @@ describe('ChannelRouter cold-start prefetch', () => {
     ).toBe(true)
   })
 
+  test('prefetch skip carrying skipReason rate-limited logs at info, not warn', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerHistory('discord-bot', async () => ({
+      ok: false,
+      error: 'prefetch skipped: rate-limit backpressure',
+      skipReason: 'rate-limited',
+    }))
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'still works' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(
+      logs.some((l) => l.startsWith('info:') && l.includes('prefetch skipped') && l.includes('rate limited')),
+    ).toBe(true)
+    expect(logs.some((l) => l.startsWith('warn:') && l.includes('prefetch skipped'))).toBe(false)
+  })
+
   test('no history adapter registered → prefetch quietly skipped, no error', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
@@ -8507,7 +8527,7 @@ describe('ChannelRouter cold-start prefetch', () => {
     await router.route(inbound({ thread: 't-A', externalMessageId: 'engage', text: 'hi' }))
     await router.__testing!.flushDebounce(THREAD_KEY)
 
-    expect(captured).toEqual([{ chat: 'c1', thread: 't-A', limit: 8 }])
+    expect(captured).toEqual([{ chat: 'c1', thread: 't-A', limit: 8, prefetch: true }])
   })
 })
 

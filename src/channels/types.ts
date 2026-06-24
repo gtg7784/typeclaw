@@ -339,11 +339,18 @@ export type FetchHistoryArgs = {
   thread: string | null
   limit: number
   cursor?: string
+  // Set by best-effort callers (cold-start prefetch, membership fallback) to opt
+  // into adapter-side rate-limit backpressure. Explicit reads (channel_history)
+  // leave it unset so they always attempt the fetch under the router's timeout.
+  prefetch?: boolean
 }
 
 export type FetchHistoryResult =
   | { ok: true; messages: ChannelHistoryMessage[]; nextCursor?: string }
-  | { ok: false; error: string }
+  // `skipReason: 'rate-limited'` marks an expected, optional-context skip (the
+  // adapter declined a best-effort read to avoid hammering a rate-limited
+  // resource) so callers can log it at info instead of warn.
+  | { ok: false; error: string; skipReason?: 'rate-limited' }
 
 // Registered per-adapter on the ChannelRouter alongside outbound/typing
 // callbacks. Adapters that cannot fetch history (e.g. webhook-only future

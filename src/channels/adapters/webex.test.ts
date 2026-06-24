@@ -15,6 +15,7 @@ import {
   type WebexAdapterLogger,
 } from './webex'
 import type { WebexInboundMessage } from './webex-classify'
+import { createWebexPrefetchLimiter } from './webex-prefetch-limiter'
 
 const config = channelsSchema.parse({ webex: {} }).webex!
 
@@ -461,18 +462,146 @@ describe('createWebexHistoryCallback reply attribution', () => {
     expect(history.find((m) => m.externalMessageId === 'child-1')?.replyToBotMessageId).toBeNull()
   })
 
-  test('fails fast when listMessages hangs past the cold-start timeout', async () => {
+  test('logs prefetch rate-limit skips at info with skipReason, not warn', async () => {
+    const log = logger()
     const cb = createWebexHistoryCallback({
-      client: { listMessages: () => new Promise<WebexMessage[]>(() => {}) },
+      client: {
+        listMessages: async () => Promise.reject(Object.assign(new Error('HTTP 429'), { code: 'http_429' })),
+      },
+      logger: log,
+      botPersonIdRef: () => 'bot-1',
+    })
+
+    const res = await cb({ chat: 'room-1', thread: null, limit: 50, prefetch: true })
+
+    expect(res).toEqual({ ok: false, error: 'HTTP 429', skipReason: 'rate-limited' })
+    expect(log.lines.some((l) => l.startsWith('info:') && l.includes('rate limited'))).toBe(true)
+    expect(log.lines.some((l) => l.startsWith('warn:'))).toBe(false)
+  })
+
+  test('warns (no skipReason) on a 429 from an explicit non-prefetch read', async () => {
+    const log = logger()
+    const cb = createWebexHistoryCallback({
+      client: {
+        listMessages: async () => Promise.reject(Object.assign(new Error('HTTP 429'), { code: 'http_429' })),
+      },
+      logger: log,
+      botPersonIdRef: () => 'bot-1',
+    })
+
+    const res = await cb({ chat: 'room-1', thread: null, limit: 50 })
+
+    expect(res.ok).toBe(false)
+    if (res.ok) throw new Error('expected failure')
+    expect(res.skipReason).toBeUndefined()
+    expect(log.lines.some((l) => l.startsWith('warn:'))).toBe(true)
+  })
+
+  test('still logs non-rate-limit failures at warn', async () => {
+    const log = logger()
+    const cb = createWebexHistoryCallback({
+      client: { listMessages: async () => Promise.reject(new Error('boom')) },
+      logger: log,
+      botPersonIdRef: () => 'bot-1',
+    })
+
+    const res = await cb({ chat: 'room-1', thread: null, limit: 50, prefetch: true })
+
+    expect(res.ok).toBe(false)
+    expect(log.lines.some((l) => l.startsWith('warn:') && l.includes('boom'))).toBe(true)
+  })
+
+  test('skips a same-room prefetch without calling listMessages when the limiter cannot admit', async () => {
+    let calls = 0
+    const blockUntil = Promise.withResolvers<void>()
+    const limiter = createWebexPrefetchLimiter({ concurrency: 1, admitTimeoutMs: 20 })
+    const cb = createWebexHistoryCallback({
+      client: {
+        listMessages: async () => {
+          calls++
+          await blockUntil.promise
+          return [] as WebexMessage[]
+        },
+      },
       logger: logger(),
       botPersonIdRef: () => 'bot-1',
-      timeoutMs: 20,
+      limiter,
     })
-    const start = Date.now()
-    const res = await cb({ chat: 'room-1', thread: null, limit: 50 })
-    const elapsed = Date.now() - start
-    expect(res.ok).toBe(false)
-    expect(elapsed).toBeLessThan(500)
+
+    const held = cb({ chat: 'room-1', thread: null, limit: 50, prefetch: true })
+    const skipped = await cb({ chat: 'room-1', thread: null, limit: 50, prefetch: true })
+
+    expect(skipped).toEqual({
+      ok: false,
+      error: 'prefetch skipped: rate-limit backpressure',
+      skipReason: 'rate-limited',
+    })
+    expect(calls).toBe(1)
+    blockUntil.resolve()
+    await held
+    expect(calls).toBe(1)
+  })
+
+  test('an explicit (non-prefetch) read bypasses the limiter even under backpressure', async () => {
+    let prefetchCalls = 0
+    let explicitCalls = 0
+    const blockPrefetch = Promise.withResolvers<void>()
+    const limiter = createWebexPrefetchLimiter({ concurrency: 1, admitTimeoutMs: 20 })
+    const cb = createWebexHistoryCallback({
+      client: {
+        listMessages: async (_chat, opts) => {
+          // The prefetch caller over-requests by one; use the limit to tell the
+          // two callers apart so blocking is independent of scheduling order.
+          if ((opts?.max ?? 0) === 99) {
+            prefetchCalls++
+            await blockPrefetch.promise
+          } else {
+            explicitCalls++
+          }
+          return [] as WebexMessage[]
+        },
+      },
+      logger: logger(),
+      botPersonIdRef: () => 'bot-1',
+      limiter,
+    })
+
+    const heldPrefetch = cb({ chat: 'room-1', thread: null, limit: 99, prefetch: true })
+    const explicit = await cb({ chat: 'room-1', thread: null, limit: 50 })
+
+    expect(explicit.ok).toBe(true)
+    expect(explicitCalls).toBe(1)
+    blockPrefetch.resolve()
+    await heldPrefetch
+    expect(prefetchCalls).toBe(1)
+  })
+
+  test('does not throttle prefetches for different rooms', async () => {
+    let calls = 0
+    const blockUntil = Promise.withResolvers<void>()
+    const limiter = createWebexPrefetchLimiter({ concurrency: 1, admitTimeoutMs: 20 })
+    const cb = createWebexHistoryCallback({
+      client: {
+        listMessages: async () => {
+          calls++
+          await blockUntil.promise
+          return [] as WebexMessage[]
+        },
+      },
+      logger: logger(),
+      botPersonIdRef: () => 'bot-1',
+      limiter,
+    })
+
+    const held = cb({ chat: 'room-1', thread: null, limit: 50, prefetch: true })
+    const other = cb({ chat: 'room-2', thread: null, limit: 50, prefetch: true })
+
+    blockUntil.resolve()
+    const [a, b] = await Promise.all([held, other])
+
+    expect(a.ok).toBe(true)
+    expect(b.ok).toBe(true)
+    expect(calls).toBe(2)
   })
 })
 
