@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { AgentSession as PiAgentSession, SettingsManager } from '@mariozechner/pi-coding-agent'
+
 import type { AgentSession } from './index'
 import { detectProviderError, isThrottleOrOverload, subscribeProviderErrors } from './provider-error'
 
@@ -191,21 +193,36 @@ describe('isThrottleOrOverload', () => {
 
 type FakeListener = (event: { type: string; message?: unknown }) => void
 
-function fakeSession(): { session: AgentSession; emit: (event: { type: string; message?: unknown }) => void } {
+function fakeSession(): {
+  session: AgentSession
+  abortRetryCalls: string[]
+  emit: (event: { type: string; message?: unknown }) => void
+} {
   const listeners = new Set<FakeListener>()
+  const abortRetryCalls: string[] = []
   const session = {
     subscribe: (cb: FakeListener) => {
       listeners.add(cb)
       return () => listeners.delete(cb)
     },
+    abortRetry: () => abortRetryCalls.push('abortRetry'),
   } as unknown as AgentSession
   return {
     session,
+    abortRetryCalls,
     emit: (event) => {
       for (const cb of listeners) cb(event)
     },
   }
 }
+
+describe('SDK retry contract smoke', () => {
+  test('pi AgentSession exposes retry controls used by provider-error failover', () => {
+    expect(typeof PiAgentSession.prototype.abortRetry).toBe('function')
+    expect(typeof PiAgentSession.prototype.setAutoRetryEnabled).toBe('function')
+    expect(typeof SettingsManager.prototype.getRetrySettings).toBe('function')
+  })
+})
 
 describe('subscribeProviderErrors', () => {
   test('invokes onError exactly once per detected provider error', () => {
@@ -258,5 +275,29 @@ describe('subscribeProviderErrors', () => {
     emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'second' } })
 
     expect(calls).toEqual(['first'])
+  })
+
+  test('aborts the SDK retry loop exactly once for a throttle-classified provider error', () => {
+    const { session, emit, abortRetryCalls } = fakeSession()
+    subscribeProviderErrors(session, () => {})
+
+    emit({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: 'server_is_overloaded' },
+    })
+
+    expect(abortRetryCalls).toEqual(['abortRetry'])
+  })
+
+  test('keeps SDK retry running for a non-throttle provider error', () => {
+    const { session, emit, abortRetryCalls } = fakeSession()
+    subscribeProviderErrors(session, () => {})
+
+    emit({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: 'malformed response' },
+    })
+
+    expect(abortRetryCalls).toEqual([])
   })
 })
