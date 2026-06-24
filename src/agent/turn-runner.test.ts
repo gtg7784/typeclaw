@@ -53,7 +53,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const fake = fakeSession(['soft-throttle', 'success'])
     const result = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       session: fake.session,
       text: 'hello',
       circuit: new ThrottleCircuit(),
@@ -73,7 +73,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const fake = fakeSession(['text-then-throttle'])
     const result = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       session: fake.session,
       text: 'hello',
       circuit: new ThrottleCircuit(),
@@ -93,7 +93,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const fake = fakeSession(['tool-then-throttle'])
     const result = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       session: fake.session,
       text: 'hello',
       circuit: new ThrottleCircuit(),
@@ -112,7 +112,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const fake = fakeSession(['soft-billing'])
     const result = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       session: fake.session,
       text: 'hello',
       circuit: new ThrottleCircuit(),
@@ -131,7 +131,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const fake = fakeSession(['soft-throttle', 'success'])
     const result = await promptPersistentTurnWithFallback({
       refs: [REF_A],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       session: fake.session,
       text: 'hello',
       circuit: new ThrottleCircuit(),
@@ -155,7 +155,7 @@ describe('promptPersistentTurnWithFallback', () => {
 
     const skipped = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       profile: 'default',
       session: fake.session,
       text: 'hello',
@@ -174,7 +174,7 @@ describe('promptPersistentTurnWithFallback', () => {
     const probe = fakeSession(['success'])
     const probed = await promptPersistentTurnWithFallback({
       refs: [REF_A, REF_B],
-      currentRef: REF_A,
+      currentModelRef: REF_A,
       profile: 'default',
       session: probe.session,
       text: 'hello',
@@ -187,5 +187,102 @@ describe('promptPersistentTurnWithFallback', () => {
 
     expect(probed.refUsed).toBe(REF_A)
     expect(probe.setModels).toEqual([])
+  })
+
+  test('detects a soft error from the leaf entry when event subscriptions are skipped', async () => {
+    const fake = fakeSession(['success'])
+    const session = Object.assign(fake.session, {
+      sessionManager: {
+        getLeafEntry: () => ({
+          type: 'message',
+          message: { role: 'assistant', stopReason: 'error', errorMessage: 'server_is_overloaded' },
+        }),
+      },
+    }) as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      skipProviderErrorSubscription: true,
+      detectSoftErrorFromLeaf: true,
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+    })
+
+    expect(result.refUsed).toBe(REF_B)
+    expect(fake.setModels).toEqual([REF_B])
+  })
+
+  test('a subagent leaf error AFTER a tool ran does not fail over (idempotency holds with subscriptions skipped)', async () => {
+    const fake = fakeSession(['tool-then-throttle'])
+    const session = Object.assign(fake.session, {
+      sessionManager: {
+        getLeafEntry: () => ({
+          type: 'message',
+          message: { role: 'assistant', stopReason: 'error', errorMessage: 'server_is_overloaded' },
+        }),
+      },
+    }) as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      skipProviderErrorSubscription: true,
+      detectSoftErrorFromLeaf: true,
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(fake.setModels).toEqual([])
+  })
+
+  test('after a one-time failover, the next logical turn re-probes the primary from the head of the chain', async () => {
+    const circuit = new ThrottleCircuit()
+
+    const turn1 = fakeSession(['soft-throttle', 'success'])
+    let active = REF_A
+    const r1 = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: active,
+      session: turn1.session,
+      text: 'one',
+      circuit,
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      setModelForRef: async (ref) => {
+        turn1.setModels.push(ref)
+        active = ref
+      },
+    })
+    expect(r1.refUsed).toBe(REF_B)
+    expect(active).toBe(REF_B)
+
+    const turn2 = fakeSession(['success'])
+    const r2 = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: active,
+      session: turn2.session,
+      text: 'two',
+      circuit,
+      shouldFailover: (err) => /overloaded/i.test(err.message),
+      setModelForRef: async (ref) => {
+        turn2.setModels.push(ref)
+        active = ref
+      },
+    })
+
+    expect(r2.refUsed).toBe(REF_A)
+    expect(turn2.setModels).toEqual([REF_A])
   })
 })
