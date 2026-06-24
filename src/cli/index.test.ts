@@ -171,6 +171,52 @@ describe('typeclaw update on host stage', () => {
   })
 })
 
+describe('top-level usage (hand-rendered, no subcommand modules imported)', () => {
+  test.concurrent('no args: prints the usage table to stdout, "No command specified." to stderr, exits 1', async () => {
+    const dir = await mkAgent()
+    const { stdout, stderr, code } = await runCli([], dir)
+    expect(code).toBe(1)
+    expect(stdout).toContain('USAGE')
+    expect(stdout).toContain('COMMANDS')
+    expect(stdout).toContain('init')
+    expect(stdout).toContain('update')
+    expect(stdout).toContain('Use ')
+    expect(stderr.trim()).toBe('No command specified.')
+  })
+
+  pluginCommandTest('no args: does NOT discover plugin commands even in an agent that declares one', async () => {
+    const dir = await mkAgent(ECHO_PLUGIN)
+    const { stdout, code } = await runCli([], dir)
+    expect(code).toBe(1)
+    expect(stdout).not.toContain('Plugin commands:')
+    expect(stdout).not.toContain('echo-host')
+  })
+
+  test.concurrent('--help and -h produce identical output and exit 0', async () => {
+    const dir = await mkAgent()
+    const [long, short] = await Promise.all([runCli(['--help'], dir), runCli(['-h'], dir)])
+    expect(long.code).toBe(0)
+    expect(short.code).toBe(0)
+    expect(short.stdout).toBe(long.stdout)
+    expect(long.stdout).toContain('USAGE')
+    expect(long.stdout).toContain('COMMANDS')
+  })
+
+  test.concurrent('usage table hides the internal _hostd / _update-check commands', async () => {
+    const dir = await mkAgent()
+    const { stdout } = await runCli(['--help'], dir)
+    expect(stdout).not.toContain('_hostd')
+    expect(stdout).not.toContain('_update-check')
+  })
+
+  test.concurrent('--version stays handled by citty: prints the version and exits 0', async () => {
+    const dir = await mkAgent()
+    const { stdout, code } = await runCli(['--version'], dir)
+    expect(code).toBe(0)
+    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+  })
+})
+
 describe('_hostd preservation', () => {
   test.concurrent('_hostd is recognized as a built-in (not routed to plugin dispatcher)', async () => {
     // We can't actually launch _hostd in a test (it would daemonize), but
