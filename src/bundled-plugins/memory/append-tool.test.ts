@@ -364,6 +364,84 @@ describe('appendTool provenance (who/where)', () => {
   })
 })
 
+describe('appendTool reference validation', () => {
+  test('keeps already-clean references as-is when no resolver is wired', async () => {
+    const root = tmpRoot()
+
+    await call(root, { references: ['some-slug'] })
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ references: ['some-slug'] })
+  })
+
+  test('normalizes references (trim, drop blanks, de-dupe) even with no resolver wired', async () => {
+    const root = tmpRoot()
+
+    await call(root, { references: ['  spaced  ', '', '   ', 'dup', 'dup'] })
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ references: ['spaced', 'dup'] })
+  })
+
+  test('omits the references field entirely when no resolver is wired and all entries are blank', async () => {
+    const root = tmpRoot()
+
+    await call(root, { references: ['', '   '] })
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).not.toHaveProperty('references')
+  })
+
+  test('keeps only resolver-known slugs and drops the rest', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ referenceSlugResolver: async () => ['real-slug', 'other-real'] })
+
+    await tool.execute(
+      { ...baseInput, references: ['real-slug', 'streams/2026-06-19#abc', 'invented-pr-998', 'other-real'] },
+      ctx(root),
+    )
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ references: ['real-slug', 'other-real'] })
+  })
+
+  test('omits the references field entirely when every cited slug is unknown', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ referenceSlugResolver: async () => [] })
+
+    await tool.execute({ ...baseInput, references: ['ghost-1', 'ghost-2'] }, ctx(root))
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).not.toHaveProperty('references')
+  })
+
+  test('drops empty-string and whitespace-only slugs even when a resolver allows real ones', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ referenceSlugResolver: async () => ['kept'] })
+
+    await tool.execute({ ...baseInput, references: ['', '   ', 'kept'] }, ctx(root))
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ references: ['kept'] })
+  })
+
+  test('logs the dropped slugs so dangling citations are observable', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ referenceSlugResolver: async () => ['kept'] })
+    const warnings: string[] = []
+    const loggingCtx: ToolContext = {
+      signal: undefined,
+      sessionId: 'test',
+      agentDir: root,
+      logger: { info: () => {}, warn: (m) => warnings.push(m), error: () => {} },
+    }
+
+    await tool.execute({ ...baseInput, references: ['kept', 'dangling'] }, loggingCtx)
+
+    expect(warnings.some((m) => m.includes('dangling') && /unknown reference slug/i.test(m))).toBe(true)
+  })
+})
+
 describe('advanceWatermarkTool', () => {
   test('writes only a watermark event', async () => {
     const root = tmpRoot()

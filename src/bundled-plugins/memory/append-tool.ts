@@ -21,9 +21,17 @@ export type FragmentsAppendedHook = (fragments: FragmentEvent[], context: Fragme
 // value) because the same factory builds tools whose origin is only known later.
 export type OriginProvider = () => SessionOrigin | undefined
 
+// Returns the set of reference slugs the agent is allowed to cite from
+// `references[]`: every reference that exists on disk (a `store_reference` call
+// writes the file synchronously before returning the slug, so a same-run store
+// is already on disk by append time). Lets the append tool strip hallucinated
+// slugs the model invents without ever calling `store_reference`.
+export type ReferenceSlugResolver = (agentDir: string) => Promise<Iterable<string>>
+
 export type CreateAppendToolOptions = {
   onFragmentsAppended?: FragmentsAppendedHook
   originProvider?: OriginProvider
+  referenceSlugResolver?: ReferenceSlugResolver
 }
 
 // Stamped fields are the stable channel coordinates only. Author identity is
@@ -57,10 +65,10 @@ function redactIfSecret(name: string | undefined): string | undefined {
 }
 
 export function createAppendTool(options: CreateAppendToolOptions = {}) {
-  const { onFragmentsAppended, originProvider } = options
+  const { onFragmentsAppended, originProvider, referenceSlugResolver } = options
   return defineTool({
     description:
-      "Append a memory fragment to today's JSONL daily stream and advance the watermark. The runtime serializes your call into a JSON line and chooses the filename — do not emit raw JSON and do not pass a path. `topic`/`body` are the fragment's substance; `source` is the parent session id; `entry` is the transcript-entry-id this fragment anchors to; `latestEntryId` is the latest transcript-entry-id you evaluated in this run (advances the watermark, may equal `entry` or be later). `who` is the display name/handle of the person the fragment's evidence is attributable to — set it ONLY when one transcript speaker clearly owns the evidence; omit it when the fact is the user's own, spans multiple speakers, or is not attributable. The channel/room/platform (`where`) is stamped automatically from the session origin — do not pass it and do not restate it in the body. Refuses content with recognized credential patterns and refuses byte-equivalent topic+body within the same daily stream.",
+      "Append a memory fragment to today's JSONL daily stream and advance the watermark. The runtime serializes your call into a JSON line and chooses the filename — do not emit raw JSON and do not pass a path. `topic`/`body` are the fragment's substance; `source` is the parent session id; `entry` is the transcript-entry-id this fragment anchors to; `latestEntryId` is the latest transcript-entry-id you evaluated in this run (advances the watermark, may equal `entry` or be later). `references` may ONLY contain slugs returned by `store_reference` (it returns the slug it wrote) — never topic ids, PR names, stream paths, or invented labels; unknown slugs are dropped. `who` is the display name/handle of the person the fragment's evidence is attributable to — set it ONLY when one transcript speaker clearly owns the evidence; omit it when the fact is the user's own, spans multiple speakers, or is not attributable. The channel/room/platform (`where`) is stamped automatically from the session origin — do not pass it and do not restate it in the body. Refuses content with recognized credential patterns and refuses byte-equivalent topic+body within the same daily stream.",
     parameters: z.object({
       topic: z.string().min(1),
       body: z.string().min(1),
@@ -104,8 +112,9 @@ export function createAppendTool(options: CreateAppendToolOptions = {}) {
         topic,
         body,
       }
-      if (references !== undefined && references.length > 0) {
-        fragment.references = references
+      const validReferences = await resolveValidReferences(references, referenceSlugResolver, ctx)
+      if (validReferences.length > 0) {
+        fragment.references = validReferences
       }
       if (who !== undefined) fragment.who = who
       if (where !== undefined) fragment.where = where
@@ -171,6 +180,35 @@ export const advanceWatermarkTool = defineTool({
 
 function dailyStreamPath(agentDir: string): string {
   return streamFilePath(agentDir, formatLocalDate())
+}
+
+// The model treats `references[]` as a free-text related-id field, citing empty
+// strings, stream paths, and slugs for references it never stored. Every path
+// first normalizes: trim, drop blank/whitespace-only entries, and de-duplicate
+// — an empty or repeated citation is never meaningful regardless of wiring.
+// With a resolver, only slugs backed by a real reference file then survive; the
+// rest are dropped and logged so dangling citations never reach the stream.
+// Without one (the standalone `appendTool` export, no reference subsystem
+// wired) the normalized slugs pass through.
+async function resolveValidReferences(
+  references: string[] | undefined,
+  resolver: ReferenceSlugResolver | undefined,
+  ctx: { agentDir: string; logger?: { warn(message: string): void } },
+): Promise<string[]> {
+  if (references === undefined || references.length === 0) return []
+  const requested = [...new Set(references.map((slug) => slug.trim()).filter((slug) => slug.length > 0))]
+  if (resolver === undefined) return requested
+
+  const known = new Set(await resolver(ctx.agentDir))
+  const valid = requested.filter((slug) => known.has(slug))
+  const dropped = requested.filter((slug) => !known.has(slug))
+  if (dropped.length > 0) {
+    ctx.logger?.warn(
+      `[memory] dropped ${dropped.length} unknown reference slug(s) from fragment: ${dropped.join(', ')}. ` +
+        `references[] may only cite slugs returned by store_reference.`,
+    )
+  }
+  return valid
 }
 
 function assertNoSecrets(parts: ReadonlyArray<string | undefined>): void {

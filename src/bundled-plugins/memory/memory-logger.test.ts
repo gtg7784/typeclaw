@@ -720,6 +720,35 @@ describe('memoryLoggerSubagent', () => {
     )
   })
 
+  test('the wired append tool drops a hallucinated reference slug while keeping the real one', async () => {
+    const agentDir = makeAgentDir()
+    const wiredStore = silentSubagent.customTools!.find((t) => t.description.startsWith('store_reference:'))!
+    const wiredAppend = silentSubagent.customTools!.find((t) => t.description.startsWith('Append a memory fragment'))!
+
+    const stored = await wiredStore.execute(
+      { title: 'Lookup query', body: 'SELECT 1', origin: 'episode', tags: [] },
+      toolCtx(agentDir),
+    )
+    const slug = (stored.details as { slug: string }).slug
+
+    await wiredAppend.execute(
+      {
+        topic: 'verbatim reference stored',
+        body: 'Stored the lookup query.',
+        source: 'ses_abc',
+        entry: 'entry_sql',
+        latestEntryId: 'entry_sql',
+        references: [slug, 'typeclaw-pr-998-invented', ''],
+      },
+      toolCtx(agentDir),
+    )
+
+    const events = await readEvents(streamFilePath(agentDir, formatLocalDate()))
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'fragment', topic: 'verbatim reference stored', references: [slug] }),
+    )
+  })
+
   test('the default exported memoryLoggerSubagent still has a handler (back-compat)', () => {
     expect(memoryLoggerSubagent.handler).toBeDefined()
   })
