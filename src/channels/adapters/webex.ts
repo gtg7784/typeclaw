@@ -37,6 +37,7 @@ import type { WebexAccountRecord } from '@/secrets/schema'
 import { createWebexChannelNameResolver } from './webex-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-classify'
 import { resolveWebexBodyText } from './webex-format'
+import { createWebexPrefetchLimiter, isWebexRateLimitError, type WebexPrefetchLimiter } from './webex-prefetch-limiter'
 import { enrichWebexMessageReference } from './webex-reference'
 
 export type WebexAdapterLogger = {
@@ -187,32 +188,40 @@ export function createTypingCallback(deps: {
   }
 }
 
-// The Webex REST/internal client offers no AbortSignal, so a hung `listMessages`
-// would otherwise block cold-start prefetch for the router's full 5s history
-// ceiling before degrading. Racing it against a tighter internal deadline lets
-// prefetch fall back to membership-derivation (or skip) seconds sooner, mirroring
-// the cold-fetch fail-fast posture the membership resolver already uses.
-const WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS = 2500
-
 export function createWebexHistoryCallback(deps: {
   client: Pick<WebexClient, 'listMessages'>
   logger: WebexAdapterLogger
   botPersonIdRef: () => string | null
-  timeoutMs?: number
+  limiter?: WebexPrefetchLimiter
 }): HistoryCallback {
-  const timeoutMs = deps.timeoutMs ?? WEBEX_HISTORY_COLD_FETCH_TIMEOUT_MS
+  const limiter = deps.limiter ?? createWebexPrefetchLimiter()
+  const listMessages = (args: FetchHistoryArgs) =>
+    deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) })
+  const toHistory = (messages: WebexMessage[]): FetchHistoryResult => {
+    const authorById = new Map(messages.map((m) => [m.ref, m.personRef]))
+    const botPersonId = deps.botPersonIdRef()
+    return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, botPersonId, authorById)).reverse() }
+  }
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     try {
-      const messages = await raceWithTimeout(
-        deps.client.listMessages(args.chat, { max: clampLimit(args.limit, 100) }),
-        timeoutMs,
-        '[webex] history fetch',
-      )
-      const authorById = new Map(messages.map((m) => [m.ref, m.personRef]))
-      const botPersonId = deps.botPersonIdRef()
-      return { ok: true, messages: messages.map((m) => mapWebexHistoryMessage(m, botPersonId, authorById)).reverse() }
+      // Only best-effort reads (cold-start prefetch, membership fallback) submit
+      // to the per-room limiter. Explicit channel_history reads bypass it so a
+      // user-initiated look-back is never declined by prefetch backpressure.
+      if (args.prefetch !== true) {
+        return toHistory(await listMessages(args))
+      }
+      const outcome = await limiter.run(args.chat, () => listMessages(args))
+      if (!outcome.admitted) {
+        deps.logger.info('[webex] history prefetch skipped: rate-limit backpressure')
+        return { ok: false, error: 'prefetch skipped: rate-limit backpressure', skipReason: 'rate-limited' }
+      }
+      return toHistory(outcome.value)
     } catch (err) {
       const message = describe(err)
+      if (args.prefetch === true && isWebexRateLimitError(err)) {
+        deps.logger.info(`[webex] history prefetch skipped: rate limited (${message})`)
+        return { ok: false, error: message, skipReason: 'rate-limited' }
+      }
       deps.logger.warn(`[webex] history fetch failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -257,7 +266,7 @@ export function createWebexMembershipResolver(deps: {
     } catch (err) {
       deps.logger.warn(`[webex] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
       return await deriveMembershipFromHistory({
-        fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
+        fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit, prefetch: true }),
         now,
       })
     }
@@ -547,18 +556,6 @@ function clampLimit(requested: number, max: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
-}
-
-async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-  })
-  try {
-    return await Promise.race([work, timeout])
-  } finally {
-    if (timer !== null) clearTimeout(timer)
-  }
 }
 
 function dropHint(reason: InboundDropReason): string {

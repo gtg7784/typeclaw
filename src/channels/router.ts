@@ -1999,10 +1999,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: live.key.chat,
       thread: live.key.thread,
       limit: requested,
+      prefetch: true,
     })
 
     if (!result.ok) {
-      logger.warn(`[channels] ${live.keyId}: prefetch skipped (history fetch failed: ${result.error})`)
+      // An adapter that declined a best-effort read to avoid hammering a
+      // rate-limited resource is expected optional-context loss, not a failure —
+      // log it at info so it does not masquerade as an auth/network warning.
+      if (result.skipReason === 'rate-limited') {
+        logger.info(`[channels] ${live.keyId}: prefetch skipped (rate limited: ${result.error})`)
+      } else {
+        logger.warn(`[channels] ${live.keyId}: prefetch skipped (history fetch failed: ${result.error})`)
+      }
       return
     }
 
