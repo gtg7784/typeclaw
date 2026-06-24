@@ -715,11 +715,20 @@ export function detectAttentionEscalation(text: string, prior?: QuestionSignal |
 // unconditionally and gives OpenAI models maximum effort on escalation turns.
 const ESCALATED_LEVEL: ThinkingLevel = 'xhigh'
 
+// `allowEscalation: false` pins the turn to `sessionDefault`. Subagent turns set
+// it because their "user prompt" is composed by another agent, not a human — so
+// the question-mark/frustration heuristics would misread a multi-question brief
+// and silently bump a `fast`/`low` worker to `xhigh`. Default `true` keeps the
+// human-facing sessions (TUI, channels, cron) escalating as before.
+export type TurnThinkingOptions = { allowEscalation?: boolean }
+
 export function resolveTurnThinkingLevel(
   text: string,
   sessionDefault: ThinkingLevel | undefined,
   prior?: QuestionSignal | null,
+  options?: TurnThinkingOptions,
 ): ThinkingLevel | undefined {
+  if (options?.allowEscalation === false) return sessionDefault
   return detectAttentionEscalation(text, prior) ? ESCALATED_LEVEL : sessionDefault
 }
 
@@ -735,7 +744,8 @@ export function applyTurnThinkingLevel(
   text: string,
   sessionDefault: ThinkingLevel | undefined,
   prior?: QuestionSignal | null,
+  options?: TurnThinkingOptions,
 ): void {
-  const resolved = resolveTurnThinkingLevel(text, sessionDefault, prior)
+  const resolved = resolveTurnThinkingLevel(text, sessionDefault, prior, options)
   if (resolved !== undefined) session.setThinkingLevel(resolved)
 }
