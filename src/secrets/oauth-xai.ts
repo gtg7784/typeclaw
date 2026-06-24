@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 
-import { registerOAuthProvider } from '@mariozechner/pi-ai/oauth'
+import { getOAuthProvider, registerOAuthProvider } from '@mariozechner/pi-ai/oauth'
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from '@mariozechner/pi-ai/oauth'
 
 // xAI (Grok) OAuth 2.0. xAI runs a standard OIDC authorization server at
@@ -336,7 +336,7 @@ let registered = false
 // so the provider is always present before `AuthStorage.login()` /
 // `getApiKey()` look it up via `getOAuthProvider('xai')`.
 export function registerXaiOAuthProvider(): void {
-  if (registered) return
+  if (registered && getOAuthProvider(XAI_OAUTH_PROVIDER_ID)) return
   registerOAuthProvider(xaiOAuthProvider)
   registered = true
 }
