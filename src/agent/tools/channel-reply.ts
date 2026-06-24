@@ -92,9 +92,9 @@ export function createChannelReplyTool({
       resolve_review_thread: Type.Optional(
         Type.Boolean({
           description:
-            'GitHub review threads ONLY — ignored on Slack, Discord, Telegram, KakaoTalk, and any non-github session, and ignored on a github reply that is not inside a `thread`. On those, leave this unset and ignore the rest of this description. ' +
-            'On a github reply inside a review thread you authored: when your `text` acknowledges the concern is fixed/verified/addressed (e.g. "verified at <sha>", "thanks, that resolves it"), treat setting this `true` as the expected close-out — do it in the SAME call. This is a strong instruction, not a schema requirement: the field stays optional and nothing rejects an acknowledgement that omits it, but a bare ack without it leaves the thread open, because a successful reply ends the turn and the resolve cannot run in a later one. So this flag is the only way the close-out actually happens. ' +
-            "It is safe to set by default: the runtime resolves BEFORE posting and ONLY if the thread's root comment is yours — it refuses (and blocks the reply) on a human reviewer's thread, so you never close someone else's open question. You need not pre-check authorship; just set it on your acknowledgement and let the runtime enforce ownership. Leave it unset when you intend to keep the thread open (partial fix, disagreement, mid-discussion).",
+            'GitHub PR review threads ONLY. On a TERMINAL (`continue:false`) github PR review-thread reply that carries `text`, this is REQUIRED: you must set it to `true` or `false` and omitting it is rejected — you will be told to re-call with an explicit choice. (It stays a normal optional field everywhere else: ignored on Slack/Discord/Telegram/KakaoTalk and any non-github session, on github replies outside a review thread, on attachments-only replies, and on mid-turn `continue:true` status updates — leave it unset there.) ' +
+            'Set `true` when your `text` acknowledges the concern is fixed/verified/addressed (e.g. "verified at <sha>", "thanks, that resolves it"): the runtime resolves the thread BEFORE posting, so the close-out actually happens in this same turn — a successful reply ends the turn, so a resolve deferred to "later" never runs. ' +
+            "Set `false` when the thread should stay open (partial fix, disagreement, mid-discussion). It is safe to set `true` by default: the runtime resolves ONLY if the thread's root comment is yours — it refuses (and blocks the reply) on a human reviewer's thread, so you never close someone else's open question. You need not pre-check authorship; let the runtime enforce ownership.",
         }),
       ),
     }),
@@ -137,6 +137,27 @@ export function createChannelReplyTool({
         return {
           content: [{ type: 'text' as const, text: `channel_reply denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
+        }
+      }
+
+      // Required-choice guard: a terminal github review-thread text reply must
+      // make an explicit resolve_review_thread choice. The model kept silently
+      // omitting the flag after acknowledging a fix, leaving the thread open;
+      // forcing the choice (the discipline `continue` already enforces) closes
+      // the loop where prose instructions did not. The field stays optional in
+      // the schema precisely so omission is still detectable here (vs explicit
+      // false). Runs before the resolve/guards so a missing choice never acts.
+      const missingResolveChoice = missingReviewThreadResolveChoiceError({
+        origin,
+        text,
+        isContinue: keepTurnAlive,
+        resolveReviewThread: params.resolve_review_thread,
+      })
+      if (missingResolveChoice) {
+        logger.warn(formatChannelToolFailure('channel_reply', missingResolveChoice))
+        return {
+          content: [{ type: 'text' as const, text: `channel_reply denied: ${missingResolveChoice}` }],
+          details: { ok: false, error: missingResolveChoice },
         }
       }
 
@@ -277,6 +298,30 @@ export function createChannelReplyTool({
       }
     },
   })
+}
+
+// Returns the denial string when a terminal github PR review-thread text reply
+// omits an explicit resolve_review_thread choice, or '' when no choice is owed.
+// Scoped by `^pr:\d+$` (not just thread !== null) so a future threaded github
+// context can't be forced into a resolve choice that means nothing there.
+function missingReviewThreadResolveChoiceError(input: {
+  origin: ChannelReplyOrigin
+  text: string | undefined
+  isContinue: boolean
+  resolveReviewThread: boolean | undefined
+}): string {
+  const isGithubPrReviewThread =
+    input.origin.adapter === 'github' && /^pr:\d+$/.test(input.origin.chat) && input.origin.thread !== null
+  const hasText = input.text !== undefined && input.text.trim() !== ''
+  if (!isGithubPrReviewThread || !hasText || input.isContinue || input.resolveReviewThread !== undefined) {
+    return ''
+  }
+  return (
+    'This is a terminal github PR review-thread reply with text, so `resolve_review_thread` is required: ' +
+    'set it to `true` when the concern is fixed and this bot-authored thread should be closed (the runtime ' +
+    'resolves before posting and only on your own thread), or `false` to leave it open. You omitted it; ' +
+    're-call channel_reply with an explicit boolean.'
+  )
 }
 
 // Returns an error string when the resolve should block the reply, or null
