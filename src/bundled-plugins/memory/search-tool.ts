@@ -54,7 +54,7 @@ export type Matcher = (haystack: string) => boolean
 export function createMemorySearchTool() {
   return defineTool({
     description:
-      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers topic shards under memory/topics/ (consolidated facts), references under memory/references/ (verbatim artifacts), and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard (or reference) with its full body — use it to read a topic OR reference whose slug you already have (e.g. a heading shown in injected memory); it resolves the topic shard first and falls back to a reference of the same slug. Returns matches discriminated by `source: "topic" | "reference" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then reference matches, then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-then-reference-then-stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match.',
+      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers topic shards under memory/topics/ (consolidated facts), references under memory/references/ (verbatim artifacts), and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard (or reference) with its full body — use it to read a topic OR reference whose slug you already have (e.g. a heading shown in injected memory); it resolves the topic shard first and falls back to a reference of the same slug. Returns matches discriminated by `source: "topic" | "reference" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then reference matches, then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-then-reference-then-stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match. Pass `where` (a channel/room name like "#incidents" or its raw chat id) to scope the search to one room — use it for questions like "what did we discuss in #incidents"; it matches a stream fragment by its captured room id or human-readable name (case-insensitive, leading "#" optional) and, because room is fragment-only provenance, returns ONLY stream matches (topic shards and references carry no room).',
     parameters: z.object({
       query: z.string().optional(),
       topic: z.string().optional(),
@@ -63,8 +63,9 @@ export function createMemorySearchTool() {
       maxResults: z.number().int().min(0).default(DEFAULT_MAX_RESULTS),
       since: z.string().optional(),
       before: z.string().optional(),
+      where: z.string().optional(),
     }),
-    async execute({ query, topic, asRegex, full, maxResults, since, before }, ctx) {
+    async execute({ query, topic, asRegex, full, maxResults, since, before, where }, ctx) {
       if ((query === undefined) === (topic === undefined)) {
         return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
       }
@@ -86,14 +87,24 @@ export function createMemorySearchTool() {
       const dateFilter = parseReferenceDateFilter(since, before)
       if ('error' in dateFilter) return resultToToolResult(dateFilter)
 
-      const references = allReferences.filter((reference) => referenceCandidateAllowed(reference, dateFilter))
-      if (shards.length === 0 && streamDays.length === 0 && references.length === 0) {
+      // A `where` filter scopes the search to ONE room. `where` is fragment-only
+      // provenance, so a room query excludes topic shards and references (they
+      // carry no room) and keeps only stream fragments whose `where` matches.
+      const roomFilteredDays = where === undefined ? streamDays : filterStreamDaysByRoom(streamDays, where)
+      const scopedShards = where === undefined ? shards : []
+      const references =
+        where === undefined ? allReferences.filter((r) => referenceCandidateAllowed(r, dateFilter)) : []
+
+      if (scopedShards.length === 0 && roomFilteredDays.length === 0 && references.length === 0) {
         return resultToToolResult({ matches: [], truncatedAt: 0 })
       }
 
-      let result = searchAll(shards, streamDays, matcherOrError, { full, maxResults, references })
+      let result = searchAll(scopedShards, roomFilteredDays, matcherOrError, { full, maxResults, references })
       if ('matches' in result && result.matches.length === 0) {
-        const fallback = tokenFallback(query!, asRegex, shards, streamDays, references, { full, maxResults })
+        const fallback = tokenFallback(query!, asRegex, scopedShards, roomFilteredDays, references, {
+          full,
+          maxResults,
+        })
         if (fallback !== null) result = fallback
       }
       if ('matches' in result) await bumpReturnedReferences(allReferences, result.matches)
@@ -517,6 +528,32 @@ function parseDateParam(name: string, value: string): Date | string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return `invalid ${name}: expected ISO 8601 datetime string`
   return date
+}
+
+// Keep only fragments whose `where` names this room, by raw `chat` id (canonical)
+// or `chatName` (convenience, case-insensitive — the agent often knows only
+// "#incidents"). The `#` prefix is stripped so "#incidents" and "incidents"
+// both match. Non-fragment events (watermarks, legacy prose) have no `where` and
+// are dropped under a room filter; days that end up empty are removed.
+function filterStreamDaysByRoom(days: UndreamedStreamDay[], room: string): UndreamedStreamDay[] {
+  const normalizedKey = normalizeRoomKey(room)
+  return days.flatMap((day) => {
+    const events = day.events.filter(
+      (event) => event.type === 'fragment' && fragmentMatchesRoom(event, room, normalizedKey),
+    )
+    return events.length === 0 ? [] : [{ ...day, events }]
+  })
+}
+
+function fragmentMatchesRoom(event: FragmentEvent, rawRoom: string, normalizedKey: string): boolean {
+  const where = event.where
+  if (where === undefined) return false
+  if (where.chat === rawRoom) return true
+  return where.chatName !== undefined && normalizeRoomKey(where.chatName) === normalizedKey
+}
+
+function normalizeRoomKey(value: string): string {
+  return value.replace(/^#/, '').toLocaleLowerCase()
 }
 
 function referenceCandidateAllowed(reference: Reference, filter: ReferenceDateFilter): boolean {
