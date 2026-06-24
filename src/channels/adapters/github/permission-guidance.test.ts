@@ -4,6 +4,7 @@ import {
   buildAppPermissionPreflightGuidance,
   buildOutboundPermissionGuidance,
   buildPermissionGuidance,
+  githubRequiredPermissionsNote,
   isOutboundPermissionDenial,
   parseListHooksPermissionStatus,
 } from './permission-guidance'
@@ -262,5 +263,18 @@ describe('buildOutboundPermissionGuidance', () => {
   test('App guidance reminds the user the install owner must reaccept the new permissions', () => {
     const g = buildOutboundPermissionGuidance({ authType: 'app', endpointKind: 'issue-comment' })
     expect(g).toContain('accept the updated permissions request')
+  })
+})
+
+describe('githubRequiredPermissionsNote', () => {
+  test('both variants include Actions read/write so init and channel-add cannot drift', () => {
+    expect(githubRequiredPermissionsNote(true)).toContain('Actions read/write')
+    expect(githubRequiredPermissionsNote(false)).toContain('Actions read/write')
+  })
+
+  test('includeWebhookNote toggles only the webhook-management reassurance', () => {
+    expect(githubRequiredPermissionsNote(true)).toContain('TypeClaw will create and manage the repository webhooks')
+    expect(githubRequiredPermissionsNote(false)).not.toContain('TypeClaw will create and manage')
+    expect(githubRequiredPermissionsNote(false)).toContain('Webhooks read/write.')
   })
 })

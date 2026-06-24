@@ -13,6 +13,24 @@ export type OutboundEndpointKind =
   | 'issue-reaction'
   | 'pr-review-comment-reaction'
 
+// The required-permissions checklist shown verbatim during interactive GitHub
+// channel setup (both `typeclaw init` and `typeclaw channel add github`). Kept
+// here — the single owner of GitHub permission copy — so the init and
+// channel-add flows can't drift apart (they did once: Actions was added to one
+// and not the other). The labels mirror github.com's UI strings so a user can
+// grep their settings page for the exact text. `includeWebhookNote` appends the
+// "TypeClaw will create and manage the repository webhooks for you" reassurance,
+// shown only on the first-setup prompts (not the rotate/switch prompts).
+export function githubRequiredPermissionsNote(includeWebhookNote: boolean): string {
+  const webhooks = includeWebhookNote
+    ? 'Webhooks read/write (TypeClaw will create and manage the repository webhooks for you).'
+    : 'Webhooks read/write.'
+  return [
+    'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+    `Actions read/write, Metadata read, and ${webhooks}`,
+  ].join('\n')
+}
+
 // Parses webhook-register errors of the shape `list hooks failed: <status> <body>`.
 // Returns the status code when it matches the two shapes GitHub emits for
 // missing access on the list-hooks endpoint:

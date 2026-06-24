@@ -15,6 +15,7 @@ import {
 } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
+import { githubRequiredPermissionsNote } from '@/channels/adapters/github/permission-guidance'
 import {
   KNOWN_PROVIDER_VENDORS,
   KNOWN_PROVIDERS,
@@ -1666,8 +1667,7 @@ async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['c
   note(
     [
       'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
-      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-      'Metadata read, and Webhooks read/write (TypeClaw will create and manage the repository webhooks for you).',
+      githubRequiredPermissionsNote(true),
     ].join('\n'),
     'Get GitHub credentials',
   )
