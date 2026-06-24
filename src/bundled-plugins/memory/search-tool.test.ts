@@ -10,7 +10,7 @@ import { renderShard, type ShardFrontmatter } from './frontmatter'
 import { referenceFilePath, referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { parseReference, renderReference } from './references/frontmatter'
 import { createMemorySearchTool } from './search-tool'
-import type { FragmentEvent, LegacyProseEvent, WatermarkEvent } from './stream-events'
+import type { FragmentEvent, FragmentProvenance, LegacyProseEvent, WatermarkEvent } from './stream-events'
 import { appendEvents } from './stream-io'
 
 const tmpRoots: string[] = []
@@ -32,6 +32,9 @@ type StreamMatch = {
   topic: string
   excerpt: string
   fullBody?: string
+  who?: string
+  when?: string
+  where?: FragmentProvenance
 }
 
 type ReferenceMatch = {
@@ -400,6 +403,7 @@ describe('memorySearchTool — stream events', () => {
           eventId: 'streams/2026-05-20#frag-001',
           topic: 'Deploy preferences',
           excerpt: 'Deploy preferences',
+          when: '2026-05-20T12:00:00Z',
         },
       ],
     })
@@ -422,6 +426,7 @@ describe('memorySearchTool — stream events', () => {
           eventId: 'streams/2026-05-20#frag-002',
           topic: 'Random topic',
           excerpt: 'line 1\nline 2\nneedle here\nline 4\nline 5',
+          when: '2026-05-20T12:00:00Z',
         },
       ],
     })
@@ -570,6 +575,77 @@ describe('memorySearchTool — stream events', () => {
   })
 })
 
+describe('memorySearchTool — where (room) filter', () => {
+  const incidents = { adapter: 'slack-bot', workspace: 'T0', chat: 'C_INC', chatName: 'incidents', thread: null }
+  const general = { adapter: 'slack-bot', workspace: 'T0', chat: 'C_GEN', chatName: 'general', thread: null }
+
+  async function seedTwoRooms(agentDir: string): Promise<void> {
+    await writeStream(agentDir, '2026-05-20', [
+      fragmentIn('inc-1', 'Deploy plan', 'roll out the deploy', incidents),
+      fragmentIn('gen-1', 'Deploy plan', 'roll out the deploy', general),
+    ])
+  }
+
+  test('scopes results to a room by raw chat id', async () => {
+    const agentDir = await makeAgentDir()
+    await seedTwoRooms(agentDir)
+
+    const result = await call(agentDir, { query: 'deploy', where: 'C_INC' })
+
+    expect('matches' in result ? result.matches.map((m) => ('eventId' in m ? m.eventId : undefined)) : []).toEqual([
+      'streams/2026-05-20#inc-1',
+    ])
+  })
+
+  test('scopes results by human-readable chatName, case-insensitive with optional leading #', async () => {
+    const agentDir = await makeAgentDir()
+    await seedTwoRooms(agentDir)
+
+    const result = await call(agentDir, { query: 'deploy', where: '#INCIDENTS' })
+
+    expect('matches' in result ? result.matches.map((m) => ('eventId' in m ? m.eventId : undefined)) : []).toEqual([
+      'streams/2026-05-20#inc-1',
+    ])
+  })
+
+  test('matches a non-English room name', async () => {
+    const agentDir = await makeAgentDir()
+    const payments = { adapter: 'kakaotalk', workspace: 'w', chat: 'c-pay', chatName: '결제팀', thread: null }
+    await writeStream(agentDir, '2026-05-20', [fragmentIn('pay-1', '환불 정책', '환불은 7일 이내', payments)])
+
+    const result = await call(agentDir, { query: '환불', where: '결제팀' })
+
+    expect('matches' in result ? result.matches.map((m) => ('eventId' in m ? m.eventId : undefined)) : []).toEqual([
+      'streams/2026-05-20#pay-1',
+    ])
+  })
+
+  test('excludes fragments that carry no where, and topic shards (room is fragment-only)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'deploy-notes', 'Deploy notes', 'how we deploy\n')
+    await writeStream(agentDir, '2026-05-20', [
+      fragmentIn('inc-1', 'Deploy plan', 'roll out the deploy', incidents),
+      fragment('legacy-1', 'Deploy plan', 'roll out the deploy'),
+    ])
+
+    const result = await call(agentDir, { query: 'deploy', where: 'C_INC' })
+
+    expect('matches' in result ? result.matches.map((m) => m.source) : []).toEqual(['stream'])
+    expect('matches' in result ? result.matches.map((m) => ('eventId' in m ? m.eventId : undefined)) : []).toEqual([
+      'streams/2026-05-20#inc-1',
+    ])
+  })
+
+  test('returns no matches for an unknown room', async () => {
+    const agentDir = await makeAgentDir()
+    await seedTwoRooms(agentDir)
+
+    const result = await call(agentDir, { query: 'deploy', where: 'C_NOPE' })
+
+    expect(result).toEqual({ matches: [], truncatedAt: 0 })
+  })
+})
+
 // Descriptive multi-word queries (more than one whitespace-separated word
 // that no single body contains as one contiguous substring even though every
 // word is present individually) used to return {"matches":[]}. Fallback
@@ -687,6 +763,10 @@ function fragment(id: string, topic: string, body: string): FragmentEvent {
     topic,
     body,
   }
+}
+
+function fragmentIn(id: string, topic: string, body: string, where: FragmentProvenance): FragmentEvent {
+  return { ...fragment(id, topic, body), where }
 }
 
 async function writeStream(

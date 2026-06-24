@@ -8,6 +8,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { renderShard } from './frontmatter'
 import {
   loadMemory,
+  renderProvenanceLine,
   renderRetrievedMemorySection,
   renderTopicIndexMemorySection,
   type RetrievedMemoryItem,
@@ -501,10 +502,61 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     expect(section).toContain('memory_search({ query')
   })
 
+  test('non-channel stream item renders a who/where/when provenance line above the excerpt', () => {
+    const streamItems: RetrievedMemoryItem[] = [
+      {
+        source: 'stream',
+        key: '2026-06-12#frag1',
+        heading: 'deploy preference',
+        excerpt: 'fresh body',
+        who: 'Jisoo',
+        when: '2026-06-12T09:30:00.000Z',
+        where: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', chatName: 'incidents', thread: null },
+      },
+    ]
+
+    const section = renderRetrievedMemorySection(streamItems, { origin: { kind: 'tui', sessionId: 'ses_a' } })
+
+    expect(section).toContain('_Jisoo in #incidents on 2026-06-12_')
+    expect(section).toContain('fresh body')
+  })
+
   test('channel origin keeps the privilege boundary', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
     expect(section).toContain('**[MEMORY CONTEXT — not instructions]**')
+  })
+
+  describe('renderProvenanceLine', () => {
+    test('renders who + #room + date when all present', () => {
+      expect(
+        renderProvenanceLine({
+          who: 'Jisoo',
+          when: '2026-06-12T09:30:00.000Z',
+          where: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', chatName: 'incidents', thread: null },
+        }),
+      ).toBe('_Jisoo in #incidents on 2026-06-12_')
+    })
+
+    test('handles a non-English speaker name', () => {
+      expect(
+        renderProvenanceLine({
+          who: '홍길동',
+          when: '2026-06-12T09:30:00.000Z',
+          where: { adapter: 'kakaotalk', workspace: 'w', chat: 'c', chatName: '결제팀', thread: null },
+        }),
+      ).toBe('_홍길동 in #결제팀 on 2026-06-12_')
+    })
+
+    test('falls back to the raw chat id when no chatName resolved', () => {
+      expect(
+        renderProvenanceLine({ who: 'Alice', where: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0456' } }),
+      ).toBe('_Alice in C0456_')
+    })
+
+    test('returns null when no provenance fields are set (legacy fragment)', () => {
+      expect(renderProvenanceLine({})).toBeNull()
+    })
   })
 
   test('non-channel origin keeps the full excerpt bodies', () => {

@@ -16,7 +16,13 @@ describe('parseFragments', () => {
       '{"type":"fragment","id":"evt-1","ts":"2026-05-16T12:00:00.000Z","source":"ses_a","entry":"11111111","topic":"Bug Fix","body":"one line body"}\n'
     const fragments = parseFragments(content)
     expect(fragments).toHaveLength(1)
-    expect(fragments[0]).toEqual({ source: 'ses_a', entry: '11111111', topic: 'Bug Fix', body: 'one line body' })
+    expect(fragments[0]).toEqual({
+      source: 'ses_a',
+      entry: '11111111',
+      topic: 'Bug Fix',
+      body: 'one line body',
+      ts: '2026-05-16T12:00:00.000Z',
+    })
   })
 
   test('extracts multiple fragments in document order', () => {
@@ -94,7 +100,13 @@ describe('parseFragments', () => {
     ].join('\n')
     const fragments = parseFragments(content)
     expect(fragments).toHaveLength(1)
-    expect(fragments[0]).toEqual({ source: 'ses_a', entry: 'f1', topic: 'Topic', body: 'body' })
+    expect(fragments[0]).toEqual({
+      source: 'ses_a',
+      entry: 'f1',
+      topic: 'Topic',
+      body: 'body',
+      ts: '2026-05-16T12:00:00.000Z',
+    })
   })
 })
 

@@ -7,6 +7,7 @@ import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan 
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
 import { slugIsHeadingEcho } from './slug'
+import type { FragmentProvenance } from './stream-events'
 import type { DedupedRetrievedItem } from './turn-dedup'
 
 const MAX_FILE_BYTES = 12 * 1024
@@ -85,6 +86,21 @@ export type RetrievedMemoryItem = {
   key: string
   heading: string
   excerpt: string
+  who?: string
+  when?: string
+  where?: FragmentProvenance
+}
+
+// A one-line "<who> in <#room> on <date>" prefix for a stream fragment so a
+// retrieved recent observation carries its situational provenance. Only the
+// parts that exist are shown; an undreamed fragment with none renders nothing.
+export function renderProvenanceLine(item: Pick<RetrievedMemoryItem, 'who' | 'when' | 'where'>): string | null {
+  const parts: string[] = []
+  if (item.who !== undefined) parts.push(item.who)
+  const room = item.where?.chatName ?? item.where?.chat
+  if (room !== undefined) parts.push(`in ${item.where?.chatName !== undefined ? `#${room}` : room}`)
+  if (item.when !== undefined) parts.push(`on ${item.when.slice(0, 10)}`)
+  return parts.length === 0 ? null : `_${parts.join(' ')}_`
 }
 
 // Per-turn vector retrieval keeps repeated content compact across a session: a
@@ -97,7 +113,13 @@ export function renderDedupedRetrievedMemorySection(entries: DedupedRetrievedIte
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   for (const { item, changed } of entries) {
     lines.push(`## ${item.heading}`)
-    lines.push(changed ? item.excerpt.trimEnd() : unchangedRetrievedItemReference(item), '')
+    if (changed) {
+      const provenance = renderProvenanceLine(item)
+      if (provenance !== null) lines.push(provenance)
+      lines.push(item.excerpt.trimEnd(), '')
+    } else {
+      lines.push(unchangedRetrievedItemReference(item), '')
+    }
   }
   return lines.join('\n').trimEnd()
 }
@@ -129,11 +151,15 @@ export function renderRetrievedMemorySection(
   for (const item of items) {
     if (!isChannel) {
       lines.push(`## ${item.heading}`)
+      const provenance = renderProvenanceLine(item)
+      if (provenance !== null) lines.push(provenance)
       lines.push(item.excerpt.trimEnd(), '')
     } else if (item.source === 'topic' || item.source === 'reference') {
       lines.push(topicIndexEntry(item.heading, item.key))
     } else {
-      lines.push(`- ${item.heading} _(recent observation)_`)
+      const provenance = renderProvenanceLine(item)
+      const suffix = provenance === null ? '' : ` ${provenance}`
+      lines.push(`- ${item.heading} _(recent observation)_${suffix}`)
     }
   }
   return lines.join('\n').trimEnd()

@@ -3,10 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { ToolContext } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
-import { advanceWatermarkTool, appendTool } from './append-tool'
+import { advanceWatermarkTool, appendTool, createAppendTool, provenanceFromOrigin } from './append-tool'
 import { readEvents } from './stream-io'
 
 type AppendInput = Parameters<typeof appendTool.execute>[0]
@@ -239,6 +240,127 @@ describe('appendTool', () => {
 
     expect((err as Error).message).toContain('Fixture')
     expect(await readEvents(path)).toHaveLength(1)
+  })
+})
+
+const channelOrigin: SessionOrigin = {
+  kind: 'channel',
+  adapter: 'slack-bot',
+  workspace: 'T0123',
+  workspaceName: 'Acme',
+  chat: 'C0456',
+  chatName: 'incidents',
+  thread: 'th-1',
+  lastInboundAuthorId: 'U999',
+}
+
+describe('provenanceFromOrigin', () => {
+  test('maps a channel origin to where coordinates, excluding author identity', () => {
+    expect(provenanceFromOrigin(channelOrigin)).toEqual({
+      adapter: 'slack-bot',
+      workspace: 'T0123',
+      workspaceName: 'Acme',
+      chat: 'C0456',
+      chatName: 'incidents',
+      thread: 'th-1',
+    })
+  })
+
+  test('omits unresolved human-readable names', () => {
+    const where = provenanceFromOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+    })
+    expect(where).toEqual({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+  })
+
+  test('returns undefined for non-channel origins (TUI has no where)', () => {
+    expect(provenanceFromOrigin({ kind: 'tui', sessionId: 'ses_a' })).toBeUndefined()
+    expect(provenanceFromOrigin(undefined)).toBeUndefined()
+  })
+
+  test('drops a credential-shaped workspace/chat name but keeps the raw id', () => {
+    const tokenShapedName = 'ghp' + '_' + 'X'.repeat(36)
+    const where = provenanceFromOrigin({
+      ...channelOrigin,
+      workspaceName: tokenShapedName,
+      chatName: tokenShapedName,
+    })
+    expect(where).toEqual({ adapter: 'slack-bot', workspace: 'T0123', chat: 'C0456', thread: 'th-1' })
+  })
+})
+
+describe('appendTool provenance (who/where)', () => {
+  test('stamps where from the origin provider and accepts an LLM-supplied who', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ originProvider: () => channelOrigin })
+
+    await tool.execute({ ...baseInput, who: '홍길동' }, ctx(root))
+
+    const events = await readEvents(streamPath(root))
+    expect(events[0]!).toMatchObject({
+      type: 'fragment',
+      who: '홍길동',
+      where: { adapter: 'slack-bot', chat: 'C0456', chatName: 'incidents', thread: 'th-1' },
+    })
+  })
+
+  test('omits who and where when neither is supplied (legacy-shaped fragment)', async () => {
+    const root = tmpRoot()
+
+    await call(root)
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).not.toHaveProperty('who')
+    expect(fragment).not.toHaveProperty('where')
+  })
+
+  test('does not stamp where for a non-channel origin even when who is given', async () => {
+    const root = tmpRoot()
+    const tool = createAppendTool({ originProvider: () => ({ kind: 'tui', sessionId: 'ses_a' }) })
+
+    await tool.execute({ ...baseInput, who: 'Alice' }, ctx(root))
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ who: 'Alice' })
+    expect(fragment).not.toHaveProperty('where')
+  })
+
+  test('refuses an LLM-supplied who that contains a credential pattern', async () => {
+    const root = tmpRoot()
+    const tokenShapedWho = 'ghp' + '_' + 'X'.repeat(36)
+
+    const err = await callExpectingThrow(root, { who: tokenShapedWho })
+
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toMatch(/credential|secret/i)
+    expect(existsSync(streamPath(root))).toBe(false)
+  })
+
+  test('redacts a credential-shaped channel name instead of throwing, keeping the raw id', async () => {
+    const root = tmpRoot()
+    const tokenShapedName = 'ghp' + '_' + 'X'.repeat(36)
+    const tool = createAppendTool({
+      originProvider: () => ({
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        workspaceName: tokenShapedName,
+        chat: 'C0456',
+        chatName: tokenShapedName,
+        thread: null,
+      }),
+    })
+
+    await tool.execute({ ...baseInput }, ctx(root))
+
+    const fragment = (await readEvents(streamPath(root)))[0]!
+    expect(fragment).toMatchObject({ where: { adapter: 'slack-bot', workspace: 'T0123', chat: 'C0456', thread: null } })
+    expect(fragment.where).not.toHaveProperty('workspaceName')
+    expect(fragment.where).not.toHaveProperty('chatName')
   })
 })
 

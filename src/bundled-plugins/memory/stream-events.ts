@@ -30,6 +30,21 @@ export function timestampFromId(id: string): string {
   return new Date(ms).toISOString()
 }
 
+// Runtime-stamped (not LLM-supplied): the channel/room/platform is stable for a
+// whole logger run, so unlike `who` it cannot be misattributed across speakers.
+// All-optional so legacy fragments and non-channel (TUI) origins parse with it
+// absent; names are best-effort (resolver may not have run). Never embedded.
+export const fragmentProvenanceSchema = z
+  .object({
+    adapter: z.string(),
+    workspace: z.string(),
+    workspaceName: z.string().optional(),
+    chat: z.string(),
+    chatName: z.string().optional(),
+    thread: z.string().nullable().optional(),
+  })
+  .passthrough()
+
 export const fragmentEventSchema = z
   .object({
     type: z.literal('fragment'),
@@ -40,6 +55,13 @@ export const fragmentEventSchema = z
     topic: z.string(),
     body: z.string(),
     references: z.array(z.string()).optional(),
+    // WHO the evidence is attributable to (display name/handle of the speaker).
+    // LLM-supplied by the memory-logger, set ONLY when one transcript speaker
+    // line clearly owns the evidence — a single logger run spans many speakers,
+    // so this is per-fragment, never stamped from the spawn-time origin.
+    who: z.string().min(1).optional(),
+    // WHERE the evidence happened. Runtime-stamped from the session origin.
+    where: fragmentProvenanceSchema.optional(),
   })
   .passthrough()
 
@@ -68,6 +90,7 @@ export const streamEventSchema = z.discriminatedUnion('type', [
   legacyProseEventSchema,
 ])
 
+export type FragmentProvenance = z.infer<typeof fragmentProvenanceSchema>
 export type FragmentEvent = z.infer<typeof fragmentEventSchema>
 export type WatermarkEvent = z.infer<typeof watermarkEventSchema>
 export type LegacyProseEvent = z.infer<typeof legacyProseEventSchema>
