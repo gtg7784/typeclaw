@@ -261,48 +261,58 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'line') {
+      const credentialsStore = createContainerLineCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
       return createLine({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsStore: createContainerLineCredentialStore(options.agentDir, env),
+        credentialsStore,
       })
     }
     if (name === 'kakaotalk') {
+      const credentialsStore = createContainerKakaoCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
       return createKakaotalk({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsStore: createContainerKakaoCredentialStore(options.agentDir, env),
+        credentialsStore,
       })
     }
     if (name === 'slack') {
+      const credentialsStore = createContainerSlackCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
       return createSlackUser({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsStore: createContainerSlackCredentialStore(options.agentDir, env),
+        credentialsStore,
       })
     }
     if (name === 'discord') {
+      const credentialsStore = createContainerDiscordCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
       return createDiscordUser({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsStore: createContainerDiscordCredentialStore(options.agentDir, env),
+        credentialsStore,
       })
     }
     if (name === 'webex') {
+      const credentialsStore = createContainerWebexCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
       return createWebex({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsStore: createContainerWebexCredentialStore(options.agentDir, env),
+        credentialsStore,
       })
     }
     if (name === 'github') {
@@ -538,22 +548,33 @@ const TOKEN_ENV: Record<
   'webex-bot': ['WEBEX_BOT_TOKEN'],
 }
 
-function createContainerDiscordCredentialStore(
-  agentDir: string,
-  env: NodeJS.ProcessEnv,
-): SecretsDiscordCredentialStore {
+// Personal-account adapters (line/kakaotalk/slack/discord/webex) need the hostd
+// triple the host CLI injects at `docker run` time, gated on a successful daemon
+// registration (src/container/start.ts). If the daemon wasn't reachable at
+// launch (e.g. a lost first-boot spawn race) the triple is absent; null lets
+// buildAdapter skip the adapter instead of throwing and crashing the whole
+// channel manager. startAdapter's signature pre-check only reads secrets.json,
+// so this is the only place the missing triple is caught.
+type HostdContainerCredentials = { hostdUrl: string; restartToken: string; containerName: string }
+
+function resolveHostdContainerCredentials(env: NodeJS.ProcessEnv): HostdContainerCredentials | null {
   const hostdUrl = env.TYPECLAW_HOSTD_URL
   const restartToken = env.TYPECLAW_HOSTD_TOKEN
   const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) {
-    throw new Error('Discord credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
-  }
+  if (!hostdUrl || !restartToken || !containerName) return null
+  return { hostdUrl, restartToken, containerName }
+}
+
+function createContainerDiscordCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsDiscordCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
   return new SecretsDiscordCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostdUrl,
-    restartToken,
-    containerName,
+    ...creds,
   })
 }
 
@@ -571,19 +592,16 @@ function buildDiscordSignature(agentDir: string): { signature: string; missing: 
   }
 }
 
-function createContainerSlackCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsSlackCredentialStore {
-  const hostdUrl = env.TYPECLAW_HOSTD_URL
-  const restartToken = env.TYPECLAW_HOSTD_TOKEN
-  const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) {
-    throw new Error('Slack credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
-  }
+function createContainerSlackCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsSlackCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
   return new SecretsSlackCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostdUrl,
-    restartToken,
-    containerName,
+    ...creds,
   })
 }
 
@@ -601,19 +619,16 @@ function buildSlackSignature(agentDir: string): { signature: string; missing: st
   }
 }
 
-function createContainerWebexCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsWebexCredentialStore {
-  const hostdUrl = env.TYPECLAW_HOSTD_URL
-  const restartToken = env.TYPECLAW_HOSTD_TOKEN
-  const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) {
-    throw new Error('Webex credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
-  }
+function createContainerWebexCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsWebexCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
   return new SecretsWebexCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostdUrl,
-    restartToken,
-    containerName,
+    ...creds,
   })
 }
 
@@ -631,21 +646,16 @@ function buildWebexSignature(agentDir: string): { signature: string; missing: st
   }
 }
 
-function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsKakaoCredentialStore {
-  const hostdUrl = env.TYPECLAW_HOSTD_URL
-  const restartToken = env.TYPECLAW_HOSTD_TOKEN
-  const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) {
-    throw new Error(
-      'KakaoTalk credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME',
-    )
-  }
+function createContainerKakaoCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsKakaoCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
   return new SecretsKakaoCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostdUrl,
-    restartToken,
-    containerName,
+    ...creds,
   })
 }
 
@@ -663,19 +673,16 @@ function buildKakaotalkSignature(agentDir: string): { signature: string; missing
   }
 }
 
-function createContainerLineCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsLineCredentialStore {
-  const hostdUrl = env.TYPECLAW_HOSTD_URL
-  const restartToken = env.TYPECLAW_HOSTD_TOKEN
-  const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) {
-    throw new Error('LINE credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME')
-  }
+function createContainerLineCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsLineCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
   return new SecretsLineCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostdUrl,
-    restartToken,
-    containerName,
+    ...creds,
   })
 }
 
