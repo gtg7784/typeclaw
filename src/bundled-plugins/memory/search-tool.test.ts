@@ -10,7 +10,7 @@ import { renderShard, type ShardFrontmatter } from './frontmatter'
 import { referenceFilePath, referencesDir, streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { parseReference, renderReference } from './references/frontmatter'
 import { createMemorySearchTool } from './search-tool'
-import type { FragmentEvent, LegacyProseEvent, WatermarkEvent } from './stream-events'
+import type { FragmentEvent, FragmentProvenance, LegacyProseEvent, WatermarkEvent } from './stream-events'
 import { appendEvents } from './stream-io'
 
 const tmpRoots: string[] = []
@@ -32,6 +32,9 @@ type StreamMatch = {
   topic: string
   excerpt: string
   fullBody?: string
+  who?: string
+  when?: string
+  where?: FragmentProvenance
 }
 
 type ReferenceMatch = {
@@ -400,6 +403,7 @@ describe('memorySearchTool — stream events', () => {
           eventId: 'streams/2026-05-20#frag-001',
           topic: 'Deploy preferences',
           excerpt: 'Deploy preferences',
+          when: '2026-05-20T12:00:00Z',
         },
       ],
     })
@@ -422,6 +426,7 @@ describe('memorySearchTool — stream events', () => {
           eventId: 'streams/2026-05-20#frag-002',
           topic: 'Random topic',
           excerpt: 'line 1\nline 2\nneedle here\nline 4\nline 5',
+          when: '2026-05-20T12:00:00Z',
         },
       ],
     })

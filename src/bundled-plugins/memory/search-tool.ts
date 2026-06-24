@@ -7,7 +7,7 @@ import { defineTool } from '@/plugin'
 import { loadAllShards, loadShard, type TopicShard } from './load-shards'
 import { renderReference } from './references/frontmatter'
 import { loadAllReferences, loadReference, type Reference } from './references/load-references'
-import type { FragmentEvent, LegacyProseEvent, StreamEvent } from './stream-events'
+import type { FragmentEvent, FragmentProvenance, LegacyProseEvent, StreamEvent } from './stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
 
 const DEFAULT_MAX_RESULTS = 10
@@ -31,6 +31,9 @@ export type StreamMatch = {
   topic: string
   excerpt: string
   fullBody?: string
+  who?: string
+  when?: string
+  where?: FragmentProvenance
 }
 
 export type ReferenceMatch = {
@@ -449,7 +452,10 @@ function matchFragmentEvent(
     eventId: `streams/${day.date}#${event.id}`,
     topic: event.topic,
     excerpt: firstBodyLineIndex === -1 ? event.topic : excerptForLine(bodyLines, firstBodyLineIndex),
+    when: event.ts,
   }
+  if (event.who !== undefined) match.who = event.who
+  if (event.where !== undefined) match.where = event.where
   if (full) match.fullBody = event.body
   return match
 }

@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto'
 
-import { parseEventLine } from './stream-events'
+import { type FragmentProvenance, parseEventLine } from './stream-events'
 
 export type Fragment = {
   source: string
   entry: string
   topic: string
   body: string
+  who?: string
+  where?: FragmentProvenance
+  ts?: string
 }
 
 export function parseFragments(content: string): Fragment[] {
@@ -17,12 +20,16 @@ export function parseFragments(content: string): Fragment[] {
     const event = parseEventLine(line)
     if (event === null) continue
     if (event.type === 'fragment') {
-      fragments.push({
+      const fragment: Fragment = {
         source: event.source,
         entry: event.entry,
         topic: event.topic,
         body: event.body,
-      })
+        ts: event.ts,
+      }
+      if (event.who !== undefined) fragment.who = event.who
+      if (event.where !== undefined) fragment.where = event.where
+      fragments.push(fragment)
     }
   }
   return fragments

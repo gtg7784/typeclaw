@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 
 import { z } from 'zod'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import { defineTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
@@ -10,15 +11,56 @@ import { fragmentContentHash } from './fragment-parser'
 import { streamFilePath } from './paths'
 import { detectSecrets } from './secret-detector'
 import { newEventId, timestampFromId } from './stream-events'
-import type { FragmentEvent, WatermarkEvent } from './stream-events'
+import type { FragmentEvent, FragmentProvenance, WatermarkEvent } from './stream-events'
 import { appendEvents, readEvents, type FragmentsAppendedContext } from './stream-io'
 
 export type FragmentsAppendedHook = (fragments: FragmentEvent[], context: FragmentsAppendedContext) => Promise<void>
 
-export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
+// Lets the memory-logger thread its spawn-time `payload.origin` into the append
+// tool so `where` is stamped server-side. A provider closure (not a static
+// value) because the same factory builds tools whose origin is only known later.
+export type OriginProvider = () => SessionOrigin | undefined
+
+export type CreateAppendToolOptions = {
+  onFragmentsAppended?: FragmentsAppendedHook
+  originProvider?: OriginProvider
+}
+
+// Stamped fields are the stable channel coordinates only. Author identity is
+// deliberately excluded: a channel session sees many speakers and the origin's
+// `lastInboundAuthorId` is just the spawn-time one, so attributing it to every
+// fragment would misattribute fragments about earlier speakers. `who` is the
+// LLM's job, per fragment, from the transcript speaker line.
+export function provenanceFromOrigin(origin: SessionOrigin | undefined): FragmentProvenance | undefined {
+  if (origin === undefined || origin.kind !== 'channel') return undefined
+  const where: FragmentProvenance = {
+    adapter: origin.adapter,
+    workspace: origin.workspace,
+    chat: origin.chat,
+    thread: origin.thread,
+  }
+  // workspaceName/chatName are external channel data force-committed to memory.
+  // The agent cannot rewrite them (they come from the origin, not a tool arg),
+  // so a credential-shaped name is dropped rather than thrown — keep the raw id,
+  // never let the leaky display string reach git. Raw ids are platform-issued
+  // identifiers, not free text, so they are not scanned.
+  const workspaceName = redactIfSecret(origin.workspaceName)
+  const chatName = redactIfSecret(origin.chatName)
+  if (workspaceName !== undefined) where.workspaceName = workspaceName
+  if (chatName !== undefined) where.chatName = chatName
+  return where
+}
+
+function redactIfSecret(name: string | undefined): string | undefined {
+  if (name === undefined) return undefined
+  return detectSecrets(name).length === 0 ? name : undefined
+}
+
+export function createAppendTool(options: CreateAppendToolOptions = {}) {
+  const { onFragmentsAppended, originProvider } = options
   return defineTool({
     description:
-      "Append a memory fragment to today's JSONL daily stream and advance the watermark. The runtime serializes your call into a JSON line and chooses the filename — do not emit raw JSON and do not pass a path. `topic`/`body` are the fragment's substance; `source` is the parent session id; `entry` is the transcript-entry-id this fragment anchors to; `latestEntryId` is the latest transcript-entry-id you evaluated in this run (advances the watermark, may equal `entry` or be later). Refuses content with recognized credential patterns and refuses byte-equivalent topic+body within the same daily stream.",
+      "Append a memory fragment to today's JSONL daily stream and advance the watermark. The runtime serializes your call into a JSON line and chooses the filename — do not emit raw JSON and do not pass a path. `topic`/`body` are the fragment's substance; `source` is the parent session id; `entry` is the transcript-entry-id this fragment anchors to; `latestEntryId` is the latest transcript-entry-id you evaluated in this run (advances the watermark, may equal `entry` or be later). `who` is the display name/handle of the person the fragment's evidence is attributable to — set it ONLY when one transcript speaker clearly owns the evidence; omit it when the fact is the user's own, spans multiple speakers, or is not attributable. The channel/room/platform (`where`) is stamped automatically from the session origin — do not pass it and do not restate it in the body. Refuses content with recognized credential patterns and refuses byte-equivalent topic+body within the same daily stream.",
     parameters: z.object({
       topic: z.string().min(1),
       body: z.string().min(1),
@@ -26,10 +68,17 @@ export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
       entry: z.string().min(1),
       latestEntryId: z.string().min(1),
       references: z.array(z.string()).optional(),
+      who: z.string().min(1).optional(),
     }),
-    async execute({ topic, body, source, entry, latestEntryId, references }, ctx) {
+    async execute({ topic, body, source, entry, latestEntryId, references, who }, ctx) {
       const streamPath = dailyStreamPath(ctx.agentDir)
-      assertNoSecrets(`${topic}\n${body}`)
+      const where = provenanceFromOrigin(originProvider?.())
+      // `who` is LLM-supplied and force-committed to memory, so it clears the
+      // same secret guard as topic/body — a token-shaped display name is refused
+      // with the same retryable error. (`where` names are origin-derived and the
+      // agent can't rewrite them, so they are self-redacted in provenanceFromOrigin
+      // instead of throwing here.)
+      assertNoSecrets([topic, body, who])
 
       const hash = fragmentContentHash({ topic, body })
       const events = await readEvents(streamPath)
@@ -58,6 +107,8 @@ export function createAppendTool(onFragmentsAppended?: FragmentsAppendedHook) {
       if (references !== undefined && references.length > 0) {
         fragment.references = references
       }
+      if (who !== undefined) fragment.who = who
+      if (where !== undefined) fragment.where = where
       const watermark: WatermarkEvent = {
         type: 'watermark',
         id: watermarkId,
@@ -122,7 +173,8 @@ function dailyStreamPath(agentDir: string): string {
   return streamFilePath(agentDir, formatLocalDate())
 }
 
-function assertNoSecrets(content: string): void {
+function assertNoSecrets(parts: ReadonlyArray<string | undefined>): void {
+  const content = parts.filter((part): part is string => part !== undefined).join('\n')
   const secrets = detectSecrets(content)
   if (secrets.length === 0) return
 

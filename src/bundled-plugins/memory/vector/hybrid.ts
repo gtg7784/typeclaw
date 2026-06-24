@@ -12,7 +12,7 @@ import {
   type MemorySearchMatch,
   type StreamMatch,
 } from '../search-tool'
-import type { StreamEvent } from '../stream-events'
+import type { FragmentProvenance, StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import type { Passage } from './passages'
@@ -29,6 +29,9 @@ export type HybridSearchResult = {
   heading: string
   excerpt: string
   rrfScore: number
+  who?: string
+  when?: string
+  where?: FragmentProvenance
 }
 
 export type EmbedFn = (texts: string[], type: EmbedType) => Promise<Float32Array[]>
@@ -398,12 +401,16 @@ function streamIndexItem(
   if (event.type === 'watermark') return null
   if (event.type === 'fragment') {
     if (supersededFragmentIds.has(event.id)) return null
-    return {
+    const item: Omit<HybridSearchResult, 'rrfScore'> = {
       source: 'stream',
       key: `${day.date}#${event.id}`,
       heading: event.topic,
       excerpt: excerpt(event.body, event.topic),
+      when: event.ts,
     }
+    if (event.who !== undefined) item.who = event.who
+    if (event.where !== undefined) item.where = event.where
+    return item
   }
   return {
     source: 'stream',

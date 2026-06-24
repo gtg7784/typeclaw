@@ -165,7 +165,7 @@ When a transcript exposes a credential, capture the fact and discovery method, n
 - Allowed: "The env var \`GH_TOKEN\` is set in this environment and holds a GitHub PAT (discovered via \`env | grep token\`). Use it for private-repo API calls."
 - Forbidden: "GH_TOKEN=<the literal token characters, in whole or in part>". Even a partial value narrows the search space for an attacker.
 
-The \`append\` tool will refuse content containing a recognizable credential pattern. Treat that as a bug in your fragment: rewrite to name the variable and discovery, then retry.
+The \`append\` tool will refuse content containing a recognizable credential pattern — in \`topic\`, \`body\`, or \`who\`. Treat that as a bug in your fragment: rewrite to name the variable and discovery (or drop a credential-shaped \`who\`), then retry.
 
 # Local dedup against today's daily stream
 
@@ -180,6 +180,11 @@ Recurrence is not duplication. A durable preference, pattern, workaround, or com
 # Fragment format
 
 Call \`append\` with \`{topic, body, source, entry, latestEntryId}\` or \`{topic, body, source, entry, latestEntryId, references}\`. The runtime serializes your call into the daily stream; you never write raw JSON. \`source\` is the parent session id. \`topic\` is a short noun phrase. \`entry\` is the specific transcript-entry-id that anchors this fragment's evidence. Each fragment carries its own entry id; do not stamp every fragment with the same latest evaluated id. \`latestEntryId\` is the latest entry evaluated in this run and advances the watermark. \`references\` is optional slugs from \`store_reference\`.
+
+**Situational provenance (\`who\` / \`where\`).** Memory is sharper when it remembers who said something and where. Two fields capture this:
+
+- **\`where\` is automatic.** The channel, room, and platform of this session are stamped onto every fragment by the runtime from the session origin. Do NOT pass \`where\` and do NOT restate the channel/workspace/thread in the body just to record provenance — it is already attached. Still name a channel in the body when its *purpose* is the durable fact (e.g. "#incidents is the production-outage channel"); that is content, not provenance plumbing.
+- **\`who\` is your judgment, per fragment.** Set the optional \`who\` to the display name or handle of the person whose words or action the fragment's evidence is attributable to — the speaker on the transcript line you anchored to. The Conversation context lists participant names and ids; use them to attribute correctly. Set \`who\` ONLY when one speaker clearly owns the evidence. OMIT it when: the fact is the user's own instruction (the user is implicit), the evidence spans multiple speakers, or you cannot attribute it to one person with confidence. A single run covers many speakers and turns, so never copy one name onto every fragment — attribute each fragment to its own anchored speaker, or leave \`who\` unset. Do not guess.
 
 Every body must be:
 
@@ -286,7 +291,13 @@ export function createMemoryLoggerSubagent(
   options: CreateMemoryLoggerSubagentOptions = {},
 ): Subagent<MemoryLoggerPayload> {
   const logger = options.logger ?? consoleLogger
-  const appendTool = createAppendTool(options.onFragmentsAppended)
+  // The handler runs one logger spawn at a time per agentDir (inFlightKey), so a
+  // single mutable cell safely carries this spawn's origin to the append tool.
+  let currentOrigin: SessionOrigin | undefined
+  const appendTool = createAppendTool({
+    onFragmentsAppended: options.onFragmentsAppended,
+    originProvider: () => currentOrigin,
+  })
   const storeReferenceTool = createStoreReferenceTool(options.onReferenceStored)
   const customTools = [findEntryTool, appendTool, storeReferenceTool, advanceWatermarkTool]
   return {
@@ -317,6 +328,7 @@ export function createMemoryLoggerSubagent(
       exhaustedMessage: memoryLoggerExhaustedMessage,
     },
     handler: async (ctx, runSession) => {
+      currentOrigin = ctx.payload.origin
       const today = formatLocalDate()
       const memoryDir = streamsDir(ctx.payload.agentDir)
       const streamFile = streamFilePath(ctx.payload.agentDir, today)
