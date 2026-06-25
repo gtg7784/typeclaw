@@ -446,64 +446,72 @@ describe('spinner', () => {
 describe('prepareStdinForClack', () => {
   type FakeStdin = {
     isTTY: boolean
-    setRawMode?: (value: boolean) => void
-    rawModeCalls: boolean[]
     resumed: number
     resume: () => void
   }
 
-  function fakeStdin(opts: { isTTY: boolean; hasSetRawMode?: boolean; rawModeThrows?: boolean }): FakeStdin {
-    const s: FakeStdin = {
+  function fakeStdin(opts: { isTTY: boolean }): FakeStdin {
+    return {
       isTTY: opts.isTTY,
-      rawModeCalls: [],
       resumed: 0,
       resume() {
         this.resumed += 1
       },
     }
-    if (opts.hasSetRawMode !== false) {
-      s.setRawMode = (value: boolean): void => {
-        s.rawModeCalls.push(value)
-        if (opts.rawModeThrows === true) throw new Error('terminal torn down')
-      }
-    }
-    return s
   }
 
-  test('resumes stdin so a clack picker receives bytes over an SSH pseudo-TTY', () => {
-    // given: a TTY that has never been resumed (the first-picker state over SSH)
+  test('arms readline keypress decoding on stdin so arrow bytes become keypress events', () => {
+    // given: a TTY whose readline keypress decoder is not yet armed (SSH first-picker)
     const stdin = fakeStdin({ isTTY: true })
+    const armed: unknown[] = []
     // when: handing stdin to clack
-    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
-    // then: the stream is resumed so clack's keypress listener gets input
-    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream, {
+      emitKeypressEvents: (stream) => armed.push(stream),
+    })
+    // then: the keypress decoder is installed on that exact stream
+    expect(armed).toEqual([stdin])
   })
 
-  test('kicks stdin back to flowing with a raw-mode toggle, ending non-raw', () => {
-    // A pi-tui ProcessTerminal.stop() leaves stdin paused; on->off raw toggle
-    // re-flows it under Bun/SSH, and the final non-raw state is what clack owns.
+  test('pre-arms with clack 1.2.0 escapeCodeTimeout (50ms) so bare Esc stays fast', () => {
+    // readline binds escapeCodeTimeout once, when the decoder is first installed,
+    // and no-ops on clack's later createInterface — so the pre-arm MUST carry
+    // clack's 50ms or a bare Esc falls back to readline's 500ms default.
     const stdin = fakeStdin({ isTTY: true })
-    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
-    expect(stdin.rawModeCalls).toEqual([true, false])
+    let ifaceArg: { escapeCodeTimeout?: number } | undefined
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream, {
+      emitKeypressEvents: (_stream, iface) => {
+        ifaceArg = iface
+      },
+    })
+    expect(ifaceArg?.escapeCodeTimeout).toBe(50)
+  })
+
+  test('arms keypress decoding BEFORE resuming so no keystroke is missed', () => {
+    const order: string[] = []
+    const stdin = {
+      isTTY: true,
+      resume: () => order.push('resume'),
+    }
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream, {
+      emitKeypressEvents: () => order.push('emitKeypressEvents'),
+    })
+    expect(order).toEqual(['emitKeypressEvents', 'resume'])
+  })
+
+  test('resumes stdin so the flowing stream feeds clack the decoded keypresses', () => {
+    const stdin = fakeStdin({ isTTY: true })
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream, { emitKeypressEvents: () => {} })
+    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
   })
 
   test('is a no-op on a non-TTY stdin (piped/redirected input)', () => {
     const stdin = fakeStdin({ isTTY: false })
-    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
+    const armed: unknown[] = []
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream, {
+      emitKeypressEvents: (stream) => armed.push(stream),
+    })
     expect(stdin.resumed).toBe(0)
-    expect(stdin.rawModeCalls).toEqual([])
-  })
-
-  test('still resumes when setRawMode throws (terminal already torn down)', () => {
-    const stdin = fakeStdin({ isTTY: true, rawModeThrows: true })
-    expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
-    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
-  })
-
-  test('resumes even when setRawMode is unavailable on the stream', () => {
-    const stdin = fakeStdin({ isTTY: true, hasSetRawMode: false })
-    expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
-    expect(stdin.resumed).toBeGreaterThanOrEqual(1)
+    expect(armed).toEqual([])
   })
 })
 
