@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { waitFor } from '@/test-helpers/wait-for'
+
 import { runInspect } from './index'
 import type { SessionSummary } from './session-list'
 
@@ -434,10 +436,11 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const ctrl = new AbortController()
     const sink = captureSink()
-    // Abort AFTER replay finishes and the viewer is parked in the idle wait, so
-    // the footer is reached (aborting during replay would skip it entirely).
-    setTimeout(() => ctrl.abort(), 30)
-    const result = await runInspect({
+    const footerCount = (): number => sink.out.filter((l) => l.includes('end of transcript')).length
+    // Abort off the observable footer, not a fixed timer: the viewer prints it
+    // when it parks at replay-only-idle, which races a hardcoded 30ms under
+    // parallel contention. Wait for it, then abort; 'end' must not reprint.
+    const done = runInspect({
       agentDir,
       sessionIdOrPrefix: ID_LIVET,
       color: false,
@@ -446,9 +449,11 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
       signal: ctrl.signal,
       ...sink.push,
     })
+    await waitFor(() => footerCount() === 1, { description: 'replay-only footer printed' })
+    ctrl.abort()
+    const result = await done
     expect(result.ok).toBe(true)
-    const footers = sink.out.filter((l) => l.includes('end of transcript'))
-    expect(footers).toHaveLength(1)
+    expect(footerCount()).toBe(1)
   })
 })
 

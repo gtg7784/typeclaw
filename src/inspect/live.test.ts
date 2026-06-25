@@ -407,15 +407,17 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer()
     const ctrl = new AbortController()
     const liveFlags: boolean[] = []
+    const subscribed = Promise.withResolvers<void>()
     const gen = streamLive({
       url,
       sessionId: 'ses_dead',
       signal: ctrl.signal,
       onSubscribed: (live) => {
         liveFlags.push(live)
+        subscribed.resolve()
       },
     })
-    setTimeout(() => ctrl.abort(), 100)
+    void subscribed.promise.then(() => ctrl.abort())
     for await (const _ of gen) {
       void _
     }
