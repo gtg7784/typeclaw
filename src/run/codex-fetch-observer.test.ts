@@ -328,21 +328,46 @@ describe('installCodexFetchObserver', () => {
     expect(globalThis.fetch).toBe(before)
   })
 
-  test('double install warns and returns existing uninstall', () => {
-    const { logger, entries } = captureLogger()
-    const uninstall1 = installCodexFetchObserver({ logger })
+  test('a second install shares the wrapper and is ref-counted: a later release keeps fetch observed while another claimant remains', () => {
+    const { logger } = captureLogger()
+    const before = globalThis.fetch
+    const release1 = installCodexFetchObserver({ logger })
     const wrappedAfterFirst = globalThis.fetch
-    const uninstall2 = installCodexFetchObserver({ logger })
+    const release2 = installCodexFetchObserver({ logger })
     try {
+      // given two claimants sharing one wrapper
       expect(globalThis.fetch).toBe(wrappedAfterFirst)
-      const warns = entries.filter((e) => e.level === 'warn')
-      expect(warns.length).toBe(1)
-      expect(warns[0]!.msg).toContain('[codex-fetch]')
-      expect(warns[0]!.msg).toContain('already installed')
+
+      // when the second claimant releases (e.g. a second agent's boot-failure
+      // cleanup), the first agent's observer must survive
+      release2()
+      expect(globalThis.fetch).toBe(wrappedAfterFirst)
+
+      // then only the final release restores the original fetch
+      release1()
+      expect(globalThis.fetch).toBe(before)
     } finally {
-      uninstall1()
-      uninstall2()
+      release1()
+      release2()
     }
+  })
+
+  test('a release is idempotent and never tears down a re-acquired observer', () => {
+    const { logger } = captureLogger()
+    const before = globalThis.fetch
+    const release1 = installCodexFetchObserver({ logger })
+    release1()
+    release1() // idempotent: second call is a no-op
+    expect(globalThis.fetch).toBe(before)
+
+    // a fresh install after full release re-wraps and is independent
+    const release2 = installCodexFetchObserver({ logger })
+    expect(globalThis.fetch).not.toBe(before)
+    // the stale release1 must NOT restore over the new observer
+    release1()
+    expect(globalThis.fetch).not.toBe(before)
+    release2()
+    expect(globalThis.fetch).toBe(before)
   })
 
   test('TYPECLAW_CODEX_FETCH_OBSERVER=off disables installation', () => {
