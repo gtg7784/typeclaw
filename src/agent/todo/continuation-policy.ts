@@ -65,6 +65,12 @@ export type ContinuationState = {
   // explicit user abort; cleared only by the next real user turn. While set,
   // no auto-continuation fires regardless of episode budget.
   autoResumeBlockedUntilRealUserTurn: boolean
+  // One-shot marker the graceful-restart shutdown sets per scope before it
+  // aborts an in-flight turn. It tells onTurnOutcome that the imminent 'aborted'
+  // outcome is a restart lifecycle transition, not a user stop, so the durable
+  // D1 block above must NOT arm. Consumed on the next turn outcome so it never
+  // masks a later genuine user abort.
+  restartAbortPending: boolean
 }
 
 export function emptyContinuationState(): ContinuationState {
@@ -73,6 +79,7 @@ export function emptyContinuationState(): ContinuationState {
     lastTurnOutcome: null,
     suppressNextIdleNudgeReason: null,
     autoResumeBlockedUntilRealUserTurn: false,
+    restartAbortPending: false,
   }
 }
 
@@ -94,6 +101,7 @@ export function parseContinuationState(value: unknown): ContinuationState {
     lastTurnOutcome: parseOutcome(v.lastTurnOutcome),
     suppressNextIdleNudgeReason: v.suppressNextIdleNudgeReason === 'restart-kick' ? 'restart-kick' : null,
     autoResumeBlockedUntilRealUserTurn: v.autoResumeBlockedUntilRealUserTurn === true,
+    restartAbortPending: v.restartAbortPending === true,
   }
 }
 

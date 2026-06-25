@@ -89,6 +89,7 @@ describe('parseContinuationState (fail-closed validation)', () => {
       lastTurnOutcome: { turnId: 't', stopReason: 'stop', endedAt: 9 },
       suppressNextIdleNudgeReason: 'restart-kick',
       autoResumeBlockedUntilRealUserTurn: true,
+      restartAbortPending: false,
     }
     expect(parseContinuationState(state)).toEqual(state)
   })
