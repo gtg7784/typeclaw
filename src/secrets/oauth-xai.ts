@@ -221,9 +221,15 @@ async function exchangeAuthorizationCode(
   return toCredentials(token)
 }
 
-export async function loginXai(callbacks: OAuthLoginCallbacks, fetchImpl: FetchFn = fetch): Promise<OAuthCredentials> {
+type StartCallbackServerFn = (expectedState: string) => Promise<CallbackServer | null>
+
+export async function loginXai(
+  callbacks: OAuthLoginCallbacks,
+  fetchImpl: FetchFn = fetch,
+  startServer: StartCallbackServerFn = startCallbackServer,
+): Promise<OAuthCredentials> {
   const { verifier, challenge } = await generatePkce()
-  const server = await startCallbackServer(verifier)
+  const server = await startServer(verifier)
   let code: string | undefined
   try {
     const authParams = new URLSearchParams({

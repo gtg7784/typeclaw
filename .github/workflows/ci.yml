@@ -110,6 +110,78 @@ jobs:
         # the slower GitHub Actions runners.
         run: bun test --parallel --timeout 30000
 
+  flake-guard:
+    # Contention guard. A single `bun test --parallel` run almost never
+    # reproduces our flaky tests — they only surface when the worker pool is
+    # OVERSUBSCRIBED (more in-flight test workers than cores), which starves
+    # timing-sensitive tests (subprocess cold-starts, watchdog deadlines, fixed
+    # abort timers) past their budgets. This lane forces that state by running
+    # TWO full `--parallel` suites concurrently on the same runner, turning a
+    # rare random CI flake into a deterministic pre-merge signal. If a future
+    # change reintroduces a contention-sensitive test, it fails HERE instead of
+    # randomly on someone else's unrelated PR.
+    #
+    # Required (NOT continue-on-error): the whole point is to block the merge.
+    # Runs on PRs and main pushes. Reuses the same Bun + cache setup as `ci`.
+    name: flake guard (oversubscribed parallel)
+    runs-on: ubuntu-latest
+    env:
+      FIREWORKS_API_KEY: dummy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Cache Bun install cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [ "$attempt" = 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 20))
+          done
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@typeclaw.dev"
+          git config --global user.name "TypeClaw CI"
+
+      - name: Test under oversubscription
+        # Two concurrent full suites. Each is `--parallel` (one worker per core),
+        # so running two at once doubles in-flight workers vs cores — the exact
+        # starvation condition that exposes contention flakes. `wait` on both
+        # PIDs; if either exits non-zero, fail the job. The 60s timeout absorbs
+        # the slower per-test wall time under deliberate oversubscription so a
+        # failure means a genuine flake, not the contention overhead itself.
+        shell: bash
+        run: |
+          bun test --parallel --timeout 60000 > /tmp/flake-a.log 2>&1 &
+          pid_a=$!
+          bun test --parallel --timeout 60000 > /tmp/flake-b.log 2>&1 &
+          pid_b=$!
+          rc=0
+          wait $pid_a || rc=1
+          wait $pid_b || rc=1
+          echo '===== suite A tail ====='; tail -40 /tmp/flake-a.log
+          echo '===== suite B tail ====='; tail -40 /tmp/flake-b.log
+          exit $rc
+
   windows-static:
     # Native-Windows host support (#899) is experimental. This lane proves the
     # toolchain (bun install + typecheck/lint/format) runs on native Windows. It

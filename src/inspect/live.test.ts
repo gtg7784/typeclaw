@@ -4,6 +4,7 @@ import type { AgentSession } from '@/agent'
 import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { createServer } from '@/server'
 import { createStream } from '@/stream'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import { streamLive } from './live'
 import type { InspectEvent } from './types'
@@ -407,15 +408,17 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer()
     const ctrl = new AbortController()
     const liveFlags: boolean[] = []
+    const subscribed = Promise.withResolvers<void>()
     const gen = streamLive({
       url,
       sessionId: 'ses_dead',
       signal: ctrl.signal,
       onSubscribed: (live) => {
         liveFlags.push(live)
+        subscribed.resolve()
       },
     })
-    setTimeout(() => ctrl.abort(), 100)
+    void subscribed.promise.then(() => ctrl.abort())
     for await (const _ of gen) {
       void _
     }
@@ -588,11 +591,13 @@ describe('streamLive — live session events', () => {
     const drained = (async () => {
       for await (const ev of gen) events.push(ev)
     })()
-    // Outlive several heartbeat cycles to prove the pongs keep the tail alive,
-    // then abort — the only thing that should end a healthy idle tail.
-    await new Promise((r) => setTimeout(r, 60))
+    // Wait for several heartbeat cycles to actually happen rather than a fixed
+    // wall-clock sleep: a fixed 60ms wait assumed N pings fired in that window,
+    // but a contention-slowed clock delivered fewer and flaked the >1 assertion.
+    // Reaching >1 ping proves the heartbeat is alive AND that pongs kept it open
+    // (the pong-timeout would have closed it before a second ping otherwise).
+    await waitFor(() => fake.pingsReceived > 1, { description: 'heartbeat pings keep flowing' })
     expect(fake.closed).toBe(false)
-    expect(fake.pingsReceived).toBeGreaterThan(1)
     ctrl.abort()
     await drained
     expect(events).toEqual([])

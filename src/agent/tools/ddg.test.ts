@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { isWindows } from '@/shared'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import {
   _setCurlBinaryForTest,
@@ -298,9 +299,14 @@ describe.skipIf(onWindows)('ddgSearch (retry + concurrency)', () => {
   })
 
   test('caps concurrent ddgSearch calls at DDG_CONCURRENCY across the process', async () => {
-    // given: a fake binary that records overlap by tracking live invocations
-    const liveFile = join(scratchDir, 'live')
-    const peakFile = join(scratchDir, 'peak')
+    // given: each spawn marks itself with a per-pid file and holds the slot
+    // until released. Per-spawn marker files make the live count race-free —
+    // the prior shared-counter version lost increments to a read-modify-write
+    // race under contention (a fixed `sleep 0.3` overlap window also flaked on
+    // slow runners). This mirrors the marker-file technique the abort test below
+    // already uses.
+    const liveDir = join(scratchDir, 'live')
+    const releaseFile = join(scratchDir, 'release')
     installFakeBinary(`
 WTPL=""
 i=1
@@ -308,22 +314,44 @@ for arg in "$@"; do
   if [ "$arg" = "-w" ]; then j=$((i + 1)); eval "WTPL=\\"\\\${$j}\\""; break; fi
   i=$((i + 1))
 done
-LIVE=$(cat ${liveFile} 2>/dev/null || echo 0); LIVE=$((LIVE + 1)); echo $LIVE > ${liveFile}
-PEAK=$(cat ${peakFile} 2>/dev/null || echo 0); if [ "$LIVE" -gt "$PEAK" ]; then echo $LIVE > ${peakFile}; fi
-sleep 0.3
-LIVE=$(cat ${liveFile}); echo $((LIVE - 1)) > ${liveFile}
+mkdir -p ${liveDir}
+: > ${liveDir}/live.$$
+while [ ! -f ${releaseFile} ]; do sleep 0.02; done
+rm -f ${liveDir}/live.$$
 RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
 printf '%s' '${RESULT_SERP}'
 printf '%s' "$RENDERED"
 `)
 
-    // when: fire 5 searches at once through the shared process-wide limiter
-    await Promise.all(Array.from({ length: 5 }, () => ddgSearch('q', 10)))
+    const countLive = async (): Promise<number> => {
+      if (!existsSync(liveDir)) return 0
+      const glob = new Bun.Glob('live.*')
+      let n = 0
+      for await (const _ of glob.scan({ cwd: liveDir })) n++
+      return n
+    }
+
+    // when: fire 5 searches at once through the shared process-wide limiter and
+    // hold every admitted slot, so the live count reaches its true peak before
+    // any slot frees
+    const searches = Promise.all(Array.from({ length: 5 }, () => ddgSearch('q', 10)))
+    let peak = 0
+    await waitFor(
+      async () => {
+        const live = await countLive()
+        if (live > peak) peak = live
+        return live >= DDG_CONCURRENCY
+      },
+      { description: 'live spawns reach DDG_CONCURRENCY' },
+    )
 
     // then: never more than DDG_CONCURRENCY ran the curl spawn simultaneously
-    const peak = Number((await Bun.file(peakFile).text()).trim())
     expect(peak).toBeLessThanOrEqual(DDG_CONCURRENCY)
     expect(peak).toBeGreaterThan(0)
+
+    // cleanup: release the held slots so the searches finish
+    writeFileSync(releaseFile, 'go', 'utf8')
+    await searches
   })
 
   test('a queued ddgSearch aborted before a slot frees rejects without spawning curl', async () => {
