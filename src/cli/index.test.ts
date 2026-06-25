@@ -82,13 +82,14 @@ describe('BUILTIN_COMMAND_NAMES exposure', () => {
   })
 })
 
-// Each test spawns `bun run src/cli/index.ts` (~300-400ms cold start). The
-// suite is otherwise hermetic — each test mkdtemp's its own agent folder, no
-// shared state between tests — so `.concurrent` runs them on the runner's
-// worker pool instead of serially. The 6 host-stage subprocess tests below
-// drop from ~1.8s sequential to ~0.4s in parallel.
-// Spawns POSIX shell plugin-command shim, #899.
-const pluginCommandTest = onWindows ? test.skip : test.concurrent
+// Serial, NOT `.concurrent`: each test spawns a fresh `bun run src/cli/index.ts`
+// that re-transpiles the whole CLI module graph. `.concurrent` fired all ~16
+// spawns at once on an already-saturated `--parallel` worker pool, so they
+// raced the 30s timeout under contention (the recurring "timed out after
+// 30000ms" flake). Serial bounds the file to one in-flight subprocess. Don't
+// restore `.concurrent` or bump the timeout — both only hide the spawn storm.
+// Windows skips the POSIX shell plugin-command shim, #899.
+const pluginCommandTest = onWindows ? test.skip : test
 
 describe('typeclaw <plugin-command> on host stage', () => {
   pluginCommandTest('QA-5 end-to-end: dispatches a host command via CLI entrypoint', async () => {
@@ -105,7 +106,7 @@ describe('typeclaw <plugin-command> on host stage', () => {
     expect(stderr).toMatch(/msg/i)
   })
 
-  test.concurrent('unknown command falls through to citty (no plugin match, no built-in)', async () => {
+  test('unknown command falls through to citty (no plugin match, no built-in)', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { code } = await runCli(['no-such-command'], dir)
     expect(code).not.toBe(0)
@@ -122,7 +123,7 @@ describe('typeclaw --help on host stage', () => {
     expect(stdout).toContain('echo a message')
   })
 
-  test.concurrent('QA-17: outside an agent folder, no Plugin commands section is shown', async () => {
+  test('QA-17: outside an agent folder, no Plugin commands section is shown', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'tccli-bare-'))
     tmpDirs.push(dir)
     const { stdout, code } = await runCli(['--help'], dir)
@@ -132,7 +133,7 @@ describe('typeclaw --help on host stage', () => {
 })
 
 describe('typeclaw update on host stage', () => {
-  test.concurrent('dry-run prints the selected updater command without hitting the registry', async () => {
+  test('dry-run prints the selected updater command without hitting the registry', async () => {
     const dir = await mkAgent()
     const { stdout, stderr, code } = await runCli(['update', '--manager=bun', '--dry-run'], dir)
     expect(code).toBe(0)
@@ -140,7 +141,7 @@ describe('typeclaw update on host stage', () => {
     expect(stdout.trim()).toBe('bun update -g typeclaw --latest')
   })
 
-  test.concurrent('dry-run renders the pnpm command when --manager=pnpm', async () => {
+  test('dry-run renders the pnpm command when --manager=pnpm', async () => {
     const dir = await mkAgent()
     const { stdout, stderr, code } = await runCli(['update', '--manager=pnpm', '--dry-run'], dir)
     expect(code).toBe(0)
@@ -148,7 +149,7 @@ describe('typeclaw update on host stage', () => {
     expect(stdout.trim()).toBe('pnpm add -g typeclaw@latest')
   })
 
-  test.concurrent('dry-run renders the yarn command when --manager=yarn', async () => {
+  test('dry-run renders the yarn command when --manager=yarn', async () => {
     const dir = await mkAgent()
     const { stdout, stderr, code } = await runCli(['update', '--manager=yarn', '--dry-run'], dir)
     expect(code).toBe(0)
@@ -156,14 +157,14 @@ describe('typeclaw update on host stage', () => {
     expect(stdout.trim()).toBe('yarn global upgrade typeclaw --latest')
   })
 
-  test.concurrent('rejects unknown --manager values with exit code 2', async () => {
+  test('rejects unknown --manager values with exit code 2', async () => {
     const dir = await mkAgent()
     const { stderr, code } = await runCli(['update', '--manager=cargo', '--dry-run'], dir)
     expect(code).toBe(2)
     expect(stderr).toContain('Invalid --manager=cargo')
   })
 
-  test.concurrent('auto mode refuses a source checkout because it cannot prove the global manager', async () => {
+  test('auto mode refuses a source checkout because it cannot prove the global manager', async () => {
     const dir = await mkAgent()
     const { stderr, code } = await runCli(['update', '--dry-run'], dir)
     expect(code).toBe(1)
@@ -172,7 +173,7 @@ describe('typeclaw update on host stage', () => {
 })
 
 describe('top-level usage (hand-rendered, no subcommand modules imported)', () => {
-  test.concurrent('no args: prints the usage table to stdout, "No command specified." to stderr, exits 1', async () => {
+  test('no args: prints the usage table to stdout, "No command specified." to stderr, exits 1', async () => {
     const dir = await mkAgent()
     const { stdout, stderr, code } = await runCli([], dir)
     expect(code).toBe(1)
@@ -192,7 +193,7 @@ describe('top-level usage (hand-rendered, no subcommand modules imported)', () =
     expect(stdout).not.toContain('echo-host')
   })
 
-  test.concurrent('--help and -h produce identical output and exit 0', async () => {
+  test('--help and -h produce identical output and exit 0', async () => {
     const dir = await mkAgent()
     const [long, short] = await Promise.all([runCli(['--help'], dir), runCli(['-h'], dir)])
     expect(long.code).toBe(0)
@@ -202,14 +203,14 @@ describe('top-level usage (hand-rendered, no subcommand modules imported)', () =
     expect(long.stdout).toContain('COMMANDS')
   })
 
-  test.concurrent('usage table hides the internal _hostd / _update-check commands', async () => {
+  test('usage table hides the internal _hostd / _update-check commands', async () => {
     const dir = await mkAgent()
     const { stdout } = await runCli(['--help'], dir)
     expect(stdout).not.toContain('_hostd')
     expect(stdout).not.toContain('_update-check')
   })
 
-  test.concurrent('--version stays handled by citty: prints the version and exits 0', async () => {
+  test('--version stays handled by citty: prints the version and exits 0', async () => {
     const dir = await mkAgent()
     const { stdout, code } = await runCli(['--version'], dir)
     expect(code).toBe(0)
@@ -218,7 +219,7 @@ describe('top-level usage (hand-rendered, no subcommand modules imported)', () =
 })
 
 describe('_hostd preservation', () => {
-  test.concurrent('_hostd is recognized as a built-in (not routed to plugin dispatcher)', async () => {
+  test('_hostd is recognized as a built-in (not routed to plugin dispatcher)', async () => {
     // We can't actually launch _hostd in a test (it would daemonize), but
     // we can verify it appears in `typeclaw --help` (citty subCommand) and
     // is in BUILTIN_COMMAND_NAMES so the intercept skips it.
