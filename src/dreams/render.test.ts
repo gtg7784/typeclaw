@@ -32,7 +32,12 @@ describe('renderListRow', () => {
 
   it('shows an absolute date anchor alongside the relative time', () => {
     const row = renderListRow(base, { color: false })
-    expect(row).toContain('06-14')
+    // The anchor is rendered in local time, so derive the expected MM-DD from
+    // the same instant rather than hardcoding a UTC date (18:42Z rolls to the
+    // next day east of UTC+6, which is the latent flake this guards against).
+    const d = new Date(base.committedAt)
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    expect(row).toContain(`${pad(d.getMonth() + 1)}-${pad(d.getDate())}`)
   })
 
   it('drops the noise-only "other" badge when a meaningful category exists', () => {
