@@ -22,6 +22,7 @@ import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-l
 import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { bumpReferenceAccess } from './references/load-references'
+import { memoryCommands } from './search-command'
 import { createMemorySearchTool } from './search-tool'
 import { type InjectedMemoryState, partitionRetrievedMemoryItems } from './turn-dedup'
 import { vectorConfigSchema } from './vector/config'
@@ -276,6 +277,7 @@ async function renderVectorTurnMemory(
 export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
   return definePlugin({
     configSchema: memoryConfigSchema,
+    commands: memoryCommands,
     plugin: async (ctx) => {
       const idleMs = ctx.config.idleMs
       const bufferBytes = ctx.config.bufferBytes
