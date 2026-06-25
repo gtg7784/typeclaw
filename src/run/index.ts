@@ -19,7 +19,7 @@ import {
   type SubagentRegistry,
   type SubagentShared,
 } from '@/agent/subagents'
-import { clearTodosForOrigin } from '@/agent/todo/continuation-wiring'
+import { clearTodosForOrigin, markRestartAbortPendingForOrigin } from '@/agent/todo/continuation-wiring'
 import { vectorEnabledFromMemoryConfig } from '@/bundled-plugins/memory/vector/config'
 import { embed, warmEmbedder } from '@/bundled-plugins/memory/vector/embedder'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
@@ -211,7 +211,11 @@ async function startAgentRuntime(
     processGlobalsDisposed = true
     uninstallCodexFetchObserver()
     fatalGuard.dispose()
+    // onSigterm is defined later in this scope but only ever invoked after init;
+    // removing it here keeps a restarted startAgent() from stacking listeners.
+    if (sigtermHandler !== null) process.removeListener('SIGTERM', sigtermHandler)
   }
+  let sigtermHandler: (() => void) | null = null
   onProcessGlobalsInstalled(disposeProcessGlobals)
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
@@ -953,6 +957,34 @@ async function startAgentRuntime(
       disposeProcessGlobals()
     }
   }
+
+  // Graceful shutdown on host-initiated restart (`typeclaw restart` → docker
+  // stop → SIGTERM, ~10s before SIGKILL). Mark every live session's todo scope
+  // so the turn this restart aborts does not arm the durable user-abort block —
+  // each scope's incomplete todos then auto-continue after the new container
+  // boots. Then run best-effort teardown. A hard deadline force-exits well
+  // inside Docker's grace window so a hung turn can't get the process SIGKILL'd
+  // mid-flush. Only meaningful inside a container; outside Docker SIGTERM is an
+  // ordinary stop with nothing to resume.
+  const SHUTDOWN_DEADLINE_MS = 8_000
+  let shuttingDown = false
+  const onSigterm = (): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    const forceExit = setTimeout(() => process.exit(0), SHUTDOWN_DEADLINE_MS)
+    forceExit.unref()
+    void (async () => {
+      if (containerName !== undefined) {
+        await markRestartAbortPendingForOrigin(cwd, { kind: 'tui', sessionId: 'tui' }).catch(() => undefined)
+        await channelManager.router.markRestartAbortForAllLive().catch(() => undefined)
+      }
+      await stop().catch(() => undefined)
+      clearTimeout(forceExit)
+      process.exit(0)
+    })()
+  }
+  sigtermHandler = onSigterm
+  process.on('SIGTERM', onSigterm)
 
   if (!attachTui) {
     return {

@@ -4,6 +4,8 @@ import { maybeInjectContinuation } from './continuation'
 import { type TurnOutcome } from './continuation-policy'
 import {
   armRestartKickSuppression,
+  clearAbortSuppression,
+  markRestartAbortPending,
   onTurnOutcome,
   onTurnStart,
   readContinuationState,
@@ -88,6 +90,30 @@ export async function armRestartKickForOrigin(agentDir: string, origin: SessionO
   if (scope === null) return
   const state = await readContinuationState(agentDir, scope)
   await writeContinuationState(agentDir, scope, armRestartKickSuppression(state))
+}
+
+// Mark an origin's scope so the imminent restart-induced abort does not arm the
+// durable user-abort block. Called by the graceful-restart shutdown BEFORE it
+// aborts the in-flight turn, so onTurnOutcome reads the marker when it records
+// the 'aborted' outcome. No-op for scopeless origins.
+export async function markRestartAbortPendingForOrigin(agentDir: string, origin: SessionOrigin): Promise<void> {
+  const scope = resolveTodoScope(origin)
+  if (scope === null) return
+  const state = await readContinuationState(agentDir, scope)
+  const next = markRestartAbortPending(state)
+  if (next !== state) await writeContinuationState(agentDir, scope, next)
+}
+
+// Clear the durable user-abort suppressor for an origin's scope on a restart
+// resume, so a turn aborted by the restart itself does not permanently block
+// auto-continuation. Gated by the caller to the restart-handoff path only.
+// No-op for scopeless origins.
+export async function clearAbortSuppressionForOrigin(agentDir: string, origin: SessionOrigin): Promise<void> {
+  const scope = resolveTodoScope(origin)
+  if (scope === null) return
+  const state = await readContinuationState(agentDir, scope)
+  const next = clearAbortSuppression(state)
+  if (next !== state) await writeContinuationState(agentDir, scope, next)
 }
 
 // Empty the todo list for an origin's scope. No-op for scopeless origins.

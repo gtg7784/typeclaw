@@ -50,10 +50,18 @@ export async function writeContinuationState(
   await rename(tmp, path)
 }
 
-// A real user turn ends any active continuation episode and clears both
-// suppressors. This is the ONLY thing that resets the episode budget — the
-// runtime's own injected continuation prompts must not. Callers pass `false`
-// for injected prompts so the episode budget keeps counting down.
+// A real user turn ends any active continuation episode and clears every
+// suppressor, including the one-shot restart-abort marker. This is the ONLY
+// thing that resets the episode budget — the runtime's own injected
+// continuation prompts must not. Callers pass `false` for injected prompts so
+// the episode budget keeps counting down.
+//
+// Clearing restartAbortPending here is load-bearing for policy D1: the host
+// SIGTERM path can leave a marker on disk that was never consumed (the process
+// exited before any aborted outcome was recorded, or the singleton TUI scope
+// was marked with no live turn). A real user turn is the staleness boundary —
+// once the user prompts again, any leftover marker is stale, so a LATER user
+// abort in that turn must still arm D1 rather than consume the dead marker.
 export function onTurnStart(state: ContinuationState, isRealUserTurn: boolean): ContinuationState {
   if (!isRealUserTurn) return state
   return {
@@ -61,20 +69,46 @@ export function onTurnStart(state: ContinuationState, isRealUserTurn: boolean): 
     episode: null,
     autoResumeBlockedUntilRealUserTurn: false,
     suppressNextIdleNudgeReason: null,
+    restartAbortPending: false,
   }
 }
 
 // Record the most recently completed turn's outcome. Explicit user abort also
 // arms the durable suppressor so no auto-continuation fires until a real user
-// turn clears it (policy D1).
+// turn clears it (policy D1). A restart-induced abort is the one exception: the
+// graceful-shutdown path sets restartAbortPending before aborting, so the
+// imminent 'aborted' outcome does NOT arm the block. The marker is one-shot —
+// consumed here regardless — so a later genuine user abort still arms D1.
 export function onTurnOutcome(state: ContinuationState, outcome: TurnOutcome): ContinuationState {
-  const next: ContinuationState = { ...state, lastTurnOutcome: outcome }
-  if (outcome.stopReason === 'aborted') next.autoResumeBlockedUntilRealUserTurn = true
+  const next: ContinuationState = { ...state, lastTurnOutcome: outcome, restartAbortPending: false }
+  if (outcome.stopReason === 'aborted' && !state.restartAbortPending) {
+    next.autoResumeBlockedUntilRealUserTurn = true
+  }
   return next
+}
+
+// Set the one-shot restart-abort marker so the next 'aborted' outcome is read
+// as a restart lifecycle transition, not a user stop. Gated by the caller to
+// the graceful-restart shutdown path only. Consumed by onTurnOutcome OR cleared
+// by the next real user turn (onTurnStart), whichever comes first — so a marker
+// orphaned by a hard process exit can never outlive the next user prompt.
+export function markRestartAbortPending(state: ContinuationState): ContinuationState {
+  if (state.restartAbortPending) return state
+  return { ...state, restartAbortPending: true }
 }
 
 export function armRestartKickSuppression(state: ContinuationState): ContinuationState {
   return { ...state, suppressNextIdleNudgeReason: 'restart-kick' }
+}
+
+// The ONE sanctioned bypass of policy D1's "only a real user turn clears the
+// abort block": a restart aborts the in-flight turn (arming the block via
+// onTurnOutcome), but that is a lifecycle transition, not a user stop. Callers
+// MUST gate this on the consumed restart handoff so an ordinary user abort
+// still leaves the block in place.
+export function clearAbortSuppression(state: ContinuationState): ContinuationState {
+  if (!state.autoResumeBlockedUntilRealUserTurn) return state
+  return { ...state, autoResumeBlockedUntilRealUserTurn: false }
 }
 
 export function consumeRestartKickSuppression(state: ContinuationState): ContinuationState {

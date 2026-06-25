@@ -52,6 +52,7 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},
+    markRestartAbortForAllLive: async () => {},
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),

@@ -12,6 +12,7 @@ import {
 import {
   armRestartKickSuppression,
   consumeRestartKickSuppression,
+  markRestartAbortPending,
   onTurnOutcome,
   onTurnStart,
   readContinuationState,
@@ -52,6 +53,7 @@ describe('continuation-state persistence', () => {
       lastTurnOutcome: { turnId: 't', stopReason: 'stop', endedAt: 1 },
       suppressNextIdleNudgeReason: null,
       autoResumeBlockedUntilRealUserTurn: false,
+      restartAbortPending: false,
     }
     await writeContinuationState(agentDir, SCOPE, state)
     expect(await readContinuationState(agentDir, SCOPE)).toEqual(state)
@@ -86,16 +88,34 @@ describe('onTurnStart', () => {
       lastTurnOutcome: null,
       suppressNextIdleNudgeReason: 'restart-kick',
       autoResumeBlockedUntilRealUserTurn: true,
+      restartAbortPending: true,
     }
     const next = onTurnStart(state, true)
     expect(next.episode).toBeNull()
     expect(next.suppressNextIdleNudgeReason).toBeNull()
     expect(next.autoResumeBlockedUntilRealUserTurn).toBe(false)
+    expect(next.restartAbortPending).toBe(false)
   })
 
   test('an injected (non-user) turn does NOT reset the episode budget', () => {
     const state: ContinuationState = { ...emptyContinuationState(), episode: EPISODE }
     expect(onTurnStart(state, false)).toBe(state)
+  })
+
+  // Regression: a restart marker orphaned by a hard process exit (no aborted
+  // outcome ever recorded — e.g. the singleton TUI scope marked with no live
+  // turn) must NOT survive into the next user turn and downgrade a genuine user
+  // abort. The real user turn clears the stale marker, so the user's later
+  // abort still arms D1.
+  test('a stale restart marker does not suppress D1 for a later genuine user abort', () => {
+    // given a marker left on disk by a restart, with no outcome recorded
+    const stale: ContinuationState = { ...emptyContinuationState(), restartAbortPending: true }
+    // when the user prompts again (real user turn) and then aborts that turn
+    const afterUserPrompt = onTurnStart(stale, true)
+    expect(afterUserPrompt.restartAbortPending).toBe(false)
+    const afterUserAbort = onTurnOutcome(afterUserPrompt, { turnId: 'u1', stopReason: 'aborted', endedAt: 1 })
+    // then D1 arms — the stale marker did not classify it as restart-induced
+    expect(afterUserAbort.autoResumeBlockedUntilRealUserTurn).toBe(true)
   })
 })
 
@@ -114,6 +134,35 @@ describe('onTurnOutcome', () => {
   test('a normal stop does not arm the suppressor', () => {
     const outcome: TurnOutcome = { turnId: 't', stopReason: 'stop', endedAt: 9 }
     expect(onTurnOutcome(emptyContinuationState(), outcome).autoResumeBlockedUntilRealUserTurn).toBe(false)
+  })
+
+  test('a restart-induced abort does NOT arm the suppressor and consumes the marker', () => {
+    const outcome: TurnOutcome = { turnId: 't', stopReason: 'aborted', endedAt: 9 }
+    const marked = markRestartAbortPending(emptyContinuationState())
+    const next = onTurnOutcome(marked, outcome)
+    expect(next.autoResumeBlockedUntilRealUserTurn).toBe(false)
+    expect(next.restartAbortPending).toBe(false)
+  })
+
+  test('the marker is one-shot: a later genuine abort still arms the suppressor', () => {
+    const firstAbort = onTurnOutcome(markRestartAbortPending(emptyContinuationState()), {
+      turnId: 't1',
+      stopReason: 'aborted',
+      endedAt: 1,
+    })
+    const secondAbort = onTurnOutcome(firstAbort, { turnId: 't2', stopReason: 'aborted', endedAt: 2 })
+    expect(secondAbort.autoResumeBlockedUntilRealUserTurn).toBe(true)
+  })
+})
+
+describe('markRestartAbortPending', () => {
+  test('sets the one-shot marker', () => {
+    expect(markRestartAbortPending(emptyContinuationState()).restartAbortPending).toBe(true)
+  })
+
+  test('is idempotent', () => {
+    const once = markRestartAbortPending(emptyContinuationState())
+    expect(markRestartAbortPending(once)).toBe(once)
   })
 })
 

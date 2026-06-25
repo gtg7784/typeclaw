@@ -9,6 +9,7 @@ import { readContinuationState } from './continuation-state'
 import {
   armRestartKickForOrigin,
   classifyStopReason,
+  clearAbortSuppressionForOrigin,
   clearTodosForOrigin,
   extractStopReason,
   recordTurnOutcome,
@@ -75,6 +76,61 @@ describe('recordTurnOutcome / recordTurnStart', () => {
     await recordTurnOutcome({ agentDir, origin, turnId: 't', stopReason: 'stop' })
     await recordTurnStart({ agentDir, origin, isRealUserTurn: true })
     // nothing thrown, nothing written
+    expect(true).toBe(true)
+  })
+})
+
+describe('clearAbortSuppressionForOrigin', () => {
+  test('clears the abort suppressor a restart-induced abort armed', async () => {
+    // given a turn aborted (as a restart would) which armed the durable block
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 't1', stopReason: 'aborted' })
+    expect((await readContinuationState(agentDir, SCOPE)).autoResumeBlockedUntilRealUserTurn).toBe(true)
+    // when the restart resume path clears it
+    await clearAbortSuppressionForOrigin(agentDir, TUI)
+    // then auto-continuation is unblocked without needing a real user turn
+    expect((await readContinuationState(agentDir, SCOPE)).autoResumeBlockedUntilRealUserTurn).toBe(false)
+  })
+
+  test('lets work auto-continue once the restart-kick turn laundered the aborted outcome', async () => {
+    // given a turn the restart aborted, leaving incomplete work
+    await writeTodos(agentDir, SCOPE, [{ content: 'task', status: 'pending' }])
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 't1', stopReason: 'aborted' })
+
+    // when the resume path clears the durable block and arms the one-shot kick
+    await clearAbortSuppressionForOrigin(agentDir, TUI)
+    await armRestartKickForOrigin(agentDir, TUI)
+
+    // and the synthetic "I'm back" kick runs as a non-user turn, then goes idle
+    await recordTurnStart({ agentDir, origin: TUI, isRealUserTurn: false })
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 'kick', stopReason: 'stop' })
+    let count = 0
+    const firstIdle = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => count++ })
+
+    // then the kick's own idle is suppressed, but the next idle continues —
+    // proving the kick laundered lastTurnOutcome from 'aborted' to 'stop'
+    expect(firstIdle).toBe(false)
+    const secondIdle = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => count++ })
+    expect(secondIdle).toBe(true)
+    expect(count).toBe(1)
+  })
+
+  test('still blocks when the restart-kick turn itself aborts', async () => {
+    await writeTodos(agentDir, SCOPE, [{ content: 'task', status: 'pending' }])
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 't1', stopReason: 'aborted' })
+    await clearAbortSuppressionForOrigin(agentDir, TUI)
+    await armRestartKickForOrigin(agentDir, TUI)
+    await recordTurnStart({ agentDir, origin: TUI, isRealUserTurn: false })
+    await recordTurnOutcome({ agentDir, origin: TUI, turnId: 'kick', stopReason: 'aborted' })
+    await runIdleContinuation({ agentDir, origin: TUI, deliver: () => undefined })
+    let delivered = false
+    const ok = await runIdleContinuation({ agentDir, origin: TUI, deliver: () => (delivered = true) })
+    expect(ok).toBe(false)
+    expect(delivered).toBe(false)
+  })
+
+  test('scopeless origins are a no-op', async () => {
+    const origin: SessionOrigin = { kind: 'subagent', subagent: 's', parentSessionId: 'p' }
+    await clearAbortSuppressionForOrigin(agentDir, origin)
     expect(true).toBe(true)
   })
 })

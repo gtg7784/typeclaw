@@ -10,6 +10,8 @@ import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 import type { AgentSession } from '@/agent'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
+import { readContinuationState } from '@/agent/todo/continuation-state'
+import { resolveTodoScope } from '@/agent/todo/scope'
 import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
 
@@ -11473,6 +11475,40 @@ describe('resumeRestartHandoff', () => {
     expect(originDuringWake?.kind).toBe('channel')
     if (originDuringWake?.kind !== 'channel') throw new Error('unreachable')
     expect(originDuringWake.lastInboundAuthorId).toBe('U_OWNER')
+  })
+})
+
+describe('markRestartAbortForAllLive (graceful host restart)', () => {
+  test('aborts every live session and marks its scope so resume auto-continues', async () => {
+    // given a live channel session with an in-flight-capable turn
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+
+    // when the graceful-restart shutdown marks + aborts all live sessions
+    await router.markRestartAbortForAllLive()
+
+    // then the turn was aborted and the scope carries the one-shot marker, so
+    // the next 'aborted' outcome will NOT arm the durable user-abort block
+    expect(sessions[0]!.aborted).toBeGreaterThan(0)
+    const scope = resolveTodoScope({
+      kind: 'channel',
+      adapter: KEY.adapter,
+      workspace: KEY.workspace,
+      chat: KEY.chat,
+      thread: KEY.thread,
+      participants: [],
+    })!
+    expect((await readContinuationState(dir, scope)).restartAbortPending).toBe(true)
+  })
+
+  test('is a no-op with no live sessions', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    await router.markRestartAbortForAllLive()
+    expect(true).toBe(true)
   })
 })
 
