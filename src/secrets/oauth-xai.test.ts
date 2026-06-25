@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { createServer, type Server } from 'node:http'
 
 import { getOAuthProvider, unregisterOAuthProvider } from '@mariozechner/pi-ai/oauth'
 
@@ -123,27 +122,13 @@ describe('errorHtml', () => {
 })
 
 describe('loginXai callback-server fallback', () => {
-  const CALLBACK_PORT = 56121
-  let blocker: Server | undefined
-
-  afterEach(async () => {
-    if (blocker) {
-      await new Promise<void>((resolve) => blocker!.close(() => resolve()))
-      blocker = undefined
-    }
-  })
-
   test('falls back to manual paste when the loopback port cannot be bound', async () => {
-    // given: the fixed callback port is already occupied, so startCallbackServer fails to bind
-    blocker = createServer()
-    await new Promise<void>((resolve, reject) => {
-      blocker!.once('error', reject)
-      blocker!.listen(CALLBACK_PORT, '127.0.0.1', () => resolve())
-    })
-
     let authUrlShown: string | undefined
     let manualPromptShown = false
 
+    // given: the callback server cannot bind (EADDRINUSE / sandbox bind block),
+    // injected deterministically instead of racing a real OS port — the fixed
+    // callback port collided across parallel workers and flaked under contention
     // when: the user pastes the redirect URL via onManualCodeInput
     const creds = await loginXai(
       {
@@ -165,6 +150,7 @@ describe('loginXai callback-server fallback', () => {
           status: 200,
         })
       }),
+      async () => null,
     )
 
     // then: the auth URL was still shown and the pasted code drove the token exchange
