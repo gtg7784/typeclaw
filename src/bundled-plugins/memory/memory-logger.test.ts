@@ -135,9 +135,20 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
   test('declares durable facts about non-user people as a capture-worthy category', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('collaborator/contact facts')
+    expect(lower).toContain('active-participant status')
     expect(lower).toMatch(/role|responsibility/)
     expect(lower).toMatch(/working preference|communication preference|coordination/)
     expect(lower).toMatch(/routing|coordinate|address|interpret/)
+  })
+
+  test('encourages compact identity capture for active participants even without a stated role', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/actively participates.*recurring presence.*multiple messages.*back-and-forth/s)
+    expect(lower).toMatch(
+      /capture one compact identity fragment.*even if they did not state a durable role or preference/s,
+    )
+    expect(lower).toContain('a stated role/preference strengthens the fragment but is no longer required')
+    expect(lower).not.toContain('this is not a contact database')
   })
 
   test('keeps a person introduction to one compact fragment instead of one-per-attribute', () => {
@@ -154,12 +165,21 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
   test('qualifies social-graph trivia so operationally-relevant people facts are no longer blanket-skipped', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('who knows whom')
-    expect(lower).toMatch(/capture a person fact only if it changes how the agent should/)
+    expect(lower).toMatch(/capture a person fact when it records an active participant's compact identity/)
+    expect(lower).toMatch(/or when it changes how the agent should later route to/)
   })
 
-  test('demonstrates people capture in a non-English (Korean) example so the rule is not English-bound', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('민지는 결제 담당이고')
+  test('demonstrates active-participant identity capture in a non-English (Korean) example', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('민준이 이 대화에서 여러 번 답하고 배포 메모 확인을 요청했다')
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/in any language/i)
+  })
+
+  test('keeps the anti-personality guard while allowing active-participant identity', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('personality observations')
+    expect(lower).toContain('vibes')
+    expect(lower).toContain('impressions of people')
+    expect(lower).toMatch(/not as a character sketch or one-off impression/)
   })
 
   test('declares durable channel/environment facts as a capture-worthy situation-memory category', () => {
