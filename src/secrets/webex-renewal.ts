@@ -83,6 +83,9 @@ export async function decideRenewal(block: WebexChannelBlock, ctx: WebexRenewalC
     plaintextPassword = decrypt(account.encryptedPassword, key, {
       containerName: ctx.containerName,
       accountId: account.account_id,
+      // Must match the AAD `runWebexBootstrap` seals with (init/webex-auth.ts);
+      // the default 'kakaotalk-password' never authenticates a webex blob.
+      purpose: 'webex-password',
     })
   } catch (err) {
     return classifyDecryptFailure(err, accountId)

@@ -10,6 +10,14 @@ import { type LoginWithPasswordFn, decideRenewal, RENEWAL_WINDOW_MS, renewCurren
 
 const HOUR_MS = 60 * 60 * 1000
 
+// Seal exactly like runWebexBootstrap (init/webex-auth.ts) does, so these
+// fixtures exercise the production AAD. A bare `encrypt(pw, key, {container,
+// account})` would default purpose to 'kakaotalk-password' and silently
+// re-encode the decrypt_failed bug this suite is meant to guard.
+function sealWebexPassword(plaintext: string, key: Buffer): WebexEncryptedPassword {
+  return encrypt(plaintext, key, { containerName: 'webex', accountId: 'u-1', purpose: 'webex-password' })
+}
+
 function fakeKeyStore(opts: { containerName: string; key: Buffer | null }): KeyStore {
   return {
     keyPath: (name: string) => `/fake/${name}.key`,
@@ -114,7 +122,7 @@ describe('decideRenewal', () => {
 
   test('requires reauth when the key file is missing', async () => {
     const key = generateKey()
-    const encryptedPassword = encrypt('pw', key, { containerName: 'webex', accountId: 'u-1' })
+    const encryptedPassword = sealWebexPassword('pw', key)
     const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
     const decision = await decideRenewal(block, {
       containerName: 'webex',
@@ -128,7 +136,7 @@ describe('decideRenewal', () => {
   test('requires reauth when the key does not match the ciphertext (wrong key)', async () => {
     const realKey = generateKey()
     const otherKey = generateKey()
-    const encryptedPassword = encrypt('pw', realKey, { containerName: 'webex', accountId: 'u-1' })
+    const encryptedPassword = sealWebexPassword('pw', realKey)
     const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
     const decision = await decideRenewal(block, {
       containerName: 'webex',
@@ -141,7 +149,7 @@ describe('decideRenewal', () => {
 
   test('returns should_renew with decrypted password when everything aligns', async () => {
     const key = generateKey()
-    const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+    const encryptedPassword = sealWebexPassword('hunter2', key)
     const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
     const decision = await decideRenewal(block, {
       containerName: 'webex',
@@ -158,7 +166,7 @@ describe('decideRenewal', () => {
 
   test('renews an already-expired token (negative expiresInMs is inside the window)', async () => {
     const key = generateKey()
-    const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+    const encryptedPassword = sealWebexPassword('hunter2', key)
     const block = buildBlock({ accountId: 'u-1', expiresInHours: -2, email: 'u@e.com', encryptedPassword })
     const decision = await decideRenewal(block, {
       containerName: 'webex',
@@ -222,7 +230,7 @@ describe('renewCurrentAccount', () => {
   test('writes fresh tokens through the store, preserving email + encryptedPassword', async () => {
     await withAgentDir(async (agentDir) => {
       const key = generateKey()
-      const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+      const encryptedPassword = sealWebexPassword('hunter2', key)
       const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
       await seedSecrets(agentDir, block)
 
@@ -255,7 +263,7 @@ describe('renewCurrentAccount', () => {
   test('preserves created_at across renewals (only updated_at advances)', async () => {
     await withAgentDir(async (agentDir) => {
       const key = generateKey()
-      const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+      const encryptedPassword = sealWebexPassword('hunter2', key)
       const originalCreatedAt = '2026-01-01T00:00:00.000Z'
       const block = buildBlock({
         accountId: 'u-1',
@@ -283,7 +291,7 @@ describe('renewCurrentAccount', () => {
   test('reports reauth_required (not transient) on an SSO/MFA WebexError', async () => {
     await withAgentDir(async (agentDir) => {
       const key = generateKey()
-      const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+      const encryptedPassword = sealWebexPassword('hunter2', key)
       const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
       await seedSecrets(agentDir, block)
 
@@ -304,7 +312,7 @@ describe('renewCurrentAccount', () => {
   test('reports transient_failure when login throws for a non-auth reason', async () => {
     await withAgentDir(async (agentDir) => {
       const key = generateKey()
-      const encryptedPassword = encrypt('hunter2', key, { containerName: 'webex', accountId: 'u-1' })
+      const encryptedPassword = sealWebexPassword('hunter2', key)
       const block = buildBlock({ accountId: 'u-1', expiresInHours: 1, email: 'u@e.com', encryptedPassword })
       await seedSecrets(agentDir, block)
 
