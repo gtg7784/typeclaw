@@ -1089,10 +1089,18 @@ describe('ChannelRouter ensureLive watchdog', () => {
     const firstCreation = new Promise<void>((resolve) => {
       firstCreationEntered = resolve
     })
+    // The watchdog wraps the WHOLE ensureLive chain (ensureLoaded + name/
+    // membership resolution + factory), not just the factory. The first call's
+    // factory hangs forever, so it times out at ANY finite budget — but the
+    // second, success-path call must finish that whole chain before the watchdog
+    // fires. A 50ms budget lost that race under parallel contention (the
+    // recurring flake: the success-path call timed out too). 5s is still far
+    // under the 30s test timeout, keeps the first timeout fast enough, and gives
+    // the success path enough headroom to never lose to contention.
     const router = createChannelRouter({
       agentDir: dir,
       configForAdapter: () => baseConfig,
-      ensureLiveTimeoutMs: 50,
+      ensureLiveTimeoutMs: 5_000,
       logger: {
         info: (m) => logs.push(`info:${m}`),
         warn: (m) => logs.push(`warn:${m}`),
@@ -1119,10 +1127,7 @@ describe('ChannelRouter ensureLive watchdog', () => {
     await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out/)
     expect(logs.some((l) => l.includes('ensureLive failed'))).toBe(true)
     // Gate the retry on the first creation actually reaching the factory and
-    // hanging. Under parallel-test load the watchdog can fire before the slow
-    // pre-factory chain (ensureLoaded + name/membership resolution) reaches the
-    // factory; without this barrier the hang races onto the SECOND call, which
-    // then times out too and rejects this retry.
+    // hanging, so the hang can't race onto the SECOND call.
     await firstCreation
     await router.route(inbound({ externalMessageId: 'm2' }))
     await router.__testing!.flushDebounce(KEY)
