@@ -25,6 +25,7 @@ import type { CreateSessionForSubagent } from '@/agent/subagents'
 import { TODO_CONTINUATION_SOURCE } from '@/agent/todo/continuation'
 import {
   armRestartKickForOrigin,
+  clearAbortSuppressionForOrigin,
   extractTurnUsage,
   recordTurnOutcome,
   recordTurnStart,
@@ -619,6 +620,13 @@ export function createServer({
               if (agentDir !== undefined) {
                 await armRestartKickForOrigin(agentDir, origin).catch((err) =>
                   logger.error(`[server] ${sessionFileId}: arm restart-kick suppression failed: ${describeErr(err)}`),
+                )
+                // The restart may have aborted an in-flight turn, arming the
+                // durable user-abort block. This resume IS the restart, so
+                // clear it — otherwise the resumed session never auto-continues
+                // its incomplete todos. Gated to this restart-handoff path.
+                await clearAbortSuppressionForOrigin(agentDir, origin).catch((err) =>
+                  logger.error(`[server] ${sessionFileId}: clear abort suppression failed: ${describeErr(err)}`),
                 )
               }
               stream.publish({
