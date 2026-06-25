@@ -66,6 +66,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     resumeRestartHandoff: async () => {},
     stop: async () => {},
     tearDownAllLive: async () => {},
+    markRestartAbortForAllLive: async () => {},
     liveCount: () => 0,
   }
 }

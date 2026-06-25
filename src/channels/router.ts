@@ -15,7 +15,9 @@ import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import {
   armRestartKickForOrigin,
+  clearAbortSuppressionForOrigin,
   extractTurnUsage,
+  markRestartAbortPendingForOrigin,
   recordTurnOutcome,
   recordTurnStart,
   runIdleContinuation,
@@ -1168,6 +1170,9 @@ export type ChannelRouter = {
   resumeRestartHandoff: (handoff: RestartHandoff) => Promise<void>
   stop: () => Promise<void>
   tearDownAllLive: () => Promise<void>
+  // Graceful-restart shutdown: mark + abort every live channel session so each
+  // scope's incomplete todos auto-continue on the next boot. See the impl.
+  markRestartAbortForAllLive: () => Promise<void>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
@@ -4393,6 +4398,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     closing = false
   }
 
+  // Graceful-restart shutdown: mark every live channel session's todo scope so
+  // the turn the restart is about to abort does not arm the durable user-abort
+  // block, then abort the in-flight turns. On the next boot each scope's resume
+  // continues its incomplete todos instead of waiting for a human. Best-effort
+  // and bounded by the caller's shutdown deadline.
+  const markRestartAbortForAllLive = async (): Promise<void> => {
+    for (const live of Array.from(liveSessions.values())) {
+      const origin = buildLiveOrigin(live)
+      await markRestartAbortPendingForOrigin(options.agentDir, origin).catch((err) =>
+        logger.error(`[channels] graceful-restart mark abort failed: ${describe(err)}`),
+      )
+      await live.session
+        .abort()
+        .catch((err) => logger.error(`[channels] graceful-restart abort failed: ${describe(err)}`))
+    }
+  }
+
   // Boot-time resume for a restart that originated from a channel session, in
   // two phases to close the race with adapters that begin receiving inbounds.
   //
@@ -4493,6 +4515,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
         await armRestartKickForOrigin(options.agentDir, buildLiveOrigin(live)).catch((err) =>
           logger.error(`[channels] ${keyId}: restart-resume arm restart-kick failed: ${describe(err)}`),
+        )
+        // A restart-aborted turn arms the durable user-abort block; this resume
+        // IS the restart, so clear it or the resumed session never auto-resumes
+        // its incomplete todos. Gated to this restart-handoff path.
+        await clearAbortSuppressionForOrigin(options.agentDir, buildLiveOrigin(live)).catch((err) =>
+          logger.error(`[channels] ${keyId}: restart-resume clear abort suppression failed: ${describe(err)}`),
         )
 
         live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
@@ -4792,6 +4820,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     resumeRestartHandoff,
     stop,
     tearDownAllLive,
+    markRestartAbortForAllLive,
     liveCount: () => liveSessions.size,
     __testing: {
       flushDebounce: async (key: ChannelKey) => {

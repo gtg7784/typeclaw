@@ -37,6 +37,7 @@ function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): C
     getSelfAliases: () => [],
     stop: async () => {},
     tearDownAllLive: async () => {},
+    markRestartAbortForAllLive: async () => {},
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
     injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
