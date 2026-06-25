@@ -13,6 +13,10 @@ export type ClaimSessionOptions = {
   role: string
   channel?: string
   ttlMs?: number
+  // Defaults to connectTimeoutMs. Split out so a loaded host can't let the
+  // open (transport) phase exhaust the budget meant for the connected phase
+  // and surface the wrong timeout error. See waitForOpen/waitForConnected.
+  openTimeoutMs?: number
   connectTimeoutMs?: number
   onStarted?: (payload: ClaimStartedPayload) => void
 }
@@ -28,11 +32,12 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000
 export async function runClaimSession(opts: ClaimSessionOptions): Promise<ClaimSessionResult> {
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
   const connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
+  const openTimeoutMs = opts.openTimeoutMs ?? connectTimeoutMs
   const code = generateClaimCode()
 
   const ws = new WebSocket(opts.url)
   const displayUrl = redactUrl(opts.url)
-  await waitForOpen(ws, displayUrl, connectTimeoutMs)
+  await waitForOpen(ws, displayUrl, openTimeoutMs)
   await waitForConnected(ws, displayUrl, connectTimeoutMs)
 
   try {
