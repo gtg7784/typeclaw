@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   captureQuoteCandidate,
   decideQuoteAnchor,
+  formatAuthorAttribution,
   prependQuoteAnchor,
   renderQuoteAnchor,
   resolveReplyRenderMode,
@@ -24,6 +25,30 @@ const humanInbound = {
   receivedAt: 1000,
   externalMessageId: 'M_ALICE',
 }
+
+describe('formatAuthorAttribution', () => {
+  test('Slack transcript attribution includes display name and stable mention id', () => {
+    expect(formatAuthorAttribution('slack-bot', 'U_ALICE', 'Alice')).toBe('Alice <@U_ALICE>')
+  })
+
+  test('Discord transcript attribution includes display name and stable mention id', () => {
+    expect(formatAuthorAttribution('discord-bot', '123456789', 'Bob')).toBe('Bob <@123456789>')
+  })
+
+  test('KakaoTalk transcript attribution includes Korean display name and numeric id', () => {
+    expect(formatAuthorAttribution('kakaotalk', '999000111', '민준')).toBe('민준 <999000111>')
+  })
+
+  test('GitHub transcript attribution uses a natural handle without duplicating login-only names', () => {
+    expect(formatAuthorAttribution('github', 'octocat', 'octocat')).toBe('@octocat')
+    expect(formatAuthorAttribution('github', 'octocat', 'Mona Lisa')).toBe('Mona Lisa (@octocat)')
+  })
+
+  test('empty display names fall back to the stable identifier only', () => {
+    expect(formatAuthorAttribution('slack-bot', 'U_ALICE', '  ')).toBe('<@U_ALICE>')
+    expect(formatAuthorAttribution('kakaotalk', '999000111', '')).toBe('999000111')
+  })
+})
 
 describe('renderQuoteAnchor', () => {
   test('Slack: emits a real `<@authorId>` mention so the quote anchors against the platform-native mention', () => {

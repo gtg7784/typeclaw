@@ -1194,7 +1194,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.route(inbound({ text: 'what time is it?' }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(1)
-    expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): what time is it?')
+    expect(sessions[0]!.prompts[0]).toContain('alice <@alice>: what time is it?')
   })
 
   test('prompt line is prefixed with the platform-side ISO 8601 timestamp from event.ts', async () => {
@@ -1202,7 +1202,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const { router, sessions } = makeRouter(dir)
     await router.route(inbound({ text: 'hello there', ts: FIXED_INBOUND_TS }))
     await router.__testing!.flushDebounce(KEY)
-    expect(sessions[0]!.prompts[0]).toContain(`[${FIXED_INBOUND_ISO}] <@alice> (alice): hello there`)
+    expect(sessions[0]!.prompts[0]).toContain(`[${FIXED_INBOUND_ISO}] alice <@alice>: hello there`)
   })
 
   test('prompt line omits the timestamp prefix when ts is unknown (0)', async () => {
@@ -1211,7 +1211,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.route(inbound({ text: 'hello there', ts: 0 }))
     await router.__testing!.flushDebounce(KEY)
     const line = sessions[0]!.prompts[0]!
-    expect(line).toContain('<@alice> (alice): hello there')
+    expect(line).toContain('alice <@alice>: hello there')
     expect(line).not.toMatch(/\[\d{4}-\d{2}-\d{2}T/)
   })
 
@@ -1232,7 +1232,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     )
     await router.__testing!.flushDebounce(key)
 
-    expect(sessions[0]!.prompts[0]).toContain('@octocat (octocat): @typeey can you review this PR')
+    expect(sessions[0]!.prompts[0]).toContain('@octocat: @typeey can you review this PR')
     expect(sessions[0]!.prompts[0]).not.toContain('<@12345>')
   })
 
@@ -1277,9 +1277,9 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.__testing!.flushDebounce(KEY)
     const prompt = sessions[0]!.prompts[0]!
     expect(prompt).toContain('Recent context (not addressed to you, for awareness only)')
-    expect(prompt).toContain('<@bob> (bob): unrelated')
+    expect(prompt).toContain('bob <@bob>: unrelated')
     expect(prompt).toContain('Current message')
-    expect(prompt).toContain('<@alice> (alice): hey bot')
+    expect(prompt).toContain('alice <@alice>: hey bot')
     expect(prompt.indexOf('unrelated')).toBeLessThan(prompt.indexOf('hey bot'))
   })
 
@@ -1402,7 +1402,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const prompt = sessions[0]!.prompts[0]!
     expect(prompt).not.toContain('Recent context')
     expect(prompt).toContain('## Current message (addressed to you)')
-    expect(prompt).toContain('<@alice> (alice): hey bot')
+    expect(prompt).toContain('alice <@alice>: hey bot')
   })
 
   test('engaged turn carries the history-interpretation note above the current-message header', async () => {
@@ -1472,7 +1472,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.route(inbound({ isBotMention: false, text: 'hello there' }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(1)
-    expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): hello there')
+    expect(sessions[0]!.prompts[0]).toContain('alice <@alice>: hello there')
   })
 
   test('solo-human fallback turns off once a second human posts', async () => {
@@ -8079,7 +8079,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
     await router.__testing!.flushDebounce(KEY)
 
     // then
-    expect(sessions[0]!.prompts[0]).toContain('<@peer1> (PeerBot) [bot]: hi from a bot')
+    expect(sessions[0]!.prompts[0]).toContain('PeerBot <@peer1> [bot]: hi from a bot')
   })
 
   test('human author lines are NOT tagged with [bot]', async () => {
@@ -8092,7 +8092,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
     await router.__testing!.flushDebounce(KEY)
 
     // then
-    expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): hi from alice')
+    expect(sessions[0]!.prompts[0]).toContain('alice <@alice>: hi from alice')
     expect(sessions[0]!.prompts[0]).not.toContain('[bot]')
   })
 
@@ -8117,7 +8117,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
     await router.__testing!.flushDebounce(KEY)
 
     // then
-    expect(sessions[0]!.prompts[0]).toContain('<@peer1> (PeerBot) [bot]: ')
+    expect(sessions[0]!.prompts[0]).toContain('PeerBot <@peer1> [bot]: ')
   })
 })
 
@@ -10005,7 +10005,7 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(prompt).toContain(`> <@bob>: ${'x'.repeat(QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`)
     expect(prompt).not.toContain('tail')
     expect(prompt).toContain('> <@carol>: linked context')
-    expect(prompt.indexOf('> <@bob>:')).toBeLessThan(prompt.indexOf(`<@alice> (alice): actual reply`))
+    expect(prompt.indexOf('> <@bob>:')).toBeLessThan(prompt.indexOf(`alice <@alice>: actual reply`))
   })
 
   test('share-only Slack referenceContext renders even when raw text is empty', async () => {
@@ -10033,8 +10033,8 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
 
     const prompt = sessions[0]!.prompts[0] ?? ''
     expect(prompt).toContain('> <@UBOB>: shared message body')
-    expect(prompt).toContain('<@alice> (alice): ')
-    expect(prompt.indexOf('> <@UBOB>: shared message body')).toBeLessThan(prompt.indexOf('<@alice> (alice): '))
+    expect(prompt).toContain('alice <@alice>: ')
+    expect(prompt.indexOf('> <@UBOB>: shared message body')).toBeLessThan(prompt.indexOf('alice <@alice>: '))
   })
 
   test("reminder lookup skips destroyed sessions (channels GC'd while subagent was running drops the reminder)", async () => {

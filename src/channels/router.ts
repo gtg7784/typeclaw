@@ -5091,7 +5091,7 @@ function formatAuthorLine(
 ): string {
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
-  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${capObservedText(text, maxChars)}`
+  return `${stamp}${formatAuthorAttribution(adapter, authorId, authorName)}${tag}: ${capObservedText(text, maxChars)}`
 }
 
 // Cap by whole code points so truncation never splits a surrogate pair (emoji,
@@ -5133,6 +5133,36 @@ function formatInboundPromptLines(
 }
 
 export type { QuoteAnchorSource } from './types'
+
+export function formatAuthorAttribution(adapter: AdapterId, authorId: string, authorName: string): string {
+  const displayName = authorName.trim()
+  const hasDisplayName = displayName !== ''
+  const id = authorId.trim()
+  if (id === '') return hasDisplayName ? displayName : authorId
+
+  switch (adapter) {
+    case 'slack':
+    case 'slack-bot':
+    case 'discord':
+    case 'discord-bot': {
+      const mention = `<@${id}>`
+      return hasDisplayName ? `${displayName} ${mention}` : mention
+    }
+    case 'github': {
+      const login = /^\d+$/.test(id) && hasDisplayName ? displayName : id
+      const handle = login.startsWith('@') ? login : `@${login}`
+      if (!hasDisplayName) return handle
+      const normalizedDisplayName = displayName.startsWith('@') ? displayName : `@${displayName}`
+      return normalizedDisplayName === handle ? handle : `${displayName} (${handle})`
+    }
+    case 'telegram-bot':
+    case 'webex':
+    case 'webex-bot':
+    case 'line':
+    case 'kakaotalk':
+      return hasDisplayName ? `${displayName} <${id}>` : id
+  }
+}
 
 // Picks the right author syntax for the platform so prompts and rendered
 // quote anchors use the same form the user would type in that channel.
