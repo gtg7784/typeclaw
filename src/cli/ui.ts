@@ -1,3 +1,4 @@
+import { emitKeypressEvents as nodeEmitKeypressEvents } from 'node:readline'
 import { styleText } from 'node:util'
 
 import { cancel, intro, isCancel, log, note, outro, spinner as clackSpinner } from '@clack/prompts'
@@ -8,29 +9,38 @@ import { COMPACT_WORDMARK, WORDMARK_LINES, WORDMARK_WIDTH } from '@/shared/wordm
 
 export { cancel, intro, isCancel, log, note, outro }
 
-type ClackInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume'>
+type ClackInput = Pick<NodeJS.ReadStream, 'isTTY' | 'resume'>
 
-// Hand stdin to a clack picker in a state it can own. Over an SSH pseudo-TTY,
-// Bun's readline keypress wiring only transitions stdin into flowing raw mode
-// reliably once the stream has already been resumed; on a never-resumed stdin
-// the picker renders but arrow keys echo as raw `^[[B` and never advance it.
-// Local terminals dodge this because stdin was already flowing. Worse, after a
-// pi-tui viewer (ProcessTerminal.stop() calls process.stdin.pause()), a plain
-// resume() does NOT re-flow stdin under Bun, so the next picker is dead over
-// SSH. Toggling raw mode on->off forces the TTY read back into flowing mode;
-// the trailing resume() + non-raw state is the baseline clack expects.
-// Never pause() here — a paused process.stdin does not reliably re-flow.
-export function prepareStdinForClack(input: ClackInput = process.stdin): void {
+type KeypressInterface = { escapeCodeTimeout?: number }
+
+type PrepareStdinDeps = {
+  emitKeypressEvents?: (stream: NodeJS.ReadableStream, iface: KeypressInterface) => void
+}
+
+// @clack/core@1.2.0 builds its readline interface with escapeCodeTimeout: 50 so
+// a bare Esc (the cancel key) resolves fast. readline's keypress decoder binds
+// that timeout ONCE, when emitKeypressEvents first installs it on the stream, and
+// is a no-op on every later call — so pre-arming here without it would lock in
+// readline's 500ms default and clack's own 50ms could never take effect.
+const CLACK_ESCAPE_CODE_TIMEOUT_MS = 50
+
+// Arm readline's keypress decoder on stdin before a clack picker reads it. Over
+// an SSH pseudo-TTY, arrow keys arrive as raw `\x1b[A`/`\x1b[B` bytes and only
+// become the `{ name: 'up' }` keypress events clack navigates on once that
+// decoder is installed on THIS stream. After a prior raw-mode 'data' consumer or
+// a pi-tui detach (ProcessTerminal.stop() pauses stdin), Bun does NOT re-arm the
+// decoder when clack later calls createInterface({ terminal: true }), so the
+// picker renders but arrows echo as `^[[A` and never advance. We pass clack's
+// own escapeCodeTimeout so the pre-arm matches what clack would have set; raw
+// mode is left to clack. Never pause() — a paused process.stdin does not
+// reliably re-flow under Bun.
+export function prepareStdinForClack(input: ClackInput = process.stdin, deps: PrepareStdinDeps = {}): void {
   if (!input.isTTY) return
-  input.resume()
-  if (typeof input.setRawMode === 'function') {
-    try {
-      input.setRawMode(true)
-      input.setRawMode(false)
-    } catch {
-      /* terminal already torn down */
-    }
-  }
+  const emitKeypressEvents =
+    deps.emitKeypressEvents ??
+    ((stream: NodeJS.ReadableStream, iface: KeypressInterface) =>
+      nodeEmitKeypressEvents(stream, iface as unknown as Parameters<typeof nodeEmitKeypressEvents>[1]))
+  emitKeypressEvents(input as unknown as NodeJS.ReadableStream, { escapeCodeTimeout: CLACK_ESCAPE_CODE_TIMEOUT_MS })
   input.resume()
 }
 

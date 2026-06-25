@@ -85,9 +85,8 @@ export type ResolveInspectResult = { ok: true; target: InspectTarget } | { ok: f
 
 // Picker phase, split out from the streaming phase so the tail scope is created
 // AFTER the picker, never before. A raw-mode 'data' listener active during the
-// Clack picker (which forces cooked mode via prepareStdinForClack) fights Clack
-// for stdin and leaves the later stream in cooked mode — that was the recurring
-// "esc does nothing" regression.
+// Clack picker fights Clack for stdin and leaves the later stream in cooked mode
+// — that was the recurring "esc does nothing" regression.
 export async function resolveInspectTarget(opts: Omit<RunInspectOptions, 'signal'>): Promise<ResolveInspectResult> {
   const filterResult = parseFilter(opts.filter)
   if (!filterResult.ok) return { ok: false, exitCode: 2, reason: filterResult.reason }
