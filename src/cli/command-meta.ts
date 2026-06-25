@@ -19,7 +19,7 @@ export type BuiltinCommandName =
   | 'reload'
   | 'logs'
   | 'inspect'
-  | 'dreams'
+  | 'memory'
   | 'shell'
   | 'compose'
   | 'channel'
@@ -52,7 +52,7 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommandMeta[] = [
   { name: 'reload', description: "reload the running agent's reloadable subsystems (cron, ...)" },
   { name: 'logs', description: 'show the agent container logs (host stage)' },
   { name: 'inspect', description: 'session viewer: a session, the live TUI, or container logs' },
-  { name: 'dreams', description: "browse the dreaming subagent's memory-consolidation journal" },
+  { name: 'memory', description: "browse and search the agent's long-term memory" },
   { name: 'shell', description: 'open an interactive shell in the agent container (host stage)' },
   { name: 'compose', description: 'orchestrate every typeclaw agent in subdirectories of cwd' },
   { name: 'channel', description: 'manage channel adapters wired into the agent' },
