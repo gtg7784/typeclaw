@@ -277,7 +277,7 @@ const listSub = defineCommand({
 export const modelCommand = defineCommand({
   meta: {
     name: 'model',
-    description: 'manage model profiles in typeclaw.json (models.default, models.fast, …)',
+    description: 'manage model profiles in typeclaw.json (models.default, ...)',
   },
   subCommands: {
     set: setSub,

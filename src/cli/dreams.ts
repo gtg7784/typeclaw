@@ -12,7 +12,7 @@ const QUIT_KEY = 0x71
 export const dreamsCommand = defineCommand({
   meta: {
     name: 'dreams',
-    description: "browse the dreaming subagent's memory-consolidation journal from git history (host stage)",
+    description: "browse the dreaming subagent's memory-consolidation journal",
   },
   args: {
     limit: {

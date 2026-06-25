@@ -27,7 +27,7 @@ const ESC_DEBOUNCE_MS = 50
 export const inspectCommand = defineCommand({
   meta: {
     name: 'inspect',
-    description: 'session viewer: pick a session, the live TUI, or container logs to observe (host stage)',
+    description: 'session viewer: a session, the live TUI, or container logs',
   },
   args: {
     session: {

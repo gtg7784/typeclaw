@@ -65,7 +65,7 @@ const listSub = defineCommand({
 export const cronCommand = defineCommand({
   meta: {
     name: 'cron',
-    description: 'inspect cron jobs registered in the running agent (user-authored + plugin-contributed)',
+    description: 'inspect cron jobs in the running agent (user + plugin)',
   },
   subCommands: {
     list: listSub,
