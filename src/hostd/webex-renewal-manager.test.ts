@@ -23,7 +23,7 @@ async function setupAgent(opts: {
   const ks = createKeyStore({ keysDir })
   const key = await ks.ensure(containerName)
   const encryptedPassword = opts.withEncryptedPassword
-    ? encrypt('hunter2', key, { containerName, accountId: 'u-1' })
+    ? encrypt('hunter2', key, { containerName, accountId: 'u-1', purpose: 'webex-password' })
     : undefined
   const nowIso = new Date().toISOString()
   const block: WebexChannelBlock = {
