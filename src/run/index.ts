@@ -80,6 +80,7 @@ import { createTunnelManager, type TunnelManager, type TunnelManagerOptions } fr
 import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
 import { installCodexFetchObserver } from './codex-fetch-observer'
+import { installFatalGuard } from './fatal-guard'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
 type BunServer = ReturnType<Server['start']>
@@ -124,19 +125,44 @@ export type StartAgentResult = {
   stop: () => void | Promise<void>
 }
 
-export async function startAgent({
-  port,
-  attachTui,
-  initialPrompt,
-  cwd = process.cwd(),
-  createTui = createTuiDefault,
-  loadCron = loadCronDefault,
-  createSchedulerFor,
-  sessionFactory = createSessionFactory({ agentDir: cwd }),
-  stream = createStream(),
-  createChannelManager: createChannelManagerFor = createChannelManager,
-  createTunnelManager: createTunnelManagerFor = createTunnelManager,
-}: StartAgentOptions): Promise<StartAgentResult> {
+// Thin wrapper that owns ONLY the boot-failure cleanup of process-global
+// installs. `installCodexFetchObserver` and `installFatalGuard` attach
+// process-wide listeners before the fallible boot work; if any boot step throws
+// before `startAgentRuntime` returns, the caller never receives a
+// `StartAgentResult` and can never call `stop()`, so those listeners would
+// strand and double-fire into the next `startAgent`. The runtime hands its
+// disposer back via `onProcessGlobalsInstalled`; on a boot throw we dispose and
+// rethrow, on success ownership transfers to the returned `stop()`. `return
+// await` is load-bearing — without it an async boot rejection would escape this
+// try. Dispose is idempotent, so the success path's `stop()` never double-fires.
+export async function startAgent(options: StartAgentOptions): Promise<StartAgentResult> {
+  const captured: { dispose: (() => void) | null } = { dispose: null }
+  try {
+    return await startAgentRuntime(options, (dispose) => {
+      captured.dispose = dispose
+    })
+  } catch (err) {
+    captured.dispose?.()
+    throw err
+  }
+}
+
+async function startAgentRuntime(
+  {
+    port,
+    attachTui,
+    initialPrompt,
+    cwd = process.cwd(),
+    createTui = createTuiDefault,
+    loadCron = loadCronDefault,
+    createSchedulerFor,
+    sessionFactory = createSessionFactory({ agentDir: cwd }),
+    stream = createStream(),
+    createChannelManager: createChannelManagerFor = createChannelManager,
+    createTunnelManager: createTunnelManagerFor = createTunnelManager,
+  }: StartAgentOptions,
+  onProcessGlobalsInstalled: (dispose: () => void) => void,
+): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
 
   // Wrap globalThis.fetch BEFORE any plugin/session/manager construction so
@@ -156,6 +182,37 @@ export async function startAgent({
   const runtimeVersionOpt = { runtimeVersion: CLI_VERSION }
   const tuiToken = process.env.TYPECLAW_TUI_TOKEN
   const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
+
+  // Install the crash guard FIRST, before any plugin/channel/session
+  // construction, so an `unhandledRejection` escaping a channel SDK during boot
+  // or steady-state cannot terminate the container. Restart goes through the
+  // host daemon only when there is a container to bounce; outside Docker the
+  // guard logs and continues degraded (requestContainerRestart returns ok=false
+  // when the hostd control endpoint is absent, never throws).
+  const fatalGuard = installFatalGuard({
+    ...(containerName !== undefined
+      ? {
+          requestRestart: async (reason: string) => {
+            console.warn(`[fatal-guard] requesting container restart: ${reason}`)
+            const result = await requestContainerRestart({ containerName })
+            return result.ok ? { ok: true } : { ok: false, reason: result.reason }
+          },
+        }
+      : {}),
+    onDegrade: (scope, reason) => console.warn(`[fatal-guard] ${scope} degraded: ${reason}`),
+  })
+
+  // Both process-global disposers are surrendered to the wrapper as one unit the
+  // instant they exist, so a throw anywhere below detaches them; `stop()` calls
+  // the same disposer on the success path.
+  let processGlobalsDisposed = false
+  const disposeProcessGlobals = (): void => {
+    if (processGlobalsDisposed) return
+    processGlobalsDisposed = true
+    uninstallCodexFetchObserver()
+    fatalGuard.dispose()
+  }
+  onProcessGlobalsInstalled(disposeProcessGlobals)
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
   // Vector agents omit the system-prompt `# Memory` section and inject memory
@@ -875,19 +932,26 @@ export async function startAgent({
   const stop = async () => {
     if (stopped) return
     stopped = true
-    scheduler?.stop()
-    cronConsumer.stop()
-    subagentConsumer.stop()
-    server.stop(true)
-    void disposeMaterializedSkills(pluginRuntime)
-    tunnelBridge.stop()
-    subagentCompletionBridge.stop()
-    prVerdictActivityBridge.stop()
-    setReviewObserver(null)
-    await tunnelManager.stop()
-    await channelManager.stop()
-    await mcpManager?.closeAll()
-    uninstallCodexFetchObserver()
+    // The crash-guard and codex-observer disposers run in `finally` so an
+    // earlier async teardown rejection (tunnel/channel/mcp stop) cannot strand
+    // the process-global listeners they removed — a stranded fatal-guard
+    // listener would survive into the next `startAgent` and double-fire.
+    try {
+      scheduler?.stop()
+      cronConsumer.stop()
+      subagentConsumer.stop()
+      server.stop(true)
+      void disposeMaterializedSkills(pluginRuntime)
+      tunnelBridge.stop()
+      subagentCompletionBridge.stop()
+      prVerdictActivityBridge.stop()
+      setReviewObserver(null)
+      await tunnelManager.stop()
+      await channelManager.stop()
+      await mcpManager?.closeAll()
+    } finally {
+      disposeProcessGlobals()
+    }
   }
 
   if (!attachTui) {

@@ -87,9 +87,16 @@ const consoleLogger: CodexFetchObserverLogger = {
 
 type InstallState = {
   originalFetch: typeof fetch
-  uninstall: () => void
+  wrapped: typeof fetch
+  claimants: number
 }
 
+// Ref-counted so multiple agents in one process (compose, tests) share one
+// `globalThis.fetch` wrapper: the FIRST install wraps fetch, each later install
+// just joins, and `globalThis.fetch` is restored only when the LAST claimant
+// releases. A bare singleton would let one agent's release (e.g. a second
+// agent's boot-failure cleanup) tear down the observer out from under another
+// still-running agent.
 let installed: InstallState | null = null
 
 // Returns true when the request is for the Codex Responses endpoint and we
@@ -340,8 +347,8 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
   }
   const logger = opts.logger ?? consoleLogger
   if (installed !== null) {
-    logger.warn(`${LOG_PREFIX} install called but observer already installed; ignoring`)
-    return installed.uninstall
+    installed.claimants++
+    return makeRelease(installed.wrapped)
   }
 
   const codexHost = opts.codexHost ?? DEFAULT_CODEX_HOST
@@ -421,14 +428,23 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
 
   globalThis.fetch = wrapped
 
-  const uninstall = () => {
-    if (installed === null) return
-    if (globalThis.fetch === wrapped) {
-      globalThis.fetch = originalFetch
+  installed = { originalFetch, wrapped, claimants: 1 }
+  return makeRelease(wrapped)
+}
+
+// Each install call gets its own idempotent release. The shared
+// `globalThis.fetch` wrapper is restored only when the final claimant releases,
+// so one agent releasing never disturbs another's still-active observer.
+function makeRelease(wrapped: typeof fetch): () => void {
+  let released = false
+  return () => {
+    if (released || installed === null || installed.wrapped !== wrapped) return
+    released = true
+    installed.claimants--
+    if (installed.claimants > 0) return
+    if (globalThis.fetch === installed.wrapped) {
+      globalThis.fetch = installed.originalFetch
     }
     installed = null
   }
-
-  installed = { originalFetch, uninstall }
-  return uninstall
 }

@@ -40,8 +40,8 @@ afterEach(async () => {
   if (savedBrokerToken === undefined) delete process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
   else process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = savedBrokerToken
   if (!running) return
-  running.server.stop(true)
   running.tuiPromise?.catch(() => {})
+  await running.stop()
   running = null
 })
 
@@ -66,6 +66,83 @@ describe('startAgent', () => {
     const res = await fetch(`http://localhost:${running.server.port}`)
     expect(res.status).toBe(200)
     expect(await res.text()).toBe('typeclaw agent')
+  })
+
+  test('installs a process crash guard so an escaped channel rejection does not crash', async () => {
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
+    expect(process.listenerCount('unhandledRejection')).toBeGreaterThanOrEqual(1)
+
+    // The webex KMS shape from the incident: emitting it as a real process
+    // event must be contained by the installed guard, not re-thrown.
+    const kmsError = Object.assign(new Error('KMS request timed out'), { code: 'KMS_ERROR' })
+    expect(() => process.emit('unhandledRejection', kmsError, Promise.resolve())).not.toThrow()
+
+    await running.stop()
+    running = null
+  })
+
+  test('disposes the process crash guard when boot fails after install', async () => {
+    const before = process.listenerCount('unhandledRejection')
+    // A channel manager whose start() rejects forces a boot failure AFTER the
+    // guard is installed but BEFORE startAgent returns, so the caller never gets
+    // a stop() to call — the guard must self-dispose on the throw, not leak.
+    const failingChannelManager = (opts: ChannelManagerOptions): ChannelManager => ({
+      router: createChannelRouter({ agentDir: testCwd, configForAdapter: () => undefined }),
+      start: async () => {
+        void opts
+        throw new Error('boot failure: channel manager start rejected')
+      },
+      stop: async () => {},
+      reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+
+    await expect(
+      startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: testCwd,
+        loadCron: noCron,
+        createChannelManager: failingChannelManager,
+      }),
+    ).rejects.toThrow('boot failure: channel manager start rejected')
+
+    expect(process.listenerCount('unhandledRejection')).toBe(before)
+    // running stays null: startAgent threw, there is nothing to tear down.
+  })
+
+  test('a second agent boot failure leaves a running agent fetch observer intact', async () => {
+    // given a running agent A whose boot installed the codex fetch observer
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
+    const observedFetch = globalThis.fetch
+    expect(typeof observedFetch).toBe('function')
+
+    // when a second agent B starts in the same process and fails after the
+    // process globals are captured
+    const failingChannelManager = (): ChannelManager => ({
+      router: createChannelRouter({ agentDir: testCwd, configForAdapter: () => undefined }),
+      start: async () => {
+        throw new Error('boot failure: second agent')
+      },
+      stop: async () => {},
+      reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+    await expect(
+      startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: testCwd,
+        loadCron: noCron,
+        createChannelManager: failingChannelManager,
+      }),
+    ).rejects.toThrow('boot failure: second agent')
+
+    // then B's boot-failure cleanup must NOT have torn down A's observer
+    expect(globalThis.fetch).toBe(observedFetch)
+
+    await running.stop()
+    running = null
   })
 
   test('attaches a local tui pointing at the server it just started', async () => {
