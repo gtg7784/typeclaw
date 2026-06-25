@@ -257,7 +257,7 @@ const doctorSub = defineCommand({
 export const composeCommand = defineCommand({
   meta: {
     name: 'compose',
-    description: 'orchestrate every typeclaw agent in immediate subdirectories of cwd',
+    description: 'orchestrate every typeclaw agent in subdirectories of cwd',
   },
   subCommands: {
     start: startSub,

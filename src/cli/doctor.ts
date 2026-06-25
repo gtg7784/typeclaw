@@ -6,7 +6,7 @@ import { findAgentDir } from '@/init'
 export const doctorCommand = defineCommand({
   meta: {
     name: 'doctor',
-    description: 'diagnose the host, agent folder, and plugins; surface remediation steps',
+    description: 'diagnose host, agent folder, and plugins; suggest fixes',
   },
   args: {
     verbose: {
