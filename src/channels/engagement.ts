@@ -22,11 +22,22 @@ export class StickyLedger {
     inner.set(authorId, expiresAt)
   }
 
-  consume(key: string, authorId: string, now: number): boolean {
+  // A live credit SLIDES its window forward (`now + windowMs`) rather than
+  // clearing on first spend. The send-path only re-grants after the reply lands
+  // (router `send()`), so a same-author follow-up arriving in that gap finds no
+  // credit and observes in a multi-human group (the solo-human fallback masks it
+  // in 1-human channels). A refreshed credit keeps that follow-up engaged and
+  // still expires after a full quiet window. An expired credit is purged and
+  // returns false (the expired-credit contract). `windowMs <= 0` purges on spend.
+  consume(key: string, authorId: string, now: number, windowMs: number): boolean {
     const inner = this.byKey.get(key)
     if (!inner) return false
     const expiresAt = inner.get(authorId)
     if (expiresAt === undefined) return false
+    if (expiresAt > now && windowMs > 0) {
+      inner.set(authorId, now + windowMs)
+      return true
+    }
     inner.delete(authorId)
     if (inner.size === 0) this.byKey.delete(key)
     return expiresAt > now
@@ -141,7 +152,11 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // STRUCTURALLY addressed elsewhere, leaving plain follow-ups engaged.
   // GitHub review-thread traffic must not spend content-blind sticky credit
   // unless the bot was explicitly addressed.
-  if (!explicitOnly && config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
+  if (
+    !explicitOnly &&
+    config.stickiness !== 'off' &&
+    ledger.consume(key, message.authorId, now, config.stickiness.perReply.window)
+  ) {
     return 'engage'
   }
 

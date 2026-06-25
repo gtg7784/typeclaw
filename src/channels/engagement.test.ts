@@ -207,7 +207,7 @@ describe('decideEngagement (explicit-only inbounds)', () => {
       participants: crowded,
     })
     expect(decision).toBe('engage')
-    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
   })
 })
 
@@ -356,10 +356,10 @@ describe('decideEngagement (alias)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('alias engagement does NOT consume sticky credit when alias path fires', () => {
-    // Alias engagement runs after sticky check. If sticky credit exists
-    // and alias also matches, sticky check wins first and consumes the
-    // credit — no double-engage, no leaked credit.
+  test('sticky check wins over the alias path and refreshes the credit', () => {
+    // Sticky runs before the alias rule: when both match, sticky engages first
+    // and slides its window forward (the alias path never runs), so the credit
+    // stays live rather than being double-spent.
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     decideEngagement({
@@ -371,7 +371,7 @@ describe('decideEngagement (alias)', () => {
       participants: crowded,
       selfAliases: ['토토'],
     })
-    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
   })
 })
 
@@ -395,19 +395,14 @@ describe('decideEngagement (sticky)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('sticky credit is consumed (single message)', () => {
+  test('spending a live sticky credit slides its window forward', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 1000)
     decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 100, participants: solo })
-    const second = decideEngagement({
-      message: inbound({ mentionsOthers: true }),
-      config: baseConfig,
-      key: KEY,
-      ledger,
-      now: 200,
-      participants: solo,
-    })
-    expect(second).toBe('observe')
+    // window = 5min, spent at now=100 → fresh expiry 100 + 5min, still live past
+    // the original 1000 expiry.
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
+    expect(ledger.has(KEY, 'alice', 100 + 5 * 60 * 1000 + 1)).toBe(false)
   })
 
   test('expired sticky credit does not engage and is consumed', () => {
@@ -423,6 +418,31 @@ describe('decideEngagement (sticky)', () => {
     })
     expect(decision).toBe('observe')
     expect(ledger.has(KEY, 'alice', 5000)).toBe(false)
+  })
+
+  test('multi-human in-flight follow-up keeps engaging on a refreshed sticky credit', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 1000)
+    const first = decideEngagement({
+      message: inbound({ text: 'omo 만든 분이야' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 100,
+      participants: crowded,
+    })
+    // A same-author follow-up landing before the reply re-grants the credit
+    // (the engage→send gap) must still engage in a 2-human group, not observe.
+    const followUp = decideEngagement({
+      message: inbound({ text: 'ㅋㅋㅋㅋ' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 200,
+      participants: crowded,
+    })
+    expect(first).toBe('engage')
+    expect(followUp).toBe('engage')
   })
 
   test('sticky off makes follow-ups observe even with prior credits', () => {
@@ -792,7 +812,7 @@ describe('decideEngagement (sticky in groups)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('sticky credit force-engages a plain follow-up in a multi-human group, and is consumed', () => {
+  test('sticky credit force-engages a plain follow-up in a multi-human group and stays live', () => {
     // given a multi-human group and a held credit for alice
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
@@ -808,18 +828,18 @@ describe('decideEngagement (sticky in groups)', () => {
     })
 
     // then we engage (selectivity is the model's job via the prompt nudge),
-    // and the one-shot credit is spent
+    // and the credit slides forward instead of being spent
     expect(decision).toBe('engage')
-    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
   })
 
-  test('a consumed group credit does not resurrect a later follow-up', () => {
-    // given a credit consumed by the first group follow-up
+  test('a refreshed group credit keeps engaging successive plain follow-ups', () => {
+    // given a credit refreshed by the first group follow-up
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 1000, participants: crowded })
 
-    // when alice posts again with no fresh credit and no trigger
+    // when alice posts again before any reply re-grants the credit
     const second = decideEngagement({
       message: inbound(),
       config: baseConfig,
@@ -829,8 +849,8 @@ describe('decideEngagement (sticky in groups)', () => {
       participants: crowded,
     })
 
-    // then observe — the spent one-shot credit cannot wake us a second time
-    expect(second).toBe('observe')
+    // then engage — the rolling credit keeps the active conversation alive
+    expect(second).toBe('engage')
   })
 
   test('an expired group credit is consumed but does not engage', () => {
@@ -1281,9 +1301,9 @@ describe('decideEngagement (multi-human sticky target check)', () => {
       participants: crowded,
     })
 
-    // then the preserved credit wakes us and is consumed
+    // then the preserved credit wakes us and slides forward
     expect(second).toBe('engage')
-    expect(ledger.has(KEY, 'alice', 2000)).toBe(false)
+    expect(ledger.has(KEY, 'alice', 2000)).toBe(true)
   })
 
   test('a plain multi-human follow-up from a credited author still engages (no suppressor set)', () => {
@@ -1300,7 +1320,7 @@ describe('decideEngagement (multi-human sticky target check)', () => {
       participants: crowded,
     })
     expect(decision).toBe('engage')
-    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
   })
 
   test('a credited author who names a third party BUT also aliases us engages (alias precedence)', () => {
