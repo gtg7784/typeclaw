@@ -90,6 +90,18 @@ export function getAuth(): Auth {
   return getAuthFor(providerForModelRef(defaultRef))
 }
 
+// Clears the per-provider cache so the next getAuthFor() re-resolves from
+// secrets.json (bind-mounted live) and re-layers process.env. Wired into
+// `typeclaw reload` via the providers reloadable so a rotated secrets.json
+// key takes effect without a container restart. Resolution stays lazy, so a
+// half-written secrets.json can't turn reload into getAuthFor's process-kill;
+// the missing-credential exit only fires on next actual use. Does NOT mutate
+// live AgentSessions that already captured an AuthStorage — the run stage
+// tears those down so the next session is built with fresh auth.
+export function invalidateProviderAuthCache(): void {
+  cached.clear()
+}
+
 export function resetAuthForTesting(): void {
   cached.clear()
 }
