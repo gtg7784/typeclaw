@@ -239,10 +239,10 @@ describe('reviewer subagent declaration', () => {
     expect(sub.timeoutMs).toBeGreaterThan(0)
   })
 
-  test('spawn timeout is generous enough for a deep-model review but not unbounded', () => {
+  test('spawn timeout is generous enough for a deep-model review of a large PR but not unbounded', () => {
     const sub = createReviewerSubagent()
     const timeout = sub.timeoutMs ?? 0
-    expect(timeout).toBeGreaterThanOrEqual(60_000)
+    expect(timeout).toBeGreaterThanOrEqual(1_800_000)
     expect(timeout).toBeLessThanOrEqual(1_800_000)
   })
 

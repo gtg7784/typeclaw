@@ -51,7 +51,15 @@ export const REVIEWER_SKILLS: readonly LoadableSkill[] = [
 // liveness for the parent, not hard cancellation: pi's `session.prompt` takes no
 // AbortSignal, so the LLM stream may run until the OS reaps it. See
 // src/agent/subagents.ts `timeoutMs`.
-export const REVIEWER_SPAWN_TIMEOUT_MS = 600_000
+//
+// 30m, not the prior 10m: the `deep` profile trades speed for quality, and a
+// real review of a large PR (many changed files + nested scout fan-out + a few
+// web lookups + careful synthesis) routinely exceeds 10m. A 10m ceiling killed
+// both the first and retry reviews of a 27-file PR mid-analysis, leaving the PR
+// with no posted verdict — the exact "stranded review" failure the guards exist
+// to prevent. Matches RESEARCHER_SPAWN_TIMEOUT_MS, the other deep-profile
+// subagent that hit the same nested-fan-out wall.
+export const REVIEWER_SPAWN_TIMEOUT_MS = 1_800_000
 
 // The reviewer's read-only contract is enforced in depth: this system prompt
 // states it, the global bash guards (`secret-exfil-bash`, `git-exfil`) catch
