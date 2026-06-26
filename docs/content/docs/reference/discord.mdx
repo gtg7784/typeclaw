@@ -1,0 +1,128 @@
+---
+title: Discord (user)
+description: Personal-account adapter — QR login, user-token session, and capabilities
+icon: MessageCircle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **gateway** over a user-token session (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+
+This is the **user-account** Discord adapter (`discord`). It signs in as your own Discord user, not a bot application. For the bot-application adapter, see [Discord bot](/docs/reference/discord-bot) — that one is the recommended path.
+
+<Callout type="warn" title="Unofficial session — against Discord's ToS">
+  This adapter drives a real user account through a QR-obtained user token. Self-bot / user-account automation is
+  prohibited by Discord's Terms of Service and risks account suspension. The session is also unofficial and may need
+  periodic re-auth. Prefer [`discord-bot`](/docs/reference/discord-bot) unless you specifically need to operate as a
+  user account, and only on an account you are comfortable putting at risk.
+</Callout>
+
+## Auth
+
+QR-code login. `typeclaw channel add discord` opens a remote-auth flow; you scan the code from the Discord mobile app, and the resulting user-token session is stored in `secrets.json#channels.discord` as one or more account records.
+
+Unlike bot-token adapters, `secrets.json#channels.discord` is not a flat credential object — it wraps one or more account records:
+
+```json
+{
+  "channels": {
+    "discord": {
+      "currentAccount": "<accountId>",
+      "accounts": {
+        "<accountId>": {
+          "account_id": "<accountId>",
+          "token": "…",
+          "username": "TypeClaw",
+          "created_at": "…",
+          "updated_at": "…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                  | Notes                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| `currentAccount`       | `string \| null` — active account id, or `null` if none |
+| `accounts.<accountId>` | Map of account id → account record (fields below)       |
+
+Each record under `accounts.<accountId>`:
+
+| Field        | Notes                                    |
+| ------------ | ---------------------------------------- |
+| `account_id` | Account identifier (matches the map key) |
+| `token`      | User-token session string                |
+| `username`   | _optional_ — account display name        |
+| `created_at` | Record creation timestamp                |
+| `updated_at` | Last-update timestamp                    |
+
+CLI: `typeclaw channel add discord` (interactive QR login). The `discord` adapter is not part of `channel set` or `channel reauth` today, so there is no dedicated re-auth command — see the [re-auth quirk](#quirks) below if the session expires.
+
+## Capabilities
+
+| Feature                  | Supported | Notes                                               |
+| ------------------------ | --------- | --------------------------------------------------- |
+| Outbound messages        | yes       | Chunked at 2,000 chars                              |
+| Attachments              | yes       | Outbound upload + inbound CDN fetch                 |
+| Reactions (add + remove) | yes       |                                                     |
+| Typing indicator         | no        |                                                     |
+| Channel-name resolution  | yes       |                                                     |
+| Self identity            | yes       |                                                     |
+| History                  | yes       | Limit 100 messages                                  |
+| Membership               | yes       | Derived from history; DMs reported as 1 human/1 bot |
+| Slash commands           | no        | User accounts can't register application commands   |
+
+## Workspaces
+
+Discord chats fall into two internal workspace shapes:
+
+| Internal workspace | Notes                              |
+| ------------------ | ---------------------------------- |
+| `@dm`              | 1:1 direct messages                |
+| `<guildId>`        | Server channels (numeric guild id) |
+
+In role match rules, DMs are addressed by the canonical `dm` **bucket** scope, not the internal `@dm` workspace value: `discord:*` for everything, `discord:dm/*` for any DM, `discord:<guildId>` for one server, or `discord:<guildId>/<channelId>` for a concrete server channel. See the [match-rule DSL](/docs/reference/match-rule-dsl).
+
+## Quirks
+
+- **User token, not a bot token**: outbound and REST calls use the raw session token with no `Bot ` prefix. There are no gateway intents to configure and no server invite step — the account already sees whatever servers and DMs it's a member of.
+- **No typing indicator**: the adapter declares no typing capability, so delayed replies are anchored with a quoted-reply prefix instead of a live typing dot (see [Channel adapters](/docs/reference/channel-adapters)).
+- **No slash commands**: `/help`, `/stop`, `/reload`, `/restart` exist only on the [`discord-bot`](/docs/reference/discord-bot) adapter.
+- **Attachments post first, then text**: a failed upload won't leave a text-only message already posted.
+- **Re-auth has no dedicated CLI command**: the session can expire, but `discord` is excluded from both `channel set` and `channel reauth`, and `channel add discord` refuses an already-configured adapter. To re-authenticate today, remove the `channels.discord` block from `secrets.json` (and the `discord` entry from `typeclaw.json` if present), then run `typeclaw channel add discord` again to scan a fresh QR code.
+
+## Config
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `discord`. Credentials live in [`secrets.json#channels.discord`](/docs/reference/secrets-json).
+
+## See also
+
+- [Discord bot adapter](/docs/reference/discord-bot) — the recommended bot-application path
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
+- [`secrets.json` reference](/docs/reference/secrets-json)
