@@ -1,3 +1,5 @@
+import type { CurrentHostDaemon } from '@/container'
+
 import type { Response } from './protocol'
 
 export type SupervisorRestart = (input: {
@@ -8,6 +10,9 @@ export type SupervisorRestart = (input: {
   // image even if it already exists. Default false matches the host-side
   // `typeclaw restart` (no `--build` flag) behavior.
   build?: boolean
+  // Injected by the daemon so the restart registers the container in-process
+  // instead of over the socket — see CurrentHostDaemon docs in src/container.
+  currentHostDaemon?: CurrentHostDaemon
 }) => Promise<{ ok: true } | { ok: false; reason: string }>
 
 export type SupervisorOptions = {
@@ -20,7 +25,12 @@ export type SupervisorLogEvent =
   | { kind: 'restart-failed'; containerName: string; reason: string }
 
 export type Supervisor = {
-  scheduleRestart: (input: { containerName: string; cwd: string; build?: boolean }) => Response
+  scheduleRestart: (input: {
+    containerName: string
+    cwd: string
+    build?: boolean
+    currentHostDaemon?: CurrentHostDaemon
+  }) => Response
 }
 
 export type SupervisorBuildOptions = {
@@ -36,7 +46,7 @@ export type SupervisorBuildOptions = {
 // surfaced via the log channel; there is no connected client to receive them.
 export function buildSupervisor({ restart, onLog, isStopped }: SupervisorBuildOptions): Supervisor {
   return {
-    scheduleRestart: ({ containerName, cwd, build = false }): Response => {
+    scheduleRestart: ({ containerName, cwd, build = false, currentHostDaemon }): Response => {
       if (isStopped()) return { ok: false, reason: 'daemon stopping' }
       onLog({ kind: 'restart-scheduled', containerName, build })
       void runRestart()
@@ -44,7 +54,12 @@ export function buildSupervisor({ restart, onLog, isStopped }: SupervisorBuildOp
 
       async function runRestart(): Promise<void> {
         try {
-          const result = await restart({ containerName, cwd, build })
+          const result = await restart({
+            containerName,
+            cwd,
+            build,
+            ...(currentHostDaemon ? { currentHostDaemon } : {}),
+          })
           if (result.ok) onLog({ kind: 'restart-completed', containerName })
           else onLog({ kind: 'restart-failed', containerName, reason: result.reason })
         } catch (error) {

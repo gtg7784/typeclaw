@@ -10,6 +10,7 @@ import { isWindows } from '@/shared'
 import { expectStable, waitFor } from '@/test-helpers/wait-for'
 
 import { isDaemonReachable, send, sendHttp } from './client'
+import { createCurrentHostDaemonHolder } from './current-host-daemon'
 import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
 import type { KakaoRenewalCallbacks, KakaoRenewalStartInput } from './kakao-renewal-manager'
 import { registrationFilePath, registrationsDir, socketPath } from './paths'
@@ -268,6 +269,52 @@ describe('startDaemon', () => {
 
     await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: false }])
+  })
+
+  test('restart RPC supplies the supervisor with an in-process currentHostDaemon (no socket self-RPC)', async () => {
+    const restartCalls: Array<{ containerName: string; currentHostDaemon?: { httpPort: number } }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restart: async ({ containerName, currentHostDaemon }) => {
+        restartCalls.push({
+          containerName,
+          ...(currentHostDaemon ? { currentHostDaemon: { httpPort: currentHostDaemon.httpPort } } : {}),
+        })
+        return { ok: true }
+      },
+    })
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    const ack = await send({ kind: 'restart', containerName: 'coder' })
+    expect(ack.ok).toBe(true)
+
+    await waitFor(() => restartCalls.length > 0)
+    // then: the daemon injected its own http port so start() skips the http-info RPC
+    expect(restartCalls[0]?.currentHostDaemon?.httpPort).toBeGreaterThan(0)
+  })
+
+  test('populates the currentHostDaemon holder with an in-process registrar once booted', async () => {
+    const holder = createCurrentHostDaemonHolder()
+    daemon = await startDaemon({
+      exec: fakeExec(),
+      gcIntervalMs: 1_000_000,
+      currentHostDaemonHolder: holder,
+    })
+
+    // then: the holder is populated and its registrar records a registration in-process
+    const current = await holder.ready()
+    expect(current.httpPort).toBeGreaterThan(0)
+    const reply = await current.register({
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      restartToken: 'tok',
+      wsHostPort: 8973,
+      portForward: { allow: [] },
+      brokerToken: 'broker',
+    })
+    expect(reply).toEqual({ ok: true })
+    expect(daemon.registered()).toContain('coder')
   })
 
   test('restart RPC forwards build:true to the supervisor', async () => {
