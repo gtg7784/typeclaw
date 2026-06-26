@@ -1202,7 +1202,7 @@ describe('migrateLegacyConfigShape', () => {
             models: { default: VALID_MODEL },
             port: 9100,
             'standup-log': { channel: 'C123' },
-            memory: { vector: { enabled: true } },
+            memory: { idleMs: 1234, vector: { enabled: true } },
           }),
         )
 
@@ -1211,7 +1211,7 @@ describe('migrateLegacyConfigShape', () => {
         expect(bundle.config).toEqual(loadConfigSync(cwd))
         expect(bundle.pluginConfigs).toEqual(loadPluginConfigsSync(cwd))
         expect(bundle.pluginConfigs['standup-log']).toEqual({ channel: 'C123' })
-        expect(bundle.pluginConfigs.memory).toEqual({ vector: { enabled: true } })
+        expect(bundle.pluginConfigs.memory).toEqual({ idleMs: 1234 })
       } finally {
         await rm(cwd, { recursive: true, force: true })
       }
@@ -1263,6 +1263,85 @@ describe('migrateLegacyConfigShape', () => {
   test('returns applied: [] when nothing migrated', () => {
     const result = migrateLegacyConfigShape({ models: { default: VALID_MODEL }, port: 9001 })
     expect(result.applied).toEqual([])
+  })
+
+  test('strips memory.vector when it is the only memory key', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      memory: { vector: { enabled: true } },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect('memory' in json).toBe(false)
+    expect(result.applied).toEqual([{ kind: 'drop-memory-vector-config' }])
+  })
+
+  test('strips memory.vector while preserving other memory fields', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      memory: { idleMs: 1234, bufferBytes: 500_000, vector: { enabled: false } },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect(json.memory).toEqual({ idleMs: 1234, bufferBytes: 500_000 })
+    expect(result.applied).toEqual([{ kind: 'drop-memory-vector-config' }])
+  })
+
+  test('strips an empty memory.vector block', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      memory: { vector: {} },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect('memory' in json).toBe(false)
+    expect(result.applied).toEqual([{ kind: 'drop-memory-vector-config' }])
+  })
+
+  test('is a no-op when memory has no vector key', () => {
+    const input = { models: { default: VALID_MODEL }, memory: { idleMs: 1234 } }
+    const result = migrateLegacyConfigShape(input)
+    expect(result.changed).toBe(false)
+    expect(result.json).toBe(input)
+    expect(result.applied).toEqual([])
+  })
+
+  test('is a no-op when memory is present but not a plain object', () => {
+    for (const memory of [null, 'on', 42, [{ vector: { enabled: true } }]]) {
+      const input = { models: { default: VALID_MODEL }, memory }
+      const result = migrateLegacyConfigShape(input)
+      expect(result.changed).toBe(false)
+      expect(result.json).toBe(input)
+      expect(result.applied).toEqual([])
+    }
+  })
+
+  test('strips memory.vector and seeded github eventAllowlist independently', () => {
+    const result = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      memory: { injectionBudgetBytes: 8192, vector: { enabled: true } },
+      channels: { github: { repos: ['acme/widgets'], eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST] } },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(json.memory).toEqual({ injectionBudgetBytes: 8192 })
+    expect(channels.github).toEqual({ repos: ['acme/widgets'] })
+    expect(result.applied).toEqual([
+      { kind: 'drop-github-seeded-event-allowlist' },
+      { kind: 'drop-memory-vector-config' },
+    ])
+  })
+
+  test('memory.vector strip is idempotent: re-running on the migrated shape does nothing', () => {
+    const first = migrateLegacyConfigShape({
+      models: { default: VALID_MODEL },
+      memory: { idleMs: 1234, vector: { enabled: true } },
+    })
+    const second = migrateLegacyConfigShape(first.json)
+    expect(second.changed).toBe(false)
+    expect(second.json).toEqual(first.json)
+    expect(second.applied).toEqual([])
   })
 
   test('strips a seeded channels.github.eventAllowlist so it re-tracks the shipped default', () => {
@@ -1400,6 +1479,12 @@ describe('buildConfigMigrationCommitMessage', () => {
     const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-github-seeded-event-allowlist' }])
     expect(msg).toContain('typeclaw.json: drop seeded channels.github.eventAllowlist')
     expect(msg).toContain('re-tracks the shipped default')
+  })
+
+  test('names the memory vector config drop step', () => {
+    const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-memory-vector-config' }])
+    expect(msg).toContain('typeclaw.json: drop memory.vector config')
+    expect(msg).toContain('vector memory is always on')
   })
 })
 
