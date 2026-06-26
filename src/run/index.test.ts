@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -9,6 +9,7 @@ import { createChannelRouter, type ChannelManager, type ChannelManagerOptions } 
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
 import type { SessionFactory } from '@/sessions'
+import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 import type { TuiOptions } from '@/tui'
 import type { TunnelManager, TunnelManagerOptions } from '@/tunnels'
 
@@ -54,7 +55,7 @@ describe('startAgent', () => {
     testCwd = await mkdtemp(join(tmpdir(), 'typeclaw-run-cwd-'))
   })
   afterEach(async () => {
-    await rm(testCwd, { recursive: true, force: true })
+    await rmTempDir(testCwd)
   })
 
   test('starts a ws server on an ephemeral port in headless mode', async () => {
@@ -453,7 +454,7 @@ describe('startAgent', () => {
       await running?.stop()
       running = null
       __resetConfigForTesting()
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 
@@ -516,7 +517,7 @@ describe('startAgent', () => {
       await running?.stop()
       running = null
       __resetConfigForTesting()
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 })
@@ -546,7 +547,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       expect(factoryCalls).toHaveLength(1)
       expect(running.scheduler).not.toBeNull()
     } finally {
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 
@@ -577,7 +578,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       expect(factoryCalls).toHaveLength(1)
       expect(running.scheduler).not.toBeNull()
     } finally {
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 
@@ -616,7 +617,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       expect(ids).toContain('__plugin_memory_dreaming')
       expect(ids).toContain('user-job')
     } finally {
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 
@@ -668,7 +669,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
         expect(dreamingMsg.payload).toEqual({ agentDir })
       }
     } finally {
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 })
@@ -703,7 +704,7 @@ describe('startAgent config reload wiring', () => {
     } finally {
       if (originalContainerName === undefined) delete process.env.TYPECLAW_CONTAINER_NAME
       else process.env.TYPECLAW_CONTAINER_NAME = originalContainerName
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 
@@ -735,7 +736,7 @@ describe('startAgent config reload wiring', () => {
       }
     } finally {
       if (originalContainerName !== undefined) process.env.TYPECLAW_CONTAINER_NAME = originalContainerName
-      await rm(agentDir, { recursive: true, force: true })
+      await rmTempDir(agentDir)
     }
   })
 })
@@ -744,7 +745,7 @@ describe('startAgent session persistence wiring', () => {
   let agentDir: string
 
   afterEach(async () => {
-    if (agentDir) await rm(agentDir, { recursive: true, force: true })
+    if (agentDir) await rmTempDir(agentDir)
   })
 
   test('creates <cwd>/sessions/ on disk when no sessionFactory is injected', async () => {
