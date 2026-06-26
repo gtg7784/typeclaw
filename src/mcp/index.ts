@@ -14,7 +14,6 @@ export {
   type McpConnectResult,
   type McpManager,
 } from './manager'
-export { mergeConfigAndPluginMcpServers, pluginMcpServersToConfig } from './from-plugins'
 export { renderMcpCatalog, type McpCatalogServer } from './catalog'
 export {
   createMcpDispatcherTools,

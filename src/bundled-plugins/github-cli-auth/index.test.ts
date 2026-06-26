@@ -7,7 +7,6 @@ import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import type { GithubTokenResolveResult } from '@/channels/github-token-bridge'
 import { noopPermissionService, type PermissionService } from '@/permissions'
 import type { PluginContext, PluginLogger, ToolBeforeEvent } from '@/plugin'
-import { stubPluginModels } from '@/plugin/test-support'
 
 import { resetGitAskPassHelperForTests } from './git-askpass'
 import githubCliAuthPlugin from './index'
@@ -44,8 +43,6 @@ function pluginContext(
     version: undefined,
     agentDir: '/agent',
     config: undefined,
-    models: stubPluginModels({ defaultProviderId: 'fireworks' }),
-    hasSecret: () => false,
     logger: opts.logger ?? noopLogger,
     permissions: opts.permissions ?? noopPermissionService,
     github: { resolveTokenForRepo: resolve, hasAppTokenResolver: () => hasAppTokenResolver },

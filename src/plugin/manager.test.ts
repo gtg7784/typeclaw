@@ -208,47 +208,6 @@ describe('loadPlugins — bundled plugin failures stay fatal', () => {
   })
 })
 
-describe('loadPlugins — mcpServers permission gate', () => {
-  test("a plugin exporting mcpServers without the 'mcp' permission fails registration", async () => {
-    const bundled = [
-      {
-        name: 'vision',
-        version: undefined,
-        source: '<bundled>',
-        defined: {
-          plugin: async () => ({
-            mcpServers: { vision: { transport: { type: 'stdio' as const, command: 'vision-mcp' } } },
-          }),
-        },
-      },
-    ]
-
-    await expect(
-      loadPlugins({ entries: [], agentDir: '/tmp', configsByName: {}, loadEntry: async () => bundled[0]!, bundled }),
-    ).rejects.toThrow(/exporting mcpServers requires declaring the 'mcp' permission/)
-  })
-
-  test("a plugin exporting mcpServers with the 'mcp' permission registers them", async () => {
-    const loadEntry: LoadPluginEntryFn = async () => ({
-      name: 'vision',
-      version: undefined,
-      source: 'vision',
-      defined: {
-        permissions: ['mcp'],
-        plugin: async () => ({
-          mcpServers: { vision: { transport: { type: 'stdio', command: 'vision-mcp' } } },
-        }),
-      },
-    })
-
-    const result = await loadPlugins({ entries: ['vision'], agentDir: '/tmp', configsByName: {}, loadEntry })
-
-    expect(result.loadedPlugins.map((p) => p.name)).toEqual(['vision'])
-    expect(result.declaredPermissions).toContain('mcp')
-    expect(result.registry.mcpServers.map((server) => server.name)).toEqual(['vision'])
-  })
-})
-
 describe('loadPlugins — a failed plugin does not influence the permission model', () => {
   test("a skipped user plugin's permissions + ownerWildcardExclusions never reach the live service", async () => {
     const ownerOrigin = { kind: 'system', component: 'test' } as const
@@ -593,6 +552,5 @@ describe('loadPlugins — registry shape', () => {
     expect(s).toContain('a v1.2.3')
     expect(s).toContain('b')
     expect(s).toContain('0 tool(s)')
-    expect(s).toContain('0 mcp server(s)')
   })
 })

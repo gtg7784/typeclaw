@@ -11,7 +11,6 @@ function emptyRegistry(): PluginRegistry {
     tools: [],
     subagents: [],
     cronJobs: [],
-    mcpServers: [],
     skills: [],
     skillsDirs: [],
     doctorChecks: [],

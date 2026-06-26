@@ -30,7 +30,6 @@ A plugin can contribute any of these — phrase your request around the outcome,
 - **A tool** — a new action the agent can take ("post to this webhook", "query our metrics API")
 - **A channel** — a new platform it can send and receive on
 - **A scheduled job** — recurring work, on a cron schedule
-- **An MCP server** — a stdio or HTTP server whose tools join the agent's MCP catalog
 - **A skill** — a procedure it loads on demand for a certain kind of task
 - **A subagent** — a focused helper with its own brief, for heavy or specialized work
 
@@ -112,36 +111,6 @@ The config key (`notify`) is the plugin's derived name — for this local plugin
 ```
 
 `typeclaw.json` is the single source of truth — you don't edit `package.json`. On the next `typeclaw start`, the npm entries are materialized into `package.json#dependencies` and installed; removing an entry prunes it. A bare name (no `@version`) resolves to the current latest and is pinned, the same way `bun add <name>` writes a concrete version. Provenance is tracked under `package.json#typeclaw.managedPlugins`, so the sync only ever touches plugins it added — never your own dependencies. The agent itself can only add or version-bump a plugin entry when running at `owner`/`trusted` trust; lower-trust channel input is blocked by the bundled `security` plugin's `pluginAddition` guard, since installing a package runs host-side code.
-
-</Accordion>
-
-<Accordion title="Contributing an MCP server">
-
-Plugins can register MCP servers in their returned `mcpServers` map. The plugin must declare the public `mcp` permission; server names are global, unprefixed, lowercase, and cannot contain `__`.
-
-```ts
-import { definePlugin } from 'typeclaw/plugin'
-
-export default definePlugin({
-  permissions: ['mcp'],
-  async plugin() {
-    return {
-      mcpServers: {
-        browser: {
-          description: 'Browser automation tools',
-          transport: {
-            type: 'stdio',
-            command: 'bunx',
-            args: ['@acme/browser-mcp'],
-          },
-        },
-      },
-    }
-  },
-})
-```
-
-At boot, TypeClaw merges `typeclaw.json#mcpServers` first and plugin servers second. If a plugin name collides with user config, the config server wins and the plugin server is skipped with a warning. A server that later fails to spawn or connect does not crash boot.
 
 </Accordion>
 

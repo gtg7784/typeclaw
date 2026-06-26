@@ -5,7 +5,6 @@ import path from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
 import type { ContentPart, HookContext, PluginContext, ToolAfterEvent, ToolBeforeEvent, ToolResult } from '@/plugin'
-import { stubPluginModels } from '@/plugin/test-support'
 
 import guardPlugin from './index'
 
@@ -437,8 +436,6 @@ function pluginContext(agentDir: string): PluginContext<undefined> {
     version: undefined,
     agentDir,
     config: undefined,
-    models: stubPluginModels({ defaultProviderId: 'fireworks' }),
-    hasSecret: () => false,
     logger: noopLogger,
     permissions: noopPermissionService,
     github: {
