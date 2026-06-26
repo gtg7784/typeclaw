@@ -10,16 +10,14 @@ import { buildPluginCronGlobalId, definePlugin, type SpawnSubagentOptions } from
 import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
-import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
+import { DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
 import {
   loadMemoryInjectionPlan,
   renderDedupedRetrievedMemorySection,
   renderRetrievedMemorySection,
   renderTopicIndexMemorySection,
 } from './load-memory'
-import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
-import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 import { bumpReferenceAccess } from './references/load-references'
 import { memoryCommands } from './search-command'
@@ -65,17 +63,6 @@ const DEFAULT_DREAMING_SCHEDULE = '*/30 * * * *'
 // infra-turn discriminator below cannot drift to different ids.
 const DREAMING_CRON_KEY = 'dreaming'
 const DREAMING_CRON_JOB_ID = buildPluginCronGlobalId('memory', DREAMING_CRON_KEY)
-
-// memory-retrieval's ceiling, enforced by the orchestration layer (see
-// `awaitWithSubagentTimeout` in @/agent/subagents). 30s is sized for the
-// declared workload — up to 3 `memory_search` calls + 1 `write` against a
-// `fast`-profile model. The 5+ minute outliers observed in the wild
-// (reasoning-model cold-start on the default profile) require either a
-// genuinely wedged provider, a misconfigured profile that routes retrieval
-// to a reasoning model anyway, or both. In all three cases, releasing the
-// coalescing key after 30s lets the next channel turn spawn a fresh
-// retrieval instead of staying skip-coalesced behind the stuck one.
-const RETRIEVAL_SPAWN_TIMEOUT_MS = 30_000
 
 // Hard ceiling on a single memory-logger spawn. The chain serializes spawns
 // per agent, so a non-settling spawn would otherwise wedge every subsequent
@@ -137,11 +124,6 @@ const memoryConfigSchema = z
     // the timeout in milliseconds instead of the production 50s. Kept
     // undocumented for users.
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
-    // Test seam: per-spawn ceiling for memory-retrieval. Same rationale as
-    // `spawnTimeoutMs` — operators have no reason to tune this; it exists
-    // so the wedge-recovery test for memory-retrieval can fire the timeout
-    // in milliseconds instead of the production 30s.
-    retrievalSpawnTimeoutMs: z.number().int().min(1).default(RETRIEVAL_SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
     vector: vectorConfigSchema,
   })
@@ -151,7 +133,6 @@ const memoryConfigSchema = z
     injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
     minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
-    retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
     vector: { enabled: false },
   })
 
@@ -283,7 +264,6 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
       const bufferBytes = ctx.config.bufferBytes
       const minIdleDeltaLines = ctx.config.minIdleDeltaLines
       const spawnTimeoutMs = ctx.config.spawnTimeoutMs
-      const retrievalSpawnTimeoutMs = ctx.config.retrievalSpawnTimeoutMs
       const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
 
       const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -416,38 +396,6 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         return { skip: false }
       }
 
-      const runMemoryRetrieval = async (event: {
-        sessionId: string
-        agentDir: string
-        userPrompt: string
-        origin?: SessionOrigin
-      }): Promise<void> => {
-        const shards = await loadAllShards(event.agentDir)
-        const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
-        if (plan.mode === 'direct') return
-
-        const cacheFilePath = join(event.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
-        const payload: MemoryRetrievalPayload = {
-          parentSessionId: event.sessionId,
-          agentDir: event.agentDir,
-          recentPrompt: event.userPrompt,
-          cacheFilePath,
-          ...(event.origin !== undefined ? { origin: event.origin } : {}),
-        }
-        // System authority, not the triggering turn's role — see the
-        // memory-logger spawn above. memory-retrieval writes
-        // memory/.retrieval-cache/, which a guest-demoted role cannot.
-        const retrievalSpawnOptions: SpawnSubagentOptions = {
-          parentSessionId: event.sessionId,
-          spawnedByOrigin: {
-            kind: 'system',
-            component: 'memory-retrieval',
-            ...(event.origin !== undefined ? { triggeredBy: event.origin } : {}),
-          },
-        }
-        await ctx.spawnSubagent('memory-retrieval', payload, retrievalSpawnOptions)
-      }
-
       // Subagents are constructed at boot here (rather than imported as constants)
       // so their lifecycle logs route through the plugin logger and pick up the
       // `[plugin:memory]` prefix. Without this, they would write directly to
@@ -458,23 +406,14 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         error: (m: string) => ctx.logger.error(m),
       }
 
-      // Open a long-lived VectorStore for append-time indexing when vector is enabled.
-      const appendVectorStore = ctx.config.vector.enabled ? deps.openAppendVectorStore(ctx.agentDir) : undefined
+      const appendVectorStore = deps.openAppendVectorStore(ctx.agentDir)
 
       return {
         subagents: {
           'memory-logger': createMemoryLoggerSubagent({
             logger: subagentLogger,
-            ...(appendVectorStore !== undefined
-              ? {
-                  onFragmentsAppended: makeAppendHook(appendVectorStore),
-                  onReferenceStored: makeReferenceStoredHook(appendVectorStore),
-                }
-              : {}),
-          }),
-          'memory-retrieval': createMemoryRetrievalSubagent({
-            logger: subagentLogger,
-            timeoutMs: retrievalSpawnTimeoutMs,
+            onFragmentsAppended: makeAppendHook(appendVectorStore),
+            onReferenceStored: makeReferenceStoredHook(appendVectorStore),
           }),
           dreaming: createDreamingSubagent({
             logger: subagentLogger,
@@ -493,18 +432,6 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
           },
         },
         hooks: {
-          // Memory injection lives in core (`createResourceLoader` calls `loadMemory`
-          // directly, appended LAST in the system prompt). It does not run from a
-          // plugin hook because positioning matters for cache-prefix stability:
-          // the daily-stream file grows after every channel turn (memory-logger
-          // appends a fragment + watermark) and memory/topics/ changes on every dream.
-          // A volatile region in the middle of the system prompt invalidates the
-          // entire cacheable suffix below it on every session resurrection
-          // (channel sessions evicted by idle GC, container restarts). Pinning
-          // memory to the bottom of the system prompt keeps everything above it
-          // cacheable across resurrections, at the cost of re-billing only the
-          // memory section itself when it grows.
-          //
           // Core fires `session.idle` immediately after every prompt completion;
           // the plugin owns the debounce timer so memory-logger only spawns
           // after the user has been quiet for `idleMs`. Re-arming a still-armed
@@ -547,50 +474,24 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
               await fireMemoryLogger(sessionId, 'buffer-trip')
             }
           },
-          // memory-retrieval used to run from `session.prompt`, which fires
-          // during system-prompt assembly (createResourceLoader) and carries
-          // the ASSEMBLING SYSTEM PROMPT as `event.prompt` — not the user's
-          // message. The plugin was feeding that string into the subagent as
-          // `recentPrompt`, so the LLM keyword-mined TypeClaw's framing prose
-          // (`TypeClaw`, `subagent`, `AGENTS.md`, `systemPromptLeak`, etc.)
-          // and burned 15+ memory_search calls per session on terms the user
-          // never said. `session.turn.start` is the correct trigger: it fires
-          // before each `session.prompt(text)` call with the actual text the
-          // session is about to receive.
-          //
           'session.turn.start': async (event) => {
-            if (ctx.config.vector.enabled) {
-              // Vector agents inject long-term memory PER-TURN into the user
-              // prompt (the system-prompt `# Memory` section is suppressed at
-              // session creation). This runs for every origin that supplies a
-              // retrievalContext bag — including subagents, which no longer get
-              // memory via the system prompt either.
-              if (event.retrievalContext === undefined) return
-              try {
-                let injectedState = injectedMemory.get(event.sessionId)
-                if (injectedState === undefined) {
-                  injectedState = new Map()
-                  injectedMemory.set(event.sessionId, injectedState)
-                }
-                event.retrievalContext.results = await renderVectorTurnMemory(
-                  event,
-                  ctx.config.injectionBudgetBytes,
-                  injectedState,
-                  deps,
-                  ctx.logger,
-                )
-              } catch (err) {
-                ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
+            if (event.retrievalContext === undefined) return
+            try {
+              let injectedState = injectedMemory.get(event.sessionId)
+              if (injectedState === undefined) {
+                injectedState = new Map()
+                injectedMemory.set(event.sessionId, injectedState)
               }
-              return
+              event.retrievalContext.results = await renderVectorTurnMemory(
+                event,
+                ctx.config.injectionBudgetBytes,
+                injectedState,
+                deps,
+                ctx.logger,
+              )
+            } catch (err) {
+              ctx.logger.error(`vector-retrieval failed: ${err instanceof Error ? err.message : String(err)}`)
             }
-            // Non-vector agents keep memory in the system prompt. The index-mode
-            // retrieval subagent must NOT fire for subagent-origin turns (it would
-            // recurse: the subagent it spawns triggers another turn.start).
-            if (event.origin?.kind === 'subagent') return
-            void runMemoryRetrieval(event).catch((err) => {
-              ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
-            })
           },
           // The memory-logger spawn is intentionally detached (`void`) instead
           // of awaited. The channel router calls `tearDownLive` synchronously
@@ -628,9 +529,9 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             // readSize requires an await. fireMemoryLogger itself captures its
             // payload synchronously from `lastIdleEvent` (see fireMemoryLogger
             // comment block), so the `lastIdleEvent.delete` that follows can
-            // never race with the chained spawn. The cache-cleanup and
-            // bookkeeping deletes are dispatched alongside (not blocking the
-            // hook return) to preserve the "session.end returns synchronously"
+            // never race with the chained spawn. The bookkeeping deletes are
+            // dispatched alongside (not blocking the hook return) to preserve the
+            // "session.end returns synchronously"
             // contract that the channel router's tearDownLive path depends on
             // (see the comment block above this hook).
             void (async () => {
@@ -654,10 +555,6 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
               linesAtLastRun.delete(sessionId)
               streamCursorAtLastRun.delete(sessionId)
             })()
-            const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${sessionId}.md`)
-            unlink(cacheFilePath).catch((err) => {
-              if (!isEnoent(err)) ctx.logger.warn(`[memory] failed to clean retrieval cache: ${err}`)
-            })
           },
         },
         doctorChecks: {

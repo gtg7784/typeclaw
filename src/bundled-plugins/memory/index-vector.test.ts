@@ -393,9 +393,9 @@ describe('vector session.turn.start hook', () => {
     expect(errors.some((line) => line.includes('vector-retrieval failed'))).toBe(true)
   })
 
-  test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
+  test('memory-logger subagent is created with on-write vector hooks', async () => {
     const memoryPlugin = createMemoryPluginWithStoreCapture()
-    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
+    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096 })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
       name: 'memory',
@@ -414,9 +414,10 @@ describe('vector session.turn.start hook', () => {
     const memoryLoggerSubagent = exports.subagents!['memory-logger']!
     expect(memoryLoggerSubagent.customTools).toBeDefined()
     expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
+    expect(disposers).toHaveLength(1)
   })
 
-  test('memory-logger subagent is created without onFragmentsAppended hook when vector.enabled is false', async () => {
+  test('legacy vector.enabled false no longer disables append-time indexing', async () => {
     const memoryPlugin = createMemoryPluginWithStoreCapture()
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: false } })
     if (!parsed.success) throw new Error(parsed.error.message)
@@ -437,6 +438,7 @@ describe('vector session.turn.start hook', () => {
     const memoryLoggerSubagent = exports.subagents!['memory-logger']!
     expect(memoryLoggerSubagent.customTools).toBeDefined()
     expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
+    expect(disposers).toHaveLength(1)
   })
 })
 
