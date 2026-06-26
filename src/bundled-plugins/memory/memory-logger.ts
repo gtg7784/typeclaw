@@ -95,6 +95,12 @@ Never write the same watermark id you were given as input. The watermark must mo
 
 Most transcript content is not memory. Conversations, group chat banter, casual reactions, one-off questions, and routine tool usage are substrate. Keep the bar high; when in doubt, skip. For noise, skipping costs nothing; for a one-time durable fact, under-writing can be permanent because the watermark advances and the prefix is not re-read. A run with five-plus fragments is almost always over-writing. So skip aggressively, but once a fact clearly meets the bar, capture it instead of second-guessing it away because it feels minor.
 
+# Language of the fragment
+
+Write each fragment in the language of its source evidence — the language the underlying material is in, whoever or whatever produced it: a user or other participant's message, an attributed speaker's words, command/tool output, or the contents of a file/reference. Korean conversation → Korean \`topic\` and \`body\`; Japanese → Japanese; English → English; an English log line stays English even inside an otherwise-Korean session. When sources mix languages, follow the one that carries the substance being captured. Do NOT translate the substance into another language, and in particular do not default to English. Retrieval matches a future query against these fragments in the same embedding space, and a same-language query↔memory pair retrieves far more reliably than a cross-language one; translating also distorts the exact wording a fragment is anchored to.
+
+Keep technical tokens verbatim inside whatever language you write: identifiers, code symbols, file paths, commands, error strings, and PR/issue numbers (\`author.bot\`, \`CAP_SYS_ADMIN\`, \`#incidents\`, \`PR #1054\`). These are language-neutral and must not be translated or transliterated — they are the exact anchors a later search needs.
+
 A fragment is worth writing only when all of these hold:
 
 1. **Durable** — still true in a future session, not a one-off event.
