@@ -16,8 +16,9 @@ import type { FragmentProvenance, StreamEvent } from '../stream-events'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import type { Passage } from './passages'
-import { clearsBaseline, gateRelevance, streamAdmissionBaseline } from './relevance-gate'
-import { VectorStore, type VectorRow } from './store'
+import { clearsBaseline, gateRelevance, MARGIN, streamAdmissionBaseline } from './relevance-gate'
+import { crossScriptMarginScale, dominantScript, type ScriptClass } from './script'
+import { VectorStore, type ScoredVectorRow, type VectorRow } from './store'
 
 export { collectPassages, findMissingPassages, type Passage } from './passages'
 
@@ -54,7 +55,8 @@ export async function hybridSearch(
 
   const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
   const index = buildContentIndex(shards, streamDays, references, supersededFragmentIds)
-  const vectorRows = queryEmbeddings[0] === undefined ? [] : gatedVectorLane(queryEmbeddings[0], store, topK)
+  const vectorRows =
+    queryEmbeddings[0] === undefined ? [] : gatedVectorLane(queryEmbeddings[0], store, topK, query, index)
   const keywordMatches = keywordLane(query, shards, streamDays, references, topK * 2)
 
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
@@ -82,17 +84,57 @@ export async function hybridSearch(
 // exist at all. A lexically-corroborated fragment still reaches RRF via the
 // separate keyword lane. An empty merged lane composes with RRF exactly like a
 // lane that found nothing, so a genuine keyword hit survives a full no-match.
-function gatedVectorLane(queryEmbedding: Float32Array, store: VectorStore, topK: number): VectorRow[] {
+function gatedVectorLane(
+  queryEmbedding: Float32Array,
+  store: VectorStore,
+  topK: number,
+  query: string,
+  index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+): VectorRow[] {
   const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
   const bandDefiningRows = scored.filter(({ row }) => row.source === 'topic' || row.source === 'reference')
   const streamRows = scored.filter(({ row }) => row.source === 'stream')
 
+  // The cross-script verdict is judged against the HEAD of the scored band — the
+  // high-scoring rows that actually define the contrast the gate measures — not
+  // the whole corpus. Deriving it from every shard would let one unrelated same-
+  // script heading anywhere in the index cancel the loosening, so a real cross-
+  // script winner whose contrast sits between the loosened and strict margins
+  // would still be suppressed. Headings (via `index`) carry the language; slugs
+  // are ASCII-kebab even for non-Latin topics.
+  const topicMargin = MARGIN * crossScriptMarginScale(dominantScript(query), headBandScripts(bandDefiningRows, index))
   const bandScores = bandDefiningRows.map(({ score }) => score)
-  const keptBandDefiningRows = bandDefiningRows.slice(0, gateRelevance(bandScores, topK * 2))
+  const keptBandDefiningRows = bandDefiningRows.slice(0, gateRelevance(bandScores, topK * 2, topicMargin))
+
+  // Stream admission stays on the STRICT MARGIN regardless of the topic verdict.
+  // The cross-script loosening is calibrated for the topic band the query is
+  // judged against; a stream row's own language is not part of that band, so
+  // applying the loosened margin here would admit an irrelevant in-band stream
+  // neighbour on a cross-script query — exactly the closest-neighbour leak the
+  // strict stream guard exists to block.
   const streamBaseline = streamAdmissionBaseline(bandScores)
   const keptStreams = streamRows.filter(({ score }) => clearsBaseline(score, streamBaseline)).slice(0, topK * 2)
 
   return [...keptBandDefiningRows, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
+}
+
+// The scripts of the HEAD band-defining rows (the gate examines the top of the
+// score-sorted band to set the knee, so the head is what the query is actually
+// contrasted against). `bandDefiningRows` is score-sorted descending, so the
+// first HEAD_BAND_SCRIPT_SAMPLE rows ARE the head. Headings come from the content
+// index; a row whose content was pruned contributes no script.
+const HEAD_BAND_SCRIPT_SAMPLE = 10
+
+function headBandScripts(
+  bandDefiningRows: ScoredVectorRow[],
+  index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+): ScriptClass[] {
+  const scripts = new Set<ScriptClass>()
+  for (const { row } of bandDefiningRows.slice(0, HEAD_BAND_SCRIPT_SAMPLE)) {
+    const content = index.get(`${row.source}:${row.key}`)
+    if (content !== undefined) scripts.add(dominantScript(content.heading))
+  }
+  return [...scripts]
 }
 
 // Phrase-first, then token-OR fallback (mirrors `memory_search`). `hybridSearch`'s
