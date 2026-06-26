@@ -41,6 +41,10 @@ export type DaemonOptions = {
   onLog?: (event: DaemonLogEvent | SupervisorLogEvent) => void
   gcIntervalMs?: number
   gcMissesToDeregister?: number
+  // Per-step bound on teardown calls (portbroker/renewal stop) run inside the
+  // per-container serial chain. Defaults to CLEANUP_STEP_TIMEOUT_MS; tests
+  // override it to a few ms to assert the chain never wedges on a hung step.
+  cleanupStepTimeoutMs?: number
   socket?: string
   // When provided, the daemon honors `restart` RPCs by invoking this with the
   // (containerName, cwd) it captured at register time. Omit to disable the
@@ -129,6 +133,14 @@ const DEFAULT_GC_INTERVAL_MS = 30_000
 const DEFAULT_GC_MISSES_TO_DEREGISTER = 3
 const MAX_REQUEST_BUFFER_BYTES = 64 * 1024
 const MAX_HTTP_REQUEST_BYTES = 64 * 1024
+
+// Upper bound on any single teardown step (portbroker/renewal stop) run inside
+// the per-container runSerially chain. A teardown dependency must never own a
+// container's serial queue forever — that wedges every later register/deregister
+// for that container (the renewal-restart wedge). Larger than tailscale's 30s
+// per-call budget so a slow-but-progressing serve-off isn't cut off, yet finite
+// so a genuine hang releases the queue instead of poisoning it.
+const CLEANUP_STEP_TIMEOUT_MS = 60_000
 
 // Preferred port for the HTTP control surface. Adjacent to CONTAINER_PORT
 // (8973) for mnemonics. Stability matters: containers cache the URL in
@@ -223,6 +235,21 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+// Races a teardown step against a wall clock so a hung dependency can't hold the
+// per-container serial chain open forever. Resolves (never rejects) on timeout
+// so the surrounding runSerially op always settles and releases the queue.
+async function withCleanupTimeout(work: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs)
+  })
+  try {
+    await Promise.race([work.catch(() => {}), timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function errorCode(error: Error): unknown {
   const direct = error as Error & { code?: unknown; cause?: unknown }
   if (direct.code !== undefined) return direct.code
@@ -282,6 +309,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const exec = opts.exec ?? defaultDockerExec
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
+  const cleanupStepTimeoutMs = opts.cleanupStepTimeoutMs ?? CLEANUP_STEP_TIMEOUT_MS
   const version = opts.version ?? UNVERSIONED_SENTINEL
   const cwds = new Map<string, string>()
   const restartTokens = new Map<string, string>()
@@ -362,9 +390,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       cwds.delete(containerName)
       restartTokens.delete(containerName)
       gcMisses.delete(containerName)
-      if (opts.portbroker) await opts.portbroker.stop(containerName, 'fatal-auth').catch(() => {})
-      if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(containerName).catch(() => {})
-      if (opts.webexRenewal) await opts.webexRenewal.stop(containerName).catch(() => {})
+      if (opts.portbroker)
+        await withCleanupTimeout(opts.portbroker.stop(containerName, 'fatal-auth'), cleanupStepTimeoutMs)
+      if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(containerName), cleanupStepTimeoutMs)
+      if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(containerName), cleanupStepTimeoutMs)
       await removeRegistrationFile(containerName)
       log({ kind: 'registration-skipped', containerName, reason: `fatal broker auth: ${reason}` })
     })
@@ -430,9 +459,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       restartTokens.delete(req.containerName)
       brokerTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
-      if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
-      if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(req.containerName).catch(() => {})
-      if (opts.webexRenewal) await opts.webexRenewal.stop(req.containerName).catch(() => {})
+      if (opts.portbroker)
+        await withCleanupTimeout(opts.portbroker.stop(req.containerName, 'deregistered'), cleanupStepTimeoutMs)
+      if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(req.containerName), cleanupStepTimeoutMs)
+      if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(req.containerName), cleanupStepTimeoutMs)
       await removeRegistrationFile(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
@@ -759,9 +789,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       void runSerially(name, async () => {
         const hadCwd = cwds.delete(name)
         restartTokens.delete(name)
-        if (opts.portbroker) await opts.portbroker.stop(name, 'deregistered').catch(() => {})
-        if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(name).catch(() => {})
-        if (opts.webexRenewal) await opts.webexRenewal.stop(name).catch(() => {})
+        if (opts.portbroker) await withCleanupTimeout(opts.portbroker.stop(name, 'deregistered'), cleanupStepTimeoutMs)
+        if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(name), cleanupStepTimeoutMs)
+        if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(name), cleanupStepTimeoutMs)
         await removeRegistrationFile(name)
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
@@ -787,17 +817,23 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       // after the teardown loop below already ran, leaking it. Let restore
       // settle (it never rejects past the detached catch) before tearing down.
       await (restoreComplete ?? Promise.resolve()).catch(() => {})
+      // Bound shutdown teardown too: a wedged broker/renewal stop must not
+      // block daemon.stop() forever, which would also stall the version-drift
+      // respawn flow that waits for this to return before unlinking the socket.
       if (opts.portbroker) {
         const names = Array.from(cwds.keys())
-        await Promise.allSettled(names.map((n) => opts.portbroker!.stop(n, 'broker-stopped')))
+        await withCleanupTimeout(
+          Promise.allSettled(names.map((n) => opts.portbroker!.stop(n, 'broker-stopped'))),
+          cleanupStepTimeoutMs,
+        )
       }
       if (opts.kakaoRenewal) {
         const names = Array.from(cwds.keys())
-        await Promise.allSettled(names.map((n) => opts.kakaoRenewal!.stop(n)))
+        await withCleanupTimeout(Promise.allSettled(names.map((n) => opts.kakaoRenewal!.stop(n))), cleanupStepTimeoutMs)
       }
       if (opts.webexRenewal) {
         const names = Array.from(cwds.keys())
-        await Promise.allSettled(names.map((n) => opts.webexRenewal!.stop(n)))
+        await withCleanupTimeout(Promise.allSettled(names.map((n) => opts.webexRenewal!.stop(n))), cleanupStepTimeoutMs)
       }
       cwds.clear()
       restartTokens.clear()

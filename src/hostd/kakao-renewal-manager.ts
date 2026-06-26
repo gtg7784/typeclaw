@@ -104,7 +104,14 @@ export function createKakaoRenewalManager(opts: KakaoRenewalManagerOptions = {})
           accountId: result.account_id,
           previousUpdatedAt: result.previousUpdatedAt,
         })
-        if (opts.onRenewalOk) {
+        // A tick that started before stop()/drain() (deregister, shutdown) or
+        // before a re-register with a different cwd can finish the slow login
+        // here. Restarting a container that is no longer the current
+        // registration would resurrect a just-deregistered agent or fight a
+        // shutdown, so skip onRenewalOk unless this container+cwd is still the
+        // live registration. Matches webex-renewal-manager's guard.
+        const current = latestInput.get(input.containerName)
+        if (opts.onRenewalOk && current?.cwd === input.cwd) {
           log({
             kind: 'kakao-renewal-restart-scheduled',
             containerName: input.containerName,
@@ -187,9 +194,21 @@ export function createKakaoRenewalManager(opts: KakaoRenewalManagerOptions = {})
 
   return {
     start(input: KakaoRenewalStartInput): void {
-      if (opts.shouldRenew && !opts.shouldRenew(input)) return
+      // Tear down any prior registration for this container BEFORE the
+      // shouldRenew gate. The daemon calls start() on every registration, so a
+      // container that had Kakao can re-register to a non-Kakao cwd; if we
+      // returned early without clearing, the old timer would keep ticking and a
+      // post-login restart guard would still match the stale cwd. Clearing
+      // latestInput also makes an in-flight tick's onRenewalOk re-check fail.
       const existing = timers.get(input.containerName)
-      if (existing) existing.stop()
+      if (existing) {
+        existing.stop()
+        timers.delete(input.containerName)
+      }
+      latestInput.delete(input.containerName)
+
+      if (opts.shouldRenew && !opts.shouldRenew(input)) return
+
       latestInput.set(input.containerName, input)
       const handle = schedule(() => {
         void scheduleTick(input.containerName)
@@ -198,26 +217,32 @@ export function createKakaoRenewalManager(opts: KakaoRenewalManagerOptions = {})
       void scheduleTick(input.containerName)
     },
 
-    async stop(containerName: string): Promise<void> {
+    // Must NOT await the in-flight tick: a successful tick runs onRenewalOk →
+    // hostdRestart → container stop() → deregister RPC → handleDeregister →
+    // kakaoRenewal.stop(), so awaiting inFlight here waits on the very tick that
+    // is parked waiting for this restart — a self-deadlock that wedges the
+    // daemon's per-container serial chain forever. Clearing latestInput (not the
+    // await) is what fails the tick's onRenewalOk guard; drain() still awaits.
+    stop(containerName: string): Promise<void> {
       const handle = timers.get(containerName)
       if (handle) {
         timers.delete(containerName)
         handle.stop()
       }
       latestInput.delete(containerName)
-      // Await any in-flight tick before resolving so the caller can rely on
-      // "stop returned → no work outstanding". Daemon shutdown depends on
-      // this; without it, a mid-tick `attemptLogin` HTTPS call is abandoned.
-      const promise = inFlight.get(containerName)
-      if (promise) await promise.catch(() => {})
+      return Promise.resolve()
     },
 
     async drain(): Promise<void> {
       for (const [, handle] of timers) handle.stop()
       timers.clear()
-      latestInput.clear()
+      // Clear latestInput AFTER awaiting in-flight: the onRenewalOk guard reads
+      // latestInput, so clearing first would suppress the restart of a tick that
+      // is mid-login when drain() runs. drain() is shutdown — it waits for that
+      // work to finish rather than dropping it.
       const promises = Array.from(inFlight.values())
       await Promise.allSettled(promises)
+      latestInput.clear()
     },
   }
 }

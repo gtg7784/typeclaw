@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   createTailscaleServeManager,
+  runTailscale,
   tailscaleCandidates,
   type TailscaleExec,
   type TailscaleServeEvent,
@@ -139,5 +140,25 @@ describe('tailscaleCandidates', () => {
 
   test('Linux uses PATH only', () => {
     expect(tailscaleCandidates('linux')).toEqual(['tailscale'])
+  })
+})
+
+describe('runTailscale subprocess timeout', () => {
+  test('kills a hung CLI call and returns exit 124 instead of blocking forever', async () => {
+    const start = Date.now()
+    const result = await runTailscale('sh', ['-c', 'sleep 30'], 50)
+    const elapsed = Date.now() - start
+
+    expect(result.exitCode).toBe(124)
+    expect(result.stderr).toContain('timed out after 50ms')
+    expect(elapsed).toBeLessThan(5_000)
+  })
+
+  test('returns stdout/stderr for a CLI call that exits before the timeout', async () => {
+    const result = await runTailscale('sh', ['-c', 'echo hi; echo oops 1>&2; exit 3'], 5_000)
+
+    expect(result.exitCode).toBe(3)
+    expect(result.stdout.trim()).toBe('hi')
+    expect(result.stderr.trim()).toBe('oops')
   })
 })

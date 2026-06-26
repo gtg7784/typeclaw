@@ -158,6 +158,48 @@ describe('startDaemon', () => {
     expect((await send({ kind: 'deregister', containerName: 'never' })).ok).toBe(true)
   })
 
+  test('a hung portbroker.stop does not wedge the container serial chain forever', async () => {
+    // portbroker.stop never resolves — the renewal-restart wedge failure mode.
+    // The cleanup timeout must let deregister settle so a later register for the
+    // SAME container (which serializes behind it) still succeeds.
+    const portbroker: PortbrokerCallbacks = {
+      start: async () => {},
+      stop: () => new Promise<void>(() => {}),
+      forwardedPorts: () => [],
+    }
+    daemon = await startDaemon({
+      exec: fakeExec(),
+      gcIntervalMs: 1_000_000,
+      portbroker,
+      cleanupStepTimeoutMs: 20,
+    })
+    await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/x',
+      wsHostPort: 1,
+      portForward: { allow: '*' },
+      brokerToken: 'tok',
+    })
+
+    expect((await send({ kind: 'deregister', containerName: 'coder' })).ok).toBe(true)
+
+    const reReg = await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/x2',
+      wsHostPort: 1,
+      portForward: { allow: '*' },
+      brokerToken: 'tok',
+    })
+    expect(reReg.ok).toBe(true)
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations).toEqual([{ containerName: 'coder', cwd: '/x2' }])
+  })
+
   test('GC removes registrations whose containers vanished', async () => {
     const alive = new Set(['coder'])
     daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 30, gcMissesToDeregister: 1 })
@@ -991,7 +1033,7 @@ describe('startDaemon', () => {
     expect(starts).toEqual([{ containerName: 'kakao-agent', cwd: '/agent/kakao' }])
   })
 
-  test('deregister awaits kakaoRenewal.stop for that container', async () => {
+  test('deregister calls kakaoRenewal.stop for that container', async () => {
     const stopCalls: string[] = []
     const kakaoRenewal: KakaoRenewalCallbacks = {
       start: () => {},
@@ -1066,7 +1108,7 @@ describe('startDaemon', () => {
     expect(starts).toEqual([{ containerName: 'webex-agent', cwd: '/agent/webex' }])
   })
 
-  test('deregister awaits webexRenewal.stop for that container', async () => {
+  test('deregister calls webexRenewal.stop for that container', async () => {
     const stopCalls: string[] = []
     const webexRenewal: WebexRenewalCallbacks = {
       start: () => {},

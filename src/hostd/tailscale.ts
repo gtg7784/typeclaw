@@ -36,6 +36,17 @@ type TailscaleStatus = {
 const MACOS_APP_CLI = '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
 const WINDOWS_CLI = 'C:\\Program Files\\Tailscale\\tailscale.exe'
 
+// Per-CLI-call wall clock. The tailscaled "serve config" is a global resource
+// guarded by an etag; concurrent agent restarts racing `serve`/`serve off`
+// surface "Another client is changing the serve config" and the losing CLI can
+// block on the lock indefinitely. An unbounded `await proc.exited` then poisons
+// stopAll() → portbroker.stop() → the daemon's per-container serial chain (the
+// renewal-restart wedge). 30s is far longer than a healthy serve call yet bounds
+// the hang. Kept below the daemon teardown budget so a timed-out call surfaces
+// as a normal tailscale-serve-failed before the teardown wrapper trips.
+const TAILSCALE_CLI_TIMEOUT_MS = 30_000
+const TAILSCALE_TIMEOUT_EXIT_CODE = 124
+
 export function createTailscaleServeManager(opts: TailscaleServeManagerOptions): TailscaleServeManager {
   const exec = opts.exec ?? defaultTailscaleExec
   const log = opts.onLog ?? (() => {})
@@ -153,7 +164,11 @@ export const defaultTailscaleExec: TailscaleExec = async (args) => {
   return { exitCode: 127, stdout: '', stderr: lastError }
 }
 
-async function runTailscale(bin: string, args: string[]): Promise<TailscaleExecResult> {
+export async function runTailscale(
+  bin: string,
+  args: string[],
+  timeoutMs: number = TAILSCALE_CLI_TIMEOUT_MS,
+): Promise<TailscaleExecResult> {
   const bun = getBun()
   if (!bun) return { exitCode: 127, stdout: '', stderr: 'bun runtime not available' }
   try {
@@ -163,10 +178,31 @@ async function runTailscale(bin: string, args: string[]): Promise<TailscaleExecR
       stderr: 'pipe',
       env: bin === MACOS_APP_CLI ? { ...process.env, TAILSCALE_BE_CLI: '1' } : process.env,
     })
-    const exitCode = await proc.exited
-    const stdout = await new Response(proc.stdout).text()
-    const stderr = await new Response(proc.stderr).text()
-    return { exitCode, stdout, stderr }
+    // Drain both pipes concurrently with the exit wait. Reading them only after
+    // `proc.exited` can deadlock: a child that fills its stdout/stderr pipe
+    // buffer blocks on write while we block on exit, so neither side advances.
+    const stdoutPromise = new Response(proc.stdout).text().catch(() => '')
+    const stderrPromise = new Response(proc.stderr).text().catch(() => '')
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs)
+    })
+    const outcome = await Promise.race([proc.exited.then(() => 'exited' as const), timedOut])
+    if (timer) clearTimeout(timer)
+
+    if (outcome === 'timeout') {
+      try {
+        proc.kill()
+      } catch {}
+      return {
+        exitCode: TAILSCALE_TIMEOUT_EXIT_CODE,
+        stdout: '',
+        stderr: `tailscale ${args.join(' ')} timed out after ${timeoutMs}ms`,
+      }
+    }
+
+    return { exitCode: await proc.exited, stdout: await stdoutPromise, stderr: await stderrPromise }
   } catch (error) {
     const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
     const exitCode = code === 'ENOENT' ? 127 : 1
