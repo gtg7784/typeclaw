@@ -28,7 +28,11 @@
 // MARGIN suppresses. We keep the absolute margin as the vector-only no-match
 // guard; recovery for a genuinely-suppressed single-domain match belongs in the
 // corroborating keyword lane, not in a weaker semantic threshold.
-const MARGIN = 0.06
+// The same-script default. A cross-script query (detected in hybrid.ts via
+// script.ts) passes a SMALLER margin here, because E5's cross-lingual top1-
+// baseline contrast is structurally compressed below this same-language bar.
+// The parameter defaults to MARGIN, so every same-script call is unchanged.
+export const MARGIN = 0.06
 const HEAD_EXCLUDED_FROM_BASELINE = 5
 // Minimum non-head scores required to trust a suppression verdict. A median over
 // 1-4 scores (n=6..9 once the head is dropped) is too noisy to zero out the only
@@ -62,8 +66,8 @@ export function streamAdmissionBaseline(topicScores: number[]): number | null {
 // admit stream rows against the topic contrast reference: a stream candidate
 // survives only if it stands as far above the band as a real topic match would.
 // A null baseline (no topics at all) admits nothing.
-export function clearsBaseline(score: number, baseline: number | null): boolean {
-  return baseline !== null && score - baseline >= MARGIN
+export function clearsBaseline(score: number, baseline: number | null, margin: number = MARGIN): boolean {
+  return baseline !== null && score - baseline >= margin
 }
 
 // Returns how many of the sorted-descending topic cosine scores survive the
@@ -72,15 +76,15 @@ export function clearsBaseline(score: number, baseline: number | null): boolean 
 // tail is too short (1-4 scores) for a reliable suppression verdict, so topics
 // pass ungated (a false negative of one obvious shard is cheaper than
 // suppressing the only memory). `scores` MUST be sorted descending.
-export function gateRelevance(scores: number[], topK: number): number {
+export function gateRelevance(scores: number[], topK: number, margin: number = MARGIN): number {
   if (scores.length === 0 || topK <= 0) return 0
   if (scores.length < GATED_TOPIC_FLOOR) return Math.min(scores.length, topK)
 
   const top = scores[0]!
-  const margin = top - median(scores.slice(HEAD_EXCLUDED_FROM_BASELINE))
-  if (margin < MARGIN) return 0
+  const contrast = top - median(scores.slice(HEAD_EXCLUDED_FROM_BASELINE))
+  if (contrast < margin) return 0
 
-  const knee = top - 0.5 * margin
+  const knee = top - 0.5 * contrast
   const survivors = scores.filter((score) => score >= knee).length
   return Math.min(survivors, topK)
 }

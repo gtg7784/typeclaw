@@ -96,6 +96,31 @@ describe('gateRelevance', () => {
 
     expect(kept).toBeGreaterThan(0)
   })
+
+  it('suppresses a cross-script-shaped match at the strict default margin', () => {
+    // given: a real cross-lingual match whose top1-baseline contrast is compressed
+    // to ~0.045 (E5 cross-script gap runs ~half a same-language gap) — below the
+    // strict 0.06 margin, so the default gate wrongly suppresses it.
+    const scores = band(0.8, 0.755, 193)
+
+    expect(gateRelevance(scores, 10)).toBe(0)
+  })
+
+  it('recovers the same cross-script match when the margin is loosened', () => {
+    // given: the SAME compressed-contrast distribution, judged with the loosened
+    // cross-script margin (~0.04) — the real match now clears the bar.
+    const scores = band(0.8, 0.755, 193)
+
+    expect(gateRelevance(scores, 10, 0.04)).toBeGreaterThan(0)
+  })
+
+  it('a loosened margin still suppresses a genuine no-match (in-band top1)', () => {
+    // given: top1 sits right in the band (gap ~0.01) — even the loosened margin
+    // must reject it, so cross-script loosening never becomes "match anything".
+    const scores = band(0.765, 0.755, 193)
+
+    expect(gateRelevance(scores, 10, 0.04)).toBe(0)
+  })
 })
 
 describe('streamAdmissionBaseline + clearsBaseline', () => {

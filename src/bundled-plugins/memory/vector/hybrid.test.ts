@@ -607,6 +607,87 @@ describe('hybridSearch relevance gate', () => {
       store.close()
     }
   })
+
+  it('recovers a cross-script topic match whose head band is the matching script (loosened margin)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a flat English no-match band, plus ONE English topic the Korean
+      // query matches with a compressed cross-script contrast (~0.045 — below the
+      // strict 0.06, above the loosened 0.04). The head of the scored band IS the
+      // English winner, so the query (Korean) is cross-script against it and the
+      // margin loosens. No keyword hit (Korean shares no tokens with English).
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.755 + (i % 3) * 0.001)))
+      }
+      writeTopic(agentDir, 'proc-bind', 'Sandbox proc-bind strategy', 'The container binds a real procfs.')
+      store.upsert(row('topic:proc-bind', 'proc-bind', bandedVector(0.8)))
+
+      const results = await hybridSearch(
+        '\uC0CC\uB4DC\uBC15\uC2A4 proc \uBC14\uC778\uB4DC \uC804\uB7B5',
+        store,
+        agentDir,
+        10,
+        embedFrom({ 0: 1 }),
+      )
+
+      expect(results[0]?.key).toBe('proc-bind')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('does NOT loosen when an unrelated same-script shard is the corpus but the head band matches the query script', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: the same English compressed-contrast no-match band, queried in
+      // ENGLISH (same script as the band head). The contrast (~0.045) is below the
+      // strict margin and must STILL suppress — same-script pairs never loosen, so
+      // a real English no-match is not rescued by the cross-script path.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.755 + (i % 3) * 0.001)))
+      }
+      writeTopic(agentDir, 'near', 'Near Miss', 'A barely-elevated topic.')
+      store.upsert(row('topic:near', 'near', bandedVector(0.8)))
+
+      const results = await hybridSearch('zxqw gibberish nonmatching token', store, agentDir, 10, embedFrom({ 0: 1 }))
+
+      expect(results).toHaveLength(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('keeps stream admission strict under a cross-script query (no closest-neighbor leak via loosened margin)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: a Korean cross-script query that loosens the TOPIC gate, plus an
+      // in-band English stream neighbor sitting ~0.045 above the band (between the
+      // loosened 0.04 and the strict 0.06). Stream admission must stay on the
+      // STRICT margin, so this irrelevant neighbor is still suppressed — the
+      // cross-script topic loosening must not weaken the stream leak guard.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVector(0.755 + (i % 3) * 0.001)))
+      }
+      const fragmentId = '019e2ee8-bcc4-772f-8821-876162c5e601'
+      writeStreamFragment(agentDir, '2026-06-11', fragmentId, 'noise', 'An unrelated English fragment.')
+      store.upsert(row(`stream:2026-06-11#${fragmentId}`, `2026-06-11#${fragmentId}`, bandedVector(0.8), 'stream'))
+
+      const results = await hybridSearch(
+        '\uBD07\uB07C\uB9AC \uBB34\uD55C \uB8E8\uD504 \uAC00\uB4DC',
+        store,
+        agentDir,
+        10,
+        embedFrom({ 0: 1 }),
+      )
+
+      expect(results.some((r) => r.source === 'stream')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
 })
 
 function createFixture(): { agentDir: string; store: VectorStore } {
