@@ -71,9 +71,6 @@ export type BuildChannelSessionFactoryDeps = {
   subagentRegistry?: SubagentRegistry
   getCreateSessionForSubagent?: () => CreateSessionForSubagent
   liveSessionRegistry?: LiveSessionRegistry
-  // Forwarded to createSession: when true the `# Memory` section is omitted
-  // from the system prompt (vector agents inject memory per-turn instead).
-  suppressSystemMemory?: boolean
 }
 
 // Tight basename validation so a tampered or corrupt channels/sessions.json
@@ -141,7 +138,6 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
       ...(deps.getCreateSessionForSubagent !== undefined
         ? { createSessionForSubagent: deps.getCreateSessionForSubagent() }
         : {}),
-      ...(deps.suppressSystemMemory !== undefined ? { suppressSystemMemory: deps.suppressSystemMemory } : {}),
     })
 
     const sessionId = sessionManager.getSessionId()

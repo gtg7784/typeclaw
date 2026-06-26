@@ -393,9 +393,9 @@ describe('vector session.turn.start hook', () => {
     expect(errors.some((line) => line.includes('vector-retrieval failed'))).toBe(true)
   })
 
-  test('memory-logger subagent is created with onFragmentsAppended hook when vector.enabled is true', async () => {
+  test('memory-logger subagent is created with on-write vector hooks', async () => {
     const memoryPlugin = createMemoryPluginWithStoreCapture()
-    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: true } })
+    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096 })
     if (!parsed.success) throw new Error(parsed.error.message)
     const ctx = createPluginContext({
       name: 'memory',
@@ -414,35 +414,13 @@ describe('vector session.turn.start hook', () => {
     const memoryLoggerSubagent = exports.subagents!['memory-logger']!
     expect(memoryLoggerSubagent.customTools).toBeDefined()
     expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
-  })
-
-  test('memory-logger subagent is created without onFragmentsAppended hook when vector.enabled is false', async () => {
-    const memoryPlugin = createMemoryPluginWithStoreCapture()
-    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096, vector: { enabled: false } })
-    if (!parsed.success) throw new Error(parsed.error.message)
-    const ctx = createPluginContext({
-      name: 'memory',
-      version: undefined,
-      agentDir,
-      config: parsed.data,
-      logger: createPluginLogger('memory'),
-      permissions: noopPermissionService,
-      spawnSubagent: async () => {},
-      isBooted: () => true,
-    })
-    const exports = await memoryPlugin.plugin(ctx)
-
-    expect(exports.subagents).toBeDefined()
-    expect(exports.subagents!['memory-logger']).toBeDefined()
-    const memoryLoggerSubagent = exports.subagents!['memory-logger']!
-    expect(memoryLoggerSubagent.customTools).toBeDefined()
-    expect(memoryLoggerSubagent.customTools!.length).toBeGreaterThan(0)
+    expect(disposers).toHaveLength(1)
   })
 })
 
 async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
   const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch: hybridSearchMock })
-  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
+  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
     name: 'memory',
@@ -463,7 +441,7 @@ async function bootVectorPluginWith(
   logger = createPluginLogger('memory'),
 ) {
   const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch })
-  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
+  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
     name: 'memory',

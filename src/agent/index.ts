@@ -11,7 +11,6 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
-import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import type { ReactionRef } from '@/channels/types'
 import {
@@ -229,12 +228,6 @@ export type CreateSessionOptions = {
   subagentRegistry?: SubagentRegistry
   createSessionForSubagent?: CreateSessionForSubagent
   allowBackgroundFromSubagent?: boolean
-  // When true, the `# Memory` section is omitted from the system prompt and
-  // long-term memory is injected per-turn into the user prompt instead (the
-  // memory plugin's vector `session.turn.start` path). Derived once at boot
-  // from `memory.vector.enabled`, which is restart-required — so the boot
-  // snapshot stays coherent with the per-turn injection decision.
-  suppressSystemMemory?: boolean
 }
 
 export type CreateSessionResult = {
@@ -304,7 +297,6 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
           ...(options.mcpManager !== undefined ? { mcpManager: options.mcpManager } : {}),
           ...(options.subagentRegistry !== undefined ? { subagentRegistry: options.subagentRegistry } : {}),
-          ...(options.suppressSystemMemory !== undefined ? { suppressSystemMemory: options.suppressSystemMemory } : {}),
           ...(isOpenAiFamilyRef(activeRef) ? { proactiveNextStepNudge: true } : {}),
         })
 
@@ -985,12 +977,6 @@ export type CreateResourceLoaderOptions = {
   // 'full' to force the heavy prompt even on an unattended origin (rarely
   // useful; mostly an escape hatch for ad-hoc debugging).
   mode?: SystemPromptMode
-  // When true, the `# Memory` section is omitted from the system prompt and
-  // long-term memory is injected per-turn into the user prompt instead (the
-  // memory plugin's vector `session.turn.start` path). Derived once at boot
-  // from `memory.vector.enabled` — vector is restart-required, so the boot
-  // snapshot is coherent with the per-turn injection decision.
-  suppressSystemMemory?: boolean
   proactiveNextStepNudge?: boolean
 }
 
@@ -1056,7 +1042,6 @@ export type SystemPromptComposition = {
   mcpCatalog?: string
   gitNudge: string
   proactiveNextStepNudge?: string
-  memorySection: string
 }
 
 // Section-order contract for the system prompt. Kept as a pure string→string
@@ -1072,9 +1057,7 @@ export type SystemPromptComposition = {
 // 2. gitNudge — rare changes; agent folders force-commit sessions/ and
 //    memory/ after every turn, so the dirty-files list is empty most of
 //    the time.
-// 3. memorySection — volatile: MEMORY.md grows on every dream cycle and
-//    memory/streams/yyyy-MM-dd.jsonl grows after every channel turn that
-//    triggers memory-logger.
+// 3. proactive next-step nudge — deterministic per model family.
 //
 // The wall-clock anchor that used to live here as `## Now` moved out
 // entirely. It is now injected into the user turn at each `session.prompt`
@@ -1104,9 +1087,6 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   if (parts.proactiveNextStepNudge !== undefined && parts.proactiveNextStepNudge !== '') {
     prompt = `${prompt}\n\n${parts.proactiveNextStepNudge}`
   }
-  if (parts.memorySection !== '') {
-    prompt = `${prompt}\n\n${parts.memorySection}`
-  }
   return prompt
 }
 
@@ -1126,48 +1106,31 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   const basePrompt =
     mode === 'slim' ? SLIM_SYSTEM_PROMPT : buildDefaultSystemPrompt(subagentRoster ?? DEFAULT_SUBAGENT_ROSTER)
 
-  // Kick off the three independent I/O paths concurrently. Sequential awaits
+  // Kick off the independent I/O paths concurrently. Sequential awaits
   // here used to be the dominant cold-start cost amplifier: loadSelf is 2
-  // file reads, renderGitNudge spawns a subprocess, loadMemory reads N topic
-  // shards. None of them depend on each other, so we run them in parallel.
+  // file reads and renderGitNudge spawns a subprocess. They do not depend on
+  // each other, so we run them in parallel.
   // The plugin hook (runSessionPrompt) only needs `self`, so it can overlap
-  // with the gitNudge subprocess and the shard reads while `self` is in
-  // flight too.
+  // with the gitNudge subprocess while `self` is in flight too.
   //
-  // Plugin-hook contract: `runSessionPrompt` runs AFTER gitNudge/memory I/O
-  // has been kicked off. A hook that mutates `memory/topics/` or git-tracked
-  // files during its body races those in-flight reads -- mutations may or
-  // may not be reflected in the resulting prompt. The bundled hooks only
-  // mutate the prompt string itself; third-party plugins that need to mutate
-  // disk before the suffix sections see it must do so before/outside the
-  // session-prompt hook.
+  // Plugin-hook contract: `runSessionPrompt` runs AFTER gitNudge I/O has been
+  // kicked off. A hook that mutates git-tracked files during its body races
+  // that in-flight read -- mutations may or may not be reflected in the
+  // resulting prompt. The bundled hooks only mutate the prompt string itself;
+  // third-party plugins that need to mutate disk before the suffix section sees
+  // it must do so before/outside the session-prompt hook.
   //
-  // We wrap gitNudge and memory promises in `settled` shells so any
-  // rejection from them cannot surface as an unhandled rejection during the
+  // We wrap gitNudge in a `settled` shell so any rejection cannot surface as
+  // an unhandled rejection during the
   // window where we're awaiting selfPromise + runSessionPrompt. Production
-  // callers don't reject (renderGitNudge swallows internally, loadMemory
-  // catches ENOENT) but a non-ENOENT fs error (EACCES/EIO) on the agent
-  // folder would otherwise terminate the process before we reach the
-  // gather point.
+  // callers don't reject (renderGitNudge swallows internally) but the wrapper
+  // keeps the gather shape robust if that contract changes.
   const selfPromise = loadSelf(agentDir)
   const gitNudgeSettled = mode === 'slim' ? Promise.resolve(ok('')) : settle(renderGitNudge(agentDir))
-  // Vector agents omit the `# Memory` section entirely: long-term memory is
-  // injected per-turn into the user prompt by the memory plugin's vector
-  // `session.turn.start` hook. Keeping both would double-inject and re-break the
-  // cache prefix this change exists to protect — the invariant is
-  // `suppressSystemMemory === memory.vector.enabled`.
-  const memorySettled = options.suppressSystemMemory
-    ? Promise.resolve(ok(''))
-    : settle(
-        loadMemory(agentDir, {
-          ...(options.origin !== undefined ? { origin: options.origin } : {}),
-          ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
-        }),
-      )
   // MCP connection is warmed up in the background at boot; gate the catalog
   // render on that warm-up settling (bounded) so a session created in the
   // warm-up window still lists connected servers. Kicked off here to overlap
-  // with the self/git/memory I/O above instead of serializing before compose.
+  // with the self/git I/O above instead of serializing before compose.
   const mcpReadySettled =
     mode === 'full' && options.mcpManager !== undefined
       ? options.mcpManager.whenInitialConnectSettled()
@@ -1194,11 +1157,9 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   // Slim mode skips git-nudge entirely: cron + subagent sessions are not the
   // right actor to drive interactive commit decisions, and the operator-facing
   // commit guidance the nudge points back to is itself excluded from the slim
-  // base prompt. Memory is still included so cron jobs that depend on MEMORY.md
-  // context (e.g. "send today's standup summary") keep working.
-  const [gitNudgeResult, memoryResult] = await Promise.all([gitNudgeSettled, memorySettled])
+  // base prompt.
+  const gitNudgeResult = await gitNudgeSettled
   const gitNudge = unwrapSettled(gitNudgeResult)
-  const memorySection = unwrapSettled(memoryResult)
 
   let mcpCatalog: string | undefined
   if (mode === 'full' && options.mcpManager !== undefined) {
@@ -1216,7 +1177,6 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     ...(mcpCatalog !== undefined ? { mcpCatalog } : {}),
     gitNudge,
     ...(options.proactiveNextStepNudge === true ? { proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE } : {}),
-    memorySection,
   })
 
   const additionalSkillPaths = [getBundledSkillsDir()]

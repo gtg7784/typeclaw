@@ -4,7 +4,6 @@ import path from 'node:path'
 import type { SessionOrigin } from '@/agent/session-origin'
 
 import { ACKNOWLEDGE_GUARDS, type GuardBlock, isGuardAcknowledged } from '../policy'
-import { isMemoryRetrievalCacheWriteAllowed } from './memory-retrieval-cache-write'
 import { isMemoryTopicsWriteAllowed } from './memory-topics-write'
 import { isSkillAuthoringAllowed } from './skill-authoring'
 
@@ -50,7 +49,6 @@ export async function checkNonWorkspaceWriteGuard(options: {
     resolveRealIntendedPath('/tmp'),
   ])
   if (await isSkillAuthoringAllowed({ tool, args, agentDir })) return undefined
-  if (await isMemoryRetrievalCacheWriteAllowed({ tool, args, agentDir, origin })) return undefined
   if (await isMemoryTopicsWriteAllowed({ tool, args, agentDir, origin })) return undefined
   if (await isAllowedAgentRootWrite(agentDir, targetPath, realTargetPath)) return undefined
   if (isInside(realWorkspacePath, realTargetPath)) return undefined

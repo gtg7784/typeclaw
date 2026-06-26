@@ -6,22 +6,21 @@ icon: BrainCircuit
 
 The bundled `memory` plugin is the self-improving loop: it watches sessions, distills them into long-term beliefs, and feeds those beliefs back into future prompts — no hand-written prompts, no human in the loop. This page is the contributor-facing companion to the [memory loop concept](/docs/concepts/memory-loop); for the exhaustive reference (config table, every hook, observability log lines) see [`src/bundled-plugins/memory/README.md`](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).
 
-The plugin is auto-loaded by every agent. There is no `plugins[]` entry to add and no opt-out — configure it via the `memory` block in `typeclaw.json` (see the [config table in the memory README](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md#config) for every field and default, including `memory.vector.enabled`, default `false`). All `memory.*` fields are **restart-required**: the plugin reads them once at boot. The `memory` block is plugin-owned config that passes through core's schema (`.catchall`), so it sits **outside the core `FIELD_EFFECTS` reload fence** — changing a `memory.*` field and running `typeclaw reload` silently no-ops with no "restart-required" warning. Restart the container to apply.
+The plugin is auto-loaded by every agent. There is no `plugins[]` entry to add and no opt-out — configure it via the `memory` block in `typeclaw.json` (see the [config table in the memory README](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md#config) for every field and default). Vector memory is always on. All `memory.*` fields are **restart-required**: the plugin reads them once at boot. The `memory` block is plugin-owned config that passes through core's schema (`.catchall`), so it sits **outside the core `FIELD_EFFECTS` reload fence** — changing a `memory.*` field and running `typeclaw reload` silently no-ops with no "restart-required" warning. Restart the container to apply.
 
-## Two surfaces, three subagents
+## Two surfaces, two subagents
 
-Memory is split across two on-disk surfaces and three subagents that move data between them.
+Memory is split across two on-disk surfaces and two subagents that move data between them.
 
 | Surface                           | Shape                                                            | Writer                                    |
 | --------------------------------- | ---------------------------------------------------------------- | ----------------------------------------- |
 | `memory/streams/yyyy-MM-dd.jsonl` | Append-only daily log of `fragment \| watermark \| legacy_prose` | `memory-logger` (runtime)                 |
 | `memory/topics/<slug>.md`         | Consolidated beliefs, one topic per file, with citations         | `dreaming` (body) + runtime (frontmatter) |
 
-| Subagent           | Cadence                                                   | Job                                                                     |
-| ------------------ | --------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `memory-logger`    | `session.idle` / `session.end`                            | Distills the transcript past a watermark into stream fragments.         |
-| `dreaming`         | cron (`memory.dreaming.schedule`, default `*/30 * * * *`) | Consolidates undreamed fragments into topic shards; rebalances the set. |
-| `memory-retrieval` | `session.turn.start` (index mode, vector off)             | Writes a focused retrieval cache for the over-budget non-vector case.   |
+| Subagent        | Cadence                                                   | Job                                                                     |
+| --------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `memory-logger` | `session.idle` / `session.end`                            | Distills the transcript past a watermark into stream fragments.         |
+| `dreaming`      | cron (`memory.dreaming.schedule`, default `*/30 * * * *`) | Consolidates undreamed fragments into topic shards; rebalances the set. |
 
 The loop is **observe → dream → apply**: `memory-logger` observes, `dreaming` consolidates, and the next prompt applies the updated shards automatically.
 
@@ -90,12 +89,11 @@ While reading streams, dreaming watches for **repeated multi-step procedures** a
 
 Forms B and C are **passive recommendations** recorded as topic shards (exempt from the one-sentence belief rule — they keep a rationale paragraph plus the `proposal:` line). A shard alone never authorizes action; the main agent acts only when a current user request makes the suggestion relevant. The codifying bar is the same for all three: multi-step, recurred across ≥2 fragments (ideally across days), clearly statable trigger, and generalizable. No speculative skills — one the agent never reaches for is dead weight in the prompt budget.
 
-## Injection: where memory lands depends on `memory.vector.enabled`
+## Injection: memory always lands in the user turn
 
-The same shard set is injected in one of two places, never both. The invariant `suppressSystemMemory === memory.vector.enabled` (derived once at boot in `src/run/index.ts`) is what prevents double-injection.
+Memory is injected per turn into the user prompt; the system prompt never contains long-term memory; vector memory is always on.
 
-- **Vector off (default): system prompt, once per session.** `loadMemory` renders the `# Memory` section into the cacheable prefix. Two-tier by `injectionBudgetBytes` (16 KB): **direct** mode injects all shard bodies verbatim under budget; **index** mode injects headings + metadata over budget, and the `memory-retrieval` subagent covers the over-budget case lag-by-one.
-- **Vector on: user prompt, per turn.** The `# Memory` section is suppressed from the system prompt entirely (keeping the cache prefix stable across the session). The `session.turn.start` hook renders memory into `event.retrievalContext.results`, which the turn-drivers append to the user message — all shards under budget, top-K `hybridSearch` over budget.
+The `session.turn.start` hook renders memory into `event.retrievalContext.results`, which the turn-drivers append to the user message. Tiny direct-mode memory sets render topic headings directly, with repeated excerpts de-duplicated across turns; over-budget sets run top-K `hybridSearch` over topics, undreamed stream fragments, and references. Keeping memory out of the system prompt stabilizes the cache prefix and lets retrieval track the current turn instead of a stale session-start snapshot.
 
 **Channel-origin always uses index mode** regardless of shard size — a memory-bleed defense, since the agent can treat injected memory as instructions when channel users can see it.
 

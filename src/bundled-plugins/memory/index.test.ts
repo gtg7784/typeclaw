@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,20 +9,12 @@ import * as FakeTimers from '@sinonjs/fake-timers'
 type Clock = FakeTimers.Clock
 
 import { noopPermissionService } from '@/permissions'
-import type {
-  PluginContext,
-  PluginExports,
-  PluginLogger,
-  SessionEndEvent,
-  SessionIdleEvent,
-  SessionTurnStartEvent,
-} from '@/plugin'
+import type { PluginContext, PluginExports, PluginLogger, SessionEndEvent, SessionIdleEvent } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { formatLocalDate } from '@/shared'
 
-import { renderShard } from './frontmatter'
 import memoryPlugin, { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
-import { streamFilePath, topicShardPath, topicsDir } from './paths'
+import { streamFilePath } from './paths'
 import { VectorStore } from './vector/store'
 
 // Fake timers replace ~10s of real setTimeout waits used to exercise the idle
@@ -166,14 +158,6 @@ function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps>
 let agentDir: string
 let disposers: Array<() => Promise<void> | void>
 
-async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
-  await mkdir(topicsDir(dir), { recursive: true })
-  await writeFile(
-    topicShardPath(dir, slug),
-    renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-05-16' }, body),
-  )
-}
-
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-plugin-'))
   disposers = []
@@ -187,26 +171,8 @@ afterEach(async () => {
 describe('memory plugin shape', () => {
   test('exposes memory subagents and memory_search tool', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, {})
-    expect(Object.keys(exports.subagents ?? {})).toEqual(
-      expect.arrayContaining(['memory-logger', 'dreaming', 'memory-retrieval']),
-    )
+    expect(Object.keys(exports.subagents ?? {})).toEqual(expect.arrayContaining(['memory-logger', 'dreaming']))
     expect(exports.tools?.memory_search).toBeDefined()
-  })
-
-  test('memory-retrieval declares profile=fast', async () => {
-    const { exports } = await bootMemoryPlugin(agentDir, {})
-    expect(exports.subagents?.['memory-retrieval']?.profile).toBe('fast')
-  })
-
-  test('plumbs retrievalSpawnTimeoutMs onto the memory-retrieval subagent declaration', async () => {
-    // given a non-default retrieval timeout
-    const { exports } = await bootMemoryPlugin(agentDir, { retrievalSpawnTimeoutMs: 7777 })
-
-    // when reading the subagent the plugin contributed
-    const retrieval = exports.subagents?.['memory-retrieval']
-
-    // then the timeout flows to the field the orchestration layer reads
-    expect(retrieval?.timeoutMs).toBe(7777)
   })
 
   test('registers a dreaming cron job with the configured schedule', async () => {
@@ -256,257 +222,6 @@ describe('memory plugin shape', () => {
 
   test('rejects idleMs below the 1000ms minimum (lower bound prevents memory-logger thrash)', async () => {
     await expect(bootMemoryPlugin(agentDir, { idleMs: 500 })).rejects.toThrow()
-  })
-})
-
-describe('session.turn.start hook', () => {
-  test('spawns memory-retrieval with the user prompt when injection plan is index mode', async () => {
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-    const origin: SessionTurnStartEvent['origin'] = { kind: 'tui', sessionId: 'ses_parent' }
-
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_parent', agentDir, userPrompt: 'what do I know about deploys?', origin },
-      {
-        agentDir,
-        pluginName: 'memory',
-        logger: createPluginLogger('m'),
-      },
-    )
-
-    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
-
-    expect(spawned).toHaveLength(1)
-    expect(spawned[0]!.name).toBe('memory-retrieval')
-    expect(spawned[0]!.payload).toEqual({
-      parentSessionId: 'ses_parent',
-      agentDir,
-      recentPrompt: 'what do I know about deploys?',
-      cacheFilePath: join(agentDir, 'memory', '.retrieval-cache', 'ses_parent.md'),
-      origin,
-    })
-    // Execution authority is `system` (→ owner), with the triggering origin
-    // preserved as `triggeredBy` for audit. Content provenance stays in the
-    // payload `origin` above.
-    expect(spawned[0]!.options).toEqual({
-      parentSessionId: 'ses_parent',
-      spawnedByOrigin: { kind: 'system', component: 'memory-retrieval', triggeredBy: origin },
-    })
-  })
-
-  test('passes the actual user text, not the assembling system prompt (the bug session.prompt produced)', async () => {
-    // Regression guard. Pre-fix, memory-retrieval ran from `session.prompt`
-    // whose `event.prompt` is `basePrompt + IDENTITY.md + SOUL.md` (the
-    // assembling system prompt). The plugin shipped that string as
-    // `recentPrompt`, so the retrieval subagent keyword-mined TypeClaw's
-    // framing prose instead of the user's question. Moving to
-    // `session.turn.start` plumbs `event.userPrompt` (the literal text
-    // headed to `session.prompt(text)`) into `recentPrompt`. This test
-    // pins that wiring so a future refactor that "simplifies" the field
-    // back to event.prompt or `event.text` is caught.
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_user', agentDir, userPrompt: 'Did Alice merge the deploy PR?', origin: undefined },
-      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-    )
-    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
-
-    const payload = spawned[0]!.payload as { recentPrompt: string }
-    expect(payload.recentPrompt).toBe('Did Alice merge the deploy PR?')
-    expect(payload.recentPrompt).not.toContain('You are a general-purpose AI agent')
-    expect(payload.recentPrompt).not.toContain('TypeClaw')
-  })
-
-  test('does not block on a slow memory-retrieval spawn', async () => {
-    // PR #337 made the spawn fire-and-forget under session.prompt to keep
-    // channel cold-start under ensureLive's 30s watchdog. Moving to
-    // session.turn.start preserves that detached shape so a slow retrieval
-    // never gates the user's reply.
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned, started } = await bootMemoryPlugin(
-      agentDir,
-      { injectionBudgetBytes: 4096 },
-      { spawnDelayMs: 10_000 },
-    )
-
-    const start = Date.now()
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_turn', agentDir, userPrompt: 'first turn', origin: undefined },
-      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-    )
-    const elapsed = Date.now() - start
-
-    expect(elapsed).toBeLessThan(500)
-    await waitFor(() => started.length >= 1, 'memory-retrieval spawn settles')
-    expect(started[0]!.name).toBe('memory-retrieval')
-    expect(spawned).toHaveLength(0)
-  })
-
-  test('hook returns synchronously without awaiting the shard load (channel turn gating)', async () => {
-    // session.turn.start has NO per-handler timeout (unlike session.prompt,
-    // session.idle, session.end), and the channel router awaits it before
-    // calling `live.session.prompt(text)`. An inline `await loadAllShards`
-    // would gate every channel turn on N shard reads. The hook body must
-    // be fully detached. This test fires the hook against a tmpdir with no
-    // memory directory at all — `loadAllShards` rejects/returns empty after
-    // an fs round-trip — and asserts the hook returns within a single
-    // event-loop tick. Pre-fix, the await would yield to libuv for the
-    // readdir ENOENT and the hook would resolve only after that round-trip.
-    const { exports } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-
-    // Promise.resolve() wraps the return so we can observe whether the
-    // hook returned synchronously (sync function → resolves on the next
-    // microtask) vs after yielding to libuv (async function with an
-    // inline await → resolves only after the libuv round-trip).
-    let resolved = false
-    const hookPromise = Promise.resolve(
-      exports.hooks!['session.turn.start']!(
-        { sessionId: 'ses_sync', agentDir, userPrompt: 'q', origin: undefined },
-        { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-      ),
-    )
-    void hookPromise.then(() => {
-      resolved = true
-    })
-    for (let i = 0; i < 3; i++) await Promise.resolve()
-    await hookPromise
-    expect(resolved).toBe(true)
-  })
-
-  test('detached spawn rejection is reported via plugin logger, not unhandled', async () => {
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096 })
-    if (!parsed.success) throw new Error(parsed.error.message)
-    const { logger, logs } = makeCapturingLogger()
-    const ctx = createPluginContext({
-      name: 'memory',
-      version: undefined,
-      agentDir,
-      config: parsed.data,
-      logger,
-      permissions: noopPermissionService,
-      spawnSubagent: async () => {
-        throw new Error('spawn rejected for test')
-      },
-      isBooted: () => true,
-    })
-    const exports = await memoryPlugin.plugin(ctx)
-
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_fail', agentDir, userPrompt: 'q?', origin: undefined },
-      { agentDir, pluginName: 'memory', logger },
-    )
-
-    await waitFor(
-      () => logs.error.some((m) => m.includes('memory-retrieval spawn failed')),
-      'detached spawn rejection routed to logger',
-    )
-
-    const errorLine = logs.error.find((m) => m.includes('memory-retrieval spawn failed'))
-    expect(errorLine).toMatch(/spawn rejected for test/)
-  })
-
-  test('does not spawn memory-retrieval when the injection plan is direct mode', async () => {
-    await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
-    const { exports, spawned } = await bootMemoryPlugin(agentDir, {})
-
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_direct', agentDir, userPrompt: 'small?' },
-      {
-        agentDir,
-        pluginName: 'memory',
-        logger: createPluginLogger('m'),
-      },
-    )
-
-    expect(spawned).toHaveLength(0)
-  })
-
-  test('does not recurse for subagent-origin turn events', async () => {
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-
-    await exports.hooks!['session.turn.start']!(
-      {
-        sessionId: 'ses_subagent',
-        agentDir,
-        userPrompt: 'subagent prompt',
-        origin: { kind: 'subagent', subagent: 'memory-retrieval', parentSessionId: 'ses_parent' },
-      },
-      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-    )
-
-    expect(spawned).toHaveLength(0)
-  })
-
-  // Opt-out invariant guard for `suppressSystemMemory === memory.vector.enabled`:
-  // with vector OFF (default) memory lives only in the system prompt, so the
-  // non-vector hook branch must never write the per-turn `retrievalContext` bag.
-  // Writing it would double-inject (system prompt + user turn). The sentinel
-  // surviving proves the opt-out path leaves the bag untouched in BOTH plans.
-  //
-  // The non-vector retrieval runs DETACHED (`void runMemoryRetrieval`), so each
-  // test must wait for an observable completion point AFTER the plan decision
-  // before asserting — otherwise a future write inside the detached path (which
-  // awaits `loadAllShards` first) would race past the assertion unobserved.
-  test('leaves retrievalContext.results empty when vector is off (index-mode plan)', async () => {
-    // given: over-budget shards → index mode, whose detached path ends in a spawn
-    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
-    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-
-    const retrievalContext = { results: 'SENTINEL' }
-    await exports.hooks!['session.turn.start']!(
-      { sessionId: 'ses_optout_index', agentDir, userPrompt: 'what do I know?', retrievalContext },
-      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-    )
-
-    // The spawn is the detached path's terminal step: once it lands, the hook has
-    // run past every line that could have touched the bag.
-    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
-    expect(retrievalContext.results).toBe('SENTINEL')
-  })
-
-  test('leaves retrievalContext.results empty when vector is off (direct-mode plan)', async () => {
-    // given: a small shard under budget → direct mode, which returns early with
-    // NO spawn and NO log. Its only observable is `loadAllShards` resolving, so
-    // wrap that module boundary as an observer (real impl preserved) and signal a
-    // barrier on the next macrotask — by then the plugin's microtask continuation
-    // (buildInjectionPlan + the direct-mode early return) has already run.
-    await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
-    const { loadAllShards: realLoadAllShards } = await import('./load-shards')
-    let signalDirectPathSettled: () => void = () => {}
-    const directPathSettled = new Promise<void>((resolve) => {
-      signalDirectPathSettled = resolve
-    })
-    mock.module('./load-shards', () => ({
-      loadAllShards: async (dir: string) => {
-        const shards = await realLoadAllShards(dir)
-        setImmediate(signalDirectPathSettled)
-        return shards
-      },
-    }))
-    try {
-      const { exports } = await bootMemoryPlugin(agentDir, {})
-
-      const retrievalContext = { results: 'SENTINEL' }
-      await exports.hooks!['session.turn.start']!(
-        { sessionId: 'ses_optout_direct', agentDir, userPrompt: 'small?', retrievalContext },
-        { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
-      )
-
-      await directPathSettled
-      expect(retrievalContext.results).toBe('SENTINEL')
-    } finally {
-      mock.restore()
-    }
   })
 })
 
@@ -653,41 +368,6 @@ describe('session.end hook', () => {
     await waitFor(() => spawned.length >= 1, 'memory-logger spawn on session.end')
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.name).toBe('memory-logger')
-  })
-
-  test('deletes the retrieval cache file on close', async () => {
-    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 })
-    const cacheFilePath = join(agentDir, 'memory', '.retrieval-cache', 'ses_cache.md')
-    await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
-    await writeFile(cacheFilePath, 'retrieved context', 'utf8')
-
-    await exports.hooks!['session.end']!({ sessionId: 'ses_cache' } as SessionEndEvent, {
-      agentDir,
-      pluginName: 'memory',
-      logger: createPluginLogger('m'),
-    })
-
-    await waitFor(() => !existsSync(cacheFilePath), 'retrieval cache unlinked')
-    expect(existsSync(cacheFilePath)).toBe(false)
-  })
-
-  test('logs a warning when retrieval cache cleanup fails for a non-ENOENT error', async () => {
-    const { logger, logs } = makeCapturingLogger()
-    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 }, { logger })
-    const cacheFilePath = join(agentDir, 'memory', '.retrieval-cache', 'ses_cache.md')
-    await mkdir(cacheFilePath, { recursive: true })
-
-    await exports.hooks!['session.end']!({ sessionId: 'ses_cache' } as SessionEndEvent, {
-      agentDir,
-      pluginName: 'memory',
-      logger,
-    })
-
-    await waitFor(
-      () => logs.warn.some((m) => m.includes('failed to clean retrieval cache')),
-      'retrieval cache cleanup warning',
-    )
-    expect(logs.warn.some((m) => m.includes('failed to clean retrieval cache'))).toBe(true)
   })
 
   test('on close without a prior idle event, does NOT spawn (no transcript path is known)', async () => {
@@ -1583,29 +1263,16 @@ describe('doctor checks', () => {
     expect(existsSync(backupPath)).toBe(false)
   })
 
-  test('vector-index: no-op ok when memory.vector is not enabled', async () => {
+  test('vector-index: runs the real index check (ok for an empty indexed agent)', async () => {
+    // Booting opens the store, which creates the index DB, so the realistic
+    // empty agent is healthy (nothing to index).
     const { exports } = await bootMemoryPlugin(agentDir, {})
 
     const check = exports.doctorChecks?.['vector-index']
     expect(check).toBeDefined()
 
     const { logger } = makeCapturingLogger()
-    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: false } }, logger })
-    expect(result.status).toBe('ok')
-    expect(result.message).toContain('not enabled')
-    expect(result.fix).toBeUndefined()
-  })
-
-  test('vector-index: when enabled, runs the real index check (ok for an empty agent)', async () => {
-    // Booting with vector enabled opens the store, which creates the index DB,
-    // so the realistic enabled-but-empty agent is healthy (nothing to index).
-    const { exports } = await bootMemoryPlugin(agentDir, { vector: { enabled: true } })
-
-    const check = exports.doctorChecks?.['vector-index']
-    expect(check).toBeDefined()
-
-    const { logger } = makeCapturingLogger()
-    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: true } }, logger })
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
     expect(result.status).toBe('ok')
     expect(result.message).toContain('0/0')
   })

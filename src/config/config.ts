@@ -1197,7 +1197,7 @@ export function loadConfigBundleSync(cwd: string): { config: Config; pluginConfi
 // `changed` is the boolean equivalent of `applied.length > 0` and is preserved
 // for back-compat with the many call sites that only care whether ANY rewrite
 // happened.
-export type MigrationStep = { kind: 'drop-github-seeded-event-allowlist' }
+export type MigrationStep = { kind: 'drop-github-seeded-event-allowlist' } | { kind: 'drop-memory-vector-config' }
 
 export type MigrationResult = { json: unknown; changed: boolean; applied: MigrationStep[] }
 
@@ -1207,18 +1207,20 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
   }
 
   const obj = json as Record<string, unknown>
-  const hasSeededGithubEventAllowlist = isSeededGithubEventAllowlist(obj)
-  if (!hasSeededGithubEventAllowlist) {
-    return { json, changed: false, applied: [] }
-  }
-
   const applied: MigrationStep[] = []
   const next: Record<string, unknown> = { ...obj }
-  if (hasSeededGithubEventAllowlist) {
+
+  if (isSeededGithubEventAllowlist(obj)) {
     dropSeededGithubEventAllowlist(next)
     applied.push({ kind: 'drop-github-seeded-event-allowlist' })
   }
-  return { json: next, changed: true, applied }
+
+  if (hasLegacyMemoryVectorConfig(obj)) {
+    dropMemoryVectorConfig(next)
+    applied.push({ kind: 'drop-memory-vector-config' })
+  }
+
+  return { json: applied.length > 0 ? next : json, changed: applied.length > 0, applied }
 }
 
 // True when channels.github.eventAllowlist deep-equals an allowlist that
@@ -1241,6 +1243,23 @@ function dropSeededGithubEventAllowlist(next: Record<string, unknown>): void {
   if (!isPlainObject(github)) return
   const { eventAllowlist: _dropped, ...rest } = github
   next.channels = { ...channels, github: rest }
+}
+
+function hasLegacyMemoryVectorConfig(obj: Record<string, unknown>): boolean {
+  const memory = obj.memory
+  return isPlainObject(memory) && Object.prototype.hasOwnProperty.call(memory, 'vector')
+}
+
+function dropMemoryVectorConfig(next: Record<string, unknown>): void {
+  const memory = next.memory
+  if (!isPlainObject(memory)) return
+  const clone = { ...memory }
+  delete clone.vector
+  if (Object.keys(clone).length === 0) {
+    delete next.memory
+    return
+  }
+  next.memory = clone
 }
 
 function arraysEqual(a: readonly unknown[], b: readonly unknown[]): boolean {
@@ -1267,6 +1286,8 @@ function shortStepLabel(step: MigrationStep): string {
   switch (step.kind) {
     case 'drop-github-seeded-event-allowlist':
       return 'drop seeded channels.github.eventAllowlist'
+    case 'drop-memory-vector-config':
+      return 'drop memory.vector config'
   }
 }
 
@@ -1274,6 +1295,8 @@ function describeStep(step: MigrationStep): string {
   switch (step.kind) {
     case 'drop-github-seeded-event-allowlist':
       return 'drop seeded channels.github.eventAllowlist so it re-tracks the shipped default'
+    case 'drop-memory-vector-config':
+      return 'drop memory.vector config; vector memory is always on'
   }
 }
 

@@ -129,7 +129,7 @@ type ScaffoldedConfig = {
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
   sandbox?: { realProc?: boolean; writablePaths?: string[]; symlinks?: Array<{ from: string; to: string }> }
-  memory?: { vector?: { enabled?: boolean } }
+  memory?: Record<string, unknown>
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -155,6 +155,7 @@ const deterministicAllocator = async (preferred: number): Promise<number> => (pr
 // `bun install` against the tmpdir, which is irrelevant to most of these
 // tests and would slow each one by ~hundreds of ms.
 const noEnsureDeps = async (): Promise<{ ok: true; installed: false }> => ({ ok: true, installed: false })
+const noEnsureModels = async (): Promise<void> => {}
 
 // The real autoUpgrade detector sees the test runner itself as a LOCAL typeclaw
 // checkout and would relink each agent's package.json — disruptive to tests that
@@ -166,7 +167,7 @@ const noAutoUpgrade = async () => ({ kind: 'up-to-date', installedVersion: '0.1.
 // pay the production 1.5s wait. Verification has its own dedicated test file
 // (verify-running.test.ts); start.test.ts only proves start() routes a
 // failing verifier into the documented failure response.
-const bypassVerify = { verifyRunning: async () => ({ ok: true as const }) }
+const bypassVerify = { verifyRunning: async () => ({ ok: true as const }), ensureModels: noEnsureModels }
 
 function labelValue(runArgs: string[], key: string): string | undefined {
   for (let i = 0; i < runArgs.length - 1; i++) {
@@ -381,7 +382,6 @@ describe('planStart', () => {
       await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
       await writeTypeclawConfig(root, {
         mounts: [{ name: 'projects', path: projectDir }],
-        memory: { vector: { enabled: true } },
       })
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
@@ -690,10 +690,10 @@ describe('planStart model mount', () => {
     readonly: true,
   }
 
-  test('adds shared readonly model cache mount at /opt/models when memory.vector.enabled', async () => {
+  test('adds shared readonly model cache mount at /opt/models', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
+    await writeTypeclawConfig(root)
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
@@ -701,10 +701,10 @@ describe('planStart model mount', () => {
     expect(hasBindMount(plan.runArgs, modelsMount)).toBe(true)
   })
 
-  test('sets TYPECLAW_MODEL_CACHE env var to /opt/models when memory.vector.enabled', async () => {
+  test('sets TYPECLAW_MODEL_CACHE env var to /opt/models', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
+    await writeTypeclawConfig(root)
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
@@ -715,7 +715,7 @@ describe('planStart model mount', () => {
   test('model mount appears before imageTag (last positional arg)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: true } } })
+    await writeTypeclawConfig(root)
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
@@ -725,36 +725,25 @@ describe('planStart model mount', () => {
     expect(specIdx).toBeLessThan(plan.runArgs.length - 1)
   })
 
-  test('omits model cache mount and TYPECLAW_MODEL_CACHE when vector is opted out', async () => {
-    await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: false } } })
-
-    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
-
-    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
-    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
-  })
-
-  test('omits model cache mount when memory.vector block is absent (default opt-out)', async () => {
+  test('mounts model cache when memory config is absent', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root)
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
-    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(true)
+    expect(plan.runArgs).toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 
-  test('omits model cache mount when typeclaw.json is missing entirely', async () => {
+  test('mounts model cache when typeclaw.json is missing entirely', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(false)
-    expect(plan.runArgs).not.toContain('TYPECLAW_MODEL_CACHE=/opt/models')
+    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(true)
+    expect(plan.runArgs).toContain('TYPECLAW_MODEL_CACHE=/opt/models')
   })
 })
 
@@ -1523,6 +1512,53 @@ function fakeDockerExec(scenario: {
 }
 
 describe('start (composition)', () => {
+  test('provisions embedding models on every fresh start', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    let ensureModelCalls = 0
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      ensureModels: async () => {
+        ensureModelCalls += 1
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(ensureModelCalls).toBe(1)
+  })
+
+  test('reports an actionable error when embedding model provisioning fails', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      ...bypassVerify,
+      ensureModels: async () => {
+        throw new Error('offline')
+      },
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'embedding model unavailable; ensure network access on first start or a populated model cache: offline',
+    })
+  })
+
   test('publishes on all host interfaces for Docker Desktop', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })

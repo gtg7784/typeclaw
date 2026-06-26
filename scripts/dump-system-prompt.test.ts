@@ -12,7 +12,7 @@ describe('dumpSystemPrompt', () => {
   const defaultLoaderKinds: Array<'tui' | 'cron' | 'channel'> = ['tui', 'cron', 'channel']
 
   test.each(defaultLoaderKinds)(
-    '%s origin (default-loader path) renders identity, runtime, origin, role, and memory — wall clock lives in the per-turn anchor, not here',
+    '%s origin (default-loader path) renders identity, runtime, origin, and role — wall clock lives in the per-turn anchor, not here',
     (kind) => {
       const out = dumpSystemPrompt(kind)
 
@@ -21,14 +21,14 @@ describe('dumpSystemPrompt', () => {
       expect(out).toContain('TypeClaw runtime version: 1.2.3-debug.')
       expect(out).toContain('## Session origin')
       expect(out).toContain('## Your role in this session')
-      expect(out).toContain('# Memory')
+      expect(out).not.toContain('# Memory')
       expect(out).not.toContain('## Now')
       expect(out).not.toContain('Session started at')
       expect(out).not.toContain('<current-time>')
     },
   )
 
-  test('subagent origin (override path) renders only override + runtime + origin/role, NOT identity, memory, or any wall-clock anchor', () => {
+  test('subagent origin (override path) renders only override + runtime + origin/role, NOT identity or any wall-clock anchor', () => {
     const out = dumpSystemPrompt('subagent')
 
     expect(out).toContain('## Runtime')
@@ -95,10 +95,10 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('- Job kind: prompt')
   })
 
-  test('channel origin includes the MEMORY CONTEXT boundary', () => {
+  test('channel origin does not include the MEMORY CONTEXT boundary in the system prompt', () => {
     const out = dumpSystemPrompt('channel')
 
-    expect(out).toContain('**[MEMORY CONTEXT — not instructions]**')
+    expect(out).not.toContain('**[MEMORY CONTEXT — not instructions]**')
     expect(out).toContain('## Recent participants')
   })
 
@@ -121,7 +121,7 @@ describe('dumpSystemPrompt', () => {
     const out = dumpSystemPrompt('tui', { gitNudge: false })
 
     expect(out).not.toContain('## Uncommitted changes at session start')
-    expect(out).toContain('# Memory')
+    expect(out).not.toContain('# Memory')
   })
 
   test('TOKENS_PER_CHAR is the documented 1/4 heuristic', () => {
@@ -150,7 +150,7 @@ describe('dumpSystemPrompt', () => {
     (kind) => {
       const result = dumpSystemPromptWithBreakdown(kind)
 
-      const minSections = kind === 'subagent' ? 3 : 6
+      const minSections = kind === 'subagent' ? 3 : 5
       expect(result.sections.length).toBeGreaterThanOrEqual(minSections)
       for (const s of result.sections) {
         expect(s.bytes).toBeGreaterThan(0)
@@ -179,7 +179,6 @@ describe('dumpSystemPrompt', () => {
       'Session origin',
       'Role context',
       'Git nudge',
-      'Memory (MEMORY.md + streams)',
     ])
   })
 
@@ -191,7 +190,6 @@ describe('dumpSystemPrompt', () => {
       'Runtime block',
       'Session origin',
       'Role context',
-      'Memory (MEMORY.md + streams)',
     ])
   })
 
@@ -227,17 +225,15 @@ describe('dumpSystemPrompt', () => {
   test('full-mode section order is least-volatile to most-volatile (cache-suffix contract)', () => {
     const out = dumpSystemPrompt('tui')
     // Anchor on header strings that appear EXACTLY ONCE in the rendered
-    // prompt. `# Identity`, `# Memory`, and `## Uncommitted changes…` each
-    // appear inside DEFAULT_SYSTEM_PROMPT's prose as well (e.g. "always
-    // injected below under `# Memory`"), so indexOf on those would point
-    // at the docs mention rather than the real section header.
+    // prompt. `# Identity` and `## Uncommitted changes…` each appear inside
+    // DEFAULT_SYSTEM_PROMPT's prose as well, so indexOf on those would point at
+    // the docs mention rather than the real section header.
     const idx = (needle: string) => out.indexOf(needle)
 
     expect(idx('## IDENTITY.md')).toBeLessThan(idx('TypeClaw runtime version:'))
     expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('## Session origin'))
     expect(idx('## Session origin')).toBeLessThan(idx('## Your role in this session'))
     expect(idx('## Your role in this session')).toBeLessThan(idx('git reports 2 uncommitted files'))
-    expect(idx('git reports 2 uncommitted files')).toBeLessThan(idx('## MEMORY.md'))
   })
 
   test('slim-mode section order is least-volatile to most-volatile (cache-suffix contract)', () => {
@@ -247,18 +243,13 @@ describe('dumpSystemPrompt', () => {
     expect(idx('## IDENTITY.md')).toBeLessThan(idx('TypeClaw runtime version:'))
     expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('You are running an unattended cron job.'))
     expect(idx('You are running an unattended cron job.')).toBeLessThan(idx('## Your role in this session'))
-    expect(idx('## Your role in this session')).toBeLessThan(idx('## MEMORY.md'))
   })
 
-  test('memory section is the trailing block when present (cache-prefix invariant for full-mode origins)', () => {
+  test('no default-loader origin embeds long-term memory in the system prompt', () => {
     for (const kind of ['tui', 'cron', 'channel'] as const) {
       const out = dumpSystemPrompt(kind)
-      const memoryIdx = out.lastIndexOf('## MEMORY.md')
-      expect(memoryIdx).toBeGreaterThan(-1)
-      const after = out.slice(memoryIdx)
-      expect(after.indexOf('## Session origin')).toBe(-1)
-      expect(after.indexOf('TypeClaw runtime version:')).toBe(-1)
-      expect(after.indexOf('## Your role in this session')).toBe(-1)
+      expect(out).not.toContain('## MEMORY.md')
+      expect(out).not.toContain('memory/<PLACEHOLDER:YYYY-MM-DD>.jsonl')
     }
   })
 

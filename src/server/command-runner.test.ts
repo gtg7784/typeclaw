@@ -766,11 +766,9 @@ describe('runPromptForCommand', () => {
     expect(new Set(seen).size).toBe(3)
   })
 
-  // Regression guard: forwarding suppressSystemMemory removed system-prompt
-  // memory from command/handler sessions, but this path never fired
-  // session.turn.start, so a vector agent's command prompts got NO memory at
-  // all. The turn-start hook must run and its retrievalContext.results must be
-  // appended to the prompt text, mirroring the TUI/channel/cron/subagent paths.
+  // Regression guard: command/handler sessions must fire session.turn.start so
+  // vector memory can append retrievalContext.results to the prompt text,
+  // mirroring the TUI/channel/cron/subagent paths.
   test('fires session.turn.start and appends retrievalContext.results to the command prompt', async () => {
     const { sessionFactory, agentDir } = makeSessionFactoryForTest()
     const hooks = createHookBus()
@@ -816,7 +814,6 @@ describe('runPromptForCommand', () => {
       runtimeVersion: '0.0.0-test',
       containerName: 'test-agent',
       sessionFactory,
-      suppressSystemMemory: true,
       _createSession: fakeCreate as Parameters<typeof runPromptForCommand>[0]['_createSession'],
     })
 

@@ -98,7 +98,7 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
 
 async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
   const memoryPlugin = createMemoryPluginWithStoreCapture({ queryEmbedFn: queryAligned() })
-  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes, vector: { enabled: true } })
+  const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes })
   if (!parsed.success) throw new Error(parsed.error.message)
   const ctx = createPluginContext({
     name: 'memory',

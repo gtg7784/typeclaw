@@ -16,7 +16,7 @@ export async function runVectorIndexDoctor(agentDir: string): Promise<PluginChec
   if (!existsSync(dbPath)) {
     return {
       status: 'warning',
-      message: 'vector memory is enabled but the index DB is missing; it rebuilds on the next startup',
+      message: 'vector memory index DB is missing; it rebuilds on the next startup',
     }
   }
 

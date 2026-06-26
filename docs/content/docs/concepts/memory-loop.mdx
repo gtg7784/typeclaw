@@ -12,7 +12,7 @@ TypeClaw's bundled `memory` plugin takes a different shape. Three subagents, thr
 
 **Dream** runs on a cron schedule (default `*/30 * * * *`, every 30 minutes). The `dreaming` subagent reads the undreamed fragments and consolidates them — into per-topic shards at `memory/topics/<slug>.md` (the long-term memory injected into prompts) and, when it spots a repeatable procedure, into a new skill at `memory/skills/<name>/SKILL.md`. Every consolidation is git-committed with a one-line summary.
 
-**Apply** is automatic. The next prompt sees the updated topic shards — injected into the system prompt by default, or per-turn into the user prompt when `memory.vector.enabled` is on. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. The agent doesn't have to remember to use them — they're just there, with names and descriptions tuned for retrieval.
+**Apply** is automatic. The next prompt sees the updated topic shards because memory is injected per turn into the user prompt; the system prompt never contains long-term memory; vector memory is always on. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. The agent doesn't have to remember to use them — they're just there, with names and descriptions tuned for retrieval.
 
 ## Why "dreaming"
 

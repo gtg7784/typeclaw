@@ -39,11 +39,10 @@ type TransformersEnv = typeof TransformersEnvValue
 type FeatureExtractor = Awaited<ReturnType<typeof TransformersPipeline<'feature-extraction'>>>
 
 // Defer the transformers (and thus sharp/onnxruntime) module load until an
-// embedding is actually requested. typeclaw's memory plugin is always loaded
-// and `vector.enabled` defaults to false, so a top-level static import would
-// drag the heavy native stack onto every container boot — and crash it when
-// sharp can't resolve its platform binary. Memoized so the module evaluates
-// at most once.
+// embedding is actually requested. The memory plugin is always loaded, so a
+// top-level static import would drag the heavy native stack onto every
+// container boot — and crash it when sharp can't resolve its platform binary.
+// Memoized so the module evaluates at most once.
 type TransformersModule = { env: TransformersEnv; pipeline: typeof TransformersPipeline }
 
 let transformersModulePromise: Promise<TransformersModule> | undefined

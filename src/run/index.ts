@@ -20,7 +20,6 @@ import {
   type SubagentShared,
 } from '@/agent/subagents'
 import { clearTodosForOrigin, markRestartAbortPendingForOrigin } from '@/agent/todo/continuation-wiring'
-import { vectorEnabledFromMemoryConfig } from '@/bundled-plugins/memory/vector/config'
 import { embed, warmEmbedder } from '@/bundled-plugins/memory/vector/embedder'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
@@ -219,10 +218,6 @@ async function startAgentRuntime(
   onProcessGlobalsInstalled(disposeProcessGlobals)
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
-  // Vector agents omit the system-prompt `# Memory` section and inject memory
-  // per-turn instead. Derived once here: `memory.vector.enabled` is
-  // restart-required, so a single boot read is coherent for the process.
-  const suppressSystemMemory = vectorEnabledFromMemoryConfig(pluginConfigsByName.memory)
   const githubTokenBridge = createGithubTokenBridge()
   const mcpManager =
     cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
@@ -256,7 +251,7 @@ async function startAgentRuntime(
     hasGithubAppTokenResolver: githubTokenBridge.hasAppTokenResolver,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
-  const vectorStartupPromise = suppressSystemMemory ? runVectorStartup(cwd) : Promise.resolve()
+  const vectorStartupPromise = runVectorStartup(cwd)
   let pluginsLoaded: LoadPluginsResult
   try {
     const [loaded] = await Promise.all([pluginsLoadedPromise, vectorStartupPromise])
@@ -368,7 +363,6 @@ async function startAgentRuntime(
       stream,
       reloadRegistry,
       pluginRuntime,
-      suppressSystemMemory,
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
@@ -612,7 +606,6 @@ async function startAgentRuntime(
             containerName: containerNameOpt.containerName,
             sessionFactory,
             channelRouter: channelManager.router,
-            suppressSystemMemory,
             ...mcpManagerOpt,
           }),
         subagent: (subName: string, payload?: unknown) =>
@@ -653,7 +646,6 @@ async function startAgentRuntime(
         channelRouter: channelManager.router,
         origin: cronOrigin,
         permissions: pluginsLoaded.permissions,
-        suppressSystemMemory,
         ...(refOverride !== undefined ? { refOverride } : {}),
         ...(snap.hasAnyPluginContent
           ? {
@@ -786,12 +778,10 @@ async function startAgentRuntime(
   // In-flight coalescing for direct ctx.spawnSubagent calls mirrors the
   // SubagentConsumer's stream-path gate (subagents.ts:441). Two queued
   // `new-session` messages for the same (name, inFlightKey) drop the second
-  // on the consumer side; without the same gate here, two consecutive
-  // session.prompt fires (cold-start prompt N immediately followed by prompt
-  // N+1 on the same channel session) could both fire memory-retrieval spawns
-  // racing to write `memory/.retrieval-cache/<sessionId>.md`. Awaiting the
-  // spawn in the hook used to mask this; now that the hook is fire-and-forget,
-  // the race is exposed and the gate is mandatory.
+  // on the consumer side; without the same gate here, two consecutive direct
+  // plugin spawns with the same in-flight key could race. Awaiting the spawn in
+  // the hook used to mask this; detached hook paths expose the race and make the
+  // gate mandatory.
   //
   // Same key shape as the consumer: `${name}:${inFlightKey(payload)}` when the
   // subagent declares one, else just `${name}`. Collisions resolve cleanly
@@ -898,7 +888,6 @@ async function startAgentRuntime(
       outbound,
       sessionFactory,
       channelRouter: channelManager.router,
-      suppressSystemMemory,
       ...mcpManagerOpt,
     })
 

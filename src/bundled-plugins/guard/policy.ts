@@ -17,10 +17,5 @@ export {
   isSkillAuthoringAllowed,
 } from './policies/skill-authoring'
 export { GUARD_MEMORY_TOPICS_DELETE, checkMemoryTopicsDeleteGuard } from './policies/memory-topics-delete'
-export {
-  GUARD_MEMORY_RETRIEVAL_CACHE_WRITE,
-  GUARD_MEMORY_RETRIEVAL_CACHE_WRITE_SEVERITY,
-  isMemoryRetrievalCacheWriteAllowed,
-} from './policies/memory-retrieval-cache-write'
 export { isMemoryTopicsWriteAllowed } from './policies/memory-topics-write'
 export { GUARD_UNCOMMITTED_CHANGES, checkUncommittedChangesAdvice } from './policies/uncommitted-changes'
