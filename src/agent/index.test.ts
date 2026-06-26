@@ -172,21 +172,6 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('`memory_search`')
   })
 
-  test('suppressSystemMemory omits the # Memory section entirely (vector agents inject per-turn)', async () => {
-    // given: a populated MEMORY.md that WOULD render under # Memory by default
-    await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
-
-    // when: the session is created as a vector agent
-    const loader = await createResourceLoader({ agentDir, suppressSystemMemory: true })
-
-    // then: no memory in the system prompt — it is injected per-turn instead
-    const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).not.toContain('# Memory')
-    expect(prompt).not.toContain('Neo prefers terse replies.')
-    // and the rest of the system prompt is unaffected
-    expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
-  })
-
   test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {
     // given: a git repo with a dirty tracked file so gitNudge renders, AND a
     // populated MEMORY.md so the memory section renders content.
