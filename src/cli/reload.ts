@@ -4,6 +4,7 @@ import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/con
 import { findAgentDir } from '@/init'
 import { requestReloadWithFallback, type ReloadResult } from '@/reload'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { c, errorLine, spinner } from './ui'
 
 export const reload = defineCommand({
@@ -84,6 +85,11 @@ export function printReloadRecoveryHint(recoveredHostError: string | undefined):
 
 async function defaultTarget(): Promise<{ url: string; cwd: string; token: string | null }> {
   const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+  const preflight = await preflightDocker()
+  if (!preflight.ok) {
+    printDockerGuidance(preflight)
+    process.exit(1)
+  }
   const precheck = await requireContainerRunning({ cwd })
   if (!precheck.ok) {
     console.error(errorLine(precheck.reason))
