@@ -4,12 +4,11 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
-import { agentUsesVector } from '@/bundled-plugins/memory/vector/config'
 import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config, type PortForward } from '@/config'
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
-import { ensureModels } from '@/hostd/models'
+import { ensureModels as ensureHostModels } from '@/hostd/models'
 import { homeRoot } from '@/hostd/paths'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon, type EnsureDaemonResult } from '@/hostd/spawn'
@@ -132,6 +131,9 @@ export type StartOptions = {
   // injected from known-good values even under IPC congestion. See type docs.
   currentHostDaemon?: CurrentHostDaemon
   ensureDeps?: (cwd: string, opts?: { force?: boolean }) => Promise<EnsureDepsResult>
+  // Test seam for host embedding model provisioning. Production callers use
+  // the file-locked host cache downloader.
+  ensureModels?: () => Promise<void>
   // Test seam for the typeclaw-version auto-upgrade. Production callers omit
   // this and get the real autoUpgradeTypeclawDep (which reads the CLI's own
   // package.json). Tests inject a stub to simulate `bun -g update typeclaw`
@@ -210,6 +212,7 @@ export async function start({
   reuseCurrentHostDaemon = false,
   currentHostDaemon,
   ensureDeps = (dir, opts) => ensureDepsInstalled({ cwd: dir, ...opts }),
+  ensureModels = ensureHostModels,
   autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir, localSpec: resolveTypeclawSpec(dir) }),
   forceBunUpdate = runBunUpdate,
   readInstalledVersion = readInstalledTypeclawVersionFromAgent,
@@ -378,19 +381,14 @@ export async function start({
     // container will actually load.
     const dockerfileRefresh = await refreshDockerfile(cwd, { buildKit: hasBuildx })
 
-    // Provision the embedding model only when THIS agent opts into vector. The
-    // container embedder runs with local_files_only, so the model must already
-    // be on the host's ~/.typeclaw/models cache before the container boots —
-    // otherwise the startup vector index build fails. Kick the download off here
-    // (idempotent + file-locked) so it overlaps the docker build, then await it
-    // just before `docker run`. A vector-opted-out agent never reaches this, so
-    // a host whose containers are all opted out never downloads the ~280 MB
-    // model — including every agent under `typeclaw compose`, since each agent's
-    // start() makes this decision independently. The `.catch` swallow only keeps
-    // an early return between here and the await from logging an unhandled
-    // rejection; the real error is surfaced when we await at the run site below.
-    const modelsReady = agentUsesVector(cwd) ? ensureModels() : null
-    modelsReady?.catch(() => {})
+    // The container embedder runs with local_files_only, so the model must
+    // already be on the host's ~/.typeclaw/models cache before the container
+    // boots. Kick the download off here (idempotent + file-locked) so it
+    // overlaps the docker build, then await it just before `docker run`. The
+    // `.catch` swallow only keeps an early return between here and the await
+    // from logging an unhandled rejection; the real error is surfaced below.
+    const modelsReady = ensureModels()
+    modelsReady.catch(() => {})
 
     if (state.exists) {
       // Container holds the name but is not running. Without `--rm`, this is
@@ -483,15 +481,13 @@ export async function start({
       built = true
     }
 
-    if (modelsReady) {
-      try {
-        await modelsReady
-      } catch (error) {
-        await cleanupHostDaemonRegistration(containerName, hostd)
-        return {
-          ok: false,
-          reason: `embedding model provisioning failed (memory.vector.enabled): ${error instanceof Error ? error.message : String(error)}`,
-        }
+    try {
+      await modelsReady
+    } catch (error) {
+      await cleanupHostDaemonRegistration(containerName, hostd)
+      return {
+        ok: false,
+        reason: `embedding model unavailable; ensure network access on first start or a populated model cache: ${error instanceof Error ? error.message : String(error)}`,
       }
     }
 
@@ -759,15 +755,10 @@ export async function planStart({
     runArgs.push(...dockerBindMount({ src: hostPath, dst: target, readonly: mount.readOnly }))
   }
 
-  // Shared model cache mount for embeddings. Gated on vector opt-in: a
-  // vector-opted-out container has no embedder to feed, and the host never
-  // populates ~/.typeclaw/models for it (see ensureModels gating in start()),
-  // so mounting an empty cache would only invite a confusing local_files_only
-  // miss if something inside the container reached for the model anyway.
-  if (agentUsesVector(cwd)) {
-    runArgs.push(...dockerBindMount({ src: join(homeRoot(), 'models'), dst: '/opt/models', readonly: true }))
-    runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
-  }
+  // Shared model cache mount for embeddings. Vector memory is always on, and
+  // the embedder runs with local_files_only inside the container.
+  runArgs.push(...dockerBindMount({ src: join(homeRoot(), 'models'), dst: '/opt/models', readonly: true }))
+  runArgs.push('-e', 'TYPECLAW_MODEL_CACHE=/opt/models')
 
   runArgs.push(imageTag)
 
