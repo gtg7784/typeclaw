@@ -438,5 +438,12 @@ function describeSource(source: CredentialSource): string {
 
 function nextStepHints(opts: { credentialChanged: boolean }): { label: string; command: string }[] {
   if (!opts.credentialChanged) return []
-  return [{ label: 'If the agent is running:', command: 'typeclaw reload' }]
+  // secrets.json is bind-mounted live, so `typeclaw reload` clears the provider
+  // auth cache and the next call re-reads this file. Editing a key's value in
+  // .env instead still needs a restart — container env is fixed at `docker run`
+  // — so surface both paths to the user, not just reload.
+  return [
+    { label: 'Apply the secrets.json change:', command: 'typeclaw reload' },
+    { label: 'If you changed a key in .env:', command: 'typeclaw restart' },
+  ]
 }

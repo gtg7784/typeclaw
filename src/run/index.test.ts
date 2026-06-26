@@ -286,6 +286,14 @@ describe('startAgent', () => {
     expect(running.reloadRegistry.has('cron')).toBe(true)
   })
 
+  test('registers the providers reload scope before channels so secrets.json key rotation takes effect on reload', async () => {
+    running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron: noCron })
+
+    expect(running.reloadRegistry.has('providers')).toBe(true)
+    const scopes = running.reloadRegistry.list().map((r) => r.scope)
+    expect(scopes.indexOf('providers')).toBeLessThan(scopes.indexOf('channels'))
+  })
+
   test('logs and continues when cron.json fails to load', async () => {
     const loadCron: LoadCronFn = async () => ({ ok: false, reason: 'bad json' }) as LoadCronResult
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
