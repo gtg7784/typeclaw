@@ -9,9 +9,9 @@ The agent's long-term memory is sharded across files in `memory/topics/<slug>.md
 
 ## Reading
 
-The `# Memory` section comes from topic shards only. Undreamed daily-stream events are **not** injected — call `memory_search` when you need them. When total shard bytes are above the 16 KB injection budget (or when speaking in a channel), shard bodies are dropped — only the heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` shows; call `memory_search` to fetch the bodies you need. The same `memory_search` covers both surfaces (topic shards and undreamed stream events), so one tool call reaches everything.
+The `# Memory` block is injected per turn into the user prompt; the system prompt never contains long-term memory; vector memory is always on. Undreamed daily-stream events are **not** dumped wholesale into prompts — use `memory_search` when you need them. When speaking in a channel, shard bodies are dropped and only headings/slugs show; call `memory_search` to fetch the bodies you need. The same `memory_search` covers both surfaces (topic shards and undreamed stream events), so one tool call reaches everything.
 
-**Where the `# Memory` section lives depends on `memory.vector.enabled`.** With vector **off** (default), it's part of the system prompt, snapshotted once at session creation. With vector **on**, it is removed from the system prompt and injected fresh into each **user turn** instead: under budget you get all shard bodies, over budget you get the top-K shards/fragments most relevant to the current message (hybrid vector + keyword search). This keeps the system-prompt cache prefix stable across a session and lets retrieval track the current topic instead of a stale session-start snapshot. Either way `memory_search` remains available on demand.
+Under budget you get shard bodies de-duplicated across turns; over budget you get the top-K shards/fragments/references most relevant to the current message (hybrid vector + keyword search). This keeps the system-prompt cache prefix stable across a session and lets retrieval track the current topic instead of a stale session-start snapshot. `memory_search` remains available on demand.
 
 ## Writing
 

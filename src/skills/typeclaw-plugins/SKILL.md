@@ -380,7 +380,7 @@ hooks: {
 
 The `prompt` field on `SessionPromptEvent` is the system prompt as it's being composed by `createResourceLoader` (`basePrompt + IDENTITY.md + SOUL.md`), NOT the user's most recent message. Reading it as if it were the user's prompt — and feeding it to a retrieval system, classifier, or LLM — will keyword-mine TypeClaw's framing prose (`TypeClaw`, `subagent`, `AGENTS.md`) on every session.
 
-If you want the **user's actual prompt** (their message text), subscribe to `session.turn.start` and read `event.userPrompt`. The bundled memory plugin's `memory-retrieval` subagent learned this the hard way; see `src/bundled-plugins/memory/index.ts`'s `session.turn.start` handler.
+If you want the **user's actual prompt** (their message text), subscribe to `session.turn.start` and read `event.userPrompt`. The bundled memory plugin's per-turn retrieval uses this hook so it embeds the user's text instead of the assembling system prompt; see `src/bundled-plugins/memory/index.ts`'s `session.turn.start` handler.
 
 #### CRITICAL: `session.prompt` and provider prompt caching
 
