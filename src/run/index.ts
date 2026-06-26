@@ -778,12 +778,10 @@ async function startAgentRuntime(
   // In-flight coalescing for direct ctx.spawnSubagent calls mirrors the
   // SubagentConsumer's stream-path gate (subagents.ts:441). Two queued
   // `new-session` messages for the same (name, inFlightKey) drop the second
-  // on the consumer side; without the same gate here, two consecutive
-  // session.prompt fires (cold-start prompt N immediately followed by prompt
-  // N+1 on the same channel session) could both fire memory-retrieval spawns
-  // racing to write `memory/.retrieval-cache/<sessionId>.md`. Awaiting the
-  // spawn in the hook used to mask this; now that the hook is fire-and-forget,
-  // the race is exposed and the gate is mandatory.
+  // on the consumer side; without the same gate here, two consecutive direct
+  // plugin spawns with the same in-flight key could race. Awaiting the spawn in
+  // the hook used to mask this; detached hook paths expose the race and make the
+  // gate mandatory.
   //
   // Same key shape as the consumer: `${name}:${inFlightKey(payload)}` when the
   // subagent declares one, else just `${name}`. Collisions resolve cleanly

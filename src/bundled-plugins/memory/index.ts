@@ -23,7 +23,6 @@ import { bumpReferenceAccess } from './references/load-references'
 import { memoryCommands } from './search-command'
 import { createMemorySearchTool } from './search-tool'
 import { type InjectedMemoryState, partitionRetrievedMemoryItems } from './turn-dedup'
-import { vectorConfigSchema } from './vector/config'
 import { runVectorIndexDoctor } from './vector/doctor'
 import { embed } from './vector/embedder'
 import { hybridSearch, type EmbedFn } from './vector/hybrid'
@@ -125,7 +124,6 @@ const memoryConfigSchema = z
     // undocumented for users.
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
-    vector: vectorConfigSchema,
   })
   .default({
     idleMs: DEFAULT_IDLE_MS,
@@ -133,7 +131,6 @@ const memoryConfigSchema = z
     injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
     minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
-    vector: { enabled: false },
   })
 
 const VECTOR_TURN_TOP_K = 10
@@ -164,8 +161,7 @@ const defaultDeps: MemoryPluginDeps = {
 // ~560-token query that trips the 512-token bound warning on every spawn. None
 // of these subagents consume injected long-term memory the way a conversational
 // turn does, so per-turn retrieval is pure waste here. This is the same class of
-// "don't mine framing prose" bug PR #340 fixed for memory-retrieval, applied to
-// the subagent turn-start path.
+// "don't mine framing prose" bug applied to the subagent turn-start path.
 //
 // Two provenance shapes carry infra work, because the two infra subagents are
 // spawned differently:
@@ -406,6 +402,11 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         error: (m: string) => ctx.logger.error(m),
       }
 
+      // Long-lived, process-lifetime SQLite handle for append-time indexing
+      // (the on-write fragment/reference hooks below). Intentionally not closed
+      // by the plugin: it lives as long as the agent runtime and is released on
+      // process teardown. The per-turn query stores opened in renderVectorTurnMemory
+      // are the ones that get closed each turn.
       const appendVectorStore = deps.openAppendVectorStore(ctx.agentDir)
 
       return {
@@ -636,14 +637,8 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             },
           },
           'vector-index': {
-            description: 'vector index is consistent with memory (only when memory.vector is enabled)',
-            run: async (dctx) => {
-              const config = dctx.config as typeof ctx.config
-              if (!vectorEnabled(config)) {
-                return { status: 'ok', message: 'vector memory not enabled; skipping index health check' }
-              }
-              return runVectorIndexDoctor(dctx.agentDir)
-            },
+            description: 'vector index is available and consistent with memory',
+            run: async (dctx) => runVectorIndexDoctor(dctx.agentDir),
           },
         },
       }
@@ -655,12 +650,6 @@ export default createMemoryPlugin()
 
 export function createMemoryPluginForTests(overrides: Partial<MemoryPluginDeps> = {}) {
   return createMemoryPlugin({ ...defaultDeps, ...overrides })
-}
-
-function vectorEnabled(config: unknown): boolean {
-  if (typeof config !== 'object' || config === null) return false
-  const parsed = vectorConfigSchema.safeParse((config as Record<string, unknown>).vector)
-  return parsed.success && parsed.data.enabled
 }
 
 async function readSize(path: string): Promise<number> {

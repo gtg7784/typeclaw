@@ -40,10 +40,9 @@ export const END_HANDLER_TIMEOUT_MS = 60_000
 // (loadSelf, loadMemory shard reads, prefetchChannelContext) before
 // ensureLive fires.
 //
-// The bundled memory plugin's session.prompt fires memory-retrieval
-// detached, so it returns in <1ms in steady state; this ceiling guards
-// third-party hooks that legitimately need to do work inline, AND a
-// regression in the memory plugin that re-introduces an inline await.
+// The bundled memory plugin does per-turn retrieval from session.turn.start;
+// this ceiling guards third-party hooks that legitimately need to do work
+// inline, AND regressions that re-introduce expensive inline prompt work.
 export const PROMPT_HANDLER_TIMEOUT_MS = 20_000
 
 export type RegisteredHook<K extends keyof Hooks> = {

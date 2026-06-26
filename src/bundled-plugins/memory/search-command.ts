@@ -6,7 +6,6 @@ import { z } from 'zod'
 import { defineCommand, type ContainerCommand, type PluginCommand } from '@/plugin'
 
 import { bumpReferenceAccess } from './references/load-references'
-import { agentUsesVector } from './vector/config'
 import { hybridSearch, type EmbedFn, type HybridSearchResult } from './vector/hybrid'
 import { VectorStore } from './vector/store'
 
@@ -24,8 +23,8 @@ export type MemorySearchArgs = z.infer<typeof memorySearchArgs>
 // Container-only: hybridSearch needs the in-container embedding model (the host
 // has no ONNX runtime / weights). The host `typeclaw memory search` CLI proxies
 // here over the /commands websocket and streams this stdout back to the
-// operator. Vector-only by design — no keyword `memory_search` fallback: with
-// vector disabled there is no index to query, so it exits non-zero rather than
+// operator. Vector-only by design — no keyword `memory_search` fallback: without
+// an index DB there is nothing to query, so it exits non-zero rather than
 // silently degrade to a different search the operator didn't request.
 export function createMemorySearchCommand(embedFn?: EmbedFn): ContainerCommand<MemorySearchArgs> {
   return defineCommand({
@@ -33,14 +32,6 @@ export function createMemorySearchCommand(embedFn?: EmbedFn): ContainerCommand<M
     description: 'vector-search the agent long-term memory and print ranked topic/stream/reference hits',
     args: memorySearchArgs,
     async run(ctx, args) {
-      if (!agentUsesVector(ctx.agentDir)) {
-        await writeLine(
-          ctx.stderr,
-          'memory.vector.enabled is false — vector search is unavailable. Enable it in typeclaw.json (memory.vector.enabled) and restart the container.',
-        )
-        return 1
-      }
-
       const dbPath = vectorDbPath(ctx.agentDir)
       if (!existsSync(dbPath)) {
         await writeLine(

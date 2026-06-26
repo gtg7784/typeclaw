@@ -8,19 +8,6 @@ import { isWindows } from '@/shared'
 import { checkNonWorkspaceWriteGuard } from './non-workspace-write'
 
 describe('non-workspace-write guard policy', () => {
-  test('allows memory-retrieval subagent writes to its retrieval cache file', async () => {
-    const agentDir = await makeAgentDir()
-
-    const result = await checkNonWorkspaceWriteGuard({
-      tool: 'write',
-      args: { path: 'memory/.retrieval-cache/s1.md', content: 'summary' },
-      agentDir,
-      origin: { kind: 'subagent', subagent: 'memory-retrieval', parentSessionId: 's1' },
-    })
-
-    expect(result).toBeUndefined()
-  })
-
   test('allows unacknowledged writes to public/ (the guest-visible zone)', async () => {
     const agentDir = await makeAgentDir()
 
@@ -78,7 +65,7 @@ describe('non-workspace-write guard policy', () => {
 
     const result = await checkNonWorkspaceWriteGuard({
       tool: 'write',
-      args: { path: 'memory/.retrieval-cache/s1.md', content: 'x' },
+      args: { path: 'memory/notes/s1.md', content: 'x' },
       agentDir,
       origin: { kind: 'tui', sessionId: 's1' },
     })
@@ -89,12 +76,12 @@ describe('non-workspace-write guard policy', () => {
     })
   })
 
-  test('blocks main-agent writes to the retrieval cache file', async () => {
+  test('blocks main-agent writes to memory files outside explicit memory allowlists', async () => {
     const agentDir = await makeAgentDir()
 
     const result = await checkNonWorkspaceWriteGuard({
       tool: 'write',
-      args: { path: 'memory/.retrieval-cache/s1.md', content: 'summary' },
+      args: { path: 'memory/notes/s1.md', content: 'summary' },
       agentDir,
       origin: { kind: 'tui', sessionId: 's1' },
     })

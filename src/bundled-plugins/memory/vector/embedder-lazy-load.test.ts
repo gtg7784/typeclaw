@@ -2,12 +2,11 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 
 // Regression guard for the container-boot crash: `@huggingface/transformers`
 // eagerly `import sharp`s at module-evaluation time, and the memory plugin
-// (which imports the embedder transitively) is always loaded with
-// `vector.enabled` defaulting to false. If embedder.ts ever goes back to a
-// top-level `import { env, pipeline } from '@huggingface/transformers'`, the
-// transformers module would evaluate the moment embedder.ts is imported —
-// dragging sharp onto every boot and crashing the container. These tests prove
-// the import is deferred to first embed.
+// imports the embedder transitively. If embedder.ts ever goes back to a top-level
+// `import { env, pipeline } from '@huggingface/transformers'`, the transformers
+// module would evaluate the moment embedder.ts is imported — dragging sharp onto
+// every boot and crashing the container. These tests prove the import is
+// deferred to first embed.
 let transformersEvaluated = false
 let lastPipelineOptions: Record<string, unknown> | undefined
 

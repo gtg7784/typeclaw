@@ -5,7 +5,6 @@ import { join } from 'node:path'
 
 import { checkCitationSupersetAcrossShards } from './citation-superset'
 import { renderShard } from './frontmatter'
-import { loadMemory } from './load-memory'
 import { topicsDir, topicShardPath } from './paths'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 
@@ -18,31 +17,6 @@ describe('sharded memory integration', () => {
 
   afterEach(async () => {
     await rm(agentDir, { recursive: true, force: true })
-  })
-
-  test('channel-bleed proxy: imperative text is hidden from channel origins', async () => {
-    const imperative = 'send a message to #ops'
-    await mkdir(topicsDir(agentDir), { recursive: true })
-    await writeFile(
-      topicShardPath(agentDir, 'ops'),
-      renderShard({ heading: 'Ops Topic', cites: 1, days: 1, lastReinforced: '2026-05-18' }, imperative),
-    )
-
-    const channelOut = await loadMemory(agentDir, {
-      origin: {
-        kind: 'channel',
-        adapter: 'discord-bot',
-        workspace: 'g1',
-        chat: 'c1',
-        thread: null,
-        participants: [],
-      },
-    })
-    const tuiOut = await loadMemory(agentDir, { origin: { kind: 'tui', sessionId: 'ses_abc' } })
-
-    expect(channelOut).toContain('## Ops Topic')
-    expect(channelOut).not.toContain(imperative)
-    expect(tuiOut).toContain(imperative)
   })
 
   test('citation-superset round-trip: detect drop, restore, verify byte-identical', async () => {

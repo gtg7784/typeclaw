@@ -129,7 +129,7 @@ type ScaffoldedConfig = {
   git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
   sandbox?: { realProc?: boolean; writablePaths?: string[]; symlinks?: Array<{ from: string; to: string }> }
-  memory?: { vector?: { enabled?: boolean } }
+  memory?: Record<string, unknown>
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -382,7 +382,6 @@ describe('planStart', () => {
       await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
       await writeTypeclawConfig(root, {
         mounts: [{ name: 'projects', path: projectDir }],
-        memory: { vector: { enabled: true } },
       })
 
       const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
@@ -726,18 +725,7 @@ describe('planStart model mount', () => {
     expect(specIdx).toBeLessThan(plan.runArgs.length - 1)
   })
 
-  test('legacy vector opt-out still mounts the model cache', async () => {
-    await writeDockerfile(root)
-    await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: false } } })
-
-    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
-
-    expect(hasBindMount(plan.runArgs, modelsMount)).toBe(true)
-    expect(plan.runArgs).toContain('TYPECLAW_MODEL_CACHE=/opt/models')
-  })
-
-  test('mounts model cache when memory.vector block is absent', async () => {
+  test('mounts model cache when memory config is absent', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root)
@@ -1524,10 +1512,9 @@ function fakeDockerExec(scenario: {
 }
 
 describe('start (composition)', () => {
-  test('provisions embedding models even when legacy vector config is disabled', async () => {
+  test('provisions embedding models on every fresh start', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await writeTypeclawConfig(root, { memory: { vector: { enabled: false } } })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
     let ensureModelCalls = 0
 

@@ -316,8 +316,8 @@ export function createMemoryLoggerSubagent(
     // append" — mechanical extraction, no deep reasoning. Without this it fell
     // back to `default`, sharing the slow reasoning model that a concurrent
     // `researcher` pass saturates, which made the 50s spawn timeout fire under
-    // load. `fast` matches `memory-retrieval` (same I/O-bound shape) and itself
-    // falls back to `default` with a one-time warning when unconfigured.
+    // load. `fast` matches this I/O-bound extraction shape and falls back to
+    // `default` with a one-time warning when unconfigured.
     profile: 'fast',
     tools: [readTool],
     customTools,

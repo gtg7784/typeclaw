@@ -9,13 +9,7 @@ import * as FakeTimers from '@sinonjs/fake-timers'
 type Clock = FakeTimers.Clock
 
 import { noopPermissionService } from '@/permissions'
-import type {
-  PluginContext,
-  PluginExports,
-  PluginLogger,
-  SessionEndEvent,
-  SessionIdleEvent,
-} from '@/plugin'
+import type { PluginContext, PluginExports, PluginLogger, SessionEndEvent, SessionIdleEvent } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { formatLocalDate } from '@/shared'
 
@@ -177,9 +171,7 @@ afterEach(async () => {
 describe('memory plugin shape', () => {
   test('exposes memory subagents and memory_search tool', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, {})
-    expect(Object.keys(exports.subagents ?? {})).toEqual(
-      expect.arrayContaining(['memory-logger', 'dreaming']),
-    )
+    expect(Object.keys(exports.subagents ?? {})).toEqual(expect.arrayContaining(['memory-logger', 'dreaming']))
     expect(exports.tools?.memory_search).toBeDefined()
   })
 
@@ -1271,29 +1263,16 @@ describe('doctor checks', () => {
     expect(existsSync(backupPath)).toBe(false)
   })
 
-  test('vector-index: no-op ok when memory.vector is not enabled', async () => {
+  test('vector-index: runs the real index check (ok for an empty indexed agent)', async () => {
+    // Booting opens the store, which creates the index DB, so the realistic
+    // empty agent is healthy (nothing to index).
     const { exports } = await bootMemoryPlugin(agentDir, {})
 
     const check = exports.doctorChecks?.['vector-index']
     expect(check).toBeDefined()
 
     const { logger } = makeCapturingLogger()
-    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: false } }, logger })
-    expect(result.status).toBe('ok')
-    expect(result.message).toContain('not enabled')
-    expect(result.fix).toBeUndefined()
-  })
-
-  test('vector-index: when enabled, runs the real index check (ok for an empty agent)', async () => {
-    // Booting with vector enabled opens the store, which creates the index DB,
-    // so the realistic enabled-but-empty agent is healthy (nothing to index).
-    const { exports } = await bootMemoryPlugin(agentDir, { vector: { enabled: true } })
-
-    const check = exports.doctorChecks?.['vector-index']
-    expect(check).toBeDefined()
-
-    const { logger } = makeCapturingLogger()
-    const result = await check!.run({ pluginName: 'memory', agentDir, config: { vector: { enabled: true } }, logger })
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
     expect(result.status).toBe('ok')
     expect(result.message).toContain('0/0')
   })

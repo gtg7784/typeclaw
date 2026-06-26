@@ -64,22 +64,13 @@ describe('renderResults', () => {
 })
 
 describe('memory-search container command', () => {
-  test('exits non-zero with guidance when vector is disabled', async () => {
-    await writeConfig({ memory: { vector: { enabled: false } } })
-    const { code, stderr } = await runCommand({ query: 'orbit', topK: 10, json: false })
-    expect(code).toBe(1)
-    expect(stderr).toContain('memory.vector.enabled is false')
-  })
-
   test('exits non-zero when the vector index has not been built', async () => {
-    await writeConfig({ memory: { vector: { enabled: true } } })
     const { code, stderr } = await runCommand({ query: 'orbit', topK: 10, json: false })
     expect(code).toBe(1)
     expect(stderr).toContain('vector index not built yet')
   })
 
   test('runs hybridSearch and prints ranked text results', async () => {
-    await writeConfig({ memory: { vector: { enabled: true } } })
     await writeTopic('orbital-mechanics', 'Orbital Mechanics', 'Satellites remain in orbit.')
     seedVector('topic:orbital-mechanics', 'topic', 'orbital-mechanics')
 
@@ -90,7 +81,6 @@ describe('memory-search container command', () => {
   })
 
   test('emits raw JSON when --json is set', async () => {
-    await writeConfig({ memory: { vector: { enabled: true } } })
     await writeTopic('orbital-mechanics', 'Orbital Mechanics', 'Satellites remain in orbit.')
     seedVector('topic:orbital-mechanics', 'topic', 'orbital-mechanics')
 
@@ -103,7 +93,6 @@ describe('memory-search container command', () => {
   })
 
   test('advances a surfaced reference accessCount/lastAccessed so it survives time-decay', async () => {
-    await writeConfig({ memory: { vector: { enabled: true } } })
     await writeReference('runbook', 'DB Runbook', 'Restart the primary, then failover.')
     seedVector('reference:runbook#0', 'reference', 'runbook')
 
@@ -149,10 +138,6 @@ async function runCommand(args: { query: string; topK: number; json: boolean }):
     args,
   )
   return { code, stdout: out.getOutput(), stderr: err.getOutput() }
-}
-
-async function writeConfig(value: unknown): Promise<void> {
-  await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify(value))
 }
 
 async function writeTopic(slug: string, heading: string, body: string): Promise<void> {
