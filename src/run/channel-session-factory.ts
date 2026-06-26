@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession as defaultCreateSession } from '@/agent'
@@ -192,7 +194,7 @@ function tryReopenOrCreate(
     )
     return SessionManager.create(cwd, sessionDir)
   }
-  const path = `${sessionDir}/${existingSessionFile}`
+  const path = join(sessionDir, existingSessionFile)
   if (capOptions !== null) {
     try {
       const stats = capJsonlFileInPlace(path, capOptions)
