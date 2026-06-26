@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { Type } from '@mariozechner/pi-ai'
 import type { ImageContent } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
@@ -5,6 +7,9 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import { createSessionWithDispose, type SessionOrigin } from '@/agent'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
+import { getConfig, resolveModel, resolveProfile } from '@/config'
+import { providerForModelRef } from '@/config/providers'
+import { SecretsBackend } from '@/secrets'
 
 import { buildMultimodalLookerSystemPrompt, resolveImage, type ImageInput } from './looker'
 
@@ -139,6 +144,15 @@ function toImageContent(data: string, mimeType: string): ImageContent {
 }
 
 async function runLookAtImages(imageContents: ImageContent[], prompt: string | undefined) {
+  // Exception for text-only GLM Coding Plan models: the subagent below would
+  // resolve to the same image-blind model and silently fail. GLM-4.6V vision is
+  // reachable on the coding-plan endpoint with the same key (POST
+  // /api/coding/paas/v4 → 200, drawn from the plan's vision quota). Only this
+  // setup diverts; every other one keeps the subagent path.
+  if (shouldUseGlmCodingPlanVision()) {
+    return await analyzeWithGlmCodingPlanVision(imageContents, prompt)
+  }
+
   const systemPrompt = buildMultimodalLookerSystemPrompt(prompt)
   const userText =
     prompt !== undefined && prompt.trim() !== '' ? prompt.trim() : 'Please describe the attached image(s).'
@@ -186,6 +200,79 @@ async function runLookAtImages(imageContents: ImageContent[], prompt: string | u
     session.dispose()
     await dispose()
   }
+}
+
+const GLM_VISION_PROVIDER = 'zai-coding'
+const GLM_VISION_MODEL = 'glm-4.6v'
+const GLM_VISION_ENDPOINT = 'https://api.z.ai/api/coding/paas/v4/chat/completions'
+const GLM_VISION_MAX_TOKENS = 32768
+
+function shouldUseGlmCodingPlanVision(): boolean {
+  const ref = resolveProfile(getConfig().models, 'vision').ref
+  return providerForModelRef(ref) === GLM_VISION_PROVIDER && !resolveModel(ref).input.includes('image')
+}
+
+async function analyzeWithGlmCodingPlanVision(imageContents: ImageContent[], prompt: string | undefined) {
+  const details = { count: imageContents.length, prompt }
+  const apiKey = new SecretsBackend(join(process.cwd(), 'secrets.json')).tryReadProviderApiKeySync(GLM_VISION_PROVIDER)
+  if (apiKey === null) {
+    return errorResult('GLM Coding Plan vision unavailable: no zai-coding API key', details)
+  }
+
+  let response: Response
+  try {
+    response = await fetch(GLM_VISION_ENDPOINT, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: GLM_VISION_MODEL,
+        max_tokens: GLM_VISION_MAX_TOKENS,
+        messages: buildGlmVisionMessages(imageContents, prompt),
+      }),
+    })
+  } catch (error) {
+    return errorResult(`GLM vision request failed: ${error instanceof Error ? error.message : String(error)}`, details)
+  }
+
+  if (!response.ok) {
+    return errorResult(`GLM vision request failed: HTTP ${response.status}`, details)
+  }
+
+  const text = extractGlmVisionText(await response.json().catch(() => null))
+  if (text === null) {
+    return errorResult('GLM vision returned no text response', details)
+  }
+  return successResult(text, details)
+}
+
+// Mirror the subagent path's systemPromptOverride so the direct route keeps
+// the same visible-only / faithful-transcription / no-preamble behavior.
+export function buildGlmVisionMessages(imageContents: ImageContent[], prompt: string | undefined) {
+  const userText =
+    prompt !== undefined && prompt.trim() !== '' ? prompt.trim() : 'Please describe the attached image(s).'
+  return [
+    { role: 'system' as const, content: buildMultimodalLookerSystemPrompt(prompt) },
+    {
+      role: 'user' as const,
+      content: [
+        ...imageContents.map((image) => ({
+          type: 'image_url' as const,
+          image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+        })),
+        { type: 'text' as const, text: userText },
+      ],
+    },
+  ]
+}
+
+export function extractGlmVisionText(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null
+  const choices = (body as { choices?: unknown }).choices
+  if (!Array.isArray(choices) || choices.length === 0) return null
+  const message = (choices[0] as { message?: unknown }).message
+  const text = (message as { content?: unknown } | undefined)?.content
+  if (typeof text !== 'string' || text.trim() === '') return null
+  return text.trim()
 }
 
 function toImageInput(p: ImageParam): ImageInput {

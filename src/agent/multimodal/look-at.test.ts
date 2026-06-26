@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
-import { lookAtTool } from './look-at'
+import { buildGlmVisionMessages, extractGlmVisionText, lookAtTool } from './look-at'
+import { buildMultimodalLookerSystemPrompt } from './looker'
 
 type ImageParam = { url?: string; path?: string; data?: string; mimeType?: string } | Record<string, never>
 
@@ -76,5 +77,55 @@ describe('lookAtTool — image source validation (no LLM call)', () => {
       type: 'text',
       text: expect.stringContaining('mimeType must be image/*'),
     })
+  })
+})
+
+describe('extractGlmVisionText — GLM vision response parsing', () => {
+  test('extracts trimmed assistant content from a well-formed response', () => {
+    const body = { choices: [{ message: { role: 'assistant', content: '\nblue\n' } }] }
+    expect(extractGlmVisionText(body)).toBe('blue')
+  })
+
+  test('returns null when choices is empty', () => {
+    expect(extractGlmVisionText({ choices: [] })).toBeNull()
+  })
+
+  test('returns null when content is blank', () => {
+    expect(extractGlmVisionText({ choices: [{ message: { content: '   ' } }] })).toBeNull()
+  })
+
+  test('returns null for a non-object body', () => {
+    expect(extractGlmVisionText(null)).toBeNull()
+    expect(extractGlmVisionText('oops')).toBeNull()
+  })
+
+  test('returns null when the API returns an error envelope instead of choices', () => {
+    expect(extractGlmVisionText({ error: { code: '1113', message: 'Insufficient balance' } })).toBeNull()
+  })
+})
+
+describe('buildGlmVisionMessages — GLM payload preserves looker behavior', () => {
+  const image = { type: 'image' as const, data: 'aGk=', mimeType: 'image/png' }
+
+  test('prepends the looker system prompt (with a question)', () => {
+    const messages = buildGlmVisionMessages([image], 'What color is the car?')
+    expect(messages[0]).toEqual({
+      role: 'system',
+      content: buildMultimodalLookerSystemPrompt('What color is the car?'),
+    })
+    expect(messages[0]!.content).toContain('What color is the car?')
+  })
+
+  test('uses the describe-everything system prompt when no prompt is given', () => {
+    const messages = buildGlmVisionMessages([image], undefined)
+    expect(messages[0]).toEqual({ role: 'system', content: buildMultimodalLookerSystemPrompt(undefined) })
+  })
+
+  test('carries the image as a data-URI and the user text in the user turn', () => {
+    const messages = buildGlmVisionMessages([image], undefined)
+    const user = messages[1] as { role: string; content: Array<Record<string, unknown>> }
+    expect(user.role).toBe('user')
+    expect(user.content[0]).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } })
+    expect(user.content[1]).toEqual({ type: 'text', text: 'Please describe the attached image(s).' })
   })
 })
