@@ -282,7 +282,7 @@ describe('planner subagent declaration', () => {
   test('spawn timeout is generous enough for a deep-model plan but not unbounded', () => {
     const sub = createPlannerSubagent()
     const timeout = sub.timeoutMs ?? 0
-    expect(timeout).toBeGreaterThanOrEqual(60_000)
+    expect(timeout).toBeGreaterThanOrEqual(1_800_000)
     expect(timeout).toBeLessThanOrEqual(1_800_000)
   })
 

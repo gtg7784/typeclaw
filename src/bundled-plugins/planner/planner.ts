@@ -38,8 +38,10 @@ export const PLANNER_SKILLS: readonly LoadableSkill[] = [PROJECT_PLAN_SKILL, GEN
 // request fails loudly. Sized for a thorough `deep`-model plan (research lookups
 // + a careful decomposition), well above the typical sub-minute plan. This is
 // liveness for the parent, not hard cancellation. See src/agent/subagents.ts
-// `timeoutMs`.
-export const PLANNER_SPAWN_TIMEOUT_MS = 600_000
+// `timeoutMs`. 30m matches the reviewer and researcher — every deep-profile
+// subagent shares the same nested-fan-out budget so a real pass is not killed
+// mid-synthesis.
+export const PLANNER_SPAWN_TIMEOUT_MS = 1_800_000
 
 // The default write zone for the plan file when the caller does not specify
 // `outputPath`. MUST be a universally-writable location, because a subagent
