@@ -39,6 +39,23 @@ describe('classifyConfiguredRuntime', () => {
     expect(classifyConfiguredRuntime({}, 'unix:///var/run/docker.sock')).toBeNull()
     expect(classifyConfiguredRuntime({}, undefined)).toBeNull()
   })
+
+  test('classifies Docker Desktop from the Windows named pipe', () => {
+    expect(classifyConfiguredRuntime({ DOCKER_HOST: 'npipe:////./pipe/dockerDesktopLinuxEngine' }, undefined)).toBe(
+      'docker-desktop',
+    )
+  })
+
+  test('classifies Podman from the Windows machine pipe', () => {
+    expect(classifyConfiguredRuntime({ DOCKER_HOST: 'npipe:////./pipe/podman-machine-default' }, undefined)).toBe(
+      'podman',
+    )
+  })
+
+  test('returns null for the generic Windows docker_engine pipe (no runtime marker)', () => {
+    const detail = 'open //./pipe/docker_engine: The system cannot find the file specified.'
+    expect(classifyConfiguredRuntime({ DOCKER_HOST: 'npipe:////./pipe/docker_engine' }, detail)).toBeNull()
+  })
 })
 
 describe('detectInstalledDockerApps', () => {
@@ -60,7 +77,7 @@ describe('detectInstalledDockerApps', () => {
     expect(found).toEqual(['docker-desktop', 'orbstack'])
   })
 
-  test('finds colima and podman on PATH regardless of platform', () => {
+  test('finds colima and podman on PATH on linux', () => {
     const found = detectInstalledDockerApps({
       platform: 'linux',
       exists: () => false,
@@ -69,11 +86,41 @@ describe('detectInstalledDockerApps', () => {
     expect(found).toEqual(['colima', 'podman'])
   })
 
-  test('does not probe app bundles off macOS', () => {
+  test('does not probe macOS app bundles off macOS', () => {
+    const found = detectInstalledDockerApps({
+      platform: 'linux',
+      exists: (p) => p.startsWith('/Applications/'),
+      which: () => null,
+    })
+    expect(found).toEqual([])
+  })
+
+  test('finds Docker Desktop on Windows via Program Files', () => {
     const found = detectInstalledDockerApps({
       platform: 'win32',
-      exists: () => true,
+      env: { ProgramFiles: 'C:\\Program Files' },
+      exists: (p) => p === 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
       which: () => null,
+    })
+    expect(found).toEqual(['docker-desktop'])
+  })
+
+  test('finds Podman on Windows via per-user install', () => {
+    const found = detectInstalledDockerApps({
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local' },
+      exists: (p) => p === 'C:\\Users\\example\\AppData\\Local\\Programs\\Podman\\podman.exe',
+      which: () => null,
+    })
+    expect(found).toEqual(['podman'])
+  })
+
+  test('does not suggest Colima or OrbStack on Windows', () => {
+    const found = detectInstalledDockerApps({
+      platform: 'win32',
+      env: {},
+      exists: () => false,
+      which: (cmd) => (cmd === 'colima' ? 'C:\\colima.exe' : null),
     })
     expect(found).toEqual([])
   })
@@ -126,6 +173,15 @@ describe('renderDockerUnavailableGuidance', () => {
     )
     expect(result.summary).toBe('Docker is not running. Docker Desktop is installed but not started.')
     expect(result.lines.join('\n')).toContain('open -a Docker')
+  })
+
+  test('daemon-down with docker-desktop nudge on Windows points at the Start menu', () => {
+    const result = renderDockerUnavailableGuidance(
+      { ok: false, reason: 'daemon-down', detail: 'npipe:////./pipe/docker_engine' },
+      { platform: 'win32', nudge: 'docker-desktop', installed: ['docker-desktop'] },
+    )
+    expect(result.summary).toBe('Docker is not running. Docker Desktop is installed but not started.')
+    expect(result.lines.join('\n')).toContain('Start menu')
   })
 
   test('daemon-down with colima nudge', () => {

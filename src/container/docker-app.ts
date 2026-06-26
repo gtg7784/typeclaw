@@ -93,7 +93,7 @@ function classifyRuntimeMarker(text: string | undefined): DockerApp | null {
 // "installed" only downgrades the message from runtime-specific to generic, it
 // never blocks anything.
 export function detectInstalledDockerApps(probes: DockerAppProbes = {}): DockerApp[] {
-  const { platform, exists, which } = resolveProbes(probes)
+  const { platform, exists, which, env } = resolveProbes(probes)
   const found: DockerApp[] = []
 
   if (platform === 'darwin') {
@@ -101,10 +101,50 @@ export function detectInstalledDockerApps(probes: DockerAppProbes = {}): DockerA
     if (exists('/Applications/OrbStack.app')) found.push('orbstack')
   }
 
-  if (which('colima') !== null) found.push('colima')
-  if (which('podman') !== null) found.push('podman')
+  if (platform === 'win32') {
+    if (windowsDockerDesktopInstalled(env, exists)) found.push('docker-desktop')
+    if (windowsPodmanInstalled(env, exists)) found.push('podman')
+  }
+
+  // Colima and OrbStack are macOS/Linux only, so probing them on win32 would be
+  // dead weight; Podman ships a `podman.exe` that also lands on PATH, caught by
+  // the install-path probe above. Off Windows, the PATH binaries are the
+  // canonical signal for the CLI-first runtimes.
+  if (platform !== 'win32') {
+    if (which('colima') !== null) found.push('colima')
+    if (which('podman') !== null) found.push('podman')
+  }
 
   return found
+}
+
+// Docker Desktop's GUI launcher (`Docker Desktop.exe`) across the MSI, 32-bit,
+// and per-user install layouts confirmed by the Docker Desktop installer and
+// PowerShell's own probing scripts. Probing the exe (not just `docker` on PATH)
+// is what lets us say "Docker Desktop is installed but not started" when the
+// daemon is down — a stale PATH can hide the CLI even when Desktop is present.
+function windowsDockerDesktopInstalled(env: NodeJS.ProcessEnv, exists: (path: string) => boolean): boolean {
+  const programFiles = env.ProgramW6432 ?? env.ProgramFiles ?? 'C:\\Program Files'
+  const programFilesX86 = env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)'
+  const candidates = [
+    `${programFiles}\\Docker\\Docker\\Docker Desktop.exe`,
+    `${programFilesX86}\\Docker\\Docker\\Docker Desktop.exe`,
+  ]
+  if (env.LOCALAPPDATA) {
+    candidates.push(`${env.LOCALAPPDATA}\\Programs\\Docker\\Docker\\Docker Desktop.exe`)
+  }
+  return candidates.some(exists)
+}
+
+// Podman's Windows install layouts: per-machine (current + legacy RedHat path)
+// and per-user, from the official podman win-installer test script.
+function windowsPodmanInstalled(env: NodeJS.ProcessEnv, exists: (path: string) => boolean): boolean {
+  const programFiles = env.ProgramW6432 ?? env.ProgramFiles ?? 'C:\\Program Files'
+  const candidates = [`${programFiles}\\Podman\\podman.exe`, `${programFiles}\\RedHat\\Podman\\podman.exe`]
+  if (env.LOCALAPPDATA) {
+    candidates.push(`${env.LOCALAPPDATA}\\Programs\\Podman\\podman.exe`)
+  }
+  return candidates.some(exists)
 }
 
 // The runtime we should nudge the user to start: configured-socket hint first,
