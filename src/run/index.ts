@@ -125,24 +125,32 @@ export type StartAgentResult = {
   stop: () => void | Promise<void>
 }
 
-// Thin wrapper that owns ONLY the boot-failure cleanup of process-global
-// installs. `installCodexFetchObserver` and `installFatalGuard` attach
-// process-wide listeners before the fallible boot work; if any boot step throws
-// before `startAgentRuntime` returns, the caller never receives a
-// `StartAgentResult` and can never call `stop()`, so those listeners would
-// strand and double-fire into the next `startAgent`. The runtime hands its
-// disposer back via `onProcessGlobalsInstalled`; on a boot throw we dispose and
+// Owns boot-failure cleanup for everything installed before `startAgentRuntime`
+// returns a `StartAgentResult`. `installCodexFetchObserver`/`installFatalGuard`
+// attach process-wide listeners, and `loadPlugins` opens plugin-lifetime
+// resources (the memory plugin's sqlite handle); if any boot step throws before
+// the result exists, the caller never receives `stop()`, so each of those would
+// strand. The runtime registers each cleanup via `registerBootCleanup` as boot
+// progresses; on a throw we run them all (newest first, best-effort) and
 // rethrow, on success ownership transfers to the returned `stop()`. `return
 // await` is load-bearing — without it an async boot rejection would escape this
-// try. Dispose is idempotent, so the success path's `stop()` never double-fires.
+// try. Cleanups are idempotent, so the success path's `stop()` never double-fires.
 export async function startAgent(options: StartAgentOptions): Promise<StartAgentResult> {
-  const captured: { dispose: (() => void) | null } = { dispose: null }
+  const bootCleanups: Array<() => void | Promise<void>> = []
   try {
-    return await startAgentRuntime(options, (dispose) => {
-      captured.dispose = dispose
+    return await startAgentRuntime(options, (cleanup) => {
+      bootCleanups.push(cleanup)
     })
   } catch (err) {
-    captured.dispose?.()
+    for (const cleanup of bootCleanups.reverse()) {
+      try {
+        await cleanup()
+      } catch (cleanupErr) {
+        console.warn(
+          `[run] boot-failure cleanup error: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+        )
+      }
+    }
     throw err
   }
 }
@@ -161,7 +169,7 @@ async function startAgentRuntime(
     createChannelManager: createChannelManagerFor = createChannelManager,
     createTunnelManager: createTunnelManagerFor = createTunnelManager,
   }: StartAgentOptions,
-  onProcessGlobalsInstalled: (dispose: () => void) => void,
+  registerBootCleanup: (cleanup: () => void | Promise<void>) => void,
 ): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
 
@@ -216,7 +224,7 @@ async function startAgentRuntime(
     if (sigtermHandler !== null) process.removeListener('SIGTERM', sigtermHandler)
   }
   let sigtermHandler: (() => void) | null = null
-  onProcessGlobalsInstalled(disposeProcessGlobals)
+  registerBootCleanup(disposeProcessGlobals)
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
   const githubTokenBridge = createGithubTokenBridge()
@@ -261,6 +269,9 @@ async function startAgentRuntime(
     if (mcpManager !== null) await mcpManager.closeAll()
     throw err
   }
+  // Plugins are loaded (sqlite handles open); from here any boot failure must
+  // release them — the caller gets no stop() on the failure path.
+  registerBootCleanup(() => pluginsLoaded.disposePlugins())
 
   reloadRegistry.register(
     createConfigReloadable({
@@ -555,6 +566,7 @@ async function startAgentRuntime(
       return name
     },
   })
+  registerBootCleanup(() => subagentConsumer.stop())
   subagentConsumer.start()
 
   // Populated by startScheduler's factory (onCountStore). The consumer
@@ -693,11 +705,13 @@ async function startAgentRuntime(
   // delivers only to live subscribers (no replay), so a fire published before
   // the subscription exists would be lost. Subscribing to an empty stream is
   // harmless when there are no jobs.
+  registerBootCleanup(() => cronConsumer.stop())
   cronConsumer.start()
   const scheduler = await startScheduler({
     cwd,
     loadCron,
     createSchedulerFor: factory,
+    registerBootCleanup,
     stream,
     hasInternalJobs: internalJobs().length > 0,
     getSubagents: () => pluginRuntime.get().subagents,
@@ -713,6 +727,7 @@ async function startAgentRuntime(
   }
 
   const tunnelBridge: TunnelBridge = createTunnelBridge({ stream, channelManager })
+  registerBootCleanup(() => tunnelBridge.stop())
 
   // Bridge `subagent.completed` broadcasts into the channel router so a
   // backgrounded subagent finishing wakes up its parent channel session
@@ -723,6 +738,7 @@ async function startAgentRuntime(
     stream,
     router: channelManager.router,
   })
+  registerBootCleanup(() => subagentCompletionBridge.stop())
 
   // Fan a landed formal review verdict out to the sibling sessions reviewing the
   // same PR so they stand down from a redundant verdict (the per-thread fan-out
@@ -733,12 +749,14 @@ async function startAgentRuntime(
     stream,
     router: channelManager.router,
   })
+  registerBootCleanup(() => prVerdictActivityBridge.stop())
   setReviewObserver((review) => {
     stream.publish({
       target: { kind: 'broadcast' },
       payload: { kind: 'pr.verdict-activity', ...review },
     })
   })
+  registerBootCleanup(() => setReviewObserver(null))
 
   // Registered before channels so its cache clear lands before any channel
   // session teardown observes it. secrets.json provider credentials are not
@@ -773,6 +791,7 @@ async function startAgentRuntime(
     console.warn(`[run] channel restart-resume reserve failed: ${err instanceof Error ? err.message : err}`)
   }
 
+  registerBootCleanup(() => channelManager.stop())
   await channelManager.start()
 
   if (restartReservation !== null) {
@@ -903,7 +922,7 @@ async function startAgentRuntime(
       ...mcpManagerOpt,
     })
 
-  const server = createServer({
+  const serverFactory = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
     reloadRegistry,
@@ -924,23 +943,26 @@ async function startAgentRuntime(
     ...runtimeVersionOpt,
     ...tuiTokenOpt,
     ...containerBrokerOpt,
-  }).start()
+  })
+  let server: BunServer | null = null
+  registerBootCleanup(() => server?.stop(true))
+  server = serverFactory.start()
 
   // Tunnel manager starts AFTER the WS server is up so a slow/hanging
   // provider (PR 2's cloudflared first-URL wait) cannot block TUI, reload,
   // or channel adapter availability. External providers resolve URLs
   // synchronously; future managed providers will resolve asynchronously
   // and broadcast URL events when ready.
+  registerBootCleanup(() => tunnelManager.stop())
   await tunnelManager.start()
 
   let stopped = false
   const stop = async () => {
     if (stopped) return
     stopped = true
-    // The crash-guard and codex-observer disposers run in `finally` so an
-    // earlier async teardown rejection (tunnel/channel/mcp stop) cannot strand
-    // the process-global listeners they removed — a stranded fatal-guard
-    // listener would survive into the next `startAgent` and double-fire.
+    // The final disposers run in `finally` so an earlier async teardown
+    // rejection cannot strand process-global listeners or plugin-owned handles
+    // into the next `startAgent`.
     try {
       scheduler?.stop()
       cronConsumer.stop()
@@ -955,6 +977,7 @@ async function startAgentRuntime(
       await channelManager.stop()
       await mcpManager?.closeAll()
     } finally {
+      await pluginsLoaded.disposePlugins()
       disposeProcessGlobals()
     }
   }
@@ -1079,6 +1102,7 @@ async function startScheduler({
   cwd,
   loadCron,
   createSchedulerFor,
+  registerBootCleanup,
   stream,
   hasInternalJobs,
   getSubagents,
@@ -1087,6 +1111,7 @@ async function startScheduler({
   cwd: string
   loadCron: LoadCronFn
   createSchedulerFor: SchedulerFactory
+  registerBootCleanup: (cleanup: () => void | Promise<void>) => void
   stream: Stream
   hasInternalJobs: boolean
   getSubagents?: () => SubagentRegistry
@@ -1111,6 +1136,7 @@ async function startScheduler({
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
   const scheduler = await createSchedulerFor({ cwd, file, onFire, onCountStore })
+  registerBootCleanup(() => scheduler.stop())
   scheduler.start()
   return scheduler
 }

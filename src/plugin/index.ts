@@ -89,6 +89,7 @@ export {
   type RegisteredCommand,
   type RegisteredCronJob,
   type RegisteredDoctorCheck,
+  type RegisteredPluginDisposer,
   type RegisteredSkillDir,
   type RegisteredSkillEntry,
   type RegisteredSubagent,

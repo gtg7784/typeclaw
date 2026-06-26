@@ -15,6 +15,7 @@ function emptyRegistry(): PluginRegistry {
     skillsDirs: [],
     doctorChecks: [],
     commands: [],
+    disposers: [],
   }
 }
 
