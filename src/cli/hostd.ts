@@ -2,6 +2,7 @@ import { defineCommand } from 'citty'
 
 import { loadConfigSync, validateConfig, type Config, type ValidateConfigResult } from '@/config'
 import { start, stop, type StartOptions, type StartResult, type StopResult } from '@/container'
+import { createCurrentHostDaemonHolder } from '@/hostd/current-host-daemon'
 import { startDaemon, type DaemonLogEvent, type RestartPreflight } from '@/hostd/daemon'
 import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
@@ -26,6 +27,10 @@ export const hostdCommand = defineCommand({
     })
 
     const hostdRestart = buildHostdRestart(cliEntry, defaultRestartDeps, version)
+    // Renewal restarts call hostdRestart directly (not via the restart RPC), so
+    // they must thread currentHostDaemon themselves to get the in-process
+    // registration path. The daemon populates this holder once booted.
+    const currentHostDaemonHolder = createCurrentHostDaemonHolder()
     const kakaoRenewal = createKakaoRenewalManager({
       onLog: (event) => writeLogLine(formatLog(event)),
       onRenewalOk: async ({ containerName, cwd }) => {
@@ -33,7 +38,8 @@ export const hostdCommand = defineCommand({
         // up the renewed tokens from secrets.json. Without this, the cron
         // would write fresh tokens but the running adapter would keep using
         // the old token in its closure and still 401 at the ~7-day wall.
-        const result = await hostdRestart({ containerName, cwd })
+        const currentHostDaemon = await currentHostDaemonHolder.ready()
+        const result = await hostdRestart({ containerName, cwd, currentHostDaemon })
         if (!result.ok) throw new Error(result.reason)
       },
       shouldRenew: ({ cwd }) => kakaoChannelConfigured(cwd),
@@ -45,7 +51,8 @@ export const hostdCommand = defineCommand({
         // secrets.json. Without this, the cron writes a fresh token but the
         // running adapter keeps the old token in its getToken closure and still
         // 401s on every outbound REST call + KMS key fetch.
-        const result = await hostdRestart({ containerName, cwd })
+        const currentHostDaemon = await currentHostDaemonHolder.ready()
+        const result = await hostdRestart({ containerName, cwd, currentHostDaemon })
         if (!result.ok) throw new Error(result.reason)
       },
       shouldRenew: ({ cwd }) => webexChannelConfigured(cwd),
@@ -58,6 +65,7 @@ export const hostdCommand = defineCommand({
       portbroker,
       kakaoRenewal,
       webexRenewal,
+      currentHostDaemonHolder,
       restartPreflight: buildHostdRestartPreflight(cliEntry, version, defaultPreflightDeps),
       restart: hostdRestart,
     })
@@ -96,7 +104,7 @@ export function buildHostdRestart(
   deps: HostdRestartDeps = defaultRestartDeps,
   daemonVersion?: string,
 ): SupervisorRestart {
-  return async ({ containerName, cwd, build = false }) => {
+  return async ({ containerName, cwd, build = false, currentHostDaemon }) => {
     const drift = await detectSourceDrift(cliEntry, daemonVersion)
     if (drift) return { ok: false, reason: drift }
 
@@ -114,6 +122,7 @@ export function buildHostdRestart(
       forceBuild: build,
       cliEntry,
       reuseCurrentHostDaemon: true,
+      ...(currentHostDaemon ? { currentHostDaemon } : {}),
     })
     if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
     return { ok: true }

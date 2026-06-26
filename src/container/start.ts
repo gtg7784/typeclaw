@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import { agentUsesVector } from '@/bundled-plugins/memory/vector/config'
-import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config } from '@/config'
+import { expandMountPath, loadConfigSync, withDefaultPlugins, type Config, type PortForward } from '@/config'
 import { commitGitignoreWithUntracks, untrackTrulyIgnoredFiles } from '@/git/reconcile-ignored'
 import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
@@ -94,6 +94,27 @@ export type HostDaemonControl = {
   brokerToken: string
 }
 
+// Mirrors the `register` RPC's fields minus `kind`; shared by socket and
+// in-process registration so both paths record the same registry entry.
+export type HostDaemonRegisterPayload = {
+  containerName: string
+  cwd: string
+  restartToken: string
+  wsHostPort: number
+  portForward: PortForward
+  brokerToken: string
+}
+
+// Injected only on the daemon-owned restart path (reuseCurrentHostDaemon).
+// The daemon registers the container in-process and reports its own HTTP port,
+// so the restart skips the `http-info`/`register` self-RPCs — those round-trips
+// can time out under IPC congestion and silently drop the TYPECLAW_HOSTD_* env
+// triple, booting a container whose hostd-bridged adapters can't construct.
+export type CurrentHostDaemon = {
+  httpPort: number
+  register: (payload: HostDaemonRegisterPayload) => Promise<{ ok: true } | { ok: false; reason: string }>
+}
+
 export type StartOptions = {
   cwd: string
   preferredHostPort: number
@@ -106,6 +127,10 @@ export type StartOptions = {
   // Hostd's supervisor restart callback already runs inside the daemon process.
   // Reusing that daemon avoids a self-shutdown when disk source has drifted.
   reuseCurrentHostDaemon?: boolean
+  // Set by hostd's supervisor restart wrapper. When present, registration goes
+  // through the daemon in-process (no socket round-trips), so the env triple is
+  // injected from known-good values even under IPC congestion. See type docs.
+  currentHostDaemon?: CurrentHostDaemon
   ensureDeps?: (cwd: string, opts?: { force?: boolean }) => Promise<EnsureDepsResult>
   // Test seam for the typeclaw-version auto-upgrade. Production callers omit
   // this and get the real autoUpgradeTypeclawDep (which reads the CLI's own
@@ -183,6 +208,7 @@ export async function start({
   allocatePort = findFreePort,
   cliEntry,
   reuseCurrentHostDaemon = false,
+  currentHostDaemon,
   ensureDeps = (dir, opts) => ensureDepsInstalled({ cwd: dir, ...opts }),
   autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir, localSpec: resolveTypeclawSpec(dir) }),
   forceBunUpdate = runBunUpdate,
@@ -424,7 +450,7 @@ export async function start({
     // Register AFTER port allocation so the daemon's portbroker has the right
     // wsHostPort. Re-register on TOCTOU retry below if the port changes.
     let hostd: PreparedHostDaemonStatus = cliEntry
-      ? await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
+      ? await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon, currentHostDaemon })
       : { state: 'disabled' as const }
     let hostdControl = hostd.state === 'registered' ? hostd.control : undefined
 
@@ -503,7 +529,14 @@ export async function start({
       }
       hostPort = await allocatePort(0)
       if (cliEntry) {
-        hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
+        hostd = await registerWithDaemon({
+          cwd,
+          containerName,
+          cliEntry,
+          hostPort,
+          reuseCurrentHostDaemon,
+          currentHostDaemon,
+        })
         hostdControl = hostd.state === 'registered' ? hostd.control : undefined
       }
       plan = await planStart({
@@ -1158,27 +1191,47 @@ async function registerWithDaemon({
   cliEntry,
   hostPort,
   reuseCurrentHostDaemon,
+  currentHostDaemon,
 }: {
   cwd: string
   containerName: string
   cliEntry: string
   hostPort: number
   reuseCurrentHostDaemon: boolean
+  currentHostDaemon: CurrentHostDaemon | undefined
 }): Promise<PreparedHostDaemonStatus> {
-  const prepared = reuseCurrentHostDaemon ? await useCurrentHostDaemon() : await ensureDaemonWithBridgeRetry(cliEntry)
-  if (!prepared.ok) return { state: 'unavailable', reason: prepared.reason }
   const token = randomBytes(32).toString('base64url')
   const brokerToken = randomBytes(32).toString('base64url')
   const cfg = await loadTypeclawConfig(cwd)
-  const reply = await sendToDaemon({
-    kind: 'register',
+  const payload: HostDaemonRegisterPayload = {
     containerName,
     cwd,
     restartToken: token,
     wsHostPort: hostPort,
     portForward: cfg.portForward,
     brokerToken,
-  })
+  }
+
+  if (currentHostDaemon) {
+    // A thrown/rejected registrar must degrade to a still-booting container,
+    // not abort start() — the daemon-owned restart already stopped the old
+    // container, so ok:false here would leave the agent dead.
+    let reply: { ok: true } | { ok: false; reason: string }
+    try {
+      reply = await currentHostDaemon.register(payload)
+    } catch (error) {
+      return { state: 'unavailable', reason: error instanceof Error ? error.message : String(error) }
+    }
+    if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
+    return {
+      state: 'registered',
+      control: { url: `http://${CONTAINER_HOSTD_HOST}:${currentHostDaemon.httpPort}`, token, brokerToken },
+    }
+  }
+
+  const prepared = reuseCurrentHostDaemon ? await useCurrentHostDaemon() : await ensureDaemonWithBridgeRetry(cliEntry)
+  if (!prepared.ok) return { state: 'unavailable', reason: prepared.reason }
+  const reply = await sendToDaemon({ kind: 'register', ...payload })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
   return {
     state: 'registered',

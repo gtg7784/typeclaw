@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket as NetSocket } from 'node:net'
 import { join } from 'node:path'
 
 import type { PortForward } from '@/config'
-import { defaultDockerExec, type DockerExec } from '@/container'
+import { defaultDockerExec, type DockerExec, type HostDaemonRegisterPayload } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
 import {
   discordChannelBlockSchema,
@@ -17,6 +17,7 @@ import { SecretsBackend } from '@/secrets/storage'
 import { isWindows } from '@/shared'
 
 import { isDaemonReachable } from './client'
+import type { CurrentHostDaemonHolder } from './current-host-daemon'
 import type { KakaoRenewalCallbacks, KakaoRenewalLogEvent } from './kakao-renewal-manager'
 import { ensureDirs, registrationFilePath, registrationsDir, socketPath } from './paths'
 import type {
@@ -71,6 +72,10 @@ export type DaemonOptions = {
   // ticks hourly because Webex password tokens live ~27h (see
   // webex-renewal-manager.ts). Omit when the agent has no webex channel.
   webexRenewal?: WebexRenewalCallbacks
+  // Populated once the daemon is booted so direct callers of the restart
+  // (the renewal callbacks in cli/hostd.ts) get the in-process registration
+  // path instead of the socket self-RPC. Omit in tests that don't exercise it.
+  currentHostDaemonHolder?: CurrentHostDaemonHolder
 }
 
 export type RestartPreflight = (input: {
@@ -400,7 +405,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     }
   }
 
-  const handleRegister = async (req: RegisterPayload): Promise<RpcResponse> => {
+  const registerContainer = async (req: RegisterPayload): Promise<RpcResponse> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
@@ -416,6 +421,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       return { ok: true }
     })
   }
+
+  const handleRegister = async (req: RegisterPayload): Promise<RpcResponse> => registerContainer(req)
 
   const handleDeregister = async (req: { containerName: string }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
@@ -449,6 +456,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
+  // Lets the supervisor's restart re-register the child in-process instead of
+  // over the socket. Awaits restore for the same no-mutation-before-restore
+  // invariant the socket dispatcher enforces before handleRegister.
+  const registerCurrentChild = async (
+    payload: HostDaemonRegisterPayload,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    await awaitRestored()
+    const reply = await registerContainer(payload)
+    return reply.ok ? { ok: true } : { ok: false, reason: reply.reason }
+  }
+
   // Auth: only restart containers that registered with this daemon. The
   // socket is 0o600 + UID-bound, but inside a container any process that
   // reaches the mounted socket could otherwise restart any peer container on
@@ -465,7 +483,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       ? await opts.restartPreflight({ containerName: req.containerName, cwd, build: req.build })
       : null
     if (preflight) return preflight
-    const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd, build: req.build })
+    const ack = supervisor.scheduleRestart({
+      containerName: req.containerName,
+      cwd,
+      build: req.build,
+      currentHostDaemon: { httpPort, register: registerCurrentChild },
+    })
     if (!ack.ok) return ack
     const result: RestartResult = { containerName: req.containerName, scheduled: true }
     return { ok: true, result }
@@ -699,6 +722,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
   httpPort = httpServer.port ?? 0
   log({ kind: 'daemon-http-listening', host: httpHostname, port: httpPort })
+  opts.currentHostDaemonHolder?.set({ httpPort, register: registerCurrentChild })
 
   const sockets = new Set<NetSocket>()
   const listener = createServer((socket) => {

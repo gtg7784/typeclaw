@@ -20,6 +20,7 @@ import {
   shouldMirrorDevSource,
   shouldMountWindowsDevSource,
   start,
+  type HostDaemonRegisterPayload,
 } from './start'
 
 type ParsedBindMount = { src: string; dst: string; readonly: boolean }
@@ -2639,6 +2640,106 @@ describe('start (composition)', () => {
       else process.env.TYPECLAW_HOME = previousHome
       await rm(home, { recursive: true, force: true })
     }
+  })
+
+  test('currentHostDaemon registers in-process and injects the hostd env triple without any socket RPC', async () => {
+    // given: a daemon-owned restart supplies its own httpPort + in-process registrar
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    const registered: HostDaemonRegisterPayload[] = []
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      cliEntry: '/nonexistent/cli.ts',
+      reuseCurrentHostDaemon: true,
+      currentHostDaemon: {
+        httpPort: 49999,
+        register: async (payload) => {
+          registered.push(payload)
+          return { ok: true }
+        },
+      },
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.hostd.state).toBe('registered')
+    // then: the container is registered in-process (not over a socket)
+    expect(registered).toHaveLength(1)
+    expect(registered[0]).toMatchObject({ containerName: basename(root), cwd: root, wsHostPort: 8973 })
+    // then: the env triple points at the daemon's own http port
+    expect(result.plan.runArgs).toContain('TYPECLAW_HOSTD_URL=http://host.docker.internal:49999')
+    expect(result.plan.runArgs).toContain(`TYPECLAW_HOSTD_TOKEN=${registered[0]!.restartToken}`)
+    expect(result.plan.runArgs).toContain(`TYPECLAW_HOSTD_BROKER_TOKEN=${registered[0]!.brokerToken}`)
+  })
+
+  test('currentHostDaemon register failure still boots the container (degraded, never dead)', async () => {
+    // given: in-process registration fails — the daemon-owned restart must not strand the agent
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      cliEntry: '/nonexistent/cli.ts',
+      reuseCurrentHostDaemon: true,
+      currentHostDaemon: {
+        httpPort: 49999,
+        register: async () => ({ ok: false, reason: 'daemon stopping' }),
+      },
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: the container still launches, but without the hostd env triple
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.hostd).toEqual({ state: 'unavailable', reason: 'daemon stopping' })
+    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+    expect(result.plan.runArgs.find((a) => a.startsWith('TYPECLAW_HOSTD_URL='))).toBeUndefined()
+  })
+
+  test('a throwing in-process registrar degrades to a booting container, never aborts the restart', async () => {
+    // given: the in-process registrar rejects (e.g. a throw from the shared registration path)
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root)
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      cliEntry: '/nonexistent/cli.ts',
+      reuseCurrentHostDaemon: true,
+      currentHostDaemon: {
+        httpPort: 49999,
+        register: async () => {
+          throw new Error('registry write failed')
+        },
+      },
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: the throw is normalized to a degraded boot, not an aborted start
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.hostd).toEqual({ state: 'unavailable', reason: 'registry write failed' })
+    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+    expect(result.plan.runArgs.find((a) => a.startsWith('TYPECLAW_HOSTD_URL='))).toBeUndefined()
   })
 
   test('forceBuild=false skips build entirely when image already exists', async () => {

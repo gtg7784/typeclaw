@@ -130,6 +130,46 @@ describe('buildHostdRestart', () => {
     expect(result).toBeNull()
   })
 
+  test('forwards the daemon-supplied currentHostDaemon into start()', async () => {
+    const starts: StartOptions[] = []
+    const register = async (): Promise<{ ok: true }> => ({ ok: true })
+    const restart = buildHostdRestart('/repo/src/cli/index.ts', {
+      validateConfig: () => ({ ok: true }),
+      stop: async () => ({ ok: true, containerName: 'agent', running: true }),
+      loadConfigSync: () => configSchema.parse({ port: 61234 }),
+      start: async (opts) => {
+        starts.push(opts)
+        return startOk(opts)
+      },
+    })
+
+    const result = await restart({
+      containerName: 'agent',
+      cwd: '/agent-dir',
+      currentHostDaemon: { httpPort: 8974, register },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(starts[0]?.currentHostDaemon).toEqual({ httpPort: 8974, register })
+  })
+
+  test('omits currentHostDaemon when the daemon does not supply one', async () => {
+    const starts: StartOptions[] = []
+    const restart = buildHostdRestart('/repo/src/cli/index.ts', {
+      validateConfig: () => ({ ok: true }),
+      stop: async () => ({ ok: true, containerName: 'agent', running: true }),
+      loadConfigSync: () => configSchema.parse({ port: 61234 }),
+      start: async (opts) => {
+        starts.push(opts)
+        return startOk(opts)
+      },
+    })
+
+    await restart({ containerName: 'agent', cwd: '/agent-dir' })
+
+    expect(starts[0]).not.toHaveProperty('currentHostDaemon')
+  })
+
   test('omitted build defaults to forceBuild:false', async () => {
     const starts: StartOptions[] = []
     const restart = buildHostdRestart('/repo/src/cli/index.ts', {
