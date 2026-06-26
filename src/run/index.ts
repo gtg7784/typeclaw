@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
+import { createProviderAuthReloadable } from '@/agent/auth-reloadable'
 import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { requestContainerRestart } from '@/agent/restart'
@@ -738,6 +739,17 @@ async function startAgentRuntime(
       payload: { kind: 'pr.verdict-activity', ...review },
     })
   })
+
+  // Registered before channels so its cache clear lands before any channel
+  // session teardown observes it. secrets.json provider credentials are not
+  // part of the typeclaw.json config diff, so a rotated key takes effect on
+  // `typeclaw reload` only via this dedicated scope. Live sessions captured
+  // their AuthStorage at creation, so teardown recreates them with fresh auth.
+  reloadRegistry.register(
+    createProviderAuthReloadable({
+      onProviderAuthChanged: () => channelManager.router.tearDownAllLive(),
+    }),
+  )
 
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
 
