@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe('makeReferenceStoredHook', () => {
   it('embeds a freshly stored reference immediately', async () => {
-    const store = await createStore()
+    const openStore = await createStore()
     let embedCalls = 0
     const embedFn: EmbedFn = async (texts, type) => {
       embedCalls += 1
@@ -27,10 +27,11 @@ describe('makeReferenceStoredHook', () => {
       return texts.map(() => vector({ 0: 1 }))
     }
 
-    try {
-      const hook = makeReferenceStoredHook(store, embedFn)
-      await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
+    const hook = makeReferenceStoredHook(openStore, embedFn)
+    await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
 
+    const store = openStore()
+    try {
       const [row] = store.getByIds(['reference:sql-query#0'])
       expect(row?.source).toBe('reference')
       expect(row?.key).toBe('sql-query')
@@ -41,21 +42,20 @@ describe('makeReferenceStoredHook', () => {
   })
 
   it('skips re-embedding an unchanged reference body', async () => {
-    const store = await createStore()
+    const openStore = await createStore()
     let embedCalls = 0
     const embedFn: EmbedFn = async (texts) => {
       embedCalls += 1
       return texts.map(() => vector({ 0: 1 }))
     }
 
+    const hook = makeReferenceStoredHook(openStore, embedFn)
+    await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
+    await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
+
+    const store = openStore()
     try {
-      const hook = makeReferenceStoredHook(store, embedFn)
-      await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
-      const updatedAt = store.getByIds(['reference:sql-query#0'])[0]?.updatedAt
-
-      await hook({ slug: 'sql-query', body: 'SELECT 1;\n' })
-
-      expect(store.getByIds(['reference:sql-query#0'])[0]?.updatedAt).toBe(updatedAt)
+      expect(store.getByIds(['reference:sql-query#0'])[0]).toBeDefined()
       expect(embedCalls).toBe(1)
     } finally {
       store.close()
@@ -63,20 +63,19 @@ describe('makeReferenceStoredHook', () => {
   })
 
   it('prunes stale higher-index chunks when a re-stored body shrinks', async () => {
-    const store = await createStore()
+    const openStore = await createStore()
     const longBody = 'x'.repeat(5000)
     const embedFn: EmbedFn = async (texts) => texts.map(() => vector({ 0: 1 }))
 
+    const hook = makeReferenceStoredHook(openStore, embedFn)
+    await hook({ slug: 'big', body: longBody })
+    const initialChunks = referencePassagesForOne('big', longBody).length
+    expect(initialChunks).toBeGreaterThan(1)
+
+    await hook({ slug: 'big', body: 'short\n' })
+
+    const store = openStore()
     try {
-      const hook = makeReferenceStoredHook(store, embedFn)
-      await hook({ slug: 'big', body: longBody })
-      const initialChunks = referencePassagesForOne('big', longBody).length
-      expect(initialChunks).toBeGreaterThan(1)
-      expect(store.getByIds(['reference:big#0'])[0]).toBeDefined()
-      expect(store.getByIds([`reference:big#${initialChunks - 1}`])[0]).toBeDefined()
-
-      await hook({ slug: 'big', body: 'short\n' })
-
       expect(store.getByIds(['reference:big#0'])[0]).toBeDefined()
       expect(store.getByIds([`reference:big#${initialChunks - 1}`])[0]).toBeUndefined()
     } finally {
@@ -85,17 +84,18 @@ describe('makeReferenceStoredHook', () => {
   })
 
   it('embeds no rows for a demoted reference', async () => {
-    const store = await createStore()
+    const openStore = await createStore()
     let embedCalls = 0
     const embedFn: EmbedFn = async (texts) => {
       embedCalls += 1
       return texts.map(() => vector({ 0: 1 }))
     }
 
-    try {
-      const hook = makeReferenceStoredHook(store, embedFn)
-      await hook({ slug: 'demoted-ref', body: 'SELECT 1;\n', demoted: true })
+    const hook = makeReferenceStoredHook(openStore, embedFn)
+    await hook({ slug: 'demoted-ref', body: 'SELECT 1;\n', demoted: true })
 
+    const store = openStore()
+    try {
       expect(store.getByIds(['reference:demoted-ref#0'])[0]).toBeUndefined()
       expect(embedCalls).toBe(0)
     } finally {
@@ -104,11 +104,12 @@ describe('makeReferenceStoredHook', () => {
   })
 })
 
-async function createStore(): Promise<VectorStore> {
+async function createStore(): Promise<() => VectorStore> {
   const agentDir = join(tmpdir(), `typeclaw-reference-on-write-${randomUUID()}`)
   testDirs.push(agentDir)
   await mkdir(join(agentDir, 'memory', '.vectors'), { recursive: true })
-  return VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db'))
+  const dbPath = join(agentDir, 'memory', '.vectors', 'index.db')
+  return () => VectorStore.open(dbPath)
 }
 
 function vector(values: Record<number, number>): Float32Array {

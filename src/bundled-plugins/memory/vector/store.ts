@@ -2,6 +2,8 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+export type OpenVectorStore = () => VectorStore
+
 export type VectorRow = {
   id: string
   source: 'topic' | 'stream' | 'reference'

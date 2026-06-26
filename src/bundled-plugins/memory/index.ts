@@ -28,7 +28,7 @@ import { embed } from './vector/embedder'
 import { hybridSearch, type EmbedFn } from './vector/hybrid'
 import { makeAppendHook } from './vector/index-on-write'
 import { makeReferenceStoredHook } from './vector/reference-index-on-write'
-import { VectorStore } from './vector/store'
+import { type OpenVectorStore, VectorStore } from './vector/store'
 
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
@@ -144,13 +144,13 @@ const VECTOR_TURN_TOP_K = 10
 export type MemoryPluginDeps = {
   hybridSearch: typeof hybridSearch
   queryEmbedFn: EmbedFn
-  openAppendVectorStore: (agentDir: string) => VectorStore
+  openAppendVectorStore: (agentDir: string) => OpenVectorStore
 }
 
 const defaultDeps: MemoryPluginDeps = {
   hybridSearch,
   queryEmbedFn: embed,
-  openAppendVectorStore: (agentDir) => VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db')),
+  openAppendVectorStore: (agentDir) => () => VectorStore.open(join(agentDir, 'memory', '.vectors', 'index.db')),
 }
 
 // TypeClaw-owned infrastructure subagents (memory-logger, dreaming, backup) run
@@ -402,19 +402,18 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
         error: (m: string) => ctx.logger.error(m),
       }
 
-      // Long-lived, process-lifetime SQLite handle for append-time indexing
-      // (the on-write fragment/reference hooks below). Intentionally not closed
-      // by the plugin: it lives as long as the agent runtime and is released on
-      // process teardown. The per-turn query stores opened in renderVectorTurnMemory
-      // are the ones that get closed each turn.
-      const appendVectorStore = deps.openAppendVectorStore(ctx.agentDir)
+      // Opener (not an open handle) for append-time indexing. Each on-write hook
+      // opens its own short-lived store and closes it when the batch settles, so
+      // no bun:sqlite handle outlives a hook call to pin the agent dir (Bun
+      // #25964). Boot-only paths that never append never open the DB at all.
+      const openAppendVectorStore = deps.openAppendVectorStore(ctx.agentDir)
 
       return {
         subagents: {
           'memory-logger': createMemoryLoggerSubagent({
             logger: subagentLogger,
-            onFragmentsAppended: makeAppendHook(appendVectorStore),
-            onReferenceStored: makeReferenceStoredHook(appendVectorStore),
+            onFragmentsAppended: makeAppendHook(openAppendVectorStore),
+            onReferenceStored: makeReferenceStoredHook(openAppendVectorStore),
           }),
           dreaming: createDreamingSubagent({
             logger: subagentLogger,

@@ -1,7 +1,7 @@
 import { embed, EMBEDDING_MODEL_ID } from './embedder'
 import type { EmbedFn } from './hybrid'
 import { referencePassagesForOne } from './passages'
-import type { VectorStore } from './store'
+import type { OpenVectorStore } from './store'
 
 export type ReferenceStoredContext = { slug: string; body: string; demoted?: boolean }
 
@@ -17,34 +17,39 @@ export type ReferenceStoredContext = { slug: string; body: string; demoted?: boo
 // exists. We compute the wanted id set, upsert changed chunks, and delete any
 // existing row for this slug that is not wanted.
 export function makeReferenceStoredHook(
-  store: VectorStore,
+  openStore: OpenVectorStore,
   embedFn: EmbedFn = embed,
 ): (context: ReferenceStoredContext) => Promise<void> {
   return async ({ slug, body, demoted }) => {
-    const passages = referencePassagesForOne(slug, body, demoted)
-    const wantedIds = new Set(passages.map((passage) => passage.id))
+    const store = openStore()
+    try {
+      const passages = referencePassagesForOne(slug, body, demoted)
+      const wantedIds = new Set(passages.map((passage) => passage.id))
 
-    const prefix = `reference:${slug}#`
-    const staleIds = store
-      .getAllMeta()
-      .flatMap((row) => (row.id.startsWith(prefix) && !wantedIds.has(row.id) ? [row.id] : []))
-    if (staleIds.length > 0) store.deleteMany(staleIds)
+      const prefix = `reference:${slug}#`
+      const staleIds = store
+        .getAllMeta()
+        .flatMap((row) => (row.id.startsWith(prefix) && !wantedIds.has(row.id) ? [row.id] : []))
+      if (staleIds.length > 0) store.deleteMany(staleIds)
 
-    for (const passage of passages) {
-      const existing = store.getByIds([passage.id])[0]
-      if (existing?.contentHash === passage.contentHash && existing.model === EMBEDDING_MODEL_ID) continue
+      for (const passage of passages) {
+        const existing = store.getByIds([passage.id])[0]
+        if (existing?.contentHash === passage.contentHash && existing.model === EMBEDDING_MODEL_ID) continue
 
-      const [embedding] = await embedFn([passage.text], 'passage')
-      if (embedding === undefined) continue
-      store.upsert({
-        id: passage.id,
-        source: 'reference',
-        key: slug,
-        model: EMBEDDING_MODEL_ID,
-        dims: embedding.length,
-        embedding,
-        contentHash: passage.contentHash,
-      })
+        const [embedding] = await embedFn([passage.text], 'passage')
+        if (embedding === undefined) continue
+        store.upsert({
+          id: passage.id,
+          source: 'reference',
+          key: slug,
+          model: EMBEDDING_MODEL_ID,
+          dims: embedding.length,
+          embedding,
+          contentHash: passage.contentHash,
+        })
+      }
+    } finally {
+      store.close()
     }
   }
 }

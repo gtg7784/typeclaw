@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { __resetForwardRequestForTesting as resetDashboardForwardRequest } from '@/bundled-plugins/agent-browser'
 import type { LoadCronResult } from '@/cron'
+import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import { startAgent, type LoadCronFn } from './index'
 
@@ -29,7 +30,7 @@ afterEach(async () => {
     running = null
   }
   if (agentDir) {
-    await rm(agentDir, { recursive: true, force: true })
+    await rmTempDir(agentDir)
     agentDir = null
   }
   resetDashboardForwardRequest()
