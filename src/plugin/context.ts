@@ -1,7 +1,9 @@
 import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
+import { getConfig, resolveModel, resolveProfile, type Models } from '@/config'
+import { providerForModelRef } from '@/config/providers'
 import type { PermissionService } from '@/permissions'
 
-import type { PluginContext, PluginLogger, SpawnSubagentOptions } from './types'
+import type { PluginContext, PluginLogger, PluginModelInfo, PluginModels, SpawnSubagentOptions } from './types'
 
 export type SpawnSubagentFn = (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
 
@@ -24,11 +26,15 @@ const githubTokenUnavailable: ResolveGithubTokenForRepo = async () => ({
 })
 
 export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TConfig>): PluginContext<TConfig> {
+  const models = buildPluginModels(getConfig().models)
   return Object.freeze({
     name: opts.name,
     version: opts.version,
     agentDir: opts.agentDir,
     config: opts.config,
+    models,
+    // Presence-only by design: plugin code must not receive secret values here.
+    hasSecret: (envName: string) => typeof process.env[envName] === 'string' && process.env[envName]!.length > 0,
     logger: opts.logger,
     permissions: opts.permissions,
     github: {
@@ -43,6 +49,34 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
       }
       await opts.spawnSubagent(name, payload, options)
     },
+  })
+}
+
+export function buildPluginModels(models: Models): PluginModels {
+  const profiles = Object.keys(models).map((name) => pluginModelInfo(name, models[name]!.refs[0]!))
+  const defaultModel =
+    profiles.find((profile) => profile.profile === 'default') ?? pluginModelInfo('default', models.default.refs[0]!)
+
+  return Object.freeze({
+    default: defaultModel,
+    profiles,
+    resolve: (name: string) => {
+      const resolved = resolveProfile(models, name)
+      return pluginModelInfo(resolved.profile, resolved.ref)
+    },
+    usesProvider: (providerId: string) => profiles.some((profile) => profile.providerId === providerId),
+  })
+}
+
+function pluginModelInfo(profile: string, ref: string): PluginModelInfo {
+  const model = resolveModel(ref)
+  return Object.freeze({
+    profile,
+    ref,
+    providerId: providerForModelRef(ref),
+    modelId: model.id,
+    input: [...model.input],
+    reasoning: model.reasoning,
   })
 }
 

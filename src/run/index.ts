@@ -51,7 +51,7 @@ import {
   type Scheduler,
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
-import { createMcpManager } from '@/mcp'
+import { createMcpManager, mergeConfigAndPluginMcpServers, pluginMcpServersToConfig, type McpManager } from '@/mcp'
 import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
@@ -206,9 +206,11 @@ async function startAgentRuntime(
   // instant they exist, so a throw anywhere below detaches them; `stop()` calls
   // the same disposer on the success path.
   let processGlobalsDisposed = false
+  let bootMcpManager: McpManager | null = null
   const disposeProcessGlobals = (): void => {
     if (processGlobalsDisposed) return
     processGlobalsDisposed = true
+    void bootMcpManager?.closeAll()
     uninstallCodexFetchObserver()
     fatalGuard.dispose()
     // onSigterm is defined later in this scope but only ever invoked after init;
@@ -220,29 +222,11 @@ async function startAgentRuntime(
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
   const githubTokenBridge = createGithubTokenBridge()
-  const mcpManager =
-    cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
-  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
-
-  // Warm up MCP connections in the BACKGROUND so boot doesn't block on each
-  // server's subprocess spawn + listTools() (worst case the 15s connect
-  // timeout). Tool calls lazily ensureConnected() and the catalog render awaits
-  // whenInitialConnectSettled(), so correctness never depends on this finishing
-  // first. closeAll() below cleans these up if boot aborts.
-  if (mcpManager !== null) {
-    void mcpManager.connectAll().then((results) => {
-      for (const result of results) {
-        if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
-      }
-    })
-  }
 
   // loadPlugins and the vector startup unit have no mutual data dependency, so
   // run them concurrently. loadPlugins stays UNCAUGHT so a bundled-plugin or
-  // plugin-security failure still aborts boot; when it does, close the background
-  // MCP warm-up so its servers can't leak — startAgent returns no stop() handler
-  // on this path, so this is the only cleanup chance. closeAll() also closes any
-  // connection the warm-up establishes after shutdown begins.
+  // plugin-security failure still aborts boot. MCP manager construction happens
+  // after plugin loading because plugins can contribute servers.
   const pluginsLoadedPromise = loadPlugins({
     entries: withDefaultPlugins(cwdConfig.plugins),
     agentDir: cwd,
@@ -253,14 +237,7 @@ async function startAgentRuntime(
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   const vectorStartupPromise = runVectorStartup(cwd)
-  let pluginsLoaded: LoadPluginsResult
-  try {
-    const [loaded] = await Promise.all([pluginsLoadedPromise, vectorStartupPromise])
-    pluginsLoaded = loaded
-  } catch (err) {
-    if (mcpManager !== null) await mcpManager.closeAll()
-    throw err
-  }
+  const [pluginsLoaded] = await Promise.all([pluginsLoadedPromise, vectorStartupPromise])
 
   reloadRegistry.register(
     createConfigReloadable({
@@ -272,6 +249,27 @@ async function startAgentRuntime(
   )
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
+  const mergedMcpServers = mergeConfigAndPluginMcpServers(
+    cwdConfig.mcpServers,
+    pluginMcpServersToConfig(pluginRegistry.mcpServers),
+    (message) => console.warn(message),
+  )
+  const mcpManager = mergedMcpServers.length > 0 ? createMcpManager(mergedMcpServers, { env: process.env }) : null
+  bootMcpManager = mcpManager
+  const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
+
+  // Warm up MCP connections in the BACKGROUND so boot doesn't block on each
+  // server's subprocess spawn + listTools() (worst case the 15s connect
+  // timeout). Tool calls lazily ensureConnected() and the catalog render awaits
+  // whenInitialConnectSettled(), so correctness never depends on this finishing
+  // first. closeAll() on stop cleans up connections and in-flight warm-up work.
+  if (mcpManager !== null) {
+    void mcpManager.connectAll().then((results) => {
+      for (const result of results) {
+        if (!result.ok) console.warn(`[mcp] ${result.name} failed to connect: ${result.error.message}`)
+      }
+    })
+  }
 
   const { registry: subagents, pluginSubagentByShim, pluginSubagentByName } = mergeSubagents(pluginRegistry)
 
@@ -279,6 +277,7 @@ async function startAgentRuntime(
     pluginRegistry.tools.length > 0 ||
     pluginRegistry.subagents.length > 0 ||
     pluginRegistry.cronJobs.length > 0 ||
+    pluginRegistry.mcpServers.length > 0 ||
     pluginRegistry.skills.length > 0 ||
     pluginRegistry.skillsDirs.length > 0 ||
     pluginRegistry.commands.length > 0 ||

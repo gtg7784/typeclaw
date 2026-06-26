@@ -4,6 +4,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import type { SubagentShared } from '@/agent/subagents'
 import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
 import type { PermissionService } from '@/permissions'
+import type { Secret } from '@/secrets/resolve'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
 
@@ -275,10 +276,28 @@ export type PluginContext<TConfig = never> = {
   readonly version: string | undefined
   readonly agentDir: string
   readonly config: TConfig
+  readonly models: PluginModels
+  readonly hasSecret: (envName: string) => boolean
   readonly logger: PluginLogger
   readonly permissions: PermissionService
   readonly github: PluginGithubServices
   spawnSubagent: (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
+}
+
+export type PluginModelInfo = {
+  readonly profile: string
+  readonly ref: string
+  readonly providerId: string
+  readonly modelId: string
+  readonly input: readonly ('text' | 'image')[]
+  readonly reasoning: boolean
+}
+
+export type PluginModels = {
+  readonly default: PluginModelInfo
+  readonly profiles: readonly PluginModelInfo[]
+  resolve(profile: string): PluginModelInfo
+  usesProvider(providerId: string): boolean
 }
 
 export type PluginGithubServices = {
@@ -290,10 +309,20 @@ export type PluginExports = {
   tools?: Record<string, Tool<any>>
   subagents?: Record<string, Subagent<any>>
   cronJobs?: Record<string, PluginCronJob>
+  mcpServers?: Record<string, PluginMcpServer>
   skills?: Record<string, PluginSkill>
   skillsDirs?: string[]
   hooks?: Hooks
   doctorChecks?: Record<string, PluginDoctorCheck>
+}
+
+export type PluginMcpServer = {
+  description?: string
+  enabled?: boolean
+  timeoutMs?: number
+  transport:
+    | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, Secret> }
+    | { type: 'http'; url: string; env?: Record<string, Secret> }
 }
 
 // `typeclaw doctor` plugin extension surface. Each check is read-only by

@@ -254,6 +254,11 @@ async function registerOnePlugin(args: RegisterOnePluginArgs): Promise<void> {
     throw new PluginPhaseError('factory', message, err)
   }
 
+  if (hasContributedMcpServers(exports) && !(resolved.defined.permissions ?? []).includes('mcp')) {
+    const message = `plugin ${resolved.name}: exporting mcpServers requires declaring the 'mcp' permission`
+    throw new PluginPhaseError('register', message, new Error(message))
+  }
+
   try {
     registerContributions({
       pluginName: resolved.name,
@@ -269,6 +274,10 @@ async function registerOnePlugin(args: RegisterOnePluginArgs): Promise<void> {
     discardRegistrationsBy(resolved.name, registry, hooks)
     throw new PluginPhaseError('register', err instanceof Error ? err.message : String(err), err)
   }
+}
+
+function hasContributedMcpServers(exports: PluginExports): boolean {
+  return exports.mcpServers !== undefined && Object.keys(exports.mcpServers).length > 0
 }
 
 function collectDeclaredPermissions(
@@ -301,6 +310,7 @@ export function summarizeLoaded(loaded: LoadPluginsResult['loadedPlugins'], regi
     `${registry.tools.length} tool(s)`,
     `${registry.subagents.length} subagent(s)`,
     `${registry.cronJobs.length} cron job(s)`,
+    `${registry.mcpServers.length} mcp server(s)`,
     `${registry.skills.length} skill(s)`,
     `${registry.skillsDirs.length} skills dir(s)`,
     `${registry.doctorChecks.length} doctor check(s)`,

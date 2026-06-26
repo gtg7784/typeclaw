@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { noopPermissionService } from '@/permissions'
 import type { HookContext, PluginContext, ToolBeforeEvent } from '@/plugin'
+import { stubPluginModels } from '@/plugin/test-support'
 
 import bunHygienePlugin from './index'
 
@@ -65,6 +66,8 @@ function pluginContext(): PluginContext<undefined> {
     version: undefined,
     agentDir: '/agent',
     config: undefined,
+    models: stubPluginModels({ defaultProviderId: 'fireworks' }),
+    hasSecret: () => false,
     logger: noopLogger,
     permissions: noopPermissionService,
     github: {
