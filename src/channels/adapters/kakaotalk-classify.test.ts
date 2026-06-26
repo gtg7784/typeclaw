@@ -191,6 +191,75 @@ describe('classifyInbound', () => {
     expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 
+  test('engages reply-to-bot when LOCO sends src_userId as a string (production shape)', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'yes, please',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'BOT-L1',
+          src_userId: '999',
+          src_message: 'Do you want me to summarize this?',
+          src_type: 1,
+        },
+      }),
+      dmConfig(),
+      { selfUserId: '999', lookupChat: dmLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.replyToBotMessageId).toBe('BOT-L1')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
+  })
+
+  test('compares large string ids without precision loss', () => {
+    const bigId = '9007199254740993123'
+    const verdict = classifyInbound(
+      event({
+        message: 'thanks',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'BOT-L9',
+          src_userId: bigId,
+          src_message: 'sure',
+          src_type: 1,
+        },
+      }),
+      dmConfig(),
+      { selfUserId: bigId, lookupChat: dmLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.replyToBotMessageId).toBe('BOT-L9')
+  })
+
+  test('ignores a non-numeric src_userId rather than crediting the bot', () => {
+    const verdict = classifyInbound(
+      event({
+        message: 'hm',
+        message_type: 26,
+        attachment: {
+          attach_only: false,
+          src_logId: 'L-X',
+          src_userId: 'not-a-number',
+          src_message: 'context',
+          src_type: 1,
+        },
+      }),
+      dmConfig(),
+      { selfUserId: '999', lookupChat: dmLookup },
+    )
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
+  })
+
   test('keeps raw text and sets referenceContext for replies to another user', () => {
     const verdict = classifyInbound(
       event({
