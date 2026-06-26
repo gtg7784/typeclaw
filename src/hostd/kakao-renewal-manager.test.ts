@@ -400,7 +400,7 @@ describe('createKakaoRenewalManager', () => {
     })
   })
 
-  test('stop(containerName) awaits the in-flight tick for that container', async () => {
+  test('stop(containerName) returns without awaiting the in-flight tick (no self-deadlock)', async () => {
     await withAgentDir(async (dir) => {
       const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
       let attemptStarted = false
@@ -430,12 +430,117 @@ describe('createKakaoRenewalManager', () => {
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
       await waitFor(() => attemptStarted)
 
+      // stop() must resolve while the tick is still parked in login. Awaiting
+      // the tick here is the self-deadlock that wedged hostd: deregister calls
+      // stop() on the very tick that is mid-restart waiting for deregister.
       const stopPromise = manager.stop(setup.containerName)
-      const racer = Promise.race([stopPromise, new Promise((r) => setTimeout(() => r('timeout'), 50))])
-      expect(await racer).toBe('timeout')
+      const racer = Promise.race([
+        stopPromise.then(() => 'stopped'),
+        new Promise((r) => setTimeout(() => r('timeout'), 50)),
+      ])
+      expect(await racer).toBe('stopped')
 
       releaseAttempt!()
-      await stopPromise
+      await manager.drain()
+    })
+  })
+
+  test('does NOT invoke onRenewalOk when stop() removed the container during an in-flight renewal', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      let attemptStarted = false
+      let releaseAttempt: (() => void) | null = null
+      const restartCalls: string[] = []
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => {
+          attemptStarted = true
+          await new Promise<void>((r) => {
+            releaseAttempt = r
+          })
+          return {
+            authenticated: true,
+            credentials: {
+              access_token: 'fresh',
+              refresh_token: 'fresh-refresh',
+              user_id: 'u-1',
+              device_uuid: deviceUuid,
+              device_type: deviceType,
+            },
+          }
+        },
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+        onRenewalOk: async ({ containerName }) => {
+          restartCalls.push(containerName)
+        },
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await waitFor(() => attemptStarted)
+
+      await manager.stop(setup.containerName)
+      releaseAttempt!()
+      await manager.drain()
+
+      expect(restartCalls).toEqual([])
+    })
+  })
+
+  test('re-registering to a shouldRenew=false cwd clears the old timer and does not restart the old cwd', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      let attemptStarted = false
+      let releaseAttempt: (() => void) | null = null
+      const restartCwds: string[] = []
+      const scheduleStops = new Map<number, number>()
+      let scheduleSeq = 0
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => {
+          attemptStarted = true
+          await new Promise<void>((r) => {
+            releaseAttempt = r
+          })
+          return {
+            authenticated: true,
+            credentials: {
+              access_token: 'fresh',
+              refresh_token: 'fresh-refresh',
+              user_id: 'u-1',
+              device_uuid: deviceUuid,
+              device_type: deviceType,
+            },
+          }
+        },
+        schedule: (_fn, _ms) => {
+          const id = scheduleSeq++
+          scheduleStops.set(id, 0)
+          return {
+            stop: () => {
+              scheduleStops.set(id, (scheduleStops.get(id) ?? 0) + 1)
+            },
+          }
+        },
+        onRenewalOk: async ({ cwd }) => {
+          restartCwds.push(cwd)
+        },
+        shouldRenew: ({ cwd }) => cwd === setup.cwd,
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await waitFor(() => attemptStarted)
+
+      manager.start({ containerName: setup.containerName, cwd: '/agent/no-kakao' })
+      releaseAttempt!()
+      await manager.drain()
+
+      expect(restartCwds).not.toContain(setup.cwd)
+      // The first registration's timer was stopped by the ineligible re-register.
+      expect(scheduleStops.get(0)).toBe(1)
+      // No second timer was scheduled for the ineligible cwd.
+      expect(scheduleSeq).toBe(1)
     })
   })
 })

@@ -194,23 +194,32 @@ export function createWebexRenewalManager(opts: WebexRenewalManagerOptions = {})
       void scheduleTick(input.containerName)
     },
 
-    async stop(containerName: string): Promise<void> {
+    // Must NOT await the in-flight tick: a successful tick runs onRenewalOk →
+    // hostdRestart → container stop() → deregister RPC → handleDeregister →
+    // webexRenewal.stop(), so awaiting inFlight here waits on the very tick that
+    // is parked waiting for this restart — a self-deadlock that wedges the
+    // daemon's per-container serial chain forever. Clearing latestInput (not the
+    // await) is what fails the tick's onRenewalOk guard; drain() still awaits.
+    stop(containerName: string): Promise<void> {
       const handle = timers.get(containerName)
       if (handle) {
         timers.delete(containerName)
         handle.stop()
       }
       latestInput.delete(containerName)
-      const promise = inFlight.get(containerName)
-      if (promise) await promise.catch(() => {})
+      return Promise.resolve()
     },
 
     async drain(): Promise<void> {
       for (const [, handle] of timers) handle.stop()
       timers.clear()
-      latestInput.clear()
+      // Clear latestInput AFTER awaiting in-flight: the onRenewalOk guard reads
+      // latestInput, so clearing first would suppress the restart of a tick that
+      // is mid-login when drain() runs. drain() is shutdown — it waits for that
+      // work to finish rather than dropping it.
       const promises = Array.from(inFlight.values())
       await Promise.allSettled(promises)
+      latestInput.clear()
     },
   }
 }
