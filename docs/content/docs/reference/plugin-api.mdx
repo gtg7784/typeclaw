@@ -40,6 +40,8 @@ type PluginContext<TConfig = never> = {
   readonly version: string | undefined
   readonly agentDir: string // absolute; '/agent' in container
   readonly config: TConfig // parsed per configSchema (the ctx is frozen; the config object itself is not)
+  readonly models: PluginModels // all configured model profiles, with fallback-aware lookup
+  readonly hasSecret: (envName: string) => boolean // presence-only; never returns the value
   readonly logger: PluginLogger // .info / .warn / .error
   readonly permissions: PermissionService // .has(origin, perm) etc.
   readonly github: PluginGithubServices // .resolveTokenForRepo
@@ -50,7 +52,25 @@ type SpawnSubagentOptions = {
   parentSessionId?: string
   spawnedByOrigin?: SessionOrigin
 }
+
+type PluginModelInfo = {
+  readonly profile: string
+  readonly ref: string
+  readonly providerId: string
+  readonly modelId: string
+  readonly input: readonly ('text' | 'image')[]
+  readonly reasoning: boolean
+}
+
+type PluginModels = {
+  readonly default: PluginModelInfo
+  readonly profiles: readonly PluginModelInfo[]
+  resolve(profile: string): PluginModelInfo
+  usesProvider(providerId: string): boolean
+}
 ```
+
+`ctx.models` describes every configured `typeclaw.json#models` profile — built-ins like `default`, `fast`, `deep`, and `vision`, plus custom profile names. Each `PluginModelInfo` reports the profile's head model ref, provider id, provider-local model id, input modalities, and reasoning support. `ctx.models.default` is the resolved `default` profile. `ctx.models.profiles` contains one entry per configured profile. `ctx.models.resolve(profile)` mirrors runtime profile resolution: unknown names fall back to `default` and return a `PluginModelInfo` whose `profile` is the resolved profile name. `ctx.models.usesProvider(providerId)` is a convenience for provider-specific plugin wiring.
 
 `spawnSubagent` resolves `spawnedByRole` from `spawnedByOrigin` via the `PermissionService`, so the spawning session's role is inherited rather than forged. Hook handlers that own an origin (e.g. `session.idle`, `session.turn.end`) should pass `parentSessionId` and `spawnedByOrigin: event.origin`.
 
@@ -63,6 +83,7 @@ type PluginExports = {
   tools?: Record<string, Tool<any>>
   subagents?: Record<string, Subagent<any>>
   cronJobs?: Record<string, PluginCronJob>
+  mcpServers?: Record<string, PluginMcpServer>
   skills?: Record<string, PluginSkill>
   skillsDirs?: string[]
   hooks?: Hooks
@@ -71,6 +92,30 @@ type PluginExports = {
 ```
 
 Commands are declared on `definePlugin` (by-value), not returned here.
+
+### MCP servers
+
+`mcpServers` lets a plugin contribute servers to the same runtime `McpManager` as `typeclaw.json#mcpServers`. Keys are the public server names; they are not prefixed with the plugin name.
+
+```ts
+type PluginMcpServer = {
+  description?: string
+  enabled?: boolean
+  timeoutMs?: number
+  transport:
+    | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, Secret> }
+    | { type: 'http'; url: string; env?: Record<string, Secret> }
+}
+```
+
+Rules:
+
+- The plugin must declare `permissions: ['mcp']` (alongside any other permissions) before returning non-empty `mcpServers`.
+- Server names must match `^[a-z0-9][a-z0-9-_]*$` and must not contain `__`; that separator is reserved for `<server>__<tool>` namespacing.
+- Names must be globally unique across plugins. If a plugin server has the same name as a user-configured `typeclaw.json#mcpServers` entry, the config server wins and the plugin server is skipped with a warning.
+- Spawn/connect/list-tools failures are non-fatal. The manager reports the failed server and keeps booting; tool calls can retry through lazy connection.
+
+`env` values use the same `Secret` shape as `secrets.json` (`{ value }`, `{ env }`, or string shorthand after schema normalization). A plugin can use `ctx.hasSecret('NAME')` to check presence without reading the value.
 
 ### Tool
 
@@ -215,7 +260,7 @@ type PluginCommand = ContainerCommand | HostCommand | EitherCommand
 
 Plugins load once at container start. They can:
 
-- Expose tools, subagents, cron jobs, skills, hooks, doctor checks, and commands
+- Expose tools, subagents, cron jobs, MCP servers, skills, hooks, doctor checks, and commands
 - Read live config via `ctx.config` (boot-only fields are snapshots; reloadable fields are live)
 - Spawn subagents with provenance (`spawnedByRole` is resolved from the parent origin)
 
