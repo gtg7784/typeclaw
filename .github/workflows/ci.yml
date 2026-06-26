@@ -187,16 +187,14 @@ jobs:
     # toolchain (bun install + typecheck/lint/format) runs on native Windows. It
     # omits `bun run test` on purpose — many tests need Docker/Unix sockets that a
     # Windows runner lacks and require a separate triage (#899) first.
-    # continue-on-error keeps it informational until the Windows toolchain is
-    # proven stable, then it graduates to a required check.
-    # Gated to push (post-merge on main), matching windows-test: while the lane
-    # is advisory (continue-on-error), running a Windows runner on every PR
-    # spends 2x-cost minutes for a check nobody blocks on. Post-merge coverage
-    # still catches Windows toolchain regressions before a release. Drop this
-    # `if` and graduate to a required PR check once the Windows lane is stable.
+    # Runs on PRs (not just post-merge): now that the Windows suite passes, the
+    # pre-merge signal catches Windows toolchain regressions before they reach
+    # main, which is worth the 2x Windows-runner cost. continue-on-error keeps it
+    # advisory for now; drop it to make this a required, merge-blocking check once
+    # the lane has stayed green across a few PRs.
     name: windows static checks (typecheck / lint / format)
     runs-on: windows-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     continue-on-error: true
     env:
       FIREWORKS_API_KEY: dummy
@@ -249,17 +247,16 @@ jobs:
         run: bun run format:check
 
   windows-test:
-    # Companion to windows-static: runs the full suite on native Windows to triage
-    # which tests assume POSIX (Docker, Unix sockets, chmod, /tmp). Many are
-    # expected to fail until guarded (#899), so it's continue-on-error and purely
-    # informational — read its logs for the Windows failure list. Gated to push
-    # (post-merge on main) to avoid the 2x Windows-runner cost on every PR;
-    # broaden the trigger and drop continue-on-error once the suite is green on
-    # Windows. The longer --timeout absorbs the slower Windows runner so failures
-    # reflect real incompatibilities, not timeouts.
+    # Companion to windows-static: runs the full suite on native Windows. The
+    # suite now passes on Windows, so this runs on PRs (not just post-merge) to
+    # give a pre-merge signal that catches Windows regressions before they reach
+    # main — worth the 2x Windows-runner cost. Still continue-on-error (advisory)
+    # for now; drop that to make it a required, merge-blocking check once it has
+    # stayed green across a few PRs. The longer --timeout absorbs the slower
+    # Windows runner so failures reflect real incompatibilities, not timeouts.
     name: windows tests (informational triage)
     runs-on: windows-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     continue-on-error: true
     env:
       FIREWORKS_API_KEY: dummy
