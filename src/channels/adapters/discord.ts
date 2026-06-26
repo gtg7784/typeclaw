@@ -24,6 +24,7 @@ import type {
 import { chunkMarkdown } from '@/markdown'
 import type { DiscordAccountRecord } from '@/secrets/schema'
 
+import { describeError } from './describe-error'
 import { createDiscordAuthorResolver } from './discord-author-resolver'
 import { createDiscordChannelResolver } from './discord-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './discord-classify'
@@ -84,7 +85,7 @@ export function createDiscordOutboundCallback(deps: {
       }
       return { ok: true }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.error(`[discord] outbound failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -100,7 +101,7 @@ export function createDiscordHistoryCallback(deps: {
       const messages = await deps.client.getMessages(args.chat, clampLimit(args.limit, 100))
       return { ok: true, messages: messages.map(mapDiscordHistoryMessage).reverse() }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.warn(`[discord] history fetch failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -159,7 +160,7 @@ export function createDiscordFetchAttachmentCallback(deps: {
         size: buffer.length,
       }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.error(`[discord] fetchAttachment failed for ${url.toString()}: ${message}`)
       return { ok: false, error: message }
     }
@@ -232,7 +233,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
       logger.info(`[discord] routed id=${event.id} ${tag} mention=${payload.isBotMention}`)
       await options.router.route(payload)
     } catch (err) {
-      logger.error(`[discord] handleInbound failed: ${describe(err)}`)
+      logger.error(`[discord] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -262,7 +263,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
         started = false
         selfUserId = null
         token = null
-        logger.error(`[discord] login failed: ${describe(err)}`)
+        logger.error(`[discord] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -281,7 +282,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
       })
       listener.on('error', (err) => {
         if (!listenerConnected && listenerStartupError === null) listenerStartupError = err
-        logger.error(`[discord] listener error: ${describe(err)}`)
+        logger.error(`[discord] listener error: ${describeError(err)}`)
       })
       listener.on('message_create', (event) => void handleMessage(event))
       listener.on('message_reaction_add', (event) =>
@@ -305,14 +306,14 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
         token = null
         connected = false
         started = false
-        logger.error(`[discord] ${reason}: ${describe(cause)}`)
+        logger.error(`[discord] ${reason}: ${describeError(cause)}`)
         throw cause
       }
 
       try {
         await listener.start()
       } catch (err) {
-        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
+        rollbackStart('listener start threw', err instanceof Error ? err : new Error(describeError(err)))
       }
       if (!listenerConnected) {
         rollbackStart(
@@ -398,10 +399,6 @@ const DISCORD_ATTACHMENT_HOSTS = new Set(['cdn.discordapp.com', 'media.discordap
 function clampLimit(requested: number, max: number): number {
   if (!Number.isFinite(requested) || requested <= 0) return max
   return Math.min(Math.floor(requested), max)
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function dropHint(reason: InboundDropReason): string {
