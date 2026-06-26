@@ -10,7 +10,6 @@ import type {
   PluginDoctorCheck,
   PluginExports,
   PluginLogger,
-  PluginMcpServer,
   PluginSkill,
   Subagent,
   Tool,
@@ -35,13 +34,11 @@ export type RegisteredCommand = {
   command: PluginCommand
   logger: PluginLogger
 }
-export type RegisteredMcpServer = { pluginName: string; name: string; server: PluginMcpServer; logger: PluginLogger }
 
 export type PluginRegistry = {
   tools: RegisteredTool[]
   subagents: RegisteredSubagent[]
   cronJobs: RegisteredCronJob[]
-  mcpServers: RegisteredMcpServer[]
   skills: RegisteredSkillEntry[]
   skillsDirs: RegisteredSkillDir[]
   doctorChecks: RegisteredDoctorCheck[]
@@ -62,9 +59,6 @@ export type RegisterContributionsOptions = {
 }
 
 const COMMAND_NAME_REGEX = /^[a-z][a-z0-9-]*$/
-// Mirrors src/config/config.ts#MOUNT_NAME_PATTERN plus the MCP-specific
-// no-'__' refine because server names become `<server>__<tool>` namespaces.
-const MCP_SERVER_NAME_REGEX = /^[a-z0-9][a-z0-9-_]*$/
 
 // CLI subcommands plugins MUST NOT shadow. Derived from BUILTIN_COMMAND_NAMES
 // so cli/index.ts and registry.ts cannot drift apart.
@@ -113,19 +107,6 @@ export function registerContributions(opts: RegisterContributionsOptions): void 
       }
       const job = toCronJob(globalId, spec)
       registry.cronJobs.push({ pluginName, localId, globalId, job })
-    }
-  }
-
-  if (ex.mcpServers) {
-    for (const [name, server] of Object.entries(ex.mcpServers)) {
-      validatePluginMcpServerName(pluginName, name)
-      const conflict = registry.mcpServers.find((s) => s.name === name)
-      if (conflict) {
-        throw new Error(
-          `plugin ${pluginName}: mcp server "${name}" already registered by plugin ${conflict.pluginName}`,
-        )
-      }
-      registry.mcpServers.push({ pluginName, name, server, logger })
     }
   }
 
@@ -184,7 +165,6 @@ export function discardRegistrationsBy(pluginName: string, registry: PluginRegis
   registry.tools = registry.tools.filter((t) => t.pluginName !== pluginName)
   registry.subagents = registry.subagents.filter((s) => s.pluginName !== pluginName)
   registry.cronJobs = registry.cronJobs.filter((j) => j.pluginName !== pluginName)
-  registry.mcpServers = registry.mcpServers.filter((s) => s.pluginName !== pluginName)
   registry.skills = registry.skills.filter((s) => s.pluginName !== pluginName)
   registry.skillsDirs = registry.skillsDirs.filter((d) => d.pluginName !== pluginName)
   registry.doctorChecks = registry.doctorChecks.filter((d) => d.pluginName !== pluginName)
@@ -197,22 +177,10 @@ export function emptyRegistry(): PluginRegistry {
     tools: [],
     subagents: [],
     cronJobs: [],
-    mcpServers: [],
     skills: [],
     skillsDirs: [],
     doctorChecks: [],
     commands: [],
-  }
-}
-
-function validatePluginMcpServerName(pluginName: string, name: string): void {
-  if (!MCP_SERVER_NAME_REGEX.test(name)) {
-    throw new Error(
-      `plugin ${pluginName}: mcp server "${name}" must match ${MCP_SERVER_NAME_REGEX.source} (lowercase alphanumeric with - or _)`,
-    )
-  }
-  if (name.includes('__')) {
-    throw new Error(`plugin ${pluginName}: mcp server "${name}" must not contain '__'`)
   }
 }
 

@@ -39,7 +39,6 @@ const EMPTY_REGISTRY: PluginRegistry = {
   tools: [],
   subagents: [],
   cronJobs: [],
-  mcpServers: [],
   skills: [],
   skillsDirs: [],
   doctorChecks: [],

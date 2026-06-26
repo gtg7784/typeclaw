@@ -11,10 +11,9 @@ import {
   RESERVED_COMMAND_NAMES,
   registerContributions,
 } from './registry'
-import type { PluginCommand, PluginExports, PluginMcpServer } from './types'
+import type { PluginCommand, PluginExports } from './types'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
-const stdioMcpServer: PluginMcpServer = { transport: { type: 'stdio', command: 'server' } }
 
 function makeOptions(pluginName: string, ex: PluginExports, commands?: Record<string, PluginCommand>) {
   return {
@@ -101,60 +100,6 @@ describe('registerContributions', () => {
     })
     registerContributions(opts)
     expect(() => registerContributions(opts)).toThrow(/conflicts with plugin p1/)
-  })
-
-  test('records plugin mcp servers', () => {
-    const opts = makeOptions('vision', {
-      mcpServers: {
-        vision: {
-          description: 'Vision MCP',
-          timeoutMs: 5000,
-          transport: { type: 'stdio', command: 'vision-mcp', args: ['serve'] },
-        },
-      },
-    })
-
-    registerContributions(opts)
-
-    expect(opts.registry.mcpServers).toEqual([
-      {
-        pluginName: 'vision',
-        name: 'vision',
-        server: opts.exports.mcpServers!.vision!,
-        logger: noopLogger,
-      },
-    ])
-  })
-
-  test("rejects plugin mcp server names containing the reserved '__' separator", () => {
-    const opts = makeOptions('vision', { mcpServers: { bad__name: stdioMcpServer } })
-
-    expect(() => registerContributions(opts)).toThrow(/plugin vision: mcp server "bad__name" must not contain '__'/)
-  })
-
-  test('rejects plugin mcp server names that do not match config server names', () => {
-    for (const bad of ['Bad-Name', 'has spaces', '-leading-dash', '']) {
-      const opts = makeOptions('vision', { mcpServers: { [bad]: stdioMcpServer } })
-      expect(() => registerContributions(opts)).toThrow(/plugin vision: mcp server .* must match/)
-    }
-  })
-
-  test('rejects duplicate mcp server names across plugins', () => {
-    const registry = emptyRegistry()
-    const hooks = createHookBus()
-    registerContributions({
-      ...makeOptions('p1', { mcpServers: { shared: stdioMcpServer } }),
-      registry,
-      hooks,
-    })
-
-    expect(() =>
-      registerContributions({
-        ...makeOptions('p2', { mcpServers: { shared: stdioMcpServer } }),
-        registry,
-        hooks,
-      }),
-    ).toThrow(/plugin p2: mcp server "shared" already registered by plugin p1/)
   })
 
   test('cron globalId uses __plugin_<name>_<key> format', () => {
@@ -314,7 +259,6 @@ describe('discardRegistrationsBy', () => {
         tools: { t1: tool },
         subagents: { s1: defineSubagent({ systemPrompt: '' }) },
         cronJobs: { c1: { schedule: '* * * * *', kind: 'prompt', prompt: '' } },
-        mcpServers: { m1: stdioMcpServer },
         skills: { sk1: { description: '', content: '' } },
         skillsDirs: ['/p1/skills'],
         hooks: { 'session.start': () => {} },
@@ -351,7 +295,6 @@ describe('discardRegistrationsBy', () => {
     expect(registry.tools.map((t) => t.pluginName)).toEqual(['p2'])
     expect(registry.subagents).toEqual([])
     expect(registry.cronJobs).toEqual([])
-    expect(registry.mcpServers).toEqual([])
     expect(registry.skills).toEqual([])
     expect(registry.skillsDirs).toEqual([])
     expect(registry.doctorChecks).toEqual([])
