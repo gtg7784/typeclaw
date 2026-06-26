@@ -5,6 +5,7 @@ import { config, validateConfig } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { guardIncompleteInit } from './incomplete-init'
 import { errorLine, renderStartSuccess, reportConfigWarnings, spinner } from './ui'
 
@@ -62,6 +63,12 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
     reportConfigWarnings(validated.warnings)
+
+    const preflight = await preflightDocker()
+    if (!preflight.ok) {
+      printDockerGuidance(preflight)
+      process.exit(1)
+    }
 
     const s = spinner()
     s.start('Starting container...')
