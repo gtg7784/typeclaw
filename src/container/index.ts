@@ -26,6 +26,8 @@ export {
   refreshDockerfile,
   refreshGitignore,
   start,
+  type CurrentHostDaemon,
+  type HostDaemonRegisterPayload,
   type HostDaemonStatus,
   type PlanStartOptions,
   type StartOptions,
