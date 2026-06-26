@@ -47,7 +47,8 @@ class FakeListener {
   started = false
   stopped = 0
   startCalls = 0
-  startBehavior: 'emit-connected' | 'silent-fail' | 'throw' | 'wait-for-connected-call' = 'emit-connected'
+  startBehavior: 'emit-connected' | 'silent-fail' | 'error-event' | 'throw' | 'wait-for-connected-call' =
+    'emit-connected'
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private handlers = new Map<ListenerEvent, Array<(...args: any[]) => void>>()
 
@@ -71,6 +72,11 @@ class FakeListener {
     }
     if (this.startBehavior === 'silent-fail') {
       this.emit('error', new Error('deleteWebhook failed'))
+      return
+    }
+    if (this.startBehavior === 'error-event') {
+      // A WebSocket 'error' fires with an ErrorEvent-shaped value, not an Error
+      this.emit('error', { type: 'error', message: 'invalid_auth' } as unknown as Error)
       return
     }
     // 'wait-for-connected-call' — caller will trigger the event manually
@@ -171,6 +177,33 @@ describe('createTelegramBotAdapter — startup correctness', () => {
     expect(sendResult.ok).toBe(false)
     if (sendResult.ok) throw new Error('expected error')
     expect(sendResult.error).toContain('no adapter registered')
+  })
+
+  test('surfaces the real reason from an ErrorEvent-shaped listener failure, not [object ErrorEvent]', async () => {
+    const fakeClient = new FakeClient()
+    const fakeListener = new FakeListener()
+    fakeListener.startBehavior = 'error-event'
+    const logger = silentLogger()
+
+    const adapter = createTelegramBotAdapter({
+      router: makeRouter(),
+      configRef: () => adapterCfg,
+      token: 'tok',
+      logger,
+      createClient: () => fakeClient as unknown as TelegramBotClient,
+      createListener: () => fakeListener as unknown as TelegramBotListener,
+    })
+
+    let thrown: unknown = null
+    try {
+      await adapter.start()
+    } catch (err) {
+      thrown = err
+    }
+
+    expect((thrown as Error).message).toContain('invalid_auth')
+    expect(logger.errors.some((line) => line.includes('invalid_auth'))).toBe(true)
+    expect(logger.errors.some((line) => line.includes('[object'))).toBe(false)
   })
 
   test('throws and unregisters when listener.start() rejects synchronously', async () => {
