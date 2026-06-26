@@ -5,6 +5,7 @@ import { CLI_VERSION } from '@/init/cli-version'
 import { runTuiViewer } from '@/inspect'
 import { formatVersionMismatchWarning } from '@/tui'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { runInspectViewer } from './inspect'
 import { requireAgentDir } from './require-agent-dir'
 import { errorLine } from './ui'
@@ -75,6 +76,11 @@ export const tui = defineCommand({
 })
 
 async function defaultUrl(cwd: string): Promise<string> {
+  const preflight = await preflightDocker()
+  if (!preflight.ok) {
+    printDockerGuidance(preflight)
+    process.exit(1)
+  }
   const precheck = await requireContainerRunning({ cwd })
   if (!precheck.ok) throw new Error(precheck.reason)
   const port = await resolveHostPort({ cwd })

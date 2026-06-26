@@ -2,6 +2,7 @@ import { defineCommand } from 'citty'
 
 import { stop } from '@/container'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { requireAgentDir } from './require-agent-dir'
 import { c, spinner } from './ui'
 
@@ -12,6 +13,12 @@ export const stopCommand = defineCommand({
   },
   async run() {
     const cwd = requireAgentDir()
+
+    const preflight = await preflightDocker()
+    if (!preflight.ok) {
+      printDockerGuidance(preflight)
+      process.exit(1)
+    }
 
     const s = spinner()
     s.start('Stopping container...')

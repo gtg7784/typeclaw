@@ -7,6 +7,8 @@ import { isDaemonReachable, send } from '@/hostd'
 import type { StatusResult } from '@/hostd'
 import { findAgentDir } from '@/init'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
+
 export type HostdStatus =
   | { kind: 'unreachable' }
   | { kind: 'not-registered'; reason: string }
@@ -25,6 +27,13 @@ export const statusCommand = defineCommand({
   },
   async run() {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+
+    const preflight = await preflightDocker()
+    if (!preflight.ok) {
+      printDockerGuidance(preflight)
+      process.exit(1)
+    }
+
     const container = await containerStatus({ cwd })
     const hostd = await fetchHostdStatus(container.containerName)
 

@@ -2,6 +2,7 @@ import { defineCommand } from 'citty'
 
 import { logs, parseTailValue } from '@/container'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { runInspectViewer } from './inspect'
 import { requireAgentDir } from './require-agent-dir'
 import { c, errorLine } from './ui'
@@ -49,6 +50,12 @@ export const logsCommand = defineCommand({
     if (args.list) {
       const exitCode = await runInspectViewer({ cwd, sessionArg: 'logs' })
       process.exit(exitCode)
+    }
+
+    const preflight = await preflightDocker()
+    if (!preflight.ok) {
+      printDockerGuidance(preflight)
+      process.exit(1)
     }
 
     if (args.follow) {

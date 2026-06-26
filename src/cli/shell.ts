@@ -2,6 +2,7 @@ import { defineCommand } from 'citty'
 
 import { shell } from '@/container'
 
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { requireAgentDir } from './require-agent-dir'
 import { c, errorLine } from './ui'
 
@@ -19,6 +20,12 @@ export const shellCommand = defineCommand({
   },
   async run({ args }) {
     const cwd = requireAgentDir()
+
+    const preflight = await preflightDocker()
+    if (!preflight.ok) {
+      printDockerGuidance(preflight)
+      process.exit(1)
+    }
 
     console.log(c.cyan(`Attaching ${args.shell} inside the container...`))
 

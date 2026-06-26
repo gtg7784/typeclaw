@@ -1,3 +1,12 @@
+export {
+  classifyConfiguredRuntime,
+  detectInstalledDockerApps,
+  dockerAppLabel,
+  pickRuntimeToNudge,
+  renderDockerUnavailableGuidance,
+  type DockerApp,
+  type DockerAppProbes,
+} from './docker-app'
 export { buildDockerLogsCmd, logs, parseTailValue, planLogs, type LogsPlan, type LogsResult } from './logs'
 export { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, resolveHostPort, resolveTuiToken } from './port'
 export {
