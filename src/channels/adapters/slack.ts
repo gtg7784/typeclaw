@@ -32,6 +32,7 @@ import type {
 import { chunkMarkdown } from '@/markdown'
 import type { SlackAccountRecord } from '@/secrets/schema'
 
+import { describeError } from './describe-error'
 import { createSlackAuthorResolver } from './slack-author-resolver'
 import { slackTsToMillis } from './slack-bot-time'
 import { createSlackChannelResolver } from './slack-channel-resolver'
@@ -49,6 +50,8 @@ const consoleLogger: SlackAdapterLogger = {
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
 }
+
+const LISTENER_CONNECT_TIMEOUT_MS = 15_000
 
 export type SlackCredentialStore = {
   getAccount(id?: string): Promise<SlackAccountRecord | null>
@@ -102,7 +105,7 @@ export function createSlackOutboundCallback(deps: {
       }
       return { ok: true }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.error(`[slack] outbound failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -118,7 +121,7 @@ export function createSlackHistoryCallback(deps: {
       const messages = await deps.client.getMessages(args.chat, { limit: clampLimit(args.limit, 100) })
       return { ok: true, messages: messages.map(mapSlackHistoryMessage).reverse() }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.warn(`[slack] history fetch failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -150,7 +153,9 @@ export function createSlackMembershipResolver(deps: {
       if (truncated) return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated }
       return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated, humanMemberIds }
     } catch (err) {
-      deps.logger.warn(`[slack] membership channel=${key.chat} failed: ${describe(err)}; deriving from recent history`)
+      deps.logger.warn(
+        `[slack] membership channel=${key.chat} failed: ${describeError(err)}; deriving from recent history`,
+      )
       return await deriveMembershipFromHistory({
         fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
         now,
@@ -174,7 +179,7 @@ export function createSlackFetchAttachmentCallback(deps: {
         size: buffer.length,
       }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.error(`[slack] fetchAttachment failed for ${ref}: ${message}`)
       return { ok: false, error: message }
     }
@@ -239,7 +244,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
       logger.info(`[slack] routed id=${event.ts} ${tag} mention=${payload.isBotMention}`)
       await options.router.route(payload)
     } catch (err) {
-      logger.error(`[slack] handleInbound failed: ${describe(err)}`)
+      logger.error(`[slack] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -274,26 +279,52 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
         started = false
         selfUserId = null
         teamId = ''
-        logger.error(`[slack] login failed: ${describe(err)}`)
+        logger.error(`[slack] login failed: ${describeError(err)}`)
         throw err
       }
 
       listener = createListener(client)
       let listenerConnected = false
       let listenerStartupError: Error | null = null
+
+      // SlackListener.start() resolves as soon as the WebSocket is opened, but
+      // 'connected' is only emitted later when Slack sends the `hello` frame. A
+      // synchronous post-start check therefore always fails the race. Gate
+      // startup on a deferred settled by the 'connected'/'error' handlers below.
+      let settleStartup: (() => void) | null = null
+      let failStartup: ((err: Error) => void) | null = null
+      const startupTimer = setTimeout(() => {
+        failStartup?.(new Error(`listener did not connect within ${LISTENER_CONNECT_TIMEOUT_MS}ms`))
+      }, LISTENER_CONNECT_TIMEOUT_MS)
+      const connectedPromise = new Promise<void>((resolve, reject) => {
+        settleStartup = () => {
+          clearTimeout(startupTimer)
+          resolve()
+        }
+        failStartup = (err) => {
+          clearTimeout(startupTimer)
+          reject(err)
+        }
+      })
+
       listener.on('connected', (info) => {
         listenerConnected = true
         connected = true
         selfUserId = info.self.id
         teamId = info.team.id
+        settleStartup?.()
       })
       listener.on('disconnected', () => {
         connected = false
         logger.warn('[slack] disconnected')
       })
       listener.on('error', (err) => {
-        if (!listenerConnected && listenerStartupError === null) listenerStartupError = err
-        logger.error(`[slack] listener error: ${describe(err)}`)
+        const error = err instanceof Error ? err : new Error(describeError(err))
+        if (!listenerConnected && listenerStartupError === null) {
+          listenerStartupError = error
+          failStartup?.(error)
+        }
+        logger.error(`[slack] listener error: ${describeError(err)}`)
       })
       listener.on('message', (event) => void handleMessage(event))
       listener.on('reaction_added', (event) => handleReaction('added', event))
@@ -319,25 +350,22 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
         options.router.unregisterMembership('slack', membershipResolver)
         options.router.unregisterReaction('slack', reactionCallback)
         options.router.unregisterRemoveReaction('slack', removeReactionCallback)
+        clearTimeout(startupTimer)
         listener?.stop()
         listener = null
         selfUserId = null
         connected = false
         started = false
-        logger.error(`[slack] ${reason}: ${describe(cause)}`)
+        logger.error(`[slack] ${reason}: ${describeError(cause)}`)
         throw cause
       }
 
       try {
-        await listener.start()
+        await Promise.all([listener.start(), connectedPromise])
       } catch (err) {
-        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
-      }
-      if (!listenerConnected) {
-        rollbackStart(
-          'listener start failed silently',
-          listenerStartupError ?? new Error('listener.start() returned without emitting connected'),
-        )
+        const cause = err instanceof Error ? err : new Error(describeError(err))
+        const reason = listenerStartupError !== null ? 'listener start failed' : 'listener start threw'
+        rollbackStart(reason, cause)
       }
     },
 
@@ -397,10 +425,6 @@ function mapSlackHistoryMessage(msg: SlackMessage): ChannelHistoryMessage {
 function clampLimit(requested: number, max: number): number {
   if (!Number.isFinite(requested) || requested <= 0) return max
   return Math.min(Math.floor(requested), max)
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function dropHint(reason: InboundDropReason): string {

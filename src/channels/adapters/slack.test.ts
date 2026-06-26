@@ -34,10 +34,14 @@ function account(overrides: Partial<SlackAccountRecord> = {}): SlackAccountRecor
   }
 }
 
+type ConnectMode = 'sync' | 'async' | 'never'
+
 class FakeListener {
   private handlers = new Map<string, Array<(value: unknown) => void>>()
   stopped = false
   failStart = false
+  connectMode: ConnectMode = 'sync'
+  emitErrorOnStart: unknown = null
 
   on(event: string, handler: (value: unknown) => void): void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler])
@@ -45,6 +49,12 @@ class FakeListener {
 
   async start(): Promise<void> {
     if (this.failStart) throw new Error('boom')
+    if (this.emitErrorOnStart !== null) queueMicrotask(() => this.emit('error', this.emitErrorOnStart))
+    if (this.connectMode === 'sync') this.emitConnected()
+    else if (this.connectMode === 'async') queueMicrotask(() => this.emitConnected())
+  }
+
+  emitConnected(): void {
     this.emit('connected', { self: { id: 'USELF' }, team: { id: 'T0123456789' } })
   }
 
@@ -242,6 +252,49 @@ describe('createSlackAdapter', () => {
     expect(listener.stopped).toBe(true)
     expect(r.unregistered).toContain('outbound:slack')
     expect(r.unregistered).toContain('remove-reaction:slack')
+  })
+
+  test('start resolves when connected is emitted asynchronously after start()', async () => {
+    // given: the real SlackListener emits 'connected' on the later `hello` frame,
+    // not synchronously inside start()
+    const r = router()
+    const listener = new FakeListener()
+    listener.connectMode = 'async'
+    const adapter = createSlackAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () => fakeClient(),
+      createListener: () => listener as unknown as SlackListener,
+    })
+
+    await adapter.start()
+
+    expect(adapter.isConnected()).toBe(true)
+  })
+
+  test('an error before connected rolls back with the real reason, not [object ErrorEvent]', async () => {
+    const r = router()
+    const log = logger()
+    const listener = new FakeListener()
+    listener.connectMode = 'never'
+    listener.emitErrorOnStart = { type: 'error', message: 'invalid_auth' }
+    const adapter = createSlackAdapter({
+      router: r,
+      configRef: () => config,
+      logger: log,
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () => fakeClient(),
+      createListener: () => listener as unknown as SlackListener,
+    })
+
+    await expect(adapter.start()).rejects.toThrow('invalid_auth')
+    expect(adapter.isConnected()).toBe(false)
+    expect(listener.stopped).toBe(true)
+    expect(r.unregistered).toContain('outbound:slack')
+    expect(log.lines).toContain('error:[slack] listener error: invalid_auth')
+    expect(log.lines.some((line) => line.includes('[object'))).toBe(false)
   })
 })
 
