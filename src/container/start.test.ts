@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import * as ts from 'typescript'
+
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'
 import { buildDockerfile } from '@/init/dockerfile'
@@ -177,6 +179,44 @@ function labelValue(runArgs: string[], key: string): string | undefined {
   }
   return undefined
 }
+
+// Anti-flake guard. start()'s default `ensureModels` (src/hostd/models.ts) takes
+// a 30s stale file-lock and downloads a ~279MB model; CI's "flake guard" lane
+// runs two `bun test --parallel` suites on one runner, so two processes contend
+// on that shared lock and the loser is killed at exactly 30000ms. It only
+// reproduces under that oversubscription, so a forgotten stub fails randomly on
+// an unrelated PR. Every start() call here MUST neutralize the model seam with a
+// `...bypassVerify` spread (carries noEnsureModels) or an explicit `ensureModels`
+// property. Matched over the parsed AST, not by substring, so a
+// `bypassVerify.verifyRunning` access or those names inside a comment cannot pass.
+describe('start() model-provisioning anti-flake guard', () => {
+  test('every start() call in this file stubs the model seam', async () => {
+    const file = join(import.meta.dir, 'start.test.ts')
+    const tree = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.Latest, true)
+
+    const stubsModelSeam = (options: ts.ObjectLiteralExpression): boolean =>
+      options.properties.some((prop) => {
+        if (ts.isSpreadAssignment(prop)) {
+          return ts.isIdentifier(prop.expression) && prop.expression.text === 'bypassVerify'
+        }
+        const { name } = prop
+        return (ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === 'ensureModels'
+      })
+
+    const offendingLines: number[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'start') {
+        const [options] = node.arguments
+        const safe = options !== undefined && ts.isObjectLiteralExpression(options) && stubsModelSeam(options)
+        if (!safe) offendingLines.push(tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+
+    expect(offendingLines).toEqual([])
+  })
+})
 
 describe('planStart', () => {
   test('publishes the TUI websocket port on host loopback by default', async () => {
@@ -2207,6 +2247,8 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: async () => ({ ok: false, reason: 'lockfile permission denied' }),
+      ensureModels: noEnsureModels,
+      autoUpgrade: noAutoUpgrade,
     })
 
     // then: start returned failure carrying the upstream reason
@@ -3714,6 +3756,8 @@ describe('start (post-run verification composition)', () => {
         cliEntry: '/nonexistent/cli.ts',
         reuseCurrentHostDaemon: true,
         ensureDeps: noEnsureDeps,
+        ensureModels: noEnsureModels,
+        autoUpgrade: noAutoUpgrade,
         verifyRunning: async () => ({
           ok: false,
           mode: 'exited',
@@ -3746,6 +3790,8 @@ describe('start (post-run verification composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ensureModels: noEnsureModels,
+      autoUpgrade: noAutoUpgrade,
       verifyRunning: async () => {
         const runIdx = calls.findIndex((c) => c.args[0] === 'run')
         verifierInvokedAfterRun = runIdx >= 0
@@ -3774,6 +3820,8 @@ describe('start (post-run verification composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ensureModels: noEnsureModels,
+      autoUpgrade: noAutoUpgrade,
       verifyRunning: async () => {
         verifierCalled = true
         return { ok: true }
@@ -3898,6 +3946,7 @@ describe('start autoUpgrade integration', () => {
       ensureDeps: noEnsureDeps,
       autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
       forceBunUpdate: async () => ({ ok: false, reason: 'registry timeout' }),
+      ensureModels: noEnsureModels,
     })
 
     expect(result.ok).toBe(false)
