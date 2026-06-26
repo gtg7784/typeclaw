@@ -10,8 +10,8 @@ on:
 # install + typecheck + lint + test for no reason, hogging runner minutes and
 # the concurrency queue.
 #
-# Pushes to `main` must NEVER be superseded: each post-merge run gates
-# `windows-test` and reflects the actual shipped state of main, so every
+# Pushes to `main` must NEVER be superseded: each post-merge run reflects the
+# actual shipped state of main (including the advisory `windows` lane), so every
 # back-to-back merge has to run to completion. `cancel-in-progress: false`
 # alone is NOT enough — GitHub allows only one running + one PENDING run per
 # group, and a newly-queued run cancels the existing pending one regardless of
@@ -182,20 +182,36 @@ jobs:
           echo '===== suite B tail ====='; tail -40 /tmp/flake-b.log
           exit $rc
 
-  windows-static:
-    # Native-Windows host support (#899) is experimental. This lane proves the
-    # toolchain (bun install + typecheck/lint/format) runs on native Windows. It
-    # omits `bun run test` on purpose — many tests need Docker/Unix sockets that a
-    # Windows runner lacks and require a separate triage (#899) first.
+  windows:
+    # Native-Windows host support (#899) is experimental. This single lane proves
+    # the toolchain (bun install + typecheck/lint/format) AND the full test suite
+    # run on native Windows. It was previously two jobs (windows-static +
+    # windows-test); they were merged because each paid the SAME cold-start cost
+    # twice — on Windows, `actions/checkout` (NTFS many-small-files) and
+    # `bun install` (per-runner native rebuilds of sharp / onnxruntime /
+    # @huggingface/transformers) dominate wall time, and a non-blocking advisory
+    # lane should not pay that twice. One job = one checkout, one Bun setup, one
+    # cache restore, one install — then static checks, then tests, in sequence.
+    #
+    # Static checks run BEFORE the suite and fail fast (no `if: always()`): if
+    # typecheck/lint/format already break on Windows, the test result is rarely
+    # actionable and not worth the extra (expensive) Windows minutes. The job log
+    # still attributes failure to the specific step (Typecheck / Lint / Format /
+    # Test), so merging costs no diagnostic granularity.
+    #
     # Runs on PRs (not just post-merge): now that the Windows suite passes, the
-    # pre-merge signal catches Windows toolchain regressions before they reach
-    # main, which is worth the 2x Windows-runner cost. continue-on-error keeps it
-    # advisory for now; drop it to make this a required, merge-blocking check once
-    # the lane has stayed green across a few PRs.
-    name: windows static checks (typecheck / lint / format)
+    # pre-merge signal catches Windows regressions before they reach main, which
+    # is worth the Windows-runner cost. continue-on-error keeps it advisory for
+    # now; drop it to make this a required, merge-blocking check once the lane has
+    # stayed green across a few PRs. The longer --timeout absorbs the slower
+    # Windows runner so a test failure reflects a real incompatibility, not a
+    # timeout. timeout-minutes caps a hung install/test instead of letting it
+    # grind against GitHub's 6-hour default on a 2x-cost runner.
+    name: windows checks (typecheck / lint / format / test)
     runs-on: windows-latest
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     continue-on-error: true
+    timeout-minutes: 30
     env:
       FIREWORKS_API_KEY: dummy
     steps:
@@ -223,7 +239,7 @@ jobs:
         # are fetched from api.github.com, which intermittently 504s under GHA token
         # contention and kills the whole run before any test executes. Retry the fetch;
         # the lockfile stays frozen so each attempt is the same deterministic install.
-        # shell: bash so the loop runs identically on the windows-* jobs (Git Bash is
+        # shell: bash so the loop runs identically to the Linux jobs (Git Bash is
         # present on windows-latest; the default shell there is pwsh, not bash).
         shell: bash
         run: |
@@ -246,60 +262,10 @@ jobs:
       - name: Format check
         run: bun run format:check
 
-  windows-test:
-    # Companion to windows-static: runs the full suite on native Windows. The
-    # suite now passes on Windows, so this runs on PRs (not just post-merge) to
-    # give a pre-merge signal that catches Windows regressions before they reach
-    # main — worth the 2x Windows-runner cost. Still continue-on-error (advisory)
-    # for now; drop that to make it a required, merge-blocking check once it has
-    # stayed green across a few PRs. The longer --timeout absorbs the slower
-    # Windows runner so failures reflect real incompatibilities, not timeouts.
-    name: windows tests (informational triage)
-    runs-on: windows-latest
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    continue-on-error: true
-    env:
-      FIREWORKS_API_KEY: dummy
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
-      - name: Cache Bun install cache
-        # Same rationale as the `ci` job's cache step. The ${{ runner.os }} key
-        # prefix keeps this Windows cache separate from the Linux one — the
-        # tarball store layout differs per OS and must never cross-contaminate.
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-1.3.14-
-
-      - name: Install dependencies
-        # GitHub tarball deps (e.g. libsignal-node, pinned via @whiskeysockets/baileys)
-        # are fetched from api.github.com, which intermittently 504s under GHA token
-        # contention and kills the whole run before any test executes. Retry the fetch;
-        # the lockfile stays frozen so each attempt is the same deterministic install.
-        # shell: bash so the loop runs identically on the windows-* jobs (Git Bash is
-        # present on windows-latest; the default shell there is pwsh, not bash).
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if bun install --frozen-lockfile; then
-              exit 0
-            fi
-            if [ "$attempt" = 3 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 20))
-          done
-
       - name: Configure git identity
+        # Several tests shell out to `git commit` against tmp repos. GitHub
+        # Actions runners have no global user.name/user.email, so the commits
+        # would silently fail and leave files staged.
         run: |
           git config --global user.email "ci@typeclaw.dev"
           git config --global user.name "TypeClaw CI"
