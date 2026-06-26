@@ -4,7 +4,7 @@ description: Plugins shipped with TypeClaw; auto-loaded, not listed in plugins[]
 icon: Package
 ---
 
-Nine plugins ship with TypeClaw and load automatically. You don't list them in `plugins[]`; they're always on. Their config blocks live at the top level of `typeclaw.json`, namespaced by plugin name.
+Bundled plugins ship with TypeClaw and load automatically. You don't list them in `plugins[]`; they're always on. Their config blocks live at the top level of `typeclaw.json`, namespaced by plugin name.
 
 | Plugin            | Config key      | Contributions                                                                                                                                                    |
 | ----------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -14,6 +14,7 @@ Nine plugins ship with TypeClaw and load automatically. You don't list them in `
 | `memory`          | `memory`        | three subagents (`memory-logger`, `dreaming`, daily-stream rotator); writes daily memory streams and consolidates them into `MEMORY.md` and muscle-memory skills |
 | `backup`          | `backup`        | auto-commits `sessions/` and `memory/` on idle; LLM-generated commit subjects                                                                                    |
 | `agent-browser`   | `agentBrowser`  | headed Chrome under Xvfb for bot-resistant browsing; dashboard host-forward                                                                                      |
+| `glm-vision`      | `glm-vision`    | exposes the Z.AI vision MCP server for GLM Coding Plan agents when `ZAI_CODING_API_KEY` is present                                                               |
 | `explorer`        | none            | workspace exploration tools — file tree, glob, grep tuned for agent ergonomics                                                                                   |
 | `scout`           | none            | web-research subagent that scrapes and summarizes                                                                                                                |
 | `operator`        | none            | exposes the `operator` subagent — a focused worker that can write files and edit the workspace                                                                   |
@@ -54,6 +55,19 @@ Both fields restart-required. The `dreaming.schedule` is a standard 5-field cron
 ```
 
 `maxChars` is the threshold above which tool results are truncated (default 50 KB). Truncated output is replaced with a tail summary plus the path to the full result on disk. Restart-required.
+
+## `glm-vision`
+
+```json
+{
+  "glm-vision": {
+    "enabled": true,
+    "version": "0.1.4"
+  }
+}
+```
+
+`glm-vision` only activates for GLM Coding Plan agents (`defaultProviderId: "zai-coding"`). When `ZAI_CODING_API_KEY` is configured, it registers the `glm-vision` MCP server via `bunx @z_ai/mcp-server` and provides skill guidance for image, video, OCR, UI-to-code, diagram, and chart analysis. Without the key, it contributes the skill and a doctor warning but no MCP server. Set `enabled: false` to disable it entirely. Restart-required.
 
 ## Plugin permissions
 
