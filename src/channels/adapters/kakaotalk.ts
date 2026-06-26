@@ -480,7 +480,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         authorName: resolvedName ?? verdict.payload.authorId,
       }
       logger.info(
-        `[kakaotalk] routed log_id=${event.log_id} ${inboundTag} mention=${enriched.isBotMention} dm=${enriched.isDm}`,
+        `[kakaotalk] routed log_id=${event.log_id} ${inboundTag} mention=${enriched.isBotMention} reply=${enriched.replyToBotMessageId !== null} dm=${enriched.isDm}`,
       )
       await options.router.route(enriched)
     } catch (err) {

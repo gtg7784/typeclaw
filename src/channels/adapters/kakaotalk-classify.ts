@@ -109,11 +109,10 @@ function parseReplyContext(event: KakaoTalkPushMessageEvent, selfUserId: string)
   if (event.message_type !== KAKAO_MESSAGE_TYPE.REPLY) return null
   if (event.attachment === null) return null
 
-  const logId = stringField(event.attachment, 'src_logId')
-  const sourceUserId = numericField(event.attachment, 'src_userId')
-  if (logId === null || sourceUserId === null) return null
+  const logId = scalarIdField(event.attachment, 'src_logId')
+  const sourceAuthorId = decimalIdField(event.attachment, 'src_userId')
+  if (logId === null || sourceAuthorId === null) return null
 
-  const sourceAuthorId = String(sourceUserId)
   const quotedText = stringField(event.attachment, 'src_message')
   return {
     logId,
@@ -150,7 +149,33 @@ function stringField(record: Record<string, unknown>, key: string): string | nul
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-function numericField(record: Record<string, unknown>, key: string): number | null {
+// LOCO reply attachments are unvalidated `JSON.parse` output: `src_userId` arrives
+// as a string in production despite the SDK annotating it `number`, so a number-only
+// reader dropped every reply-to-bot. `src_userId` gates the bot-vs-other identity
+// check, so require digits and keep it as an opaque string — never `Number()` a
+// 64-bit id (lossy past 2^53).
+function decimalIdField(record: Record<string, unknown>, key: string): string | null {
   const value = record[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return /^\d+$/.test(trimmed) ? trimmed : null
+  }
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 ? String(value) : null
+  }
+  return null
+}
+
+// `src_logId` is an opaque message reference we only echo back, never compare for
+// identity, so accept any non-empty scalar (string or integer) without digit-gating.
+function scalarIdField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 ? String(value) : null
+  }
+  return null
 }
