@@ -17,8 +17,22 @@ import { formatJson, formatReport } from '@/doctor'
 
 import { formatComposeStatus } from './compose-status'
 import { formatComposeUsage, formatComposeUsageJson } from './compose-usage'
+import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { c, errorLine, spinner } from './ui'
 import { parseSince, parseUntil } from './usage-args'
+
+// Compose fans a docker command out across every agent folder. A down daemon
+// would otherwise surface as N identical raw-stderr rows (one per agent) instead
+// of one actionable message, so gate the whole fleet operation on a single
+// preflight up front. usage reads only local session files and never touches
+// docker, so it is intentionally not gated.
+async function requireDockerOrExit(): Promise<void> {
+  const preflight = await preflightDocker()
+  if (!preflight.ok) {
+    printDockerGuidance(preflight)
+    process.exit(1)
+  }
+}
 
 const startSub = defineCommand({
   meta: { name: 'start', description: 'start every agent in immediate subdirectories of cwd' },
@@ -35,6 +49,7 @@ const startSub = defineCommand({
     },
   },
   async run({ args }) {
+    await requireDockerOrExit()
     const board = makeBoard('Starting agents')
     const s = spinner()
     const { agents, results } = await composeStart({
@@ -63,6 +78,7 @@ const startSub = defineCommand({
 const stopSub = defineCommand({
   meta: { name: 'stop', description: 'stop every agent in immediate subdirectories of cwd' },
   async run() {
+    await requireDockerOrExit()
     const board = makeBoard('Stopping agents')
     const s = spinner()
     const { agents, results } = await composeStop({
@@ -100,6 +116,7 @@ const restartSub = defineCommand({
     },
   },
   async run({ args }) {
+    await requireDockerOrExit()
     const board = makeBoard('Restarting agents')
     const s = spinner()
     const { agents, results } = await composeRestart({
@@ -130,6 +147,7 @@ const restartSub = defineCommand({
 const statusSub = defineCommand({
   meta: { name: 'status', description: 'show status of every agent in immediate subdirectories of cwd' },
   async run() {
+    await requireDockerOrExit()
     const result = await composeStatus(process.cwd())
     const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
     process.stdout.write(`${formatComposeStatus(result, { useColor })}\n`)
@@ -161,6 +179,8 @@ const logsSub = defineCommand({
       }
       tail = parsed.value
     }
+
+    await requireDockerOrExit()
 
     const controller = new AbortController()
     const onSig = (): void => controller.abort()
