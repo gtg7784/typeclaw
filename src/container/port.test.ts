@@ -204,12 +204,14 @@ describe('resolveHostPort', () => {
     const folder = join(root, 'coder')
     await mkdir(folder)
 
-    // when
-    const port = await resolveHostPort({ cwd: folder, exec, retryMs: 200, intervalMs: 5 })
+    // when: a generous retry budget and zero interval keep success tied to the
+    // deterministic 3-probe sequence, not to wall-clock timing (which drifts
+    // under CPU oversubscription and made this test flaky)
+    const port = await resolveHostPort({ cwd: folder, exec, retryMs: 60_000, intervalMs: 0 })
 
     // then
     expect(port).toBe(42424)
-    expect(calls.length).toBeGreaterThanOrEqual(3)
+    expect(calls.length).toBe(3)
   })
 
   test('uses the container name derived from the agent folder basename', async () => {
