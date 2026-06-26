@@ -30,7 +30,13 @@ import {
   type KnownProviderId,
   type KnownProviderVendorId,
 } from '@/config/providers'
-import { checkDockerAvailable, type DockerAvailability } from '@/container'
+import {
+  checkDockerAvailable,
+  detectInstalledDockerApps,
+  pickRuntimeToNudge,
+  renderDockerUnavailableGuidance,
+  type DockerAvailability,
+} from '@/container'
 import {
   appendOrReplaceEnvKey,
   findAgentDir,
@@ -1928,31 +1934,27 @@ function reportProgress(
   }
 }
 
+function renderPreflightFailure(result: Extract<DockerAvailability, { ok: false }>): {
+  summary: string
+  lines: string[]
+} {
+  const detail = result.reason === 'daemon-down' ? result.detail : undefined
+  const installed = detectInstalledDockerApps()
+  const nudge = pickRuntimeToNudge(process.env, detail, installed)
+  return renderDockerUnavailableGuidance(result, {
+    platform: process.platform,
+    nudge,
+    installed,
+    retryHint: 'Then re-run `typeclaw init`.',
+  })
+}
+
 function preflightFailureSummary(result: Extract<DockerAvailability, { ok: false }>): string {
-  if (result.reason === 'binary-missing') return 'Docker is not installed.'
-  return 'Docker is installed but the daemon is not reachable.'
+  return renderPreflightFailure(result).summary
 }
 
 function preflightFailureGuidance(result: Extract<DockerAvailability, { ok: false }>): string[] {
-  if (result.reason === 'binary-missing') {
-    return [
-      'TypeClaw runs every agent inside its own Docker container, so Docker is required.',
-      '',
-      'Install one of:',
-      '  • Docker Desktop — https://docs.docker.com/get-docker/',
-      '  • OrbStack (macOS, lighter) — https://orbstack.dev',
-      '',
-      'Then re-run `typeclaw init`.',
-    ]
-  }
-  return [
-    'The docker CLI is on $PATH, but the daemon refused the connection:',
-    '',
-    `  ${result.detail}`,
-    '',
-    'Start Docker Desktop / OrbStack (or `sudo systemctl start docker` on Linux),',
-    'then re-run `typeclaw init`.',
-  ]
+  return renderPreflightFailure(result).lines
 }
 
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
