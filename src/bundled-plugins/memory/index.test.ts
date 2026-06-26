@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,6 +12,7 @@ import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports, PluginLogger, SessionEndEvent, SessionIdleEvent } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { formatLocalDate } from '@/shared'
+import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import memoryPlugin, { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
 import { streamFilePath } from './paths'
@@ -147,25 +148,18 @@ async function bootMemoryPlugin(
 function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps> = {}) {
   return createMemoryPluginForTests({
     ...overrides,
-    openAppendVectorStore: (dir) => {
-      const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
-      disposers.push(() => store.close())
-      return store
-    },
+    openAppendVectorStore: (dir) => () => VectorStore.open(join(dir, 'memory', '.vectors', 'index.db')),
   })
 }
 
 let agentDir: string
-let disposers: Array<() => Promise<void> | void>
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-plugin-'))
-  disposers = []
 })
 
 afterEach(async () => {
-  await Promise.all(disposers.map((dispose) => dispose()))
-  await rm(agentDir, { recursive: true, force: true })
+  await rmTempDir(agentDir)
 })
 
 describe('memory plugin shape', () => {
@@ -1263,9 +1257,10 @@ describe('doctor checks', () => {
     expect(existsSync(backupPath)).toBe(false)
   })
 
-  test('vector-index: runs the real index check (ok for an empty indexed agent)', async () => {
-    // Booting opens the store, which creates the index DB, so the realistic
-    // empty agent is healthy (nothing to index).
+  test('vector-index: warns when no index DB exists yet (boot no longer eagerly creates it)', async () => {
+    // The append store is opened lazily per write now, so a boot-only agent that
+    // never appended has no index DB; the doctor reports the rebuild-on-startup
+    // warning rather than a hollow "ok 0/0" from an eagerly-created empty DB.
     const { exports } = await bootMemoryPlugin(agentDir, {})
 
     const check = exports.doctorChecks?.['vector-index']
@@ -1273,7 +1268,7 @@ describe('doctor checks', () => {
 
     const { logger } = makeCapturingLogger()
     const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
-    expect(result.status).toBe('ok')
-    expect(result.message).toContain('0/0')
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('rebuilds on the next startup')
   })
 })

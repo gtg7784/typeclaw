@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
+import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import { renderShard } from './frontmatter'
 import { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
@@ -23,16 +24,13 @@ const DIMS = 8
 const QUERY = 'zzqxvtrprobe'
 
 let agentDir: string
-let disposers: Array<() => Promise<void> | void>
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-vector-retrieval-'))
-  disposers = []
 })
 
 afterEach(async () => {
-  await Promise.all(disposers.map((dispose) => dispose()))
-  await rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  await rmTempDir(agentDir)
 })
 
 describe('vector retrieval end-to-end through session.turn.start', () => {
@@ -116,11 +114,7 @@ async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPlu
 function createMemoryPluginWithStoreCapture(overrides: Partial<MemoryPluginDeps> = {}) {
   return createMemoryPluginForTests({
     ...overrides,
-    openAppendVectorStore: (dir) => {
-      const store = VectorStore.open(join(dir, 'memory', '.vectors', 'index.db'))
-      disposers.push(() => store.close())
-      return store
-    },
+    openAppendVectorStore: (dir) => () => VectorStore.open(join(dir, 'memory', '.vectors', 'index.db')),
   })
 }
 
