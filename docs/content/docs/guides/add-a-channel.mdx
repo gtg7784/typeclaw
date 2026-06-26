@@ -171,7 +171,8 @@ Replies in a thread stay in that thread's conversation, so the agent keeps conte
 The wiring is the same shape everywhere — `typeclaw channel add <platform>`, then pair yourself. Only the sign-in changes.
 
 ```sh
-typeclaw channel add discord-bot     # bot token
+typeclaw channel add discord-bot     # bot token (recommended)
+typeclaw channel add discord         # QR login as your own Discord user (unofficial)
 typeclaw channel add telegram-bot    # bot token
 typeclaw channel add webex-bot       # bot token
 typeclaw channel add github          # PAT or GitHub App; needs a public URL
@@ -192,6 +193,14 @@ https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+application
 ```
 
 See the [Discord adapter reference](/docs/reference/discord-bot) for the rest.
+
+</Accordion>
+
+<Accordion title="Discord — running as your own user account instead of a bot">
+
+`typeclaw channel add discord` (no `-bot`) signs in as your own Discord **user** by QR code, the same way LINE does — no bot application, no server invite, no intents. It already sees whatever servers and DMs your account is in. It can't register slash commands and shows no typing indicator.
+
+This is an **unofficial** path: Discord's Terms of Service prohibit user-account automation (self-bots), the session can need periodic re-auth, and the account is at risk of suspension. Prefer `discord-bot` unless you specifically need to operate as a user. See the [Discord (user) adapter reference](/docs/reference/discord).
 
 </Accordion>
 
