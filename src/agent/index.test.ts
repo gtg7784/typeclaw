@@ -147,34 +147,18 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('SOUL.md')
   })
 
-  test('injects MEMORY.md under # Memory but leaves undreamed stream events for memory_search to retrieve on demand', async () => {
+  test('does not inject MEMORY.md into the system prompt', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
-    await mkdir(join(agentDir, 'memory'))
-    const fragmentEvent = JSON.stringify({
-      type: 'fragment',
-      id: 'evt-1',
-      ts: '2026-04-27T12:00:00.000Z',
-      source: 'sess-1',
-      entry: 'ent-1',
-      topic: 'tuesday-fragment-marker',
-      body: 'tuesday-fragment-body',
-    })
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentEvent + '\n')
 
     const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('# Memory')
-    expect(prompt).toContain('Neo prefers terse replies.')
-    expect(prompt).not.toContain('tuesday-fragment-marker')
-    expect(prompt).not.toContain('tuesday-fragment-body')
-    expect(prompt).not.toContain('## memory/2026-04-27.jsonl')
-    expect(prompt).toContain('`memory_search`')
+    expect(prompt).not.toContain('Neo prefers terse replies.')
   })
 
-  test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {
-    // given: a git repo with a dirty tracked file so gitNudge renders, AND a
-    // populated MEMORY.md so the memory section renders content.
+  test('does not append MEMORY.md after gitNudge', async () => {
+    // given: a git repo with a dirty tracked file so gitNudge renders, and a
+    // populated MEMORY.md that must stay out of the system prompt.
     await initGitRepo(agentDir)
     await writeFile(join(agentDir, 'tracked.md'), 'initial')
     await runGit(agentDir, ['add', '.'])
@@ -186,10 +170,8 @@ describe('createResourceLoader', () => {
 
     const prompt = loader.getSystemPrompt() ?? ''
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(nudgeIdx).toBeGreaterThan(-1)
-    expect(memoryIdx).toBeGreaterThan(-1)
-    expect(nudgeIdx).toBeLessThan(memoryIdx)
+    expect(prompt).not.toContain('memory-content-marker')
   })
 
   test('omits the runtime block when runtimeVersion is not provided', async () => {
@@ -233,16 +215,14 @@ describe('createResourceLoader', () => {
     expect(runtimeIdx).toBeLessThan(originIdx)
   })
 
-  test('full cache-suffix ordering: role block < gitNudge < memory section, when all three render', async () => {
-    // given: dirty git repo (gitNudge renders), populated MEMORY.md (memory
-    // section renders), and a channel origin with a permission service that
-    // produces a role block.
+  test('full cache-suffix ordering: role block < gitNudge', async () => {
+    // given: dirty git repo (gitNudge renders) and a channel origin with a
+    // permission service that produces a role block.
     await initGitRepo(agentDir)
     await writeFile(join(agentDir, 'tracked.md'), 'initial')
     await runGit(agentDir, ['add', '.'])
     await runGit(agentDir, ['commit', '-q', '-m', 'init'])
     await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
-    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
     const { createPermissionService } = await import('@/permissions')
     const permissions = createPermissionService({
       roles: {
@@ -265,17 +245,12 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     const roleIdx = prompt.indexOf('## Your role in this session')
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(roleIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeGreaterThan(-1)
-    expect(memoryIdx).toBeGreaterThan(-1)
     expect(roleIdx).toBeLessThan(nudgeIdx)
-    expect(nudgeIdx).toBeLessThan(memoryIdx)
   })
 
   test('system prompt does NOT contain a wall-clock anchor: the per-turn `<current-time>` block lives in the user message instead', async () => {
-    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
-
     const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
@@ -284,24 +259,19 @@ describe('createResourceLoader', () => {
     expect(prompt).not.toContain('<current-time>')
   })
 
-  test('memory section is the trailing cacheable block now that `## Now` is gone (cache-suffix tail invariant)', async () => {
+  test('system prompt never contains long-term memory file contents', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
 
     const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    const memoryIdx = prompt.indexOf('memory-content-marker')
-    expect(memoryIdx).toBeGreaterThan(-1)
-    expect(prompt.indexOf('## Session origin', memoryIdx)).toBe(-1)
-    expect(prompt.indexOf('## Your role in this session', memoryIdx)).toBe(-1)
-    expect(prompt.indexOf('TypeClaw runtime version:', memoryIdx)).toBe(-1)
+    expect(prompt).not.toContain('memory-content-marker')
   })
 
   test('composeSystemPrompt does not accept or emit a `now` field (removed when the anchor moved to per-turn injection)', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       gitNudge: '',
-      memorySection: '',
     })
     expect(prompt).not.toContain('## Now')
     expect(prompt).not.toContain('Session started at')
@@ -312,7 +282,6 @@ describe('createResourceLoader', () => {
       self: '# Identity\n\nfoo',
       gitNudge: '',
       proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE,
-      memorySection: '',
     })
 
     expect(prompt).toContain('## Proactive and requested next-step guidance')
@@ -325,57 +294,41 @@ describe('createResourceLoader', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       gitNudge: '',
-      memorySection: '',
     })
 
     expect(prompt).not.toContain('## Proactive and requested next-step guidance')
     expect(prompt).not.toContain('do not ask for permission or confirmation')
   })
 
-  test('composeSystemPrompt places GPT proactive next-step nudge after git nudge and before memory', () => {
+  test('composeSystemPrompt places GPT proactive next-step nudge after git nudge', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       gitNudge: '## Git nudge\n\ncommit things',
       proactiveNextStepNudge: PROACTIVE_NEXT_STEP_NUDGE,
-      memorySection: '# Memory\n\nremember things',
     })
 
     expect(prompt.indexOf('## Git nudge')).toBeLessThan(prompt.indexOf('## Proactive and requested next-step guidance'))
-    expect(prompt.indexOf('## Proactive and requested next-step guidance')).toBeLessThan(prompt.indexOf('# Memory'))
   })
 
-  test('composeSystemPrompt places MCP catalog after origin and before memory', () => {
+  test('composeSystemPrompt places MCP catalog after origin and before git nudge', () => {
     const catalog = '## MCP servers\n\n- files (2 tools): Filesystem tools'
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       origin: { kind: 'tui', sessionId: 'ses_test' },
       mcpCatalog: catalog,
-      gitNudge: '',
-      memorySection: '## Memory\n\nmemory-marker',
+      gitNudge: '## Git nudge\n\ncommit things',
     })
 
     const originIndex = prompt.indexOf('## Session origin')
     const catalogIndex = prompt.indexOf(catalog)
-    const memoryIndex = prompt.indexOf('memory-marker')
+    const gitNudgeIndex = prompt.indexOf('## Git nudge')
 
     expect(originIndex).toBeGreaterThan(-1)
     expect(catalogIndex).toBeGreaterThan(originIndex)
-    expect(memoryIndex).toBeGreaterThan(catalogIndex)
+    expect(gitNudgeIndex).toBeGreaterThan(catalogIndex)
   })
 
-  test('memory section is NOT visible to plugin session.prompt hooks (intentional: memory injection is core-owned and runs after all plugin hooks)', async () => {
-    // The security plugin's applyPromptInjectionDefense scans `event.prompt`
-    // for attack patterns during the session.prompt hook chain. After this PR
-    // memory is appended in createResourceLoader AFTER runSessionPrompt fires,
-    // so no plugin hook can see the memory bytes. This is a deliberate
-    // trade-off: memory injection is positionally constrained for prompt-cache
-    // stability, and prompt-injection mitigation for memory content is handled
-    // by loadMemory's own boundary framing (load-memory.ts MEMORY_FRAMING +
-    // CHANNEL_MEMORY_BOUNDARY) rather than by the security plugin's scanner.
-    //
-    // This test pins the contract so a future contributor who reintroduces a
-    // session.prompt hook for memory (and silently undoes the cache-suffix
-    // fix) sees the assertion fail and has to make the trade-off explicit.
+  test('long-term memory file contents are not visible to plugin session.prompt hooks', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'attacker-controlled-marker')
     const { createHookBus } = await import('@/plugin')
     const { emptyRegistry } = await import('@/plugin/registry')
@@ -401,58 +354,8 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir, plugins })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('attacker-controlled-marker')
+    expect(prompt).not.toContain('attacker-controlled-marker')
     expect(promptSeenByHook).not.toContain('attacker-controlled-marker')
-  })
-
-  test('does not surface an unhandled rejection when loadMemory throws non-ENOENT during a slow plugin hook', async () => {
-    // Regression test for the parallelization shape introduced in PR #318.
-    // gitNudge and memory promises are kicked off concurrently with loadSelf
-    // and the plugin hook. Without the settle() wrap, a non-ENOENT rejection
-    // (e.g. EISDIR from a directory masquerading as a shard) on the early-
-    // started memoryPromise would fire as `unhandledRejection` during the
-    // window between selfPromise resolving and the gather Promise.all -- a
-    // slow plugin hook widens that window arbitrarily.
-
-    // EISDIR trigger: place a directory at the path readFile expects to be
-    // a file. loadAllShards iterates memory/topics/*.md slugs, then
-    // readFile(<slug>.md). A directory at that path makes readFile reject
-    // with EISDIR (a non-ENOENT fs error).
-    await mkdir(join(agentDir, 'memory', 'topics', 'malformed.md'), { recursive: true })
-
-    const { createHookBus } = await import('@/plugin')
-    const { emptyRegistry } = await import('@/plugin/registry')
-    const hooks = createHookBus()
-    hooks.registerAll(
-      'slow-hook',
-      agentDir,
-      { info: () => {}, warn: () => {}, error: () => {} },
-      {
-        'session.prompt': async () => {
-          await new Promise((resolve) => setTimeout(resolve, 30))
-        },
-      },
-    )
-
-    const seen: unknown[] = []
-    const onUnhandled = (err: unknown) => seen.push(err)
-    process.on('unhandledRejection', onUnhandled)
-
-    try {
-      await expect(
-        createResourceLoader({
-          agentDir,
-          plugins: { registry: emptyRegistry(), hooks, sessionId: 'ses_test', agentDir },
-        }),
-      ).rejects.toThrow()
-    } finally {
-      process.off('unhandledRejection', onUnhandled)
-    }
-
-    // The error must propagate through the gather point, not as a detached
-    // unhandled rejection. Allow one microtask tick to settle.
-    await new Promise((resolve) => setTimeout(resolve, 5))
-    expect(seen).toEqual([])
   })
 
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {
@@ -857,15 +760,14 @@ describe('createResourceLoader', () => {
     expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
   })
 
-  test('slim mode still injects memory so cron jobs see MEMORY.md context', async () => {
+  test('slim mode does not inject MEMORY.md into the system prompt', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'standup-summary-marker')
     const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
 
     const loader = await createResourceLoader({ agentDir, origin })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('# Memory')
-    expect(prompt).toContain('standup-summary-marker')
+    expect(prompt).not.toContain('standup-summary-marker')
   })
 
   test('slim cron prompt carries the load-bearing guidance review surfaced (errors, narration, workspace, memory shards, runtime-managed paths)', async () => {
@@ -1044,7 +946,6 @@ describe('composeSystemPrompt slim mode', () => {
       mode: 'slim',
       self: '# Identity\n\nfoo',
       gitNudge: '',
-      memorySection: '# Memory\n\nbar',
     })
     expect(prompt.startsWith(SLIM_SYSTEM_PROMPT)).toBe(true)
     expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
@@ -1054,20 +955,8 @@ describe('composeSystemPrompt slim mode', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       gitNudge: '',
-      memorySection: '# Memory\n\nbar',
     })
     expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
-  })
-
-  test('omits memory section when memorySection is the empty string', () => {
-    const prompt = composeSystemPrompt({
-      mode: 'slim',
-      self: '# Identity\n\nfoo',
-      gitNudge: '',
-      memorySection: '',
-    })
-    expect(prompt).not.toContain('# Memory')
-    expect(prompt.endsWith('# Identity\n\nfoo')).toBe(true)
   })
 })
 
