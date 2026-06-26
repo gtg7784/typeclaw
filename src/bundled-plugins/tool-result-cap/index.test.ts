@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports, ToolAfterEvent } from '@/plugin'
+import { stubPluginModels } from '@/plugin/test-support'
 
 import toolResultCapPlugin, { resolveCapOptionsFromConfig } from './index'
 
@@ -15,6 +16,8 @@ function makeCtx(overrides: { config: unknown }): {
     version: undefined,
     agentDir: '/agent',
     config: overrides.config,
+    models: stubPluginModels({ defaultProviderId: 'fireworks' }),
+    hasSecret: () => false,
     logger: {
       info: (m) => logs.push(`info:${m}`),
       warn: (m) => logs.push(`warn:${m}`),

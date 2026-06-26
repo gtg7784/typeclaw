@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { createPermissionService, noopPermissionService, type PermissionService, type RolesConfig } from '@/permissions'
 import type { HookContext, PluginContext, SessionPromptEvent, ToolBeforeEvent } from '@/plugin'
+import { stubPluginModels } from '@/plugin/test-support'
 
 import securityPlugin from './index'
 import { HIGH_TIER_PER_GUARD_PERMISSIONS, SECURITY_PERMISSIONS } from './permissions'
@@ -831,6 +832,8 @@ function pluginContext(agentDir: string): PluginContext<undefined> {
     version: undefined,
     agentDir,
     config: undefined,
+    models: stubPluginModels({ defaultProviderId: 'fireworks' }),
+    hasSecret: () => false,
     logger: noopLogger,
     permissions: noopPermissionService,
     github: {

@@ -382,6 +382,7 @@ describe('createResourceLoader', () => {
       tools: [],
       subagents: [],
       cronJobs: [],
+      mcpServers: [],
       skills: [],
       skillsDirs: [
         {
@@ -511,6 +512,7 @@ describe('createResourceLoader', () => {
       tools: [],
       subagents: [],
       cronJobs: [],
+      mcpServers: [],
       skills: [],
       skillsDirs: [],
       doctorChecks: [],
@@ -545,6 +547,7 @@ describe('createResourceLoader', () => {
       tools: [],
       subagents: [],
       cronJobs: [],
+      mcpServers: [],
       skills: [],
       skillsDirs: [],
       doctorChecks: [],

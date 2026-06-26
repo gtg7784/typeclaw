@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { noopPermissionService } from '@/permissions'
 
 import { defineCommand, definePlugin, readTool, writeTool } from './define'
+import { stubPluginModels } from './test-support'
 import type { ContainerCommand, EitherCommand, HostCommand } from './types'
 
 describe('definePlugin', () => {
@@ -37,6 +38,8 @@ describe('definePlugin', () => {
       version: undefined,
       agentDir: '/tmp',
       config: { count: 42 },
+      models: stubPluginModels({ defaultProviderId: 'fireworks' }),
+      hasSecret: () => false,
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       permissions: noopPermissionService,
       github: {
