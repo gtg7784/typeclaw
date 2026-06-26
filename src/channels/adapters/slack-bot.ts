@@ -32,6 +32,7 @@ import type {
 } from '@/channels/types'
 import { chunkMarkdown } from '@/markdown'
 
+import { describeError } from './describe-error'
 import { addSlackMentionHints } from './mention-hints'
 import { createSlackAuthorResolver, type SlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
@@ -110,7 +111,7 @@ export function createSlashCommandHandler(
       try {
         ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
       } catch (err) {
-        deps.logger.warn(`[slack-bot] slash command ack (drop path) failed: ${describe(err)}`)
+        deps.logger.warn(`[slack-bot] slash command ack (drop path) failed: ${describeError(err)}`)
       }
       return
     }
@@ -128,11 +129,11 @@ export function createSlashCommandHandler(
         invokerId: command.invokerId,
       })
     } catch (err) {
-      deps.logger.error(`[slack-bot] slash command handler failed: ${describe(err)}`)
+      deps.logger.error(`[slack-bot] slash command handler failed: ${describeError(err)}`)
       try {
         ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
       } catch (ackErr) {
-        deps.logger.warn(`[slack-bot] slash command error-ack failed: ${describe(ackErr)}`)
+        deps.logger.warn(`[slack-bot] slash command error-ack failed: ${describeError(ackErr)}`)
       }
       return
     }
@@ -146,7 +147,7 @@ export function createSlashCommandHandler(
     try {
       ack(buildSlashAckPayload(replyContent))
     } catch (err) {
-      deps.logger.warn(`[slack-bot] slash command ack failed: ${describe(err)}`)
+      deps.logger.warn(`[slack-bot] slash command ack failed: ${describeError(err)}`)
     }
 
     // Decorative post-ack logging: resolve channel names now that the 3s
@@ -156,7 +157,7 @@ export function createSlashCommandHandler(
       deps.logger.info(`[slack-bot] slash /${command.name} result=${result.kind} ${inboundTag}`)
     } catch (err) {
       deps.logger.info(
-        `[slack-bot] slash /${command.name} result=${result.kind} (channel-tag resolution failed: ${describe(err)})`,
+        `[slack-bot] slash /${command.name} result=${result.kind} (channel-tag resolution failed: ${describeError(err)})`,
       )
     }
   }
@@ -210,14 +211,14 @@ export function createThreadCommandHandler(
       reply = commandResultReply(result)
       deps.logger.info(`[slack-bot] thread-command !${command.name} result=${result.kind}`)
     } catch (err) {
-      deps.logger.error(`[slack-bot] thread-command !${command.name} failed: ${describe(err)}`)
+      deps.logger.error(`[slack-bot] thread-command !${command.name} failed: ${describeError(err)}`)
       reply = SLACK_SLASH_REPLY_FAILED
     }
 
     try {
       await deps.postReply({ chat: input.channel, thread: input.threadTs, text: reply })
     } catch (err) {
-      deps.logger.warn(`[slack-bot] thread-command reply post failed: ${describe(err)}`)
+      deps.logger.warn(`[slack-bot] thread-command reply post failed: ${describeError(err)}`)
     }
     return { kind: 'executed' }
   }
@@ -329,7 +330,7 @@ export function createSlackTypingTracker(deps: {
       })
       .catch((err: unknown) => {
         logger.warn(
-          `[slack-bot] typing call=${callId} chat=${chat} thread=${threadTs} status="${status}" failed: ${describe(err)}`,
+          `[slack-bot] typing call=${callId} chat=${chat} thread=${threadTs} status="${status}" failed: ${describeError(err)}`,
         )
       })
     queues.set(key, next)
@@ -575,7 +576,7 @@ async function slackApi<T>(
     })
     raw = (await response.json()) as { ok?: boolean; error?: string }
   } catch (err) {
-    return { ok: false, reason: describe(err), failure: { kind: 'transient' } }
+    return { ok: false, reason: describeError(err), failure: { kind: 'transient' } }
   }
   if (raw.ok !== true) {
     const reason = raw.error ?? 'unknown slack error'
@@ -1162,7 +1163,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       )
       await options.router.route(enriched)
     } catch (err) {
-      logger.error(`[slack-bot] handleInbound failed: ${describe(err)}`)
+      logger.error(`[slack-bot] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -1181,7 +1182,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         await client.login({ token: options.token })
       } catch (err) {
         started = false
-        logger.error(`[slack-bot] login failed: ${describe(err)}`)
+        logger.error(`[slack-bot] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -1196,7 +1197,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         logger.info(`[slack-bot] authenticated as ${auth.user ?? auth.user_id} in team ${auth.team ?? auth.team_id}`)
       } catch (err) {
         started = false
-        logger.error(`[slack-bot] auth.test failed: ${describe(err)}`)
+        logger.error(`[slack-bot] auth.test failed: ${describeError(err)}`)
         throw err
       }
 
@@ -1208,7 +1209,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         logger.warn('[slack-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        logger.error(`[slack-bot] socket-mode error: ${describe(err)}`)
+        logger.error(`[slack-bot] socket-mode error: ${describeError(err)}`)
       })
       listener.on('message', ({ ack, event }) => {
         // Ack first so Slack stops retrying; failure to ack causes duplicate
@@ -1280,7 +1281,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         botUserId = null
         teamId = null
         started = false
-        logger.error(`[slack-bot] listener start failed: ${describe(err)}`)
+        logger.error(`[slack-bot] listener start failed: ${describeError(err)}`)
         throw err
       }
     },
@@ -1313,10 +1314,6 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       return botUserId !== null && teamId !== null
     },
   }
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function dropHint(reason: InboundDropReason): string {

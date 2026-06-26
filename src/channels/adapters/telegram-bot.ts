@@ -16,6 +16,7 @@ import type {
   TypingTarget,
 } from '@/channels/types'
 
+import { describeError } from './describe-error'
 import { classifyInbound, type InboundDropReason, TELEGRAM_WORKSPACE } from './telegram-bot-classify'
 import { toTelegramMarkdownV2 } from './telegram-bot-format'
 
@@ -105,7 +106,7 @@ export function createTypingCallback(deps: {
         logger.warn(`[telegram-bot] typing ${tag} status=${response.status}`)
       }
     } catch (err) {
-      logger.warn(`[telegram-bot] typing ${tag} failed: ${describe(err)}`)
+      logger.warn(`[telegram-bot] typing ${tag} failed: ${describeError(err)}`)
     }
   }
 }
@@ -187,7 +188,7 @@ export function createTelegramMembershipResolver(deps: {
         truncated: true,
       }
     } catch (err) {
-      deps.logger.warn(`[telegram-bot] membership chat=${key.chat} failed: ${describe(err)}`)
+      deps.logger.warn(`[telegram-bot] membership chat=${key.chat} failed: ${describeError(err)}`)
       return { kind: 'transient' } satisfies MembershipResolverFailure
     }
   }
@@ -240,7 +241,7 @@ export function createOutboundCallback(deps: {
           )
         }
       } catch (err) {
-        const message = describe(err)
+        const message = describeError(err)
         logger.error(`[telegram-bot] sendDocument failed for ${path}: ${message}`)
         return { ok: false, error: `sendDocument failed: ${message}` }
       }
@@ -263,7 +264,7 @@ export function createOutboundCallback(deps: {
       const id = String(sent.message_id)
       return { ok: true, messageId: id, messageIds: [id] }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.error(`[telegram-bot] sendMessage failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -319,7 +320,7 @@ export function createFetchAttachmentCallback(deps: {
     try {
       metaResponse = await fetchImpl(`${TELEGRAM_API_BASE}/bot${token}/getFile?file_id=${encodeURIComponent(ref)}`)
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.error(`[telegram-bot] getFile failed for ${ref}: ${message}`)
       return { ok: false, error: `getFile failed: ${message}` }
     }
@@ -333,7 +334,7 @@ export function createFetchAttachmentCallback(deps: {
     try {
       meta = (await metaResponse.json()) as TelegramFileResponse
     } catch (err) {
-      return { ok: false, error: `getFile parse failed: ${describe(err)}` }
+      return { ok: false, error: `getFile parse failed: ${describeError(err)}` }
     }
     if (!meta.ok || meta.result === undefined || meta.result.file_path === undefined) {
       const message = meta.description ?? 'getFile returned no file_path'
@@ -345,7 +346,7 @@ export function createFetchAttachmentCallback(deps: {
     try {
       response = await fetchImpl(downloadUrl)
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.error(`[telegram-bot] download failed for ${ref}: ${message}`)
       return { ok: false, error: message }
     }
@@ -449,7 +450,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       )
       await options.router.route(verdict.payload)
     } catch (err) {
-      logger.error(`[telegram-bot] handleInbound failed: ${describe(err)}`)
+      logger.error(`[telegram-bot] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -468,7 +469,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         await client.login({ token: options.token })
       } catch (err) {
         started = false
-        logger.error(`[telegram-bot] login failed: ${describe(err)}`)
+        logger.error(`[telegram-bot] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -486,7 +487,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       } catch (err) {
         started = false
         botUser = null
-        logger.error(`[telegram-bot] getMe failed (likely invalid token): ${describe(err)}`)
+        logger.error(`[telegram-bot] getMe failed (likely invalid token): ${describeError(err)}`)
         throw err
       }
 
@@ -515,11 +516,11 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         logger.warn('[telegram-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        const error = err instanceof Error ? err : new Error(String(err))
+        const error = err instanceof Error ? err : new Error(describeError(err))
         if (!listenerConnected && listenerStartupError === null) {
           listenerStartupError = error
         }
-        logger.error(`[telegram-bot] listener error: ${describe(error)}`)
+        logger.error(`[telegram-bot] listener error: ${describeError(err)}`)
       })
       listener.on('message', (event) => {
         void handleMessage(event)
@@ -548,14 +549,14 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         listener = null
         botUser = null
         started = false
-        logger.error(`[telegram-bot] ${reason}: ${describe(cause)}`)
+        logger.error(`[telegram-bot] ${reason}: ${describeError(cause)}`)
         throw cause
       }
 
       try {
         await listener.start()
       } catch (err) {
-        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
+        rollbackStart('listener start threw', err instanceof Error ? err : new Error(describeError(err)))
       }
       if (!listenerConnected) {
         const cause = listenerStartupError ?? new Error('listener.start() returned without emitting connected')
@@ -597,10 +598,6 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       return botUser !== null
     },
   }
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function dropHint(reason: InboundDropReason): string {

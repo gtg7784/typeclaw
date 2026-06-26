@@ -29,6 +29,7 @@ import type {
   SendResult,
 } from '@/channels/types'
 
+import { describeError } from './describe-error'
 import { createWebexChannelNameResolver } from './webex-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-bot-classify'
 import { enrichWebexMessageReference } from './webex-bot-reference'
@@ -129,7 +130,7 @@ export function createOutboundCallback(deps: {
       logger.info(`[webex-bot] sent id=${sent.ref} ${tag}`)
       return { ok: true, messageId: sent.ref, messageIds: [sent.ref] }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.error(`[webex-bot] outbound failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -168,7 +169,7 @@ export function createWebexHistoryCallback(deps: {
       }
       return toHistory(outcome.value)
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       if (args.prefetch === true && isWebexRateLimitError(err)) {
         deps.logger.info(`[webex-bot] history prefetch skipped: rate limited (${message})`)
         return { ok: false, error: message, skipReason: 'rate-limited' }
@@ -215,7 +216,9 @@ export function createWebexMembershipResolver(deps: {
       }
       return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated, humanMemberIds }
     } catch (err) {
-      deps.logger.warn(`[webex-bot] membership room=${key.chat} failed: ${describe(err)}; deriving from recent history`)
+      deps.logger.warn(
+        `[webex-bot] membership room=${key.chat} failed: ${describeError(err)}; deriving from recent history`,
+      )
       return await deriveMembershipFromHistory({
         fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit, prefetch: true }),
         now,
@@ -267,7 +270,7 @@ export function createFetchAttachmentCallback(deps: {
         size: buffer.length,
       }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       deps.logger.error(`[webex-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
       return { ok: false, error: message }
     }
@@ -340,7 +343,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       )
       await options.router.route(payload)
     } catch (err) {
-      logger.error(`[webex-bot] handleInbound failed: ${describe(err)}`)
+      logger.error(`[webex-bot] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -362,7 +365,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       } catch (err) {
         started = false
         botPerson = null
-        logger.error(`[webex-bot] login failed: ${describe(err)}`)
+        logger.error(`[webex-bot] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -378,9 +381,9 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         logger.warn(`[webex-bot] disconnected: ${reason}`)
       })
       listener.on('error', (err) => {
-        const error = err instanceof Error ? err : new Error(String(err))
+        const error = err instanceof Error ? err : new Error(describeError(err))
         if (!listenerConnected && listenerStartupError === null) listenerStartupError = error
-        logger.error(`[webex-bot] listener error: ${describe(error)}`)
+        logger.error(`[webex-bot] listener error: ${describeError(err)}`)
       })
       listener.on('message_created', (event: WebexBotListenerEventMap['message_created'][0]) => {
         void handleMessage(event)
@@ -405,14 +408,14 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         botPerson = null
         connected = false
         started = false
-        logger.error(`[webex-bot] ${reason}: ${describe(cause)}`)
+        logger.error(`[webex-bot] ${reason}: ${describeError(cause)}`)
         throw cause
       }
 
       try {
         await listener.start()
       } catch (err) {
-        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
+        rollbackStart('listener start threw', err instanceof Error ? err : new Error(describeError(err)))
       }
       if (!listenerConnected) {
         rollbackStart(
@@ -472,10 +475,6 @@ function isAllowedWebexFileHost(hostname: string): boolean {
 function clampLimit(requested: number, max: number): number {
   if (!Number.isFinite(requested) || requested <= 0) return max
   return Math.min(Math.floor(requested), max)
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function dropHint(reason: InboundDropReason): string {

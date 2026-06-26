@@ -25,6 +25,7 @@ import type {
   SendResult,
 } from '@/channels/types'
 
+import { describeError } from './describe-error'
 import { splitInboundLine } from './line-attachment'
 import { createLineChannelResolver } from './line-channel-resolver'
 import { classifyInbound } from './line-classify'
@@ -128,7 +129,7 @@ export function createOutboundCallback(deps: {
       logger.info(`[line] sent message_id=${result.message_id} ${tag}`)
       return { ok: true, messageId: result.message_id, messageIds: [result.message_id] }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.error(`[line] sendMessage failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -160,7 +161,7 @@ export function createLineHistoryCallback(deps: {
       })
       return { ok: true, messages: mapped }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.warn(`[line] history fetch failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -231,7 +232,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
       lastPersistedToken = authToken
       logger.info('[line] persisted refreshed auth token to secrets')
     } catch (err) {
-      logger.warn(`[line] failed to persist refreshed auth token: ${describe(err)}`)
+      logger.warn(`[line] failed to persist refreshed auth token: ${describeError(err)}`)
     }
   }
 
@@ -241,7 +242,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
       const token = await client.ensureFreshAuthToken({ skewMs: LINE_TOKEN_REFRESH_SKEW_MS })
       if (token) await persistAuthToken(token)
     } catch (err) {
-      logger.warn(`[line] token refresh failed: ${describe(err)}`)
+      logger.warn(`[line] token refresh failed: ${describeError(err)}`)
     }
   }
 
@@ -301,7 +302,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
       )
       await options.router.route(verdict.payload)
     } catch (err) {
-      logger.error(`[line] handleInbound failed: ${describe(err)}`)
+      logger.error(`[line] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -335,7 +336,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
         }
       } catch (err) {
         started = false
-        logger.error(`[line] login failed: ${describe(err)}`)
+        logger.error(`[line] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -348,14 +349,14 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
         logger.info(`[line] authenticated as ${profile.display_name || profile.mid} (${profile.mid})`)
       } catch (err) {
         started = false
-        logger.error(`[line] getProfile failed: ${describe(err)}`)
+        logger.error(`[line] getProfile failed: ${describeError(err)}`)
         throw err
       }
 
       try {
         await channelResolver.refresh()
       } catch (err) {
-        logger.warn(`[line] initial chat list fetch failed: ${describe(err)}`)
+        logger.warn(`[line] initial chat list fetch failed: ${describeError(err)}`)
       }
 
       listener = options.listenerFactory ? options.listenerFactory(client) : new LineListener(client)
@@ -368,7 +369,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
         logger.warn('[line] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        logger.error(`[line] listener error: ${describe(err)}`)
+        logger.error(`[line] listener error: ${describeError(err)}`)
       })
       listener.on('message', (event) => {
         void processInbound(event)
@@ -384,7 +385,7 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
         }
         listener = null
         started = false
-        logger.error(`[line] listener start failed: ${describe(err)}`)
+        logger.error(`[line] listener start failed: ${describeError(err)}`)
         throw err
       }
 
@@ -431,8 +432,4 @@ export function createLineAdapter(options: LineAdapterOptions): LineAdapter {
 function formatLabel(name: string | undefined, id: string): string {
   if (name === undefined || name === '' || name === id) return id
   return `${name}(${id})`
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }

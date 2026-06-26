@@ -32,6 +32,7 @@ import type {
   InboundAttachment,
 } from '@/channels/types'
 
+import { describeError } from './describe-error'
 import {
   emoticonEventToMessageEvent,
   splitEmoticonInbound,
@@ -215,7 +216,7 @@ export function createOutboundCallback(deps: {
           }),
         )
       } catch (err) {
-        const message = describe(err)
+        const message = describeError(err)
         logger.error(`[kakaotalk] readFile failed: ${message}`)
         return { ok: false, error: `readFile failed: ${message}` }
       }
@@ -228,7 +229,7 @@ export function createOutboundCallback(deps: {
         logIds.push(result.log_id)
         logger.info(`[kakaotalk] uploaded log_id=${result.log_id} attachments=${items.length} ${tag}`)
       } catch (err) {
-        const message = describe(err)
+        const message = describeError(err)
         logger.error(`[kakaotalk] sendAttachment failed: ${message}`)
         return { ok: false, error: message }
       }
@@ -262,7 +263,7 @@ export function createOutboundCallback(deps: {
         logIds.push(result.log_id)
         logger.info(`[kakaotalk] sent log_id=${result.log_id} ${tag}`)
       } catch (err) {
-        const message = describe(err)
+        const message = describeError(err)
         logger.error(`[kakaotalk] sendMessage failed: ${message}`)
         return { ok: false, error: message }
       }
@@ -295,7 +296,7 @@ async function resolveKakaoReplyTarget(
     }
     return { log_id: target.log_id, author_id: target.author_id, message: target.message, type: target.type }
   } catch (err) {
-    logger.warn(`[kakaotalk] reply target lookup failed: ${describe(err)}`)
+    logger.warn(`[kakaotalk] reply target lookup failed: ${describeError(err)}`)
     return undefined
   }
 }
@@ -334,7 +335,7 @@ export function createKakaoHistoryCallback(deps: {
       )
       return { ok: true, messages: mapped }
     } catch (err) {
-      const message = describe(err)
+      const message = describeError(err)
       logger.warn(`[kakaotalk] history fetch failed: ${message}`)
       return { ok: false, error: message }
     }
@@ -483,7 +484,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       )
       await options.router.route(enriched)
     } catch (err) {
-      logger.error(`[kakaotalk] handleInbound failed: ${describe(err)}`)
+      logger.error(`[kakaotalk] handleInbound failed: ${describeError(err)}`)
     } finally {
       inflightInbounds--
       if (inflightInbounds === 0 && stopWaiters.length > 0) {
@@ -527,7 +528,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         }
       } catch (err) {
         started = false
-        logger.error(`[kakaotalk] login failed: ${describe(err)}`)
+        logger.error(`[kakaotalk] login failed: ${describeError(err)}`)
         throw err
       }
 
@@ -546,14 +547,14 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
           logger.error(`[kakaotalk] ${message}`)
           throw new Error(message)
         }
-        logger.error(`[kakaotalk] getProfile failed: ${describe(err)}`)
+        logger.error(`[kakaotalk] getProfile failed: ${describeError(err)}`)
         throw err
       }
 
       try {
         await channelResolver.refresh()
       } catch (err) {
-        logger.warn(`[kakaotalk] initial chat list fetch failed: ${describe(err)}`)
+        logger.warn(`[kakaotalk] initial chat list fetch failed: ${describeError(err)}`)
       }
 
       listener = options.listenerFactory ? options.listenerFactory(client) : new KakaoTalkListener(client)
@@ -585,7 +586,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         logger.warn('[kakaotalk] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        logger.error(`[kakaotalk] listener error: ${describe(err)}`)
+        logger.error(`[kakaotalk] listener error: ${describeError(err)}`)
         if (!isKickoutError(err)) return
         // KICKOUT closes the SDK session and skips scheduleReconnect, so
         // without intervention the adapter goes silent. We must either
@@ -624,7 +625,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
           if (recoveryEpisode !== episode) return
           activeListener.start().catch((retryErr) => {
             logger.error(
-              `[kakaotalk] KICKOUT auto-recovery failed: ${describe(retryErr)}. Run \`typeclaw restart\` to retry.`,
+              `[kakaotalk] KICKOUT auto-recovery failed: ${describeError(retryErr)}. Run \`typeclaw restart\` to retry.`,
             )
           })
         }, delayMs)
@@ -658,7 +659,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         }
         listener = null
         started = false
-        logger.error(`[kakaotalk] listener start failed: ${describe(err)}`)
+        logger.error(`[kakaotalk] listener start failed: ${describeError(err)}`)
         throw err
       }
 
@@ -707,10 +708,6 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   }
 }
 
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 function markReadIfSupported(deps: {
   client: Pick<KakaoTalkClient, 'markRead'>
   event: KakaoTalkPushMessageEvent
@@ -738,7 +735,7 @@ function markReadIfSupported(deps: {
       }
     },
     (err) => {
-      logger.warn(`[kakaotalk] mark-read failed: ${describe(err)} chat=${event.chat_id} log=${event.log_id}`)
+      logger.warn(`[kakaotalk] mark-read failed: ${describeError(err)} chat=${event.chat_id} log=${event.log_id}`)
     },
   )
 }
