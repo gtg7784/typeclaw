@@ -4,6 +4,7 @@ import bunHygienePlugin from '@/bundled-plugins/bun-hygiene'
 import docRenderPlugin from '@/bundled-plugins/doc-render'
 import explorerPlugin from '@/bundled-plugins/explorer'
 import githubCliAuthPlugin from '@/bundled-plugins/github-cli-auth'
+import glmVisionPlugin from '@/bundled-plugins/glm-vision'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import operatorPlugin from '@/bundled-plugins/operator'
@@ -60,6 +61,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
   { name: 'doc-render', version: undefined, source: '<bundled>', defined: docRenderPlugin },
+  { name: 'glm-vision', version: undefined, source: '<bundled>', defined: glmVisionPlugin },
   { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
   { name: 'scout', version: undefined, source: '<bundled>', defined: scoutPlugin },
   { name: 'reviewer', version: undefined, source: '<bundled>', defined: reviewerPlugin },
