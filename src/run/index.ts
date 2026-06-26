@@ -566,6 +566,7 @@ async function startAgentRuntime(
       return name
     },
   })
+  registerBootCleanup(() => subagentConsumer.stop())
   subagentConsumer.start()
 
   // Populated by startScheduler's factory (onCountStore). The consumer
@@ -704,11 +705,13 @@ async function startAgentRuntime(
   // delivers only to live subscribers (no replay), so a fire published before
   // the subscription exists would be lost. Subscribing to an empty stream is
   // harmless when there are no jobs.
+  registerBootCleanup(() => cronConsumer.stop())
   cronConsumer.start()
   const scheduler = await startScheduler({
     cwd,
     loadCron,
     createSchedulerFor: factory,
+    registerBootCleanup,
     stream,
     hasInternalJobs: internalJobs().length > 0,
     getSubagents: () => pluginRuntime.get().subagents,
@@ -724,6 +727,7 @@ async function startAgentRuntime(
   }
 
   const tunnelBridge: TunnelBridge = createTunnelBridge({ stream, channelManager })
+  registerBootCleanup(() => tunnelBridge.stop())
 
   // Bridge `subagent.completed` broadcasts into the channel router so a
   // backgrounded subagent finishing wakes up its parent channel session
@@ -734,6 +738,7 @@ async function startAgentRuntime(
     stream,
     router: channelManager.router,
   })
+  registerBootCleanup(() => subagentCompletionBridge.stop())
 
   // Fan a landed formal review verdict out to the sibling sessions reviewing the
   // same PR so they stand down from a redundant verdict (the per-thread fan-out
@@ -744,12 +749,14 @@ async function startAgentRuntime(
     stream,
     router: channelManager.router,
   })
+  registerBootCleanup(() => prVerdictActivityBridge.stop())
   setReviewObserver((review) => {
     stream.publish({
       target: { kind: 'broadcast' },
       payload: { kind: 'pr.verdict-activity', ...review },
     })
   })
+  registerBootCleanup(() => setReviewObserver(null))
 
   // Registered before channels so its cache clear lands before any channel
   // session teardown observes it. secrets.json provider credentials are not
@@ -784,6 +791,7 @@ async function startAgentRuntime(
     console.warn(`[run] channel restart-resume reserve failed: ${err instanceof Error ? err.message : err}`)
   }
 
+  registerBootCleanup(() => channelManager.stop())
   await channelManager.start()
 
   if (restartReservation !== null) {
@@ -914,7 +922,7 @@ async function startAgentRuntime(
       ...mcpManagerOpt,
     })
 
-  const server = createServer({
+  const serverFactory = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
     reloadRegistry,
@@ -935,13 +943,17 @@ async function startAgentRuntime(
     ...runtimeVersionOpt,
     ...tuiTokenOpt,
     ...containerBrokerOpt,
-  }).start()
+  })
+  let server: BunServer | null = null
+  registerBootCleanup(() => server?.stop(true))
+  server = serverFactory.start()
 
   // Tunnel manager starts AFTER the WS server is up so a slow/hanging
   // provider (PR 2's cloudflared first-URL wait) cannot block TUI, reload,
   // or channel adapter availability. External providers resolve URLs
   // synchronously; future managed providers will resolve asynchronously
   // and broadcast URL events when ready.
+  registerBootCleanup(() => tunnelManager.stop())
   await tunnelManager.start()
 
   let stopped = false
@@ -1090,6 +1102,7 @@ async function startScheduler({
   cwd,
   loadCron,
   createSchedulerFor,
+  registerBootCleanup,
   stream,
   hasInternalJobs,
   getSubagents,
@@ -1098,6 +1111,7 @@ async function startScheduler({
   cwd: string
   loadCron: LoadCronFn
   createSchedulerFor: SchedulerFactory
+  registerBootCleanup: (cleanup: () => void | Promise<void>) => void
   stream: Stream
   hasInternalJobs: boolean
   getSubagents?: () => SubagentRegistry
@@ -1122,6 +1136,7 @@ async function startScheduler({
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
   const scheduler = await createSchedulerFor({ cwd, file, onFire, onCountStore })
+  registerBootCleanup(() => scheduler.stop())
   scheduler.start()
   return scheduler
 }

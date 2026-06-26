@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { __resetForwardRequestForTesting as resetDashboardForwardRequest } from '@/bundled-plugins/agent-browser'
+import { createChannelRouter, type ChannelManager } from '@/channels'
 import type { LoadCronResult } from '@/cron'
 import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 import type { TunnelManager } from '@/tunnels'
@@ -230,6 +231,82 @@ export default {
     ).rejects.toThrow('boot failure: tunnel start')
 
     expect(await Bun.file(sentinelFile).text()).toBe('disposed')
+  })
+
+  test('boot failure after a component starts runs its teardown', async () => {
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
+    )
+    let channelManagerStopped = false
+    const fakeChannelManager = (): ChannelManager => ({
+      router: createChannelRouter({ agentDir: agentDir!, configForAdapter: () => undefined }),
+      start: async () => {},
+      stop: async () => {
+        channelManagerStopped = true
+      },
+      reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+    const failingTunnelManager = (): TunnelManager => ({
+      start: async () => {
+        throw new Error('boot failure: tunnel start')
+      },
+      stop: async () => {},
+      snapshot: () => [],
+      urlFor: () => null,
+      tail: () => [],
+      subscribeToLogs: () => () => {},
+    })
+
+    await expect(
+      startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: agentDir,
+        loadCron: noCron,
+        createChannelManager: fakeChannelManager,
+        createTunnelManager: failingTunnelManager,
+      }),
+    ).rejects.toThrow('boot failure: tunnel start')
+
+    expect(channelManagerStopped).toBe(true)
+  })
+
+  test('boot failure during channelManager.start still runs its teardown', async () => {
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
+    )
+    let channelManagerStarted = false
+    let channelManagerStopped = false
+    const partiallyStartingChannelManager = (): ChannelManager => ({
+      router: createChannelRouter({ agentDir: agentDir!, configForAdapter: () => undefined }),
+      start: async () => {
+        channelManagerStarted = true
+        throw new Error('boot failure: channel manager partial start')
+      },
+      stop: async () => {
+        channelManagerStopped = true
+      },
+      reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+
+    await expect(
+      startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: agentDir,
+        loadCron: noCron,
+        createChannelManager: partiallyStartingChannelManager,
+      }),
+    ).rejects.toThrow('boot failure: channel manager partial start')
+
+    expect(channelManagerStarted).toBe(true)
+    expect(channelManagerStopped).toBe(true)
   })
 
   test('plugin skill is materialized and present in the resource loader for new sessions', async () => {
