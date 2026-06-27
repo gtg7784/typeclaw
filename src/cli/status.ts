@@ -2,12 +2,12 @@ import { styleText } from 'node:util'
 
 import { defineCommand } from 'citty'
 
-import { status as containerStatus, type ContainerStatus } from '@/container'
+import { status as containerStatus, type ContainerStatus, type DockerExec } from '@/container'
 import { isDaemonReachable, send } from '@/hostd'
 import type { StatusResult } from '@/hostd'
 import { findAgentDir } from '@/init'
 
-import { preflightDocker, printDockerGuidance } from './docker-preflight'
+import { type DockerPreflightResult, preflightDocker, printDockerGuidance } from './docker-preflight'
 
 export type HostdStatus =
   | { kind: 'unreachable' }
@@ -26,21 +26,44 @@ export const statusCommand = defineCommand({
     description: 'show the agent container and host daemon status (host stage)',
   },
   async run() {
-    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
-
-    const preflight = await preflightDocker()
-    if (!preflight.ok) {
-      printDockerGuidance(preflight)
-      process.exit(1)
-    }
-
-    const container = await containerStatus({ cwd })
-    const hostd = await fetchHostdStatus(container.containerName)
-
-    const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
-    process.stdout.write(`${formatStatus({ cwd, container, hostd }, { useColor })}\n`)
+    await runStatus()
   },
 })
+
+// Injectable seam so the render/flow can be exercised without spawning the real
+// Docker CLI. The broken-config path otherwise pays a ~70s Docker Desktop
+// cold-start on the first `docker info` of a Windows CI run; injecting the
+// preflight + exec keeps the test on the pure flow it actually cares about.
+export type RunStatusDeps = {
+  cwd?: string
+  preflight?: () => Promise<DockerPreflightResult>
+  exec?: DockerExec
+  fetchHostd?: (containerName: string) => Promise<HostdStatus>
+  write?: (text: string) => void
+  onDockerUnavailable?: (failure: Extract<DockerPreflightResult, { ok: false }>) => void
+}
+
+export async function runStatus(deps: RunStatusDeps = {}): Promise<void> {
+  const cwd = deps.cwd ?? findAgentDir(process.cwd()) ?? process.cwd()
+
+  const preflight = await (deps.preflight ?? preflightDocker)()
+  if (!preflight.ok) {
+    ;(deps.onDockerUnavailable ?? defaultOnDockerUnavailable)(preflight)
+    return
+  }
+
+  const container = await containerStatus({ cwd, exec: deps.exec })
+  const hostd = await (deps.fetchHostd ?? fetchHostdStatus)(container.containerName)
+
+  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
+  const write = deps.write ?? ((text: string) => process.stdout.write(text))
+  write(`${formatStatus({ cwd, container, hostd }, { useColor })}\n`)
+}
+
+function defaultOnDockerUnavailable(failure: Extract<DockerPreflightResult, { ok: false }>): never {
+  printDockerGuidance(failure)
+  process.exit(1)
+}
 
 async function fetchHostdStatus(containerName: string): Promise<HostdStatus> {
   if (!(await isDaemonReachable())) return { kind: 'unreachable' }

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { DockerExecResult } from '@/container'
 import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
-import { formatStatus, parseStatusResult, type StatusReport } from './status'
-
-const CLI_ENTRY = join(import.meta.dir, 'index.ts')
+import { formatStatus, type HostdStatus, parseStatusResult, runStatus, type StatusReport } from './status'
 
 function baseReport(overrides: Partial<StatusReport> = {}): StatusReport {
   return {
@@ -182,54 +181,58 @@ describe('formatStatus', () => {
   })
 })
 
-describe('typeclaw status survives broken typeclaw.json', () => {
+// The CLI-boot path that turns a broken typeclaw.json into a stderr warning
+// instead of a crash is covered end-to-end (real subprocess) by the broken-config
+// tests in model.test.ts / role.test.ts, whose commands share the same boot +
+// loadConfigSyncOrDefaults path. Here we cover the status-specific contract: the
+// render flow still completes and prints all three sections even when Docker is
+// available but the daemon/container are absent. Injecting preflight + exec keeps
+// this off the real `docker info`, which cold-starts Docker Desktop for ~70s on
+// the first probe of a Windows CI run.
+describe('typeclaw status render flow', () => {
   let cwd: string
 
   beforeEach(async () => {
-    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-status-broken-'))
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-status-render-'))
   })
 
   afterEach(async () => {
     await rmTempDir(cwd)
   })
 
-  async function runStatus(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const proc = Bun.spawn({
-      cmd: ['bun', CLI_ENTRY, 'status'],
+  const missingContainerExec = async (): Promise<DockerExecResult> => ({ exitCode: 1, stdout: '', stderr: '' })
+
+  async function captureStatus(deps: { fetchHostd?: () => Promise<HostdStatus> } = {}): Promise<string> {
+    let out = ''
+    await runStatus({
       cwd,
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: { ...process.env, NO_COLOR: '1' },
+      preflight: async () => ({ ok: true }),
+      exec: missingContainerExec,
+      fetchHostd: deps.fetchHostd ?? (async () => ({ kind: 'unreachable' })),
+      write: (text) => {
+        out += text
+      },
     })
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
-    const exitCode = await proc.exited
-    return { exitCode, stdout, stderr }
+    return out
   }
 
-  test('exits 0 and renders sections when typeclaw.json is malformed JSON', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), 'NOT JSON AT ALL {{{')
-    const { exitCode, stdout, stderr } = await runStatus()
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain('Container')
-    expect(stdout).toContain('Host daemon')
-    expect(stdout).toContain('Port forwarding')
-    expect(stderr).toMatch(/not valid JSON/)
-    expect(stderr).toMatch(/diagnostic commands still work/)
-  }, 120_000)
+  test('renders all three sections for a missing container + unreachable daemon', async () => {
+    const out = await captureStatus()
+    expect(out).toContain('Container')
+    expect(out).toContain('Host daemon')
+    expect(out).toContain('Port forwarding')
+    expect(out).toContain('missing')
+  })
 
-  test('exits 0 and renders sections when typeclaw.json is schema-invalid', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }))
-    const { exitCode, stdout, stderr } = await runStatus()
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain('Container')
-    expect(stdout).toContain('Host daemon')
-    expect(stderr).toMatch(/typeclaw\.json is invalid/)
-  }, 120_000)
+  test('renders forwarded ports when the daemon reports a registered container', async () => {
+    const out = await captureStatus({
+      fetchHostd: async () => ({ kind: 'registered', cwd, forwardedPorts: [8973] }),
+    })
+    expect(out).toContain('Host daemon')
+    expect(out).toContain('8973')
+  })
 
-  test('exits 0 and prints no warning when typeclaw.json is missing (fresh dir)', async () => {
-    const { exitCode, stdout, stderr } = await runStatus()
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain('Container')
-    expect(stderr).not.toMatch(/warning:/)
-  }, 120_000)
+  test('does not exit the process when Docker is available', async () => {
+    await expect(captureStatus()).resolves.toBeString()
+  })
 })
