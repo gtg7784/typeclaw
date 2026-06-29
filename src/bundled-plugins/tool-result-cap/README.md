@@ -9,7 +9,7 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 `pi-coding-agent`'s built-in tools occasionally return very large payloads that the model only needed once. Two empirically observed cases:
 
 1. **`read` on an image file** returns the base64-encoded image inline (e.g. `{type:"image", data:"<3.2MB of base64>"}`). The model uses it on the turn it was asked for, then sees the same 3.2MB of base64 as conversation context on every subsequent prompt — until compaction fires (which is token-driven, not byte-driven, so a single fat blob may sit in context for many turns before compaction is triggered).
-2. **`web_fetch` on a binary URL** (PNG, ZIP, etc.) receives the raw response body, treats it as text, and stores raw binary as a JSON-encoded string. Same effect: 100KB+ of mojibake sits in the transcript permanently.
+2. **`web_fetch` on a binary URL** (PNG, ZIP, etc.) receives the raw response body, treats it as text, and stores raw binary as a JSON-encoded string. Same effect: 100KB+ of mojibake sits in the transcript permanently. (Historical: this predates `web_fetch`'s own per-strategy `OUTPUT_CAPS`, which now bound its text output to ≤200KB regardless — see the `web_fetch` text exemption below.)
 
 The result is a session JSONL file that's tens of megabytes on disk but mostly one or two giant tool results, plus 3-minute first-prompt latencies after container restart because the full transcript gets re-shipped to the LLM as context.
 
@@ -46,6 +46,15 @@ The plugin registers a single `tool.after` hook. The hook receives `event.result
 The cap is per-part, not per-result, so a result with one small text part and one giant image is partly preserved (small text untouched, image elided).
 
 Placeholders carry the literal substring `tool-result-cap:` so future agents (or human operators inspecting a session) can grep for them and recognize that the original payload was intentionally elided rather than truncated by some other layer.
+
+## The `web_fetch` text exemption
+
+`web_fetch` is exempt from the **text** cap (but not the image cap), hardcoded in `cap-result.ts` via `TEXT_CAP_EXEMPT_TOOLS`. This is not user-configurable because it resolves a collision between two first-party caps:
+
+- `web_fetch` has its own per-strategy `OUTPUT_CAPS` in `src/agent/tools/webfetch/types.ts` — `readability` is capped at 200KB, `raw` at 100KB, others between 50KB and 100KB — bounded above by a 5MB transport limit. These are deliberately tuned: `readability` gets a generous budget so a full article reaches the model.
+- This plugin's flat `textMaxBytes` default (32KB) is smaller than every one of those, so without the exemption it would silently clip every `web_fetch` result to ~8K tokens, making the strategy caps meaningless. A `readability` fetch designed for 200KB would never deliver more than 32KB.
+
+The exemption is **text-only**: `web_fetch` image parts still go through `imageMaxBytes`, so the binary/base64 transcript-bloat protection (case 2 above) is preserved. The tradeoff is that this plugin no longer provides a 32KB backstop for `web_fetch` text — that responsibility now belongs entirely to `web_fetch`'s own `capOutput()`. User-configured `exemptTools` is a separate, broader knob (skips _all_ capping, image included); the `web_fetch` text exemption is narrower and always on.
 
 ## What's not capped
 

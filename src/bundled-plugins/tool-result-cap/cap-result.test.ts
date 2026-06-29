@@ -49,7 +49,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: 'A'.repeat(200) }],
     }
 
-    const stats = capToolResult('web_fetch', result, baseOptions)
+    const stats = capToolResult('bash', result, baseOptions)
 
     expect(stats.imagesReplaced).toBe(0)
     expect(stats.textsTruncated).toBe(1)
@@ -66,7 +66,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: 'A'.repeat(50) }],
     }
 
-    const stats = capToolResult('web_fetch', result, baseOptions)
+    const stats = capToolResult('bash', result, baseOptions)
 
     expect(stats.textsTruncated).toBe(0)
     expect(result.content[0]).toEqual({ type: 'text', text: 'A'.repeat(50) })
@@ -106,6 +106,42 @@ describe('capToolResult', () => {
     expect(stats.imagesReplaced).toBe(0)
     expect(stats.bytesElided).toBe(0)
     expect(result.content[0]).toEqual({ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) })
+  })
+
+  test('does not truncate web_fetch text (self-bounded by its own strategy caps)', () => {
+    const result: ToolResult = {
+      content: [{ type: 'text', text: 'A'.repeat(200) }],
+    }
+
+    const stats = capToolResult('web_fetch', result, baseOptions)
+
+    expect(stats.textsTruncated).toBe(0)
+    expect(stats.bytesElided).toBe(0)
+    expect(result.content[0]).toEqual({ type: 'text', text: 'A'.repeat(200) })
+  })
+
+  test('still replaces oversized web_fetch image parts (binary bloat protection kept)', () => {
+    const result: ToolResult = {
+      content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) }],
+    }
+
+    const stats = capToolResult('web_fetch', result, baseOptions)
+
+    expect(stats.imagesReplaced).toBe(1)
+    expect(stats.bytesElided).toBe(500)
+    expect(result.content[0]?.type).toBe('text')
+    expect((result.content[0] as { text: string }).text).toContain('tool-result-cap')
+  })
+
+  test('still truncates oversized text from a non-exempt tool', () => {
+    const result: ToolResult = {
+      content: [{ type: 'text', text: 'A'.repeat(200) }],
+    }
+
+    const stats = capToolResult('read', result, baseOptions)
+
+    expect(stats.textsTruncated).toBe(1)
+    expect((result.content[0] as { text: string }).text).toContain('tool-result-cap')
   })
 
   test('mutates the original content array in place', () => {
@@ -151,7 +187,7 @@ describe('capToolResult', () => {
       content: [{ type: 'text', text: `[tool-result-cap: quoted prior placeholder] ${'X'.repeat(500)}` }],
     }
 
-    const stats = capToolResult('web_fetch', result, baseOptions)
+    const stats = capToolResult('bash', result, baseOptions)
 
     expect(stats.textsTruncated).toBe(1)
     const part = result.content[0] as { type: 'text'; text: string }

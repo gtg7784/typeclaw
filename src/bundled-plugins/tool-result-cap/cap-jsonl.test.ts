@@ -284,8 +284,8 @@ describe('capJsonlFileInPlace', () => {
         timestamp: '2026-05-12T00:00:01Z',
         message: {
           role: 'toolResult',
-          toolCallId: 'functions.web_fetch:1',
-          toolName: 'web_fetch',
+          toolCallId: 'functions.bash:1',
+          toolName: 'bash',
           content: [{ type: 'text', text: 'B'.repeat(200) }],
         },
       },
@@ -297,5 +297,30 @@ describe('capJsonlFileInPlace', () => {
     expect(stats.bytesElided).toBe(150)
     const entries = readJsonl(path) as { message?: { content: { type: string; text?: string }[] } }[]
     expect(entries[1]!.message!.content[0]?.text).toContain('tool-result-cap')
+  })
+
+  test('does not truncate web_fetch text parts at load time', () => {
+    const path = makeTmpJsonl([
+      { type: 'session', id: 's1', timestamp: '2026-05-12T00:00:00Z', cwd: '/a' },
+      {
+        type: 'message',
+        id: 'e1',
+        parentId: null,
+        timestamp: '2026-05-12T00:00:01Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'functions.web_fetch:1',
+          toolName: 'web_fetch',
+          content: [{ type: 'text', text: 'B'.repeat(200) }],
+        },
+      },
+    ])
+
+    const stats = capJsonlFileInPlace(path, baseOptions)
+
+    expect(stats.textsTruncated).toBe(0)
+    expect(stats.entriesMutated).toBe(0)
+    const entries = readJsonl(path) as { message?: { content: { type: string; text?: string }[] } }[]
+    expect(entries[1]!.message!.content[0]?.text).toBe('B'.repeat(200))
   })
 })
