@@ -14,6 +14,13 @@ export type CapStats = {
 
 const ELIDED_MARKER = '[tool-result-cap: '
 
+// `web_fetch` already bounds its own text via per-strategy OUTPUT_CAPS
+// (src/agent/tools/webfetch/types.ts: 50KB–200KB; readability gets 200KB on
+// purpose), so the flat 32KB textMaxBytes here only collides with it and clips
+// every readability fetch to ~8K tokens. Skip TEXT capping for it; image parts
+// still hit the image cap below, preserving the binary/base64 bloat protection.
+const TEXT_CAP_EXEMPT_TOOLS = new Set(['web_fetch'])
+
 // A capped text part is exactly the placeholder we generated: starts with
 // `[tool-result-cap: `, ends with `]`, and contains no inner `]`. The shape
 // check exists for idempotency so a previously-capped entry survives a second
@@ -46,6 +53,7 @@ export function capContentParts(tool: string, content: ContentPart[], options: C
       continue
     }
     if (part.type === 'text') {
+      if (TEXT_CAP_EXEMPT_TOOLS.has(tool)) continue
       const size = part.text.length
       if (size <= options.textMaxBytes) continue
       if (isElidedPlaceholderText(part.text)) continue
