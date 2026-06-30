@@ -9,6 +9,7 @@ import { renderReference } from '../references/frontmatter'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import { hybridSearch, type EmbedFn } from './hybrid'
 import { VectorStore, type VectorRow } from './store'
+import { boundEmbeddableText, TEXT_TOKEN_BUDGET } from './truncation'
 
 const MODEL = EMBEDDING_MODEL_ID
 const testDirs: string[] = []
@@ -690,6 +691,116 @@ describe('hybridSearch relevance gate', () => {
   })
 })
 
+describe('hybridSearch query chunking', () => {
+  it('a short (in-budget) query embeds as one chunk — single-vector path preserved', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeTopic(agentDir, 'pr-651', 'PR 651 Review', 'PR #651 fixed channel reload handling.')
+      store.upsert(row('topic:pr-651', 'pr-651', vector({ 0: 1 })))
+
+      let embedCallCount = 0
+      const countingEmbed: EmbedFn = async (texts) => {
+        embedCallCount += 1
+        expect(texts).toHaveLength(1)
+        return [vector({ 0: 1 })]
+      }
+
+      const results = await hybridSearch('PR #651', store, agentDir, 3, countingEmbed)
+
+      expect(embedCallCount).toBe(1)
+      expect(results.map((r) => r.key)).toContain('pr-651')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('retrieves a topic relevant to the TAIL of an over-budget query (tail no longer truncated)', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeTopic(agentDir, 'tail-topic', 'Tail Topic', 'A belief only the tail of the prompt is about.')
+      store.upsert(row('topic:tail-topic', 'tail-topic', vector({ 5: 1 })))
+
+      // A long prompt: a benign head followed by the tail that actually matches.
+      // The head chunk(s) embed to an off-axis vector; the LAST chunk embeds to
+      // the topic's axis. Pre-fix (single truncated vector) the head won and the
+      // tail topic was unreachable; chunking + MAX-collapse surfaces it.
+      const head = 'word '.repeat(TEXT_TOKEN_BUDGET * 2)
+      const query = `${head} TAIL-PAYLOAD`
+      const embedPerChunk: EmbedFn = async (texts) =>
+        texts.map((text) => (text.includes('TAIL-PAYLOAD') ? vector({ 5: 1 }) : vector({ 7: 1 })))
+
+      const results = await hybridSearch(query, store, agentDir, 3, embedPerChunk)
+
+      expect(results.map((r) => r.key)).toContain('tail-topic')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('caps the number of embedded chunks for a pathological prompt, keeping the tail', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeTopic(agentDir, 'noise', 'Noise', 'Unrelated.')
+      store.upsert(row('topic:noise', 'noise', vector({ 1: 1 })))
+
+      // ~40 budgets of text → far more than the cap of 10 chunks.
+      const query = `${'word '.repeat(TEXT_TOKEN_BUDGET * 40)} FINAL-TAIL`
+      let seenChunks = 0
+      let tailEmbedded = false
+      const capProbe: EmbedFn = async (texts) => {
+        seenChunks = texts.length
+        tailEmbedded = texts.some((t) => t.includes('FINAL-TAIL'))
+        return texts.map(() => vector({ 1: 1 }))
+      }
+
+      await hybridSearch(query, store, agentDir, 3, capProbe)
+
+      expect(seenChunks).toBeLessThanOrEqual(10)
+      expect(seenChunks).toBe(10)
+      expect(tailEmbedded).toBe(true)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('loosens the cross-script margin from the chunk that won the TOP row, not the head majority', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      // given: an English framing head chunk that wins a crowd of ambient English
+      // noise rows (~0.755 on axis 0), and a Korean tail chunk that wins the ONE
+      // real English topic at a compressed cross-script contrast (~0.045: axis-2
+      // target 0.8 vs the 0.755 band). The head band is majority English, so a
+      // majority vote would pick `latin`, keep the margin strict, and suppress the
+      // real match. Deriving the script from the TOP row's winning chunk (Korean)
+      // loosens the margin and recovers it.
+      for (let i = 0; i < 30; i++) {
+        writeTopic(agentDir, `band-${i}`, `Band ${i}`, `Unrelated English note number ${i}.`)
+        store.upsert(row(`topic:band-${i}`, `band-${i}`, bandedVectorOnAxis(0.755 + (i % 3) * 0.001, 0)))
+      }
+      writeTopic(agentDir, 'proc-bind', 'Sandbox proc-bind strategy', 'The container binds a real procfs.')
+      store.upsert(row('topic:proc-bind', 'proc-bind', bandedVectorOnAxis(0.8, 2)))
+
+      // Align the English head to chunk boundaries so the Korean payload lands in
+      // its OWN (cjk-dominant) trailing chunk — otherwise the greedy splitter
+      // appends it to a latin-dominant chunk and dominantScript reads latin.
+      const head = budgetAlignedText('unrelated english framing prose ', 2)
+      const query = `${head}\uC0CC\uB4DC\uBC15\uC2A4 proc \uBC14\uC778\uB4DC \uC804\uB7B5 \uD655\uC778`
+      const embedPerChunk: EmbedFn = async (texts) =>
+        texts.map((text) => (/[\uAC00-\uD7AF]/.test(text) ? vector({ 2: 1 }) : vector({ 0: 1 })))
+
+      const results = await hybridSearch(query, store, agentDir, 10, embedPerChunk)
+
+      // proc-bind can ONLY enter results via the vector lane admitting it under the
+      // loosened margin — the Korean payload shares no tokens with it, so it never
+      // reaches the keyword lane. Under the old head-majority vote the margin stays
+      // strict and proc-bind is suppressed entirely.
+      expect(results.some((r) => r.key === 'proc-bind')).toBe(true)
+    } finally {
+      store.close()
+    }
+  })
+})
+
 function createFixture(): { agentDir: string; store: VectorStore } {
   const agentDir = join(tmpdir(), `typeclaw-hybrid-${randomUUID()}`)
   testDirs.push(agentDir)
@@ -782,6 +893,32 @@ function bandedVector(target: number): Float32Array {
   result[0] = target
   result[1] = Math.sqrt(Math.max(0, 1 - target * target))
   return result
+}
+
+// bandedVector with the on-query component on an arbitrary axis, so two query
+// chunks pointing at different axes can each win a different band of store rows
+// (the cross-script top-row test needs the noise band and the real topic to be
+// selected by different chunks). The shared off-query axis stays 7 to avoid
+// colliding with any on-query axis a caller picks.
+function bandedVectorOnAxis(target: number, axis: number): Float32Array {
+  const result = new Float32Array(8)
+  result[axis] = target
+  result[7] = Math.sqrt(Math.max(0, 1 - target * target))
+  return result
+}
+
+// `chunkCount` full budget-sized chunks of `unit`, cut exactly on the splitter's
+// own boundaries so a following non-Latin payload starts a fresh chunk instead of
+// tailing a Latin-dominant one.
+function budgetAlignedText(unit: string, chunkCount: number): string {
+  let remaining = unit.repeat(TEXT_TOKEN_BUDGET)
+  let head = ''
+  for (let i = 0; i < chunkCount; i++) {
+    const chunk = boundEmbeddableText(remaining).text
+    head += chunk
+    remaining = remaining.slice(chunk.length)
+  }
+  return head
 }
 
 function vector(values: Record<number, number>): Float32Array {

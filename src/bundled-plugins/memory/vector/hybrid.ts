@@ -19,10 +19,26 @@ import type { Passage } from './passages'
 import { clearsBaseline, gateRelevance, MARGIN, streamAdmissionBaseline } from './relevance-gate'
 import { crossScriptMarginScale, dominantScript, type ScriptClass } from './script'
 import { VectorStore, type ScoredVectorRow, type VectorRow } from './store'
+import { chunkEmbeddableText } from './truncation'
 
 export { collectPassages, findMissingPassages, type Passage } from './passages'
 
 const RRF_K = 60
+
+// A long prompt is embedded as multiple ≤512-token chunks (not truncated to one
+// vector), so a memory relevant to ANY part of the prompt — including its tail —
+// can still be retrieved. The cap bounds the per-turn cosine scans: each chunk is
+// a full O(rows) brute-force pass over the store, so an unbounded chunk count
+// would scale per-turn retrieval cost with prompt length. At the cap, the LAST
+// chunks are kept rather than the first: TypeClaw cron/agent prompts front-load
+// fixed framing prose and place the actual payload last, so dropping the head is
+// the lesser loss than re-introducing the tail-truncation this fix removes.
+const MAX_QUERY_CHUNKS = 10
+
+function queryEmbeddingChunks(query: string): string[] {
+  const chunks = chunkEmbeddableText(query)
+  return chunks.length <= MAX_QUERY_CHUNKS ? chunks : chunks.slice(chunks.length - MAX_QUERY_CHUNKS)
+}
 
 export type HybridSearchResult = {
   source: 'topic' | 'stream' | 'reference'
@@ -46,17 +62,18 @@ export async function hybridSearch(
 ): Promise<HybridSearchResult[]> {
   if (topK <= 0) return []
 
+  const queryChunks = queryEmbeddingChunks(query)
   const [shards, streamDays, references, queryEmbeddings] = await Promise.all([
     loadAllShards(agentDir),
     readAllUndreamedStreamDays(agentDir),
     loadAllReferences(agentDir),
-    embedFn([query], 'query'),
+    embedFn(queryChunks, 'query'),
   ])
 
   const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
   const index = buildContentIndex(shards, streamDays, references, supersededFragmentIds)
   const vectorRows =
-    queryEmbeddings[0] === undefined ? [] : gatedVectorLane(queryEmbeddings[0], store, topK, query, index)
+    queryEmbeddings.length === 0 ? [] : gatedVectorLane(queryEmbeddings, queryChunks, store, topK, index)
   const keywordMatches = keywordLane(query, shards, streamDays, references, topK * 2)
 
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
@@ -85,13 +102,13 @@ export async function hybridSearch(
 // separate keyword lane. An empty merged lane composes with RRF exactly like a
 // lane that found nothing, so a genuine keyword hit survives a full no-match.
 function gatedVectorLane(
-  queryEmbedding: Float32Array,
+  queryEmbeddings: Float32Array[],
+  queryChunks: string[],
   store: VectorStore,
   topK: number,
-  query: string,
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
 ): VectorRow[] {
-  const scored = store.queryScored(queryEmbedding, EMBEDDING_MODEL_ID)
+  const { scored, winnerChunkByRowId } = maxScoreAcrossChunks(queryEmbeddings, store)
   const bandDefiningRows = scored.filter(({ row }) => row.source === 'topic' || row.source === 'reference')
   const streamRows = scored.filter(({ row }) => row.source === 'stream')
 
@@ -102,7 +119,14 @@ function gatedVectorLane(
   // script winner whose contrast sits between the loosened and strict margins
   // would still be suppressed. Headings (via `index`) carry the language; slugs
   // are ASCII-kebab even for non-Latin topics.
-  const topicMargin = MARGIN * crossScriptMarginScale(dominantScript(query), headBandScripts(bandDefiningRows, index))
+  //
+  // The query-side script comes from the CHUNK that won each head row, not the
+  // full prompt: a boilerplate-front prompt (most TypeClaw cron prompts) has a
+  // dominant script set by framing prose, not by the payload that actually
+  // matched. Using the winning chunk's script keeps the loosening aligned with
+  // the text that produced the contrast.
+  const queryScript = dominantQueryScript(bandDefiningRows, winnerChunkByRowId, queryChunks)
+  const topicMargin = MARGIN * crossScriptMarginScale(queryScript, headBandScripts(bandDefiningRows, index))
   const bandScores = bandDefiningRows.map(({ score }) => score)
   const keptBandDefiningRows = bandDefiningRows.slice(0, gateRelevance(bandScores, topK * 2, topicMargin))
 
@@ -135,6 +159,49 @@ function headBandScripts(
     if (content !== undefined) scripts.add(dominantScript(content.heading))
   }
   return [...scripts]
+}
+
+// Scores every store row against ALL query-chunk embeddings and keeps each row's
+// MAX similarity (a row relevant to ANY chunk should rank high; mean would dilute
+// it against unrelated chunks, sum would reward prompt length). Returns the merged
+// `{ row, score }[]` in the same shape `store.queryScored` produced for a single
+// query, plus the chunk index that produced each row's winning score — so the
+// cross-script margin can be judged against the chunk that actually matched.
+function maxScoreAcrossChunks(
+  queryEmbeddings: Float32Array[],
+  store: VectorStore,
+): { scored: ScoredVectorRow[]; winnerChunkByRowId: Map<string, number> } {
+  const best = new Map<string, { scored: ScoredVectorRow; chunkIndex: number }>()
+  queryEmbeddings.forEach((embedding, chunkIndex) => {
+    for (const scoredRow of store.queryScored(embedding, EMBEDDING_MODEL_ID)) {
+      const existing = best.get(scoredRow.row.id)
+      if (existing === undefined || scoredRow.score > existing.scored.score) {
+        best.set(scoredRow.row.id, { scored: scoredRow, chunkIndex })
+      }
+    }
+  })
+  const scored = [...best.values()].map(({ scored: s }) => s).sort((a, b) => b.score - a.score)
+  const winnerChunkByRowId = new Map([...best].map(([id, { chunkIndex }]) => [id, chunkIndex]))
+  return { scored, winnerChunkByRowId }
+}
+
+// The single query script the cross-script margin is judged with, taken from the
+// chunk that won the TOP-scoring band row. The gate's contrast is top1 minus the
+// non-head median (`gateRelevance`), so the top row alone defines whether the
+// margin loosens — a majority vote across the head would let a crowd of ambient
+// same-script noise rows (each won by a framing chunk) override the cross-script
+// payload chunk that actually won the real top match, keeping the margin strict
+// and suppressing a genuine cross-script hit sitting in the compressed band.
+function dominantQueryScript(
+  bandDefiningRows: ScoredVectorRow[],
+  winnerChunkByRowId: Map<string, number>,
+  queryChunks: string[],
+): ScriptClass {
+  const topRow = bandDefiningRows[0]
+  if (topRow === undefined) return 'other'
+  const chunkIndex = winnerChunkByRowId.get(topRow.row.id)
+  const chunk = chunkIndex === undefined ? undefined : queryChunks[chunkIndex]
+  return chunk === undefined ? 'other' : dominantScript(chunk)
 }
 
 // Phrase-first, then token-OR fallback (mirrors `memory_search`). `hybridSearch`'s
