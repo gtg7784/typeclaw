@@ -32,6 +32,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     discordUserCredentials(),
     slackUserCredentials(),
     webexUserCredentials(),
+    instagramCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
     githubCredentials(),
@@ -153,6 +154,33 @@ function webexUserCredentials(): DoctorCheck {
         }
       }
       return { status: 'ok', message: 'webex has a current account access_token' }
+    },
+  }
+}
+
+function instagramCredentials(): DoctorCheck {
+  return {
+    name: 'channel.instagram.credentials',
+    category: 'channels',
+    description: 'instagram adapter has at least one account in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'instagram')) {
+        return { status: 'skipped', message: 'instagram not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.instagram
+      const accountCount = block?.accounts ? Object.keys(block.accounts).length : 0
+      if (accountCount === 0) {
+        return {
+          status: 'warning',
+          message: 'instagram has no accounts in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add instagram` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: `instagram has ${accountCount} account(s)` }
     },
   }
 }
