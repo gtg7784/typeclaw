@@ -79,6 +79,9 @@ describe('shouldConsiderUpdateNotice', () => {
     expect(shouldConsiderUpdateNotice('tui')).toBe(true)
     expect(shouldConsiderUpdateNotice('logs')).toBe(true)
     expect(shouldConsiderUpdateNotice('status')).toBe(true)
+    // The e2e gate below spawns `usage`; assert it actually flows through the
+    // gate so that vehicle stays a valid regression target.
+    expect(shouldConsiderUpdateNotice('usage')).toBe(true)
   })
 
   test('suppresses the container stage and self-update', () => {
@@ -109,18 +112,25 @@ describe('shouldConsiderUpdateNotice', () => {
 // (The positive "enabled => notice" case can't run from a source checkout: the
 // dev-checkout skip suppresses it by design; renderUpdateNotice covers that
 // path directly above.)
+//
+// The vehicle is `usage`, not `status`: `usage` is a gate-considered builtin
+// whose run path only scans <agentDir>/sessions, so it never touches Docker or
+// the host daemon. `status` probes `docker info` with no timeout, which
+// cold-starts Docker Desktop (~70s) on Windows CI and blew this test's 30s
+// budget — a flaky failure unrelated to the gate under test.
 describe('maybeNotifyUpdate (end-to-end notice gating)', () => {
   const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 
-  async function runStatus(home: string, env: Record<string, string>): Promise<string> {
+  async function runNoticeGateBuiltin(home: string, env: Record<string, string>): Promise<string> {
     const proc = Bun.spawn({
-      cmd: [process.execPath, CLI_ENTRY, 'status'],
+      cmd: [process.execPath, CLI_ENTRY, 'usage', '--cwd', home, '--json'],
       env: { ...process.env, TYPECLAW_HOME: home, NO_COLOR: '1', ...env },
       stdout: 'ignore',
       stderr: 'pipe',
     })
     const stderr = await new Response(proc.stderr).text()
-    await proc.exited
+    const exitCode = await proc.exited
+    if (exitCode !== 0) throw new Error(`usage command failed with ${exitCode}: ${stderr}`)
     return stderr
   }
 
@@ -139,14 +149,14 @@ describe('maybeNotifyUpdate (end-to-end notice gating)', () => {
 
   test('prints nothing when TYPECLAW_NO_UPDATE_CHECK is set, even with a newer cache', async () => {
     await withSeededCache(async (home) => {
-      const stderr = await runStatus(home, { TYPECLAW_NO_UPDATE_CHECK: '1' })
+      const stderr = await runNoticeGateBuiltin(home, { TYPECLAW_NO_UPDATE_CHECK: '1' })
       expect(stderr).not.toContain('Update available')
     })
   })
 
   test('prints nothing in CI mode, even with a newer cache', async () => {
     await withSeededCache(async (home) => {
-      const stderr = await runStatus(home, { CI: 'true' })
+      const stderr = await runNoticeGateBuiltin(home, { CI: 'true' })
       expect(stderr).not.toContain('Update available')
     })
   })
