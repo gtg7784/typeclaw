@@ -3,8 +3,8 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
-import type { ChannelHistoryMessage } from '@/channels/types'
 
+import { renderHistoryMessages } from './channel-history-render'
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 
 export type ChannelHistoryOrigin = {
@@ -96,7 +96,7 @@ export function createChannelHistoryTool({
 
       router.registerHistoryAttachments(origin, result.messages)
 
-      const rendered = renderMessages(result.messages)
+      const rendered = renderHistoryMessages(result.messages)
       const cursorLine =
         result.nextCursor !== undefined
           ? `\n\n(more older messages available — call channel_history again with cursor: ${JSON.stringify(result.nextCursor)})`
@@ -112,19 +112,4 @@ export function createChannelHistoryTool({
       }
     },
   })
-}
-
-// Render history as one line per message, chronological order. `BOT` marker
-// distinguishes the agent's own past replies from user messages so the
-// model doesn't treat them as user input. Author name is shown alongside
-// the id so the agent can refer to people by name in its reply.
-function renderMessages(messages: readonly ChannelHistoryMessage[]): string {
-  if (messages.length === 0) return '(no messages)'
-  const lines: string[] = []
-  for (const m of messages) {
-    const iso = m.ts > 0 ? new Date(m.ts).toISOString() : 'unknown-time'
-    const who = m.isBot ? `BOT (${m.authorName})` : `${m.authorName} (<@${m.authorId}>)`
-    lines.push(`[${iso}] ${who}: ${m.text}`)
-  }
-  return lines.join('\n')
 }
