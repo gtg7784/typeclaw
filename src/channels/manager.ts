@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
+import { SecretsInstagramCredentialStore } from '@/secrets/instagram-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
 import { SecretsSlackCredentialStore } from '@/secrets/slack-store'
@@ -14,6 +15,7 @@ import type { Stream } from '@/stream'
 import { createDiscordAdapter, type DiscordAdapter } from './adapters/discord'
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createGithubAdapter, type GithubAdapter } from './adapters/github'
+import { createInstagramAdapter, type InstagramAdapter } from './adapters/instagram'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackAdapter, type SlackAdapter } from './adapters/slack'
@@ -75,6 +77,7 @@ export type ChannelManagerOptions = {
   createDiscordAdapter?: typeof createDiscordBotAdapter
   createDiscordUserAdapter?: typeof createDiscordAdapter
   createGithubAdapter?: typeof createGithubAdapter
+  createInstagramAdapter?: typeof createInstagramAdapter
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createLineAdapter?: typeof createLineAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
@@ -145,6 +148,7 @@ type AnyAdapter =
   | DiscordAdapter
   | DiscordBotAdapter
   | GithubAdapter
+  | InstagramAdapter
   | LineAdapter
   | KakaotalkAdapter
   | SlackAdapter
@@ -188,6 +192,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createDiscordBot = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createDiscordUser = options.createDiscordUserAdapter ?? createDiscordAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
+  const createInstagram = options.createInstagramAdapter ?? createInstagramAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
   const createLine = options.createLineAdapter ?? createLineAdapter
   const createSlackBot = options.createSlackAdapter ?? createSlackBotAdapter
@@ -219,6 +224,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
     if (name === 'line') return buildLineSignature(options.agentDir)
+    if (name === 'instagram') return buildInstagramSignature(options.agentDir)
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
     if (name === 'webex') return buildWebexSignature(options.agentDir)
     if (name === 'slack') return buildSlackSignature(options.agentDir)
@@ -264,6 +270,17 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const credentialsStore = createContainerLineCredentialStore(options.agentDir, env)
       if (credentialsStore === null) return null
       return createLine({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsStore,
+      })
+    }
+    if (name === 'instagram') {
+      const credentialsStore = createContainerInstagramCredentialStore(options.agentDir, env)
+      if (credentialsStore === null) return null
+      return createInstagram({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
@@ -522,7 +539,12 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
             stopped.push(name)
           } else if (signature !== current.credentialSignature) {
             const reason =
-              name === 'kakaotalk' || name === 'line' || name === 'webex' || name === 'slack' || name === 'discord'
+              name === 'kakaotalk' ||
+              name === 'line' ||
+              name === 'instagram' ||
+              name === 'webex' ||
+              name === 'slack' ||
+              name === 'discord'
                 ? 'credential rotation'
                 : 'token rotation'
             restartRequired.push(`${name} (${reason})`)
@@ -539,7 +561,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 // secrets.json#channels.<adapter>, not in env, so they go through
 // structured-block signatures instead.
 const TOKEN_ENV: Record<
-  Exclude<AdapterId, 'kakaotalk' | 'line' | 'github' | 'webex' | 'slack' | 'discord'>,
+  Exclude<AdapterId, 'kakaotalk' | 'line' | 'instagram' | 'github' | 'webex' | 'slack' | 'discord'>,
   readonly string[]
 > = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
@@ -700,6 +722,33 @@ function buildLineSignature(agentDir: string): { signature: string; missing: str
   }
 }
 
+function createContainerInstagramCredentialStore(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+): SecretsInstagramCredentialStore | null {
+  const creds = resolveHostdContainerCredentials(env)
+  if (creds === null) return null
+  return new SecretsInstagramCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    ...creds,
+  })
+}
+
+function buildInstagramSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.instagram
+    if (!isInstagramCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.instagram'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.instagram@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`secrets.json#channels.instagram (${describe(err)})`] }
+  }
+}
+
 function buildGithubSignature(agentDir: string): { signature: string; missing: string[] } {
   const block = readGithubSecrets(agentDir)
   if (block === null) return { signature: '', missing: ['secrets.json#channels.github'] }
@@ -736,6 +785,15 @@ function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<str
 }
 
 function isLineCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
+}
+
+function isInstagramCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('accounts' in value)) return false
   const accounts = value.accounts
