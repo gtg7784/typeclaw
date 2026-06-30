@@ -8,7 +8,7 @@ import { loadAllReferences } from '../references/load-references'
 import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { EMBEDDING_MODEL_ID } from './embedder'
 import type { VectorStore } from './store'
-import { boundEmbeddableText, fragmentEmbeddableText } from './truncation'
+import { chunkEmbeddableText, fragmentEmbeddableText } from './truncation'
 
 export type Passage = {
   id: string
@@ -52,7 +52,7 @@ export async function referencePassages(agentDir: string): Promise<Passage[]> {
 // applies at startup.
 export function referencePassagesForOne(slug: string, body: string, demoted = false): Passage[] {
   if (demoted) return []
-  return chunkReferenceBody(body).map((chunk, chunkIdx) => ({
+  return chunkEmbeddableText(body).map((chunk, chunkIdx) => ({
     id: `reference:${slug}#${chunkIdx}`,
     source: 'reference',
     key: slug,
@@ -96,28 +96,6 @@ function buildPassages(shards: TopicShard[], streamDays: UndreamedStreamDay[]): 
       }),
     ),
   ]
-}
-
-function chunkReferenceBody(body: string): string[] {
-  if (body.length === 0) return ['']
-
-  const chunks: string[] = []
-  let remaining = body
-  while (remaining.length > 0) {
-    const bounded = boundEmbeddableText(remaining)
-    if (!bounded.bounded) {
-      chunks.push(bounded.text)
-      break
-    }
-    if (bounded.text.length === 0) {
-      chunks.push(remaining[0]!)
-      remaining = remaining.slice(1)
-      continue
-    }
-    chunks.push(bounded.text)
-    remaining = remaining.slice(bounded.text.length)
-  }
-  return chunks
 }
 
 function hashContent(content: string): string {

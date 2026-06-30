@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   boundEmbeddableText,
+  chunkEmbeddableText,
   estimateTokens,
   fragmentEmbeddableText,
   isOverBudget,
@@ -82,5 +83,39 @@ describe('boundEmbeddableText', () => {
     const result = boundEmbeddableText(text)
     expect(result.bounded).toBe(true)
     expect(result.text.startsWith('LEADING-BELIEF-SENTENCE')).toBe(true)
+  })
+})
+
+describe('chunkEmbeddableText', () => {
+  test('returns a single chunk for in-budget text (the common short case)', () => {
+    expect(chunkEmbeddableText('a normal short query')).toEqual(['a normal short query'])
+  })
+
+  test('returns a single-element array for an empty string', () => {
+    expect(chunkEmbeddableText('')).toEqual([''])
+  })
+
+  test('splits over-budget text into multiple chunks, each within budget', () => {
+    const long = 'word '.repeat(TEXT_TOKEN_BUDGET * 4)
+    const chunks = chunkEmbeddableText(long)
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const chunk of chunks) {
+      expect(estimateTokens(chunk)).toBeLessThanOrEqual(TEXT_TOKEN_BUDGET)
+    }
+  })
+
+  test('drops nothing — concatenated chunks reconstruct the original (Latin)', () => {
+    const long = 'word '.repeat(TEXT_TOKEN_BUDGET * 4)
+    expect(chunkEmbeddableText(long).join('')).toBe(long)
+  })
+
+  test('drops nothing — concatenated chunks reconstruct the original (CJK)', () => {
+    const long = '한'.repeat(TEXT_TOKEN_BUDGET * 3)
+    const chunks = chunkEmbeddableText(long)
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks.join('')).toBe(long)
+    for (const chunk of chunks) {
+      expect(estimateTokens(chunk)).toBeLessThanOrEqual(TEXT_TOKEN_BUDGET)
+    }
   })
 })
