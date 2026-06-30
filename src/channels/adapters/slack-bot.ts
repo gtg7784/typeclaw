@@ -751,11 +751,13 @@ export function createSlackHistoryCallback(deps: {
   }
 }
 
-// Fetch one message by ts via conversations.history with latest=ts and
-// inclusive=true, limit=1 — Slack's only by-id read for channel messages.
-// Thread replies use conversations.replies anchored on the thread ts; we then
-// pick out the requested ts. Reuses mapSlackMessage so a single message renders
-// identically to a history entry.
+// Fetch one message by ts. Slack has no by-id endpoint, so we window
+// conversations.history (channel root) or conversations.replies (thread) to a
+// single ts via oldest=latest=messageId, inclusive=true, limit=1 — without the
+// window, a long thread is cursor-paginated and a reply past the first page
+// would be wrongly reported not-found. conversations.replies still needs `ts`
+// set to the thread ROOT to identify the thread. Reuses mapSlackMessage so a
+// single message renders identically to a history entry.
 export function createSlackMessageGetCallback(deps: {
   token: string
   logger: SlackBotAdapterLogger
@@ -768,15 +770,11 @@ export function createSlackMessageGetCallback(deps: {
   return async (args: GetMessageArgs): Promise<GetMessageResult> => {
     const body = new URLSearchParams()
     body.set('channel', args.chat)
-    if (args.thread !== null) {
-      body.set('ts', args.thread)
-      body.set('inclusive', 'true')
-    } else {
-      body.set('latest', args.messageId)
-      body.set('oldest', args.messageId)
-      body.set('inclusive', 'true')
-      body.set('limit', '1')
-    }
+    if (args.thread !== null) body.set('ts', args.thread)
+    body.set('oldest', args.messageId)
+    body.set('latest', args.messageId)
+    body.set('inclusive', 'true')
+    body.set('limit', '1')
     const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
 
     let raw: SlackHistoryResponse

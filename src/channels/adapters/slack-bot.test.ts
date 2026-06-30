@@ -1390,10 +1390,7 @@ describe('createSlackMessageGetCallback', () => {
     // given
     const { fn, calls } = fakeFetch({
       ok: true,
-      messages: [
-        { ts: '170.000', user: 'UA', text: 'root' },
-        { ts: '170.002', user: 'UB', text: 'target reply' },
-      ],
+      messages: [{ ts: '170.002', user: 'UB', text: 'target reply' }],
     })
     const cb = createSlackMessageGetCallback({
       token: 'tok',
@@ -1403,8 +1400,15 @@ describe('createSlackMessageGetCallback', () => {
     })
     // when
     const result = await cb({ chat: 'C0', thread: '170.000', messageId: '170.002' })
-    // then
+    // then the replies call is windowed to the single target ts (ts = thread root)
+    // so a reply past the first page is not wrongly reported not-found
     expect(calls[0]!.url).toBe('https://slack.com/api/conversations.replies')
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('ts')).toBe('170.000')
+    expect(params.get('oldest')).toBe('170.002')
+    expect(params.get('latest')).toBe('170.002')
+    expect(params.get('inclusive')).toBe('true')
+    expect(params.get('limit')).toBe('1')
     if (!result.ok) throw new Error('expected ok')
     expect(result.message.text).toBe('target reply')
   })
