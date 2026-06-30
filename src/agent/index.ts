@@ -78,6 +78,7 @@ import { createChannelDisengageTool } from './tools/channel-disengage'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
+import { createChannelReadTool } from './tools/channel-read'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createGrantRoleTool } from './tools/grant-role'
@@ -665,12 +666,13 @@ export function formatRestartNoticeOriginating(restartedAt: string): string {
   ].join('\n')
 }
 
-// Builds the channel tool subset: channel_send (always when a router is
-// available), plus the origin-bound channel tools when the session origin is
-// a channel — channel_reply, channel_history, channel_react,
-// channel_fetch_attachment, look_at_channel_attachment, channel_disengage, and
-// (when sessionId is known) skip_response. Those rely on origin-bound
-// addressing or per-session turn state. Extracted from
+// Builds the channel tool subset: channel_send and channel_read (both always
+// when a router is available — they take explicit addressing, not origin-bound),
+// plus the origin-bound channel tools when the session origin is a channel —
+// channel_reply, channel_history, channel_react, channel_fetch_attachment,
+// look_at_channel_attachment, channel_disengage, and (when sessionId is known)
+// skip_response. Those rely on origin-bound addressing or per-session turn
+// state. Extracted from
 // createSessionWithDispose so composition can be unit-tested without
 // going through createAgentSession / auth.
 //
@@ -702,6 +704,7 @@ export function buildChannelTools(
       }),
     )
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(createChannelReadTool({ router: channelRouter }))
     tools.push(
       createChannelSendTool({
         router: channelRouter,
@@ -736,6 +739,7 @@ export function buildChannelTools(
     }
   } else {
     tools.push(createChannelSendTool({ router: channelRouter }))
+    tools.push(createChannelReadTool({ router: channelRouter }))
   }
   return tools
 }

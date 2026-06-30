@@ -1032,13 +1032,14 @@ describe('buildChannelTools', () => {
       'channel_fetch_attachment',
       'channel_history',
       'channel_react',
+      'channel_read',
       'channel_reply',
       'channel_send',
       'look_at_channel_attachment',
     ])
   })
 
-  test('exposes only channel_send (no reply or history) when origin is non-channel', () => {
+  test('exposes channel_send and channel_read (no reply or history) when origin is non-channel', () => {
     // given
     const router = makeRouter()
 
@@ -1047,10 +1048,10 @@ describe('buildChannelTools', () => {
 
     // then
     const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(['channel_send'])
+    expect(names).toEqual(['channel_read', 'channel_send'])
   })
 
-  test('exposes only channel_send when origin is cron (not channel-routed)', () => {
+  test('exposes channel_send and channel_read when origin is cron (not channel-routed)', () => {
     // given
     const router = makeRouter()
 
@@ -1059,7 +1060,7 @@ describe('buildChannelTools', () => {
 
     // then
     const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(['channel_send'])
+    expect(names).toEqual(['channel_read', 'channel_send'])
   })
 
   test('exposes no channel tools when channelRouter is undefined', () => {
@@ -1076,11 +1077,11 @@ describe('buildChannelTools', () => {
     expect(tools).toHaveLength(0)
   })
 
-  test('exposes only channel_send when channelRouter is set but origin is undefined', () => {
+  test('exposes channel_send and channel_read when channelRouter is set but origin is undefined', () => {
     // when
     const tools = buildChannelTools(makeRouter(), undefined)
     // then
-    expect(tools.map((t) => t.name)).toEqual(['channel_send'])
+    expect(tools.map((t) => t.name).sort()).toEqual(['channel_read', 'channel_send'])
   })
 })
 
