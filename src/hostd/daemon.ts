@@ -8,6 +8,7 @@ import { defaultDockerExec, type DockerExec, type HostDaemonRegisterPayload } fr
 import type { PortForwardEvent } from '@/portbroker'
 import {
   discordChannelBlockSchema,
+  instagramChannelBlockSchema,
   kakaoChannelBlockSchema,
   lineChannelBlockSchema,
   slackChannelBlockSchema,
@@ -530,6 +531,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       channels:
         | { kakaotalk: unknown }
         | { discord: unknown }
+        | { instagram: unknown }
         | { line: unknown }
         | { webex: unknown }
         | { slack: unknown }
@@ -545,13 +547,15 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       const patch =
         'line' in channelsPatch
           ? { key: 'line' as const, parsed: lineChannelBlockSchema.safeParse(channelsPatch.line) }
-          : 'discord' in channelsPatch
-            ? { key: 'discord' as const, parsed: discordChannelBlockSchema.safeParse(channelsPatch.discord) }
-            : 'webex' in channelsPatch
-              ? { key: 'webex' as const, parsed: webexChannelBlockSchema.safeParse(channelsPatch.webex) }
-              : 'slack' in channelsPatch
-                ? { key: 'slack' as const, parsed: slackChannelBlockSchema.safeParse(channelsPatch.slack) }
-                : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
+          : 'instagram' in channelsPatch
+            ? { key: 'instagram' as const, parsed: instagramChannelBlockSchema.safeParse(channelsPatch.instagram) }
+            : 'discord' in channelsPatch
+              ? { key: 'discord' as const, parsed: discordChannelBlockSchema.safeParse(channelsPatch.discord) }
+              : 'webex' in channelsPatch
+                ? { key: 'webex' as const, parsed: webexChannelBlockSchema.safeParse(channelsPatch.webex) }
+                : 'slack' in channelsPatch
+                  ? { key: 'slack' as const, parsed: slackChannelBlockSchema.safeParse(channelsPatch.slack) }
+                  : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
       if (!patch.parsed.success) {
         return { ok: false, reason: patch.parsed.error.issues.map((issue) => issue.message).join('; ') }
       }

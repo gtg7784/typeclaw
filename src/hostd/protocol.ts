@@ -1,6 +1,7 @@
 import type { PortForward } from '@/config'
 import type {
   DiscordChannelBlock,
+  InstagramChannelBlock,
   KakaoChannelBlock,
   LineChannelBlock,
   SlackChannelBlock,
@@ -28,6 +29,7 @@ export type Request =
         channels:
           | { kakaotalk: KakaoChannelBlock }
           | { discord: DiscordChannelBlock }
+          | { instagram: InstagramChannelBlock }
           | { line: LineChannelBlock }
           | { webex: WebexChannelBlock }
           | { slack: SlackChannelBlock }
