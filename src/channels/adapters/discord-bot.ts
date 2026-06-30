@@ -628,11 +628,11 @@ export function createDiscordMessageGetCallback(deps: {
   }
 }
 
-// List a guild's channels via GET /guilds/{guild}/channels. Discord channel
-// `type` 0=text, 2=voice, 4=category, 5=announcement, 10/11/12=threads; we
-// surface text-like channels and threads, mapping the numeric type to
-// ChannelListEntry.kind. Membership is not reported by this endpoint, so
-// isMember is omitted.
+// List a guild's channels via GET /guilds/{guild}/channels. Only message-
+// readable types are surfaced (text 0, announcement 5, forum 15, media 16, and
+// thread types 10/11/12); non-message channels the agent cannot channel_read —
+// category 4, voice 2, stage 13 — are dropped so they never appear as readable
+// chats. Membership is not reported by this endpoint, so isMember is omitted.
 export function createDiscordListCallback(deps: {
   token: string
   logger: DiscordBotAdapterLogger
@@ -660,12 +660,15 @@ export function createDiscordListCallback(deps: {
       const message = err instanceof Error ? err.message : String(err)
       return { ok: false, error: `parse failed: ${message}` }
     }
-    const entries = raw.filter((c) => c.id !== undefined).map((c) => mapDiscordListChannel(c))
+    const entries = raw
+      .filter((c) => c.id !== undefined && c.type !== undefined && DISCORD_READABLE_CHANNEL_TYPES.has(c.type))
+      .map((c) => mapDiscordListChannel(c))
     return { ok: true, entries: entries.slice(0, clampLimit(args.limit, DISCORD_HISTORY_LIMIT_MAX)) }
   }
 }
 
 const DISCORD_THREAD_TYPES = new Set([10, 11, 12])
+const DISCORD_READABLE_CHANNEL_TYPES = new Set([0, 5, 15, 16, 10, 11, 12])
 
 function mapDiscordListChannel(c: DiscordListChannel): ChannelListEntry {
   const kind: ChannelListEntry['kind'] = c.type !== undefined && DISCORD_THREAD_TYPES.has(c.type) ? 'thread' : 'channel'

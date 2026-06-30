@@ -1304,10 +1304,13 @@ describe('createDiscordListCallback', () => {
 
   const silentLogger = () => ({ info: () => {}, warn: () => {}, error: () => {} })
 
-  test('GETs the guild channels endpoint and maps entries with kind', async () => {
-    // given (type 0 = text channel, type 11 = public thread)
+  test('GETs the guild channels endpoint and maps readable types with kind', async () => {
+    // given text (0), announcement (5), forum (15), media (16), public thread (11)
     const { fn, calls } = fakeFetch([
       { id: 'C1', name: 'general', type: 0 },
+      { id: 'A1', name: 'news', type: 5 },
+      { id: 'F1', name: 'help-forum', type: 15 },
+      { id: 'M1', name: 'clips', type: 16 },
       { id: 'T1', name: 'spinoff', type: 11 },
     ])
     const cb = createDiscordListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
@@ -1318,8 +1321,27 @@ describe('createDiscordListCallback', () => {
     if (!result.ok) throw new Error('expected ok')
     expect(result.entries).toEqual([
       { chat: 'C1', name: '#general', kind: 'channel' },
+      { chat: 'A1', name: '#news', kind: 'channel' },
+      { chat: 'F1', name: '#help-forum', kind: 'channel' },
+      { chat: 'M1', name: '#clips', kind: 'channel' },
       { chat: 'T1', name: '#spinoff', kind: 'thread' },
     ])
+  })
+
+  test('drops non-message channel types (category, voice, stage)', async () => {
+    // given a category (4), voice (2), and stage (13) channel mixed with one text channel
+    const { fn } = fakeFetch([
+      { id: 'CAT', name: 'Information', type: 4 },
+      { id: 'VOICE', name: 'General Voice', type: 2 },
+      { id: 'STAGE', name: 'Town Hall', type: 13 },
+      { id: 'C1', name: 'general', type: 0 },
+    ])
+    const cb = createDiscordListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'G0', limit: 50 })
+    // then only the text channel survives — non-message types are not readable chats
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.entries).toEqual([{ chat: 'C1', name: '#general', kind: 'channel' }])
   })
 
   test('surfaces http errors verbatim', async () => {
