@@ -60,8 +60,10 @@ import type {
   ChannelHistoryMessage,
   ChannelKey,
   FetchHistoryArgs,
+  GetMessageArgs,
   HistoryCallback,
   InboundMessage,
+  ListChannelsArgs,
   RemoveReactionRequest,
   OutboundMessage,
   ReactionRequest,
@@ -8246,6 +8248,104 @@ describe('ChannelRouter history dispatch', () => {
     expect(elapsed).toBeLessThan(500)
     expect(result.ok).toBe(false)
     expect(logs.some((l) => l.includes('history fetch threw') && l.includes('timed out after 50ms'))).toBe(true)
+  })
+})
+
+describe('ChannelRouter message-get dispatch', () => {
+  test('getMessage invokes the registered callback with the args verbatim', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const seen: GetMessageArgs[] = []
+    const message = historyMessage({ externalMessageId: 'm1', text: 'hello' })
+    router.registerMessageGet('discord-bot', async (args) => {
+      seen.push(args)
+      return { ok: true, message }
+    })
+
+    const result = await router.getMessage('discord-bot', { chat: 'c1', thread: 't1', messageId: 'm1' })
+
+    expect(result).toEqual({ ok: true, message })
+    expect(seen).toEqual([{ chat: 'c1', thread: 't1', messageId: 'm1' }])
+  })
+
+  test('returns not-supported when no callback is registered for the adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    const result = await router.getMessage('discord-bot', { chat: 'c1', thread: null, messageId: 'm1' })
+
+    expect(result).toEqual({ ok: false, error: 'message-get-not-supported', code: 'not-supported' })
+  })
+
+  test('unregisterMessageGet removes the callback so subsequent calls fall back to not-supported', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const cb = async (): Promise<{ ok: true; message: ChannelHistoryMessage }> => ({
+      ok: true,
+      message: historyMessage(),
+    })
+    router.registerMessageGet('discord-bot', cb)
+    router.unregisterMessageGet('discord-bot', cb)
+
+    const result = await router.getMessage('discord-bot', { chat: 'c1', thread: null, messageId: 'm1' })
+
+    expect(result).toEqual({ ok: false, error: 'message-get-not-supported', code: 'not-supported' })
+  })
+
+  test('a hung message-get callback times out and degrades to not-supported', async () => {
+    const dir = await tempDir()
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      fetchHistoryTimeoutMs: 50,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    router.registerMessageGet('discord-bot', () => new Promise(() => {}))
+
+    const start = Date.now()
+    const result = await router.getMessage('discord-bot', { chat: 'c1', thread: null, messageId: 'm1' })
+    const elapsed = Date.now() - start
+
+    expect(elapsed).toBeLessThan(500)
+    expect(result).toEqual({ ok: false, error: 'message-get-not-supported', code: 'not-supported' })
+  })
+})
+
+describe('ChannelRouter channel-list dispatch', () => {
+  test('listChannels invokes the registered callback with the args verbatim', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const seen: ListChannelsArgs[] = []
+    router.registerList('slack-bot', async (args) => {
+      seen.push(args)
+      return { ok: true, entries: [{ chat: 'C1', name: '#general', kind: 'channel' }] }
+    })
+
+    const result = await router.listChannels('slack-bot', { workspace: 'T0', limit: 50, cursor: 'cur' })
+
+    expect(result).toEqual({ ok: true, entries: [{ chat: 'C1', name: '#general', kind: 'channel' }] })
+    expect(seen).toEqual([{ workspace: 'T0', limit: 50, cursor: 'cur' }])
+  })
+
+  test('returns not-supported when no callback is registered for the adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    const result = await router.listChannels('slack-bot', { workspace: 'T0', limit: 50 })
+
+    expect(result).toEqual({ ok: false, error: 'list-not-supported', code: 'not-supported' })
+  })
+
+  test('unregisterList removes the callback so subsequent calls fall back to not-supported', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const cb = async (): Promise<{ ok: true; entries: [] }> => ({ ok: true, entries: [] })
+    router.registerList('slack-bot', cb)
+    router.unregisterList('slack-bot', cb)
+
+    const result = await router.listChannels('slack-bot', { workspace: 'T0', limit: 50 })
+
+    expect(result).toEqual({ ok: false, error: 'list-not-supported', code: 'not-supported' })
   })
 })
 

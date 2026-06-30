@@ -19,11 +19,18 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelListEntry,
   ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
+  GetMessageArgs,
+  GetMessageResult,
   HistoryCallback,
+  ListCallback,
+  ListChannelsArgs,
+  ListChannelsResult,
+  MessageGetCallback,
   OutboundCallback,
   OutboundMessage,
   ResolvedChannelNames,
@@ -183,6 +190,12 @@ const DISCORD_THREAD_CHANNEL_TYPES: ReadonlySet<number> = new Set([10, 11, 12])
 type DiscordChannelObject = {
   type?: number
   permission_overwrites?: DiscordPermissionOverwrite[]
+}
+
+type DiscordListChannel = {
+  id?: string
+  name?: string
+  type?: number
 }
 
 type DiscordRole = {
@@ -578,6 +591,91 @@ export function createDiscordHistoryCallback(deps: {
   }
 }
 
+// Fetch one message via GET /channels/{id}/messages/{message_id}. Reuses
+// mapDiscordMessage so a single message renders identically to a history entry.
+// A 404 from Discord (deleted/unknown id) maps to a soft not-found.
+export function createDiscordMessageGetCallback(deps: {
+  token: string
+  logger: DiscordBotAdapterLogger
+  botUserIdRef: () => string | null
+  fetchImpl?: typeof fetch
+}): MessageGetCallback {
+  const { token, logger, botUserIdRef } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: GetMessageArgs): Promise<GetMessageResult> => {
+    const channelId = args.thread ?? args.chat
+    let response: Response
+    try {
+      response = await fetchFn(`${DISCORD_API_BASE}/channels/${channelId}/messages/${args.messageId}`, {
+        method: 'GET',
+        headers: { Authorization: `Bot ${token}` },
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[discord-bot] message get failed: ${message}`)
+      return { ok: false, error: message }
+    }
+    if (response.status === 404) return { ok: false, error: 'message not found', code: 'not-found' }
+    if (!response.ok) return { ok: false, error: `http ${response.status}` }
+    let raw: DiscordRawHistoryMessage
+    try {
+      raw = (await response.json()) as DiscordRawHistoryMessage
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `parse failed: ${message}` }
+    }
+    return { ok: true, message: mapDiscordMessage(raw, botUserIdRef()) }
+  }
+}
+
+// List a guild's channels via GET /guilds/{guild}/channels. Only message-
+// readable types are surfaced (text 0, announcement 5, forum 15, media 16, and
+// thread types 10/11/12); non-message channels the agent cannot channel_read —
+// category 4, voice 2, stage 13 — are dropped so they never appear as readable
+// chats. Membership is not reported by this endpoint, so isMember is omitted.
+export function createDiscordListCallback(deps: {
+  token: string
+  logger: DiscordBotAdapterLogger
+  fetchImpl?: typeof fetch
+}): ListCallback {
+  const { token, logger } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: ListChannelsArgs): Promise<ListChannelsResult> => {
+    let response: Response
+    try {
+      response = await fetchFn(`${DISCORD_API_BASE}/guilds/${args.workspace}/channels`, {
+        method: 'GET',
+        headers: { Authorization: `Bot ${token}` },
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[discord-bot] channel list failed: ${message}`)
+      return { ok: false, error: message }
+    }
+    if (!response.ok) return { ok: false, error: `http ${response.status}` }
+    let raw: DiscordListChannel[]
+    try {
+      raw = (await response.json()) as DiscordListChannel[]
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `parse failed: ${message}` }
+    }
+    const entries = raw
+      .filter((c) => c.id !== undefined && c.type !== undefined && DISCORD_READABLE_CHANNEL_TYPES.has(c.type))
+      .map((c) => mapDiscordListChannel(c))
+    return { ok: true, entries: entries.slice(0, clampLimit(args.limit, DISCORD_HISTORY_LIMIT_MAX)) }
+  }
+}
+
+const DISCORD_THREAD_TYPES = new Set([10, 11, 12])
+const DISCORD_READABLE_CHANNEL_TYPES = new Set([0, 5, 15, 16, 10, 11, 12])
+
+function mapDiscordListChannel(c: DiscordListChannel): ChannelListEntry {
+  const kind: ChannelListEntry['kind'] = c.type !== undefined && DISCORD_THREAD_TYPES.has(c.type) ? 'thread' : 'channel'
+  const name = c.name !== undefined && c.name !== '' ? `#${c.name}` : (c.id ?? 'unknown')
+  return { chat: c.id ?? 'unknown', name, kind }
+}
+
 function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
   // A thread started from an existing message exposes that opener only as the
   // type-21 starter's `referenced_message` — the starter itself has empty
@@ -881,6 +979,14 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     botUserIdRef: () => botUserId,
   })
 
+  const messageGetCallback = createDiscordMessageGetCallback({
+    token: options.token,
+    logger,
+    botUserIdRef: () => botUserId,
+  })
+
+  const listCallback = createDiscordListCallback({ token: options.token, logger })
+
   const membershipResolver = createDiscordMembershipResolver({
     token: options.token,
     logger,
@@ -1042,6 +1148,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
       options.router.registerSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.registerHistory('discord-bot', historyCallback)
+      options.router.registerMessageGet('discord-bot', messageGetCallback)
+      options.router.registerList('discord-bot', listCallback)
       options.router.registerFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.registerMembership('discord-bot', membershipResolver)
 
@@ -1060,6 +1168,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
         options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
         options.router.unregisterHistory('discord-bot', historyCallback)
+        options.router.unregisterMessageGet('discord-bot', messageGetCallback)
+        options.router.unregisterList('discord-bot', listCallback)
         options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('discord-bot', membershipResolver)
         listener = null
@@ -1081,6 +1191,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       options.router.unregisterSelfIdentity('discord-bot', selfIdentityResolver)
       options.router.unregisterHistory('discord-bot', historyCallback)
+      options.router.unregisterMessageGet('discord-bot', messageGetCallback)
+      options.router.unregisterList('discord-bot', listCallback)
       options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('discord-bot', membershipResolver)
       if (inflightInbounds > 0) {

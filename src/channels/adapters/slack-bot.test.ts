@@ -10,7 +10,9 @@ import { SLACK_APP_MANIFEST } from '@/cli/ui'
 import {
   createOutboundCallback,
   createSlackHistoryCallback,
+  createSlackListCallback,
   createSlackMembershipResolver,
+  createSlackMessageGetCallback,
   createSlackReferenceFetch,
   createSlackTypingTracker,
   createSlashCommandHandler,
@@ -1344,6 +1346,166 @@ describe('createSlackHistoryCallback', () => {
     // then
     if (!result.ok) throw new Error('expected ok')
     expect(result.messages[0]!.authorName).toBe('UALICE')
+  })
+})
+
+describe('createSlackMessageGetCallback', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(response: unknown): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  const silentLogger = () => ({ info: () => {}, warn: () => {}, error: () => {} })
+
+  test('fetches one message via conversations.history and maps it', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [{ ts: '170.001', user: 'UALICE', text: 'the one' }] })
+    const cb = createSlackMessageGetCallback({
+      token: 'xoxb-tok',
+      logger: silentLogger(),
+      botUserIdRef: () => 'UBOT',
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, messageId: '170.001' })
+    // then
+    expect(calls[0]!.url).toBe('https://slack.com/api/conversations.history')
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('channel')).toBe('C0')
+    expect(params.get('latest')).toBe('170.001')
+    expect(params.get('inclusive')).toBe('true')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.message.externalMessageId).toBe('170.001')
+    expect(result.message.text).toBe('the one')
+  })
+
+  test('uses conversations.replies when a thread is given', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '170.002', user: 'UB', text: 'target reply' }],
+    })
+    const cb = createSlackMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: '170.000', messageId: '170.002' })
+    // then the replies call is windowed to the single target ts (ts = thread root)
+    // so a reply past the first page is not wrongly reported not-found
+    expect(calls[0]!.url).toBe('https://slack.com/api/conversations.replies')
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('ts')).toBe('170.000')
+    expect(params.get('oldest')).toBe('170.002')
+    expect(params.get('latest')).toBe('170.002')
+    expect(params.get('inclusive')).toBe('true')
+    expect(params.get('limit')).toBe('1')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.message.text).toBe('target reply')
+  })
+
+  test('returns not-found when the requested ts is absent from the payload', async () => {
+    // given
+    const { fn } = fakeFetch({ ok: true, messages: [{ ts: '999.999', user: 'UA', text: 'other' }] })
+    const cb = createSlackMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, messageId: '170.001' })
+    // then
+    expect(result).toEqual({ ok: false, error: 'message not found', code: 'not-found' })
+  })
+
+  test('surfaces a slack api error verbatim', async () => {
+    // given
+    const { fn } = fakeFetch({ ok: false, error: 'channel_not_found' })
+    const cb = createSlackMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'CBAD', thread: null, messageId: '1.1' })
+    // then
+    expect(result).toEqual({ ok: false, error: 'channel_not_found' })
+  })
+})
+
+describe('createSlackListCallback', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(response: unknown): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  const silentLogger = () => ({ info: () => {}, warn: () => {}, error: () => {} })
+
+  test('maps conversations.list entries with kind and membership', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      ok: true,
+      channels: [
+        { id: 'C1', name: 'general', is_member: true },
+        { id: 'D1', is_im: true, is_member: true },
+        { id: 'G1', name: 'crew', is_mpim: true, is_member: false },
+      ],
+    })
+    const cb = createSlackListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'T0', limit: 50 })
+    // then
+    expect(calls[0]!.url).toBe('https://slack.com/api/conversations.list')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.entries).toEqual([
+      { chat: 'C1', name: '#general', kind: 'channel', isMember: true },
+      { chat: 'D1', name: 'D1', kind: 'dm', isMember: true },
+      { chat: 'G1', name: '#crew', kind: 'group', isMember: false },
+    ])
+  })
+
+  test('passes a paging cursor through and surfaces nextCursor', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      ok: true,
+      channels: [{ id: 'C1', name: 'general', is_member: true }],
+      response_metadata: { next_cursor: 'NEXT' },
+    })
+    const cb = createSlackListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'T0', limit: 50, cursor: 'PREV' })
+    // then
+    expect(new URLSearchParams(calls[0]!.init.body as string).get('cursor')).toBe('PREV')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.nextCursor).toBe('NEXT')
+  })
+
+  test('surfaces a slack api error verbatim', async () => {
+    // given
+    const { fn } = fakeFetch({ ok: false, error: 'missing_scope' })
+    const cb = createSlackListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'T0', limit: 50 })
+    // then
+    expect(result).toEqual({ ok: false, error: 'missing_scope' })
   })
 })
 

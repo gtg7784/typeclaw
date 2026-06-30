@@ -9,7 +9,9 @@ import type { ChannelKey } from '@/channels/types'
 
 import {
   createDiscordHistoryCallback,
+  createDiscordListCallback,
   createDiscordMembershipResolver,
+  createDiscordMessageGetCallback,
   createInteractionHandler,
   createOutboundCallback,
   createTypingCallback,
@@ -1180,6 +1182,176 @@ describe('createDiscordHistoryCallback', () => {
     // then
     expect(calls).toHaveLength(1)
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('createDiscordMessageGetCallback', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(jsonOrStatus: unknown | { status: number }): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      if (typeof jsonOrStatus === 'object' && jsonOrStatus !== null && 'status' in jsonOrStatus) {
+        return new Response(null, { status: (jsonOrStatus as { status: number }).status })
+      }
+      return new Response(JSON.stringify(jsonOrStatus), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  const silentLogger = () => ({ info: () => {}, warn: () => {}, error: () => {} })
+
+  test('GETs the single-message endpoint and maps the message', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      id: 'M1',
+      channel_id: 'C0',
+      author: { id: 'u1', username: 'Alice', bot: false },
+      content: 'the one message',
+      timestamp: '2026-04-27T00:00:01Z',
+    })
+    const cb = createDiscordMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, messageId: 'M1' })
+    // then
+    expect(calls[0]!.url).toBe('https://discord.com/api/v10/channels/C0/messages/M1')
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bot tok')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.message.externalMessageId).toBe('M1')
+    expect(result.message.text).toBe('the one message')
+  })
+
+  test('uses thread as the channel id when given', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      id: 'M2',
+      channel_id: 'TH1',
+      author: { id: 'u1', username: 'A', bot: false },
+      content: 'in thread',
+      timestamp: '2026-04-27T00:00:01Z',
+    })
+    const cb = createDiscordMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    await cb({ chat: 'C0', thread: 'TH1', messageId: 'M2' })
+    // then
+    expect(calls[0]!.url).toBe('https://discord.com/api/v10/channels/TH1/messages/M2')
+  })
+
+  test('maps a 404 to a soft not-found', async () => {
+    // given
+    const { fn } = fakeFetch({ status: 404 })
+    const cb = createDiscordMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, messageId: 'GONE' })
+    // then
+    expect(result).toEqual({ ok: false, error: 'message not found', code: 'not-found' })
+  })
+
+  test('surfaces non-404 http errors verbatim', async () => {
+    // given
+    const { fn } = fakeFetch({ status: 403 })
+    const cb = createDiscordMessageGetCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, messageId: 'M1' })
+    // then
+    expect(result).toEqual({ ok: false, error: 'http 403' })
+  })
+})
+
+describe('createDiscordListCallback', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(jsonOrStatus: unknown[] | { status: number }): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      if (Array.isArray(jsonOrStatus)) {
+        return new Response(JSON.stringify(jsonOrStatus), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(null, { status: jsonOrStatus.status })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  const silentLogger = () => ({ info: () => {}, warn: () => {}, error: () => {} })
+
+  test('GETs the guild channels endpoint and maps readable types with kind', async () => {
+    // given text (0), announcement (5), forum (15), media (16), public thread (11)
+    const { fn, calls } = fakeFetch([
+      { id: 'C1', name: 'general', type: 0 },
+      { id: 'A1', name: 'news', type: 5 },
+      { id: 'F1', name: 'help-forum', type: 15 },
+      { id: 'M1', name: 'clips', type: 16 },
+      { id: 'T1', name: 'spinoff', type: 11 },
+    ])
+    const cb = createDiscordListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'G0', limit: 50 })
+    // then
+    expect(calls[0]!.url).toBe('https://discord.com/api/v10/guilds/G0/channels')
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.entries).toEqual([
+      { chat: 'C1', name: '#general', kind: 'channel' },
+      { chat: 'A1', name: '#news', kind: 'channel' },
+      { chat: 'F1', name: '#help-forum', kind: 'channel' },
+      { chat: 'M1', name: '#clips', kind: 'channel' },
+      { chat: 'T1', name: '#spinoff', kind: 'thread' },
+    ])
+  })
+
+  test('drops non-message channel types (category, voice, stage)', async () => {
+    // given a category (4), voice (2), and stage (13) channel mixed with one text channel
+    const { fn } = fakeFetch([
+      { id: 'CAT', name: 'Information', type: 4 },
+      { id: 'VOICE', name: 'General Voice', type: 2 },
+      { id: 'STAGE', name: 'Town Hall', type: 13 },
+      { id: 'C1', name: 'general', type: 0 },
+    ])
+    const cb = createDiscordListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'G0', limit: 50 })
+    // then only the text channel survives — non-message types are not readable chats
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.entries).toEqual([{ chat: 'C1', name: '#general', kind: 'channel' }])
+  })
+
+  test('surfaces http errors verbatim', async () => {
+    // given
+    const { fn } = fakeFetch({ status: 403 })
+    const cb = createDiscordListCallback({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    // when
+    const result = await cb({ workspace: 'G0', limit: 50 })
+    // then
+    expect(result).toEqual({ ok: false, error: 'http 403' })
   })
 })
 
