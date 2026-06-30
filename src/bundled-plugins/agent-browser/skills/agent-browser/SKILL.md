@@ -44,8 +44,32 @@ The dashboard takes a moment to come up and the user needs time to open the URL.
 3. Tell the user: **"Open `http://localhost:<port>` in your browser."** Over
    Tailscale or LAN, the same port works on the host's external address:
    `http://<host>:<port>`.
-4. Wait for the user to confirm they're ready before proceeding.
-5. When the user is done, they hand control back implicitly — just resume your
+4. **Also offer a public tunnel URL — assume the user is non-technical.** Most
+   users won't know what "the dashboard" is, won't be on the host machine, and
+   won't be on the same LAN/Tailscale, so `localhost:<port>` is useless to them.
+   Whenever you hand off the dashboard, in the same message tell them you can
+   also expose it as a public link they can open from any device. In plain
+   words — never make them reason about "cloudflared" or "tunnels":
+
+   > I've started the live browser view. If `http://localhost:<port>` doesn't
+   > open on your device, I can also give you a public web link that works from
+   > anywhere — want me to set that up?
+
+   If they say yes, expose the dashboard over a Cloudflare Quick tunnel (no
+   signup, URL looks like `https://<random>.trycloudflare.com`) and hand them
+   that URL instead. Point the tunnel at the dashboard's **in-container** service
+   — not the host-forward port from `/tmp/typeclaw-agent-browser-proxy-port`.
+   That hint file is the host-visible mapping for `localhost`/Tailscale/LAN
+   handoff; it can fall back to a different host port, and a tunnel upstream must
+   be the in-container port the dashboard actually listens on. Let
+   `typeclaw-tunnels` own the upstream choice: the mechanics —
+   `docker.file.cloudflared`, `typeclaw tunnel add`, picking the right
+   `upstreamPort`, restart-required, root-cause diagnosis — live there; load it
+   before touching `typeclaw.json`. Surface the public URL to the user as a
+   normal link; never make them think about cloudflared, ports, or config.
+
+5. Wait for the user to confirm they're ready before proceeding.
+6. When the user is done, they hand control back implicitly — just resume your
    normal `agent-browser` commands. Session state is shared with the dashboard.
 
 The dashboard is served directly by `agent-browser` on one origin; TypeClaw only
