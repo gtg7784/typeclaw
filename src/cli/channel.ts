@@ -30,12 +30,14 @@ import {
   type DiscordAuthResult,
   type GithubCredentialPatch,
   type GithubTunnelProvider,
+  type InstagramAuthResult,
   type KakaotalkAuthResult,
   type LineAuthResult,
   type SlackAuthResult,
   type WebexAuthResult,
 } from '@/init'
 import { runDiscordBootstrap } from '@/init/discord-auth'
+import { runInstagramBootstrap } from '@/init/instagram-auth'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
 import { runSlackBootstrap } from '@/init/slack-auth'
@@ -55,6 +57,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
   'webex-bot': 'Webex',
+  instagram: 'Instagram',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
   github: 'GitHub',
@@ -160,6 +163,15 @@ const setSub = defineCommand({
       process.exit(1)
     }
 
+    if (args.adapter === 'instagram') {
+      console.error(
+        errorLine(
+          'Instagram uses a username/password auth flow. Use `typeclaw channel reauth instagram` to rotate its credentials.',
+        ),
+      )
+      process.exit(1)
+    }
+
     const adapter =
       args.adapter === undefined
         ? await pickSettableAdapter(configured)
@@ -171,7 +183,7 @@ const setSub = defineCommand({
   },
 })
 
-const REAUTHABLE_ADAPTERS = ['line', 'kakaotalk', 'webex'] as const
+const REAUTHABLE_ADAPTERS = ['line', 'instagram', 'kakaotalk', 'webex'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
 const reauthSub = defineCommand({
@@ -441,6 +453,9 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
     case 'line':
       await runLineReauth(cwd)
       return
+    case 'instagram':
+      await runInstagramReauth(cwd)
+      return
     case 'kakaotalk':
       await runKakaotalkReauth(cwd)
       return
@@ -448,6 +463,20 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
       await runWebexReauth(cwd)
       return
   }
+}
+
+async function runInstagramReauth(cwd: string): Promise<void> {
+  const creds = await promptInstagramCredentials()
+  const s = spinner()
+  s.start('Logging in to Instagram...')
+  const result = await runInstagramBootstrap({ username: creds.username, password: creds.password, agentDir: cwd })
+  if (!result.ok) {
+    s.stop(`Instagram login failed: ${result.reason}`)
+    process.exit(1)
+  }
+  s.stop('Instagram credentials refreshed in secrets.json.')
+
+  await maybePromptReauthRefresh(cwd, 'instagram')
 }
 
 async function runLineReauth(cwd: string): Promise<void> {
@@ -940,6 +969,7 @@ type CollectedCredentials =
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex'; runWebexAuth: (options: { cwd: string }) => Promise<WebexAuthResult> }
   | { channel: 'webex-bot'; webexBotToken: string }
+  | { channel: 'instagram'; runInstagramAuth: (options: { cwd: string }) => Promise<InstagramAuthResult> }
   | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
   | {
@@ -986,6 +1016,14 @@ async function collectCredentials(
     }
     case 'webex-bot':
       return { channel, webexBotToken: await promptWebexToken() }
+    case 'instagram': {
+      const creds = await promptInstagramCredentials()
+      return {
+        channel,
+        runInstagramAuth: ({ cwd: agentDir }) =>
+          runInstagramBootstrap({ username: creds.username, password: creds.password, agentDir }),
+      }
+    }
     case 'line': {
       const login = await promptLineLogin(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)
       return {
@@ -1515,6 +1553,34 @@ async function promptWebexCredentials(
   return { email, password: pwd }
 }
 
+async function promptInstagramCredentials(): Promise<{ username: string; password: string }> {
+  note(
+    [
+      'Instagram authentication uses a personal account.',
+      'Messages will be sent and received under this account.',
+      '2FA/checkpointed accounts are not supported; use a dedicated account without those challenges.',
+    ].join('\n'),
+    'About to log in to Instagram',
+  )
+  const username = await text({
+    message: 'Instagram username',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Username is required'),
+  })
+  if (isCancel(username)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const pwd = await password({
+    message: 'Instagram password',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Password is required'),
+  })
+  if (isCancel(pwd)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return { username, password: pwd }
+}
+
 type LinePromptResult =
   | { method: 'qr'; callbacks: { onQRUrl: (url: string) => Promise<void>; onPincode: (pin: string) => void } }
   | {
@@ -1681,6 +1747,9 @@ function reportProgress(
         if (lineSpinnerHolder) lineSpinnerHolder.current = null
         s.stop(reportLineAuth(event.result))
         break
+      case 'instagram-auth':
+        s.stop(reportInstagramAuth(event.result))
+        break
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
@@ -1708,6 +1777,7 @@ function reportProgress(
 
 const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'line-auth': 'Logging in to LINE...',
+  'instagram-auth': 'Logging in to Instagram...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
   'discord-auth': 'Logging in to Discord...',
@@ -1740,6 +1810,11 @@ function reportWebexAuth(result: WebexAuthResult): string {
 function reportLineAuth(result: LineAuthResult): string {
   if (result.ok) return 'LINE credentials saved to secrets.json.'
   return `LINE login failed: ${result.reason}`
+}
+
+function reportInstagramAuth(result: InstagramAuthResult): string {
+  if (result.ok) return 'Instagram credentials saved to secrets.json.'
+  return `Instagram login failed: ${result.reason}`
 }
 
 async function maybePromptRestart(

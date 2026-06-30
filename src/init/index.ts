@@ -86,6 +86,7 @@ export type InitStep =
   | 'scaffold'
   | 'slack-auth'
   | 'discord-auth'
+  | 'instagram-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
   | 'github-webhooks'
@@ -98,6 +99,7 @@ export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 export type WebexAuthResult = { ok: true } | { ok: false; reason: string }
 export type SlackAuthResult = { ok: true } | { ok: false; reason: string }
 export type DiscordAuthResult = { ok: true } | { ok: false; reason: string }
+export type InstagramAuthResult = { ok: true } | { ok: false; reason: string }
 
 // Structured credential block for the GitHub channel adapter. Mirrors the
 // shape `runAddChannel({ channel: 'github', ... })` consumes so the wizard
@@ -137,6 +139,8 @@ export type InitStepEvent =
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
   | { step: 'discord-auth'; phase: 'start' }
   | { step: 'discord-auth'; phase: 'done'; result: DiscordAuthResult }
+  | { step: 'instagram-auth'; phase: 'start' }
+  | { step: 'instagram-auth'; phase: 'done'; result: InstagramAuthResult }
   | { step: 'github-webhooks'; phase: 'start' }
   | { step: 'github-webhooks'; phase: 'done'; result: EagerGithubWebhookInstallResult }
   | { step: 'install'; phase: 'start' }
@@ -169,6 +173,7 @@ export type WebexAuthRunner = (options: { cwd: string }) => Promise<WebexAuthRes
 
 export type LineAuthResult = { ok: true } | { ok: false; reason: string }
 export type LineAuthRunner = (options: { cwd: string }) => Promise<LineAuthResult>
+export type InstagramAuthRunner = (options: { cwd: string }) => Promise<InstagramAuthResult>
 
 // Discriminated by `kind` so the type system enforces "you can't pass an
 // API key to an OAuth provider, and you can't pass an OAuth runner to an
@@ -223,11 +228,13 @@ export type InitOptions = {
   withTelegram?: boolean
   withWebex?: boolean
   withWebexUser?: boolean
+  withInstagram?: boolean
   withKakaotalk?: boolean
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   runWebexAuth?: WebexAuthRunner
   runDiscordAuth?: DiscordAuthRunner
+  runInstagramAuth?: InstagramAuthRunner
   // Structured GitHub credentials collected by the wizard. When omitted and
   // `withGithub` is true, the existing secrets.json#channels.github block is
   // reused as-is (the wizard's "reuse existing credentials" path).
@@ -273,11 +280,13 @@ export async function runInit({
   withTelegram,
   withWebex,
   withWebexUser = false,
+  withInstagram = false,
   withKakaotalk = false,
   withGithub = false,
   runKakaotalkAuth,
   runWebexAuth,
   runDiscordAuth,
+  runInstagramAuth,
   githubCredentials,
   githubFetchImpl,
   onProgress,
@@ -358,6 +367,7 @@ export async function runInit({
     withTelegram: wantsTelegram,
     withWebex: wantsWebex,
     withWebexUser,
+    withInstagram,
     withKakaotalk,
     platform,
   })
@@ -412,6 +422,15 @@ export async function runInit({
     }
   }
 
+  if (withInstagram && runInstagramAuth !== undefined) {
+    emit({ step: 'instagram-auth', phase: 'start' })
+    const result = await runInstagramAuth({ cwd })
+    emit({ step: 'instagram-auth', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`Instagram authentication failed: ${result.reason}`)
+    }
+  }
+
   // Write the structured github channel block alongside scaffold's bot-token
   // blocks. We do NOT delegate to runAddChannel because that's the `channel
   // add` semantics — strict no-overwrite, throws when secrets.json#channels
@@ -463,6 +482,7 @@ export async function runInit({
   if (wantsTelegram) configuredChannels.push('telegram-bot')
   if (wantsWebex) configuredChannels.push('webex-bot')
   if (withWebexUser) configuredChannels.push('webex')
+  if (withInstagram) configuredChannels.push('instagram')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
   if (withGithub) configuredChannels.push('github')
 
@@ -633,6 +653,7 @@ export type ScaffoldOptions = {
   withTelegram?: boolean
   withWebex?: boolean
   withWebexUser?: boolean
+  withInstagram?: boolean
   withKakaotalk?: boolean
   // Defaults to `process.platform`; controls the dev-mode typeclaw spec
   // (`link:` on Windows, `file:` on POSIX). Tests inject it.
@@ -671,6 +692,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withTelegram) channels['telegram-bot'] = {}
   if (options.withWebex) channels['webex-bot'] = {}
   if (options.withWebexUser) channels.webex = {}
+  if (options.withInstagram) channels.instagram = {}
   if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
   // No default `member` match is seeded. A fresh chat agent starts with every
@@ -986,7 +1008,7 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'line' | 'kakaotalk' | 'github',
+  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'instagram' | 'line' | 'kakaotalk' | 'github',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -1008,6 +1030,18 @@ export async function hasExistingChannelSecrets(
       // surfaced as a hard error inside `runAddChannel` to prevent silent
       // overwrites.
       return false
+    case 'instagram': {
+      const block = channels.instagram
+      if (!isObjectRecord(block)) return false
+      const current = (block as { currentAccount?: unknown }).currentAccount
+      if (typeof current !== 'string' || current.length === 0) return false
+      const accounts = (block as { accounts?: unknown }).accounts
+      if (!isObjectRecord(accounts)) return false
+      const account = accounts[current]
+      if (!isObjectRecord(account)) return false
+      const username = (account as { username?: unknown }).username
+      return typeof username === 'string' && username.length > 0
+    }
     case 'line': {
       // A usable LINE block needs a current account whose record carries an
       // auth_token. Unlike KakaoTalk there are no renewal fields (email +
@@ -1115,6 +1149,7 @@ export type ChannelKind =
   | 'telegram-bot'
   | 'webex'
   | 'webex-bot'
+  | 'instagram'
   | 'line'
   | 'kakaotalk'
   | 'github'
@@ -1131,6 +1166,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'telegram-bot',
   'webex',
   'webex-bot',
+  'instagram',
   'line',
   'kakaotalk',
   'github',
@@ -1138,6 +1174,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
 
 export type AddChannelStep =
   | 'line-auth'
+  | 'instagram-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
   | 'discord-auth'
@@ -1151,6 +1188,8 @@ export type AddChannelStepEvent =
   | { step: 'config'; phase: 'done' }
   | { step: 'line-auth'; phase: 'start' }
   | { step: 'line-auth'; phase: 'done'; result: LineAuthResult }
+  | { step: 'instagram-auth'; phase: 'start' }
+  | { step: 'instagram-auth'; phase: 'done'; result: InstagramAuthResult }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
@@ -1178,6 +1217,7 @@ export type AddChannelOptions = {
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex-bot'; webexBotToken: string }
   | { channel: 'webex'; runWebexAuth: WebexAuthRunner }
+  | { channel: 'instagram'; runInstagramAuth: InstagramAuthRunner }
   | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
   | {
@@ -1213,6 +1253,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     const result = await options.runLineAuth({ cwd: options.cwd })
     emit({ step: 'line-auth', phase: 'done', result })
     if (!result.ok) throw new Error(`LINE authentication failed: ${result.reason}`)
+  }
+
+  if (options.channel === 'instagram') {
+    emit({ step: 'instagram-auth', phase: 'start' })
+    const result = await options.runInstagramAuth({ cwd: options.cwd })
+    emit({ step: 'instagram-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`Instagram authentication failed: ${result.reason}`)
   }
 
   if (options.channel === 'kakaotalk') {
@@ -1323,6 +1370,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'webex-bot':
       return { token: options.webexBotToken }
     case 'webex':
+      return {}
+    case 'instagram':
       return {}
     case 'line':
       // LINE auth writes its structured account block directly to

@@ -1,0 +1,30 @@
+---
+name: typeclaw-channel-instagram
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `instagram`. Instagram DMs render messages as plain text — no markdown, no surfaced @-mention syntax, no threads, and no outbound attachments or stickers. Read this skill before composing anything on Instagram.
+---
+
+# typeclaw-channel-instagram
+
+You are speaking through the `instagram` channel adapter as a personal Instagram account.
+
+Write plain text. The adapter strips common markdown as a safety net, but Instagram DMs do not provide rich text in this adapter.
+
+Do not rely on:
+
+- Markdown formatting, tables, or code fences.
+- `@mention` syntax surfaced to the adapter. Address people by name in text.
+- Threads or replies-with-quote. Every send is a top-level message.
+- Outbound attachments, media, or stickers. The adapter sends text only via `sendMessage`.
+
+Inbound media may be observed as metadata, but bytes are not fetchable through this adapter. Do not invent attachment ids.
+
+Workspaces:
+
+- `@instagram-dm` — a 1:1 direct message.
+- `@instagram-group` — a group thread.
+
+Engagement: every DM message engages. Groups are alias-only because the SDK summary does not surface native @-mention metadata.
+
+Realtime vs polling transport is automatic and invisible to you: TypeClaw uses the hybrid listener when available and falls back to polling on older SDKs.
+
+2FA/checkpointed Instagram accounts are unsupported for this adapter; the operator must use a dedicated account that can authenticate without those challenges.

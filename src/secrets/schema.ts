@@ -90,6 +90,21 @@ export const lineChannelBlockSchema = z.object({
   accounts: z.record(z.string(), lineAccountRecordSchema),
 })
 
+export const instagramAccountRecordSchema = z.object({
+  account_id: z.string(),
+  username: z.string(),
+  full_name: z.string().optional(),
+  profile_pic_url: z.string().optional(),
+  pk: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const instagramChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), instagramAccountRecordSchema),
+})
+
 // Encrypted password envelope produced by src/secrets/encryption.ts. Optional
 // in the schema because legacy v2 accounts (pre-renewal feature) don't have
 // one; the renewal cron treats a missing envelope as "reauth required" and
@@ -193,6 +208,7 @@ export const channelsSchema = z
     github: githubChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
     line: lineChannelBlockSchema.optional(),
+    instagram: instagramChannelBlockSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
     webex: webexChannelBlockSchema.optional(),
     slack: slackChannelBlockSchema.optional(),
@@ -220,6 +236,8 @@ export type DiscordAccountRecord = z.infer<typeof discordAccountRecordSchema>
 export type DiscordChannelBlock = z.infer<typeof discordChannelBlockSchema>
 export type LineAccountRecord = z.infer<typeof lineAccountRecordSchema>
 export type LineChannelBlock = z.infer<typeof lineChannelBlockSchema>
+export type InstagramAccountRecord = z.infer<typeof instagramAccountRecordSchema>
+export type InstagramChannelBlock = z.infer<typeof instagramChannelBlockSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
 export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
 export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>

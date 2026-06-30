@@ -2047,6 +2047,7 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   scaffold: 'Laying the egg...',
   'slack-auth': 'Logging in to Slack...',
   'discord-auth': 'Logging in to Discord...',
+  'instagram-auth': 'Logging in to Instagram...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
   'github-webhooks': 'Installing GitHub repository webhooks...',

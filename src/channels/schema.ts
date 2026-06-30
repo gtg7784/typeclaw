@@ -4,6 +4,7 @@ export const ADAPTER_IDS = [
   'discord',
   'discord-bot',
   'github',
+  'instagram',
   'line',
   'kakaotalk',
   'slack',
@@ -266,6 +267,10 @@ export const channelsSchema = z
     discord: adapterSchema.optional(),
     'discord-bot': adapterSchema.optional(),
     github: githubChannelSchema.optional(),
+    // Instagram is a personal-account channel: plain-text sends only,
+    // alias-only engagement in groups, and DM/group buckets backed by
+    // secrets.json#channels.instagram credentials rather than env vars.
+    instagram: adapterSchema.optional(),
     // LINE is a personal-account channel like KakaoTalk: plain-text only,
     // alias-only engagement (no native @-mention), credentials in
     // secrets.json#channels.line (not env). Unlike KakaoTalk it has no
