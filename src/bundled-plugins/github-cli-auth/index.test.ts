@@ -8,6 +8,7 @@ import type { GithubTokenResolveResult } from '@/channels/github-token-bridge'
 import { noopPermissionService, type PermissionService } from '@/permissions'
 import type { PluginContext, PluginLogger, ToolBeforeEvent } from '@/plugin'
 
+import { __resetReviewVerdictGuardForTest } from './approve-idempotency'
 import { resetGitAskPassHelperForTests } from './git-askpass'
 import githubCliAuthPlugin from './index'
 
@@ -734,5 +735,91 @@ describe('github-cli-auth plugin — git path', () => {
 
     expect(result).toBeUndefined()
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+})
+
+describe('github-cli-auth plugin — review verdict lease is released on a tool.before block', () => {
+  const originalFetch = globalThis.fetch
+
+  // The plugin builds its effective-approval + head-SHA resolvers around the real
+  // global fetch, so the unit test stubs globalThis.fetch rather than making live
+  // GitHub calls. The stub resolves a CONCRETE head.sha for acme/widgets#5 and an
+  // empty reviews list (=> NONE, so the guard allows). A real head.sha is what
+  // makes these tests lock the succeeded:false invariant: with it, release() arms
+  // the same-head duplicate-review cooldown ONLY when succeeded is true — so a
+  // regression flipping blockAfterLease() to succeeded:true would arm the cooldown
+  // and block the second submission, failing the test. A null head (the live-call
+  // degraded path) would skip the cooldown either way and hide that regression.
+  function stubGithubFetch(): void {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const body = url.includes('/user')
+        ? { login: 'review-bot' }
+        : url.includes('/pulls/5/reviews')
+          ? []
+          : url.includes('/pulls/5')
+            ? { head: { sha: 'sha-5' } }
+            : null
+      const status = body === null ? 404 : 200
+      return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+  }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    __resetReviewVerdictGuardForTest()
+  })
+
+  function reviewBashEvent(command: string, callId: string): ToolBeforeEvent {
+    return { tool: 'bash', sessionId: 's', callId, args: { command } }
+  }
+
+  // A review-submission command whose VERDICT is detected (so guard() claims the
+  // in-flight lease) but whose SHAPE is blocked by analyzeGhCommand (the `cd … &&`
+  // composition) — the production path that stranded PR #1112's approve. The lease
+  // must be released so the next session can submit, not told "the in-flight one
+  // will post" when the blocked one never will.
+  const STRANDING_REVIEW = 'cd /agent && gh api -X POST repos/acme/widgets/pulls/5/reviews -f event=APPROVE'
+  const CLEAN_REVIEW = 'gh api -X POST repos/acme/widgets/pulls/5/reviews -f event=APPROVE'
+
+  test('a shape-blocked review submission releases the lease (succeeded:false) so a later session can still submit', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    stubGithubFetch()
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    // given: a first session's review submit is detected (lease claimed) then
+    // blocked by the composition shape guard
+    const firstBlocked = await hook(reviewBashEvent(STRANDING_REVIEW, 'call-1'), hookCtx)
+    expect(firstBlocked).toMatchObject({ block: true })
+
+    // when: a second session submits a clean review for the SAME PR on the SAME head
+    const event = reviewBashEvent(CLEAN_REVIEW, 'call-2')
+    const second = await hook(event, hookCtx)
+
+    // then: it is NOT blocked — neither by the released in-flight lease nor by a
+    // duplicate-review cooldown. With a real head.sha resolved, a regression that
+    // released the blocked submission as succeeded:true would arm the same-head
+    // cooldown and block this submission, so this assertion locks succeeded:false.
+    expect(second).toBeUndefined()
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
+  })
+
+  test('an ALLOWED in-flight submission still blocks a concurrent duplicate (the fix does not weaken the guard)', async () => {
+    process.env.GH_TOKEN = 'ghs_seeded'
+    stubGithubFetch()
+    const hook = await hookFor(tokenResolver('ghs_minted'))
+
+    // given: a clean review submit that is ALLOWED (lease claimed, command would
+    // run and tool.after would release) — here tool.after never fires in the test,
+    // so the lease stays held, exactly as a real in-flight submission would
+    const firstAllowed = await hook(reviewBashEvent(CLEAN_REVIEW, 'call-1'), hookCtx)
+    expect(firstAllowed).toBeUndefined()
+
+    // when: a second session submits for the same PR while the first is in flight
+    const second = await hook(reviewBashEvent(CLEAN_REVIEW, 'call-2'), hookCtx)
+
+    // then: the legitimate concurrent-duplicate guard still fires (only a BLOCKED
+    // first submission releases early)
+    expect(second).toMatchObject({ block: true })
   })
 })
