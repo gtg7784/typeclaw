@@ -153,6 +153,7 @@ const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
     supportsAttachments: true,
   },
   github: { displayName: 'GitHub', mentionMode: 'at-username', supportsReactions: true, supportsAttachments: false },
+  instagram: { displayName: 'Instagram', mentionMode: 'alias', supportsReactions: false, supportsAttachments: false },
   'telegram-bot': {
     displayName: 'Telegram',
     mentionMode: 'at-username',
