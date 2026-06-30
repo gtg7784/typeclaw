@@ -1,0 +1,132 @@
+---
+title: Slack (user)
+description: Personal-account adapter — QR login, RTM session, and capabilities
+icon: MessageSquare
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **RTM** over a user-token session (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+
+This is the **user-account** Slack adapter (`slack`). It signs in as your own Slack user, not a bot application. For the bot-application adapter, see [Slack bot](/docs/reference/slack-bot) — that one is the recommended path.
+
+<Callout type="warn" title="Unofficial session — may need re-auth">
+  This adapter drives a real Slack user account through a QR-obtained token + cookie pair over the RTM (Real-Time
+  Messaging) API. The session is unofficial and may expire, requiring a fresh QR login. Prefer
+  [`slack-bot`](/docs/reference/slack-bot) unless you specifically need to operate as a user account, and only on an
+  account you are comfortable putting at risk.
+</Callout>
+
+## Auth
+
+QR-code login. `typeclaw channel add slack` prompts for the QR data URL copied from the Slack desktop app's "Sign in on mobile" screen; the resulting token + cookie session is stored in `secrets.json#channels.slack` as one or more account records.
+
+Unlike bot-token adapters, `secrets.json#channels.slack` is not a flat credential object — it wraps one or more account records:
+
+```json
+{
+  "channels": {
+    "slack": {
+      "currentAccount": "<accountId>",
+      "accounts": {
+        "<accountId>": {
+          "account_id": "<accountId>",
+          "token": "…",
+          "cookie": "…",
+          "workspace_id": "…",
+          "workspace_name": "…",
+          "created_at": "…",
+          "updated_at": "…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                  | Notes                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| `currentAccount`       | `string \| null` — active account id, or `null` if none |
+| `accounts.<accountId>` | Map of account id → account record (fields below)       |
+
+Each record under `accounts.<accountId>`:
+
+| Field            | Notes                                      |
+| ---------------- | ------------------------------------------ |
+| `account_id`     | Account identifier (matches the map key)   |
+| `token`          | RTM user-session token                     |
+| `cookie`         | Session cookie                             |
+| `workspace_id`   | Slack workspace (team) id                  |
+| `workspace_name` | _optional_ — human-readable workspace name |
+| `created_at`     | Record creation timestamp                  |
+| `updated_at`     | Last-update timestamp                      |
+
+CLI: `typeclaw channel add slack` (interactive QR login). The `slack` adapter is not part of `channel set` or `channel reauth` today, so there is no dedicated re-auth command — see the [re-auth quirk](#quirks) below if the session expires.
+
+## Capabilities
+
+| Feature                  | Supported | Notes                                                       |
+| ------------------------ | --------- | ----------------------------------------------------------- |
+| Outbound messages        | yes       | Chunked at 11,500 chars; files upload after the text chunks |
+| Reactions (add + remove) | yes       |                                                             |
+| Typing indicator         | no        |                                                             |
+| Channel-name resolution  | yes       | Via the Conversations API, 24h cache                        |
+| Self identity            | yes       |                                                             |
+| History                  | yes       | Limit 100 messages                                          |
+| Attachments              | yes       | Inbound fetch + outbound upload                             |
+| Membership               | yes       |                                                             |
+
+## Workspaces
+
+Slack chats fall into two internal workspace shapes:
+
+| Internal workspace | Notes                           |
+| ------------------ | ------------------------------- |
+| `@dm`              | 1:1 direct messages (`D…` ids)  |
+| `<teamId>`         | Workspace channels (Slack team) |
+
+In role match rules, DMs are addressed by the canonical `dm` **bucket** scope, not the internal `@dm` workspace value: `slack:*` for everything, `slack:dm/*` for any DM, `slack:<teamId>` for one workspace, or `slack:<teamId>/<channelId>` for a concrete channel. See the [match-rule DSL](/docs/reference/match-rule-dsl).
+
+## Quirks
+
+- **User token, not a bot token**: outbound and REST calls use the raw RTM session token + cookie. There are no scopes or app manifest to configure — the account already sees whatever channels and DMs it's a member of.
+- **No typing indicator**: the adapter declares no typing capability, so delayed replies are anchored with a quoted-reply prefix instead of a live typing dot (see [Channel adapters](/docs/reference/channel-adapters)).
+- **No reply attribution**: RTM user-session events don't carry parent authorship, so a reply can't be proven to target the bot's own message without an extra lookup; reply-trigger engagement is therefore not surfaced for this adapter.
+- **Group mentions**: `@here`, `@channel`, and `@everyone` are treated as bot mentions for engagement.
+- **No combined send**: text chunks post first as separate messages, then file uploads follow — a failed upload won't leave a text-only message unposted.
+- **Re-auth has no dedicated CLI command**: the session can expire, but `slack` is excluded from both `channel set` and `channel reauth`, and `channel add slack` refuses an already-configured adapter. To re-authenticate today, remove the `channels.slack` block from `secrets.json` (and the `slack` entry from `typeclaw.json` if present), then run `typeclaw channel add slack` again to scan a fresh QR code.
+
+## Config
+
+```json
+{
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `slack`. Credentials live in [`secrets.json#channels.slack`](/docs/reference/secrets-json).
+
+## See also
+
+- [Slack bot adapter](/docs/reference/slack-bot) — the recommended bot-application path
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
+- [`secrets.json` reference](/docs/reference/secrets-json)

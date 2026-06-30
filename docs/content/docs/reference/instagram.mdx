@@ -1,0 +1,134 @@
+---
+title: Instagram
+description: Personal-account adapter — username/password login, DM messaging, and capabilities
+icon: MessageCircle
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+Part of the [channel adapters](/docs/reference/channel-adapters) family.
+
+Transport: **Instagram protocol** (real-time when available, 5s polling fallback; no public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+
+This is a **personal-account** adapter (`instagram`). It signs in as your own Instagram user. Outbound is plain text only, and group engagement is alias-driven.
+
+<Callout type="warn" title="Use a dedicated account — no 2FA">
+  This adapter drives a real Instagram user account via username + password. Accounts with 2FA or a checkpoint challenge
+  are rejected at login. Disable 2FA on a dedicated agent account (or clear the checkpoint in a browser first), and run
+  this adapter only on an account you are comfortable operating as the agent.
+</Callout>
+
+## Auth
+
+Username + password login. `typeclaw channel add instagram` prompts for credentials. The live session (cookies/tokens) is held by the upstream SDK under `workspace/.agent-messenger/`; `secrets.json#channels.instagram` stores only account **metadata** so the agent can list and select accounts.
+
+Unlike bot-token adapters, `secrets.json#channels.instagram` is not a flat credential object — it wraps one or more account records:
+
+```json
+{
+  "channels": {
+    "instagram": {
+      "currentAccount": "<accountId>",
+      "accounts": {
+        "<accountId>": {
+          "account_id": "<accountId>",
+          "username": "…",
+          "full_name": "…",
+          "profile_pic_url": "…",
+          "pk": "…",
+          "created_at": "…",
+          "updated_at": "…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                  | Notes                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| `currentAccount`       | `string \| null` — active account id, or `null` if none |
+| `accounts.<accountId>` | Map of account id → account record (fields below)       |
+
+Each record under `accounts.<accountId>`:
+
+| Field             | Notes                                    |
+| ----------------- | ---------------------------------------- |
+| `account_id`      | Account identifier (matches the map key) |
+| `username`        | Instagram username                       |
+| `full_name`       | _optional_ — display name                |
+| `profile_pic_url` | _optional_ — profile picture URL         |
+| `pk`              | _optional_ — Instagram numeric user id   |
+| `created_at`      | Record creation timestamp                |
+| `updated_at`      | Last-update timestamp                    |
+
+<Callout type="info" title="Session lives outside secrets.json">
+  Only profile metadata lands in `secrets.json`. The actual login session is stored by the SDK under
+  `workspace/.agent-messenger/`, so rotating credentials means re-running the login flow, not editing `secrets.json`.
+</Callout>
+
+CLI: `typeclaw channel add instagram` (interactive). **Do not use `channel set`** — Instagram uses a username/password flow; rotate with `typeclaw channel reauth instagram` instead.
+
+## Capabilities
+
+| Feature                 | Supported | Notes                                                   |
+| ----------------------- | --------- | ------------------------------------------------------- |
+| Outbound messages       | yes       | Plain text only                                         |
+| Reactions               | no        |                                                         |
+| Typing indicator        | no        |                                                         |
+| Channel-name resolution | yes       | Backed by the chat list, 5-minute cache                 |
+| Self identity           | no        | Tracked internally for self-author detection only       |
+| History                 | yes       | Limit 200 messages                                      |
+| Attachments             | no        | Inbound media shown as placeholders; no outbound upload |
+| Membership              | no        |                                                         |
+
+## Chat buckets
+
+Instagram chats are grouped into workspace buckets for match rules and permissions:
+
+| Bucket             | Notes                                  |
+| ------------------ | -------------------------------------- |
+| `@instagram-dm`    | 1:1 direct messages                    |
+| `@instagram-group` | Group threads (and anything not a 1:1) |
+
+Use the `instagram` platform token in role match rules. Instagram is scoped by its raw workspace string rather than `dm/`/`group/` bucket shorthands: `instagram:*` covers all Instagram chats, `instagram:@instagram-dm` covers every DM, and `instagram:@instagram-group` covers every group thread. A concrete chat is addressed as `instagram:@instagram-dm/<chatId>` or `instagram:@instagram-group/<chatId>`. (The `instagram:dm/*` and `instagram:group/*` bucket forms are not wired up for Instagram — use the `@instagram-…` workspace scopes above.) See the [match-rule DSL](/docs/reference/match-rule-dsl).
+
+## Quirks
+
+- **Plain text only**: Instagram has no rich-text formatting. The adapter strips markdown before sending, so write for a plain-text surface.
+- **No outbound attachments**: `channel_send` / `channel_reply` calls with attachments are rejected; inbound media arrives as a `[Instagram photo]` / `[Instagram media]` placeholder.
+- **No surfaced mentions or replies**: there is no native @-mention or per-message reply metadata, so group engagement is alias-driven while DMs engage every message. No threading is exposed.
+- **2FA / checkpoint not supported**: login fails hard if the account requires a second factor or a challenge.
+- **Provisional registration**: chats not yet surfaced by the chat list are registered provisionally as `@instagram-group` (the stricter bucket) on first message, until the next refresh can reclassify them.
+
+## Config
+
+```json
+{
+  "channels": {
+    "instagram": {
+      "enabled": true,
+      "engagement": {
+        "trigger": ["mention", "reply", "dm"],
+        "stickiness": { "perReply": { "window": 900000 } }
+      },
+      "history": {
+        "prefetch": {
+          "thread": { "head": 3, "tail": 10 },
+          "channel": { "tail": 10 }
+        }
+      },
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    }
+  }
+}
+```
+
+All fields above are shared across adapters. No adapter-specific extensions exist for `instagram`. Credentials live in [`secrets.json#channels.instagram`](/docs/reference/secrets-json).
+
+## See also
+
+- [Channel adapters overview](/docs/reference/channel-adapters)
+- [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
+- [`secrets.json` reference](/docs/reference/secrets-json)
