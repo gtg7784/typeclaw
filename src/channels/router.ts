@@ -74,10 +74,16 @@ import type {
   FetchAttachmentResult,
   FetchHistoryArgs,
   FetchHistoryResult,
+  GetMessageArgs,
+  GetMessageResult,
   HistoryCallback,
   InboundAttachment,
   InboundMessage,
   InboundReferenceContext,
+  ListCallback,
+  ListChannelsArgs,
+  ListChannelsResult,
+  MessageGetCallback,
   RemoveReactionCallback,
   RemoveReactionRequest,
   OutboundCallback,
@@ -1049,6 +1055,16 @@ export type ChannelRouter = {
   registerHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   unregisterHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   fetchHistory: (adapter: ChannelKey['adapter'], args: FetchHistoryArgs) => Promise<FetchHistoryResult>
+  // Single-message-get and channel-list are opt-in per adapter and last-write-
+  // wins (one bot account per adapter). When unregistered, `getMessage` /
+  // `listChannels` answer `code: 'not-supported'`, matching `fetchHistory`'s
+  // 'history-not-supported' fallback.
+  registerMessageGet: (adapter: ChannelKey['adapter'], cb: MessageGetCallback) => void
+  unregisterMessageGet: (adapter: ChannelKey['adapter'], cb: MessageGetCallback) => void
+  getMessage: (adapter: ChannelKey['adapter'], args: GetMessageArgs) => Promise<GetMessageResult>
+  registerList: (adapter: ChannelKey['adapter'], cb: ListCallback) => void
+  unregisterList: (adapter: ChannelKey['adapter'], cb: ListCallback) => void
+  listChannels: (adapter: ChannelKey['adapter'], args: ListChannelsArgs) => Promise<ListChannelsResult>
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
@@ -1385,6 +1401,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const selfIdentityResolvers = new Map<ChannelKey['adapter'], ChannelSelfIdentityResolver>()
   const membershipCaches = new Map<ChannelKey['adapter'], MembershipCache>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
+  const messageGetCallbacks = new Map<ChannelKey['adapter'], MessageGetCallback>()
+  const listCallbacks = new Map<ChannelKey['adapter'], ListCallback>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const reviewThreadResolvers = new Map<ChannelKey['adapter'], ReviewThreadResolver>()
   const reviewStateResolvers = new Map<ChannelKey['adapter'], ReviewStateResolver>()
@@ -3374,6 +3392,44 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return lastError
   }
 
+  const registerMessageGet = (adapter: ChannelKey['adapter'], cb: MessageGetCallback): void => {
+    messageGetCallbacks.set(adapter, cb)
+  }
+
+  const unregisterMessageGet = (adapter: ChannelKey['adapter'], cb: MessageGetCallback): void => {
+    if (messageGetCallbacks.get(adapter) === cb) messageGetCallbacks.delete(adapter)
+  }
+
+  const getMessage = async (adapter: ChannelKey['adapter'], args: GetMessageArgs): Promise<GetMessageResult> => {
+    const cb = messageGetCallbacks.get(adapter)
+    if (cb === undefined) return { ok: false, error: 'message-get-not-supported', code: 'not-supported' }
+    try {
+      return await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} message get`)
+    } catch (err) {
+      logger.warn(`[channels] message get threw for ${adapter}: ${describe(err)}`)
+      return { ok: false, error: 'message-get-not-supported', code: 'not-supported' }
+    }
+  }
+
+  const registerList = (adapter: ChannelKey['adapter'], cb: ListCallback): void => {
+    listCallbacks.set(adapter, cb)
+  }
+
+  const unregisterList = (adapter: ChannelKey['adapter'], cb: ListCallback): void => {
+    if (listCallbacks.get(adapter) === cb) listCallbacks.delete(adapter)
+  }
+
+  const listChannels = async (adapter: ChannelKey['adapter'], args: ListChannelsArgs): Promise<ListChannelsResult> => {
+    const cb = listCallbacks.get(adapter)
+    if (cb === undefined) return { ok: false, error: 'list-not-supported', code: 'not-supported' }
+    try {
+      return await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} list channels`)
+    } catch (err) {
+      logger.warn(`[channels] list channels threw for ${adapter}: ${describe(err)}`)
+      return { ok: false, error: 'list-not-supported', code: 'not-supported' }
+    }
+  }
+
   const registerFetchAttachment = (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback): void => {
     let set = fetchAttachmentCallbacks.get(adapter)
     if (!set) {
@@ -4798,6 +4854,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerHistory,
     unregisterHistory,
     fetchHistory,
+    registerMessageGet,
+    unregisterMessageGet,
+    getMessage,
+    registerList,
+    unregisterList,
+    listChannels,
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,

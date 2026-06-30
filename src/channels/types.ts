@@ -358,6 +358,52 @@ export type FetchHistoryResult =
 // 'history-not-supported' for those.
 export type HistoryCallback = (args: FetchHistoryArgs) => Promise<FetchHistoryResult>
 
+// Fetch a single message by its platform id from an arbitrary chat. Backs the
+// `channel_read` tool's `mode: "message"`. `thread` narrows the lookup on
+// platforms where a message id is only addressable within a thread (Slack
+// thread replies); pass null for channel-root lookups. Reuses
+// `ChannelHistoryMessage` as the result shape — a single message is just a
+// one-element history with the same author/ts/isBot fields.
+export type GetMessageArgs = {
+  chat: string
+  thread: string | null
+  messageId: string
+}
+
+export type GetMessageResult =
+  | { ok: true; message: ChannelHistoryMessage }
+  // `code: 'not-found'` is an expected miss (deleted/wrong id) the tool surfaces
+  // as a soft error; `code: 'not-supported'` means no adapter callback is
+  // registered, mirroring `fetchHistory`'s 'history-not-supported' contract.
+  | { ok: false; error: string; code?: 'not-found' | 'not-supported' }
+
+export type MessageGetCallback = (args: GetMessageArgs) => Promise<GetMessageResult>
+
+// One channel/chat the bot account can see, returned by `ListCallback`. `chat`
+// is the id the agent passes back to `channel_read`/`channel_send`; `name` is a
+// human label for the agent to recognize. `isMember` is best-effort — omitted
+// when the adapter can't cheaply determine membership.
+export type ChannelListEntry = {
+  chat: string
+  name: string
+  kind: 'channel' | 'dm' | 'group' | 'thread'
+  isMember?: boolean
+}
+
+export type ListChannelsArgs = {
+  workspace: string
+  limit: number
+  cursor?: string
+}
+
+export type ListChannelsResult =
+  | { ok: true; entries: ChannelListEntry[]; nextCursor?: string }
+  | { ok: false; error: string; code?: 'not-supported' }
+
+// Backs the `channel_read` tool's `mode: "list"`. Opt-in per adapter like
+// history; the router answers 'list-not-supported' when none is registered.
+export type ListCallback = (args: ListChannelsArgs) => Promise<ListChannelsResult>
+
 export type FetchAttachmentArgs = {
   ref: string
   filename?: string
