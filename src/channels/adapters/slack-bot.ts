@@ -18,11 +18,18 @@ import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  ChannelListEntry,
   ChannelSelfIdentityResolver,
   FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
+  GetMessageArgs,
+  GetMessageResult,
   HistoryCallback,
+  ListCallback,
+  ListChannelsArgs,
+  ListChannelsResult,
+  MessageGetCallback,
   OutboundCallback,
   OutboundMessage,
   ResolvedChannelNames,
@@ -414,6 +421,21 @@ type SlackConversationInfoResponse = {
   channel?: { num_members?: number }
 }
 
+type SlackConversationsListChannel = {
+  id?: string
+  name?: string
+  is_im?: boolean
+  is_mpim?: boolean
+  is_member?: boolean
+}
+
+type SlackConversationsListResponse = {
+  ok: boolean
+  error?: string
+  channels?: SlackConversationsListChannel[]
+  response_metadata?: { next_cursor?: string }
+}
+
 type SlackConversationMembersResponse = {
   ok: boolean
   error?: string
@@ -729,6 +751,118 @@ export function createSlackHistoryCallback(deps: {
   }
 }
 
+// Fetch one message by ts via conversations.history with latest=ts and
+// inclusive=true, limit=1 — Slack's only by-id read for channel messages.
+// Thread replies use conversations.replies anchored on the thread ts; we then
+// pick out the requested ts. Reuses mapSlackMessage so a single message renders
+// identically to a history entry.
+export function createSlackMessageGetCallback(deps: {
+  token: string
+  logger: SlackBotAdapterLogger
+  botUserIdRef: () => string | null
+  authorResolver?: SlackAuthorResolver
+  fetchImpl?: typeof fetch
+}): MessageGetCallback {
+  const { token, logger, botUserIdRef, authorResolver } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: GetMessageArgs): Promise<GetMessageResult> => {
+    const body = new URLSearchParams()
+    body.set('channel', args.chat)
+    if (args.thread !== null) {
+      body.set('ts', args.thread)
+      body.set('inclusive', 'true')
+    } else {
+      body.set('latest', args.messageId)
+      body.set('oldest', args.messageId)
+      body.set('inclusive', 'true')
+      body.set('limit', '1')
+    }
+    const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
+
+    let raw: SlackHistoryResponse
+    try {
+      const response = await fetchFn(`${SLACK_API_BASE}/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+        },
+        body: body.toString(),
+      })
+      raw = (await response.json()) as SlackHistoryResponse
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[slack-bot] message get failed: ${message}`)
+      return { ok: false, error: message }
+    }
+
+    if (!raw.ok) return { ok: false, error: raw.error ?? 'unknown slack error' }
+
+    const botUserId = botUserIdRef()
+    const found = (raw.messages ?? []).find((m) => m.ts === args.messageId)
+    if (found === undefined) return { ok: false, error: 'message not found', code: 'not-found' }
+
+    const message = mapSlackMessage(found, botUserId)
+    if (authorResolver !== undefined && found.user !== undefined && found.user !== '') {
+      message.text = await addSlackMentionHints(message.text, authorResolver.resolve, { botUserId })
+      message.authorName = await authorResolver.resolve(found.user)
+    }
+    return { ok: true, message }
+  }
+}
+
+// List channels the bot can see via conversations.list. Maps Slack channel
+// types to ChannelListEntry.kind; `is_member` from the API populates isMember.
+export function createSlackListCallback(deps: {
+  token: string
+  logger: SlackBotAdapterLogger
+  fetchImpl?: typeof fetch
+}): ListCallback {
+  const { token, logger } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: ListChannelsArgs): Promise<ListChannelsResult> => {
+    const body = new URLSearchParams()
+    body.set('limit', String(clampLimit(args.limit, 200)))
+    body.set('types', 'public_channel,private_channel,mpim,im')
+    if (args.cursor !== undefined && args.cursor !== '') body.set('cursor', args.cursor)
+
+    let raw: SlackConversationsListResponse
+    try {
+      const response = await fetchFn(`${SLACK_API_BASE}/conversations.list`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+        },
+        body: body.toString(),
+      })
+      raw = (await response.json()) as SlackConversationsListResponse
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[slack-bot] channel list failed: ${message}`)
+      return { ok: false, error: message }
+    }
+
+    if (!raw.ok) return { ok: false, error: raw.error ?? 'unknown slack error' }
+
+    const entries = (raw.channels ?? []).map((c) => mapSlackChannelEntry(c))
+    const nextCursor = raw.response_metadata?.next_cursor
+    if (nextCursor !== undefined && nextCursor !== '') return { ok: true, entries, nextCursor }
+    return { ok: true, entries }
+  }
+}
+
+function mapSlackChannelEntry(c: SlackConversationsListChannel): ChannelListEntry {
+  const kind: ChannelListEntry['kind'] = c.is_im === true ? 'dm' : c.is_mpim === true ? 'group' : 'channel'
+  const name = c.name !== undefined && c.name !== '' ? `#${c.name}` : (c.id ?? 'unknown')
+  return {
+    chat: c.id ?? 'unknown',
+    name,
+    kind,
+    ...(c.is_member !== undefined ? { isMember: c.is_member } : {}),
+  }
+}
+
 function mapSlackMessage(msg: SlackRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
   const isBot =
     msg.subtype === 'bot_message' ||
@@ -1022,6 +1156,15 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     authorResolver,
   })
 
+  const messageGetCallback = createSlackMessageGetCallback({
+    token: options.token,
+    logger,
+    botUserIdRef: () => botUserId,
+    authorResolver,
+  })
+
+  const listCallback = createSlackListCallback({ token: options.token, logger })
+
   const membershipResolver = createSlackMembershipResolver({
     token: options.token,
     logger,
@@ -1257,6 +1400,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
       options.router.registerSelfIdentity('slack-bot', selfIdentityResolver)
       options.router.registerHistory('slack-bot', historyCallback)
+      options.router.registerMessageGet('slack-bot', messageGetCallback)
+      options.router.registerList('slack-bot', listCallback)
       options.router.registerFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.registerMembership('slack-bot', membershipResolver)
 
@@ -1275,6 +1420,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
         options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)
         options.router.unregisterHistory('slack-bot', historyCallback)
+        options.router.unregisterMessageGet('slack-bot', messageGetCallback)
+        options.router.unregisterList('slack-bot', listCallback)
         options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('slack-bot', membershipResolver)
         listener = null
@@ -1297,6 +1444,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       options.router.unregisterSelfIdentity('slack-bot', selfIdentityResolver)
       options.router.unregisterHistory('slack-bot', historyCallback)
+      options.router.unregisterMessageGet('slack-bot', messageGetCallback)
+      options.router.unregisterList('slack-bot', listCallback)
       options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('slack-bot', membershipResolver)
       if (inflightInbounds > 0) {
