@@ -98,8 +98,8 @@ function fakeClient(overrides: Partial<InstagramClientShape> = {}): FakeInstagra
 }
 
 describe('resolveInstagramListenerCtor', () => {
-  test('resolves the installed 2.27.1 module to polling', () => {
-    expect(resolveInstagramListenerCtor().transport).toBe('polling')
+  test('resolves the installed 2.28.0 module to hybrid (realtime)', () => {
+    expect(resolveInstagramListenerCtor().transport).toBe('hybrid')
   })
 })
 
