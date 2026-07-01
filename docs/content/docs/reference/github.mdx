@@ -48,6 +48,8 @@ Fine-grained PAT. The bot acts as a real GitHub user. `GH_TOKEN` is seeded for a
 
 Installations are auto-resolved per repo. A GitHub App can't be a `requested_reviewer` — use its [decoy user account](/docs/internals/github-decoy-reviewer) instead. `GH_TOKEN` is seeded only when all repos share one owner.
 
+CLI: `typeclaw channel add github` (interactive; offers to create a Cloudflare tunnel), `typeclaw channel set github` (rotate credentials).
+
 ## Adapter-specific config fields
 
 These extend the [shared base config](/docs/reference/channel-adapters) for `channels.github`:
@@ -107,7 +109,7 @@ Reviews fire on the event named in `review.on` (default `review_requested`).
 - A ~2s delay before registration allows for Cloudflare edge warmup.
 - On tunnel URL change, the adapter restarts and re-registers automatically.
 
-## Full config example
+## Config
 
 ```json
 {
@@ -134,7 +136,7 @@ Reviews fire on the event named in `review.on` (default `review_requested`).
 }
 ```
 
-CLI: `typeclaw channel add github` (interactive; offers to create a Cloudflare tunnel).
+Credentials live in [`secrets.json#channels.github`](/docs/reference/secrets-json).
 
 ## See also
 
@@ -142,4 +144,5 @@ CLI: `typeclaw channel add github` (interactive; offers to create a Cloudflare t
 - [Add a tunnel](/docs/guides/first-tunnel)
 - [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer)
 - [Permissions model](/docs/concepts/permissions-model)
+- [`typeclaw.json` reference](/docs/reference/typeclaw-json)
 - [`secrets.json` reference](/docs/reference/secrets-json)
