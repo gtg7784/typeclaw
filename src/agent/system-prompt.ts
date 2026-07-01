@@ -11,10 +11,15 @@ const PACKAGE_JSON_INSTALL_RULE =
 // by the no-registry path (back-compat callers, the debug dumper); production
 // full-mode sessions pass the real registry-rendered roster via
 // `composeSystemPrompt`'s `subagentRoster` field.
-export function buildDefaultSystemPrompt(subagentRoster: string): string {
-  return `You are a general-purpose AI agent running inside TypeClaw.
+export function buildDefaultSystemPrompt(subagentRoster: string, branding = true): string {
+  const opening = branding
+    ? `You are a general-purpose AI agent running inside TypeClaw.
 
-TypeClaw is domain-agnostic: \`IDENTITY.md\` defines your role, \`SOUL.md\` your voice, and \`AGENTS.md\` your operating manual. This prompt describes only the runtime.
+TypeClaw is domain-agnostic: \`IDENTITY.md\` defines your role, \`SOUL.md\` your voice, and \`AGENTS.md\` your operating manual. This prompt describes only the runtime.`
+    : `You are a general-purpose AI agent.
+
+Your runtime is domain-agnostic: \`IDENTITY.md\` defines your role, \`SOUL.md\` your voice, and \`AGENTS.md\` your operating manual. This prompt describes only the runtime.`
+  return `${opening}
 
 ## Your agent folder
 
@@ -93,7 +98,7 @@ Use tmux only for work that belongs in your session. Delegate self-contained lon
 
 ## Version control
 
-Your agent folder is a git repository, but **it is your own private backup repo — not a software project you develop.** TypeClaw snapshots identity files, \`sessions/\`, and \`memory/\` there over time. It normally has no remote, nothing is pushed, and it is **not a checkout of any project**. Commits here save your state, not a codebase contribution.
+Your agent folder is a git repository, but **it is your own private backup repo — not a software project you develop.** ${branding ? 'TypeClaw snapshots' : 'The runtime snapshots'} identity files, \`sessions/\`, and \`memory/\` there over time. It normally has no remote, nothing is pushed, and it is **not a checkout of any project**. Commits here save your state, not a codebase contribution.
 
 For project work (bug, feature, PR), clone the project repo into \`/tmp/<repo>\`, work there, and open the PR from that clone with \`gh\`. Never \`git init\`, add a remote, or push your agent folder as the project. If there is no remote or you cannot find the repo, ask the user where it lives. Your agent folder is where you live; the clone is where you work.
 
@@ -262,7 +267,9 @@ export function renderTurnRoleAnchor(role: string): string | undefined {
 // The full DEFAULT_SYSTEM_PROMPT remains the right choice for TUI + channel
 // sessions because there IS a human reading the output, the agent IS expected
 // to maintain its agent folder over time, and conversational register matters.
-export const SLIM_SYSTEM_PROMPT = `You are an AI agent running inside TypeClaw.
+export function buildSlimSystemPrompt(branding = true): string {
+  const opening = branding ? 'You are an AI agent running inside TypeClaw.' : 'You are an AI agent.'
+  return `${opening}
 
 Never echo secrets from \`secrets.json\` or \`.env\`, or any credential you see in the environment. Never include them in tool calls, logs, or commit messages.
 
@@ -277,3 +284,10 @@ Your free-write zone is \`workspace/\`. Do not create files at the root of the a
 The agent folder is a private backup repo with no remote, not a project checkout. To work on a software project (fix a bug, open a PR), clone its repo elsewhere (e.g. \`/tmp/<repo>\`) and work there — never push the agent folder as if it were the project.
 
 See the session-origin block below for what kind of session this is and what's expected of you.`
+}
+
+// Back-compat constant: the slim prompt with branding on. Retained because
+// tests assert `prompt.startsWith(SLIM_SYSTEM_PROMPT)` on the default path;
+// production slim composition substitutes the branding flag via
+// `buildSlimSystemPrompt`.
+export const SLIM_SYSTEM_PROMPT = buildSlimSystemPrompt()

@@ -2,7 +2,15 @@ import { describe, expect, test } from 'bun:test'
 
 import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
 
-import { DEFAULT_SYSTEM_PROMPT, renderTurnRoleAnchor, renderTurnTimeAnchor, SLIM_SYSTEM_PROMPT } from './system-prompt'
+import {
+  buildDefaultSystemPrompt,
+  buildSlimSystemPrompt,
+  DEFAULT_SUBAGENT_ROSTER,
+  DEFAULT_SYSTEM_PROMPT,
+  renderTurnRoleAnchor,
+  renderTurnTimeAnchor,
+  SLIM_SYSTEM_PROMPT,
+} from './system-prompt'
 
 describe('subagent orchestration — explicit research routing', () => {
   // Guards the regression where an explicit "do a research" directive was answered
@@ -338,5 +346,42 @@ describe('renderTurnRoleAnchor', () => {
     expect(renderTurnRoleAnchor('contributor')).toContain(
       '<your-role authority="current-speaker">contributor</your-role>',
     )
+  })
+})
+
+describe('branding opt-out', () => {
+  test('branding on (default) is byte-identical to the exported constants', () => {
+    expect(buildDefaultSystemPrompt(DEFAULT_SUBAGENT_ROSTER)).toBe(DEFAULT_SYSTEM_PROMPT)
+    expect(buildDefaultSystemPrompt(DEFAULT_SUBAGENT_ROSTER, true)).toBe(DEFAULT_SYSTEM_PROMPT)
+    expect(buildSlimSystemPrompt()).toBe(SLIM_SYSTEM_PROMPT)
+    expect(buildSlimSystemPrompt(true)).toBe(SLIM_SYSTEM_PROMPT)
+  })
+
+  test('branding off strips every "TypeClaw" clue from the full prompt', () => {
+    const off = buildDefaultSystemPrompt(DEFAULT_SUBAGENT_ROSTER, false)
+    expect(off).not.toContain('TypeClaw')
+    expect(off).toContain('You are a general-purpose AI agent.')
+    expect(off).not.toContain('running inside TypeClaw')
+  })
+
+  test('branding off strips every "TypeClaw" clue from the slim prompt', () => {
+    const off = buildSlimSystemPrompt(false)
+    expect(off).not.toContain('TypeClaw')
+    expect(off).toContain('You are an AI agent.')
+  })
+
+  test('branding off keeps the operational substance of the full prompt', () => {
+    const off = buildDefaultSystemPrompt(DEFAULT_SUBAGENT_ROSTER, false)
+    expect(off).toContain('## Version control')
+    expect(off).toContain('private backup repo')
+    expect(off).toContain('## Subagent orchestration')
+    expect(off).toContain('secrets.json')
+  })
+
+  test('branding off keeps the safety substance of the slim prompt', () => {
+    const off = buildSlimSystemPrompt(false)
+    expect(off).toContain('Never echo secrets')
+    expect(off).toContain('never fabricate results')
+    expect(off).toContain('workspace/')
   })
 })

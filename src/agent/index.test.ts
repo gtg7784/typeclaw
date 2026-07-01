@@ -9,6 +9,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
 import { configSchema, type Models, resolveProfile, type ResolvedProfile, type ThinkingLevel } from '@/config'
+import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { ModelRef } from '@/config/providers'
 import { createHookBus, type PluginRegistry } from '@/plugin'
 import { createStream } from '@/stream'
@@ -963,6 +964,44 @@ describe('composeSystemPrompt slim mode', () => {
   })
 })
 
+describe('composeSystemPrompt branding', () => {
+  test('branding off drops the runtime block and every TypeClaw clue (full mode)', () => {
+    const prompt = composeSystemPrompt({
+      branding: false,
+      self: '# Identity\n\nfoo',
+      runtimeVersion: '9.9.9',
+      gitNudge: '',
+    })
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('9.9.9')
+    expect(prompt.startsWith('You are a general-purpose AI agent.')).toBe(true)
+  })
+
+  test('branding off drops the runtime block and every TypeClaw clue (slim mode)', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'slim',
+      branding: false,
+      self: '# Identity\n\nfoo',
+      runtimeVersion: '9.9.9',
+      gitNudge: '',
+    })
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).not.toContain('## Runtime')
+    expect(prompt.startsWith('You are an AI agent.')).toBe(true)
+  })
+
+  test('branding on (default) keeps the runtime block', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      runtimeVersion: '9.9.9',
+      gitNudge: '',
+    })
+    expect(prompt).toContain('## Runtime')
+    expect(prompt).toContain('TypeClaw runtime version: 9.9.9.')
+  })
+})
+
 describe('createOverrideResourceLoader', () => {
   test('starts with the override string verbatim', async () => {
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
@@ -991,6 +1030,52 @@ describe('createOverrideResourceLoader', () => {
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
     expect(loader.getAppendSystemPrompt()).toEqual([])
+  })
+
+  test('branding on (default) appends the runtime block naming TypeClaw and the version', async () => {
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT', undefined, undefined, '9.9.9')
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Runtime')
+    expect(prompt).toContain('TypeClaw runtime version: 9.9.9.')
+  })
+})
+
+describe('branding opt-out through config (getConfig().branding)', () => {
+  afterEach(() => {
+    __resetConfigForTesting()
+  })
+
+  test('createOverrideResourceLoader drops the runtime block and every TypeClaw clue when branding is off', async () => {
+    // given a reloaded config with branding disabled
+    await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify({ branding: false }))
+    reloadConfig(agentDir)
+
+    // when the subagent override path renders with a runtime version
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT', undefined, undefined, '9.9.9')
+
+    // then the runtime block and disclosure are absent
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith('SUBAGENT PROMPT')).toBe(true)
+    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).not.toContain('9.9.9')
+  })
+
+  test('createResourceLoader strips every TypeClaw clue and the runtime block when branding is off', async () => {
+    // given a reloaded config with branding disabled
+    await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify({ branding: false }))
+    reloadConfig(agentDir)
+
+    // when the full-mode prompt is composed with a runtime version
+    const loader = await createResourceLoader({ agentDir, runtimeVersion: '9.9.9' })
+
+    // then the opening is generic and no TypeClaw disclosure remains
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith('You are a general-purpose AI agent.')).toBe(true)
+    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).not.toContain('9.9.9')
   })
 })
 

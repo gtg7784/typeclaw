@@ -63,9 +63,9 @@ import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
 import {
   buildDefaultSystemPrompt,
+  buildSlimSystemPrompt,
   DEFAULT_SUBAGENT_ROSTER,
   renderRuntimeBlock,
-  SLIM_SYSTEM_PROMPT,
 } from './system-prompt'
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import {
@@ -952,7 +952,9 @@ export async function createOverrideResourceLoader(
   runtimeVersion?: string,
 ): Promise<DefaultResourceLoader> {
   const withRuntime =
-    runtimeVersion !== undefined ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}` : systemPrompt
+    getConfig().branding && runtimeVersion !== undefined
+      ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}`
+      : systemPrompt
   const finalPrompt = withOrigin(withRuntime, origin, permissions)
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => finalPrompt,
@@ -1034,6 +1036,10 @@ export type SystemPromptMode = 'full' | 'slim'
 
 export type SystemPromptComposition = {
   mode?: SystemPromptMode
+  // Whether the prompt discloses that the agent runs on TypeClaw. When false,
+  // the base prompt's opening is phrased generically and the `## Runtime`
+  // version block is dropped. Defaults to true. Mirrors `config.branding`.
+  branding?: boolean
   self: string
   // Pre-rendered full-mode orchestration roster (from `renderPublicSubagentRoster`).
   // Kept as a ready string so this composer stays pure and registry-free; the
@@ -1071,12 +1077,13 @@ export type SystemPromptComposition = {
 // suffix anyway — and removes the staleness failure mode where a session
 // opened Friday answered "today is Friday" on Thursday.
 export function composeSystemPrompt(parts: SystemPromptComposition): string {
+  const branding = parts.branding ?? true
   const base =
     parts.mode === 'slim'
-      ? SLIM_SYSTEM_PROMPT
-      : buildDefaultSystemPrompt(parts.subagentRoster ?? DEFAULT_SUBAGENT_ROSTER)
+      ? buildSlimSystemPrompt(branding)
+      : buildDefaultSystemPrompt(parts.subagentRoster ?? DEFAULT_SUBAGENT_ROSTER, branding)
   let prompt = `${base}\n\n${parts.self}`
-  if (parts.runtimeVersion !== undefined) {
+  if (branding && parts.runtimeVersion !== undefined) {
     prompt = `${prompt}\n\n${renderRuntimeBlock(parts.runtimeVersion)}`
   }
   if (parts.origin !== undefined) {
@@ -1107,8 +1114,11 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
       : options.subagentRegistry !== undefined
         ? renderPublicSubagentRoster(options.subagentRegistry)
         : DEFAULT_SUBAGENT_ROSTER
+  const branding = getConfig().branding
   const basePrompt =
-    mode === 'slim' ? SLIM_SYSTEM_PROMPT : buildDefaultSystemPrompt(subagentRoster ?? DEFAULT_SUBAGENT_ROSTER)
+    mode === 'slim'
+      ? buildSlimSystemPrompt(branding)
+      : buildDefaultSystemPrompt(subagentRoster ?? DEFAULT_SUBAGENT_ROSTER, branding)
 
   // Kick off the independent I/O paths concurrently. Sequential awaits
   // here used to be the dominant cold-start cost amplifier: loadSelf is 2
@@ -1173,6 +1183,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
 
   const systemPrompt = composeSystemPrompt({
     mode,
+    branding,
     self,
     subagentRoster,
     ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
