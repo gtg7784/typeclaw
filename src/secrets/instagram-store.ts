@@ -1,11 +1,10 @@
-import { sendHttp } from '@/hostd/client'
-
+import type { HostProvider } from './host-provider'
 import { type InstagramAccountRecord, type InstagramChannelBlock, instagramChannelBlockSchema } from './schema'
 import { SecretsBackend } from './storage'
 
 export type SecretsInstagramCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
-  | { mode: 'container'; secretsPath: string; hostdUrl: string; restartToken: string; containerName: string }
+  | { mode: 'container'; secretsPath: string; hostProvider: HostProvider }
 
 const EMPTY_BLOCK: InstagramChannelBlock = { currentAccount: null, accounts: {} }
 
@@ -70,15 +69,7 @@ export class SecretsInstagramCredentialStore {
     return this.enqueueWrite(async () => {
       if (this.options.mode === 'container') {
         const next = update(this.readBlock())
-        const response = await sendHttp(
-          {
-            kind: 'secrets-patch',
-            containerName: this.options.containerName,
-            patch: { channels: { instagram: next } },
-          },
-          { url: this.options.hostdUrl, token: this.options.restartToken },
-        )
-        if (!response.ok) throw new Error(`secrets-patch failed: ${response.reason}`)
+        await this.options.hostProvider.writeBackChannelBlock({ instagram: next })
         return
       }
 

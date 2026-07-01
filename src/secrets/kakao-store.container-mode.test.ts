@@ -8,6 +8,7 @@ import type { KakaoAccountCredentials } from 'agent-messenger/kakaotalk'
 
 import type { Request, Response } from '@/hostd/protocol'
 
+import { HostdHostProvider } from './host-provider'
 import { SecretsKakaoCredentialStore } from './kakao-store'
 import { kakaoChannelBlockSchema } from './schema'
 import { SecretsBackend } from './storage'
@@ -70,9 +71,11 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostdUrl: 'http://127.0.0.1:1',
-        restartToken: 'secret',
-        containerName: 'coder',
+        hostProvider: new HostdHostProvider({
+          hostdUrl: 'http://127.0.0.1:1',
+          restartToken: 'secret',
+          containerName: 'coder',
+        }),
       })
 
       expect(await store.load()).toEqual({ current_account: null, accounts: {} })
@@ -91,9 +94,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostdUrl: hostd.url,
-        restartToken: 'secret',
-        containerName: 'coder',
+        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' }),
       })
 
       await store.setAccount(account('user-1'))
@@ -115,9 +116,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostdUrl: hostd.url,
-        restartToken: 'secret',
-        containerName: 'coder',
+        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' }),
       })
 
       await Promise.all([store.setAccount(account('user-1')), store.setAccount(account('user-2'))])
@@ -138,9 +137,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostdUrl: hostd.url,
-        restartToken: 'wrong',
-        containerName: 'coder',
+        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'wrong', containerName: 'coder' }),
       })
 
       await expect(store.setAccount(account('user-1'))).rejects.toThrow(/secrets-patch failed/)

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
+import { type HostProvider, HostdHostProvider } from '@/secrets/host-provider'
 import { SecretsInstagramCredentialStore } from '@/secrets/instagram-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
@@ -577,26 +578,24 @@ const TOKEN_ENV: Record<
 // buildAdapter skip the adapter instead of throwing and crashing the whole
 // channel manager. startAdapter's signature pre-check only reads secrets.json,
 // so this is the only place the missing triple is caught.
-type HostdContainerCredentials = { hostdUrl: string; restartToken: string; containerName: string }
-
-function resolveHostdContainerCredentials(env: NodeJS.ProcessEnv): HostdContainerCredentials | null {
+function resolveHostProvider(env: NodeJS.ProcessEnv): HostProvider | null {
   const hostdUrl = env.TYPECLAW_HOSTD_URL
   const restartToken = env.TYPECLAW_HOSTD_TOKEN
   const containerName = env.TYPECLAW_CONTAINER_NAME
   if (!hostdUrl || !restartToken || !containerName) return null
-  return { hostdUrl, restartToken, containerName }
+  return new HostdHostProvider({ hostdUrl, restartToken, containerName })
 }
 
 function createContainerDiscordCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsDiscordCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsDiscordCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
@@ -618,12 +617,12 @@ function createContainerSlackCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsSlackCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsSlackCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
@@ -645,12 +644,12 @@ function createContainerWebexCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsWebexCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsWebexCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
@@ -672,12 +671,12 @@ function createContainerKakaoCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsKakaoCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsKakaoCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
@@ -699,12 +698,12 @@ function createContainerLineCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsLineCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsLineCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
@@ -726,12 +725,12 @@ function createContainerInstagramCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsInstagramCredentialStore | null {
-  const creds = resolveHostdContainerCredentials(env)
-  if (creds === null) return null
+  const hostProvider = resolveHostProvider(env)
+  if (hostProvider === null) return null
   return new SecretsInstagramCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    ...creds,
+    hostProvider,
   })
 }
 
