@@ -92,6 +92,34 @@ export function boundEmbeddableText(text: string): BoundedText {
   return { text: text.slice(0, charBudget), bounded: true, estimatedTokens }
 }
 
+// Splits text into ordered ≤budget chunks so NOTHING is dropped — the
+// no-silent-loss alternative to `boundEmbeddableText` for callers that can embed
+// every part (stored references, retrieval queries). An in-budget input yields a
+// single unchanged chunk, so the common short case is `[text]`. Each chunk is the
+// longest budgeted prefix of the remaining text (same forward walk as the bound),
+// guaranteeing forward progress; a degenerate input whose first char alone
+// over-estimates still advances one char at a time rather than looping.
+export function chunkEmbeddableText(text: string): string[] {
+  if (text.length === 0) return ['']
+  const chunks: string[] = []
+  let remaining = text
+  while (remaining.length > 0) {
+    const bounded = boundEmbeddableText(remaining)
+    if (!bounded.bounded) {
+      chunks.push(bounded.text)
+      break
+    }
+    if (bounded.text.length === 0) {
+      chunks.push(remaining[0]!)
+      remaining = remaining.slice(1)
+      continue
+    }
+    chunks.push(bounded.text)
+    remaining = remaining.slice(bounded.text.length)
+  }
+  return chunks
+}
+
 // Returns the longest prefix length (in chars) whose estimateTokens is still
 // within budget. Recomputes the EXACT same estimate incrementally — CJK chars
 // at 1 token, plus max(non-CJK char-ratio, word count) — so a bounded prefix can
