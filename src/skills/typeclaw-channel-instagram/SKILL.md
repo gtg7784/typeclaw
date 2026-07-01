@@ -27,4 +27,4 @@ Engagement: every DM message engages. Groups are alias-only because the SDK summ
 
 Realtime vs polling transport is automatic and invisible to you: TypeClaw uses the hybrid listener when available and falls back to polling on older SDKs.
 
-2FA/checkpointed Instagram accounts are unsupported for this adapter; the operator must use a dedicated account that can authenticate without those challenges.
+2FA and checkpoint-protected Instagram accounts are supported: the operator completes the verification code interactively at `typeclaw channel add instagram` (or `reauth`) time. Nothing about this is visible to you at runtime.
