@@ -7,6 +7,7 @@ import type { LineAccountCredentials } from 'agent-messenger/line'
 
 import type { Request } from '@/hostd/protocol'
 
+import { HostdHostProvider } from './host-provider'
 import { SecretsLineCredentialStore } from './line-store'
 import { SecretsBackend } from './storage'
 
@@ -117,9 +118,11 @@ describe('SecretsLineCredentialStore container mode', () => {
       const store = new SecretsLineCredentialStore({
         mode: 'container',
         secretsPath,
-        hostdUrl: `http://127.0.0.1:${server.port}`,
-        restartToken: token,
-        containerName,
+        hostProvider: new HostdHostProvider({
+          hostdUrl: `http://127.0.0.1:${server.port}`,
+          restartToken: token,
+          containerName,
+        }),
       })
       await store.setAccount(account('mid-1'))
 
