@@ -786,6 +786,14 @@ export const configSchema = z
     git: gitSchema,
     roles: rolesConfigSchema.optional(),
     tunnels: tunnelsArraySchema,
+    // When `true` (default), the system prompt tells the agent it runs on
+    // TypeClaw and stamps the runtime version. Set `false` to strip every
+    // TypeClaw-identifying clue from the system prompt: the base prompt's
+    // opening lines are phrased generically ("a general-purpose AI agent"
+    // instead of "…running inside TypeClaw") and the `## Runtime` version
+    // block is omitted entirely. Read fresh per session via `getConfig()`, so
+    // it applies on reload without a restart.
+    branding: z.boolean().default(true),
   })
   .catchall(z.unknown())
 
@@ -1012,6 +1020,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   // the corresponding projections of the whole `roles` block.
   'roles.match': 'applied',
   'roles.permissions': 'restart-required',
+  branding: 'applied',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
