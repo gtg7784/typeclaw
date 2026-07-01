@@ -109,6 +109,18 @@ export default definePlugin({
     }): Promise<HookResult | 'fall-through'> => {
       const { event, command } = params
       const review = await noteReviewCommand({ callId: event.callId, command })
+      // guard() holds the lease expecting tool.after to release it, but a
+      // tool.before block (from ANY guard below) means the command never runs, so
+      // tool.after never fires and the lease strands for its full TTL — telling
+      // every other session "the in-flight one will post" when it never will (the
+      // lost-verdict strand: a review trips the shape guard, the lease strands, the
+      // PR ends unreviewed). blockAfterLease() releases on such a block. guard()'s
+      // OWN terminal block self-releases and returns directly, bypassing this path.
+      let leaseClaimed = false
+      const blockAfterLease = async (block: HookResult & { block: true }): Promise<HookResult> => {
+        if (leaseClaimed) await verdictGuard.release({ callId: event.callId, succeeded: false })
+        return block
+      }
       if (review.detected !== null) {
         const block = await verdictGuard.guard({
           callId: event.callId,
@@ -117,8 +129,9 @@ export default definePlugin({
           verdict: review.detected.verdict,
         })
         if (block !== null) return block
+        leaseClaimed = true
       }
-      if (review.dump !== null) return review.dump
+      if (review.dump !== null) return blockAfterLease(review.dump)
 
       // Analyze first WITHOUT the fallback: an explicit `-R`/path repo must win,
       // and we only pay for fallback resolution (a git subprocess) when the
@@ -152,7 +165,7 @@ export default definePlugin({
         GITHUB_TOKEN: process.env.GITHUB_TOKEN,
       })
       if (userEndpointTokens.some((token) => shouldMintAppToken(token, hasAppTokenResolver()))) {
-        return { block: true, reason: appUserEndpointReason }
+        return blockAfterLease({ block: true, reason: appUserEndpointReason })
       }
 
       if (decision.kind === 'pass-through') return 'fall-through'
@@ -200,16 +213,22 @@ export default definePlugin({
         // bug returns); otherwise block with guidance rather than failing mute.
         if (!shouldMintAppToken(undefined, hasAppTokenResolver())) {
           if (decision.kind === 'block') {
-            return { block: true, reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo) }
+            return blockAfterLease({
+              block: true,
+              reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo),
+            })
           }
           warnSandboxedPatWithheldOnce()
-          return { block: true, reason: sandboxedPatWithheldReason }
+          return blockAfterLease({ block: true, reason: sandboxedPatWithheldReason })
         }
         mintForSandboxedPat = true
       }
 
       if (decision.kind === 'block') {
-        return { block: true, reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo) }
+        return blockAfterLease({
+          block: true,
+          reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo),
+        })
       }
 
       // No App auth (no App-class GH_TOKEN and no live minter): leave whatever
@@ -218,7 +237,7 @@ export default definePlugin({
       if (!mintForSandboxedPat && !shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver())) return
 
       const result = await resolveTokenForRepo(decision.repoSlug)
-      if (result.kind === 'unavailable') return { block: true, reason: result.reason }
+      if (result.kind === 'unavailable') return blockAfterLease({ block: true, reason: result.reason })
       // Inject via the internal env overlay (delivered to the spawn / bwrap
       // --setenv by the bash wrapper) so the token never enters the command
       // string, where it could leak through logs or later hooks. When the repo
