@@ -37,7 +37,7 @@ import {
   type WebexAuthResult,
 } from '@/init'
 import { runDiscordBootstrap } from '@/init/discord-auth'
-import { runInstagramBootstrap } from '@/init/instagram-auth'
+import { runInstagramBootstrap, type InstagramLoginCallbacks } from '@/init/instagram-auth'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
 import { runSlackBootstrap } from '@/init/slack-auth'
@@ -469,7 +469,12 @@ async function runInstagramReauth(cwd: string): Promise<void> {
   const creds = await promptInstagramCredentials()
   const s = spinner()
   s.start('Logging in to Instagram...')
-  const result = await runInstagramBootstrap({ username: creds.username, password: creds.password, agentDir: cwd })
+  const result = await runInstagramBootstrap({
+    username: creds.username,
+    password: creds.password,
+    agentDir: cwd,
+    callbacks: instagramLoginCallbacks({ pause: () => s.stop(), resume: (message) => s.start(message) }),
+  })
   if (!result.ok) {
     s.stop(`Instagram login failed: ${result.reason}`)
     process.exit(1)
@@ -1018,10 +1023,11 @@ async function collectCredentials(
       return { channel, webexBotToken: await promptWebexToken() }
     case 'instagram': {
       const creds = await promptInstagramCredentials()
+      const callbacks = instagramLoginCallbacks(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)
       return {
         channel,
         runInstagramAuth: ({ cwd: agentDir }) =>
-          runInstagramBootstrap({ username: creds.username, password: creds.password, agentDir }),
+          runInstagramBootstrap({ username: creds.username, password: creds.password, agentDir, callbacks }),
       }
     }
     case 'line': {
@@ -1558,7 +1564,7 @@ async function promptInstagramCredentials(): Promise<{ username: string; passwor
     [
       'Instagram authentication uses a personal account.',
       'Messages will be sent and received under this account.',
-      '2FA/checkpointed accounts are not supported; use a dedicated account without those challenges.',
+      'If the account has 2FA or triggers a checkpoint, you will be prompted for the verification code here.',
     ].join('\n'),
     'About to log in to Instagram',
   )
@@ -1579,6 +1585,32 @@ async function promptInstagramCredentials(): Promise<{ username: string; passwor
     process.exit(0)
   }
   return { username, password: pwd }
+}
+
+// The login spinner ('Logging in to Instagram...') keeps animating while
+// Instagram's 2FA/checkpoint step waits on a human, and would repaint over the
+// code prompt. Pause it around the prompt so the input line stays legible, then
+// resume with a "waiting" message — same control the LINE PIN flow uses.
+function instagramLoginCallbacks(spinnerControl?: LineAuthSpinnerControl): InstagramLoginCallbacks {
+  const promptCode = async (message: string): Promise<string | null> => {
+    spinnerControl?.pause()
+    const code = await text({
+      message,
+      validate: (value) => (value && value.trim().length > 0 ? undefined : 'A verification code is required'),
+    })
+    if (isCancel(code)) return null
+    spinnerControl?.resume('Verifying the Instagram code...')
+    return code
+  }
+
+  return {
+    onTwoFactorCode: () => promptCode('Enter the Instagram 2FA code from your authenticator app or SMS'),
+    onChallengeCode: async ({ contactPoint }) => {
+      const where = contactPoint === '' ? 'your email or phone' : contactPoint
+      const code = await promptCode(`Enter the Instagram verification code sent to ${where}`)
+      return code === null ? null : { code }
+    },
+  }
 }
 
 type LinePromptResult =
@@ -1735,7 +1767,9 @@ function reportProgress(
       const s = spinner()
       s.start(START_MESSAGES[event.step])
       spinners[event.step] = s
-      if (event.step === 'line-auth' && lineSpinnerHolder) lineSpinnerHolder.current = s
+      if ((event.step === 'line-auth' || event.step === 'instagram-auth') && lineSpinnerHolder) {
+        lineSpinnerHolder.current = s
+      }
       return
     }
 
@@ -1748,6 +1782,7 @@ function reportProgress(
         s.stop(reportLineAuth(event.result))
         break
       case 'instagram-auth':
+        if (lineSpinnerHolder) lineSpinnerHolder.current = null
         s.stop(reportInstagramAuth(event.result))
         break
       case 'kakaotalk-auth':
