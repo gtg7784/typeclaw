@@ -7,7 +7,7 @@ import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
 import { SecretsInstagramCredentialStore } from '@/secrets/instagram-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
-import { createHostdSecretsProvider, type RuntimeSecretsProvider } from '@/secrets/secrets-provider'
+import type { RuntimeSecretsProvider } from '@/secrets/secrets-provider'
 import { SecretsSlackCredentialStore } from '@/secrets/slack-store'
 import { SecretsBackend } from '@/secrets/storage'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
@@ -67,6 +67,13 @@ export type ChannelManagerOptions = {
   aliasesRef?: () => readonly string[]
   logger?: ChannelManagerLogger
   env?: NodeJS.ProcessEnv
+  // The container-stage secrets provider for personal-account adapters
+  // (line/kakaotalk/slack/discord/webex/instagram write-back + read). Resolved
+  // ONCE at the composition root (createRuntimeCapabilities in src/run/index.ts)
+  // and threaded in here — the manager never resolves it from env itself. Null
+  // (or omitted) skips those adapters; see the note above the
+  // createContainer*CredentialStore factories.
+  secretsProvider?: RuntimeSecretsProvider | null
   // Production wiring passes a factory that builds sessions with the full
   // runtime plumbing (channelRouter, stream, plugins, reloadRegistry). When
   // omitted, the router falls back to a hollow factory that creates sessions
@@ -268,7 +275,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'line') {
-      const credentialsStore = createContainerLineCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerLineCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createLine({
         router,
@@ -279,7 +286,10 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'instagram') {
-      const credentialsStore = createContainerInstagramCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerInstagramCredentialStore(
+        options.agentDir,
+        options.secretsProvider ?? null,
+      )
       if (credentialsStore === null) return null
       return createInstagram({
         router,
@@ -290,7 +300,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'kakaotalk') {
-      const credentialsStore = createContainerKakaoCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerKakaoCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createKakaotalk({
         router,
@@ -301,7 +311,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'slack') {
-      const credentialsStore = createContainerSlackCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerSlackCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createSlackUser({
         router,
@@ -312,7 +322,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'discord') {
-      const credentialsStore = createContainerDiscordCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerDiscordCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createDiscordUser({
         router,
@@ -323,7 +333,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'webex') {
-      const credentialsStore = createContainerWebexCredentialStore(options.agentDir, env)
+      const credentialsStore = createContainerWebexCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createWebex({
         router,
@@ -571,36 +581,21 @@ const TOKEN_ENV: Record<
   'webex-bot': ['WEBEX_BOT_TOKEN'],
 }
 
-// Personal-account adapters (line/kakaotalk/slack/discord/webex) need the hostd
-// triple the host CLI injects at `docker run` time, gated on a successful daemon
-// registration (src/container/start.ts). If the daemon wasn't reachable at
-// launch (e.g. a lost first-boot spawn race) the triple is absent; null lets
-// buildAdapter skip the adapter instead of throwing and crashing the whole
-// channel manager. startAdapter's signature pre-check only reads secrets.json,
-// so this is the only place the missing triple is caught.
-function resolveHostProvider(env: NodeJS.ProcessEnv, agentDir: string): RuntimeSecretsProvider | null {
-  const hostdUrl = env.TYPECLAW_HOSTD_URL
-  const restartToken = env.TYPECLAW_HOSTD_TOKEN
-  const containerName = env.TYPECLAW_CONTAINER_NAME
-  if (!hostdUrl || !restartToken || !containerName) return null
-  return createHostdSecretsProvider({
-    hostdUrl,
-    restartToken,
-    containerName,
-    secretsPath: join(agentDir, 'secrets.json'),
-  })
-}
-
+// Personal-account adapters (line/kakaotalk/slack/discord/webex) need a
+// container-stage secrets provider. It's resolved ONCE at the composition root
+// (createRuntimeCapabilities in src/run/index.ts) and threaded in via
+// `secretsProvider`; a null value (hostd triple absent — e.g. a lost first-boot
+// spawn race, or a managed profile with no write-back wired) lets buildAdapter
+// skip the adapter instead of crashing the whole channel manager.
 function createContainerDiscordCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsDiscordCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsDiscordCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
@@ -620,14 +615,13 @@ function buildDiscordSignature(agentDir: string): { signature: string; missing: 
 
 function createContainerSlackCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsSlackCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsSlackCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
@@ -647,14 +641,13 @@ function buildSlackSignature(agentDir: string): { signature: string; missing: st
 
 function createContainerWebexCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsWebexCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsWebexCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
@@ -674,14 +667,13 @@ function buildWebexSignature(agentDir: string): { signature: string; missing: st
 
 function createContainerKakaoCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsKakaoCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsKakaoCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
@@ -701,14 +693,13 @@ function buildKakaotalkSignature(agentDir: string): { signature: string; missing
 
 function createContainerLineCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsLineCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsLineCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
@@ -728,14 +719,13 @@ function buildLineSignature(agentDir: string): { signature: string; missing: str
 
 function createContainerInstagramCredentialStore(
   agentDir: string,
-  env: NodeJS.ProcessEnv,
+  secretsProvider: RuntimeSecretsProvider | null,
 ): SecretsInstagramCredentialStore | null {
-  const hostProvider = resolveHostProvider(env, agentDir)
-  if (hostProvider === null) return null
+  if (secretsProvider === null) return null
   return new SecretsInstagramCredentialStore({
     mode: 'container',
     secretsPath: join(agentDir, 'secrets.json'),
-    hostProvider,
+    hostProvider: secretsProvider,
   })
 }
 
