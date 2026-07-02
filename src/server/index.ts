@@ -15,7 +15,7 @@ import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { resolveFallbackChain } from '@/agent/model-fallback'
 import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
-import { detectProviderError, isThrottleOrOverload } from '@/agent/provider-error'
+import { detectProviderError, isFailoverWorthy } from '@/agent/provider-error'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
 import { sessionMetaPayload } from '@/agent/session-meta'
@@ -1130,7 +1130,7 @@ async function drain(
           currentModelRef: state.activeModelRef,
           session: state.session,
           text: turnText,
-          shouldFailover: (err) => isThrottleOrOverload(err.message),
+          shouldFailover: (err) => isFailoverWorthy(err.message),
           setModelForRef: async (ref) => {
             await state.session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
             state.activeModelRef = ref

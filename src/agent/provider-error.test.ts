@@ -3,7 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import { AgentSession as PiAgentSession, SettingsManager } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from './index'
-import { detectProviderError, isThrottleOrOverload, subscribeProviderErrors } from './provider-error'
+import {
+  detectHardProviderError,
+  detectProviderError,
+  isFailoverWorthy,
+  isThrottleOrOverload,
+  subscribeProviderErrors,
+} from './provider-error'
 
 describe('detectProviderError', () => {
   test('preserves the raw errorMessage on `message` for operator surfaces (logs/TUI)', () => {
@@ -135,6 +141,44 @@ describe('detectProviderError safeMessage redaction', () => {
   })
 })
 
+describe('detectHardProviderError', () => {
+  test('maps an observer stall timeout to the timeout-safe sentence (not the generic notice)', () => {
+    const raw = 'anthropic SSE body idle for 120000ms (typeclaw observer timeout)'
+    const result = detectHardProviderError(new Error(raw))
+
+    expect(result?.safeMessage).toMatch(/stopped responding|timed out/i)
+    expect(result?.safeMessage).not.toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+    expect(result?.message).toBe(raw)
+  })
+
+  test('classifies rate-limit, billing/quota, and auth hard throws as provider failures', () => {
+    expect(detectHardProviderError(new Error('429 All tokens rate limited'))?.safeMessage).toMatch(/rate-limited/i)
+    expect(detectHardProviderError(new Error('insufficient quota'))?.safeMessage).toMatch(/billing\/quota/i)
+    expect(detectHardProviderError(new Error('401 Unauthorized'))?.safeMessage).toMatch(/unauthorized/i)
+  })
+
+  test('returns null for internal / network errors so the caller stays silent-with-log', () => {
+    expect(detectHardProviderError(new Error('network unreachable'))).toBeNull()
+    expect(detectHardProviderError(new Error('Cannot read properties of undefined'))).toBeNull()
+    expect(detectHardProviderError(new Error('ENOENT: no such file or directory'))).toBeNull()
+  })
+
+  test('accepts a non-Error throw by stringifying it', () => {
+    expect(detectHardProviderError('503 Service Unavailable')?.safeMessage).toMatch(/timed out|rate-limited|failed/i)
+    expect(detectHardProviderError('just a plain string')).toBeNull()
+  })
+
+  test('does not leak raw provider text through the safe message', () => {
+    const raw = '429 rate limited (Authorization: Bearer sk-live-LEAK)'
+    const result = detectHardProviderError(new Error(raw))
+
+    expect(result?.safeMessage).not.toContain('sk-live-LEAK')
+    expect(result?.safeMessage).not.toContain('Bearer')
+  })
+})
+
 describe('isThrottleOrOverload', () => {
   test('matches the Codex `server_is_overloaded` shape (the production incident)', () => {
     // given: the exact body Codex returns under per-account 503 throttling
@@ -207,6 +251,26 @@ describe('isThrottleOrOverload', () => {
     expect(isThrottleOrOverload('Error code: 429 - too many requests')).toBe(true)
     expect(isThrottleOrOverload('429 rate limit exceeded')).toBe(true)
     expect(isThrottleOrOverload('503 Service Unavailable')).toBe(true)
+  })
+})
+
+describe('isFailoverWorthy', () => {
+  test('an observer stall timeout IS failover-worthy (so a stall rotates to the next ref)', () => {
+    expect(isFailoverWorthy('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')).toBe(true)
+    expect(
+      isFailoverWorthy('codex fetch timed out before response headers after 15000ms (typeclaw observer timeout)'),
+    ).toBe(true)
+  })
+
+  test('still fails over on throttle/overload (superset of isThrottleOrOverload)', () => {
+    expect(isFailoverWorthy('server_is_overloaded')).toBe(true)
+    expect(isFailoverWorthy('429 too many requests')).toBe(true)
+  })
+
+  test('does NOT fail over on account-wide faults (billing/quota/auth) or generic errors', () => {
+    expect(isFailoverWorthy('insufficient quota')).toBe(false)
+    expect(isFailoverWorthy('401 Unauthorized')).toBe(false)
+    expect(isFailoverWorthy('network unreachable')).toBe(false)
   })
 })
 

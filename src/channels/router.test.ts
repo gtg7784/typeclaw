@@ -7677,6 +7677,113 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(warns.some((m) => /prompt threw/.test(m))).toBe(false)
   })
 
+  test('a hard-thrown 429 usage-limit posts exactly one redacted rate-limit notice to the channel', async () => {
+    // given: prompt() hard-throws a 429 (fallback already exhausted upstream) —
+    // the production shape where an Anthropic proxy is usage-capped.
+    const dir = await tempDir()
+    const sent: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async () => {
+          throw new Error('429 All tokens rate limited')
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_429',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      if (msg.text !== undefined) sent.push(msg.text)
+      return { ok: true }
+    })
+
+    // when
+    await router.route(inbound({ text: 'you there?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: exactly one redacted rate-limit notice, no raw text, no "I got stuck"
+    const notices = sent.filter((t) => /rate-limited/i.test(t))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('⚠️')
+    expect(sent.some((t) => /All tokens/.test(t))).toBe(false)
+    expect(sent.some((t) => t === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+  })
+
+  test('a hard-thrown observer stall timeout posts exactly one timeout notice', async () => {
+    // given: the fetch observer aborts a stalled stream, surfaced as a hard throw
+    const dir = await tempDir()
+    const sent: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async () => {
+          throw new Error('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_stall',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      if (msg.text !== undefined) sent.push(msg.text)
+      return { ok: true }
+    })
+
+    // when
+    await router.route(inbound({ text: 'still there?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    const notices = sent.filter((t) => /stopped responding|timed out/i.test(t))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('⚠️')
+    expect(sent.some((t) => /observer timeout/.test(t))).toBe(false)
+  })
+
+  test('a generic internal hard-throw logs but posts NO channel notice (silent-with-log default)', async () => {
+    // given: an internal error that is NOT an operator-actionable provider failure
+    const dir = await tempDir()
+    const sent: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async () => {
+          throw new Error('Cannot read properties of undefined')
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_bug',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      if (msg.text !== undefined) sent.push(msg.text)
+      return { ok: true }
+    })
+
+    // when
+    await router.route(inbound({ text: 'hello?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: no ⚠️ notice for an internal bug — channels are not spammed
+    expect(sent.some((t) => t.includes('⚠️'))).toBe(false)
+  })
+
   test('fires session.end on stop() before disposing each live session', async () => {
     // given
     const dir = await tempDir()

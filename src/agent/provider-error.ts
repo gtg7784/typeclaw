@@ -26,6 +26,13 @@ export type DetectedProviderError = {
 
 const GENERIC_SAFE_NOTICE = 'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.'
 
+// The fetch observer (`llm-fetch-observer`) aborts a stalled provider stream
+// with a message ending in this marker (TTFB / idle / overall deadline). Such a
+// stall is a hard throw, not a `stopReason: 'error'` soft error, so it never
+// reaches `detectProviderError`; the marker lets the hard-throw path recognize
+// and surface it. The literal is the system's own token — English by design.
+const OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
+
 // Each entry pairs a narrow matcher against the raw provider text with the
 // canonical, leak-free sentence shown in channels. Matchers are intentionally
 // specific: a miss falls through to GENERIC_SAFE_NOTICE rather than echoing raw
@@ -60,6 +67,10 @@ const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
     match: /\b(billing|quota|insufficient.*(credit|fund|balance)|payment|account is not active)\b/i,
     safe: 'The upstream LLM provider rejected the request for a billing/quota reason. Operators can check `typeclaw logs` for details.',
   },
+  {
+    match: OBSERVER_TIMEOUT,
+    safe: 'The upstream LLM provider stopped responding and the request timed out. Try again shortly.',
+  },
 ]
 
 function toSafeMessage(raw: string): string {
@@ -90,6 +101,17 @@ export function isThrottleOrOverload(raw: string): boolean {
   return THROTTLE_OR_OVERLOAD.test(raw)
 }
 
+// Failover predicate for turn-drivers' `shouldFailover`: rotate to the next model
+// ref on a transient capacity signal (throttle/overload) OR an observer stall
+// timeout. A stall — the provider accepted the stream but stopped sending bytes —
+// is as transient as an overload and another ref may well succeed, so it must
+// fail OVER before the caller surfaces a failure notice. Account-wide faults
+// (billing/quota/auth) still return false via `isThrottleOrOverload` — a
+// different ref shares the same account problem.
+export function isFailoverWorthy(raw: string): boolean {
+  return isThrottleOrOverload(raw) || OBSERVER_TIMEOUT.test(raw)
+}
+
 export function detectProviderError(message: unknown): DetectedProviderError | null {
   if (typeof message !== 'object' || message === null) return null
   const m = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown }
@@ -100,6 +122,21 @@ export function detectProviderError(message: unknown): DetectedProviderError | n
   if (m.stopReason !== 'error') return null
   const text = typeof m.errorMessage === 'string' && m.errorMessage.length > 0 ? m.errorMessage : 'LLM call failed'
   return { message: text, safeMessage: toSafeMessage(text) }
+}
+
+// Classifies a HARD-thrown error (an exception out of `session.prompt()`, after
+// model fallback is exhausted) into a user-facing notice — the throw counterpart
+// to `detectProviderError`'s soft-error path. Returns `null` for errors that are
+// NOT an operator-actionable provider failure (internal bugs, network blips),
+// so the caller stays silent-with-log rather than spamming channels. The three
+// recognized classes are: failover-worthy throttle/overload, account-wide faults
+// (billing/quota/auth) that must surface, and observer stall timeouts.
+export function detectHardProviderError(err: unknown): DetectedProviderError | null {
+  const message = err instanceof Error ? err.message : String(err)
+  const isProviderFailure =
+    isThrottleOrOverload(message) || NON_FAILOVER_FAULT.test(message) || OBSERVER_TIMEOUT.test(message)
+  if (!isProviderFailure) return null
+  return { message, safeMessage: toSafeMessage(message) }
 }
 
 export type ProviderErrorListener = (error: DetectedProviderError) => void
