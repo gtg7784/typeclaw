@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { type RuntimeSecretsProvider, resolveRuntimeSecretsProvider } from '@/secrets/secrets-provider'
 
 // The container-stage capability bag: what the agent runtime (`typeclaw run`)
@@ -13,12 +15,16 @@ export type RuntimeCapabilities = {
   secrets: RuntimeSecretsProvider | null
 }
 
-// Composes the container-stage capabilities. Env is injectable for tests;
-// production omits it and reads `process.env`. (No profile param yet — secrets
-// resolution keys off the env triple; the deployment profile enters here when a
-// managed secrets impl selects on it.)
-export function createRuntimeCapabilities(env: NodeJS.ProcessEnv = process.env): RuntimeCapabilities {
+// Composes the container-stage capabilities. `secretsPath` is the mounted
+// secrets.json the runtime reads (defaults to <cwd>/secrets.json, which is
+// /agent/secrets.json in the container). Env is injectable for tests. (No
+// profile param yet — secrets resolution keys off the env triple; the
+// deployment profile enters here when a managed secrets impl selects on it.)
+export function createRuntimeCapabilities(
+  env: NodeJS.ProcessEnv = process.env,
+  secretsPath: string = join(process.cwd(), 'secrets.json'),
+): RuntimeCapabilities {
   return {
-    secrets: resolveRuntimeSecretsProvider(env),
+    secrets: resolveRuntimeSecretsProvider(env, secretsPath),
   }
 }
