@@ -90,15 +90,14 @@ describe('scout subagent declaration', () => {
     expect(toolNames).not.toContain('edit')
   })
 
-  test('toolRefs dual-route correctly: web_search+web_fetch land in toolDefinitions (customTools path), with no pi-side agentTools leaking', async () => {
+  test('toolRefs resolve to the web_search+web_fetch ToolDefinitions (customTools path), with no pi coding builtins leaking', async () => {
     const { resolveBuiltinToolRefs } = await import('@/agent/plugin-tools')
     const { webSearchTool } = await import('@/agent/tools/websearch')
     const { webFetchTool } = await import('@/agent/tools/webfetch')
     const sub = createScoutSubagent()
-    const resolved = resolveBuiltinToolRefs(sub.tools ?? [])
-    expect(resolved.agentTools).toEqual([])
-    expect(resolved.toolDefinitions.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
-    const byName = Object.fromEntries(resolved.toolDefinitions.map((t) => [t.name, t]))
+    const resolved = resolveBuiltinToolRefs(sub.tools ?? [], process.cwd())
+    expect(resolved.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
+    const byName = Object.fromEntries(resolved.map((t) => [t.name, t]))
     expect(byName.web_search).toBe(webSearchTool)
     expect(byName.web_fetch).toBe(webFetchTool)
   })

@@ -1,6 +1,6 @@
 import type { AgentTool } from '@mariozechner/pi-agent-core'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
-import type { TSchema } from '@sinclair/typebox'
+import type { TSchema } from 'typebox'
 
 // Subagents that read large files (memory-logger and dreaming each read parent
 // session transcripts that can run hundreds of KB) are vulnerable to a class

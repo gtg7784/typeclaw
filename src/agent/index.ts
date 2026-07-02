@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url'
 
 import {
   createAgentSession,
-  createCodingTools,
   DefaultResourceLoader,
   defineTool as definePiTool,
   SessionManager,
@@ -34,7 +33,7 @@ import type {
   RegisteredTool as PluginRegisteredTool,
   Tool as PluginTool,
 } from '@/plugin'
-import { materializeSkills } from '@/plugin'
+import { createHookBus, materializeSkills } from '@/plugin'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
@@ -48,9 +47,9 @@ import { applyModelRuntimeOverrides } from './model-overrides'
 import { createChannelLookAtTool, lookAtTool } from './multimodal'
 import {
   buildBuiltinPiToolOverrides,
+  isPiCodingBuiltinName,
   resolveBuiltinToolRefs,
   wrapPluginTool,
-  wrapSystemAgentTool,
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
@@ -69,12 +68,7 @@ import {
   renderRuntimeBlock,
 } from './system-prompt'
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
-import {
-  createBudgetState,
-  type ToolResultBudget,
-  wrapAgentToolWithBudget,
-  wrapToolDefinitionWithBudget,
-} from './tool-result-budget'
+import { createBudgetState, type ToolResultBudget, wrapToolDefinitionWithBudget } from './tool-result-budget'
 import { createChannelDisengageTool } from './tools/channel-disengage'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
@@ -100,13 +94,6 @@ export type { AgentSession }
 export { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
-
-// pi's default active built-in tools when a session declares no `tools:` filter
-// (pi `createAgentSession` falls back to `defaultActiveToolNames`, which is the
-// name set of `codingTools`). Derived from pi's own `createCodingTools()` rather
-// than hardcoded so the list can't silently drift if pi adds/removes/renames a
-// default builtin; `default-pi-builtins match pi's coding tool set` pins it.
-const DEFAULT_PI_BUILTIN_TOOL_NAMES = createCodingTools(process.cwd()).map((t) => t.name)
 
 export type PluginSessionWiring = {
   registry: PluginRegistry
@@ -312,16 +299,15 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const abortHolder: { abort?: (reason?: string) => void; reason?: string } = {}
   const getAbort: () => ((reason?: string) => void) | undefined = () => abortHolder.abort
 
-  // Subagent built-in tool refs are dual-routed (see BUILTIN_TOOL_DEFINITION
-  // dual-map in plugin-tools.ts): pi-side coding tools go to `tools:` so they
-  // become the strict base set, typeclaw-side web tools go to `customTools:`.
-  // The two `tools:` fields below (effective `options.tools` and the resolved
-  // subagent pi-side builtins) are mutually exclusive — `options.tools` is only
-  // passed by non-subagent callers like multimodal look-at; subagent sessions
-  // never set both.
+  // Subagent built-in tool refs resolve to `ToolDefinition`s (see
+  // plugin-tools.ts). Their NAMES narrow the session via `tools:`; their wrapped
+  // implementations arrive through `customTools` (either `builtinPiToolOverrides`
+  // for pi coding builtins, or `customSystemTools` for typeclaw web tools).
   const resolvedSubagentBuiltins = options.pluginSubagent?.toolRefs
-    ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
-    : { agentTools: [], toolDefinitions: [] }
+    ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs, options.plugins?.agentDir ?? process.cwd())
+    : []
+  const subagentBuiltinNames = resolvedSubagentBuiltins.map((t) => t.name)
+  const subagentTypeclawToolDefinitions = resolvedSubagentBuiltins.filter((t) => !isPiCodingBuiltinName(t.name))
   const pluginCustomTools = options.pluginSubagent
     ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin, getAbort)
     : wrapRegistryTools(options.plugins, getOrigin, getAbort)
@@ -338,15 +324,12 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     : undefined
   const sessionBudgetState = sessionBudget ? createBudgetState() : undefined
 
-  const effectiveTools =
-    options.tools ?? (options.pluginSubagent ? (resolvedSubagentBuiltins.agentTools as AgentSessionTools) : undefined)
-  const hookWrappedTools = wrapSystemAgentTools(effectiveTools, options.plugins, getOrigin, getAbort)
-  const tools =
-    sessionBudget && sessionBudgetState && hookWrappedTools
-      ? (hookWrappedTools.map((t) =>
-          wrapAgentToolWithBudget(t, sessionBudget, sessionBudgetState),
-        ) as typeof hookWrappedTools)
-      : hookWrappedTools
+  // The session's tool-name allowlist (pi 0.73 `tools:` is names, not tools).
+  // A subagent narrows to its declared refs; a non-subagent caller passes its
+  // own explicit list (e.g. look-at's `[]`); everyone else leaves it undefined
+  // so pi's default builtins apply. Implementations arrive via `customTools`;
+  // budget-wrapping happens there, not here.
+  const tools: AgentSessionTools = options.tools ?? (options.pluginSubagent ? subagentBuiltinNames : undefined)
 
   // Hoisted above tool construction so the restart tool can be wired with the
   // session's stable identity (sessionManager.getSessionId()). Subscribers use
@@ -385,7 +368,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       ? options.customTools
       : options.pluginSubagent
         ? [
-            ...resolvedSubagentBuiltins.toolDefinitions,
+            ...subagentTypeclawToolDefinitions,
             ...buildSubagentOrchestrationTools({
               liveRegistry: options.liveSubagentRegistry,
               registry: options.subagentRegistry,
@@ -435,29 +418,42 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             }),
             ...buildTodoTools(options.plugins?.agentDir, getOrigin),
           ]
-  // Hook coverage for pi's builtin coding tools (read/bash/edit/write/grep/
-  // find/ls) — pi 0.67.3 ignores `tools:` for implementation, so the only
-  // way to interpose typeclaw guards is to ship same-named ToolDefinition
-  // entries through `customTools`. Skipped when there are no tool hooks,
-  // since wrapping reduces to a passthrough in that case.
-  const builtinPiToolOverrides =
-    options.plugins && hasToolHooks(options.plugins)
-      ? buildBuiltinPiToolOverrides({
-          agentDir: options.plugins.agentDir,
-          sessionId: options.plugins.sessionId,
-          hooks: options.plugins.hooks,
-          getOrigin,
-          getAbort,
-          ...(options.permissions ? { permissions: options.permissions } : {}),
-          ...(options.bashPolicy !== undefined ? { bashPolicy: options.bashPolicy } : {}),
-        })
-      : []
+  // TypeClaw owns every pi builtin (read/bash/edit/write/grep/find/ls): each is
+  // wrapped with the hook + guard + sandbox + bash-policy pipeline and shipped
+  // via `customTools`, and the call site sets `noTools: "builtin"` so pi's own
+  // unwrapped copies are never the active implementation. Built unconditionally
+  // — the sandbox and bash policy are security behavior independent of whether
+  // any plugin registered a tool hook, so gating on hooks would leave an
+  // unsandboxed bash path. `wrapBuiltinToolDefinition` no-ops the optional
+  // stages (plugin hooks, permissions, bashPolicy) when they are absent.
+  const builtinPiToolOverrides = buildBuiltinPiToolOverrides({
+    agentDir: options.plugins?.agentDir ?? process.cwd(),
+    sessionId: options.plugins?.sessionId ?? sessionManager.getSessionId(),
+    hooks: options.plugins?.hooks ?? createHookBus(),
+    getOrigin,
+    getAbort,
+    ...(options.permissions ? { permissions: options.permissions } : {}),
+    ...(options.bashPolicy !== undefined ? { bashPolicy: options.bashPolicy } : {}),
+  })
   const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin, getAbort)
   const customToolsPreBudget = [...wrappedCustomSystemTools, ...pluginCustomTools, ...builtinPiToolOverrides]
   const customTools =
     sessionBudget && sessionBudgetState
       ? customToolsPreBudget.map((t) => wrapToolDefinitionWithBudget(t, sessionBudget, sessionBudgetState))
       : customToolsPreBudget
+
+  // The exact set of tool names the session exposes to the model, and the single
+  // source of truth passed to `createAgentSession({ tools })`. Because we set
+  // `noTools: "builtin"`, pi's default active set is empty — this list IS the
+  // active set. `builtinPiToolOverrides` names supply read/bash/edit/write/grep/
+  // find/ls; `wrappedCustomSystemTools` + `pluginCustomTools` add the typeclaw/
+  // plugin surface. A subagent's `tools` (subagentBuiltinNames) narrows the
+  // builtin slice to exactly its declared refs. Also feeds the tool-not-found
+  // nudge vocabulary so the two never drift.
+  const builtinActiveNames = tools ?? builtinPiToolOverrides.map((t) => t.name)
+  const intendedActiveToolNames = [
+    ...new Set([...builtinActiveNames, ...[...wrappedCustomSystemTools, ...pluginCustomTools].map((t) => t.name)]),
+  ]
 
   const model = applyModelRuntimeOverrides(resolveModel(activeRef), activeRef)
   // Read live so a reloaded `models` lands on the next session without a
@@ -470,7 +466,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     authStorage,
     modelRegistry,
     resourceLoader,
-    ...(tools ? { tools } : {}),
+    noTools: 'builtin',
+    tools: intendedActiveToolNames,
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
@@ -502,30 +499,6 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   abortHolder.abort = (reason?: string) => {
     if (reason !== undefined) abortHolder.reason = reason
     if (session.agent.signal?.aborted !== true) session.agent.abort()
-  }
-
-  // The names the session actually exposes to the model: pi's active base set
-  // (the caller's `tools:` filter, or pi's default builtins when unset) union
-  // the typeclaw/plugin custom tools. Deliberately EXCLUDES
-  // `builtinPiToolOverrides` — those replace builtin implementations by name,
-  // they are not additional callable names. This is the single source of truth
-  // for both the active-set re-narrowing below and the tool-not-found nudge
-  // vocabulary, so the two never drift (a divergence would make the nudge miss
-  // real tools or suggest tools the session deliberately did not expose).
-  const intendedActiveToolNames = [
-    ...new Set([
-      ...(tools !== undefined ? tools.map((t) => t.name) : DEFAULT_PI_BUILTIN_TOOL_NAMES),
-      ...[...wrappedCustomSystemTools, ...pluginCustomTools].map((t) => t.name),
-    ]),
-  ]
-
-  // Re-narrow the active tool set after `createAgentSession`. pi 0.67.3's
-  // `_refreshToolRegistry` runs with `includeAllExtensionTools: true` and
-  // pushes every customTool name into the active set, which would widen
-  // a subagent's declared `[edit]` to all 7 builtin overrides plus every
-  // typeclaw custom tool.
-  if (builtinPiToolOverrides.length > 0) {
-    session.setActiveToolsByName(intendedActiveToolNames)
   }
 
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
@@ -881,24 +854,6 @@ function wrapRegistryTools(
   )
 }
 
-function wrapSystemAgentTools(
-  tools: AgentSessionTools | undefined,
-  plugins: PluginSessionWiring | undefined,
-  getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => ((reason?: string) => void) | undefined,
-): AgentSessionTools | undefined {
-  if (!tools || !hasToolHooks(plugins)) return tools
-  return tools.map((tool) =>
-    wrapSystemAgentTool(tool, {
-      agentDir: plugins.agentDir,
-      sessionId: plugins.sessionId,
-      hooks: plugins.hooks,
-      getOrigin,
-      getAbort,
-    }),
-  )
-}
-
 function wrapSystemTools(
   tools: ToolDefinition[],
   plugins: PluginSessionWiring | undefined,
@@ -965,6 +920,8 @@ export async function createOverrideResourceLoader(
       : systemPrompt
   const finalPrompt = withOrigin(withRuntime, origin, permissions)
   const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: process.cwd(),
     systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
   })
@@ -1232,6 +1189,8 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const loader = new DefaultResourceLoader({
+    cwd: agentDir,
+    agentDir,
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
     additionalSkillPaths,

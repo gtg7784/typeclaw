@@ -92,13 +92,20 @@ const slackChannelRootOrigin: ChannelReplyOrigin = {
   thread: null,
 }
 
+type ChannelReplyParams = {
+  text?: string
+  attachments?: { path: string; filename?: string }[]
+  continue: boolean
+  resolve_review_thread?: boolean
+}
+
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[4]
 
 // `continue` is schema-required; this helper defaults it to `false` (terminal) so
 // tests not exercising the continue path stay terse. Keep the divergence.
 async function runTool(
   tool: ReturnType<typeof createChannelReplyTool>,
-  params: Omit<Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1], 'continue'> & {
+  params: Omit<ChannelReplyParams, 'continue'> & {
     continue?: boolean
   },
 ) {

@@ -71,6 +71,14 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
 }
 
 const prOrigin: ChannelReplyOrigin = { adapter: 'github', workspace: WS, chat: 'pr:12', thread: null }
+
+type ChannelReplyParams = {
+  text?: string
+  attachments?: { path: string; filename?: string }[]
+  continue: boolean
+  resolve_review_thread?: boolean
+}
+
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[4]
 
 function tool(onSend?: (msg: OutboundMessage) => SendResult, origin: ChannelReplyOrigin = prOrigin) {
@@ -79,7 +87,7 @@ function tool(onSend?: (msg: OutboundMessage) => SendResult, origin: ChannelRepl
 
 async function run(
   t: ReturnType<typeof createChannelReplyTool>,
-  params: Omit<Parameters<ReturnType<typeof createChannelReplyTool>['execute']>[1], 'continue'> & {
+  params: Omit<ChannelReplyParams, 'continue'> & {
     continue?: boolean
   },
 ) {
