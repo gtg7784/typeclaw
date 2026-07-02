@@ -373,7 +373,7 @@ export type NetworkConfig = z.infer<typeof networkSchema>
 // the default 'proc-bind' strategy `--ro-bind`s the container's already-real
 // procfs into the sandbox with NO CAP_SYS_ADMIN, giving the runner's child a
 // working /proc/self/{fd,maps} so it stops aborting with Bun's "NotDir". The
-// agent runtime's /proc/N/environ (FIREWORKS_API_KEY) stays unreadable because
+// agent runtime's /proc/N/environ (OPENAI_API_KEY) stays unreadable because
 // bwrap's --unshare-user puts the sandbox in a child user namespace the kernel
 // won't let read a parent-userns process's environ — verified at runtime by a
 // probe before the strategy is selected (src/sandbox/availability.ts). Avoiding

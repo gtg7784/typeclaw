@@ -373,7 +373,7 @@ export async function runInit({
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
   // their credentials to secrets.json (via the OAuth login step above); writing
-  // an empty FIREWORKS_API_KEY/OPENAI_API_KEY would just confuse users.
+  // an empty OPENAI_API_KEY would just confuse users.
   await writeSecrets(cwd, {
     model,
     apiKey: resolvedAuth.kind === 'api-key' ? resolvedAuth.apiKey : undefined,

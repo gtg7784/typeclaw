@@ -10,7 +10,7 @@ export type SandboxNetwork = 'none' | 'inherit'
 // ALREADY-REAL procfs straight into the sandbox — no `unshare --mount-proc`, no
 // CAP_SYS_ADMIN. A JS package runner's child gets a real /proc/self/{fd,maps,exe}
 // so `bunx`/`bun add`/`bun run <pkg-bin>` stop aborting with Bun's ENOTDIR. The
-// agent runtime's /proc/<agent>/environ (FIREWORKS_API_KEY, GH_TOKEN) is NOT
+// agent runtime's /proc/<agent>/environ (OPENAI_API_KEY, GH_TOKEN) is NOT
 // leaked: build.ts always emits --unshare-user, so the sandboxed bash runs as
 // mapped-root in a CHILD user namespace that is not an ancestor of the agent
 // runtime's userns. The kernel's PTRACE_MODE_READ_FSCREDS check on
@@ -139,7 +139,7 @@ export type SandboxPolicy = {
 // The env the sandbox always re-introduces after `--clearenv`. Anything not
 // listed here (or explicitly named in `env.set` / `env.passthrough` by the
 // consumer) is invisible inside the sandbox. This is the load-bearing leak
-// guard: the container env holds FIREWORKS_API_KEY and GH_TOKEN, and env
+// guard: the container env holds OPENAI_API_KEY and GH_TOKEN, and env
 // inheritance is the single highest-risk exfil path for prompt-injected bash.
 // HOME points at /tmp because the sandbox mounts /tmp as a fresh tmpfs.
 //
