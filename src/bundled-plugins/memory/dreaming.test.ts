@@ -293,6 +293,29 @@ describe('dreaming subagent declarations', () => {
     expect(prompt).toContain('Promotion is gated on `days`, not on `cites`')
   })
 
+  test('teaches reinforcement as a distinct path: reaffirming fragments add a citation, not dropped', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('Reinforcement (a distinct path from contradiction)')
+    expect(prompt).toContain('do NOT drop it as already-known')
+    expect(prompt).toContain("Add the new fragment id under that shard's `fragments:` list")
+    // reinforcement must NOT supersede — that is contradiction-only
+    expect(prompt).toContain('Do NOT move any old id into `superseded:` for a mere reinforcement')
+    // same-day guard so bursts don't inflate the days signal
+    expect(prompt).toContain('at most one pure-reinforcement citation per shard per day')
+  })
+
+  test('teaches encoding the negative fact when a correction reveals a repeated wrong version', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('X is not Y anymore; X is Z')
+    expect(prompt).toContain('negative fact rides in the sentence a channel turn sees first')
+  })
+
+  test('workflow step 3 names reinforcement alongside contradiction, new topic, and drop', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('choose one of four responses')
+    expect(prompt).toContain('is NOT "already-known, drop."')
+  })
+
   test('teaches demotion without a historical bucket', () => {
     const prompt = createDreamingSubagent().systemPrompt
     expect(prompt).toContain('There is no historical bucket')
