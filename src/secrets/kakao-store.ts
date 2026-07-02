@@ -1,8 +1,8 @@
 import type { KakaoAccountCredentials, KakaoConfig } from 'agent-messenger/kakaotalk'
 import type { PendingLoginState } from 'agent-messenger/kakaotalk'
 
-import type { HostProvider } from './host-provider'
 import { type KakaoChannelBlock, type KakaoEncryptedPassword, kakaoChannelBlockSchema } from './schema'
+import type { RuntimeSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 // Account shape accepted by setAccount(). Extends the upstream
@@ -17,7 +17,7 @@ export type SetKakaoAccountInput = KakaoAccountCredentials & {
 
 export type SecretsKakaoCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
-  | { mode: 'container'; secretsPath: string; hostProvider: HostProvider }
+  | { mode: 'container'; secretsPath: string; hostProvider: RuntimeSecretsProvider }
 
 const EMPTY_BLOCK: KakaoChannelBlock = { currentAccount: null, accounts: {} }
 

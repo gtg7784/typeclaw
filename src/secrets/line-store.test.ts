@@ -7,8 +7,8 @@ import type { LineAccountCredentials } from 'agent-messenger/line'
 
 import type { Request } from '@/hostd/protocol'
 
-import { HostdHostProvider } from './host-provider'
 import { SecretsLineCredentialStore } from './line-store'
+import { createHostdSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 async function withStore<T>(fn: (store: SecretsLineCredentialStore, secretsPath: string) => Promise<T>): Promise<T> {
@@ -118,7 +118,7 @@ describe('SecretsLineCredentialStore container mode', () => {
       const store = new SecretsLineCredentialStore({
         mode: 'container',
         secretsPath,
-        hostProvider: new HostdHostProvider({
+        hostProvider: createHostdSecretsProvider({
           hostdUrl: `http://127.0.0.1:${server.port}`,
           restartToken: token,
           containerName,
