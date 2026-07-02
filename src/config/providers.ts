@@ -120,9 +120,8 @@ export const KNOWN_PROVIDERS = {
   // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
   // path here on purpose — the Codex backend is OAuth-only upstream.
   //
-  // pi-ai 0.73.1's `openai-codex` bucket carries gpt-5.5 (and 5.4) against
-  // chatgpt.com/backend-api. We pin pi-coding-agent ^0.67.3 today, which
-  // ships pi-ai 0.67.3 and lacks those entries — but we hand pi-ai a
+  // pi-ai's `openai-codex` bucket carries gpt-5.5 (and 5.4) against
+  // chatgpt.com/backend-api. We don't rely on that catalog: we hand pi-ai a
   // freshly-constructed `Model<>` literal via resolveModel(), bypassing its
   // built-in catalog entirely (same trick we use for kimi-k2p6-turbo). So
   // these ids work end-to-end as long as the Codex backend itself accepts
@@ -283,7 +282,7 @@ export const KNOWN_PROVIDERS = {
       //     Per-token price is unchanged, so equivalent requests cost more.
       //   - Adaptive thinking only: manual extended thinking
       //     (`thinking: {type: "enabled"}` with `budget_tokens`) returns a
-      //     400. The pinned pi-ai 0.67.3 DOES send that payload for this id
+      //     400. The pinned pi-ai 0.73.x DOES send that payload for this id
       //     (its supportsAdaptiveThinking() only matches 4.6-generation ids,
       //     and thinking defaults to "medium"), so registering this record
       //     with `reasoning: true` depends on the rewrite shim in
@@ -336,7 +335,7 @@ export const KNOWN_PROVIDERS = {
       // text vs pre-5 models, so equivalent requests cost more than the
       // per-token rates alone suggest. Adaptive thinking only, same as
       // Sonnet 5 above: `reasoning: true` here depends on the rewrite shim
-      // in src/agent/adaptive-thinking-compat.ts (pinned pi-ai 0.67.3 would
+      // in src/agent/adaptive-thinking-compat.ts (pinned pi-ai 0.73.x would
       // otherwise send budget-based `thinking`, a hard 400 on this id).
       'claude-fable-5': {
         id: 'claude-fable-5',
