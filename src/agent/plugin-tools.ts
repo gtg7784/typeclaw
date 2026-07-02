@@ -1,20 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { join } from 'node:path'
 
-import type { AgentTool } from '@mariozechner/pi-agent-core'
 import {
-  createBashTool as piCreateBashTool,
+  createBashToolDefinition as piCreateBashToolDefinition,
+  createEditToolDefinition as piCreateEditToolDefinition,
+  createFindToolDefinition as piCreateFindToolDefinition,
+  createGrepToolDefinition as piCreateGrepToolDefinition,
+  createLsToolDefinition as piCreateLsToolDefinition,
+  createReadToolDefinition as piCreateReadToolDefinition,
+  createWriteToolDefinition as piCreateWriteToolDefinition,
   defineTool as piDefineTool,
-  editTool as piEditTool,
-  findTool as piFindTool,
-  grepTool as piGrepTool,
-  lsTool as piLsTool,
-  readTool as piReadTool,
-  writeTool as piWriteTool,
 } from '@mariozechner/pi-coding-agent'
 import type { BashSpawnContext, ToolDefinition } from '@mariozechner/pi-coding-agent'
-import type { Static, TSchema } from '@sinclair/typebox'
-import { Type } from '@sinclair/typebox'
+import type { Static, TSchema } from 'typebox'
+import { Type } from 'typebox'
 import { z } from 'zod'
 
 import {
@@ -102,7 +101,12 @@ function bashSpawnHookWithOverlay(context: BashSpawnContext): BashSpawnContext {
   return { ...context, env: { ...context.env, ...overlay } }
 }
 
-const piBashTool = piCreateBashTool(process.cwd(), { spawnHook: bashSpawnHookWithOverlay })
+// pi 0.68+ ships direct `ToolDefinition` factories for every builtin (read/
+// bash/edit/write/grep/find/ls), so TypeClaw no longer bridges an `AgentTool`
+// into a `ToolDefinition` — every builtin enters the pipeline as the same
+// `ToolDefinition` shape as our own system tools. bash keeps the spawnHook that
+// threads the internal env overlay to the (non-sandboxed) spawn.
+const piBashToolDefinition = piCreateBashToolDefinition(process.cwd(), { spawnHook: bashSpawnHookWithOverlay })
 
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
@@ -115,31 +119,31 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   ),
 )
 
-// pi-coding-agent 0.67.3 contract (load-bearing for hook coverage):
-//   - `createAgentSession({ tools: AgentTool[] })` is ONLY a name filter for
-//     `initialActiveToolNames`. It does NOT swap builtin implementations.
-//   - `customTools: ToolDefinition[]` entries override builtins by name in
-//     `_refreshToolRegistry` (the registry merge writes customTools last).
+// pi-coding-agent 0.73 contract (load-bearing for hook coverage):
+//   - `createAgentSession({ tools: string[] })` is a name allowlist: only the
+//     listed names stay active, and that allowlist gates BOTH builtins and
+//     custom tools (see `allowedToolNames` in pi's `_refreshToolRegistry`).
+//   - `noTools: "builtin"` disables pi's OWN unwrapped read/bash/edit/write, so
+//     the only same-named tools left in the registry are the wrapped
+//     `ToolDefinition`s TypeClaw ships via `customTools`.
 //
-// Consequence: to put a `tool.before` hook around pi's builtin read/bash/edit/
-// write, TypeClaw must wrap them as `ToolDefinition`s and pass them via
-// `customTools` — not via `tools`. `wrapAgentToolAsCustomToolDefinition`
-// produces those wrapped definitions; `setupSession` in `src/agent/index.ts`
-// appends them whenever the session has any `tool.before` / `tool.after`
-// hooks registered. Subagent narrowing still comes from `tools:` (the
-// name-filter path); the wrapped customTools just replace the implementation
-// underneath so subagent and channel sessions share the same hook coverage.
-type PiAgentToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
+// Consequence: every builtin enters as a `ToolDefinition` (pi now exposes
+// `create*ToolDefinition` factories), TypeClaw wraps each one with its hook +
+// guard + sandbox pipeline, and the call site routes them through `customTools`
+// while narrowing via `tools:` names. There is no longer an `AgentTool` vs
+// `ToolDefinition` split, and no reliance on customTools override ordering for
+// security — an unwrapped builtin is never registered in the first place.
+type PiBuiltinToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
 type TypeclawToolName = 'web_search' | 'web_fetch'
 
-const PI_AGENT_TOOL_MAP: Record<PiAgentToolName, AgentTool<any, any>> = {
-  read: piReadTool,
-  bash: piBashTool,
-  edit: piEditTool,
-  write: piWriteTool,
-  grep: piGrepTool,
-  find: piFindTool,
-  ls: piLsTool,
+const PI_BUILTIN_TOOL_DEFINITION_MAP: Record<PiBuiltinToolName, ToolDefinition<any, any, any>> = {
+  read: piCreateReadToolDefinition(process.cwd()),
+  bash: piBashToolDefinition,
+  edit: piCreateEditToolDefinition(process.cwd()),
+  write: piCreateWriteToolDefinition(process.cwd()),
+  grep: piCreateGrepToolDefinition(process.cwd()),
+  find: piCreateFindToolDefinition(process.cwd()),
+  ls: piCreateLsToolDefinition(process.cwd()),
 }
 
 const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any, any, any>> = {
@@ -147,33 +151,25 @@ const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any,
   web_fetch: webFetchTool,
 }
 
-function isPiAgentToolName(name: string): name is PiAgentToolName {
-  return name in PI_AGENT_TOOL_MAP
+function isPiBuiltinToolName(name: string): name is PiBuiltinToolName {
+  return name in PI_BUILTIN_TOOL_DEFINITION_MAP
+}
+
+export function isPiCodingBuiltinName(name: string): boolean {
+  return name in PI_BUILTIN_TOOL_DEFINITION_MAP
 }
 
 function isTypeclawToolName(name: string): name is TypeclawToolName {
   return name in TYPECLAW_TOOL_DEFINITION_MAP
 }
 
-export type ResolvedBuiltinTools = {
-  agentTools: AgentTool<any, any>[]
-  toolDefinitions: ToolDefinition<any, any, any>[]
-}
-
-export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): ResolvedBuiltinTools {
-  const agentTools: AgentTool<any, any>[] = []
-  const toolDefinitions: ToolDefinition<any, any, any>[] = []
-  for (const ref of refs) {
+export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): ToolDefinition<any, any, any>[] {
+  return refs.map((ref) => {
     const name = ref.__builtinTool
-    if (isPiAgentToolName(name)) {
-      agentTools.push(PI_AGENT_TOOL_MAP[name])
-    } else if (isTypeclawToolName(name)) {
-      toolDefinitions.push(TYPECLAW_TOOL_DEFINITION_MAP[name])
-    } else {
-      throw new Error(`unknown built-in tool ref: ${name}`)
-    }
-  }
-  return { agentTools, toolDefinitions }
+    if (isPiBuiltinToolName(name)) return PI_BUILTIN_TOOL_DEFINITION_MAP[name]
+    if (isTypeclawToolName(name)) return TYPECLAW_TOOL_DEFINITION_MAP[name]
+    throw new Error(`unknown built-in tool ref: ${name}`)
+  })
 }
 
 export type WrapToolOptions = {
@@ -363,81 +359,20 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
   })
 }
 
-export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>(
-  tool: AgentTool<TParams, TDetails>,
+// Wraps a pi builtin `ToolDefinition` (read/bash/edit/write/grep/find/ls) with
+// TypeClaw's full pipeline — hooks, loop guard, write/read guards, per-subagent
+// bash policy, bwrap sandbox, /tmp redirect, and the internal bash env overlay —
+// then ships it through `customTools`. `noTools: "builtin"` at the call site
+// disables pi's own unwrapped copies, so this wrapped definition is the ONLY
+// registered implementation of each builtin name.
+export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = unknown, TState = any>(
+  tool: ToolDefinition<TParams, TDetails, TState>,
   opts: WrapSystemToolOptions,
-): AgentTool<TParams, TDetails> {
-  return {
+): ToolDefinition<TParams, TDetails, TState> {
+  return piDefineTool({
     ...tool,
     parameters: withGuardAcknowledgements(tool.name, tool.parameters),
-    async execute(toolCallId, params, signal, onUpdate) {
-      const mutableArgs = params as Record<string, unknown>
-      const liveOrigin = opts.getOrigin?.()
-      const blockResult = await opts.hooks.runToolBefore({
-        tool: tool.name,
-        sessionId: opts.sessionId,
-        callId: toolCallId,
-        args: mutableArgs,
-        ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
-      })
-      if (blockResult !== undefined) {
-        throw new Error(`blocked: ${blockResult.reason}`)
-      }
-      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
-      if (loopGate.blockNow) {
-        fireLoopAbort(opts.getAbort, 'loop_guard:block')
-        throw new Error(loopGate.message)
-      }
-      const guardResult = await runFinalWriteGuards({
-        tool: tool.name,
-        args: mutableArgs,
-        agentDir: opts.agentDir,
-      })
-      if (guardResult !== undefined) {
-        throw new Error(`blocked: ${guardResult.reason}`)
-      }
-      const readGuardResult = runFinalReadGuards({ tool: tool.name, args: mutableArgs })
-      if (readGuardResult !== undefined) {
-        throw new Error(`blocked: ${readGuardResult.reason}`)
-      }
-      stripGuardAcknowledgements(mutableArgs)
-
-      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
-      const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
-      if ('deferredBlock' in resolved) {
-        fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
-        throw new Error(resolved.deferredBlock)
-      }
-      const hookResult = resolved.result
-      await opts.hooks.runToolAfter({
-        tool: tool.name,
-        sessionId: opts.sessionId,
-        callId: toolCallId,
-        result: hookResult,
-      })
-      return {
-        content: hookResult.content as ContentPart[],
-        details: hookResult.details as TDetails,
-      }
-    },
-  }
-}
-
-// Wraps a pi-coding-agent AgentTool into a ToolDefinition so it can ride in
-// `customTools` and override pi's same-named builtin (see top-of-file contract
-// block). The hook + guard pipeline matches `wrapSystemAgentTool`; only the
-// input/output shape differs.
-export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDetails = unknown>(
-  tool: AgentTool<TParams, TDetails>,
-  opts: WrapSystemToolOptions,
-): ToolDefinition<TParams, TDetails> {
-  return piDefineTool({
-    name: tool.name,
-    label: tool.label,
-    description: tool.description,
-    parameters: withGuardAcknowledgements(tool.name, tool.parameters),
-    prepareArguments: tool.prepareArguments,
-    async execute(toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mutableArgs = params as Record<string, unknown>
       const liveOrigin = opts.getOrigin?.()
       // Defense-in-depth: strip any pre-existing internal env-overlay key
@@ -499,7 +434,7 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       let rawResult: ToolResult
       try {
         rawResult = await bashEnvStore.run(bashEnvOverlay, () =>
-          tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate),
+          tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx),
         )
       } catch (error) {
         // A throwing tool (pi's bash rejects on non-zero exit) must still run
@@ -549,12 +484,20 @@ async function runToolAfterSafely(
   }
 }
 
-export function defaultBuiltinPiAgentTools(): AgentTool<any, any>[] {
-  return [piReadTool, piBashTool, piEditTool, piWriteTool, piGrepTool, piFindTool, piLsTool]
+export function defaultBuiltinPiToolDefinitions(): ToolDefinition<any, any, any>[] {
+  return [
+    PI_BUILTIN_TOOL_DEFINITION_MAP.read,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.bash,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.edit,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.write,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.grep,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.find,
+    PI_BUILTIN_TOOL_DEFINITION_MAP.ls,
+  ]
 }
 
 export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDefinition<any, any>[] {
-  return defaultBuiltinPiAgentTools().map((tool) => wrapAgentToolAsCustomToolDefinition(tool, opts))
+  return defaultBuiltinPiToolDefinitions().map((tool) => wrapBuiltinToolDefinition(tool, opts))
 }
 
 // Rewrites mutableArgs.command in place so the bash builtin runs inside bwrap

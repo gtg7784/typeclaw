@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { defineTool as definePiTool } from '@mariozechner/pi-coding-agent'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
-import { Type } from '@sinclair/typebox'
+import { Type } from 'typebox'
 import { z } from 'zod'
 
 import { createPermissionService } from '@/permissions/permissions'
@@ -15,12 +15,11 @@ import { _resetBwrapAvailabilityCacheForTests, _resetRealProcProbeCacheForTests,
 import {
   __resetSharedLoopGuardForTests,
   buildBuiltinPiToolOverrides,
-  defaultBuiltinPiAgentTools,
+  defaultBuiltinPiToolDefinitions,
   forgetSharedLoopGuardTool,
   TYPECLAW_INTERNAL_BASH_ENV,
-  wrapAgentToolAsCustomToolDefinition,
+  wrapBuiltinToolDefinition,
   wrapPluginTool,
-  wrapSystemAgentTool,
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
@@ -462,8 +461,8 @@ describe('wrapSystemTool', () => {
   })
 })
 
-describe('wrapSystemAgentTool', () => {
-  test('tool.before and tool.after fire for built-in pi-style agent tools and can rewrite the result', async () => {
+describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
+  test('tool.before and tool.after fire for built-in pi tool definitions and can rewrite the result', async () => {
     const seen: unknown[] = []
     const observed: unknown[] = []
     const tool = {
@@ -488,9 +487,9 @@ describe('wrapSystemAgentTool', () => {
       },
     })
 
-    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
 
-    const result = await wrapped.execute('c', { path: '/original' })
+    const result = await wrapped.execute('c', { path: '/original' }, undefined, undefined, {} as never)
     expect(textOfFirstContent(result)).toBe('rewritten read')
     expect(result.details as Record<string, unknown>).toEqual({ rewritten: true })
     expect(seen[0]).toEqual({ path: '/mutated' })
@@ -514,9 +513,11 @@ describe('wrapSystemAgentTool', () => {
       'tool.before': () => ({ block: true, reason: 'no bash' }),
     })
 
-    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
 
-    await expect(wrapped.execute('c', { command: 'pwd' })).rejects.toThrow('blocked: no bash')
+    await expect(wrapped.execute('c', { command: 'pwd' }, undefined, undefined, {} as never)).rejects.toThrow(
+      'blocked: no bash',
+    )
     expect(calls).toEqual([])
   })
 
@@ -541,7 +542,7 @@ describe('wrapSystemAgentTool', () => {
       },
     })
 
-    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
 
     await expect(
       wrapped.execute('c', { command: 'gh api --input /tmp/x' } as never, undefined, undefined, {} as never),
@@ -586,7 +587,7 @@ describe('wrapSystemAgentTool', () => {
       },
     })
 
-    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
 
     const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
     expect(parameters.properties).toHaveProperty('acknowledgeGuards')
@@ -595,7 +596,7 @@ describe('wrapSystemAgentTool', () => {
       edits: [{ oldText: 'x', newText: 'y' }],
       acknowledgeGuards: { nonWorkspaceWrite: true },
     } as unknown as Parameters<typeof wrapped.execute>[1]
-    await wrapped.execute('c', params)
+    await wrapped.execute('c', params, undefined, undefined, {} as never)
 
     expect(seen[0]).toEqual({ path: 'notes.md', edits: [{ oldText: 'x', newText: 'y' }] })
   })
@@ -677,8 +678,8 @@ describe('getOrigin (live origin holder)', () => {
   })
 })
 
-describe('resolveBuiltinToolRefs (dual-route)', () => {
-  test('pi-side coding tools go to agentTools, typeclaw-side web tools go to toolDefinitions', async () => {
+describe('resolveBuiltinToolRefs', () => {
+  test('resolves every ref to a ToolDefinition, preserving order', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const resolved = resolveBuiltinToolRefs([
       { __builtinTool: 'read' },
@@ -691,61 +692,54 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
       { __builtinTool: 'web_search' },
       { __builtinTool: 'web_fetch' },
     ])
-    expect(resolved.agentTools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
-    expect(resolved.toolDefinitions.map((t) => t.name)).toEqual(['web_search', 'web_fetch'])
+    expect(resolved.map((t) => t.name)).toEqual([
+      'read',
+      'bash',
+      'edit',
+      'write',
+      'grep',
+      'find',
+      'ls',
+      'web_search',
+      'web_fetch',
+    ])
   })
 
-  test('pi-side resolve to pi-coding-agent AgentTool exports by reference equality (not *ToolDefinition variant)', async () => {
+  test('pi coding builtins resolve to ToolDefinitions carrying the builtin name', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const pi = await import('@mariozechner/pi-coding-agent')
-    const cases: { name: string; expected: unknown }[] = [
-      { name: 'read', expected: pi.readTool },
-      { name: 'edit', expected: pi.editTool },
-      { name: 'write', expected: pi.writeTool },
-      { name: 'grep', expected: pi.grepTool },
-      { name: 'find', expected: pi.findTool },
-      { name: 'ls', expected: pi.lsTool },
-    ]
-    for (const { name, expected } of cases) {
+    for (const name of ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const) {
       const r = resolveBuiltinToolRefs([{ __builtinTool: name }])
-      expect(r.agentTools.length).toBe(1)
-      expect(r.toolDefinitions.length).toBe(0)
-      expect(r.agentTools[0]).toBe(expected as never)
+      expect(r.length).toBe(1)
+      expect(r[0]?.name).toBe(name)
     }
   })
 
-  test('bash resolves to a typeclaw-constructed AgentTool (spawnHook-wired), not pi.bashTool', async () => {
+  test('bash resolves to the spawnHook-wired ToolDefinition, not pi bare createBashToolDefinition', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const pi = await import('@mariozechner/pi-coding-agent')
     const r = resolveBuiltinToolRefs([{ __builtinTool: 'bash' }])
-    expect(r.agentTools.length).toBe(1)
-    expect(r.toolDefinitions.length).toBe(0)
-    expect(r.agentTools[0]?.name).toBe('bash')
-    // It is our own instance carrying the env-overlay spawnHook, not the raw
-    // pi export — reference inequality is the observable proof.
-    expect(r.agentTools[0]).not.toBe(pi.bashTool as never)
+    expect(r.length).toBe(1)
+    expect(r[0]?.name).toBe('bash')
+    // It is our own instance carrying the env-overlay spawnHook, not a fresh
+    // pi definition — reference inequality is the observable proof.
+    expect(r[0]).not.toBe(pi.createBashToolDefinition(process.cwd()) as never)
   })
 
-  test('typeclaw-side resolve to the original ToolDefinition imports by reference equality', async () => {
+  test('typeclaw web tools resolve to the original ToolDefinition imports by reference equality', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const { webSearchTool } = await import('./tools/websearch')
     const { webFetchTool } = await import('./tools/webfetch')
-    const ws = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }])
-    const wf = resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }])
-    expect(ws.agentTools).toEqual([])
-    expect(ws.toolDefinitions[0]).toBe(webSearchTool)
-    expect(wf.agentTools).toEqual([])
-    expect(wf.toolDefinitions[0]).toBe(webFetchTool)
+    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }])[0]).toBe(webSearchTool)
+    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }])[0]).toBe(webFetchTool)
   })
 
-  test('mixed refs partition correctly: scout-shape (web only) leaves agentTools empty', async () => {
+  test('mixed refs resolve in order: web-only (scout-shape)', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const r = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }, { __builtinTool: 'web_fetch' }])
-    expect(r.agentTools).toEqual([])
-    expect(r.toolDefinitions.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
+    expect(r.map((t) => t.name)).toEqual(['web_search', 'web_fetch'])
   })
 
-  test('mixed refs partition correctly: explorer-shape (coding only) leaves toolDefinitions empty', async () => {
+  test('mixed refs resolve in order: coding-only (explorer-shape)', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const r = resolveBuiltinToolRefs([
       { __builtinTool: 'read' },
@@ -754,8 +748,7 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
       { __builtinTool: 'ls' },
       { __builtinTool: 'bash' },
     ])
-    expect(r.toolDefinitions).toEqual([])
-    expect(r.agentTools.map((t) => t.name).sort()).toEqual(['bash', 'find', 'grep', 'ls', 'read'])
+    expect(r.map((t) => t.name)).toEqual(['read', 'grep', 'find', 'ls', 'bash'])
   })
 
   test('throws on unknown built-in names', async () => {
@@ -764,7 +757,7 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
   })
 })
 
-describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', () => {
+describe('wrapBuiltinToolDefinition (pi customTools override path)', () => {
   test('the returned ToolDefinition runs tool.before/runFinalWriteGuards before delegating to the underlying pi AgentTool', async () => {
     let executedUnderlying = 0
     const beforeArgs: unknown[] = []
@@ -788,7 +781,7 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
       },
     })
 
-    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
 
     expect(wrapped.name).toBe('edit')
     const result = await wrapped.execute(
@@ -837,7 +830,7 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
     const hooks = createHookBus()
     hooks.registerAll('p1', dir, noopLogger, {})
 
-    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: dir, sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: dir, sessionId: 's', hooks })
 
     await expect(
       wrapped.execute(
@@ -854,8 +847,8 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
     expect(executedUnderlying).toBe(0)
   })
 
-  test('defaultBuiltinPiAgentTools returns the seven pi coding-tool refs that need hook coverage', async () => {
-    const tools = defaultBuiltinPiAgentTools()
+  test('defaultBuiltinPiToolDefinitions returns the seven pi coding-tool definitions that need hook coverage', async () => {
+    const tools = defaultBuiltinPiToolDefinitions()
     expect(tools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
   })
 
@@ -917,7 +910,7 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
   })
 })
 
-describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hiding)', () => {
+describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', () => {
   beforeEach(() => {
     _resetBwrapAvailabilityCacheForTests()
     _resetRealProcProbeCacheForTests()
@@ -941,7 +934,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
 
   test('trusted+ (tui→owner) has no masks, so bash runs unchanged even without bwrap', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -954,7 +947,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
 
   test('guest needs masks; with bwrap unavailable the call fails closed and the underlying bash never runs', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -969,7 +962,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
 
   test('without a permission service bash is never rewritten (escape hatch for unwired sessions)', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -988,7 +981,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
       },
     })
     const args: Record<string, unknown> = { command: 'gh pr view -R acme/widgets' }
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks,
@@ -1013,7 +1006,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
       command: 'echo hi',
       [TYPECLAW_INTERNAL_BASH_ENV]: { GH_TOKEN: 'attacker' },
     }
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks,
@@ -1025,7 +1018,7 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
   })
 })
 
-describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability fence, role-independent)', () => {
+describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role-independent)', () => {
   function fakeBash(record: { command?: string }) {
     return {
       name: 'bash',
@@ -1043,7 +1036,7 @@ describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability f
 
   test('readonly-reviewer policy blocks a mutating command and the underlying bash never runs — even for a trusted owner origin', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -1059,7 +1052,7 @@ describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability f
 
   test('readonly-reviewer policy lets a read-only command through (and the role sandbox still leaves an owner command unchanged)', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -1073,7 +1066,7 @@ describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability f
 
   test('no bashPolicy leaves bash unrestricted (default subagents keep today behavior)', async () => {
     const record: { command?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
@@ -1085,7 +1078,7 @@ describe('wrapAgentToolAsCustomToolDefinition subagent bash policy (capability f
   })
 })
 
-describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session scratch)', () => {
+describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', () => {
   function fakeWrite(record: { path?: string }) {
     return {
       name: 'write',
@@ -1117,7 +1110,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
 
   test('a sandboxed role (guest) has its /tmp write redirected to the session backing dir', async () => {
     const record: { path?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1130,7 +1123,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
 
   test('a sandboxed role (guest) reading /tmp resolves to the same session backing dir bash wrote', async () => {
     const record: { path?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeRead(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1143,7 +1136,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
 
   test('an unsandboxed role (tui→owner) writes the real /tmp path untouched', async () => {
     const record: { path?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1156,7 +1149,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
 
   test('an unsandboxed role (tui→owner) reads the real /tmp path untouched', async () => {
     const record: { path?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeRead(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1169,7 +1162,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
 
   test('a non-/tmp write is left untouched even for a sandboxed role', async () => {
     const record: { path?: string } = {}
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWrite(record), {
+    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1206,7 +1199,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
   }
 
   test('a sandboxed role sees its original /tmp path in the receipt, not the backing dir', async () => {
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWriteEchoingPath(), {
+    const wrapped = wrapBuiltinToolDefinition(fakeWriteEchoingPath(), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1229,7 +1222,7 @@ describe('wrapAgentToolAsCustomToolDefinition /tmp path redirect (per-session sc
   })
 
   test('an unsandboxed role keeps the real /tmp path in the receipt (no rewrite)', async () => {
-    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeWriteEchoingPath(), {
+    const wrapped = wrapBuiltinToolDefinition(fakeWriteEchoingPath(), {
       agentDir: '/agent',
       sessionId: 'sid42',
       hooks: createHookBus(),
@@ -1319,7 +1312,12 @@ describe('setupSession integration: builtin pi tools route through customTools w
     session.dispose()
   })
 
-  test("without any tool hooks, the active `edit` falls through to pi's builtin (no wrapping overhead)", async () => {
+  test('even without tool hooks, the active `edit` is the typeclaw customTools override (sandbox/guards are hook-independent)', async () => {
+    // pi 0.73: builtins are always TypeClaw-owned wrapped definitions shipped via
+    // customTools with `noTools: "builtin"` disabling pi's raw copies. The wrap is
+    // no longer gated on plugin hooks because the bwrap sandbox and bash policy
+    // must apply regardless — so `edit` is always sourced from `sdk`, never the
+    // unwrapped `builtin`.
     const { createSession } = await import('./index')
 
     const session = await createSession({})
@@ -1327,20 +1325,19 @@ describe('setupSession integration: builtin pi tools route through customTools w
     const allTools = session.getAllTools()
     const editInfo = allTools.find((t) => t.name === 'edit')
     expect(editInfo).toBeDefined()
-    expect(editInfo?.sourceInfo.source).toBe('builtin')
+    expect(editInfo?.sourceInfo.source).toBe('sdk')
 
     session.dispose()
   })
 
-  test('regression: subagent declaring [edit] only must NOT also activate read/bash/write/grep/find/ls just because builtin overrides exist in customTools', async () => {
-    // The customTools override path widens pi's active tool set as a side effect:
-    // pi's `_refreshToolRegistry` runs with `includeAllExtensionTools: true`,
-    // which appends every customTool name into `nextActiveToolNames` even when
-    // the caller passed a narrow `tools:` filter. Without explicit re-narrowing,
-    // a subagent declaring `toolRefs: [{ __builtinTool: 'edit' }]` ends up with
-    // all 7 builtin pi tools (read/bash/edit/write/grep/find/ls) active, which
-    // is a security regression — a read-only memory-logger subagent silently
-    // gets full edit/write/bash capability. See QA finding for PR #290.
+  test('security: subagent declaring [edit] only must NOT also activate read/bash/write/grep/find/ls, even though all 7 wrapped builtins ride in customTools', async () => {
+    // Security boundary: all 7 wrapped builtins are always in `customTools`, so a
+    // subagent could over-broaden if the active set were "registry ∪ customTools".
+    // pi 0.73 gates the active set on the explicit `tools:` allowlist
+    // (`allowedToolNames` in `_refreshToolRegistry`), which we set to exactly the
+    // subagent's declared refs. A read-only memory-logger subagent declaring
+    // `[edit]` must therefore expose ONLY `edit` — a silent widening to bash/write
+    // would be a privilege-escalation regression (QA finding, PR #290).
     const { createSession } = await import('./index')
     const hooks = createHookBus()
     hooks.registerAll('p1', agentDir, noopLogger, {
@@ -1403,12 +1400,13 @@ describe('setupSession integration: builtin pi tools route through customTools w
     session.dispose()
   })
 
-  test('TUI session with hooks gets exactly pi default 4 active builtins (read/bash/edit/write) plus typeclaw customTools, not all 7 pi builtins', async () => {
-    // TUI/channel sessions pass no `options.tools`, so the intended active
-    // set is pi's defaultActiveToolNames union the typeclaw customSystemTools.
-    // The unconditional inclusion of grep/find/ls overrides would otherwise
-    // widen the TUI's active set silently — not a security regression like
-    // the subagent case, but still an unintended scope expansion.
+  test('TUI session (no options.tools) activates all seven typeclaw-owned pi builtins (read/bash/edit/write/grep/find/ls)', async () => {
+    // A non-subagent session leaves `options.tools` unset, so the active set is
+    // the full builtin override list (all 7) union the typeclaw customSystemTools.
+    // grep/find/ls are TypeClaw-owned tools we deliberately expose — unlike a
+    // subagent, a TUI session is not narrowed. With `noTools: "builtin"` and an
+    // explicit `tools:` allowlist, this list is the exact active set (no reliance
+    // on pi's default-plus-all-custom activation).
     const { createSession } = await import('./index')
     const hooks = createHookBus()
     hooks.registerAll('p1', agentDir, noopLogger, {
@@ -1434,9 +1432,9 @@ describe('setupSession integration: builtin pi tools route through customTools w
     expect(active.has('bash')).toBe(true)
     expect(active.has('edit')).toBe(true)
     expect(active.has('write')).toBe(true)
-    expect(active.has('grep')).toBe(false)
-    expect(active.has('find')).toBe(false)
-    expect(active.has('ls')).toBe(false)
+    expect(active.has('grep')).toBe(true)
+    expect(active.has('find')).toBe(true)
+    expect(active.has('ls')).toBe(true)
 
     session.dispose()
   })
