@@ -131,7 +131,7 @@ export function _resetRealProcProbeCacheForTests(): void {
 // /proc /proc`: it binds the container's already-real procfs with NO unshare
 // --mount-proc and NO CAP_SYS_ADMIN, so it works where 'real-proc' is rejected
 // (OrbStack). Its security rests entirely on the kernel BLOCKING cross-userns
-// reads of /proc/<agent>/environ — the FIREWORKS_API_KEY / GH_TOKEN surface —
+// reads of /proc/<agent>/environ — the OPENAI_API_KEY / GH_TOKEN surface —
 // because bwrap's --unshare-all puts the sandbox in a CHILD user namespace. That
 // block is a kernel fact on every mainstream host, but the consumer must never
 // assume it: a misconfigured runtime that preserves parent-userns creds, or a
@@ -279,7 +279,7 @@ async function probeProcBind(bwrap: string): Promise<ProcBindProbe> {
   let sentinel: Bun.Subprocess | undefined
   try {
     // `env -i` so the sentinel carries ONLY the marker, never the parent's real
-    // FIREWORKS_API_KEY/GH_TOKEN — the probe must not itself plant a real secret,
+    // OPENAI_API_KEY/GH_TOKEN — the probe must not itself plant a real secret,
     // independent of Bun.spawn's env merge/replace semantics. `sleep 30` outlives
     // the sub-second probe by a wide margin (so it cannot exit mid-probe and let
     // a post-exit ESRCH masquerade as the EACCES block), yet is short enough to

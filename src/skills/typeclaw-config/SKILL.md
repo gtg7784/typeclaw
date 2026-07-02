@@ -440,7 +440,7 @@ Every secret-bearing field in `secrets.json` is a **`Secret`**: either a plain s
 {
   "version": 2,
   "providers": {
-    "fireworks": { "type": "api_key", "key": "fw_xxx" },
+    "openai": { "type": "api_key", "key": "sk-xxx" },
     "openai-codex": { "type": "oauth", "access_token": "...", "refresh_token": "...", "expires_at": 99 }
   },
   "channels": {
@@ -455,7 +455,7 @@ Every secret-bearing field in `secrets.json` is a **`Secret`**: either a plain s
 **Resolution at boot, in order:**
 
 1. `process.env[secret.env]` — explicit binding wins (the `env` field on the object form).
-2. `process.env[<canonical env name>]` — canonical-env fallback (`SLACK_BOT_TOKEN`, `FIREWORKS_API_KEY`, etc.).
+2. `process.env[<canonical env name>]` — canonical-env fallback (`SLACK_BOT_TOKEN`, `OPENAI_API_KEY`, etc.).
 3. `secret.value` — the on-disk value.
 4. Otherwise the field is treated as missing.
 

@@ -206,7 +206,7 @@ function attachCloseCause(cause: unknown, closeCause: unknown): void {
 
 // A stdio MCP server is a child process the agent spawns, so it must NOT
 // inherit the full parent environment: that env holds unrelated credentials
-// (FIREWORKS_API_KEY, GH_TOKEN, channel tokens) and inheriting them leaks every
+// (OPENAI_API_KEY, GH_TOKEN, channel tokens) and inheriting them leaks every
 // secret to every server. We start from a minimal allowlist needed to spawn and
 // run a process (PATH/HOME to launch npx/bunx, locale + temp for correctness),
 // then overlay only the secrets the server explicitly declares. This mirrors

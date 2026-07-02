@@ -144,7 +144,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     // --tmpfs /proc, never --proc /proc (OrbStack's kernel blocks
     // mount("proc",...) from user namespaces) and never --dev-bind /proc /proc
     // (leaks the outer container's /proc/N/environ — including
-    // FIREWORKS_API_KEY — into the sandbox). See sandbox.mdx.
+    // OPENAI_API_KEY — into the sandbox). See sandbox.mdx.
     argv.push('--tmpfs', '/proc')
 
     // Re-expose ONLY the bun ELF at /proc/self/exe so sandboxed package runners
