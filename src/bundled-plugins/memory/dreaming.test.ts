@@ -227,6 +227,12 @@ describe('dreaming subagent declarations', () => {
     expect(prompt).not.toContain('write the full new contents')
   })
 
+  test('teaches that the heading must be the belief sentence, not a title', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('MUST be that same belief sentence, not a noun-phrase title')
+    expect(prompt).toContain('ONLY the heading')
+  })
+
   test('teaches the dreaming session about muscle memory in the system prompt', () => {
     const sub = createDreamingSubagent()
     expect(sub.systemPrompt).toContain('Muscle memory')
