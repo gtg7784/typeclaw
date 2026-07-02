@@ -303,7 +303,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // implementations arrive through `customTools` (either `builtinPiToolOverrides`
   // for pi coding builtins, or `customSystemTools` for typeclaw web tools).
   const resolvedSubagentBuiltins = options.pluginSubagent?.toolRefs
-    ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
+    ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs, options.plugins?.agentDir ?? process.cwd())
     : []
   const subagentBuiltinNames = resolvedSubagentBuiltins.map((t) => t.name)
   const subagentTypeclawToolDefinitions = resolvedSubagentBuiltins.filter((t) => !isPiCodingBuiltinName(t.name))

@@ -101,13 +101,6 @@ function bashSpawnHookWithOverlay(context: BashSpawnContext): BashSpawnContext {
   return { ...context, env: { ...context.env, ...overlay } }
 }
 
-// pi 0.68+ ships direct `ToolDefinition` factories for every builtin (read/
-// bash/edit/write/grep/find/ls), so TypeClaw no longer bridges an `AgentTool`
-// into a `ToolDefinition` — every builtin enters the pipeline as the same
-// `ToolDefinition` shape as our own system tools. bash keeps the spawnHook that
-// threads the internal env overlay to the (non-sandboxed) spawn.
-const piBashToolDefinition = piCreateBashToolDefinition(process.cwd(), { spawnHook: bashSpawnHookWithOverlay })
-
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
     {
@@ -123,27 +116,46 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
 //   - `createAgentSession({ tools: string[] })` is a name allowlist: only the
 //     listed names stay active, and that allowlist gates BOTH builtins and
 //     custom tools (see `allowedToolNames` in pi's `_refreshToolRegistry`).
-//   - `noTools: "builtin"` disables pi's OWN unwrapped read/bash/edit/write, so
-//     the only same-named tools left in the registry are the wrapped
-//     `ToolDefinition`s TypeClaw ships via `customTools`.
+//   - `noTools: "builtin"` drops pi's read/bash/edit/write from the INITIAL
+//     active set; pi still registers its base builtins, so a same-named entry
+//     in `customTools` is what overrides the implementation (registry
+//     last-write-wins). Passing an explicit `tools:` allowlist plus shipping all
+//     seven wrapped builtins is what makes the wrapped versions the only
+//     callable ones.
 //
 // Consequence: every builtin enters as a `ToolDefinition` (pi now exposes
 // `create*ToolDefinition` factories), TypeClaw wraps each one with its hook +
 // guard + sandbox pipeline, and the call site routes them through `customTools`
 // while narrowing via `tools:` names. There is no longer an `AgentTool` vs
-// `ToolDefinition` split, and no reliance on customTools override ordering for
-// security — an unwrapped builtin is never registered in the first place.
+// `ToolDefinition` split.
 type PiBuiltinToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
 type TypeclawToolName = 'web_search' | 'web_fetch'
 
-const PI_BUILTIN_TOOL_DEFINITION_MAP: Record<PiBuiltinToolName, ToolDefinition<any, any, any>> = {
-  read: piCreateReadToolDefinition(process.cwd()),
-  bash: piBashToolDefinition,
-  edit: piCreateEditToolDefinition(process.cwd()),
-  write: piCreateWriteToolDefinition(process.cwd()),
-  grep: piCreateGrepToolDefinition(process.cwd()),
-  find: piCreateFindToolDefinition(process.cwd()),
-  ls: piCreateLsToolDefinition(process.cwd()),
+const PI_BUILTIN_TOOL_NAMES: readonly PiBuiltinToolName[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
+
+// pi builtins resolve relative paths (and, for trusted/owner bash, the spawn
+// cwd) against the cwd baked in at factory time, so the definitions are built
+// per session from the session's agentDir rather than the module-load
+// process.cwd() — otherwise a session whose agentDir differs from the import-
+// time cwd would read/write in the wrong tree. bash keeps the spawnHook that
+// threads the internal env overlay to the (non-sandboxed) spawn.
+function createPiBuiltinToolDefinition(name: PiBuiltinToolName, cwd: string): ToolDefinition<any, any, any> {
+  switch (name) {
+    case 'read':
+      return piCreateReadToolDefinition(cwd)
+    case 'bash':
+      return piCreateBashToolDefinition(cwd, { spawnHook: bashSpawnHookWithOverlay })
+    case 'edit':
+      return piCreateEditToolDefinition(cwd)
+    case 'write':
+      return piCreateWriteToolDefinition(cwd)
+    case 'grep':
+      return piCreateGrepToolDefinition(cwd)
+    case 'find':
+      return piCreateFindToolDefinition(cwd)
+    case 'ls':
+      return piCreateLsToolDefinition(cwd)
+  }
 }
 
 const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any, any, any>> = {
@@ -152,21 +164,21 @@ const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any,
 }
 
 function isPiBuiltinToolName(name: string): name is PiBuiltinToolName {
-  return name in PI_BUILTIN_TOOL_DEFINITION_MAP
+  return (PI_BUILTIN_TOOL_NAMES as readonly string[]).includes(name)
 }
 
 export function isPiCodingBuiltinName(name: string): boolean {
-  return name in PI_BUILTIN_TOOL_DEFINITION_MAP
+  return isPiBuiltinToolName(name)
 }
 
 function isTypeclawToolName(name: string): name is TypeclawToolName {
   return name in TYPECLAW_TOOL_DEFINITION_MAP
 }
 
-export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): ToolDefinition<any, any, any>[] {
+export function resolveBuiltinToolRefs(refs: BuiltinToolRef[], cwd: string): ToolDefinition<any, any, any>[] {
   return refs.map((ref) => {
     const name = ref.__builtinTool
-    if (isPiBuiltinToolName(name)) return PI_BUILTIN_TOOL_DEFINITION_MAP[name]
+    if (isPiBuiltinToolName(name)) return createPiBuiltinToolDefinition(name, cwd)
     if (isTypeclawToolName(name)) return TYPECLAW_TOOL_DEFINITION_MAP[name]
     throw new Error(`unknown built-in tool ref: ${name}`)
   })
@@ -484,20 +496,12 @@ async function runToolAfterSafely(
   }
 }
 
-export function defaultBuiltinPiToolDefinitions(): ToolDefinition<any, any, any>[] {
-  return [
-    PI_BUILTIN_TOOL_DEFINITION_MAP.read,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.bash,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.edit,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.write,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.grep,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.find,
-    PI_BUILTIN_TOOL_DEFINITION_MAP.ls,
-  ]
+export function defaultBuiltinPiToolDefinitions(cwd: string): ToolDefinition<any, any, any>[] {
+  return PI_BUILTIN_TOOL_NAMES.map((name) => createPiBuiltinToolDefinition(name, cwd))
 }
 
 export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDefinition<any, any>[] {
-  return defaultBuiltinPiToolDefinitions().map((tool) => wrapBuiltinToolDefinition(tool, opts))
+  return defaultBuiltinPiToolDefinitions(opts.agentDir).map((tool) => wrapBuiltinToolDefinition(tool, opts))
 }
 
 // Rewrites mutableArgs.command in place so the bash builtin runs inside bwrap

@@ -95,7 +95,7 @@ describe('scout subagent declaration', () => {
     const { webSearchTool } = await import('@/agent/tools/websearch')
     const { webFetchTool } = await import('@/agent/tools/webfetch')
     const sub = createScoutSubagent()
-    const resolved = resolveBuiltinToolRefs(sub.tools ?? [])
+    const resolved = resolveBuiltinToolRefs(sub.tools ?? [], process.cwd())
     expect(resolved.map((t) => t.name).sort()).toEqual(['web_fetch', 'web_search'])
     const byName = Object.fromEntries(resolved.map((t) => [t.name, t]))
     expect(byName.web_search).toBe(webSearchTool)

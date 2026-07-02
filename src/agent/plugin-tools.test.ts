@@ -681,17 +681,20 @@ describe('getOrigin (live origin holder)', () => {
 describe('resolveBuiltinToolRefs', () => {
   test('resolves every ref to a ToolDefinition, preserving order', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const resolved = resolveBuiltinToolRefs([
-      { __builtinTool: 'read' },
-      { __builtinTool: 'bash' },
-      { __builtinTool: 'edit' },
-      { __builtinTool: 'write' },
-      { __builtinTool: 'grep' },
-      { __builtinTool: 'find' },
-      { __builtinTool: 'ls' },
-      { __builtinTool: 'web_search' },
-      { __builtinTool: 'web_fetch' },
-    ])
+    const resolved = resolveBuiltinToolRefs(
+      [
+        { __builtinTool: 'read' },
+        { __builtinTool: 'bash' },
+        { __builtinTool: 'edit' },
+        { __builtinTool: 'write' },
+        { __builtinTool: 'grep' },
+        { __builtinTool: 'find' },
+        { __builtinTool: 'ls' },
+        { __builtinTool: 'web_search' },
+        { __builtinTool: 'web_fetch' },
+      ],
+      process.cwd(),
+    )
     expect(resolved.map((t) => t.name)).toEqual([
       'read',
       'bash',
@@ -708,7 +711,7 @@ describe('resolveBuiltinToolRefs', () => {
   test('pi coding builtins resolve to ToolDefinitions carrying the builtin name', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     for (const name of ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const) {
-      const r = resolveBuiltinToolRefs([{ __builtinTool: name }])
+      const r = resolveBuiltinToolRefs([{ __builtinTool: name }], process.cwd())
       expect(r.length).toBe(1)
       expect(r[0]?.name).toBe(name)
     }
@@ -717,7 +720,7 @@ describe('resolveBuiltinToolRefs', () => {
   test('bash resolves to the spawnHook-wired ToolDefinition, not pi bare createBashToolDefinition', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const pi = await import('@mariozechner/pi-coding-agent')
-    const r = resolveBuiltinToolRefs([{ __builtinTool: 'bash' }])
+    const r = resolveBuiltinToolRefs([{ __builtinTool: 'bash' }], process.cwd())
     expect(r.length).toBe(1)
     expect(r[0]?.name).toBe('bash')
     // It is our own instance carrying the env-overlay spawnHook, not a fresh
@@ -729,31 +732,36 @@ describe('resolveBuiltinToolRefs', () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     const { webSearchTool } = await import('./tools/websearch')
     const { webFetchTool } = await import('./tools/webfetch')
-    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }])[0]).toBe(webSearchTool)
-    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }])[0]).toBe(webFetchTool)
+    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }], process.cwd())[0]).toBe(webSearchTool)
+    expect(resolveBuiltinToolRefs([{ __builtinTool: 'web_fetch' }], process.cwd())[0]).toBe(webFetchTool)
   })
 
   test('mixed refs resolve in order: web-only (scout-shape)', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const r = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }, { __builtinTool: 'web_fetch' }])
+    const r = resolveBuiltinToolRefs([{ __builtinTool: 'web_search' }, { __builtinTool: 'web_fetch' }], process.cwd())
     expect(r.map((t) => t.name)).toEqual(['web_search', 'web_fetch'])
   })
 
   test('mixed refs resolve in order: coding-only (explorer-shape)', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    const r = resolveBuiltinToolRefs([
-      { __builtinTool: 'read' },
-      { __builtinTool: 'grep' },
-      { __builtinTool: 'find' },
-      { __builtinTool: 'ls' },
-      { __builtinTool: 'bash' },
-    ])
+    const r = resolveBuiltinToolRefs(
+      [
+        { __builtinTool: 'read' },
+        { __builtinTool: 'grep' },
+        { __builtinTool: 'find' },
+        { __builtinTool: 'ls' },
+        { __builtinTool: 'bash' },
+      ],
+      process.cwd(),
+    )
     expect(r.map((t) => t.name)).toEqual(['read', 'grep', 'find', 'ls', 'bash'])
   })
 
   test('throws on unknown built-in names', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
-    expect(() => resolveBuiltinToolRefs([{ __builtinTool: 'nope' }])).toThrow(/unknown built-in tool ref/)
+    expect(() => resolveBuiltinToolRefs([{ __builtinTool: 'nope' }], process.cwd())).toThrow(
+      /unknown built-in tool ref/,
+    )
   })
 })
 
@@ -848,8 +856,27 @@ describe('wrapBuiltinToolDefinition (pi customTools override path)', () => {
   })
 
   test('defaultBuiltinPiToolDefinitions returns the seven pi coding-tool definitions that need hook coverage', async () => {
-    const tools = defaultBuiltinPiToolDefinitions()
+    const tools = defaultBuiltinPiToolDefinitions(process.cwd())
     expect(tools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+  })
+
+  test('builtin file tools resolve relative paths against the cwd they were built with, not process.cwd()', async () => {
+    // Regression: pi builtins bake in the cwd at factory time. Building them from
+    // the session's agentDir (not the module-load process.cwd()) is what keeps a
+    // read/write/edit of a relative path landing in the session's own tree.
+    const dir = await mkdtemp(path.join(tmpdir(), 'typeclaw-cwd-bind-'))
+    try {
+      await Bun.write(path.join(dir, 'marker.txt'), 'in-agent-dir')
+      const [read] = defaultBuiltinPiToolDefinitions(dir)
+      const result = await read!.execute('c', { path: 'marker.txt' } as never, undefined, undefined, {} as never)
+      const text = (result.content as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      expect(text).toContain('in-agent-dir')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test('buildBuiltinPiToolOverrides produces same-named ToolDefinitions ready for customTools', async () => {
