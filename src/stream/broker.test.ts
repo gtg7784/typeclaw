@@ -239,13 +239,13 @@ describe('createStream — scan() over the in-memory history', () => {
     expect(replies.map((m) => m.payload)).toEqual(['response'])
   })
 
-  test('respects sinceTs to filter older entries', async () => {
-    const stream = createStream()
+  test('respects sinceTs to filter older entries', () => {
+    let clock = 1_000
+    const stream = createStream({ now: () => clock })
     stream.publish({ target: { kind: 'broadcast' }, payload: 'old' })
 
-    await new Promise((r) => setTimeout(r, 5))
-    const cutoff = Date.now()
-    await new Promise((r) => setTimeout(r, 5))
+    clock = 1_010
+    const cutoff = 1_005
 
     stream.publish({ target: { kind: 'broadcast' }, payload: 'new' })
 

@@ -13,9 +13,13 @@ type TargetKind = (typeof TARGET_KINDS)[number]
 
 export type CreateStreamSnapshotToolOptions = {
   stream: Stream
+  // Clock source for the `since_ms_ago` cutoff. Defaults to the real clock;
+  // injectable so tests can pin `now` and assert the time filter without
+  // depending on wall-clock timing between publish and execute.
+  now?: () => number
 }
 
-export function createStreamSnapshotTool({ stream }: CreateStreamSnapshotToolOptions) {
+export function createStreamSnapshotTool({ stream, now = Date.now }: CreateStreamSnapshotToolOptions) {
   return defineTool({
     name: 'stream_snapshot',
     label: 'Stream Snapshot',
@@ -54,7 +58,7 @@ export function createStreamSnapshotTool({ stream }: CreateStreamSnapshotToolOpt
 
     async execute(_toolCallId, params) {
       const limit = clampLimit(params.limit)
-      const filter = buildFilter(params.target_kind, params.target_id, params.since_ms_ago, limit)
+      const filter = buildFilter(params.target_kind, params.target_id, params.since_ms_ago, limit, now)
       const events = stream.scan(filter)
       return formatResult(events, params)
     },
@@ -71,10 +75,11 @@ function buildFilter(
   id: string | undefined,
   sinceMsAgo: number | undefined,
   limit: number,
+  now: () => number,
 ): ScanFilter {
   const filter: ScanFilter = { limit }
   if (kind !== undefined) filter.target = buildTargetFilter(kind, id)
-  if (sinceMsAgo !== undefined) filter.sinceTs = Date.now() - sinceMsAgo
+  if (sinceMsAgo !== undefined) filter.sinceTs = now() - sinceMsAgo
   return filter
 }
 

@@ -62,6 +62,7 @@ export type Stream = {
 
 export type CreateStreamOptions = {
   historySize?: number
+  now?: () => number
 }
 
 export class StreamTimeoutError extends Error {
