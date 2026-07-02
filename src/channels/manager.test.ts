@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { AgentSession } from '@/agent'
+import { createFileSecretsProvider } from '@/secrets/secrets-provider'
 
 import { createChannelManager } from './manager'
 import { defaultHistoryConfig, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
@@ -581,6 +582,7 @@ describe('channel manager — slack adapter lifecycle', () => {
       agentDir,
       channelsConfigRef: () => cfg,
       env,
+      secretsProvider: createFileSecretsProvider(join(agentDir, 'secrets.json')),
       createSlackUserAdapter: () => {
         constructed = true
         return fake
@@ -1017,6 +1019,7 @@ describe('channel manager — kakaotalk credential preflight', () => {
       agentDir,
       channelsConfigRef: () => cfg,
       env: kakaoEnv,
+      secretsProvider: createFileSecretsProvider(join(agentDir, 'secrets.json')),
       createKakaotalkAdapter: () => fake,
     })
 
@@ -1069,6 +1072,7 @@ describe('channel manager — kakaotalk credential preflight', () => {
       agentDir,
       channelsConfigRef: () => cfg,
       env: kakaoEnv,
+      secretsProvider: createFileSecretsProvider(join(agentDir, 'secrets.json')),
       createKakaotalkAdapter: () => fake,
     })
 
@@ -1090,6 +1094,7 @@ describe('channel manager — kakaotalk credential preflight', () => {
       agentDir,
       channelsConfigRef: () => cfg,
       env: kakaoEnv,
+      secretsProvider: createFileSecretsProvider(join(agentDir, 'secrets.json')),
       createKakaotalkAdapter: () => fake,
     })
 
@@ -1111,6 +1116,7 @@ describe('channel manager — kakaotalk credential preflight', () => {
       agentDir,
       channelsConfigRef: () => cfg,
       env: kakaoEnv,
+      secretsProvider: createFileSecretsProvider(join(agentDir, 'secrets.json')),
       createKakaotalkAdapter: () => fake,
     })
 
