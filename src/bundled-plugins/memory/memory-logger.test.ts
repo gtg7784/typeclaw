@@ -132,6 +132,15 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(lower).toMatch(/single-occurrence|one event produces at most one fragment/)
   })
 
+  test('captures a user correction even when memory may already know it, in any language', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('EVEN IF it sounds like something memory may already know')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('cannot inspect `memory/topics/`')
+    // multi-language, not English cue phrases (per AGENTS.md)
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('language-independent')
+    expect(lower).toMatch(/korean|japanese|chinese|arabic/)
+  })
+
   test('declares durable facts about non-user people as a capture-worthy category', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toContain('collaborator/contact facts')
