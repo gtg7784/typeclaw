@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -17,8 +18,35 @@ afterEach(() => {
   server = null
 })
 
-function startOkServer(): ReturnType<typeof Bun.serve> {
-  return Bun.serve({
+// Bun.serve returns a bound port before its accept loop is guaranteed to be
+// serving; under parallel-test contention the very first 127.0.0.1 connection
+// can be refused/reset, which sendHttp reports as a fast ok:false and demotes
+// the restart to a failure. Probe the listener with a bounded TCP connect
+// (never an HTTP request — the recording fetch handlers would count it) before
+// handing the server to a test.
+async function serveReady(options: Parameters<typeof Bun.serve>[0]): Promise<ReturnType<typeof Bun.serve>> {
+  const server = Bun.serve(options)
+  const port = server.port
+  if (port === undefined) return server
+  for (let i = 0; i < 40; i++) {
+    if (await canConnect(port)) return server
+    await Bun.sleep(5)
+  }
+  return server
+}
+
+function canConnect(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: '127.0.0.1', port }, () => {
+      socket.end()
+      resolve(true)
+    })
+    socket.on('error', () => resolve(false))
+  })
+}
+
+async function startOkServer(): Promise<ReturnType<typeof Bun.serve>> {
+  return serveReady({
     port: 0,
     fetch() {
       return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
@@ -53,7 +81,7 @@ const TEST_ACK_TIMEOUT_MS = 30_000
 describe('createRestartTool', () => {
   test('uses HTTP hostd transport when URL and token are configured', async () => {
     const requests: Array<{ auth: string | null; body: unknown }> = []
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       async fetch(req) {
         requests.push({ auth: req.headers.get('authorization'), body: await req.json() })
@@ -87,7 +115,7 @@ describe('createRestartTool', () => {
 
   test('forwards build:true in the RPC body when invoked with { build: true }', async () => {
     const requests: Array<{ body: unknown }> = []
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       async fetch(req) {
         requests.push({ body: await req.json() })
@@ -112,7 +140,7 @@ describe('createRestartTool', () => {
 
   test('omitting build defaults to build:false in the RPC body', async () => {
     const requests: Array<{ body: unknown }> = []
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       async fetch(req) {
         requests.push({ body: await req.json() })
@@ -135,7 +163,7 @@ describe('createRestartTool', () => {
   })
 
   test('returns denial details when HTTP restart is rejected', async () => {
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       fetch() {
         return Response.json({ ok: false, reason: 'invalid restart token' })
@@ -158,7 +186,7 @@ describe('createRestartTool', () => {
   })
 
   test('does not exit when hostd rejects restart before ACK', async () => {
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       fetch() {
         return Response.json({ ok: false, reason: 'host daemon source has drifted' })
@@ -189,7 +217,7 @@ describe('createRestartTool', () => {
 
   test('publishes a container-restarting broadcast on successful ACK', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const stream = createStream()
     const received: StreamMessage[] = []
     stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -219,7 +247,7 @@ describe('createRestartTool', () => {
 
   test('broadcast carries the originatingSessionId passed at construction', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const stream = createStream()
     const received: StreamMessage[] = []
     stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -246,7 +274,7 @@ describe('createRestartTool', () => {
 
   test('does not publish a broadcast when hostd denies the restart', async () => {
     // given
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       fetch() {
         return Response.json({ ok: false, reason: 'denied' })
@@ -278,7 +306,7 @@ describe('createRestartTool', () => {
 
   test('completes successfully when stream is omitted (back-compat for non-runtime callers)', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     let exitCode: number | undefined
     const tool = createRestartTool({
       containerName: 'coder',
@@ -314,7 +342,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('writes the handoff file when agentDir and originatingSessionFile are passed', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -343,7 +371,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('writes a channel-origin handoff carrying the channel key', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -374,7 +402,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('writes the LIVE turn author into the handoff, not the session-creation author', async () => {
     // given: the provider tracks a mutable holder advanced after construction
-    server = startOkServer()
+    server = await startOkServer()
     const liveAuthor = { current: 'U_OPENER' as string | undefined }
     const tool = createRestartTool({
       containerName: 'coder',
@@ -403,7 +431,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('skips the handoff when handoffOrigin is omitted (cron/subagent/system origins)', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -424,7 +452,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('skips the handoff when agentDir is omitted (non-TUI origins do not greet)', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -444,7 +472,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('skips the handoff when originatingSessionFile is omitted (in-memory sessions)', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
@@ -464,7 +492,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('does not write the handoff when hostd denies the restart', async () => {
     // given
-    server = Bun.serve({
+    server = await serveReady({
       port: 0,
       fetch() {
         return Response.json({ ok: false, reason: 'denied' })
@@ -493,7 +521,7 @@ describe('createRestartTool restart-pending handoff', () => {
 
   test('uses the broadcast restartedAt timestamp in the handoff (single source of truth)', async () => {
     // given
-    server = startOkServer()
+    server = await startOkServer()
     const stream = createStream()
     const received: StreamMessage[] = []
     stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => received.push(msg))
