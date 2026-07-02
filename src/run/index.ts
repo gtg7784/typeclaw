@@ -82,8 +82,8 @@ import { createTunnelManager, type TunnelManager, type TunnelManagerOptions } fr
 
 import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
-import { installCodexFetchObserver } from './codex-fetch-observer'
 import { installFatalGuard } from './fatal-guard'
+import { installLlmFetchObserver } from './llm-fetch-observer'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
 type BunServer = ReturnType<Server['start']>
@@ -133,7 +133,7 @@ export type StartAgentResult = {
 }
 
 // Owns boot-failure cleanup for everything installed before `startAgentRuntime`
-// returns a `StartAgentResult`. `installCodexFetchObserver`/`installFatalGuard`
+// returns a `StartAgentResult`. `installLlmFetchObserver`/`installFatalGuard`
 // attach process-wide listeners, and `loadPlugins` opens plugin-lifetime
 // resources (the memory plugin's sqlite handle); if any boot step throws before
 // the result exists, the caller never receives `stop()`, so each of those would
@@ -182,12 +182,15 @@ async function startAgentRuntime(
   const reloadRegistry = new ReloadRegistry()
 
   // Wrap globalThis.fetch BEFORE any plugin/session/manager construction so
-  // every Codex Responses call from anywhere in the container is observed.
-  // Logs one `[codex-fetch]` line per matched request with phase timings;
-  // never aborts, never retries — purely passive instrumentation while we
-  // investigate the recurring multi-minute Codex stalls (see issue #394).
-  // Opt out with TYPECLAW_CODEX_FETCH_OBSERVER=off.
-  const uninstallCodexFetchObserver = installCodexFetchObserver()
+  // every LLM provider stream from anywhere in the container is guarded. Logs
+  // one `[llm-fetch]` line per matched request with phase timings and applies
+  // TTFB/idle/overall deadlines that abort a stalled stream — turning a silent
+  // infinite hang (e.g. a rate-limited proxy holding the SSE connection open
+  // with zero bytes) into a retryable error the fallback path can surface.
+  // Covers Codex, Anthropic (`/v1/messages`), and OpenAI-compatible endpoints
+  // regardless of host, since base URLs are user-configured. Opt out with
+  // TYPECLAW_LLM_FETCH_OBSERVER=off.
+  const uninstallLlmFetchObserver = installLlmFetchObserver()
 
   // The host CLI sets TYPECLAW_CONTAINER_NAME when it `docker run`s us. When
   // running outside a typeclaw container (tests, ad-hoc `bun run typeclaw run`
@@ -225,7 +228,7 @@ async function startAgentRuntime(
   const disposeProcessGlobals = (): void => {
     if (processGlobalsDisposed) return
     processGlobalsDisposed = true
-    uninstallCodexFetchObserver()
+    uninstallLlmFetchObserver()
     fatalGuard.dispose()
     // onSigterm is defined later in this scope but only ever invoked after init;
     // removing it here keeps a restarted startAgent() from stacking listeners.

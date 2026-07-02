@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { installCodexFetchObserver, type TimeoutScheduler } from './codex-fetch-observer'
+import { defaultLlmFetchEndpoints, installLlmFetchObserver, type TimeoutScheduler } from './llm-fetch-observer'
 
 // Programmable scheduler for tests. Tasks scheduled for time T fire when the
 // test calls `fire(T)`. Out-of-order T values (T must be monotonically
@@ -122,23 +122,28 @@ async function drainQuiet(stream: ReadableStream<Uint8Array> | null): Promise<vo
 
 const originalFetch = globalThis.fetch
 
-describe('installCodexFetchObserver', () => {
-  beforeEach(() => {
-    globalThis.fetch = originalFetch
+describe('installLlmFetchObserver', () => {
+  const clearObserverEnv = () => {
     delete process.env.TYPECLAW_CODEX_TIMEOUTS
     delete process.env.TYPECLAW_CODEX_TTFB_MS
     delete process.env.TYPECLAW_CODEX_IDLE_MS
     delete process.env.TYPECLAW_CODEX_OVERALL_MS
     delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
+    delete process.env.TYPECLAW_LLM_TIMEOUTS
+    delete process.env.TYPECLAW_LLM_TTFB_MS
+    delete process.env.TYPECLAW_LLM_IDLE_MS
+    delete process.env.TYPECLAW_LLM_OVERALL_MS
+    delete process.env.TYPECLAW_LLM_FETCH_OBSERVER
+  }
+
+  beforeEach(() => {
+    globalThis.fetch = originalFetch
+    clearObserverEnv()
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
-    delete process.env.TYPECLAW_CODEX_TIMEOUTS
-    delete process.env.TYPECLAW_CODEX_TTFB_MS
-    delete process.env.TYPECLAW_CODEX_IDLE_MS
-    delete process.env.TYPECLAW_CODEX_OVERALL_MS
-    delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
+    clearObserverEnv()
   })
 
   test('passes non-Codex requests through unchanged (no wrapping)', async () => {
@@ -146,7 +151,7 @@ describe('installCodexFetchObserver', () => {
     const sentinel = Symbol('upstream')
     globalThis.fetch = (async () => sentinel as unknown as Response) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger })
+    const uninstall = installLlmFetchObserver({ logger })
     try {
       const result = await fetch('https://example.com/some/other/path')
       expect(result).toBe(sentinel as unknown as Response)
@@ -163,7 +168,7 @@ describe('installCodexFetchObserver', () => {
       throw upstreamError
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger })
+    const uninstall = installLlmFetchObserver({ logger })
     try {
       await expect(fetch('https://api.openai.com/v1/responses')).rejects.toBe(upstreamError)
       expect(entries).toEqual([])
@@ -185,7 +190,7 @@ describe('installCodexFetchObserver', () => {
       })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
     try {
       clock.set(0)
       const responsePromise = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -203,9 +208,9 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    const line = codexLines[0]!.msg
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    const line = observed[0]!.msg
     expect(line).toContain('status=200')
     expect(line).toContain('headers_ms=50')
     expect(line).toContain('first_byte_ms=200')
@@ -228,7 +233,7 @@ describe('installCodexFetchObserver', () => {
       })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
     try {
       clock.set(0)
       const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -240,10 +245,10 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    expect(codexLines[0]!.msg).toContain('status=429')
-    expect(codexLines[0]!.msg).toContain('retry_after=42')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('status=429')
+    expect(observed[0]!.msg).toContain('retry_after=42')
   })
 
   test('logs stream errors with error message and partial timings', async () => {
@@ -256,7 +261,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
     try {
       clock.set(0)
       const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -270,9 +275,9 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    const line = codexLines[0]!.msg
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    const line = observed[0]!.msg
     expect(line).toContain('status=200')
     expect(line).toContain('first_byte_ms=100')
     expect(line).toContain('error="connection reset by peer"')
@@ -286,7 +291,7 @@ describe('installCodexFetchObserver', () => {
       throw new Error('fetch failed')
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
     try {
       clock.set(0)
       await expect(fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })).rejects.toThrow(
@@ -296,12 +301,12 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    expect(codexLines[0]!.msg).toContain('error="fetch failed"')
-    expect(codexLines[0]!.msg).toContain('headers_ms=null')
-    expect(codexLines[0]!.msg).toContain('first_byte_ms=null')
-    expect(codexLines[0]!.msg).toMatch(/total_ms=\d+/)
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('error="fetch failed"')
+    expect(observed[0]!.msg).toContain('headers_ms=null')
+    expect(observed[0]!.msg).toContain('first_byte_ms=null')
+    expect(observed[0]!.msg).toMatch(/total_ms=\d+/)
   })
 
   test('matches Codex URL by host and path, ignores other paths on same host', async () => {
@@ -309,11 +314,11 @@ describe('installCodexFetchObserver', () => {
     const sentinel = new Response(null, { status: 204 })
     globalThis.fetch = (async () => sentinel) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger })
+    const uninstall = installLlmFetchObserver({ logger })
     try {
       const result = await fetch('https://chatgpt.com/backend-api/me')
       expect(result).toBe(sentinel)
-      expect(entries.filter((e) => e.msg.startsWith('[codex-fetch]'))).toEqual([])
+      expect(entries.filter((e) => e.msg.startsWith('[llm-fetch]'))).toEqual([])
     } finally {
       uninstall()
     }
@@ -322,7 +327,7 @@ describe('installCodexFetchObserver', () => {
   test('uninstall restores original fetch', () => {
     const { logger } = captureLogger()
     const before = globalThis.fetch
-    const uninstall = installCodexFetchObserver({ logger })
+    const uninstall = installLlmFetchObserver({ logger })
     expect(globalThis.fetch).not.toBe(before)
     uninstall()
     expect(globalThis.fetch).toBe(before)
@@ -331,9 +336,9 @@ describe('installCodexFetchObserver', () => {
   test('a second install shares the wrapper and is ref-counted: a later release keeps fetch observed while another claimant remains', () => {
     const { logger } = captureLogger()
     const before = globalThis.fetch
-    const release1 = installCodexFetchObserver({ logger })
+    const release1 = installLlmFetchObserver({ logger })
     const wrappedAfterFirst = globalThis.fetch
-    const release2 = installCodexFetchObserver({ logger })
+    const release2 = installLlmFetchObserver({ logger })
     try {
       // given two claimants sharing one wrapper
       expect(globalThis.fetch).toBe(wrappedAfterFirst)
@@ -355,13 +360,13 @@ describe('installCodexFetchObserver', () => {
   test('a release is idempotent and never tears down a re-acquired observer', () => {
     const { logger } = captureLogger()
     const before = globalThis.fetch
-    const release1 = installCodexFetchObserver({ logger })
+    const release1 = installLlmFetchObserver({ logger })
     release1()
     release1() // idempotent: second call is a no-op
     expect(globalThis.fetch).toBe(before)
 
     // a fresh install after full release re-wraps and is independent
-    const release2 = installCodexFetchObserver({ logger })
+    const release2 = installLlmFetchObserver({ logger })
     expect(globalThis.fetch).not.toBe(before)
     // the stale release1 must NOT restore over the new observer
     release1()
@@ -375,17 +380,17 @@ describe('installCodexFetchObserver', () => {
     const before = globalThis.fetch
     process.env.TYPECLAW_CODEX_FETCH_OBSERVER = 'off'
     try {
-      const uninstall = installCodexFetchObserver({ logger })
+      const uninstall = installLlmFetchObserver({ logger })
       expect(globalThis.fetch).toBe(before)
       uninstall()
       expect(globalThis.fetch).toBe(before)
-      expect(entries.filter((e) => e.msg.startsWith('[codex-fetch]'))).toEqual([])
+      expect(entries.filter((e) => e.msg.startsWith('[llm-fetch]'))).toEqual([])
     } finally {
       delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
     }
   })
 
-  test('custom codexHost option matches a different host (for staging/testing)', async () => {
+  test('observes an arbitrary Anthropic proxy host by /v1/messages path suffix', async () => {
     const { logger, entries } = captureLogger()
     const clock = makeClock()
     const ctrl = makeControllableBody()
@@ -395,10 +400,10 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, codexHost: 'staging.example.com', now: clock.now })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
     try {
       clock.set(0)
-      const response = await fetch('https://staging.example.com/backend-api/codex/responses', { method: 'POST' })
+      const response = await fetch('https://proxy.example.com/anthropic/v1/messages', { method: 'POST' })
       const drainPromise = drainQuiet(response.body)
       clock.set(20)
       await ctrl.close()
@@ -407,7 +412,138 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    expect(entries.filter((e) => e.msg.startsWith('[codex-fetch]')).length).toBe(1)
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('provider=anthropic')
+  })
+
+  test('matches Anthropic, OpenAI-compatible, and Codex paths; ignores GET and unrelated paths', async () => {
+    const { logger, entries } = captureLogger()
+    const sentinel = new Response(null, { status: 204 })
+    globalThis.fetch = (async () => sentinel) as unknown as typeof fetch
+
+    const matchCases: Array<{ url: string; provider: string }> = [
+      { url: 'https://api.anthropic.com/v1/messages', provider: 'anthropic' },
+      { url: 'https://proxy.internal/gateway/anthropic/v1/messages', provider: 'anthropic' },
+      { url: 'https://api.openai.com/v1/chat/completions', provider: 'openai-compatible' },
+      { url: 'https://api.fireworks.ai/inference/v1/chat/completions', provider: 'openai-compatible' },
+      { url: 'https://litellm.internal/chat/completions', provider: 'openai-compatible' },
+      { url: 'https://api.openai.com/v1/responses', provider: 'openai-compatible' },
+      { url: 'https://chatgpt.com/backend-api/codex/responses', provider: 'codex' },
+    ]
+
+    const uninstall = installLlmFetchObserver({ logger, ttfbMs: 0, idleMs: 0, overallMs: 0 })
+    try {
+      for (const { url, provider } of matchCases) {
+        entries.length = 0
+        await fetch(url, { method: 'POST' })
+        const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+        expect(observed.length, `expected ${url} to be observed`).toBe(1)
+        expect(observed[0]!.msg).toContain(`provider=${provider}`)
+      }
+
+      // given a GET to a matching path and a POST to an unrelated path
+      entries.length = 0
+      await fetch('https://api.anthropic.com/v1/messages', { method: 'GET' })
+      await fetch('https://api.anthropic.com/v1/models', { method: 'POST' })
+      expect(entries.filter((e) => e.msg.startsWith('[llm-fetch]'))).toEqual([])
+    } finally {
+      uninstall()
+    }
+  })
+
+  test('idle timeout aborts a stalled Anthropic proxy stream (the production silent-hang)', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://proxy.example.com/anthropic/v1/messages', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(105)
+      await scheduler.fire(105)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('anthropic SSE body idle for 100ms')
+
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('provider=anthropic')
+    expect(observed[0]!.msg).toContain('cause=idle_timeout')
+  })
+
+  test('a fast 429 JSON error body passes through and logs without tripping a timeout', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    const jsonBody = new TextEncoder().encode(
+      '{"error":{"type":"rate_limit_error","message":"All tokens rate limited"}}',
+    )
+    globalThis.fetch = (async () => {
+      clock.set(8)
+      return new Response(jsonBody, { status: 429, headers: { 'retry-after': '30' } })
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 100, overallMs: 200 })
+    let status: number | null = null
+    let text = ''
+    try {
+      clock.set(0)
+      const response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST' })
+      status = response.status
+      clock.set(12)
+      text = await response.text()
+    } finally {
+      uninstall()
+    }
+
+    expect(status).toBe(429)
+    expect(text).toContain('All tokens rate limited')
+    expect(scheduler.pending()).toBe(0)
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('provider=anthropic')
+    expect(observed[0]!.msg).toContain('status=429')
+    expect(observed[0]!.msg).toContain('retry_after=30')
+    expect(observed[0]!.msg).toContain('cause=null')
+    expect(observed[0]!.msg).toContain('error=null')
+  })
+
+  test('TYPECLAW_CODEX_FETCH_OBSERVER=off still disables installation (legacy alias)', () => {
+    const { logger } = captureLogger()
+    const before = globalThis.fetch
+    process.env.TYPECLAW_CODEX_FETCH_OBSERVER = 'off'
+    try {
+      const uninstall = installLlmFetchObserver({ logger })
+      expect(globalThis.fetch).toBe(before)
+      uninstall()
+    } finally {
+      delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
+    }
   })
 
   test('TTFB timeout aborts pending fetch with a retryable error message', async () => {
@@ -425,7 +561,7 @@ describe('installCodexFetchObserver', () => {
       return fetchRejection as unknown as Response
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 0 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 0 })
     let caught: Error | null = null
     try {
       clock.set(0)
@@ -441,18 +577,19 @@ describe('installCodexFetchObserver', () => {
 
     expect(caught).not.toBeNull()
     expect(caught!.message).toContain('timed out')
-    expect(caught!.message).toContain('15ms'.replace('15', '50'))
+    expect(caught!.message).toContain('50ms')
     expect(underlyingSignal?.aborted).toBe(true)
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    const line = codexLines[0]!.msg
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    const line = observed[0]!.msg
+    expect(line).toContain('provider=codex')
     expect(line).toContain('status=null')
     expect(line).toContain('headers_ms=null')
     expect(line).toContain('first_byte_ms=null')
     expect(line).toContain('total_ms=50')
     expect(line).toContain('cause=ttfb_timeout')
-    expect(line).toMatch(/error="Codex fetch timed out before response headers after 50ms.*"/)
+    expect(line).toMatch(/error="codex fetch timed out before response headers after 50ms.*"/)
   })
 
   test('TTFB timer is cancelled once headers arrive (healthy fast turn)', async () => {
@@ -466,7 +603,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 1000, idleMs: 0 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 1000, idleMs: 0 })
     try {
       clock.set(0)
       const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -481,11 +618,11 @@ describe('installCodexFetchObserver', () => {
     }
 
     expect(scheduler.pending()).toBe(0)
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    expect(codexLines[0]!.msg).toContain('status=200')
-    expect(codexLines[0]!.msg).toContain('cause=null')
-    expect(codexLines[0]!.msg).toContain('error=null')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('status=200')
+    expect(observed[0]!.msg).toContain('cause=null')
+    expect(observed[0]!.msg).toContain('error=null')
   })
 
   test('TTFB composes with caller-provided AbortSignal (caller abort still wins)', async () => {
@@ -502,7 +639,7 @@ describe('installCodexFetchObserver', () => {
       }) as unknown as Response
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 60000, idleMs: 0 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 60000, idleMs: 0 })
     let caught: Error | null = null
     try {
       const pending = fetch('https://chatgpt.com/backend-api/codex/responses', {
@@ -533,7 +670,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
     let drainErr: Error | null = null
     try {
       clock.set(0)
@@ -559,9 +696,9 @@ describe('installCodexFetchObserver', () => {
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('idle for 100ms')
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    const line = codexLines[0]!.msg
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    const line = observed[0]!.msg
     expect(line).toContain('status=200')
     expect(line).toContain('cause=idle_timeout')
     expect(line).toMatch(/error=".*idle for 100ms.*"/)
@@ -578,7 +715,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
     try {
       clock.set(0)
       const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -596,11 +733,11 @@ describe('installCodexFetchObserver', () => {
       uninstall()
     }
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    expect(codexLines[0]!.msg).toContain('cause=null')
-    expect(codexLines[0]!.msg).toContain('error=null')
-    expect(codexLines[0]!.msg).toContain('body_bytes=18')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('cause=null')
+    expect(observed[0]!.msg).toContain('error=null')
+    expect(observed[0]!.msg).toContain('body_bytes=18')
   })
 
   test('Overall deadline aborts a slow-trickle stream that never trips the idle timer', async () => {
@@ -622,7 +759,7 @@ describe('installCodexFetchObserver', () => {
 
     // idleMs=100 (small) but each chunk lands inside it, so idle never trips.
     // overallMs=250 is exceeded while chunks are still trickling.
-    const uninstall = installCodexFetchObserver({
+    const uninstall = installLlmFetchObserver({
       logger,
       now: clock.now,
       scheduler,
@@ -664,9 +801,9 @@ describe('installCodexFetchObserver', () => {
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('overall deadline')
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    const line = codexLines[0]!.msg
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    const line = observed[0]!.msg
     expect(line).toContain('status=200')
     expect(line).toContain('cause=overall_timeout')
     expect(line).toMatch(/error=".*overall deadline.*"/)
@@ -687,7 +824,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({
+    const uninstall = installLlmFetchObserver({
       logger,
       now: clock.now,
       scheduler,
@@ -719,8 +856,8 @@ describe('installCodexFetchObserver', () => {
 
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('overall deadline')
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('cause=overall_timeout')
   })
 
   test('Overall deadline aborts immediately when the budget is already spent on headers', async () => {
@@ -737,7 +874,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({
+    const uninstall = installLlmFetchObserver({
       logger,
       now: clock.now,
       scheduler,
@@ -769,8 +906,8 @@ describe('installCodexFetchObserver', () => {
 
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('overall deadline')
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('cause=overall_timeout')
   })
 
   test('Idle abort listener count stays bounded across many chunks (no leak)', async () => {
@@ -807,7 +944,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 10_000 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 10_000 })
     try {
       // when: 100 chunks flow through, each one comfortably inside the idle window
       clock.set(0)
@@ -843,7 +980,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 50 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 50 })
     try {
       clock.set(0)
       const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
@@ -858,10 +995,10 @@ describe('installCodexFetchObserver', () => {
     }
 
     expect(scheduler.pending()).toBe(0)
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines.length).toBe(1)
-    expect(codexLines[0]!.msg).toContain('status=200')
-    expect(codexLines[0]!.msg).toContain('cause=null')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('status=200')
+    expect(observed[0]!.msg).toContain('cause=null')
   })
 
   test('TYPECLAW_CODEX_TTFB_MS env var overrides default', async () => {
@@ -878,7 +1015,7 @@ describe('installCodexFetchObserver', () => {
       }) as unknown as Response
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
     let caught: Error | null = null
     try {
       clock.set(0)
@@ -895,9 +1032,9 @@ describe('installCodexFetchObserver', () => {
     expect(caught).not.toBeNull()
     expect(caught!.message).toContain('250ms')
 
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('total_ms=250')
-    expect(codexLines[0]!.msg).toContain('cause=ttfb_timeout')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('total_ms=250')
+    expect(observed[0]!.msg).toContain('cause=ttfb_timeout')
   })
 
   test('Overall deadline fires even when the idle timer is disabled', async () => {
@@ -911,7 +1048,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({
+    const uninstall = installLlmFetchObserver({
       logger,
       now: clock.now,
       scheduler,
@@ -943,8 +1080,8 @@ describe('installCodexFetchObserver', () => {
 
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('overall deadline')
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('cause=overall_timeout')
   })
 
   test('overallMs=0 disables the overall deadline (stream may run unbounded)', async () => {
@@ -958,7 +1095,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({
+    const uninstall = installLlmFetchObserver({
       logger,
       now: clock.now,
       scheduler,
@@ -979,9 +1116,9 @@ describe('installCodexFetchObserver', () => {
     }
 
     expect(scheduler.pending()).toBe(0)
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('cause=null')
-    expect(codexLines[0]!.msg).toContain('error=null')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('cause=null')
+    expect(observed[0]!.msg).toContain('error=null')
   })
 
   test('TYPECLAW_CODEX_OVERALL_MS env var overrides default', async () => {
@@ -996,7 +1133,7 @@ describe('installCodexFetchObserver', () => {
       return new Response(ctrl.body, { status: 200 })
     }) as unknown as typeof fetch
 
-    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 0 })
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 0 })
     let drainErr: Error | null = null
     try {
       clock.set(0)
@@ -1021,7 +1158,97 @@ describe('installCodexFetchObserver', () => {
 
     expect(drainErr).not.toBeNull()
     expect(drainErr!.message).toContain('300ms')
-    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
-    expect(codexLines[0]!.msg).toContain('cause=overall_timeout')
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed[0]!.msg).toContain('cause=overall_timeout')
+  })
+
+  test('an unset TYPECLAW_CODEX_*_MS leaves the codex endpoint timeouts undefined (defers to generic/default)', () => {
+    const codex = defaultLlmFetchEndpoints({}).find((e) => e.label === 'codex')
+    expect(codex).toBeDefined()
+    expect(codex!.ttfbMs).toBeUndefined()
+    expect(codex!.idleMs).toBeUndefined()
+    expect(codex!.overallMs).toBeUndefined()
+  })
+
+  test('a set TYPECLAW_CODEX_*_MS pins the codex endpoint override', () => {
+    const codex = defaultLlmFetchEndpoints({
+      TYPECLAW_CODEX_TTFB_MS: '111',
+      TYPECLAW_CODEX_IDLE_MS: '222',
+      TYPECLAW_CODEX_OVERALL_MS: '333',
+    }).find((e) => e.label === 'codex')
+    expect(codex!.ttfbMs).toBe(111)
+    expect(codex!.idleMs).toBe(222)
+    expect(codex!.overallMs).toBe(333)
+  })
+
+  test('generic TYPECLAW_LLM_TTFB_MS applies to Codex when TYPECLAW_CODEX_TTFB_MS is unset', async () => {
+    // given: only the generic var is set; the Codex-specific var is unset, so it
+    // must NOT mask the generic one (the review bug).
+    process.env.TYPECLAW_LLM_TTFB_MS = '70'
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      clock.set(0)
+      const pending = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      clock.set(70)
+      await scheduler.fire(70)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    // then: the 70ms generic TTFB fired for Codex
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('70ms')
+    expect(entries.find((e) => e.msg.startsWith('[llm-fetch]'))!.msg).toContain('cause=ttfb_timeout')
+  })
+
+  test('TYPECLAW_CODEX_TTFB_MS overrides the generic TYPECLAW_LLM_TTFB_MS for Codex', async () => {
+    // given: both vars set; the Codex-specific one must win for the codex endpoint
+    process.env.TYPECLAW_LLM_TTFB_MS = '70'
+    process.env.TYPECLAW_CODEX_TTFB_MS = '40'
+    const { logger } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      clock.set(0)
+      const pending = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      clock.set(40)
+      await scheduler.fire(40)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    // then: the 40ms Codex-specific TTFB fired, not the 70ms generic one
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('40ms')
   })
 })
