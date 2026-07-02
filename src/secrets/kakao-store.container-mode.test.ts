@@ -75,6 +75,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
           hostdUrl: 'http://127.0.0.1:1',
           restartToken: 'secret',
           containerName: 'coder',
+          secretsPath,
         }),
       })
 
@@ -98,6 +99,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
           hostdUrl: hostd.url,
           restartToken: 'secret',
           containerName: 'coder',
+          secretsPath,
         }),
       })
 
@@ -124,6 +126,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
           hostdUrl: hostd.url,
           restartToken: 'secret',
           containerName: 'coder',
+          secretsPath,
         }),
       })
 
@@ -149,6 +152,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
           hostdUrl: hostd.url,
           restartToken: 'wrong',
           containerName: 'coder',
+          secretsPath,
         }),
       })
 

@@ -578,19 +578,24 @@ const TOKEN_ENV: Record<
 // buildAdapter skip the adapter instead of throwing and crashing the whole
 // channel manager. startAdapter's signature pre-check only reads secrets.json,
 // so this is the only place the missing triple is caught.
-function resolveHostProvider(env: NodeJS.ProcessEnv): RuntimeSecretsProvider | null {
+function resolveHostProvider(env: NodeJS.ProcessEnv, agentDir: string): RuntimeSecretsProvider | null {
   const hostdUrl = env.TYPECLAW_HOSTD_URL
   const restartToken = env.TYPECLAW_HOSTD_TOKEN
   const containerName = env.TYPECLAW_CONTAINER_NAME
   if (!hostdUrl || !restartToken || !containerName) return null
-  return createHostdSecretsProvider({ hostdUrl, restartToken, containerName })
+  return createHostdSecretsProvider({
+    hostdUrl,
+    restartToken,
+    containerName,
+    secretsPath: join(agentDir, 'secrets.json'),
+  })
 }
 
 function createContainerDiscordCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsDiscordCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsDiscordCredentialStore({
     mode: 'container',
@@ -617,7 +622,7 @@ function createContainerSlackCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsSlackCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsSlackCredentialStore({
     mode: 'container',
@@ -644,7 +649,7 @@ function createContainerWebexCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsWebexCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsWebexCredentialStore({
     mode: 'container',
@@ -671,7 +676,7 @@ function createContainerKakaoCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsKakaoCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsKakaoCredentialStore({
     mode: 'container',
@@ -698,7 +703,7 @@ function createContainerLineCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsLineCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsLineCredentialStore({
     mode: 'container',
@@ -725,7 +730,7 @@ function createContainerInstagramCredentialStore(
   agentDir: string,
   env: NodeJS.ProcessEnv,
 ): SecretsInstagramCredentialStore | null {
-  const hostProvider = resolveHostProvider(env)
+  const hostProvider = resolveHostProvider(env, agentDir)
   if (hostProvider === null) return null
   return new SecretsInstagramCredentialStore({
     mode: 'container',
