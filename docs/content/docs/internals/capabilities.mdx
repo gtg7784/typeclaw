@@ -99,6 +99,36 @@ Every capability is an exported factory (`create*` / `resolve*`) returning an ob
 - **`managed` stays a single value until behavior diverges.** Split to `'ecs' | 'k8s'` only when an implementation actually differs by platform.
 - **The runtime call sites are the invariant.** Across every profile composition, `caps.secrets?.writeBackChannelBlock(...)` / `caps.controller.stop(...)` never change — only the injected implementations swap. That property is what "run the container without a host" reduces to.
 
-## Not yet done
+## Status and roadmap
 
-The bags are defined but **not yet threaded through the composition roots** (`startAgentRuntime` in `src/run/index.ts`, `startDaemon` wiring in `src/cli/hostd.ts`) — those still hold collaborators as locals. Only two capabilities are extracted (`Controller`, `RuntimeSecretsProvider`); restart, port-forwarding, credential renewal, and ingress remain hostd-owned until their managed halves are built. There is no ECS/K8s implementation — the interfaces are prepared, file-based, ahead of the concrete platform work.
+The interfaces are **prepared, file-based, ahead of any concrete platform work**. `resolveDeploymentProfile()` returns `'host'` unconditionally — there is no managed runtime yet, so the `managed` branches (`createNoopController`, a future volume/secret-store provider) exist but never execute in production.
+
+### Shipped
+
+- **`Controller`** — extracted with two implementations (`createLocalDockerController`, `createNoopController`) and `resolveController(profile)`.
+- **`RuntimeSecretsProvider`** — extracted with read + write-back, file-based, with `createHostdSecretsProvider` and `createFileSecretsProvider`.
+- **`RuntimeCapabilities` is threaded through the container root.** `startAgentRuntime` (`src/run/index.ts`) assembles it once and hands `caps.secrets` to the channel manager — the six per-adapter provider resolutions collapsed to one. The manager no longer reads the hostd env triple itself.
+
+### Deliberately deferred — the on-trigger ledger
+
+A capability is extracted into an interface only when its trigger fires (see Rules of thumb: a second implementation exists, it crosses a stage boundary, or the root must hide platform selection). Extracting earlier — against a single caller — bakes hostd-isms into a "neutral" interface. Current triggers:
+
+| Capability                                  | State                                              | Trigger to extract                                                   |
+| ------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
+| `Restarter` (self-recycle)                  | hostd-owned (supervisor + restart tool)            | when a managed restart impl (e.g. ECS `StopTask`+`RunTask`) is built |
+| `PortForwarder` (portbroker)                | hostd-owned                                        | when a managed ingress replacement is built                          |
+| `CredentialRenewer` (KakaoTalk/Webex crons) | hostd-owned                                        | host-only today; extract only if a managed renewal home appears      |
+| `Ingress` (tunnels)                         | container-side (cloudflared) + host-side Tailscale | when a platform ingress replaces it                                  |
+
+`ControlPlaneCapabilities` is **not** threaded through a single host-stage root, and that is intentional: each CLI command (`typeclaw start`/`stop`/…) is its own process-level composition root, so a per-command `resolveController()` already _is_ the root. Collapsing the ~14 call sites into a shared bag would be ceremony, not consolidation — revisit only when multiple commands need shared profile/config resolution beyond a one-line factory.
+
+### What a managed platform would fire, all at once
+
+Committing to a concrete target (ECS or K8s) is the trigger that unblocks the rest, because it supplies the _second implementation_ every deferred interface is waiting for:
+
+1. A managed `Controller` (`createEcsController` / a K8s operator) — makes `resolveController('managed')` reach something real instead of the fail-loud noop.
+2. A managed `RuntimeSecretsProvider` — the `createFileSecretsProvider` shape already fits a **writable** mounted volume (EFS, a K8s PVC/CSI volume, a Cloud Run volume), since it writes back through the file. Read-only mounts (a projected K8s Secret/configMap) satisfy the read half but would fail write-back with `EROFS` — those need a live-API provider implementation instead.
+3. `Restarter` / `PortForwarder` interface extraction, each with its managed server half.
+4. Closing the three controller **escape hatches** that make `Controller` non-load-bearing today — `resolveDockerBinary()` in `src/compose/logs.ts`, `inspectContainer()` in `src/compose/status.ts`, and the raw `start`/`stop` imports in `src/init/index.ts` — plus the `preflightDocker()`-before-`resolveController()` ordering in the lifecycle CLI commands, which would exit on a host-only Docker check before a managed controller is reached. These only matter once a managed profile is executable; until then they are correct as-is.
+
+The invariant that makes all of this tractable: **runtime call sites never change** across profiles (`caps.secrets?.writeBackChannelBlock(...)`, `caps.controller.stop(...)`). A managed platform swaps the injected implementations behind the bags, not the callers.
