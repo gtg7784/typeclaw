@@ -61,7 +61,7 @@ export class SecretsInstagramCredentialStore {
 
   private readBlock(): InstagramChannelBlock {
     const channels =
-      this.options.mode === 'container' ? this.backend.tryReadChannelsSync() : this.backend.readChannelsSync()
+      this.options.mode === 'container' ? this.options.hostProvider.readChannels() : this.backend.readChannelsSync()
     return parseBlock(channels?.instagram)
   }
 
