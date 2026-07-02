@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: The three stages, the host daemon, the trust boundary
+description: The three stages, the host-side control plane, the trust boundary
 icon: Layers
 ---
 
@@ -16,16 +16,16 @@ TypeClaw runs code in three stages. Each stage has a different filesystem, a dif
 
 This split is what makes deployments boring. Nothing on the host changes when an agent restarts. Nothing in the container has authority over the host. The two communicate over narrow, typed channels.
 
-## The host daemon
+## The host-side control plane
 
-There are two problems that both want a long-lived host-side process:
+There are two problems that both want something on the host side that the container can reach:
 
 - **Auto port-forward.** When a dev server inside the container binds to `127.0.0.1:5173`, the user wants `http://localhost:5173` on the host to work. Docker's `-p` mapping can't reach loopback inside a container's netns. A userland proxy can — if the upstream side runs inside the container and the downstream side runs on the host.
-- **Container self-restart.** Sometimes the agent updates itself and wants to bounce its container. The container has no Docker access; some other process on the host has to call `docker stop` / `docker start`.
+- **Container self-restart.** Sometimes the agent updates itself and wants to bounce its container. The container has no Docker access; some other process has to call `docker stop` / `docker start`.
 
-Both reduce to "a host process the container can talk to." That's `hostd`. It's a singleton per host (not per agent), spawned automatically on first `typeclaw start`, survives container restarts, and serves every agent on the box.
+Both reduce to "a control plane the container talks to over narrow, typed channels." On a machine you control, that control plane is `hostd` — a singleton per host (not per agent), spawned automatically on first `typeclaw start`, surviving container restarts, serving every agent on the box. But `hostd` is one _implementation_, not the only shape: on a managed platform (ECS, K8s) the platform is the control plane and there is no `hostd`. The container asks for a capability — restart me, forward this port, persist this secret — and a profile-selected implementation answers. See [Capabilities](/docs/internals/capabilities) for the interface model that makes the container blind to which one.
 
-The CLI never sends signals based on PID — `typeclaw stop` deregisters via the Unix socket. The pidfile is a discovery hint, never a kill target, so PID reuse is safe.
+For the default `hostd` case, the CLI never sends signals based on PID — `typeclaw stop` deregisters via the Unix socket. The pidfile is a discovery hint, never a kill target, so PID reuse is safe.
 
 ## Why this matters
 
