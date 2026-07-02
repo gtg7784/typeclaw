@@ -28,19 +28,20 @@ class FakeTerminal implements Terminal {
     this.stopped = true
   }
 
-  async drainInput(): Promise<void> {}
+  async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
 
   write(data: string): void {
     this.written.push(data)
   }
 
-  moveBy(): void {}
+  moveBy(_lines: number): void {}
   hideCursor(): void {}
   showCursor(): void {}
   clearLine(): void {}
   clearFromCursor(): void {}
   clearScreen(): void {}
-  setTitle(): void {}
+  setTitle(_title: string): void {}
+  setProgress(_active: boolean): void {}
 
   feed(data: string): void {
     this.inputHandler?.(data)
