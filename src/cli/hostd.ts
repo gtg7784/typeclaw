@@ -1,7 +1,7 @@
 import { defineCommand } from 'citty'
 
 import { loadConfigSync, validateConfig, type Config, type ValidateConfigResult } from '@/config'
-import { start, stop, type StartOptions, type StartResult, type StopResult } from '@/container'
+import { LocalDockerController, type StartOptions, type StartResult, type StopResult } from '@/container'
 import { createCurrentHostDaemonHolder } from '@/hostd/current-host-daemon'
 import { startDaemon, type DaemonLogEvent, type RestartPreflight } from '@/hostd/daemon'
 import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
@@ -92,11 +92,12 @@ export type HostdRestartDeps = {
   start: (opts: StartOptions) => Promise<StartResult>
 }
 
+const controller = new LocalDockerController()
 const defaultRestartDeps: HostdRestartDeps = {
   validateConfig,
-  stop,
+  stop: (opts) => controller.stop(opts),
   loadConfigSync,
-  start,
+  start: (opts) => controller.start(opts),
 }
 
 export function buildHostdRestart(

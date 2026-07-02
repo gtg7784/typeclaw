@@ -2,7 +2,7 @@ import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { start, stop } from '@/container'
+import { LocalDockerController } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
@@ -70,9 +70,11 @@ export const restartCommand = defineCommand({
       process.exit(1)
     }
 
+    const controller = new LocalDockerController()
+
     const stopSpin = spinner()
     stopSpin.start('Stopping container...')
-    const stopped = await stop({ cwd })
+    const stopped = await controller.stop({ cwd })
     if (!stopped.ok) {
       stopSpin.error(stopped.reason)
       process.exit(1)
@@ -81,7 +83,7 @@ export const restartCommand = defineCommand({
 
     const startSpin = spinner()
     startSpin.start('Starting container...')
-    const started = await start({
+    const started = await controller.start({
       cwd,
       preferredHostPort: Number(args.port),
       forceBuild: args.build,

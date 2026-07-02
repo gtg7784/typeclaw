@@ -1,5 +1,5 @@
 import { validateConfig } from '@/config'
-import { start, stop } from '@/container'
+import { LocalDockerController } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
 import type { AgentResult, StartSuccess } from './start'
@@ -57,10 +57,11 @@ async function runOne(
   const validated = validateConfig(cwd)
   if (!validated.ok) return { name, ok: false, reason: validated.reason }
   try {
-    const stopped = await stop({ cwd })
+    const controller = new LocalDockerController()
+    const stopped = await controller.stop({ cwd })
     if (!stopped.ok) return { name, ok: false, reason: stopped.reason }
     onStopped()
-    const started = await start({ cwd, preferredHostPort, forceBuild, cliEntry })
+    const started = await controller.start({ cwd, preferredHostPort, forceBuild, cliEntry })
     if (!started.ok) return { name, ok: false, reason: started.reason }
     return { name, ok: true, data: { stop: stopped, start: started }, warnings: validated.warnings }
   } catch (error) {

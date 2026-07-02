@@ -12,7 +12,7 @@ import {
   type ChannelListEntry,
   type GithubConfigCleanup,
 } from '@/config/channels-mutation'
-import { start, status, stop } from '@/container'
+import { LocalDockerController } from '@/container'
 import {
   CHANNEL_KINDS,
   appendOrReplaceEnvKey,
@@ -580,7 +580,8 @@ async function maybePromptCredentialRefresh(
   label: string,
   verbPast: 're-authenticated' | 'credentials updated',
 ): Promise<void> {
-  const current = await status({ cwd }).catch(() => null)
+  const controller = new LocalDockerController()
+  const current = await controller.status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
       title: c.green(`${label} ${verbPast}.`),
@@ -608,12 +609,12 @@ async function maybePromptCredentialRefresh(
     return
   }
 
-  const stopped = await stop({ cwd })
+  const stopped = await controller.stop({ cwd })
   if (!stopped.ok) {
     console.error(errorLine(`Restart failed during stop: ${stopped.reason}`))
     process.exit(1)
   }
-  const started = await start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
+  const started = await controller.start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
   if (!started.ok) {
     console.error(errorLine(`Restart failed during start: ${started.reason}`))
     process.exit(1)
@@ -1858,7 +1859,8 @@ async function maybePromptRestart(
   verb: 'added' | 'removed' = 'added',
 ): Promise<void> {
   const label = CHANNEL_LABELS[channel]
-  const current = await status({ cwd }).catch(() => null)
+  const controller = new LocalDockerController()
+  const current = await controller.status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
       title: c.green(`${label} channel ${verb}.`),
@@ -1885,12 +1887,12 @@ async function maybePromptRestart(
     return
   }
 
-  const stopped = await stop({ cwd })
+  const stopped = await controller.stop({ cwd })
   if (!stopped.ok) {
     console.error(errorLine(`Restart failed during stop: ${stopped.reason}`))
     process.exit(1)
   }
-  const started = await start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
+  const started = await controller.start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
   if (!started.ok) {
     console.error(errorLine(`Restart failed during start: ${started.reason}`))
     process.exit(1)
