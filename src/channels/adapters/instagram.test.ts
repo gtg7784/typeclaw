@@ -4,6 +4,7 @@ import type { InstagramChatSummary, InstagramMessageSummary } from 'agent-messen
 
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage, OutboundMessage } from '@/channels/types'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import {
   createInstagramAdapter,
@@ -280,12 +281,4 @@ function makeRouterStub(onRoute: (m: InboundMessage) => void) {
       registered.nameResolver = false
     },
   } as unknown as Parameters<typeof createInstagramAdapter>[0]['router'] & { registered: typeof registered }
-}
-
-async function waitFor(pred: () => boolean, timeoutMs = 1000): Promise<void> {
-  const start = Date.now()
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) throw new Error('timeout')
-    await new Promise((r) => setTimeout(r, 5))
-  }
 }
