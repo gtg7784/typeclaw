@@ -14,7 +14,8 @@ Read here before changing a subsystem. Skim here when something doesn't behave t
 - [Memory](/docs/internals/memory) — the observe/dream/apply loop, topic shards, the strength model, supersession, and the citation-superset invariant.
 - [Secrets](/docs/internals/secrets) — `.env` vs `secrets.json` policy, the `Secret` shape, bridge idempotency, KakaoTalk encryption-at-rest.
 - [Permissions](/docs/internals/permissions) — role resolution, the match-rule DSL, cron/subagent provenance, the security guard tier model.
-- [Host daemon (hostd)](/docs/internals/hostd) — singleton process, three trust channels (Unix socket / HTTP / WebSocket), the control protocol, portbroker internals.
+- [Capabilities](/docs/internals/capabilities) — the Controller and RuntimeSecretsProvider seams, per-stage capability bags, functional-factory DI, the host vs managed deployment profile.
+- [Host daemon (hostd)](/docs/internals/hostd) — one implementation of the host-side control plane: singleton process, three trust channels (Unix socket / HTTP / WebSocket), the control protocol, portbroker internals.
 - [Tunnels](/docs/internals/tunnels) — schema, providers, why cloudflared runs in-container, integration with channel adapters.
 - [Message stream](/docs/internals/message-stream) — four typed targets, subagent dispatch, the cron split, wire-protocol contracts with the TUI.
 - [Engagement](/docs/internals/engagement) — the four-way inbound decision, the `observe` context buffer, the suppressor ladder, the peer-bot loop guard.

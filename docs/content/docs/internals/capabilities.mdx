@@ -1,0 +1,104 @@
+---
+title: Capabilities
+description: The Controller / RuntimeSecretsProvider seams, per-stage capability bags, functional-factory DI, and the host vs managed deployment profile
+icon: Blocks
+---
+
+`src/capabilities/` and the capability interfaces it composes (`src/container/controller.ts`, `src/secrets/secrets-provider.ts`) are how TypeClaw decomposes "the host" into swappable, per-environment capabilities. A deployment is a **composition** of capability implementations, not a monolithic mode. `hostd` is one such implementation of the host-side control plane, not the architecture itself — see [Host daemon](/docs/internals/hostd).
+
+## Why it exists
+
+Historically `hostd` fused every host-side responsibility the container needs: container lifecycle, secrets write-back, restart, port-forwarding, credential renewal. That fusion assumes typeclaw is the orchestrator on a machine it controls. In a managed environment (ECS, K8s) the platform owns orchestration and there is no `hostd`.
+
+The fix is to name each responsibility as its own interface, give it per-environment implementations, and select them at boot by deployment profile. The container then calls `caps.secrets?.writeBackChannelBlock(...)` regardless of whether hostd, a mounted volume, or a platform secret store serves it (`caps.secrets` is nullable — a missing backend skips the write, it doesn't crash). That invariance is what lets the same container run with or without a host.
+
+## The two roles
+
+Two orthogonal roles, each an independent axis:
+
+- **controller** — the external actuator that acts _on_ a container: `start` / `stop` / `status` / `logs` / `shell`. `src/container/controller.ts`. The container never holds one; the host stage does.
+- **host substrate** — what the container reaches _into_ for durable state. Today that's secrets read + write-back (`RuntimeSecretsProvider`, `src/secrets/secrets-provider.ts`).
+
+These are stage-disjoint on purpose (see [Architecture](/docs/concepts/architecture)): controller lives host-stage, substrate lives container-stage.
+
+## Two composition roots, one per stage
+
+The capability bags are per-stage, never merged — the stage boundary is a real security and process line. `src/capabilities/`:
+
+```
+ControlPlaneCapabilities   (host-stage; src/capabilities/control-plane.ts)
+  controller: Controller
+
+RuntimeCapabilities        (container-stage; src/capabilities/runtime.ts)
+  secrets: RuntimeSecretsProvider | null
+```
+
+Each is built by a factory that composes implementations for a `DeploymentProfile`:
+
+```ts
+createControlPlaneCapabilities(profile) => { controller: resolveController(profile) }
+createRuntimeCapabilities(env, secretsPath) => { secrets: resolveRuntimeSecretsProvider(env, secretsPath) }
+```
+
+The bag is built at the composition root and **specific capabilities are handed down** to the modules that need them. It is not a service locator — modules receive `caps.controller`, not the whole bag.
+
+## Cross-stage capabilities: client and server halves
+
+Secrets, restart, and port-forwarding are inherently cross-stage: a container-side **client** talks to a host-side **server** over a transport. They are modeled as _two_ contracts, never one object spanning both stages. The client contract names what the runtime needs, transport- and backend-agnostic.
+
+`RuntimeSecretsProvider` is the worked example (`src/secrets/secrets-provider.ts`):
+
+- `readChannels()` — reads the mounted `secrets.json` (file-based; `null` when absent so callers degrade rather than crash).
+- `writeBackChannelBlock(block)` — persists one adapter's block. Under hostd this crosses the `secrets-patch` RPC (the container can't write the host-owned file directly); under a volume it's a direct file write.
+
+Two implementations ship today:
+
+- `createHostdSecretsProvider` — reads the mounted file, writes via hostd's `secrets-patch` RPC.
+- `createFileSecretsProvider` — both halves hit the file on disk (for a future volume-backed managed profile, or host-stage).
+
+The six channel credential stores (`src/secrets/*-store.ts`) read _and_ write through this one seam in container mode; host mode still reads `SecretsBackend` directly.
+
+## The deployment profile
+
+`DeploymentProfile` is `'host' | 'managed'` (`src/container/controller.ts`). `resolveDeploymentProfile()` is the single source of truth. There is no managed runtime yet, so it always returns `'host'`; the seam exists so that when a managed platform lands, the trigger (a platform-injected env var or config field) is wired in _one_ place.
+
+Today only the **controller axis** consumes the profile: `createControlPlaneCapabilities()` resolves it and passes it to `resolveController(profile)`. The **runtime secrets axis** does _not_ take a profile yet — `createRuntimeCapabilities(env, secretsPath)` keys off the hostd env triple via `resolveRuntimeSecretsProvider`, and the deployment profile enters there only when a managed secrets implementation lands.
+
+`resolveController(profile)` maps it to an actuator: `host` → `createLocalDockerController` (shells out to Docker), `managed` → `createNoopController` (every verb fail-loud, since the platform owns the loop).
+
+## Functional factories, not classes
+
+Every capability is an exported factory (`create*` / `resolve*`) returning an object literal that satisfies an exported `type` / `interface`. No classes for DI, no framework, no service locator — this matches the repo-wide convention (`*Deps` / `*Options` bags, `defaultDeps` constants). New capability seams follow this; don't reintroduce the class idiom.
+
+## Components
+
+`src/container/controller.ts`:
+
+- `Controller` — the lifecycle interface (`start`/`stop`/`status`/`logs`/`shell`).
+- `createLocalDockerController` — thin adapter over the existing `src/container/{start,stop,status,logs,shell}.ts` functions. No behavior change; it just names the actuation surface.
+- `createNoopController` — the managed placeholder. Lifecycle verbs return `CONTROLLER_UNSUPPORTED_REASON`; `status()` reports `missing`.
+- `DeploymentProfile`, `resolveDeploymentProfile`, `resolveController`.
+
+`src/secrets/secrets-provider.ts`:
+
+- `RuntimeSecretsProvider` — the container-stage secrets seam (read + write-back).
+- `createHostdSecretsProvider`, `createFileSecretsProvider`, `resolveRuntimeSecretsProvider`.
+
+`src/capabilities/`:
+
+- `control-plane.ts` — `ControlPlaneCapabilities` + `createControlPlaneCapabilities`.
+- `runtime.ts` — `RuntimeCapabilities` + `createRuntimeCapabilities`.
+
+## Rules of thumb
+
+- **Name contracts for the need, not the transport.** `RuntimeSecretsProvider`, not `HostProvider` — the container must not know whether hostd or a secret store serves it. The rename that fixed exactly this is why the interface reads the way it does.
+- **Never model a cross-stage capability as one object.** Split into a container-side client contract and a host/platform-side server. In managed mode the server half becomes a platform primitive and the client is reconfigured to reach it; the runtime call sites don't change.
+- **The bag is per-stage.** `ControlPlaneCapabilities` is host-stage, `RuntimeCapabilities` is container-stage. Don't merge them — that would hand container code a controller it can't use.
+- **Build the bag at the root; hand specific capabilities down.** Not a service locator. A module that needs the controller takes a `Controller`, not the whole `ControlPlaneCapabilities`.
+- **Extract a capability into an interface on-trigger, not speculatively.** The trigger is: a second implementation exists, the capability crosses a stage boundary, or the composition root needs to hide platform selection. Extracting against a single caller bakes hostd-isms into a supposedly neutral interface.
+- **`managed` stays a single value until behavior diverges.** Split to `'ecs' | 'k8s'` only when an implementation actually differs by platform.
+- **The runtime call sites are the invariant.** Across every profile composition, `caps.secrets?.writeBackChannelBlock(...)` / `caps.controller.stop(...)` never change — only the injected implementations swap. That property is what "run the container without a host" reduces to.
+
+## Not yet done
+
+The bags are defined but **not yet threaded through the composition roots** (`startAgentRuntime` in `src/run/index.ts`, `startDaemon` wiring in `src/cli/hostd.ts`) — those still hold collaborators as locals. Only two capabilities are extracted (`Controller`, `RuntimeSecretsProvider`); restart, port-forwarding, credential renewal, and ingress remain hostd-owned until their managed halves are built. There is no ECS/K8s implementation — the interfaces are prepared, file-based, ahead of the concrete platform work.

@@ -7,6 +7,7 @@
     "memory",
     "secrets",
     "permissions",
+    "capabilities",
     "hostd",
     "tunnels",
     "message-stream",
