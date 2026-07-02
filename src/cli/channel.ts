@@ -12,7 +12,7 @@ import {
   type ChannelListEntry,
   type GithubConfigCleanup,
 } from '@/config/channels-mutation'
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 import {
   CHANNEL_KINDS,
   appendOrReplaceEnvKey,
@@ -580,7 +580,7 @@ async function maybePromptCredentialRefresh(
   label: string,
   verbPast: 're-authenticated' | 'credentials updated',
 ): Promise<void> {
-  const controller = new LocalDockerController()
+  const controller = resolveController()
   const current = await controller.status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
@@ -1859,7 +1859,7 @@ async function maybePromptRestart(
   verb: 'added' | 'removed' = 'added',
 ): Promise<void> {
   const label = CHANNEL_LABELS[channel]
-  const controller = new LocalDockerController()
+  const controller = resolveController()
   const current = await controller.status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
