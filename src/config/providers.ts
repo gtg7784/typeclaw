@@ -205,14 +205,18 @@ export const KNOWN_PROVIDERS = {
   // anthropic`) before relying on the env-var path. Same rule applies to any
   // future dual-auth provider — keep the surprise in mind when expanding.
   //
-  // Model lineup is the current GA tier as of 2026-05-29: Opus 4.8 (top,
-  // released May 2026), Opus 4.7 (prior top, Apr 16 2026), Sonnet 4.6 (mid,
-  // Feb 5 2026), Haiku 4.5 (fast, Oct 1 2025). Anthropic's own model overview
-  // lists the latest Opus/Sonnet/Haiku as the current recommended set and
-  // flags earlier Opus/Sonnet variants with
+  // Model lineup is the current GA tier as of 2026-07-02: Fable 5 (top,
+  // released Jun 2026 — a tier above Opus), Sonnet 5 (mid, Jul 1 2026),
+  // Opus 4.8 (May 2026), Opus 4.7 (Apr 16 2026), Sonnet 4.6 (Feb 5 2026),
+  // Haiku 4.5 (fast, Oct 1 2025). Anthropic's own model overview lists the
+  // latest Fable/Opus/Sonnet/Haiku as the current recommended set and flags
+  // earlier Opus/Sonnet variants with
   // "Consider migrating to current models." Opus 4 / Sonnet 4 are deprecated
   // (retirement: Jun 15 2026); the 4.5/4.6 alternates remain Active but are
-  // not the recommended path.
+  // not the recommended path. Claude Mythos 5 (Fable 5's classifier-free
+  // sibling, limited availability via Project Glasswing) is intentionally
+  // NOT listed — access is gated per-org and a registry entry would fail for
+  // everyone else.
   //
   // ID semantics differ across the lineup and matter for forward-compat:
   //   - `claude-haiku-4-5` is a 4.5-generation CONVENIENCE ALIAS that
@@ -273,6 +277,35 @@ export const KNOWN_PROVIDERS = {
         contextWindow: 1000000,
         maxTokens: 64000,
       },
+      // Sonnet 5 (Jul 1 2026) is the drop-in successor to Sonnet 4.6 with a
+      // caveat set that affects consumers of this record:
+      //   - New tokenizer: ~30% more tokens for the same text vs Sonnet 4.6.
+      //     Per-token price is unchanged, so equivalent requests cost more.
+      //   - Adaptive thinking only: manual extended thinking
+      //     (`thinking: {type: "enabled"}` with `budget_tokens`) returns a
+      //     400. The pinned pi-ai 0.67.3 DOES send that payload for this id
+      //     (its supportsAdaptiveThinking() only matches 4.6-generation ids,
+      //     and thinking defaults to "medium"), so registering this record
+      //     with `reasoning: true` depends on the rewrite shim in
+      //     src/agent/adaptive-thinking-compat.ts. Don't wire a
+      //     thinking-budget knob to this id.
+      //   - Cost encodes the STANDARD rate (in effect Sep 1 2026+).
+      //     Introductory pricing ($2/$10, cacheRead 0.2, cacheWrite 2.5) runs
+      //     through Aug 31 2026, so `typeclaw usage` over-reports Sonnet 5
+      //     spend until then. Chosen so the record doesn't silently go stale
+      //     two months after landing.
+      'claude-sonnet-5': {
+        id: 'claude-sonnet-5',
+        name: 'Claude Sonnet 5',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
       'claude-opus-4-7': {
         id: 'claude-opus-4-7',
         name: 'Claude Opus 4.7',
@@ -294,6 +327,26 @@ export const KNOWN_PROVIDERS = {
         reasoning: true,
         input: ['text', 'image'],
         cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
+      // Fable 5 (Jun 2026) is a NEW TIER above Opus — Anthropic's most
+      // capable widely released model, aimed at long-horizon agentic work.
+      // Ships the 5-generation tokenizer: ~1.3x token counts for the same
+      // text vs pre-5 models, so equivalent requests cost more than the
+      // per-token rates alone suggest. Adaptive thinking only, same as
+      // Sonnet 5 above: `reasoning: true` here depends on the rewrite shim
+      // in src/agent/adaptive-thinking-compat.ts (pinned pi-ai 0.67.3 would
+      // otherwise send budget-based `thinking`, a hard 400 on this id).
+      'claude-fable-5': {
+        id: 'claude-fable-5',
+        name: 'Claude Fable 5',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
         contextWindow: 1000000,
         maxTokens: 128000,
       },
