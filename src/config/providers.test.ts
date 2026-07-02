@@ -403,12 +403,18 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('moonshot-coding/kimi-for-coding')
   })
 
-  test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8)', () => {
+  test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8 / Fable 5)', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('anthropic/claude-haiku-4-5')
     expect(refs).toContain('anthropic/claude-sonnet-4-6')
     expect(refs).toContain('anthropic/claude-opus-4-7')
     expect(refs).toContain('anthropic/claude-opus-4-8')
+    expect(refs).toContain('anthropic/claude-fable-5')
+  })
+
+  test('does not list the limited-availability claude-mythos-5', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).not.toContain('anthropic/claude-mythos-5')
   })
 
   test('includes the current xai Grok models', () => {
@@ -439,6 +445,10 @@ describe('providerForModelRef anthropic', () => {
   test('routes claude-opus-4-8 to anthropic', () => {
     expect(providerForModelRef('anthropic/claude-opus-4-8')).toBe('anthropic')
   })
+
+  test('routes claude-fable-5 to anthropic', () => {
+    expect(providerForModelRef('anthropic/claude-fable-5')).toBe('anthropic')
+  })
 })
 
 describe('isOpenAiFamilyRef', () => {
@@ -459,6 +469,7 @@ describe('defaultThinkingLevelForRef', () => {
 
   test('non-OpenAI providers defer to the SDK default (returns undefined)', () => {
     expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-8')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('anthropic/claude-fable-5')).toBeUndefined()
     expect(defaultThinkingLevelForRef('zai/glm-4.6')).toBeUndefined()
     expect(defaultThinkingLevelForRef('moonshot/kimi-k2.5')).toBeUndefined()
   })

@@ -205,14 +205,18 @@ export const KNOWN_PROVIDERS = {
   // anthropic`) before relying on the env-var path. Same rule applies to any
   // future dual-auth provider — keep the surprise in mind when expanding.
   //
-  // Model lineup is the current GA tier as of 2026-05-29: Opus 4.8 (top,
-  // released May 2026), Opus 4.7 (prior top, Apr 16 2026), Sonnet 4.6 (mid,
-  // Feb 5 2026), Haiku 4.5 (fast, Oct 1 2025). Anthropic's own model overview
-  // lists the latest Opus/Sonnet/Haiku as the current recommended set and
-  // flags earlier Opus/Sonnet variants with
+  // Model lineup is the current GA tier as of 2026-07-02: Fable 5 (top,
+  // released Jun 2026 — a tier above Opus), Opus 4.8 (May 2026), Opus 4.7
+  // (Apr 16 2026), Sonnet 4.6 (mid, Feb 5 2026), Haiku 4.5 (fast, Oct 1
+  // 2025). Anthropic's own model overview lists the
+  // latest Fable/Opus/Sonnet/Haiku as the current recommended set and flags
+  // earlier Opus/Sonnet variants with
   // "Consider migrating to current models." Opus 4 / Sonnet 4 are deprecated
   // (retirement: Jun 15 2026); the 4.5/4.6 alternates remain Active but are
-  // not the recommended path.
+  // not the recommended path. Claude Mythos 5 (Fable 5's classifier-free
+  // sibling, limited availability via Project Glasswing) is intentionally
+  // NOT listed — access is gated per-org and a registry entry would fail for
+  // everyone else.
   //
   // ID semantics differ across the lineup and matter for forward-compat:
   //   - `claude-haiku-4-5` is a 4.5-generation CONVENIENCE ALIAS that
@@ -294,6 +298,23 @@ export const KNOWN_PROVIDERS = {
         reasoning: true,
         input: ['text', 'image'],
         cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
+      // Fable 5 (Jun 2026) is a NEW TIER above Opus — Anthropic's most
+      // capable widely released model, aimed at long-horizon agentic work.
+      // Ships the 5-generation tokenizer: ~1.3x token counts for the same
+      // text vs pre-5 models, so equivalent requests cost more than the
+      // per-token rates alone suggest.
+      'claude-fable-5': {
+        id: 'claude-fable-5',
+        name: 'Claude Fable 5',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
         contextWindow: 1000000,
         maxTokens: 128000,
       },

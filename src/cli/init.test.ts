@@ -1262,12 +1262,14 @@ describe('recommended models', () => {
     const sonnet = model('anthropic/claude-sonnet-4-6', { modelName: 'Claude Sonnet 4.6' })
     const opus47 = model('anthropic/claude-opus-4-7', { modelName: 'Claude Opus 4.7' })
     const opus48 = model('anthropic/claude-opus-4-8', { modelName: 'Claude Opus 4.8' })
-    const sorted = sortRecommendedFirst([haiku, sonnet, opus47, opus48])
+    const fable5 = model('anthropic/claude-fable-5', { modelName: 'Claude Fable 5' })
+    const sorted = sortRecommendedFirst([haiku, sonnet, opus47, opus48, fable5])
     expect(sorted.map((o) => o.ref)).toEqual([
       'anthropic/claude-sonnet-4-6',
       'anthropic/claude-haiku-4-5',
       'anthropic/claude-opus-4-7',
       'anthropic/claude-opus-4-8',
+      'anthropic/claude-fable-5',
     ])
   })
 
