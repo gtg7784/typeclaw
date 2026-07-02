@@ -1,12 +1,12 @@
-import type { HostProvider } from './host-provider'
 import { type SlackAccountRecord, type SlackChannelBlock, slackChannelBlockSchema } from './schema'
+import type { RuntimeSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 export type SetSlackAccountInput = SlackAccountRecord
 
 export type SecretsSlackCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
-  | { mode: 'container'; secretsPath: string; hostProvider: HostProvider }
+  | { mode: 'container'; secretsPath: string; hostProvider: RuntimeSecretsProvider }
 
 const EMPTY_BLOCK: SlackChannelBlock = { currentAccount: null, accounts: {} }
 

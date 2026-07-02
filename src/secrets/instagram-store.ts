@@ -1,10 +1,10 @@
-import type { HostProvider } from './host-provider'
 import { type InstagramAccountRecord, type InstagramChannelBlock, instagramChannelBlockSchema } from './schema'
+import type { RuntimeSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 export type SecretsInstagramCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
-  | { mode: 'container'; secretsPath: string; hostProvider: HostProvider }
+  | { mode: 'container'; secretsPath: string; hostProvider: RuntimeSecretsProvider }
 
 const EMPTY_BLOCK: InstagramChannelBlock = { currentAccount: null, accounts: {} }
 

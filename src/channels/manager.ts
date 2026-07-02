@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
-import { type HostProvider, HostdHostProvider } from '@/secrets/host-provider'
 import { SecretsInstagramCredentialStore } from '@/secrets/instagram-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsLineCredentialStore } from '@/secrets/line-store'
+import { createHostdSecretsProvider, type RuntimeSecretsProvider } from '@/secrets/secrets-provider'
 import { SecretsSlackCredentialStore } from '@/secrets/slack-store'
 import { SecretsBackend } from '@/secrets/storage'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
@@ -578,12 +578,12 @@ const TOKEN_ENV: Record<
 // buildAdapter skip the adapter instead of throwing and crashing the whole
 // channel manager. startAdapter's signature pre-check only reads secrets.json,
 // so this is the only place the missing triple is caught.
-function resolveHostProvider(env: NodeJS.ProcessEnv): HostProvider | null {
+function resolveHostProvider(env: NodeJS.ProcessEnv): RuntimeSecretsProvider | null {
   const hostdUrl = env.TYPECLAW_HOSTD_URL
   const restartToken = env.TYPECLAW_HOSTD_TOKEN
   const containerName = env.TYPECLAW_CONTAINER_NAME
   if (!hostdUrl || !restartToken || !containerName) return null
-  return new HostdHostProvider({ hostdUrl, restartToken, containerName })
+  return createHostdSecretsProvider({ hostdUrl, restartToken, containerName })
 }
 
 function createContainerDiscordCredentialStore(

@@ -7,7 +7,7 @@ import { stop, type StopOptions, type StopResult } from './stop'
 
 // The controller role: the external actuator that acts ON a container's
 // lifecycle (start/stop/status/logs/shell). Distinct from the host role
-// (HostProvider), which the container reaches INTO for durable state.
+// (RuntimeSecretsProvider), which the container reaches INTO for durable state.
 //
 // In the `host` profile typeclaw owns this loop (LocalDockerController shells
 // out to Docker). In a `managed` profile a platform (ECS/K8s/…) owns it, so
@@ -23,26 +23,15 @@ export interface Controller {
 
 // Thin adapter over the existing lifecycle functions — no behavior change, it
 // just names the actuation surface as an interface so a managed profile can
-// substitute NoopController.
-export class LocalDockerController implements Controller {
-  start(options: StartOptions): Promise<StartResult> {
-    return start(options)
-  }
-
-  stop(options: StopOptions): Promise<StopResult> {
-    return stop(options)
-  }
-
-  status(options: StatusOptions): Promise<ContainerStatus> {
-    return status(options)
-  }
-
-  logs(options: LogsOptions): Promise<LogsResult> {
-    return logs(options)
-  }
-
-  shell(options: { cwd: string; shell?: string }): Promise<ShellResult> {
-    return shell(options)
+// substitute a no-op controller. Factory (not class) to match the repo's
+// functional DI convention.
+export function createLocalDockerController(): Controller {
+  return {
+    start: (options) => start(options),
+    stop: (options) => stop(options),
+    status: (options) => status(options),
+    logs: (options) => logs(options),
+    shell: (options) => shell(options),
   }
 }
 
@@ -53,25 +42,23 @@ export const CONTROLLER_UNSUPPORTED_REASON =
 // every lifecycle verb is a fail-loud no-op rather than a Docker shell-out.
 // status() reports `missing` because typeclaw cannot introspect a container it
 // does not orchestrate.
-export class NoopController implements Controller {
-  async start({ cwd }: StartOptions): Promise<StartResult> {
-    return { ok: false, reason: unsupported('start', cwd) }
-  }
-
-  async stop({ cwd }: StopOptions): Promise<StopResult> {
-    return { ok: false, reason: unsupported('stop', cwd) }
-  }
-
-  async status({ cwd }: StatusOptions): Promise<ContainerStatus> {
-    return { kind: 'missing', containerName: containerNameFromCwd(cwd), imageTag: imageTagFromCwd(cwd) }
-  }
-
-  async logs({ cwd }: LogsOptions): Promise<LogsResult> {
-    return { ok: false, reason: unsupported('logs', cwd) }
-  }
-
-  async shell({ cwd }: { cwd: string; shell?: string }): Promise<ShellResult> {
-    return { ok: false, reason: unsupported('shell', cwd) }
+export function createNoopController(): Controller {
+  return {
+    async start({ cwd }) {
+      return { ok: false, reason: unsupported('start', cwd) }
+    },
+    async stop({ cwd }) {
+      return { ok: false, reason: unsupported('stop', cwd) }
+    },
+    async status({ cwd }) {
+      return { kind: 'missing', containerName: containerNameFromCwd(cwd), imageTag: imageTagFromCwd(cwd) }
+    },
+    async logs({ cwd }) {
+      return { ok: false, reason: unsupported('logs', cwd) }
+    },
+    async shell({ cwd }) {
+      return { ok: false, reason: unsupported('shell', cwd) }
+    },
   }
 }
 
@@ -113,5 +100,5 @@ export function resolveDeploymentProfile(): DeploymentProfile {
 //      compose/status, `start`/`stop` deps in init) — probes not on the
 //      Controller surface. Route or narrow when managed lands.
 export function resolveController(profile: DeploymentProfile = resolveDeploymentProfile()): Controller {
-  return profile === 'managed' ? new NoopController() : new LocalDockerController()
+  return profile === 'managed' ? createNoopController() : createLocalDockerController()
 }

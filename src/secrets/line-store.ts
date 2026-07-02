@@ -1,12 +1,12 @@
 import type { LineAccountCredentials, LineConfig } from 'agent-messenger/line'
 
-import type { HostProvider } from './host-provider'
 import { type LineChannelBlock, lineChannelBlockSchema } from './schema'
+import type { RuntimeSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 export type SecretsLineCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
-  | { mode: 'container'; secretsPath: string; hostProvider: HostProvider }
+  | { mode: 'container'; secretsPath: string; hostProvider: RuntimeSecretsProvider }
 
 const EMPTY_BLOCK: LineChannelBlock = { currentAccount: null, accounts: {} }
 

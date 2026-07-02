@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 
 import type { Request, Response } from '@/hostd/protocol'
 
-import { HostdHostProvider } from './host-provider'
+import { createHostdSecretsProvider } from './secrets-provider'
 
 const servers: Array<ReturnType<typeof Bun.serve>> = []
 
@@ -27,10 +27,10 @@ function startFakeHostd(token: string, containerName: string): { url: string; re
   return { url: `http://127.0.0.1:${server.port}`, requests }
 }
 
-describe('HostdHostProvider', () => {
+describe('createHostdSecretsProvider', () => {
   test('forwards the block as a secrets-patch RPC with Bearer auth', async () => {
     const hostd = startFakeHostd('secret', 'coder')
-    const provider = new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' })
+    const provider = createHostdSecretsProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' })
 
     await provider.writeBackChannelBlock({ discord: { currentAccount: null, accounts: {} } })
 
@@ -44,7 +44,7 @@ describe('HostdHostProvider', () => {
 
   test('throws when hostd rejects the patch', async () => {
     const hostd = startFakeHostd('secret', 'coder')
-    const provider = new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'wrong', containerName: 'coder' })
+    const provider = createHostdSecretsProvider({ hostdUrl: hostd.url, restartToken: 'wrong', containerName: 'coder' })
 
     await expect(provider.writeBackChannelBlock({ discord: { currentAccount: null, accounts: {} } })).rejects.toThrow(
       /secrets-patch failed/,

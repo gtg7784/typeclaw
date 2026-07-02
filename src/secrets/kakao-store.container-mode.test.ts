@@ -8,9 +8,9 @@ import type { KakaoAccountCredentials } from 'agent-messenger/kakaotalk'
 
 import type { Request, Response } from '@/hostd/protocol'
 
-import { HostdHostProvider } from './host-provider'
 import { SecretsKakaoCredentialStore } from './kakao-store'
 import { kakaoChannelBlockSchema } from './schema'
+import { createHostdSecretsProvider } from './secrets-provider'
 import { SecretsBackend } from './storage'
 
 const servers: Array<ReturnType<typeof Bun.serve>> = []
@@ -71,7 +71,7 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostProvider: new HostdHostProvider({
+        hostProvider: createHostdSecretsProvider({
           hostdUrl: 'http://127.0.0.1:1',
           restartToken: 'secret',
           containerName: 'coder',
@@ -94,7 +94,11 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' }),
+        hostProvider: createHostdSecretsProvider({
+          hostdUrl: hostd.url,
+          restartToken: 'secret',
+          containerName: 'coder',
+        }),
       })
 
       await store.setAccount(account('user-1'))
@@ -116,7 +120,11 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'secret', containerName: 'coder' }),
+        hostProvider: createHostdSecretsProvider({
+          hostdUrl: hostd.url,
+          restartToken: 'secret',
+          containerName: 'coder',
+        }),
       })
 
       await Promise.all([store.setAccount(account('user-1')), store.setAccount(account('user-2'))])
@@ -137,7 +145,11 @@ describe('SecretsKakaoCredentialStore container mode', () => {
       const store = new SecretsKakaoCredentialStore({
         mode: 'container',
         secretsPath,
-        hostProvider: new HostdHostProvider({ hostdUrl: hostd.url, restartToken: 'wrong', containerName: 'coder' }),
+        hostProvider: createHostdSecretsProvider({
+          hostdUrl: hostd.url,
+          restartToken: 'wrong',
+          containerName: 'coder',
+        }),
       })
 
       await expect(store.setAccount(account('user-1'))).rejects.toThrow(/secrets-patch failed/)

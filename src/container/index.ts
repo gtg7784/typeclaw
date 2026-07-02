@@ -1,9 +1,9 @@
 export {
   CONTROLLER_UNSUPPORTED_REASON,
   type Controller,
+  createLocalDockerController,
+  createNoopController,
   type DeploymentProfile,
-  LocalDockerController,
-  NoopController,
   resolveController,
   resolveDeploymentProfile,
 } from './controller'
