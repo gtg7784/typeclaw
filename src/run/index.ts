@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
@@ -24,6 +26,7 @@ import { clearTodosForOrigin, markRestartAbortPendingForOrigin } from '@/agent/t
 import { embed, warmEmbedder } from '@/bundled-plugins/memory/vector/embedder'
 import { buildStartupVectorIndex } from '@/bundled-plugins/memory/vector/startup'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
+import { createRuntimeCapabilities, type RuntimeCapabilities } from '@/capabilities'
 import {
   createChannelManager,
   createChannelsReloadable,
@@ -109,6 +112,10 @@ export type StartAgentOptions = {
   stream?: Stream
   createChannelManager?: ChannelManagerFactory
   createTunnelManager?: TunnelManagerFactory
+  // The container-stage capability bag. Defaults to createRuntimeCapabilities()
+  // over the real env + <cwd>/secrets.json. Injectable so tests can supply a
+  // fake secrets provider without touching process.env.
+  caps?: RuntimeCapabilities
 }
 
 export type StartAgentResult = {
@@ -168,6 +175,7 @@ async function startAgentRuntime(
     stream = createStream(),
     createChannelManager: createChannelManagerFor = createChannelManager,
     createTunnelManager: createTunnelManagerFor = createTunnelManager,
+    caps = createRuntimeCapabilities(process.env, join(cwd, 'secrets.json')),
   }: StartAgentOptions,
   registerBootCleanup: (cleanup: () => void | Promise<void>) => void,
 ): Promise<StartAgentResult> {
@@ -365,6 +373,7 @@ async function startAgentRuntime(
 
   const channelManager = createChannelManagerFor({
     agentDir: cwd,
+    secretsProvider: caps.secrets,
     channelsConfigRef: () => getConfig().channels,
     aliasesRef: () => getConfig().alias,
     tunnelUrlForChannel: (name) => resolveTunnelUrlForChannel(name, tunnelManager),
