@@ -9,7 +9,7 @@ import { applyTurnThinkingLevel, getQuestionSignal, type QuestionSignal } from '
 import { resolveFallbackChain } from '@/agent/model-fallback'
 import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
-import { isThrottleOrOverload, subscribeProviderErrors } from '@/agent/provider-error'
+import { detectHardProviderError, isFailoverWorthy, subscribeProviderErrors } from '@/agent/provider-error'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -2654,7 +2654,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             currentModelRef: live.activeModelRef,
             session: live.session,
             text: promptText,
-            shouldFailover: (err) => isThrottleOrOverload(err.message),
+            shouldFailover: (err) => isFailoverWorthy(err.message),
             setModelForRef: async (ref) => {
               await live.session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
               live.activeModelRef = ref
@@ -2694,6 +2694,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
           logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
+          // Fallback is exhausted by now (promptPersistentTurnWithFallback only
+          // throws after rotating every eligible ref), so a recognizable provider
+          // failure is terminal for this turn. Stage a redacted notice for the
+          // `finally` poster — but never clobber a soft error already captured for
+          // this turnSeq by subscribeProviderErrors (first-detected wins).
+          const hardProviderError = detectHardProviderError(err)
+          if (hardProviderError !== null && live.pendingProviderError?.turnSeq !== live.turnSeq) {
+            live.pendingProviderError = { turnSeq: live.turnSeq, safeMessage: hardProviderError.safeMessage }
+          }
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.lastSendLeafId = null

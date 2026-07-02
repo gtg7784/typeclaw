@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
+import { isFailoverWorthy } from './provider-error'
 import { ThrottleCircuit } from './throttle-circuit'
 import { promptPersistentTurnWithFallback } from './turn-runner'
 
@@ -12,7 +13,9 @@ const REF_B = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' as ModelRef
 type FakeEvent = { type: string; message?: unknown; assistantMessageEvent?: { type: string; delta?: string } }
 
 function fakeSession(
-  behaviors: Array<'soft-throttle' | 'soft-billing' | 'text-then-throttle' | 'tool-then-throttle' | 'success'>,
+  behaviors: Array<
+    'soft-throttle' | 'soft-billing' | 'text-then-throttle' | 'tool-then-throttle' | 'hard-observer-timeout' | 'success'
+  >,
 ) {
   const events: Array<(event: FakeEvent) => void> = []
   const prompted: string[] = []
@@ -21,6 +24,9 @@ function fakeSession(
     prompt: async (text: string) => {
       prompted.push(text)
       const behavior = behaviors.shift() ?? 'success'
+      if (behavior === 'hard-observer-timeout') {
+        throw new Error('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')
+      }
       if (behavior === 'text-then-throttle') {
         for (const cb of events)
           cb({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
@@ -67,6 +73,28 @@ describe('promptPersistentTurnWithFallback', () => {
     expect(result.refUsed).toBe(REF_B)
     expect(fake.prompted).toEqual(['hello', 'hello'])
     expect(fake.setModels).toEqual([REF_B])
+  })
+
+  test('fails over to the next ref when the first ref throws an observer stall timeout (with isFailoverWorthy)', async () => {
+    // given: ref A hard-throws an observer stall timeout before any output; ref B succeeds
+    const fake = fakeSession(['hard-observer-timeout', 'success'])
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+    })
+
+    // then: the stall rotated to REF_B and succeeded — no failure surfaced to the caller
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_B)
+    expect(fake.setModels).toEqual([REF_B])
+    expect(result.attempts[0]).toMatchObject({ ref: REF_A, outcome: 'hard' })
   })
 
   test('does not advance when the throttle happens after assistant text', async () => {

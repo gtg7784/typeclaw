@@ -10,7 +10,7 @@ import { applyTurnThinkingLevel } from './attention-escalation'
 import { type AgentSession, createSession, type PluginSessionWiring } from './index'
 import { resolveFallbackChain } from './model-fallback'
 import { applyModelRuntimeOverrides } from './model-overrides'
-import { isThrottleOrOverload, subscribeProviderErrors } from './provider-error'
+import { isFailoverWorthy, subscribeProviderErrors } from './provider-error'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
 import {
@@ -349,7 +349,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           text: turnText,
           skipProviderErrorSubscription: true,
           detectSoftErrorFromLeaf: true,
-          shouldFailover: (err) => isThrottleOrOverload(err.message),
+          shouldFailover: (err) => isFailoverWorthy(err.message),
           setModelForRef: async (ref) => {
             await session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
             activeModelRef = ref
