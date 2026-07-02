@@ -1,4 +1,4 @@
-import { stop, type StopResult } from '@/container'
+import { LocalDockerController, type StopResult } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
 import type { AgentResult } from './start'
@@ -34,7 +34,7 @@ export async function composeStop({ rootCwd, onProgress }: ComposeStopOptions): 
 
 async function runOne(name: string, cwd: string): Promise<AgentResult<StopSuccess>> {
   try {
-    const data = await stop({ cwd })
+    const data = await new LocalDockerController().stop({ cwd })
     if (!data.ok) return { name, ok: false, reason: data.reason }
     return { name, ok: true, data }
   } catch (error) {

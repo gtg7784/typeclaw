@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { logs, parseTailValue } from '@/container'
+import { LocalDockerController, parseTailValue } from '@/container'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { runInspectViewer } from './inspect'
@@ -64,7 +64,7 @@ export const logsCommand = defineCommand({
       console.log(c.dim('Showing container logs.'))
     }
 
-    const result = await logs({ cwd, follow: args.follow, tail })
+    const result = await new LocalDockerController().logs({ cwd, follow: args.follow, tail })
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)

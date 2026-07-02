@@ -2,7 +2,7 @@ import { styleText } from 'node:util'
 
 import { defineCommand } from 'citty'
 
-import { status as containerStatus, type ContainerStatus, type DockerExec } from '@/container'
+import { type ContainerStatus, type DockerExec, LocalDockerController } from '@/container'
 import { isDaemonReachable, send } from '@/hostd'
 import type { StatusResult } from '@/hostd'
 import { findAgentDir } from '@/init'
@@ -52,7 +52,7 @@ export async function runStatus(deps: RunStatusDeps = {}): Promise<void> {
     return
   }
 
-  const container = await containerStatus({ cwd, exec: deps.exec })
+  const container = await new LocalDockerController().status({ cwd, exec: deps.exec })
   const hostd = await (deps.fetchHostd ?? fetchHostdStatus)(container.containerName)
 
   const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
