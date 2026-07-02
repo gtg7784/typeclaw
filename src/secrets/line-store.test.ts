@@ -122,6 +122,7 @@ describe('SecretsLineCredentialStore container mode', () => {
           hostdUrl: `http://127.0.0.1:${server.port}`,
           restartToken: token,
           containerName,
+          secretsPath,
         }),
       })
       await store.setAccount(account('mid-1'))
