@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { requireAgentDir } from './require-agent-dir'
@@ -22,7 +22,7 @@ export const stopCommand = defineCommand({
 
     const s = spinner()
     s.start('Stopping container...')
-    const result = await new LocalDockerController().stop({ cwd })
+    const result = await resolveController().stop({ cwd })
 
     if (!result.ok) {
       s.error(result.reason)

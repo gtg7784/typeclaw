@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
 import { requireAgentDir } from './require-agent-dir'
@@ -29,7 +29,7 @@ export const shellCommand = defineCommand({
 
     console.log(c.cyan(`Attaching ${args.shell} inside the container...`))
 
-    const result = await new LocalDockerController().shell({ cwd, shell: args.shell })
+    const result = await resolveController().shell({ cwd, shell: args.shell })
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
