@@ -2,7 +2,7 @@ import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
@@ -70,7 +70,7 @@ export const restartCommand = defineCommand({
       process.exit(1)
     }
 
-    const controller = new LocalDockerController()
+    const controller = resolveController()
 
     const stopSpin = spinner()
     stopSpin.start('Stopping container...')

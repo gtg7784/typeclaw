@@ -1,4 +1,4 @@
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 
 export type StreamLogsOptions = {
   cwd: string
@@ -28,7 +28,7 @@ export async function streamLogs(opts: StreamLogsOptions): Promise<StreamLogsRes
   const out = lineSink(opts.stdout)
   const err = lineSink(opts.stderr)
 
-  const result = await new LocalDockerController().logs({
+  const result = await resolveController().logs({
     cwd: opts.cwd,
     follow: true,
     out,

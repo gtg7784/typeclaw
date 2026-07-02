@@ -3,7 +3,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CONTROLLER_UNSUPPORTED_REASON, LocalDockerController, NoopController } from './controller'
+import {
+  CONTROLLER_UNSUPPORTED_REASON,
+  LocalDockerController,
+  NoopController,
+  resolveController,
+  resolveDeploymentProfile,
+} from './controller'
 import { containerNameFromCwd, type DockerExec, type DockerExecResult, imageTagFromCwd } from './shared'
 
 function fakeExec(handler: (args: string[]) => DockerExecResult): DockerExec {
@@ -92,5 +98,25 @@ describe('NoopController', () => {
     expect(result.kind).toBe('missing')
     expect(result.containerName).toBe(containerNameFromCwd(cwd))
     expect(result.imageTag).toBe(imageTagFromCwd(cwd))
+  })
+})
+
+describe('resolveController', () => {
+  test('host profile resolves to LocalDockerController', () => {
+    expect(resolveController('host')).toBeInstanceOf(LocalDockerController)
+  })
+
+  test('managed profile resolves to NoopController', () => {
+    expect(resolveController('managed')).toBeInstanceOf(NoopController)
+  })
+
+  test('defaults to the host controller (no managed runtime yet)', () => {
+    expect(resolveController()).toBeInstanceOf(LocalDockerController)
+  })
+})
+
+describe('resolveDeploymentProfile', () => {
+  test('resolves to host (the only reachable profile today)', () => {
+    expect(resolveDeploymentProfile()).toBe('host')
   })
 })

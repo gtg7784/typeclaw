@@ -2,7 +2,7 @@ import { confirm, isCancel } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { LocalDockerController } from '@/container'
+import { resolveController } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
 import { preflightDocker, printDockerGuidance } from './docker-preflight'
@@ -72,7 +72,7 @@ export const startCommand = defineCommand({
 
     const s = spinner()
     s.start('Starting container...')
-    const result = await new LocalDockerController().start({
+    const result = await resolveController().start({
       cwd,
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
