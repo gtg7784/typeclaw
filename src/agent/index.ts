@@ -38,6 +38,7 @@ import { materializeSkills } from '@/plugin'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
+import { applyAdaptiveThinkingCompat } from './adaptive-thinking-compat'
 import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
@@ -490,6 +491,13 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       return converted
     }
   }
+
+  // Same seam, one hook later: layer the adaptive-thinking rewrite over pi's
+  // onPayload so Sonnet 5 / Fable 5 never receive the budget-based `thinking`
+  // payload the pinned pi-ai 0.67.3 emits for them (a hard 400 — see
+  // adaptive-thinking-compat.ts). Covers every provider call path through the
+  // agent, including model switches mid-session.
+  applyAdaptiveThinkingCompat(session.agent)
 
   abortHolder.abort = (reason?: string) => {
     if (reason !== undefined) abortHolder.reason = reason

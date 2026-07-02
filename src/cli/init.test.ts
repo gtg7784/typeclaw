@@ -1260,13 +1260,15 @@ describe('recommended models', () => {
   test('sortRecommendedFirst floats the recommended Anthropic model to the top', () => {
     const haiku = model('anthropic/claude-haiku-4-5', { modelName: 'Claude Haiku 4.5' })
     const sonnet = model('anthropic/claude-sonnet-4-6', { modelName: 'Claude Sonnet 4.6' })
+    const sonnet5 = model('anthropic/claude-sonnet-5', { modelName: 'Claude Sonnet 5' })
     const opus47 = model('anthropic/claude-opus-4-7', { modelName: 'Claude Opus 4.7' })
     const opus48 = model('anthropic/claude-opus-4-8', { modelName: 'Claude Opus 4.8' })
     const fable5 = model('anthropic/claude-fable-5', { modelName: 'Claude Fable 5' })
-    const sorted = sortRecommendedFirst([haiku, sonnet, opus47, opus48, fable5])
+    const sorted = sortRecommendedFirst([haiku, sonnet, sonnet5, opus47, opus48, fable5])
     expect(sorted.map((o) => o.ref)).toEqual([
       'anthropic/claude-sonnet-4-6',
       'anthropic/claude-haiku-4-5',
+      'anthropic/claude-sonnet-5',
       'anthropic/claude-opus-4-7',
       'anthropic/claude-opus-4-8',
       'anthropic/claude-fable-5',
