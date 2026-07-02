@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 
+import { firstBeliefSentence, isTitleLikeHeading } from './belief-sentence'
 import { buildInjectionPlan, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
@@ -125,7 +126,9 @@ export function renderRetrievedMemorySection(
       const provenance = renderProvenanceLine(item)
       if (provenance !== null) lines.push(provenance)
       lines.push(item.excerpt.trimEnd(), '')
-    } else if (item.source === 'topic' || item.source === 'reference') {
+    } else if (item.source === 'topic') {
+      lines.push(channelTopicEntry(item.heading, item.key, item.excerpt))
+    } else if (item.source === 'reference') {
       lines.push(topicIndexEntry(item.heading, item.key))
     } else {
       const provenance = renderProvenanceLine(item)
@@ -147,8 +150,13 @@ export function renderTopicIndexMemorySection(
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
   lines.push(topicIndexDirective(options), '')
+  const channel = options.origin?.kind === 'channel'
   for (const shard of shards) {
-    lines.push(topicIndexEntry(shard.frontmatter.heading, shard.slug))
+    lines.push(
+      channel
+        ? channelTopicEntry(shard.frontmatter.heading, shard.slug, shard.body)
+        : topicIndexEntry(shard.frontmatter.heading, shard.slug),
+    )
   }
   return lines.join('\n').trimEnd()
 }
@@ -164,6 +172,18 @@ function topicIndexEntry(heading: string, slug: string): string {
     return `- \`${slug}\``
   }
   return `- ${heading} \`${slug}\``
+}
+
+// Channel turns show headings only (memory-bleed defense). That is safe ONLY when
+// the heading is the shard's self-contained belief sentence. Legacy/dreaming shards
+// put a title in `heading` and the fact in the body, so a title-like heading would
+// leak a fact-free label; recover the one belief sentence from the body instead
+// (still one sentence, never the full body). The slug rides along so the agent can
+// `memory_search({ topic })` for the rest.
+function channelTopicEntry(heading: string, slug: string, body: string): string {
+  if (!isTitleLikeHeading(heading, slug)) return topicIndexEntry(heading, slug)
+  const belief = firstBeliefSentence(body)
+  return belief === undefined ? topicIndexEntry(heading, slug) : `- ${belief} \`${slug}\``
 }
 
 function topicIndexDirective(options: Pick<LoadMemoryOptions, 'origin'>): string {
