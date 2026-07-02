@@ -1,4 +1,12 @@
-export { CONTROLLER_UNSUPPORTED_REASON, type Controller, LocalDockerController, NoopController } from './controller'
+export {
+  CONTROLLER_UNSUPPORTED_REASON,
+  type Controller,
+  type DeploymentProfile,
+  LocalDockerController,
+  NoopController,
+  resolveController,
+  resolveDeploymentProfile,
+} from './controller'
 export {
   classifyConfiguredRuntime,
   detectInstalledDockerApps,
