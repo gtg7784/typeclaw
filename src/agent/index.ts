@@ -491,7 +491,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   // Same seam, one hook later: layer the adaptive-thinking rewrite over pi's
   // onPayload so Sonnet 5 / Fable 5 never receive the budget-based `thinking`
-  // payload the pinned pi-ai 0.67.3 emits for them (a hard 400 — see
+  // payload the pinned pi-ai 0.73.x emits for them (a hard 400 — see
   // adaptive-thinking-compat.ts). Covers every provider call path through the
   // agent, including model switches mid-session.
   applyAdaptiveThinkingCompat(session.agent)
