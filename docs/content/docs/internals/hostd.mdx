@@ -4,7 +4,7 @@ description: Singleton host-stage daemon, three trust channels, the control prot
 icon: Server
 ---
 
-`src/hostd/` is a singleton host-stage daemon owning host-side capabilities the running container needs: the **supervisor** (restart), the **port broker** (delegated to `src/portbroker/`), and the **KakaoTalk renewal cron**. Singleton per host, not per agent. Only persistent host-side process; only persistent host-stage state (`~/.typeclaw/`). New host-side capabilities plug in as `src/hostd/<capability>-manager.ts` glue + a `src/<capability>/` module + an optional `DaemonOptions` callback. **Don't add new daemons.**
+`src/hostd/` is a singleton host-stage daemon: **one implementation of the host-side control plane** in the `host` deployment profile (see [Capabilities](/docs/internals/capabilities)). It provides the host-side capabilities the running container needs: the **supervisor** (restart), the **port broker** (delegated to `src/portbroker/`), and the **credential renewal crons** (KakaoTalk and Webex). Singleton per host, not per agent. Only persistent host-side process; only persistent host-stage state (`~/.typeclaw/`). A managed deployment (ECS/K8s) has no `hostd` — the platform provides these capabilities instead. New capabilities are named as interfaces and composed via `src/capabilities/`; a hostd-backed one adds `src/hostd/<capability>-manager.ts` glue + a `src/<capability>/` module + an optional `DaemonOptions` callback. **Don't add new daemons.**
 
 ## Why it exists
 
@@ -82,5 +82,5 @@ NDJSON over the Unix socket. Connection-per-request. Kinds: `register`, `deregis
 - **Wire-protocol changes to `/portbroker` require a container restart.** Bun has no hot-reload. Same as TUI protocol.
 - **CLI never SIGTERMs by PID.** `stop` deregisters via socket; pidfile is a discovery hint. Drift respawn uses `shutdown` RPC + socket-file polling. If it doesn't honor shutdown within 5s, hard failure — never escalate to signals.
 - **Daemon-source drift is detected, not assumed.** `_hostd` loads `src/` once at boot; without the version probe, every fix to daemon logic was silently a no-op until manual `pkill`. Portbroker source is part of the fingerprint.
-- **Trust boundaries scale per channel.** Unix socket → UID via 0600. HTTP → containerName + Bearer token. WS → brokerToken. New cross-container capabilities need new RPC kinds with explicit auth, not wider mounts.
+- **Trust boundaries scale per channel.** Unix socket → UID via 0600. HTTP → containerName + Bearer token. WS → brokerToken. A new capability served _by hostd_ adds a new RPC kind with explicit auth, not wider mounts — but the capability itself is defined as an interface in [Capabilities](/docs/internals/capabilities); hostd is just its `host`-profile implementation.
 - **Persistence is per-container.** One file per registration; corrupt files skip one container, not all. CLI never writes these — only hostd does, inside `runSerially(name)`.
