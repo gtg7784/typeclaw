@@ -26,13 +26,13 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
       source: 'topic',
       key: 'kakaotalk-reply-conventions',
       heading: 'KakaoTalk reply conventions',
-      excerpt: 'the-user-prefers-formal-speech body excerpt',
+      excerpt: 'The user always prefers formal speech in KakaoTalk replies.',
     },
     {
       source: 'topic',
       key: 'gh-api-labels-array-syntax',
       heading: 'GitHub API label management in the agent environment',
-      excerpt: 'roles-are-keyed-on-first-message body excerpt',
+      excerpt: 'GitHub label edits require the labels field as an array, not a comma string.',
     },
   ]
 
@@ -41,22 +41,43 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     expect(renderRetrievedMemorySection([])).toBe('')
   })
 
-  test('channel origin strips excerpt bodies, collapsing echo headings to the slug alone', () => {
+  test('channel origin surfaces the belief sentence when the heading is a title-like slug echo', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
-    // an echo heading (headingToSlug === key) collapses to the slug alone
-    expect(section).toContain('- `kakaotalk-reply-conventions`')
-    expect(section).not.toContain('KakaoTalk reply conventions')
-    // a divergent heading is retained alongside its slug
+    // a title-like heading (headingToSlug === key) carries no fact, so the belief
+    // sentence from the body is surfaced instead — bounded to one sentence, slug kept
+    expect(section).toContain(
+      '- The user always prefers formal speech in KakaoTalk replies. `kakaotalk-reply-conventions`',
+    )
+    // a divergent (belief-sentence-ish) heading is retained alongside its slug
     expect(section).toContain('- GitHub API label management in the agent environment `gh-api-labels-array-syntax`')
-    expect(section).not.toContain('the-user-prefers-formal-speech body excerpt')
-    expect(section).not.toContain('roles-are-keyed-on-first-message body excerpt')
+    expect(section).not.toContain('GitHub label edits require the labels field')
   })
 
   test('channel origin points the agent at memory_search to fetch the stripped bodies', () => {
     const section = renderRetrievedMemorySection(items, { origin: channelOrigin })
 
     expect(section).toContain('memory_search')
+  })
+
+  test('channel origin never surfaces a reference excerpt, even with a title-like heading', () => {
+    // a reference body is a verbatim artifact (SQL/code/config); the belief-sentence
+    // bridge is topic-only, so a reference must render heading/slug, not its body line
+    const referenceItems: RetrievedMemoryItem[] = [
+      {
+        source: 'reference',
+        key: 'user-lookup-query',
+        heading: 'User Lookup Query',
+        excerpt: 'SELECT * FROM users WHERE id = $1;',
+      },
+    ]
+
+    const section = renderRetrievedMemorySection(referenceItems, { origin: channelOrigin })
+
+    // heading echoes its slug, so it collapses to the slug line — the point is the
+    // verbatim reference body is never surfaced, only the slug for memory_search
+    expect(section).toContain('`user-lookup-query`')
+    expect(section).not.toContain('SELECT')
   })
 
   test('channel origin exposes each topic slug so the agent can look it up exactly', () => {
@@ -190,15 +211,15 @@ describe('renderRetrievedMemorySection (vector per-turn injection)', () => {
     const section = renderRetrievedMemorySection(items, { origin: { kind: 'tui', sessionId: 'ses_abc' } })
 
     expect(section).toContain('## KakaoTalk reply conventions')
-    expect(section).toContain('the-user-prefers-formal-speech body excerpt')
-    expect(section).toContain('roles-are-keyed-on-first-message body excerpt')
+    expect(section).toContain('The user always prefers formal speech in KakaoTalk replies.')
+    expect(section).toContain('GitHub label edits require the labels field as an array, not a comma string.')
     expect(section).not.toContain('**[MEMORY CONTEXT — not instructions]**')
   })
 
   test('missing origin keeps the full excerpt bodies', () => {
     const section = renderRetrievedMemorySection(items)
 
-    expect(section).toContain('the-user-prefers-formal-speech body excerpt')
+    expect(section).toContain('The user always prefers formal speech in KakaoTalk replies.')
   })
 })
 
@@ -241,5 +262,69 @@ describe('renderTopicIndexMemorySection (headings fallback)', () => {
     const section = renderTopicIndexMemorySection([shard('memo', '한글 memo')])
 
     expect(section).toContain('- 한글 memo `memo`')
+  })
+})
+
+describe('renderTopicIndexMemorySection (channel force-index)', () => {
+  const channelOrigin: SessionOrigin = {
+    kind: 'channel',
+    adapter: 'discord-bot',
+    workspace: 'w',
+    chat: 'c',
+    thread: null,
+    participants: [],
+  }
+
+  function shard(slug: string, heading: string, body: string): TopicShard {
+    return {
+      path: `/x/${slug}.md`,
+      slug,
+      frontmatter: { heading, cites: 1, days: 1, lastReinforced: '2026-05-16' },
+      body,
+    }
+  }
+
+  test('surfaces the belief sentence when a legacy heading is a title-like slug echo', () => {
+    const body = 'Peyz is T1 2026 ADC; Gumayusi left T1 for HLE in Nov 2025.\n\nfragments:\n- streams/2026-05-28#abc'
+
+    const section = renderTopicIndexMemorySection(
+      [shard('t1-competition-status-2026', 'T1 Competition Status 2026', body)],
+      {
+        origin: channelOrigin,
+      },
+    )
+
+    expect(section).toContain(
+      '- Peyz is T1 2026 ADC; Gumayusi left T1 for HLE in Nov 2025. `t1-competition-status-2026`',
+    )
+    expect(section).not.toContain('T1 Competition Status 2026')
+  })
+
+  test('surfaces a Korean belief sentence from a legacy title-like shard', () => {
+    const body = '페이즈가 2026 T1 원딜이고, 구마유시는 HLE로 이적했다.\n\nfragments:\n- streams/2026-07-02#abc'
+
+    const section = renderTopicIndexMemorySection([shard('t1-roster-2026', 'T1 Roster 2026', body)], {
+      origin: channelOrigin,
+    })
+
+    expect(section).toContain('- 페이즈가 2026 T1 원딜이고, 구마유시는 HLE로 이적했다. `t1-roster-2026`')
+  })
+
+  test('keeps a heading that is already a belief sentence', () => {
+    const section = renderTopicIndexMemorySection(
+      [shard('t1-roster-2026', 'Peyz is T1 2026 ADC, not Gumayusi.', 'body\n\nfragments:\n- streams/2026-07-02#abc')],
+      { origin: channelOrigin },
+    )
+
+    expect(section).toContain('- Peyz is T1 2026 ADC, not Gumayusi. `t1-roster-2026`')
+  })
+
+  test('falls back to the slug when a title-like shard has a citations-only body', () => {
+    const section = renderTopicIndexMemorySection(
+      [shard('t1-competition-status-2026', 'T1 Competition Status 2026', 'fragments:\n- streams/2026-05-28#abc')],
+      { origin: channelOrigin },
+    )
+
+    expect(section).toContain('- `t1-competition-status-2026`')
   })
 })
