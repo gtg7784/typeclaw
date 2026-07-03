@@ -495,7 +495,7 @@ function renderChannelOrigin(
         ]),
     '',
     '**Backgrounded work does not end the obligation.** If you spawn a',
-    'subagent with `run_in_background: true` to answer the current inbound,',
+    'subagent in the background to answer the current inbound,',
     'you promised a reply you have not delivered. Do not skip: the system will',
     'not surface the result. When the subagent-completion `<system-reminder>` arrives,',
     'call `subagent_output` and send the result via `channel_reply`.',

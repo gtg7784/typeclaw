@@ -853,7 +853,7 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).toContain('**Mode C — Troubleshooting.**')
     expect(prompt).toContain('typeclaw-troubleshooting')
-    expect(prompt).toContain('run_in_background: true')
+    expect(prompt).toContain('hand the loop to `operator`')
   })
 
   test('slim prompt does NOT carry the Mode C troubleshooting hand-off (full-mode-only budget guard)', async () => {

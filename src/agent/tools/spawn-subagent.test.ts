@@ -14,7 +14,7 @@ import type {
   Subagent,
   SubagentRegistry,
 } from '../subagents'
-import { createSpawnSubagentTool } from './spawn-subagent'
+import { createSpawnSubagentTool, resolveSpawnMode } from './spawn-subagent'
 
 const ctx = {} as Parameters<ReturnType<typeof createSpawnSubagentTool>['execute']>[4]
 
@@ -103,7 +103,7 @@ describe('createSpawnSubagentTool — visibility gate', () => {
 
     const result = await tool.execute(
       'call_1',
-      { subagent_type: 'explorer', prompt: 'find X' },
+      { subagent_type: 'explorer', prompt: 'find X', run_in_foreground: true },
       undefined,
       undefined,
       ctx,
@@ -172,7 +172,13 @@ describe('createSpawnSubagentTool — sync mode', () => {
     }))
     const { tool, liveRegistry } = fixedSpawn({ createSession: async () => session })
 
-    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
 
     const details = result.details as {
       ok: boolean
@@ -192,7 +198,13 @@ describe('createSpawnSubagentTool — sync mode', () => {
     const session = stubSession()
     const { tool } = fixedSpawn({ createSession: async () => session })
 
-    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
     expect(text).toMatch(/explorer completed in/)
   })
@@ -204,7 +216,13 @@ describe('createSpawnSubagentTool — sync mode', () => {
     }
     const { tool, liveRegistry } = fixedSpawn({ createSession: async () => session })
 
-    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
     const details = result.details as { ok: boolean; error?: string }
     expect(details.ok).toBe(false)
     expect(details.error).toBe('provider exploded')
@@ -227,7 +245,6 @@ describe('createSpawnSubagentTool — background mode', () => {
       {
         subagent_type: 'explorer',
         prompt: 'long search',
-        run_in_background: true,
       },
       undefined,
       undefined,
@@ -274,7 +291,6 @@ describe('createSpawnSubagentTool — background mode', () => {
       {
         subagent_type: 'explorer',
         prompt: 'q',
-        run_in_background: true,
       },
       undefined,
       undefined,
@@ -321,13 +337,7 @@ describe('createSpawnSubagentTool — background mode', () => {
       now: () => 1_000,
     })
 
-    await tool.execute(
-      'call_1',
-      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
-      undefined,
-      undefined,
-      ctx,
-    )
+    await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
@@ -356,13 +366,7 @@ describe('createSpawnSubagentTool — background mode', () => {
       now: () => 1_000,
     })
 
-    await tool.execute(
-      'call_1',
-      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
-      undefined,
-      undefined,
-      ctx,
-    )
+    await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
@@ -510,20 +514,8 @@ describe('createSpawnSubagentTool — concurrency', () => {
       now: () => 1_000,
     })
 
-    const p1 = tool.execute(
-      'call_1',
-      { subagent_type: 'explorer', prompt: 'a', run_in_background: true },
-      undefined,
-      undefined,
-      ctx,
-    )
-    const p2 = tool.execute(
-      'call_2',
-      { subagent_type: 'explorer', prompt: 'b', run_in_background: true },
-      undefined,
-      undefined,
-      ctx,
-    )
+    const p1 = tool.execute('call_1', { subagent_type: 'explorer', prompt: 'a' }, undefined, undefined, ctx)
+    const p2 = tool.execute('call_2', { subagent_type: 'explorer', prompt: 'b' }, undefined, undefined, ctx)
     const [r1, r2] = await Promise.all([p1, p2])
     const d1 = r1.details as { taskId: string }
     const d2 = r2.details as { taskId: string }
@@ -708,13 +700,17 @@ describe('createSpawnSubagentTool — depth guard', () => {
   })
 })
 
-describe('createSpawnSubagentTool — background-from-subagent guard', () => {
-  function spawnWithOrigin(origin: SessionOrigin) {
+describe('createSpawnSubagentTool — foreground/background resolution', () => {
+  function textOf(result: { content: { type: string; text?: string }[] }): string {
+    return result.content[0]?.type === 'text' ? (result.content[0].text ?? '') : ''
+  }
+
+  function spawnWithOrigin(origin: SessionOrigin, registry?: SubagentRegistry) {
     const liveRegistry = new LiveSubagentRegistry()
     let launched = 0
     let counter = 0
     const tool = createSpawnSubagentTool({
-      registry: makeRegistry(),
+      registry: registry ?? makeRegistry(),
       liveRegistry,
       createSessionForSubagent: async () => {
         launched += 1
@@ -725,6 +721,7 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
       getOrigin: () => origin,
       generateTaskId: () => `bg_bg${(counter += 1)}`,
       now: () => 1_000,
+      stream: createStream(),
     })
     return { tool, launchedCount: () => launched }
   }
@@ -736,41 +733,70 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
     spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
   }
 
-  test('background spawn from a subagent origin is denied and launches no child', async () => {
-    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+  const tuiOrigin: SessionOrigin = { kind: 'tui', sessionId: 'ses_root' }
 
-    const result = await tool.execute(
-      'call_1',
-      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
-      undefined,
-      undefined,
-      ctx,
-    )
+  const deepRegistry: SubagentRegistry = {
+    reviewer: { systemPrompt: 'You are deep.', visibility: 'public', profile: 'deep' },
+  }
 
-    const details = result.details as { ok: boolean; error?: string }
-    expect(details.ok).toBe(false)
-    expect(details.error).toContain('background spawning is not available from a subagent session')
-    expect(details.error).toContain('run_in_background=false')
-    expect(launchedCount()).toBe(0)
-  })
-
-  test('synchronous spawn from a subagent origin is still allowed', async () => {
-    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+  test('top-level spawn defaults to background', async () => {
+    const { tool } = spawnWithOrigin(tuiOrigin)
 
     const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
 
     const details = result.details as { ok: boolean; mode?: string }
     expect(details.ok).toBe(true)
-    expect(details.mode).toBe('sync')
-    expect(launchedCount()).toBe(1)
+    expect(details.mode).toBe('background')
   })
 
-  test('background spawn from a non-subagent (tui) origin is unaffected', async () => {
-    const { tool } = spawnWithOrigin({ kind: 'tui', sessionId: 'ses_root' })
+  test('top-level fast spawn honors run_in_foreground=true and runs sync', async () => {
+    const { tool } = spawnWithOrigin(tuiOrigin)
 
     const result = await tool.execute(
       'call_1',
-      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+  })
+
+  test('top-level deep-profile spawn is forced to background even when foreground is requested', async () => {
+    const { tool } = spawnWithOrigin(tuiOrigin, deepRegistry)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'reviewer', prompt: 'review', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('background')
+    expect(textOf(result)).toContain('BACKGROUND')
+    expect(textOf(result)).toContain('deep profile')
+  })
+
+  test('deep-profile via per-spawn profile override is also forced to background from top-level', async () => {
+    const overrideRegistry: SubagentRegistry = {
+      operator: {
+        systemPrompt: 'X',
+        visibility: 'public',
+        profile: 'default',
+        payloadSchema: z.object({ prompt: z.string().optional(), profile: z.string().optional() }).passthrough(),
+      },
+    }
+    const { tool } = spawnWithOrigin(tuiOrigin, overrideRegistry)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'operator', prompt: 'gnarly', profile: 'deep', run_in_foreground: true },
       undefined,
       undefined,
       ctx,
@@ -781,7 +807,112 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
     expect(details.mode).toBe('background')
   })
 
-  test('background spawn from a subagent IS allowed when allowBackgroundFromSubagent is set', async () => {
+  test('subagent origin defaults to foreground so the result folds in (planner->reviewer sync)', async () => {
+    const plannerOrigin: SessionOrigin = {
+      kind: 'subagent',
+      subagent: 'planner',
+      parentSessionId: 'ses_child',
+      spawnedByOrigin: { kind: 'tui', sessionId: 'ses_root' },
+    }
+    const { tool, launchedCount } = spawnWithOrigin(plannerOrigin, deepRegistry)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'reviewer', prompt: 'review the plan' },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+    expect(launchedCount()).toBe(1)
+  })
+
+  test('foreground spawn from a subagent origin runs sync', async () => {
+    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: true },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+    expect(launchedCount()).toBe(1)
+  })
+
+  test('explicit background (run_in_foreground=false) from a subagent that cannot drain degrades to foreground and still launches', async () => {
+    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: false },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+    expect(launchedCount()).toBe(1)
+    expect(textOf(result)).toContain('FOREGROUND')
+    expect(textOf(result)).toContain('drain')
+  })
+
+  test('degrade override note is preserved when the degraded child fails', async () => {
+    const session = stubSession()
+    session.prompt = async () => {
+      throw new Error('provider exploded')
+    }
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry: new LiveSubagentRegistry(),
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      parentSessionId: 'ses_child',
+      getOrigin: () => subagentOrigin,
+      generateTaskId: () => 'bg_fail',
+      now: () => 1_000,
+      stream: createStream(),
+    })
+
+    const result = await tool.execute(
+      'call_1',
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: false },
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toBe('provider exploded')
+    const text = textOf(result)
+    expect(text).toContain('FOREGROUND')
+    expect(text).toContain('drain')
+    expect(text).toContain('failed after')
+  })
+
+  test('subagent omitting the flag defaults to foreground with no override note', async () => {
+    const { tool, launchedCount } = spawnWithOrigin(subagentOrigin)
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean; mode?: string }
+    expect(details.ok).toBe(true)
+    expect(details.mode).toBe('sync')
+    expect(launchedCount()).toBe(1)
+    expect(textOf(result)).not.toContain('FOREGROUND:')
+  })
+
+  test('drain-capable subagent (allowBackgroundFromSubagent) gets background when it opts in with run_in_foreground=false', async () => {
     const tool = createSpawnSubagentTool({
       registry: makeRegistry(),
       liveRegistry: new LiveSubagentRegistry(),
@@ -797,7 +928,7 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
 
     const result = await tool.execute(
       'call_1',
-      { subagent_type: 'explorer', prompt: 'q', run_in_background: true },
+      { subagent_type: 'explorer', prompt: 'q', run_in_foreground: false },
       undefined,
       undefined,
       ctx,
@@ -806,5 +937,76 @@ describe('createSpawnSubagentTool — background-from-subagent guard', () => {
     const details = result.details as { ok: boolean; mode?: string }
     expect(details.ok).toBe(true)
     expect(details.mode).toBe('background')
+  })
+})
+
+describe('resolveSpawnMode', () => {
+  const base = {
+    foreground: undefined as boolean | undefined,
+    fromSubagent: false,
+    isDeepProfile: false,
+    canBackgroundFromSubagent: false,
+    subagentName: 'scout',
+  }
+
+  test('top-level default (foreground omitted) is background', () => {
+    const r = resolveSpawnMode({ ...base })
+    expect(r.background).toBe(true)
+    expect(r.overrideNote).toBeUndefined()
+  })
+
+  test('top-level foreground=true is honored for a non-deep subagent', () => {
+    const r = resolveSpawnMode({ ...base, foreground: true })
+    expect(r.background).toBe(false)
+    expect(r.overrideNote).toBeUndefined()
+  })
+
+  test('top-level deep + foreground=true is forced to background with an explaining note', () => {
+    const r = resolveSpawnMode({ ...base, foreground: true, isDeepProfile: true, subagentName: 'researcher' })
+    expect(r.background).toBe(true)
+    expect(r.overrideNote).toContain('BACKGROUND')
+    expect(r.overrideNote).toContain('researcher')
+  })
+
+  test('subagent origin default (foreground omitted) is foreground — the sync-fold path', () => {
+    const r = resolveSpawnMode({
+      ...base,
+      fromSubagent: true,
+      isDeepProfile: true,
+      canBackgroundFromSubagent: true,
+      subagentName: 'reviewer',
+    })
+    expect(r.background).toBe(false)
+    expect(r.overrideNote).toBeUndefined()
+  })
+
+  test('drain-capable subagent can opt into background with foreground=false', () => {
+    const r = resolveSpawnMode({
+      ...base,
+      foreground: false,
+      fromSubagent: true,
+      canBackgroundFromSubagent: true,
+      subagentName: 'scout',
+    })
+    expect(r.background).toBe(true)
+    expect(r.overrideNote).toBeUndefined()
+  })
+
+  test('subagent without drain degrades a background request (foreground=false) to foreground with a note', () => {
+    const r = resolveSpawnMode({
+      ...base,
+      foreground: false,
+      fromSubagent: true,
+      subagentName: 'explorer',
+    })
+    expect(r.background).toBe(false)
+    expect(r.overrideNote).toContain('FOREGROUND')
+    expect(r.overrideNote).toContain('explorer')
+  })
+
+  test('subagent explicit foreground=true needs no note', () => {
+    const r = resolveSpawnMode({ ...base, foreground: true, fromSubagent: true, subagentName: 'explorer' })
+    expect(r.background).toBe(false)
+    expect(r.overrideNote).toBeUndefined()
   })
 })

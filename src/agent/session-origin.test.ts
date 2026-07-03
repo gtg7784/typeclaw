@@ -400,7 +400,7 @@ describe('renderSessionOrigin', () => {
       thread: '1700000000.000100',
     })
     expect(out).toMatch(/Backgrounded work does not end the obligation/i)
-    expect(out).toMatch(/run_in_background:\s*true/i)
+    expect(out).toMatch(/in the background/i)
     expect(out).toMatch(/promised a reply you have not delivered/i)
     expect(out).toMatch(/subagent-completion .*system-reminder.* arrives/i)
     expect(out).toMatch(/subagent_output/)
