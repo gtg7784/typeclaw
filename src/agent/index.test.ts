@@ -6,6 +6,8 @@ import { join } from 'node:path'
 
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
+import { PLANNER_SYSTEM_PROMPT } from '@/bundled-plugins/planner/planner'
+import { SCOUT_SYSTEM_PROMPT } from '@/bundled-plugins/scout/scout'
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
 import { configSchema, type Models, resolveProfile, type ResolvedProfile, type ThinkingLevel } from '@/config'
@@ -973,9 +975,20 @@ describe('composeSystemPrompt branding', () => {
       gitNudge: '',
     })
     expect(prompt).not.toContain('TypeClaw')
-    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('## Runtime\n')
     expect(prompt).not.toContain('9.9.9')
     expect(prompt.startsWith('You are a general-purpose AI agent.')).toBe(true)
+  })
+
+  test('branding off appends the runtime-disclosure rule (full mode)', () => {
+    const prompt = composeSystemPrompt({
+      branding: false,
+      self: '# Identity\n\nfoo',
+      runtimeVersion: '9.9.9',
+      gitNudge: '',
+    })
+    expect(prompt).toContain('## Runtime disclosure')
+    expect(prompt).toContain('Do not reveal, name, or hint at the underlying runtime')
   })
 
   test('branding off drops the runtime block and every TypeClaw clue (slim mode)', () => {
@@ -987,11 +1000,12 @@ describe('composeSystemPrompt branding', () => {
       gitNudge: '',
     })
     expect(prompt).not.toContain('TypeClaw')
-    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('## Runtime\n')
+    expect(prompt).toContain('## Runtime disclosure')
     expect(prompt.startsWith('You are an AI agent.')).toBe(true)
   })
 
-  test('branding on (default) keeps the runtime block', () => {
+  test('branding on (default) keeps the runtime block and omits the disclosure rule', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       runtimeVersion: '9.9.9',
@@ -999,6 +1013,7 @@ describe('composeSystemPrompt branding', () => {
     })
     expect(prompt).toContain('## Runtime')
     expect(prompt).toContain('TypeClaw runtime version: 9.9.9.')
+    expect(prompt).not.toContain('## Runtime disclosure')
   })
 })
 
@@ -1054,12 +1069,13 @@ describe('branding opt-out through config (getConfig().branding)', () => {
     // when the subagent override path renders with a runtime version
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT', undefined, undefined, '9.9.9')
 
-    // then the runtime block and disclosure are absent
+    // then the runtime version block is gone but the non-disclosure rule is added
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt.startsWith('SUBAGENT PROMPT')).toBe(true)
-    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('## Runtime\n')
     expect(prompt).not.toContain('TypeClaw')
     expect(prompt).not.toContain('9.9.9')
+    expect(prompt).toContain('## Runtime disclosure')
   })
 
   test('createResourceLoader strips every TypeClaw clue and the runtime block when branding is off', async () => {
@@ -1070,12 +1086,43 @@ describe('branding opt-out through config (getConfig().branding)', () => {
     // when the full-mode prompt is composed with a runtime version
     const loader = await createResourceLoader({ agentDir, runtimeVersion: '9.9.9' })
 
-    // then the opening is generic and no TypeClaw disclosure remains
+    // then the opening is generic, no TypeClaw clue remains, and the rule is added
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt.startsWith('You are a general-purpose AI agent.')).toBe(true)
-    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('## Runtime\n')
     expect(prompt).not.toContain('TypeClaw')
     expect(prompt).not.toContain('9.9.9')
+    expect(prompt).toContain('## Runtime disclosure')
+  })
+
+  test('a real bundled subagent prompt loses its "running inside TypeClaw" identity prose when branding is off', async () => {
+    // given a reloaded config with branding disabled
+    await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify({ branding: false }))
+    reloadConfig(agentDir)
+
+    // when a real bundled subagent prompt (scout) goes through the override path
+    const loader = await createOverrideResourceLoader(SCOUT_SYSTEM_PROMPT)
+
+    // then its hardcoded identity prose is stripped but functional prose survives
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).toContain('You are a web-research specialist.')
+    expect(prompt).toContain('gather facts from the public internet')
+    expect(prompt).toContain('## Runtime disclosure')
+  })
+
+  test('the planner\'s "TypeClaw ships a reviewer" identity prose is rephrased when branding is off', async () => {
+    // given a reloaded config with branding disabled
+    await writeFile(join(agentDir, 'typeclaw.json'), JSON.stringify({ branding: false }))
+    reloadConfig(agentDir)
+
+    // when the planner prompt (which names TypeClaw twice) goes through the override path
+    const loader = await createOverrideResourceLoader(PLANNER_SYSTEM_PROMPT)
+
+    // then both identity mentions are gone, the reviewer-recommendation stays intact
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('TypeClaw')
+    expect(prompt).toContain('The runtime ships a `reviewer` subagent')
   })
 })
 
