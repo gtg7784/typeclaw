@@ -78,14 +78,16 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           description: '3-5 word label for this spawn, used for logs and the status_summary. Optional.',
         }),
       ),
-      run_in_background: Type.Optional(
+      run_in_foreground: Type.Optional(
         Type.Boolean({
           description:
-            'When true, the spawn returns immediately with a task_id; the subagent runs in the background and a system-reminder is delivered when it completes. ' +
-            'When false (default), the spawn blocks until the subagent finishes and returns its final message synchronously. ' +
-            'For PARALLEL fan-out, do NOT use background mode: emit several spawn_subagent calls (sync, the default) in a SINGLE turn — they execute concurrently and all their results return together before your next turn. ' +
-            'Reserve background mode for a long-running task you want to keep the conversation moving alongside (Mode B). ' +
-            'NOTE: background mode from subagents is only available when that subagent is explicitly enabled to drain child results; otherwise use sync spawns batched in one turn instead.',
+            'Request a FOREGROUND (synchronous) spawn: the tool blocks until the subagent finishes and returns its final message inline. ' +
+            'When omitted (the default) from a top-level session, the spawn runs in the BACKGROUND — it returns a task_id immediately and a system-reminder arrives when it completes; do NOT poll subagent_output. ' +
+            'The runtime may override your request and always states which mode it used and why in the tool result: ' +
+            'a deep-profile subagent spawned from a top-level session is forced to the background (a foreground run would freeze this session while it works), ' +
+            'and a background spawn requested from a subagent session that cannot drain child results is degraded to foreground so the result still reaches you. ' +
+            'From a subagent session the default is foreground — which is what you need to fold a delegated result into your own output; ' +
+            'for PARALLEL fan-out, emit several foreground spawns in a SINGLE turn and their results return together.',
         }),
       ),
       profile: Type.Optional(
@@ -115,17 +117,19 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           `subagent.spawn denied: maximum delegation depth (${MAX_SUBAGENT_DEPTH}) reached; a subagent at this depth cannot spawn further subagents`,
         )
       }
-      if (origin?.kind === 'subagent' && params.run_in_background === true && allowBackgroundFromSubagent !== true) {
-        return errorResult(
-          'subagent.spawn denied: background spawning is not available from a subagent session because the result cannot be delivered after this turn ends. ' +
-            'Retry with run_in_background=false (or omit it) — the synchronous spawn blocks until the child finishes and returns its result into your context, ' +
-            'which is what you need to fold the result into your output.',
-        )
-      }
+      const subagentName = params.subagent_type
+      const { background, overrideNote } = resolveSpawnMode({
+        foreground: params.run_in_foreground,
+        fromSubagent: origin?.kind === 'subagent',
+        // Deep-profile spawns run for minutes; forcing them background from a
+        // top-level session keeps a foreground run from freezing the message
+        // loop. Per-spawn override wins over the declared profile.
+        isDeepProfile: (params.profile ?? subagent.profile) === 'deep',
+        canBackgroundFromSubagent: allowBackgroundFromSubagent === true,
+        subagentName,
+      })
 
       const taskId = generateTaskId()
-      const subagentName = params.subagent_type
-      const background = params.run_in_background === true
       const payload: Record<string, unknown> = { requestId: taskId, prompt: params.prompt }
       if (params.description !== undefined) payload.description = params.description
       if (params.profile !== undefined) payload.profile = params.profile
@@ -200,11 +204,12 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           taskId,
           sessionId: resolvedHandle.sessionId,
         }
+        const baseText = `Spawned ${subagentName} in background. task_id=${taskId}. You will receive a system-reminder when it completes. Use subagent_output to check progress or fetch results.`
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Spawned ${subagentName} in background. task_id=${taskId}. You will receive a system-reminder when it completes. Use subagent_output to check progress or fetch results.`,
+              text: overrideNote !== undefined ? `${overrideNote}\n\n${baseText}` : baseText,
             },
           ],
           details,
@@ -223,11 +228,12 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
           result.finalMessage !== undefined
             ? ` It produced output before failing; recover it below instead of redoing the work:\n\n${result.finalMessage}`
             : ''
+        const failureText = `${subagentName} failed after ${durationMs}ms: ${result.error}.${recovered}`
         return {
           content: [
             {
               type: 'text' as const,
-              text: `${subagentName} failed after ${durationMs}ms: ${result.error}.${recovered}`,
+              text: overrideNote !== undefined ? `${overrideNote}\n\n${failureText}` : failureText,
             },
           ],
           details,
@@ -242,14 +248,15 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         durationMs,
         ...(result.finalMessage !== undefined ? { finalMessage: result.finalMessage } : {}),
       }
+      const syncText =
+        result.finalMessage !== undefined
+          ? result.finalMessage
+          : `${subagentName} completed in ${durationMs}ms with no final message.`
       return {
         content: [
           {
             type: 'text' as const,
-            text:
-              result.finalMessage !== undefined
-                ? result.finalMessage
-                : `${subagentName} completed in ${durationMs}ms with no final message.`,
+            text: overrideNote !== undefined ? `${overrideNote}\n\n${syncText}` : syncText,
           },
         ],
         details,
@@ -265,9 +272,9 @@ export function spawnSubagentDescription(registry: SubagentRegistry): string {
     `Spawn a subagent to do focused work on your behalf. Use this when a task is heavy enough to deserve a fresh context window (research fan-out) ` +
     `or long-running enough that you want to keep the conversation moving while it runs (delegate-and-converse). ` +
     `Available subagents: ${available}. ` +
-    `When run_in_background=true (preferred for long-running work), the tool returns a task_id immediately and the subagent runs concurrently — ` +
-    `you will receive a system-reminder when it completes; do NOT poll subagent_output. ` +
-    `When run_in_background=false (default), the tool blocks and returns the subagent's final message synchronously. ` +
+    `The default mode depends on the caller's origin: a top-level session defaults to background (the tool returns a task_id immediately and a system-reminder arrives when the subagent completes — do NOT poll subagent_output), while a subagent session defaults to foreground so the result folds into your own output. ` +
+    `Pass run_in_foreground=true to force a blocking inline result, or run_in_foreground=false to request background. ` +
+    `The runtime may override the mode and states which it used and why in the tool result (a deep-profile subagent is forced to the background from a top-level session; a background request from a subagent that cannot drain child results degrades to foreground). ` +
     `The delegation chain is depth-limited: a subagent you spawn may itself delegate once more, but no deeper — ` +
     `keep your delegation tree shallow.`
   )
@@ -359,4 +366,53 @@ function errorResult(message: string): ToolReturn {
     content: [{ type: 'text', text: message }],
     details,
   }
+}
+
+export type SpawnModeResolution = {
+  background: boolean
+  overrideNote: string | undefined
+}
+
+// Resolve foreground vs background for a spawn, with the runtime free to
+// override the caller's request and report why. Two axes decide it: whether the
+// caller is a top-level session (its turn services the live message loop) or a
+// subagent (its turn does not), and whether the child runs on the deep profile.
+// `foreground` is the tri-state tool param: undefined means the caller did not
+// choose, so the origin default applies.
+//
+// - Top-level default is background: a long child must not block the loop.
+//   Deep-profile children are forced background even when foreground is asked.
+// - Subagent default is foreground: the sync result folds into the caller's own
+//   output (e.g. planner -> reviewer). A subagent can still opt into background
+//   with foreground=false, but only when the runtime can drain child
+//   completions; otherwise that request degrades to foreground so the result is
+//   not lost.
+export function resolveSpawnMode(input: {
+  foreground: boolean | undefined
+  fromSubagent: boolean
+  isDeepProfile: boolean
+  canBackgroundFromSubagent: boolean
+  subagentName: string
+}): SpawnModeResolution {
+  const { foreground, fromSubagent, isDeepProfile, canBackgroundFromSubagent, subagentName } = input
+
+  if (fromSubagent) {
+    const wantsBackground = foreground === false
+    if (wantsBackground && !canBackgroundFromSubagent) {
+      return {
+        background: false,
+        overrideNote: `\`${subagentName}\` was spawned in the FOREGROUND: a subagent session cannot drain background children after its turn ends, so a foreground run is the only way its result reaches you.`,
+      }
+    }
+    return { background: wantsBackground, overrideNote: undefined }
+  }
+
+  if (isDeepProfile && foreground === true) {
+    return {
+      background: true,
+      overrideNote: `\`${subagentName}\` was spawned in the BACKGROUND despite the foreground request: it runs on the deep profile (minutes of work), and a foreground run would freeze this session until it finished. A completion reminder will arrive when it is done.`,
+    }
+  }
+
+  return { background: foreground !== true, overrideNote: undefined }
 }
