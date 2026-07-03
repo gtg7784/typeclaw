@@ -216,9 +216,42 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // fallback fix.
   if (targetsSomeoneElse(message, participants, botInThread)) return 'observe'
 
+  // Thread solo-fallback fail-closed gate. A thread is a SEPARATE live session
+  // from its parent channel (the participant/membership key carries the thread
+  // suffix — see `channelKeyId`), so a freshly-opened thread starts with one
+  // known speaker and a cold membership cache. That collapses `effectiveHumans`
+  // to ≤1 and would trip the solo-human fallback below, making the bot butt
+  // into a thread it was never part of in a busy multi-human channel. Membership
+  // is a room property, not a thread property, so a thread may ride the fallback
+  // ONLY on a fresh, complete membership read that itself proves ≤1 human; null
+  // / truncated / stale reads fail closed to `observe`. Exemptions: DMs (solo by
+  // construction) and threads the bot ALREADY participates in (`botInThread` —
+  // an established conversation, not an un-addressed intrusion; this is the same
+  // escape hatch the `replyToOtherMessageId` suppressor uses). Non-thread solo
+  // channels keep the legacy answer-everything fallback untouched.
+  //
+  // `isThreadRoom` reads the structural `room` signal FIRST so this fires for
+  // Discord threads too (their `thread` is null — the thread id lives in
+  // `chat`), falling back to `thread !== null` for Slack-shaped inbounds.
+  if (isThreadRoom(message) && !botInThread && !isFreshCompleteSoloRoom(input.membership, now)) {
+    return 'observe'
+  }
+
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+function isThreadRoom(message: InboundMessage): boolean {
+  if (message.isDm) return false
+  return message.room?.kind === 'thread' || message.thread !== null
+}
+
+function isFreshCompleteSoloRoom(membership: MembershipCount | null, now: number): boolean {
+  if (membership === null) return false
+  if (membership.truncated) return false
+  if (now - membership.fetchedAt >= MEMBERSHIP_FRESHNESS_MS) return false
+  return membership.humans <= 1
 }
 
 // Structural "this message is addressed to someone other than us" test. Pure
