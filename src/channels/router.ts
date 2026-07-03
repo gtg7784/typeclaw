@@ -2759,7 +2759,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         } finally {
           live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
-          if (sentReplyThisTurn) dropEngageReactions(live, engageAddPromises)
+          // The eager :eyes: ack is a "looking at this" signal, not a "replied"
+          // one, so it comes off at turn end no matter the outcome — a reply, but
+          // also silence, skip_response, an empty turn, or a provider error
+          // (observe-after-engage). Leaving it only on the reply path stranded the
+          // ack permanently on messages the agent looked at but never answered.
+          dropEngageReactions(live, engageAddPromises)
           // Held channel_react reactions apply only when the agent posted a
           // genuine reply this turn — NOT an empty-turn fallback or provider-
           // error notice, both of which send via source:'system' and bump
