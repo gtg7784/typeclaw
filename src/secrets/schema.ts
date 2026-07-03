@@ -22,6 +22,16 @@ export const providerCredentialSchema = z.discriminatedUnion('type', [apiKeyProv
 
 export const providersSchema = z.record(z.string(), providerCredentialSchema)
 
+export const mcpCredentialSchema = z
+  .object({
+    client: z.unknown().optional(),
+    tokens: z.unknown().optional(),
+    discovery: z.unknown().optional(),
+  })
+  .catchall(z.unknown())
+
+export const mcpSliceSchema = z.record(z.string(), mcpCredentialSchema)
+
 // Per-adapter channel slots use named fields (`botToken`, `appToken`, `token`)
 // instead of env-var-name keys. The Secret union per field carries the env-var
 // override. Unknown adapter ids pass through via catchall so a future
@@ -224,10 +234,13 @@ export const secretsFileSchema = z.object({
   version: z.literal(SECRETS_FILE_VERSION),
   providers: providersSchema.default({}),
   channels: channelsSchema.default({}),
+  mcp: mcpSliceSchema.default({}),
 })
 
 export type ProviderCredential = z.infer<typeof providerCredentialSchema>
 export type Providers = z.infer<typeof providersSchema>
+export type McpCredential = z.infer<typeof mcpCredentialSchema>
+export type McpSlice = z.infer<typeof mcpSliceSchema>
 export type Channels = z.infer<typeof channelsSchema>
 export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
 export type GithubAppAuthBlock = z.infer<typeof githubAppAuthSchema>
