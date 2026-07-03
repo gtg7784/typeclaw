@@ -40,6 +40,7 @@ import {
   commandNeedsRealProc,
   DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
+  ensureHiddenMaskTargets,
   ensureSessionTmpDir,
   getProcBindSafetyVerdict,
   isPackageInstallCommand,
@@ -526,6 +527,11 @@ async function applyBashSandbox(
   const sandboxEnvOverlay = buildRoleScopedConfigEnv(agentDir, dirs, envOverlay)
 
   await ensureBwrapAvailable()
+  // bwrap's --ro-bind-data/--tmpfs mask ops abort when the target does not exist
+  // on the (read-only, virtiofs/OrbStack) agent-folder bind. Materialize the mask
+  // targets on the real host FS first; the full {dirs, files} still feeds
+  // subtractMasked below so a masked path is never re-exposed by a later RW bind.
+  const maskTargets = await ensureHiddenMaskTargets({ dirs, files })
   // Per-session /tmp: bind this session's scratch dir over the default
   // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
   // match what the write/edit wrapper redirected a /tmp path to. The bind is
@@ -613,8 +619,8 @@ async function applyBashSandbox(
       { type: 'bind', source: sessionTmp, dest: '/tmp' },
     ],
     ...(packageInstall !== undefined
-      ? { writableRoot: { dir: packageInstall.root }, masks: { dirs, files }, protected: packageInstall.protected }
-      : { masks: { dirs, files }, writable, protected: protectedZones }),
+      ? { writableRoot: { dir: packageInstall.root }, masks: maskTargets, protected: packageInstall.protected }
+      : { masks: maskTargets, writable, protected: protectedZones }),
     symlinks,
     network: 'inherit',
     cwd: agentDir,
