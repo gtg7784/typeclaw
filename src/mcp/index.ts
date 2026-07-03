@@ -1,6 +1,7 @@
 export {
   connectMcpServer,
   createMcpConnection,
+  createTransport,
   resolveServerEnv,
   type McpConnection,
   type McpSdkClient,
@@ -14,6 +15,17 @@ export {
   type McpConnectResult,
   type McpManager,
 } from './manager'
+export {
+  createFileMcpOAuthStore,
+  createHostdMcpOAuthStore,
+  listMcpCredentials,
+  resolveContainerMcpOAuthStore,
+  TypeClawMcpOAuthProvider,
+  type HostdMcpOAuthStoreOptions,
+  type McpOAuthInvalidateScope,
+  type McpOAuthStore,
+  type TypeClawMcpOAuthProviderOptions,
+} from './oauth'
 export { renderMcpCatalog, type McpCatalogServer } from './catalog'
 export {
   createMcpDispatcherTools,
