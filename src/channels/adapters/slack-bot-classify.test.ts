@@ -275,6 +275,7 @@ describe('slack-bot classifyInbound — route path', () => {
       workspace: TEAM_ID,
       chat: 'C0CHANNEL',
       thread: '1700000000.000100',
+      room: { kind: 'thread' },
       text: `hi <@${BOT_USER_ID}>`,
       externalMessageId: '1700000000.000100',
       reactionRef: encodeSlackReactionRef({ channel: 'C0CHANNEL', ts: '1700000000.000100' }),
@@ -299,6 +300,25 @@ describe('slack-bot classifyInbound — route path', () => {
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.isBotMention).toBe(false)
     expect(verdict.payload.thread).toBeNull()
+  })
+
+  test('a flat channel message carries no room signal', () => {
+    const event = buildEvent({ text: 'good morning team' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.room).toBeUndefined()
+  })
+
+  test('a thread reply is stamped with a thread room signal', () => {
+    const event = buildEvent({ text: 'a reply in the thread', thread_ts: '1700000000.000100' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.room).toEqual({ kind: 'thread' })
   })
 
   test('routes /me messages that mention the bot because they are user-authored messages', () => {

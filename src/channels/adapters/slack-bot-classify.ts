@@ -143,6 +143,7 @@ export function classifyInbound(
       workspace,
       chat: event.channel,
       thread,
+      ...(thread !== null ? { room: { kind: 'thread' as const } } : {}),
       ...(typingThread !== undefined ? { typingThread } : {}),
       text,
       ...(attachments.length > 0 ? { attachments } : {}),

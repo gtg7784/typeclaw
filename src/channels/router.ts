@@ -656,6 +656,11 @@ type ChannelAgentSession = AgentSession & { getAbortReason?: () => string | unde
 type LiveSession = {
   key: ChannelKey
   keyId: string
+  // Structural room shape from the inbound (thread + optional parent channel).
+  // Kept on the session so membership scoping can reach the parent channel for
+  // platforms (Discord) where the thread is its own channel and the key alone
+  // cannot express "this is a thread in channel X". Updated per inbound in route().
+  room: InboundMessage['room']
   session: ChannelAgentSession
   activeModelRef: ReturnType<typeof resolveFallbackChain>[number]
   // The session's creation-time thinking level, captured once. A later escalated
@@ -1561,16 +1566,37 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return merged
   }
 
-  const readMembership = (key: ChannelKey): MembershipCount | null => {
-    if (key.workspace === '@dm') return dmMembership(now())
-    return membershipCaches.get(key.adapter)?.get(key) ?? null
+  // Membership is a ROOM property, not a thread property: every human in the
+  // parent channel can see and join a thread, so a thread has the same
+  // effective human count as its parent channel. The engagement key carries the
+  // thread suffix (`channelKeyId`) to give each thread its own live session and
+  // sticky ledger, but scoping membership by that same key would give a fresh
+  // thread a cold, thread-local count (≤1) and misfire the solo-human fallback.
+  // Resolve/cache/invalidate membership under the PARENT-channel key so a thread
+  // reuses the channel's warm count. Two platform shapes:
+  //   - Slack: the thread ts rides `key.thread`, so stripping it to null reaches
+  //     the parent channel (`key.chat` is already the parent).
+  //   - Discord: the thread is its OWN channel (`key.chat` = thread id,
+  //     `key.thread` = null), so we must repoint `chat` to `room.parentChat`.
+  // DMs keep their own key — a DM's `@dm` workspace short-circuits before this.
+  const membershipScopeKey = (key: ChannelKey, room?: InboundMessage['room']): ChannelKey => {
+    if (key.workspace === '@dm') return key
+    if (room?.parentChat !== undefined) return { ...key, chat: room.parentChat, thread: null }
+    return key.thread === null ? key : { ...key, thread: null }
   }
 
-  const warmMembership = (key: ChannelKey): Promise<MembershipCount | null> | null => {
+  const readMembership = (key: ChannelKey, room?: InboundMessage['room']): MembershipCount | null => {
+    if (key.workspace === '@dm') return dmMembership(now())
+    const scoped = membershipScopeKey(key, room)
+    return membershipCaches.get(scoped.adapter)?.get(scoped) ?? null
+  }
+
+  const warmMembership = (key: ChannelKey, room?: InboundMessage['room']): Promise<MembershipCount | null> | null => {
     if (key.workspace === '@dm') return Promise.resolve(dmMembership(now()))
-    const cache = membershipCaches.get(key.adapter)
+    const scoped = membershipScopeKey(key, room)
+    const cache = membershipCaches.get(scoped.adapter)
     if (cache === undefined) return null
-    return cache.warmUp(key)
+    return cache.warmUp(scoped)
   }
 
   const resolveThroughRegisteredMembership = async (key: ChannelKey): Promise<MembershipResolverResult> => {
@@ -1599,22 +1625,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const membershipForEngagement = async (live: LiveSession): Promise<MembershipCount | null> => {
     if (live.key.workspace === '@dm') return dmMembership(now())
-    const cache = membershipCaches.get(live.key.adapter)
+    const scoped = membershipScopeKey(live.key, live.room)
+    const cache = membershipCaches.get(scoped.adapter)
     if (cache === undefined) return null
 
-    const cached = cache.read(live.key)
+    const cached = cache.read(scoped)
     if (cached.kind === 'hit') return cached.membership
     if (cached.kind === 'stale') {
-      void cache.warmUp(live.key).catch((err) => {
+      void cache.warmUp(scoped).catch((err) => {
         logger.warn(`[channels] membership refresh failed for ${live.keyId}: ${describe(err)}`)
       })
       return cached.membership
     }
 
-    const fetchPromise = live.membershipFetch ?? warmMembership(live.key)
+    const fetchPromise = live.membershipFetch ?? warmMembership(live.key, live.room)
     live.membershipFetch = fetchPromise
     if (fetchPromise === null) return null
-    const membership = await withMembershipTimeout(fetchPromise, live.key, logger)
+    const membership = await withMembershipTimeout(fetchPromise, scoped, logger)
     if (live.membershipFetch === fetchPromise) live.membershipFetch = null
     return membership
   }
@@ -1674,6 +1701,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // is persisted only through the normal success path below — no pre-mutation
     // — so a reopen failure leaves the durable mapping untouched.
     resumeTarget?: { sessionId: string; sessionFile: string },
+    // Inbound room shape, passed so the COLD-START membership warm below is
+    // parent-scoped from the first fetch (Discord threads resolve `chat` to the
+    // thread id, so an unscoped warm would prime the cache against the thread).
+    room?: InboundMessage['room'],
   ): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
@@ -1777,7 +1808,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const phase = resolvedRecord?.sessionId === undefined ? 'cold-start' : 'rehydrate'
       logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
       const participants = (resolvedRecord?.participants ?? []) as ChannelParticipant[]
-      const membershipFetch = warmMembership(key)
+      const membershipFetch = warmMembership(key, room)
       // Independent platform lookups — overlap so the chain pays max(), not sum().
       const [resolvedNames, membership] = await Promise.all([
         resolveChannelNames(key),
@@ -1857,6 +1888,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const live: LiveSession = {
         key,
         keyId,
+        room,
         session: created.session,
         activeModelRef: resolveFallbackChain(getConfig().models, undefined)[0]!,
         turnThinkingDefault: created.session.thinkingLevel,
@@ -2941,7 +2973,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const reservation = restartReservations.get(channelKeyId(key))
     if (reservation !== undefined) reservation.sawInbound = true
 
-    const live = await ensureLive(key, event.externalMessageId, event.authorId)
+    const live = await ensureLive(key, event.externalMessageId, event.authorId, undefined, event.room)
+    live.room = event.room
 
     const isNewAuthor = !live.participants.some((p) => p.authorId === event.authorId)
     live.participants = updateParticipants(
@@ -2960,10 +2993,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // *next* turn sees fresh data, but the current turn still gets a
     // fast answer (cache miss → cold fetch with timeout, or stale-ok).
     if (isNewAuthor && live.key.workspace !== '@dm') {
-      const cache = membershipCaches.get(live.key.adapter)
+      const scoped = membershipScopeKey(live.key, live.room)
+      const cache = membershipCaches.get(scoped.adapter)
       if (cache !== undefined) {
-        cache.invalidate(live.key)
-        void cache.warmUp(live.key).catch((err) => {
+        cache.invalidate(scoped)
+        void cache.warmUp(scoped).catch((err) => {
           logger.warn(`[channels] membership warmup after new author failed for ${live.keyId}: ${describe(err)}`)
         })
       }

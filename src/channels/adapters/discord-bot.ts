@@ -55,6 +55,7 @@ import {
   registerCommands,
   type DiscordCommandDeclaration,
 } from './discord-bot-slash-commands'
+import { createDiscordThreadRoomResolver } from './discord-bot-thread-room'
 import { addDiscordMentionHints, type DiscordMentionUser } from './mention-hints'
 
 // One declared slash command per logical agent gesture. /stop maps to the
@@ -954,6 +955,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   let stopWaiters: Array<() => void> = []
 
   const channelResolver = createDiscordChannelResolver({ token: options.token })
+  const threadRoomResolver = createDiscordThreadRoomResolver({ token: options.token, fetchImpl })
 
   // Discord mentions by snowflake id (`<@id>`/`<@!id>`), so no username form.
   const selfIdentityResolver: ChannelSelfIdentityResolver = () => (botUserId !== null ? { id: botUserId } : null)
@@ -1061,10 +1063,16 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
           }
         },
       })
-      const payload =
+      // Discord threads are their own channels (`chat = thread id`, `thread`
+      // stays null), so the engagement gate cannot see "this is a thread" from
+      // the payload alone. Resolve the channel's type/parent and stamp the
+      // structural `room` signal for guild inbounds; DMs are never thread rooms.
+      const room = event.guild_id !== undefined ? await threadRoomResolver(event.channel_id) : undefined
+      const basePayload =
         referenceResult.referenceContext === undefined
           ? { ...verdict.payload, text: hintedText }
           : { ...verdict.payload, text: hintedText, referenceContext: referenceResult.referenceContext }
+      const payload = room !== undefined ? { ...basePayload, room } : basePayload
 
       const routedTag = await formatChannelTag(payload.workspace, payload.chat)
       logger.info(
