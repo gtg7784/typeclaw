@@ -49,6 +49,7 @@ export function classifyInbound(
       workspace,
       chat: event.channel,
       thread,
+      ...(thread !== null ? { room: { kind: 'thread' as const } } : {}),
       text: rawText,
       externalMessageId: event.ts,
       reactionRef: encodeSlackReactionRef({ channel: event.channel, ts: event.ts }),

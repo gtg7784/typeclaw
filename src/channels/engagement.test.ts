@@ -783,6 +783,287 @@ describe('decideEngagement (solo-human fallback)', () => {
   })
 })
 
+describe('decideEngagement (thread solo-fallback fail-closed gate)', () => {
+  const THREAD_KEY = 'slack-bot:g1:c1:t-root'
+
+  function threadInbound(over: Partial<InboundMessage> = {}): InboundMessage {
+    return inbound({ adapter: 'slack-bot', thread: 't-root', ...over })
+  }
+
+  test('observes an un-addressed thread message when membership is unknown (null)', () => {
+    // given a freshly-opened thread in a busy channel: only the opener has
+    // spoken (persistedHumans === 1) and the thread-scoped membership fetch has
+    // not resolved yet
+    const ledger = new StickyLedger()
+
+    // when a bare human message arrives with no membership evidence
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+
+    // then it fails closed rather than treating the fresh thread as solo
+    expect(decision).toBe('observe')
+  })
+
+  test('observes an un-addressed thread message when membership is truncated', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 10_000,
+      participants: [participant('alice')],
+      membership: { humans: 1, bots: 0, fetchedAt: 10_000, truncated: true },
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('observes an un-addressed thread message when membership is stale', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 120_000,
+      participants: [participant('alice')],
+      membership: { humans: 1, bots: 0, fetchedAt: 0, truncated: false },
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('reproduces the reported incident: bare compare link plus a request in a fresh thread stays silent', () => {
+    // given the exact production shape: a mention-less, alias-less, reply-less
+    // link + a Japanese "please" opening a thread in a busy multi-human channel
+    const ledger = new StickyLedger()
+
+    // when it lands with no fresh-complete membership proof
+    const decision = decideEngagement({
+      message: threadInbound({
+        text: 'https://github.com/org/repo/compare\n\nお願いします',
+        authorId: 'user-a',
+        authorName: 'user-a',
+      }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 0,
+      participants: [participant('user-a')],
+      membership: null,
+    })
+
+    // then the bot observes instead of engaging on a message not aimed at it
+    expect(decision).toBe('observe')
+  })
+
+  test('engages a thread only when a fresh complete membership read proves a solo room', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 20_000,
+      participants: [participant('alice')],
+      membership: { humans: 1, bots: 0, fetchedAt: 20_000, truncated: false, humanMemberIds: ['alice'] },
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('observes a thread when fresh complete membership shows two humans', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 20_000,
+      participants: [participant('alice')],
+      membership: { humans: 2, bots: 0, fetchedAt: 20_000, truncated: false },
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('an explicit mention still engages in a thread despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound({ isBotMention: true }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('a plain-text alias (Korean) still engages in a thread despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound({ text: '비서 이거 확인해줄 수 있어?', authorId: 'user-a', authorName: 'user-a' }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 0,
+      participants: [participant('user-a')],
+      selfAliases: ['비서', 'assistant'],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('a sticky follow-up still engages in a thread despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(THREAD_KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: threadInbound(),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 1000,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('a DM with a typing-surface thread id still engages (DMs are exempt)', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ adapter: 'slack-bot', isDm: true, thread: 'dm-typing-ts' }),
+      config: baseConfig,
+      key: 'slack-bot:@dm:d1:dm-typing-ts',
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('non-thread solo channels keep the legacy answer-everything fallback', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ adapter: 'slack-bot', thread: null }),
+      config: baseConfig,
+      key: 'slack-bot:g1:c1:',
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('a thread the bot already participates in still engages despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: threadInbound({ authorId: 'user-a', authorName: 'user-a', text: 'follow-up question' }),
+      config: baseConfig,
+      key: THREAD_KEY,
+      ledger,
+      now: 0,
+      participants: [participant('user-a')],
+      botInThread: true,
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  // Discord models a thread as its own channel: `thread` is null and the thread
+  // id rides `chat`, so the gate must key on the structural `room` signal, not
+  // `thread !== null`. Without this the Discord half of the incident bypasses
+  // the gate entirely.
+  function discordThreadInbound(over: Partial<InboundMessage> = {}): InboundMessage {
+    return inbound({
+      adapter: 'discord-bot',
+      chat: 'thread-t1',
+      thread: null,
+      room: { kind: 'thread', parentChat: 'parent-c1' },
+      ...over,
+    })
+  }
+
+  test('observes an un-addressed Discord thread message (thread=null, room set) when membership is unknown', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: discordThreadInbound(),
+      config: baseConfig,
+      key: 'discord-bot:g1:thread-t1:',
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('observes an un-addressed Discord thread message when membership is truncated (history-derived)', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: discordThreadInbound(),
+      config: baseConfig,
+      key: 'discord-bot:g1:thread-t1:',
+      ledger,
+      now: 10_000,
+      participants: [participant('alice')],
+      membership: { humans: 1, bots: 0, fetchedAt: 10_000, truncated: true },
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('engages a Discord thread only when a fresh complete membership read proves a solo room', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: discordThreadInbound(),
+      config: baseConfig,
+      key: 'discord-bot:g1:thread-t1:',
+      ledger,
+      now: 20_000,
+      participants: [participant('alice')],
+      membership: { humans: 1, bots: 0, fetchedAt: 20_000, truncated: false, humanMemberIds: ['alice'] },
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('an explicit mention still engages in a Discord thread despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: discordThreadInbound({ isBotMention: true }),
+      config: baseConfig,
+      key: 'discord-bot:g1:thread-t1:',
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('a Discord thread the bot already participates in still engages despite unknown membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: discordThreadInbound({ authorId: 'user-a', authorName: 'user-a' }),
+      config: baseConfig,
+      key: 'discord-bot:g1:thread-t1:',
+      ledger,
+      now: 0,
+      participants: [participant('user-a')],
+      botInThread: true,
+      membership: null,
+    })
+    expect(decision).toBe('engage')
+  })
+})
+
 describe('decideEngagement (sticky in groups)', () => {
   test('sticky credit force-engages in a DM', () => {
     const ledger = new StickyLedger()

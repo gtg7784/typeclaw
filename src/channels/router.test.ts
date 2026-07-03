@@ -8804,6 +8804,109 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(prompt).toContain('channel-msg-2')
   })
 
+  test('a fresh thread resolves membership under the parent-channel key (thread=null)', async () => {
+    // given: a busy channel (5 humans) and a resolver that records the keys it
+    // was queried with
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const resolvedThreads: (string | null)[] = []
+    router.registerMembership('discord-bot', async (key) => {
+      resolvedThreads.push(key.thread)
+      return { humans: 5, bots: 0, fetchedAt: Date.now(), truncated: false }
+    })
+
+    // when: a brand-new thread cold-starts
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'engage1', text: 'hey bot' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    // then: every membership query used the parent-channel key, never the thread
+    expect(resolvedThreads.length).toBeGreaterThan(0)
+    expect(resolvedThreads.every((t) => t === null)).toBe(true)
+  })
+
+  test('a fresh thread in a busy channel observes an un-addressed message (solo-fallback fail-closed)', async () => {
+    // given: a channel whose parent membership reports 5 humans
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerMembership('discord-bot', async () => ({
+      humans: 5,
+      bots: 0,
+      fetchedAt: Date.now(),
+      truncated: false,
+    }))
+
+    // when: a fresh thread opens with a plain, un-addressed message (no
+    // mention/reply/alias) — the exact reported-incident shape
+    await router.route(
+      inbound({
+        thread: 't-A',
+        externalMessageId: 'thread-opener',
+        text: 'https://github.com/org/repo/compare',
+        isBotMention: false,
+        replyToBotMessageId: null,
+        replyToOtherMessageId: null,
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+
+    // then: the bot stays silent instead of butting in
+    expect(sessions[0]?.prompts ?? []).toHaveLength(0)
+  })
+
+  test('a Discord-shaped thread room (chat=thread-id, thread=null) resolves membership under the parent chat', async () => {
+    // given: a Discord thread inbound — its own channel id in `chat`, `thread`
+    // null, and a `room.parentChat` pointing at the parent channel
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const resolvedChats: string[] = []
+    router.registerMembership('discord-bot', async (key) => {
+      resolvedChats.push(key.chat)
+      return { humans: 5, bots: 0, fetchedAt: Date.now(), truncated: false }
+    })
+
+    // when: the message lands in the thread channel
+    await router.route(
+      inbound({
+        chat: 'thread-t1',
+        thread: null,
+        room: { kind: 'thread', parentChat: 'parent-c1' },
+        externalMessageId: 'engage1',
+        text: 'hey bot',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'thread-t1', thread: null })
+
+    // then: membership was resolved against the PARENT channel, not the thread
+    expect(resolvedChats.length).toBeGreaterThan(0)
+    expect(resolvedChats.every((c) => c === 'parent-c1')).toBe(true)
+  })
+
+  test('a fresh Discord thread room observes an un-addressed message when membership is unknown', async () => {
+    // given: a resolver that fails (transient) so membership stays null, the
+    // cold-fetch-timeout shape that made the Discord half of the bug fire
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerMembership('discord-bot', async () => ({ kind: 'transient' }))
+
+    // when: a plain un-addressed message opens a Discord thread
+    await router.route(
+      inbound({
+        chat: 'thread-t1',
+        thread: null,
+        room: { kind: 'thread', parentChat: 'parent-c1' },
+        externalMessageId: 'thread-opener',
+        text: 'https://github.com/org/repo/compare',
+        isBotMention: false,
+        replyToBotMessageId: null,
+        replyToOtherMessageId: null,
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'thread-t1', thread: null })
+
+    // then: the bot stays silent (fail-closed) instead of butting in
+    expect(sessions[0]?.prompts ?? []).toHaveLength(0)
+  })
+
   test('reopened session (existing sessionId persisted) skips prefetch', async () => {
     const dir = await tempDir()
     // given: a pre-existing channel→session mapping on disk

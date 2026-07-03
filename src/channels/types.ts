@@ -51,6 +51,16 @@ export type InboundMessage = {
   workspace: string
   chat: string
   thread: string | null
+  // Structural "this message lives in a thread room" signal, kept SEPARATE
+  // from `thread`. `thread` is a reply-routing field whose meaning differs per
+  // platform: Slack puts the thread ts here (so `thread !== null` ⇒ thread
+  // room), but Discord models a thread as its own channel — the thread's id is
+  // in `chat` and `thread` stays null. The engagement gate and membership
+  // scoping need "is this a thread room?" independent of routing, so adapters
+  // set this explicitly. `parentChat` carries the parent channel id when the
+  // adapter knows it, so membership can be scoped to the room (channel), not
+  // the thread. Absent ⇒ not a thread room (or the adapter cannot tell).
+  room?: { kind: 'thread'; parentChat?: string }
   text: string
   // Prompt-only context for replied-to / quoted / linked messages. Kept out
   // of `text` so the engagement gate sees only the human-authored body.
