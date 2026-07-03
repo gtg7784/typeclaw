@@ -54,7 +54,7 @@ import {
   type Scheduler,
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
-import { createMcpManager } from '@/mcp'
+import { createMcpManager, resolveContainerMcpOAuthStore, TypeClawMcpOAuthProvider } from '@/mcp'
 import { runStartupMigrations } from '@/migrations'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createPluginLogger } from '@/plugin/context'
@@ -239,8 +239,21 @@ async function startAgentRuntime(
 
   const { config: cwdConfig, pluginConfigs: pluginConfigsByName } = loadConfigBundleSync(cwd)
   const githubTokenBridge = createGithubTokenBridge()
+  const mcpOAuthStore = resolveContainerMcpOAuthStore(process.env, join(cwd, 'secrets.json'))
   const mcpManager =
-    cwdConfig.mcpServers.length > 0 ? createMcpManager(cwdConfig.mcpServers, { env: process.env }) : null
+    cwdConfig.mcpServers.length > 0
+      ? createMcpManager(cwdConfig.mcpServers, {
+          env: process.env,
+          authProvider: (server) =>
+            server.url === undefined
+              ? undefined
+              : new TypeClawMcpOAuthProvider(server.name, mcpOAuthStore, {
+                  mode: 'container',
+                  redirectUrl: 'http://localhost:1456/callback',
+                  clientName: 'typeclaw',
+                }),
+        })
+      : null
   const mcpManagerOpt = mcpManager !== null ? { mcpManager } : {}
 
   // Warm up MCP connections in the BACKGROUND so boot doesn't block on each

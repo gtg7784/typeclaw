@@ -41,6 +41,32 @@ describe('parseSecretsFile (v2 envelope)', () => {
     if (!result.ok) return
     expect(result.file.providers).toEqual({})
     expect(result.file.channels).toEqual({})
+    expect(result.file.mcp).toEqual({})
+  })
+
+  test('accepts and preserves MCP OAuth credentials while keeping mcp optional', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      providers: {},
+      channels: {},
+      mcp: {
+        linear: {
+          client: { client_id: 'test-client' },
+          tokens: { access_token: 'access-test', refresh_token: 'refresh-test' },
+          discovery: { authorizationServerUrl: 'https://mcp.example.com' },
+          futureField: { nested: true },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.mcp.linear).toEqual({
+      client: { client_id: 'test-client' },
+      tokens: { access_token: 'access-test', refresh_token: 'refresh-test' },
+      discovery: { authorizationServerUrl: 'https://mcp.example.com' },
+      futureField: { nested: true },
+    })
   })
 
   test('accepts per-adapter channel fields with mixed Secret shapes', () => {

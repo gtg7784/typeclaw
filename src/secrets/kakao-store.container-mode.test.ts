@@ -50,7 +50,9 @@ function startFakeHostd(
       patches.push(rpc)
       if (rpc.kind !== 'secrets-patch') return json({ ok: false, reason: 'unsupported' }, 403)
       if (rpc.containerName !== containerName) return json({ ok: false, reason: 'not registered' }, 403)
-      if (!('kakaotalk' in rpc.patch.channels)) return json({ ok: false, reason: 'expected kakaotalk patch' }, 403)
+      if (rpc.patch.channels === undefined || !('kakaotalk' in rpc.patch.channels)) {
+        return json({ ok: false, reason: 'expected kakaotalk patch' }, 403)
+      }
       const block = kakaoChannelBlockSchema.parse(rpc.patch.channels.kakaotalk)
       await new SecretsBackend(secretsPath).updateChannelsAsync(async (channels) => ({
         result: undefined,

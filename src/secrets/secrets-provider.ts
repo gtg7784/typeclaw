@@ -1,5 +1,5 @@
 import { sendHttp } from '@/hostd/client'
-import type { Request } from '@/hostd/protocol'
+import type { SecretsPatchChannels } from '@/hostd/protocol'
 
 import type { Channels } from './schema'
 import { SecretsBackend } from './storage'
@@ -8,7 +8,7 @@ import { SecretsBackend } from './storage'
 // Identical to the `secrets-patch` RPC's `patch.channels` union so the hostd
 // implementation forwards it verbatim — the on-the-wire contract is unchanged
 // by this abstraction.
-export type ChannelBlockPatch = Extract<Request, { kind: 'secrets-patch' }>['patch']['channels']
+export type ChannelBlockPatch = SecretsPatchChannels
 
 // The container-stage secrets seam. Named for what the runtime NEEDS, not the
 // transport that serves it. Two halves:

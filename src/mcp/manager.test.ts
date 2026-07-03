@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+
 import type { McpServer } from '@/config/config'
 
 import type { McpConnection, McpToolInfo } from './client'
@@ -101,6 +103,23 @@ describe('createMcpManager', () => {
     await manager.connectAll({ signal: abort.signal })
 
     expect(signals).toEqual([abort.signal, abort.signal])
+  })
+
+  test('threads auth providers from the factory to HTTP connector calls', async () => {
+    const authProvider = fakeAuthProvider()
+    const authProviders: Array<OAuthClientProvider | undefined> = []
+    const manager = createMcpManager([httpServer('remote'), server('local')], {
+      env: {},
+      authProvider: (mcpServer) => (mcpServer.url === undefined ? undefined : authProvider),
+      async connect(mcpServer, opts) {
+        authProviders.push(opts.authProvider)
+        return fakeConnection(mcpServer.name, [], [])
+      },
+    })
+
+    await manager.connectAll()
+
+    expect(authProviders).toEqual([authProvider, undefined])
   })
 
   test('fails a duplicate server name fast instead of shadowing the first connection', async () => {
@@ -415,6 +434,35 @@ function paginatedListConnection(name: string, pages: number, pageDelayMs: numbe
 
 function server(name: string, enabled = true): McpServer {
   return { name, enabled, command: 'server-command', args: [], env: {} }
+}
+
+function httpServer(name: string): McpServer {
+  return { name, enabled: true, url: 'https://mcp.example.com/mcp', args: [], env: {} }
+}
+
+function fakeAuthProvider(): OAuthClientProvider {
+  return {
+    redirectUrl: 'http://localhost:1456/callback',
+    clientMetadata: {
+      client_name: 'typeclaw',
+      redirect_uris: ['http://localhost:1456/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    },
+    clientInformation() {
+      return undefined
+    },
+    tokens() {
+      return undefined
+    },
+    async saveTokens(_tokens) {},
+    async redirectToAuthorization(_url) {},
+    async saveCodeVerifier(_verifier) {},
+    codeVerifier() {
+      return 'verifier-test'
+    },
+  }
 }
 
 function fakeConnection(name: string, tools: McpToolInfo[], closed: string[]): McpConnection {

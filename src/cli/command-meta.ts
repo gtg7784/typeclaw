@@ -27,6 +27,7 @@ export type BuiltinCommandName =
   | 'tunnel'
   | 'role'
   | 'provider'
+  | 'mcp'
   | 'model'
   | 'mount'
   | 'doctor'
@@ -60,6 +61,7 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommandMeta[] = [
   { name: 'tunnel', description: 'manage public tunnels for channels and manual upstreams' },
   { name: 'role', description: 'manage role memberships on this agent' },
   { name: 'provider', description: 'manage LLM provider credentials in secrets.json' },
+  { name: 'mcp', description: 'manage MCP server OAuth credentials' },
   { name: 'model', description: 'manage model profiles in typeclaw.json (models.default, ...)' },
   { name: 'mount', description: 'manage host files and directories mounted into the agent container' },
   { name: 'doctor', description: 'diagnose host, agent folder, and plugins; suggest fixes' },

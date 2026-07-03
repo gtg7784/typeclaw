@@ -13,6 +13,8 @@ import { registerXaiOAuthProvider } from './oauth-xai'
 import { resolveSecret, type Secret } from './resolve'
 import {
   type Channels,
+  type McpCredential,
+  type McpSlice,
   type ProviderCredential,
   type Providers,
   type SecretsFile,
@@ -186,6 +188,111 @@ export class SecretsBackend implements AuthStorageBackend {
     try {
       release = this.acquireSyncLockWithRetry()
       return { ...this.readEnvelope().providers }
+    } finally {
+      release?.()
+    }
+  }
+
+  tryReadMcpSync(): McpSlice {
+    if (!existsSync(this.secretsPath)) return {}
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      return { ...this.readEnvelope().mcp }
+    } finally {
+      release?.()
+    }
+  }
+
+  readMcpCredentialSync(serverName: string): McpCredential | undefined {
+    if (!existsSync(this.secretsPath)) return undefined
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      return this.readEnvelope().mcp[serverName]
+    } finally {
+      release?.()
+    }
+  }
+
+  writeMcpCredentialSync(serverName: string, credential: McpCredential): void {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      const next: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        mcp: { ...envelope.mcp, [serverName]: credential },
+      }
+      this.writeEnvelopeAtomic(next)
+    } finally {
+      release?.()
+    }
+  }
+
+  async updateMcpAsync<T>(fn: (current: McpSlice) => Promise<{ result: T; next?: McpSlice }>): Promise<T> {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => Promise<void>) | undefined
+    let lockCompromised = false
+    let lockCompromisedError: Error | undefined
+    const throwIfCompromised = (): void => {
+      if (lockCompromised) {
+        throw lockCompromisedError ?? new Error('Secrets store lock was compromised')
+      }
+    }
+    try {
+      release = await lockfile.lock(this.secretsPath, {
+        ...ASYNC_LOCK_OPTIONS,
+        onCompromised: (err: Error) => {
+          lockCompromised = true
+          lockCompromisedError = err
+        },
+      })
+      throwIfCompromised()
+      const envelope = this.readEnvelope()
+      const { result, next } = await fn(envelope.mcp)
+      throwIfCompromised()
+      if (next !== undefined) {
+        const merged: SecretsFile = {
+          ...envelope,
+          $schema: envelope.$schema ?? SCHEMA_REL,
+          version: SECRETS_FILE_VERSION,
+          mcp: next,
+        }
+        this.writeEnvelopeAtomic(merged)
+      }
+      throwIfCompromised()
+      return result
+    } finally {
+      if (release) {
+        try {
+          await release()
+        } catch {}
+      }
+    }
+  }
+
+  removeMcpCredentialSync(serverName: string): boolean {
+    if (!existsSync(this.secretsPath)) return false
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      if (!(serverName in envelope.mcp)) return false
+      const { [serverName]: _removed, ...rest } = envelope.mcp
+      const next: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        mcp: rest,
+      }
+      this.writeEnvelopeAtomic(next)
+      return true
     } finally {
       release?.()
     }
@@ -407,7 +514,7 @@ export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
 }
 
 function newEmptyEnvelope(): SecretsFile {
-  return { $schema: SCHEMA_REL, version: SECRETS_FILE_VERSION, providers: {}, channels: {} }
+  return { $schema: SCHEMA_REL, version: SECRETS_FILE_VERSION, providers: {}, channels: {}, mcp: {} }
 }
 
 function stringifyEnvelope(envelope: SecretsFile): string {

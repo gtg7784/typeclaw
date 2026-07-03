@@ -569,6 +569,83 @@ describe('startDaemon', () => {
     }
   })
 
+  test('HTTP secrets-patch writes MCP credentials while preserving channels and sibling servers', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
+    try {
+      await writeFile(
+        join(agentDir, 'secrets.json'),
+        JSON.stringify({
+          version: 2,
+          providers: {},
+          channels: { 'discord-bot': { token: { value: 'keep' } } },
+          mcp: { existing: { client: { client_id: 'existing-client' } } },
+        }),
+      )
+      daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+      const info = await send({ kind: 'http-info' })
+      expect(info.ok).toBe(true)
+      if (!info.ok) return
+      const url = `http://127.0.0.1:${(info.result as HttpInfoResult).port}`
+      await send({ kind: 'register', containerName: 'coder', cwd: agentDir, restartToken: 'secret' })
+
+      const ack = await sendHttp(
+        {
+          kind: 'secrets-patch',
+          containerName: 'coder',
+          patch: {
+            mcp: {
+              server: 'linear',
+              credential: {
+                client: { client_id: 'test-client' },
+                tokens: { access_token: 'access-test', refresh_token: 'refresh-test' },
+              },
+            },
+          },
+        },
+        { url, token: 'secret' },
+      )
+
+      expect(ack.ok).toBe(true)
+      const raw = JSON.parse(await readFile(join(agentDir, 'secrets.json'), 'utf8')) as {
+        channels: Record<string, unknown>
+        mcp: Record<string, unknown>
+      }
+      expect(raw.channels['discord-bot']).toEqual({ token: { value: 'keep' } })
+      expect(raw.mcp.existing).toEqual({ client: { client_id: 'existing-client' } })
+      expect(raw.mcp.linear).toEqual({
+        client: { client_id: 'test-client' },
+        tokens: { access_token: 'access-test', refresh_token: 'refresh-test' },
+      })
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('HTTP secrets-patch rejects malformed MCP credential payloads', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
+    try {
+      daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+      const info = await send({ kind: 'http-info' })
+      expect(info.ok).toBe(true)
+      if (!info.ok) return
+      const url = `http://127.0.0.1:${(info.result as HttpInfoResult).port}`
+      await send({ kind: 'register', containerName: 'coder', cwd: agentDir, restartToken: 'secret' })
+
+      const ack = await sendHttp(
+        {
+          kind: 'secrets-patch',
+          containerName: 'coder',
+          patch: { mcp: { server: 'linear', credential: 'not-an-object' as unknown as Record<string, unknown> } },
+        },
+        { url, token: 'secret' },
+      )
+
+      expect(ack.ok).toBe(false)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('HTTP restart rejects oversized unauthenticated requests before parsing JSON', async () => {
     daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, restart: async () => ({ ok: true }) })
     const info = await send({ kind: 'http-info' })

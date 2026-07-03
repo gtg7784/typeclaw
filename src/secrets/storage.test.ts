@@ -42,6 +42,7 @@ describe('SecretsBackend', () => {
     expect(parsed['version']).toBe(2)
     expect(parsed['providers']).toEqual({ openai: { type: 'api_key', key: { value: 'sk-test' } } })
     expect(parsed['channels']).toEqual({})
+    expect(parsed['mcp']).toEqual({})
     expect(parsed['$schema']).toBe('./node_modules/typeclaw/secrets.schema.json')
   })
 
@@ -103,6 +104,7 @@ describe('SecretsBackend', () => {
     expect(result.file.version).toBe(2)
     expect(result.file.providers).toEqual({})
     expect(result.file.channels).toEqual({})
+    expect(result.file.mcp).toEqual({})
   })
 
   test('surfaces a parse error via drainErrors when the file is unparseable', async () => {
@@ -146,6 +148,66 @@ describe('SecretsBackend', () => {
     expect(obj['providers']).toBeDefined()
     expect(obj['channels']).toBeDefined()
     expect(obj['openai']).toBeUndefined()
+  })
+
+  describe('mcp credentials', () => {
+    async function readEnvelope(): Promise<{
+      providers: Record<string, unknown>
+      channels: Record<string, unknown>
+      mcp: Record<string, unknown>
+    }> {
+      return JSON.parse(await readFile(secretsPath, 'utf8')) as {
+        providers: Record<string, unknown>
+        channels: Record<string, unknown>
+        mcp: Record<string, unknown>
+      }
+    }
+
+    test('read/write/update/remove preserves sibling MCP servers and other slices', async () => {
+      await writeFile(
+        secretsPath,
+        JSON.stringify({
+          version: 2,
+          providers: { openai: { type: 'api_key', key: { value: 'sk-existing' } } },
+          channels: { 'discord-bot': { token: { value: 'discord-test' } } },
+          mcp: { existing: { client: { client_id: 'existing-client' } } },
+        }),
+      )
+      const backend = new SecretsBackend(secretsPath)
+
+      backend.writeMcpCredentialSync('linear', {
+        client: { client_id: 'test-client' },
+        tokens: { access_token: 'access-test', refresh_token: 'refresh-test' },
+      })
+      await backend.updateMcpAsync(async (mcp) => ({
+        result: undefined,
+        next: {
+          ...mcp,
+          linear: {
+            ...mcp.linear,
+            tokens: { access_token: 'access-rotated', refresh_token: 'refresh-rotated' },
+          },
+        },
+      }))
+
+      expect(backend.tryReadMcpSync().existing).toEqual({ client: { client_id: 'existing-client' } })
+      expect(backend.readMcpCredentialSync('linear')).toEqual({
+        client: { client_id: 'test-client' },
+        tokens: { access_token: 'access-rotated', refresh_token: 'refresh-rotated' },
+      })
+      const envelope = await readEnvelope()
+      expect(envelope.providers.openai).toEqual({ type: 'api_key', key: { value: 'sk-existing' } })
+      expect(envelope.channels['discord-bot']).toEqual({ token: { value: 'discord-test' } })
+      expect(envelope.mcp.existing).toEqual({ client: { client_id: 'existing-client' } })
+      expect(envelope.mcp.linear).toEqual({
+        client: { client_id: 'test-client' },
+        tokens: { access_token: 'access-rotated', refresh_token: 'refresh-rotated' },
+      })
+
+      expect(backend.removeMcpCredentialSync('linear')).toBe(true)
+      expect(backend.removeMcpCredentialSync('missing')).toBe(false)
+      expect(backend.tryReadMcpSync()).toEqual({ existing: { client: { client_id: 'existing-client' } } })
+    })
   })
 })
 
