@@ -4,9 +4,20 @@ import type {
   InstagramChannelBlock,
   KakaoChannelBlock,
   LineChannelBlock,
+  McpCredential,
   SlackChannelBlock,
   WebexChannelBlock,
 } from '@/secrets/schema'
+
+export type SecretsPatchChannels =
+  | { kakaotalk: KakaoChannelBlock }
+  | { discord: DiscordChannelBlock }
+  | { instagram: InstagramChannelBlock }
+  | { line: LineChannelBlock }
+  | { webex: WebexChannelBlock }
+  | { slack: SlackChannelBlock }
+
+export type SecretsPatchMcp = { server: string; credential: McpCredential }
 
 export type Request =
   | {
@@ -25,15 +36,7 @@ export type Request =
   | {
       kind: 'secrets-patch'
       containerName: string
-      patch: {
-        channels:
-          | { kakaotalk: KakaoChannelBlock }
-          | { discord: DiscordChannelBlock }
-          | { instagram: InstagramChannelBlock }
-          | { line: LineChannelBlock }
-          | { webex: WebexChannelBlock }
-          | { slack: SlackChannelBlock }
-      }
+      patch: { channels: SecretsPatchChannels; mcp?: never } | { mcp: SecretsPatchMcp; channels?: never }
     }
   | { kind: 'http-info' }
   | { kind: 'version' }

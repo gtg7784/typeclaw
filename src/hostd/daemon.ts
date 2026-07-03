@@ -11,6 +11,7 @@ import {
   instagramChannelBlockSchema,
   kakaoChannelBlockSchema,
   lineChannelBlockSchema,
+  mcpCredentialSchema,
   slackChannelBlockSchema,
   webexChannelBlockSchema,
 } from '@/secrets/schema'
@@ -527,19 +528,37 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   const handleSecretsPatch = async (req: {
     containerName: string
-    patch: {
-      channels:
-        | { kakaotalk: unknown }
-        | { discord: unknown }
-        | { instagram: unknown }
-        | { line: unknown }
-        | { webex: unknown }
-        | { slack: unknown }
-    }
+    patch:
+      | {
+          channels:
+            | { kakaotalk: unknown }
+            | { discord: unknown }
+            | { instagram: unknown }
+            | { line: unknown }
+            | { webex: unknown }
+            | { slack: unknown }
+          mcp?: never
+        }
+      | { mcp: { server: unknown; credential: unknown }; channels?: never }
   }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
       const cwd = cwds.get(req.containerName)
       if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
+      if (req.patch.mcp !== undefined) {
+        const server = req.patch.mcp.server
+        if (typeof server !== 'string' || server.length === 0) return { ok: false, reason: 'mcp.server is required' }
+        const parsed = mcpCredentialSchema.safeParse(req.patch.mcp.credential)
+        if (!parsed.success) {
+          return { ok: false, reason: parsed.error.issues.map((issue) => issue.message).join('; ') }
+        }
+        const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+        await backend.updateMcpAsync(async (mcp) => ({
+          result: undefined,
+          next: { ...mcp, [server]: parsed.data },
+        }))
+        const result: SecretsPatchResult = { containerName: req.containerName, patched: true }
+        return { ok: true, result }
+      }
       const channelsPatch = req.patch?.channels
       // Exactly one personal-account channel block per patch. KakaoTalk, LINE,
       // and Webex write their structured account block through this RPC; the
