@@ -7,9 +7,11 @@ import {
   buildSlimSystemPrompt,
   DEFAULT_SUBAGENT_ROSTER,
   DEFAULT_SYSTEM_PROMPT,
+  renderRuntimeNondisclosureRule,
   renderTurnRoleAnchor,
   renderTurnTimeAnchor,
   SLIM_SYSTEM_PROMPT,
+  stripRuntimeIdentityProse,
 } from './system-prompt'
 
 describe('subagent orchestration — explicit research routing', () => {
@@ -383,5 +385,40 @@ describe('branding opt-out', () => {
     expect(off).toContain('Never echo secrets')
     expect(off).toContain('never fabricate results')
     expect(off).toContain('workspace/')
+  })
+})
+
+describe('renderRuntimeNondisclosureRule', () => {
+  test('instructs the model to never name the runtime, and does not itself leak "TypeClaw"', () => {
+    const rule = renderRuntimeNondisclosureRule()
+    expect(rule).toContain('## Runtime disclosure')
+    expect(rule).toContain('branding: false')
+    expect(rule).toContain('Never reveal, name, or hint at the runtime')
+    expect(rule).not.toContain('TypeClaw')
+    expect(rule.toLowerCase()).not.toContain('typeclaw')
+  })
+
+  test('acknowledges that internal tokens (skills, CLI, config) stay usable', () => {
+    const rule = renderRuntimeNondisclosureRule()
+    expect(rule).toContain('Internal tokens you use for real work')
+  })
+})
+
+describe('stripRuntimeIdentityProse', () => {
+  test('drops the "running inside TypeClaw" identity phrase', () => {
+    expect(stripRuntimeIdentityProse('You are a scout running inside TypeClaw. Do work.')).toBe(
+      'You are a scout. Do work.',
+    )
+  })
+
+  test('rephrases the planner\'s "TypeClaw ships a" reviewer recommendation', () => {
+    expect(stripRuntimeIdentityProse('TypeClaw ships a `reviewer` subagent')).toBe(
+      'The runtime ships a `reviewer` subagent',
+    )
+  })
+
+  test('leaves functional lowercase tokens untouched', () => {
+    const withTokens = 'Cannot reach typeclaw.json; run `typeclaw logs -f`; use `typeclaw-render-pdf`.'
+    expect(stripRuntimeIdentityProse(withTokens)).toBe(withTokens)
   })
 })

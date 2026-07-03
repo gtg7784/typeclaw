@@ -66,6 +66,8 @@ import {
   buildSlimSystemPrompt,
   DEFAULT_SUBAGENT_ROSTER,
   renderRuntimeBlock,
+  renderRuntimeNondisclosureRule,
+  stripRuntimeIdentityProse,
 } from './system-prompt'
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import { createBudgetState, type ToolResultBudget, wrapToolDefinitionWithBudget } from './tool-result-budget'
@@ -914,10 +916,12 @@ export async function createOverrideResourceLoader(
   permissions?: PermissionService,
   runtimeVersion?: string,
 ): Promise<DefaultResourceLoader> {
-  const withRuntime =
-    getConfig().branding && runtimeVersion !== undefined
+  const branding = getConfig().branding
+  const withRuntime = branding
+    ? runtimeVersion !== undefined
       ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}`
       : systemPrompt
+    : `${stripRuntimeIdentityProse(systemPrompt)}\n\n${renderRuntimeNondisclosureRule()}`
   const finalPrompt = withOrigin(withRuntime, origin, permissions)
   const loader = new DefaultResourceLoader({
     cwd: process.cwd(),
@@ -1050,6 +1054,9 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   let prompt = `${base}\n\n${parts.self}`
   if (branding && parts.runtimeVersion !== undefined) {
     prompt = `${prompt}\n\n${renderRuntimeBlock(parts.runtimeVersion)}`
+  }
+  if (!branding) {
+    prompt = `${prompt}\n\n${renderRuntimeNondisclosureRule()}`
   }
   if (parts.origin !== undefined) {
     prompt = `${prompt}\n\n${renderSessionOrigin(parts.origin, Date.now(), parts.roleContext)}`

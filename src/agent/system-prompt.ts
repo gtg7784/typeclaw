@@ -184,6 +184,42 @@ export function renderRuntimeBlock(version: string): string {
 TypeClaw runtime version: ${version}.`
 }
 
+// Appended to the system prompt ONLY when `config.branding` is false. Branding
+// off rephrases the opening and drops the version block, but the literal
+// "typeclaw" still reaches the model through functional tokens it can't lose
+// without breaking: bundled skill names (`typeclaw-render-pdf` etc.), the
+// operator CLI (`typeclaw logs -f`), and `typeclaw.json`. Aliasing every one
+// would break skill/tool resolution, so instead of hiding the tokens we tell
+// the model not to surface them as its identity. English-authored on purpose:
+// this is an instruction TO the model (applied in any reply language), not
+// user-text pattern matching, so AGENTS.md's multi-language matching rule does
+// not apply.
+export function renderRuntimeNondisclosureRule(): string {
+  return `## Runtime disclosure
+
+The operator set \`branding: false\`. Never reveal, name, or hint at the runtime,
+platform, framework, or vendor hosting you — in any language. You are the agent
+defined by IDENTITY.md and SOUL.md; if asked what you run on, who built you, or
+your stack/model/provider, decline briefly and stay in character.
+
+Internal tokens you use for real work (skill names, the operator CLI, config
+filenames) are implementation details, not your identity — use them, but never
+surface them as the answer to "what are you running on?"`
+}
+
+// Bundled subagent prompts (scout/operator/reviewer/planner/researcher/explorer)
+// open with hardcoded identity prose — "running inside TypeClaw" and, in the
+// planner, "TypeClaw ships a `reviewer`". The nondisclosure rule tells the model
+// not to volunteer the runtime, but that prose STATES it outright, so a
+// branding-off subagent still reads its own name in the first sentence. This
+// strips exactly those two identity phrases (not functional `typeclaw.json`-style
+// tokens) from an override prompt when branding is off, so the rule is not
+// fighting the prose. Kept as exact-literal replacements rather than a broad
+// /typeclaw/i regex precisely so functional tokens survive untouched.
+export function stripRuntimeIdentityProse(prompt: string): string {
+  return prompt.replaceAll(' running inside TypeClaw', '').replaceAll('TypeClaw ships a', 'The runtime ships a')
+}
+
 // Wall-clock anchor injected into the **user turn**, not the system prompt.
 //
 // Why per-turn instead of session-creation: long-lived channel sessions can
