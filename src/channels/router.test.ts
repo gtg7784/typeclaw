@@ -14,6 +14,7 @@ import { readContinuationState } from '@/agent/todo/continuation-state'
 import { resolveTodoScope } from '@/agent/todo/scope'
 import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import type { ChannelSessionRecord } from './persistence'
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
@@ -422,14 +423,6 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     ts: FIXED_INBOUND_TS,
     ...over,
   }
-}
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 20; i++) {
-    if (predicate()) return
-    await new Promise((resolve) => setTimeout(resolve, 1))
-  }
-  throw new Error('condition not met')
 }
 
 async function expectPersistedLastInboundAt(agentDir: string, expected: number): Promise<void> {

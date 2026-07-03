@@ -11,6 +11,7 @@ import type {
 
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage, OutboundMessage } from '@/channels/types'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import {
   createLineAdapter,
@@ -472,13 +473,5 @@ function makeRouterStub(onRoute: (m: InboundMessage) => void) {
     },
   } as unknown as Parameters<typeof createLineAdapter>[0]['router'] & {
     registered: { outbound: boolean; history: boolean; nameResolver: boolean }
-  }
-}
-
-async function waitFor(pred: () => boolean, timeoutMs = 1000): Promise<void> {
-  const start = Date.now()
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) throw new Error('timeout')
-    await new Promise((r) => setTimeout(r, 5))
   }
 }

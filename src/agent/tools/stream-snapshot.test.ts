@@ -76,11 +76,13 @@ describe('stream_snapshot tool', () => {
   })
 
   test('respects since_ms_ago to filter out older events', async () => {
-    const stream = createStream()
+    let clock = 1_000
+    const stream = createStream({ now: () => clock })
     stream.publish({ target: { kind: 'broadcast' }, payload: 'old' })
-    await new Promise((r) => setTimeout(r, 30))
+    clock = 1_030
     stream.publish({ target: { kind: 'broadcast' }, payload: 'new' })
-    const tool = createStreamSnapshotTool({ stream })
+    clock = 1_040
+    const tool = createStreamSnapshotTool({ stream, now: () => clock })
 
     const result = await tool.execute('id', { since_ms_ago: 20 }, undefined, undefined, ctx)
 

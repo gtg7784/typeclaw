@@ -12,7 +12,13 @@ import type { CronJob, ExecJob, PromptJob } from './schema'
 
 async function waitForFile(path: string): Promise<string> {
   for (let i = 0; i < 200; i++) {
-    if (await Bun.file(path).exists()) return Bun.file(path).text()
+    if (await Bun.file(path).exists()) {
+      // A concurrent writer can create the inode before flushing content, so
+      // reading on the existence edge can return an empty/partial file. Wait
+      // for non-empty content before returning.
+      const text = await Bun.file(path).text()
+      if (text.length > 0) return text
+    }
     await Bun.sleep(50)
   }
   throw new Error(`file was not created before timeout: ${path}`)

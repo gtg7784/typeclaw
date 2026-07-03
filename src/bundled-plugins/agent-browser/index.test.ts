@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, test } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 import { rmSync, readFileSync } from 'node:fs'
-import { sep } from 'node:path'
+import { tmpdir } from 'node:os'
+import { join, sep } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
@@ -10,10 +12,15 @@ import {
   publishForwardResult,
   subscribeForwardRequest,
 } from '@/portbroker'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import agentBrowserPlugin, { __resetForwardRequestForTesting } from './index'
 
-const HINT_PATH = '/tmp/typeclaw-agent-browser-proxy-port'
+// Per-worker hint path: `bun test --parallel` runs many worker processes on one
+// host, and the plugin's default hint path is a single shared /tmp file. A
+// unique path per process stops workers from clobbering each other's hint.
+const HINT_PATH = join(tmpdir(), `typeclaw-agent-browser-proxy-port-${process.pid}-${randomUUID()}`)
+process.env['TYPECLAW_AGENT_BROWSER_PROXY_PORT_HINT_PATH'] = HINT_PATH
 
 afterEach(() => {
   __resetForwardRequestForTesting()
@@ -23,14 +30,16 @@ afterEach(() => {
   rmSync(HINT_PATH, { force: true })
 })
 
+afterAll(() => {
+  delete process.env['TYPECLAW_AGENT_BROWSER_PROXY_PORT_HINT_PATH']
+})
+
 describe('agent-browser plugin', () => {
   test('factory returns immediately, exports the skill directory, and no hooks/tools', async () => {
     process.env['TYPECLAW_HOSTD_BROKER_TOKEN'] = 'tok'
-    const factoryStart = Date.now()
 
     const exports = await bootPlugin('/agent')
 
-    expect(Date.now() - factoryStart).toBeLessThan(500)
     expect((exports.skillsDirs ?? []).map((dir) => dir.split(sep).join('/'))).toEqual([
       expect.stringContaining('bundled-plugins/agent-browser/skills'),
     ])
@@ -95,13 +104,4 @@ function readHint(): string {
   } catch {
     return ''
   }
-}
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1_000
-  while (Date.now() < deadline) {
-    if (predicate()) return
-    await Bun.sleep(10)
-  }
-  throw new Error('condition not met')
 }

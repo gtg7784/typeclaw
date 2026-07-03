@@ -22,12 +22,13 @@ const DEFAULT_HISTORY_SIZE = 1000
 export function createStream(opts: CreateStreamOptions = {}): Stream {
   const subscriptions = new Set<Subscription>()
   const historySize = Math.max(0, opts.historySize ?? DEFAULT_HISTORY_SIZE)
+  const now = opts.now ?? Date.now
   const history: StreamMessage[] = []
   let counter = 0
 
   function generateId(): StreamMessageId {
     counter++
-    return `s_${Date.now().toString(36)}_${counter.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+    return `s_${now().toString(36)}_${counter.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
   }
 
   function record(msg: StreamMessage): void {
@@ -51,7 +52,7 @@ export function createStream(opts: CreateStreamOptions = {}): Stream {
   function publishMessage(input: StreamMessageInput): StreamMessage {
     const msg: StreamMessage = {
       id: generateId(),
-      ts: Date.now(),
+      ts: now(),
       target: input.target,
       payload: input.payload,
       ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),
@@ -73,7 +74,7 @@ export function createStream(opts: CreateStreamOptions = {}): Stream {
         const requestId = generateId()
         const requestMessage: StreamMessage = {
           id: requestId,
-          ts: Date.now(),
+          ts: now(),
           target: input.target,
           payload: input.payload,
           ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),

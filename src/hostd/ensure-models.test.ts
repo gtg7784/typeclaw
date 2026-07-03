@@ -3,6 +3,8 @@ import { mkdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { waitFor } from '@/test-helpers/wait-for'
+
 type PipelineCall = { model: string; options: Record<string, unknown> | undefined }
 
 const pipelineCalls: PipelineCall[] = []
@@ -70,11 +72,3 @@ describe('ensureModels', () => {
     expect(modelsDir()).toBe(join(home, 'models'))
   })
 })
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 100; i += 1) {
-    if (predicate()) return
-    await Bun.sleep(10)
-  }
-  throw new Error('timed out waiting for condition')
-}
