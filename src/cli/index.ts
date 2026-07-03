@@ -33,6 +33,7 @@ const main = defineCommand({
     tunnel: () => import('./tunnel').then((m) => m.tunnelCommand),
     role: () => import('./role').then((m) => m.roleCommand),
     provider: () => import('./provider').then((m) => m.providerCommand),
+    mcp: () => import('./mcp').then((m) => m.mcpCommand),
     model: () => import('./model').then((m) => m.modelCommand),
     mount: () => import('./mount').then((m) => m.mountCommand),
     doctor: () => import('./doctor').then((m) => m.doctorCommand),
