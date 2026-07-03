@@ -2602,7 +2602,8 @@ describe('ChannelRouter drop-eyes-after-reply', () => {
     expect(removed[0]).toMatchObject({ reactionRef: INSTANCE_REF })
   })
 
-  test('keeps the engage reaction when the turn sends no reply', async () => {
+  test('detaches the engage reaction when the turn observes after engaging (no reply)', async () => {
+    // given an engaging inbound that gets the eager :eyes: ack
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
     const removed: RemoveReactionRequest[] = []
@@ -2612,13 +2613,17 @@ describe('ChannelRouter drop-eyes-after-reply', () => {
       return { ok: true }
     })
 
+    // when the turn ends up observing (NO_REPLY) instead of replying
     await router.route(inbound({ reactionRef: TARGET_REF }))
     sessions[0]!.onPrompt = () => {
       sessions[0]!.setAssistantText('NO_REPLY')
     }
     await router.__testing!.flushDebounce(KEY)
 
-    expect(removed).toHaveLength(0)
+    // then the eager :eyes: is detached rather than left stranded on a message
+    // the agent never answered
+    await waitFor(() => removed.length === 1)
+    expect(removed[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', reactionRef: INSTANCE_REF })
   })
 
   test('orders removal after the in-flight add resolves', async () => {
