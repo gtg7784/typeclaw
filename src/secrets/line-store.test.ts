@@ -102,7 +102,7 @@ describe('SecretsLineCredentialStore container mode', () => {
           const rpc = (await req.json()) as Request
           patches.push(rpc)
           if (rpc.kind !== 'secrets-patch') return Response.json({ ok: false, reason: 'unsupported' }, { status: 403 })
-          if (!('line' in rpc.patch.channels)) {
+          if (rpc.patch.channels === undefined || !('line' in rpc.patch.channels)) {
             return Response.json({ ok: false, reason: 'expected line patch' }, { status: 403 })
           }
           const lineBlock = rpc.patch.channels.line
