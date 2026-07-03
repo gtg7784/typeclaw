@@ -5,7 +5,7 @@ import type { ReactionRef, ReactionRequest, ReactionResult } from '@/channels/ty
 
 import { createChannelReactTool, type ChannelReactOrigin } from './channel-react'
 
-function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): ChannelRouter {
+function fakeRouter(queueReactionAfterReply: (req: ReactionRequest) => Promise<ReactionResult>): ChannelRouter {
   return {
     route: async () => {},
     send: async () => ({ ok: true }),
@@ -15,7 +15,8 @@ function fakeRouter(react: (req: ReactionRequest) => Promise<ReactionResult>): C
     unregisterOutbound: () => {},
     registerReaction: () => {},
     unregisterReaction: () => {},
-    react,
+    react: async () => ({ ok: true }),
+    queueReactionAfterReply,
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
@@ -70,7 +71,7 @@ const run = (tool: ReturnType<typeof createChannelReactTool>, emoji: string) =>
   tool.execute('id', { emoji }, undefined, undefined, fakeCtx)
 
 describe('createChannelReactTool', () => {
-  test('forwards the triggering-inbound reaction ref and emoji to router.react', async () => {
+  test('queues the triggering-inbound reaction ref and emoji via queueReactionAfterReply', async () => {
     let captured: ReactionRequest | undefined
     const tool = createChannelReactTool({
       router: fakeRouter(async (req) => {
