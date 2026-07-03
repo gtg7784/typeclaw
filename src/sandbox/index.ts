@@ -13,7 +13,7 @@ export {
   _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
 } from './availability'
-export { resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
+export { ensureHiddenMaskTargets, resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
 export {
   resolvePackageInstallZones,
   resolveProtectedZones,
