@@ -1,3 +1,5 @@
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+
 import type { McpServer } from '@/config/config'
 
 import { connectMcpServer, type McpConnection } from './client'
@@ -22,12 +24,14 @@ export type McpManager = {
 
 export type ConnectMcpServerFn = (
   server: McpServer,
-  opts: { env: NodeJS.ProcessEnv; signal?: AbortSignal },
+  opts: { env: NodeJS.ProcessEnv; signal?: AbortSignal; authProvider?: OAuthClientProvider },
 ) => Promise<McpConnection>
+
+export type McpAuthProviderFactory = (server: McpServer) => OAuthClientProvider | undefined
 
 export function createMcpManager(
   servers: McpServer[],
-  opts: { env: NodeJS.ProcessEnv; connect?: ConnectMcpServerFn },
+  opts: { env: NodeJS.ProcessEnv; connect?: ConnectMcpServerFn; authProvider?: McpAuthProviderFactory },
 ): McpManager {
   const activeServers = servers.filter((server) => server.enabled)
   const connect = opts.connect ?? connectMcpServer
@@ -62,7 +66,7 @@ export function createMcpManager(
     const pending = inflight.get(server.name)
     if (pending !== undefined) return pending
 
-    const attempt = connectOne(server, opts.env, connect, signal).then(async (result) => {
+    const attempt = connectOne(server, opts.env, connect, signal, opts.authProvider?.(server)).then(async (result) => {
       inflight.delete(server.name)
       if (result.ok) {
         if (closed) {
@@ -207,10 +211,11 @@ async function connectOne(
   env: NodeJS.ProcessEnv,
   connect: ConnectMcpServerFn,
   signal: AbortSignal | undefined,
+  authProvider: OAuthClientProvider | undefined,
 ): Promise<McpConnectResult> {
   let connection: McpConnection | undefined
   try {
-    connection = await connect(server, { env, signal })
+    connection = await connect(server, { env, signal, authProvider })
     const tools = await connection.listTools()
     return { ok: true, name: server.name, connection, toolCount: tools.length }
   } catch (cause) {

@@ -1,3 +1,4 @@
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -55,12 +56,13 @@ export async function connectMcpServer(
     connectTimeoutMs?: number
     client?: McpConnectClient
     transport?: Transport
+    authProvider?: OAuthClientProvider
   },
 ): Promise<McpConnection> {
   const requestTimeout = server.timeoutMs ?? DEFAULT_MCP_REQUEST_TIMEOUT_MS
   const connectTimeout = opts.connectTimeoutMs ?? DEFAULT_MCP_CONNECT_TIMEOUT_MS
   const client = opts.client ?? new Client({ name: 'typeclaw', version: '0.17.0' }, { capabilities: {} })
-  const transport = opts.transport ?? createTransport(server, opts.env)
+  const transport = opts.transport ?? createTransport(server, opts.env, opts.authProvider)
 
   try {
     await withConnectDeadline(connectTimeout, opts.signal, (signal) =>
@@ -141,10 +143,18 @@ export function createMcpConnection(
   }
 }
 
-function createTransport(server: McpServer, env: NodeJS.ProcessEnv): Transport {
-  return server.command
-    ? new StdioClientTransport({ command: server.command, args: server.args, env: resolveServerEnv(server, env) })
-    : new StreamableHTTPClientTransport(new URL(requiredUrl(server)))
+export function createTransport(
+  server: McpServer,
+  env: NodeJS.ProcessEnv,
+  authProvider?: OAuthClientProvider,
+): Transport {
+  if (server.command) {
+    return new StdioClientTransport({ command: server.command, args: server.args, env: resolveServerEnv(server, env) })
+  }
+  const url = new URL(requiredUrl(server))
+  return authProvider === undefined
+    ? new StreamableHTTPClientTransport(url)
+    : new StreamableHTTPClientTransport(url, { authProvider })
 }
 
 async function withConnectDeadline<T>(

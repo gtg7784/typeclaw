@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
 import type { McpServer } from '@/config/config'
 
-import { connectMcpServer, createMcpConnection, resolveServerEnv, type McpSdkClient } from './client'
+import { connectMcpServer, createMcpConnection, createTransport, resolveServerEnv, type McpSdkClient } from './client'
 
 describe('resolveServerEnv', () => {
   test('uses target env key before explicit secret env before secret value', () => {
@@ -159,6 +160,20 @@ describe('connectMcpServer', () => {
   })
 })
 
+describe('createTransport', () => {
+  test('attaches an auth provider only for HTTP servers when one is provided', () => {
+    const authProvider = fakeAuthProvider()
+
+    const withAuth = createTransport(httpServer(), {}, authProvider)
+    const bare = createTransport(httpServer(), {})
+    const stdio = createTransport(server(), {}, authProvider)
+
+    expect(objectGraphContains(withAuth, authProvider)).toBe(true)
+    expect(objectGraphContains(bare, authProvider)).toBe(false)
+    expect(objectGraphContains(stdio, authProvider)).toBe(false)
+  })
+})
+
 function server(timeoutMs?: number): McpServer {
   return {
     name: 'server',
@@ -168,6 +183,54 @@ function server(timeoutMs?: number): McpServer {
     env: {},
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   }
+}
+
+function httpServer(): McpServer {
+  return {
+    name: 'server',
+    enabled: true,
+    url: 'https://mcp.example.com/mcp',
+    args: [],
+    env: {},
+  }
+}
+
+function fakeAuthProvider(): OAuthClientProvider {
+  return {
+    redirectUrl: 'http://localhost:1456/callback',
+    clientMetadata: {
+      client_name: 'typeclaw',
+      redirect_uris: ['http://localhost:1456/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    },
+    clientInformation() {
+      return undefined
+    },
+    tokens() {
+      return undefined
+    },
+    async saveTokens(_tokens) {},
+    async redirectToAuthorization(_url) {},
+    async saveCodeVerifier(_verifier) {},
+    codeVerifier() {
+      return 'verifier-test'
+    },
+  }
+}
+
+function objectGraphContains(root: unknown, needle: unknown): boolean {
+  const seen = new Set<unknown>()
+  const stack: unknown[] = [root]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (current === needle) return true
+    if (typeof current !== 'object' || current === null || seen.has(current)) continue
+    seen.add(current)
+    stack.push(...Object.values(current as Record<string, unknown>))
+  }
+  return false
 }
 
 function fakeTransport(): Transport {
