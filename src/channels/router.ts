@@ -2727,7 +2727,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         } finally {
           live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
-          if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
+          if (sentReplyThisTurn) dropEngageReactions(live, engageAddPromises)
           // Held channel_react reactions apply only when the agent posted a
           // genuine reply this turn — NOT an empty-turn fallback or provider-
           // error notice, both of which send via source:'system' and bump
@@ -3159,6 +3159,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     event: InboundMessage,
     engageReaction: Promise<ReactionRef | null> | null,
   ): void => {
+    clearQueuedEngageReactions(live)
     live.promptQueue.push({
       text: event.text,
       ...(event.referenceContext !== undefined ? { referenceContext: event.referenceContext } : {}),
@@ -3329,11 +3330,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return addReactionRef
   }
 
-  const dropEngageReactionsAfterReply = (live: LiveSession, addPromises: Array<Promise<ReactionRef | null>>): void => {
-    for (const addPromise of addPromises) dropOneEngageReactionAfterReply(live, addPromise)
+  const dropEngageReactions = (live: LiveSession, addPromises: Array<Promise<ReactionRef | null>>): void => {
+    for (const addPromise of addPromises) dropOneEngageReaction(live, addPromise)
   }
 
-  const dropOneEngageReactionAfterReply = (live: LiveSession, addPromise: Promise<ReactionRef | null>): void => {
+  // Only the LAST engaging inbound of a coalesced batch should carry the eager
+  // :eyes:. Called from enqueue() before the new inbound is pushed to roll the
+  // ack off earlier queued-but-not-yet-drained inbounds. `delete` (not
+  // overwrite) is load-bearing: a newer engaging inbound that has no reactionRef
+  // must still strip the previous :eyes: rather than leave it stranded.
+  const clearQueuedEngageReactions = (live: LiveSession): void => {
+    const addPromises = live.promptQueue.flatMap((m) => (m.engageReaction !== undefined ? [m.engageReaction] : []))
+    if (addPromises.length === 0) return
+    for (const item of live.promptQueue) delete item.engageReaction
+    dropEngageReactions(live, addPromises)
+  }
+
+  const dropOneEngageReaction = (live: LiveSession, addPromise: Promise<ReactionRef | null>): void => {
     void addPromise
       .then((reactionRef) => {
         if (reactionRef === null) return undefined
@@ -4429,6 +4442,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const tearDownLive = async (live: LiveSession): Promise<void> => {
     live.destroyed = true
+    // A teardown before the queued/in-flight turn ever replies would otherwise
+    // strand its eager :eyes: forever (dropEngageReactions only runs after a
+    // successful send). Remove both the queued and current-turn acks here.
+    clearQueuedEngageReactions(live)
+    dropEngageReactions(live, live.currentTurnEngageReactions)
+    live.currentTurnEngageReactions = []
     if (live.debounceTimer) clearTimeout(live.debounceTimer)
     live.debounceTimer = null
     live.unsubProviderErrors?.()
