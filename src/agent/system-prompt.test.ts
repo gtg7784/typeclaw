@@ -392,14 +392,15 @@ describe('renderRuntimeNondisclosureRule', () => {
   test('instructs the model to never name the runtime, and does not itself leak "TypeClaw"', () => {
     const rule = renderRuntimeNondisclosureRule()
     expect(rule).toContain('## Runtime disclosure')
-    expect(rule).toContain('Do not reveal, name, or hint at the underlying runtime')
+    expect(rule).toContain('branding: false')
+    expect(rule).toContain('Never reveal, name, or hint at the runtime')
     expect(rule).not.toContain('TypeClaw')
     expect(rule.toLowerCase()).not.toContain('typeclaw')
   })
 
   test('acknowledges that internal tokens (skills, CLI, config) stay usable', () => {
     const rule = renderRuntimeNondisclosureRule()
-    expect(rule).toContain('Internal tokens you must still use verbatim')
+    expect(rule).toContain('Internal tokens you use for real work')
   })
 })
 

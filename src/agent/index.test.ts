@@ -988,7 +988,7 @@ describe('composeSystemPrompt branding', () => {
       gitNudge: '',
     })
     expect(prompt).toContain('## Runtime disclosure')
-    expect(prompt).toContain('Do not reveal, name, or hint at the underlying runtime')
+    expect(prompt).toContain('Never reveal, name, or hint at the runtime')
   })
 
   test('branding off drops the runtime block and every TypeClaw clue (slim mode)', () => {
