@@ -22,6 +22,7 @@ function fakeRouter(onSend: (msg: OutboundMessage) => SendResult = () => ({ ok: 
     registerReaction: () => {},
     unregisterReaction: () => {},
     react: async () => ({ ok: true }),
+    queueReactionAfterReply: async () => ({ ok: true }),
     registerRemoveReaction: () => {},
     unregisterRemoveReaction: () => {},
     removeReaction: async () => ({ ok: true }),

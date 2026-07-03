@@ -48,6 +48,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     registerReaction: () => {},
     unregisterReaction: () => {},
     react: async () => ({ ok: true }),
+    queueReactionAfterReply: async () => ({ ok: true }),
     registerRemoveReaction: () => {},
     unregisterRemoveReaction: () => {},
     removeReaction: async () => ({ ok: true }),

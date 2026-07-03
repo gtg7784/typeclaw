@@ -41,8 +41,9 @@ export function createChannelReactTool({
       'Pick the reaction a thoughtful teammate would leave: :+1: to agree or approve, :rocket: for something ' +
       'shipping or exciting, :tada: to celebrate, :heart: to show appreciation, :eyes: to signal "I am looking at this", ' +
       ':laugh: for something funny. Use it when a reaction adds genuine social signal — not on every message. ' +
-      'A reaction does NOT replace `channel_reply`: when the message needs a substantive answer, still send one. ' +
-      'If a reaction alone is the whole response, call `skip_response` afterward so the turn ends cleanly. ' +
+      'The reaction is only applied if you ALSO reply to this message in the same turn (via `channel_reply`/' +
+      '`channel_send`); if you stay silent or `skip_response`, the reaction is dropped. So do not use a reaction ' +
+      'as a standalone response to a message you are only observing — react to the messages you actually answer. ' +
       'Pass the bare emoji name, no colons.',
     parameters: Type.Object({
       emoji: Type.String({
@@ -66,7 +67,7 @@ export function createChannelReactTool({
       const reactionRef = getReactionRef()
       if (reactionRef === undefined) return deny('this conversation has no message to react to')
 
-      const result = await router.react({
+      const result = await router.queueReactionAfterReply({
         adapter: origin.adapter,
         workspace: origin.workspace,
         chat: origin.chat,
@@ -82,7 +83,7 @@ export function createChannelReactTool({
         content: [
           {
             type: 'text' as const,
-            text: `${TOOL_RESULT_PREFIX}reacted with :${params.emoji}: on ${origin.adapter}:${origin.workspace}/${origin.chat}`,
+            text: `${TOOL_RESULT_PREFIX}will react with :${params.emoji}: on ${origin.adapter}:${origin.workspace}/${origin.chat} if you reply this turn`,
           },
         ],
         details,

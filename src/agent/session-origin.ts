@@ -429,8 +429,11 @@ function renderChannelOrigin(
       '**React like a teammate would.** `channel_react({ emoji })` adds only a',
       'reaction: `+1` approve, `rocket` shipping/exciting, `tada` celebrate,',
       '`heart` appreciate, `laugh` funny, `eyes` looking. Use it when it adds',
-      'real signal, not every turn. It does NOT satisfy the reply obligation;',
-      'substantive answers still go through `channel_reply`.',
+      'real signal, not every turn. The reaction is applied ONLY if you also',
+      'reply to this message this turn; if you stay silent or `skip_response`,',
+      'it is dropped — so never react to a message you are only observing and',
+      'not answering. It does NOT satisfy the reply obligation; substantive',
+      'answers still go through `channel_reply`.',
     )
   }
 

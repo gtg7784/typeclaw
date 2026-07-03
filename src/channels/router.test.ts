@@ -2399,6 +2399,91 @@ describe('disengageReactionEmojiFor', () => {
   })
 })
 
+describe('ChannelRouter model react only when replying', () => {
+  const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
+
+  test('applies a queued channel_react reaction when the turn replies', async () => {
+    // given a typing-capable adapter (no eager engage :eyes:) whose model queues
+    // a reaction and then replies
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const added: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      added.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.queueReactionAfterReply({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        thread: null,
+        reactionRef: TARGET_REF,
+        emoji: 'eyes',
+      })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the reaction reaches the adapter, on the triggering message
+    await waitFor(() => added.length === 1)
+    expect(added[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', emoji: 'eyes', reactionRef: TARGET_REF })
+  })
+
+  test('drops a queued channel_react reaction when the turn stays silent', async () => {
+    // given a typing-capable adapter (no eager engage :eyes:) whose model queues
+    // a reaction but sends no reply
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let added = 0
+    router.registerReaction('discord-bot', async () => {
+      added++
+      return { ok: true }
+    })
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.queueReactionAfterReply({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        thread: null,
+        reactionRef: TARGET_REF,
+        emoji: 'eyes',
+      })
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then nothing is ever sent to the adapter — no reaction on a message it only looked at
+    expect(added).toBe(0)
+  })
+
+  test('refuses to queue a reaction when there is no live session for the target', async () => {
+    // given no live session was created for the target
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    // when the model tries to queue a reaction
+    const result = await router.queueReactionAfterReply({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      reactionRef: TARGET_REF,
+      emoji: 'eyes',
+    })
+
+    // then it is refused rather than fired blind
+    expect(result).toEqual({ ok: false, error: 'no live turn to attach this reaction to', code: 'unsupported' })
+  })
+})
+
 describe('ChannelRouter drop-eyes-after-reply', () => {
   const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
   const INSTANCE_REF: ReactionRef = { adapter: 'discord-bot', value: 'reaction-instance' }

@@ -736,6 +736,11 @@ type LiveSession = {
   // batch several inbounds that each got their own :eyes:, so every entry is
   // removed after the reply. Empty on turns with no reactable inbound.
   currentTurnEngageReactions: Array<Promise<ReactionRef | null>>
+  // Model-requested `channel_react` reactions for THIS turn, held until the turn
+  // ends. Flushed to the adapter only if the agent actually replied this turn;
+  // discarded on silence (skip_response / empty / errored turns) so the bot never
+  // leaves a reaction on a message it merely looked at (e.g. cron lookaround).
+  pendingTurnReactions: ReactionRequest[]
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -1031,6 +1036,11 @@ export type ChannelRouter = {
   registerReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
   unregisterReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
   react: (req: ReactionRequest) => Promise<ReactionResult>
+  // Buffer a model-requested reaction for the current turn instead of firing it
+  // immediately. It reaches the adapter only if the agent actually replies this
+  // turn (drain's finally); a silent/skipped turn discards it. Keeps the bot from
+  // leaving reactions on messages it looked at but never answered.
+  queueReactionAfterReply: (req: ReactionRequest) => Promise<ReactionResult>
   registerRemoveReaction: (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback) => void
   unregisterRemoveReaction: (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback) => void
   removeReaction: (req: RemoveReactionRequest) => Promise<ReactionResult>
@@ -1890,6 +1900,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnReactionRef: null,
         currentTurnTypingThread: null,
         currentTurnEngageReactions: [],
+        pendingTurnReactions: [],
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -2538,6 +2549,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     try {
       while ((live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) && !live.destroyed) {
         live.typingTimedOut = false
+        // Each turn starts with no held reactions; the model re-requests them
+        // via channel_react during this turn, and the finally flushes or drops.
+        live.pendingTurnReactions = []
         // Heartbeat must run during generation as well as during debounce.
         // Because new inbounds during a turn just push into promptQueue
         // without re-entering route(), the route() call site alone wouldn't
@@ -2714,6 +2728,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.promptInFlight = false
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
           if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
+          // Held channel_react reactions apply only when the agent posted a
+          // genuine reply this turn — NOT an empty-turn fallback or provider-
+          // error notice, both of which send via source:'system' and bump
+          // successfulChannelSends. Otherwise a silent/skipped/errored turn
+          // would still stamp a reaction on a message it never really answered.
+          // Computed BEFORE maybePostDeferredProviderError so its error send
+          // cannot flip the decision.
+          const usableReplyThisTurn =
+            sentReplyThisTurn &&
+            live.emptyTurnFallbackTurn !== live.turnSeq &&
+            assistantLeafStopReason(live.session) !== 'error'
+          if (usableReplyThisTurn) flushPendingReactions(live)
+          else live.pendingTurnReactions = []
           const emptyTurnRetryQueued = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt
           await maybePostDeferredProviderError(live, sentReplyThisTurn, emptyTurnRetryQueued)
           await fireSessionTurnEnd(live)
@@ -2732,6 +2759,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
       live.currentTurnEngageReactions = []
+      // Drop any still-held reactions if the loop exited without running the
+      // per-turn finally (e.g. session destroyed mid-drain): never leave a
+      // reaction attached to a turn that never completed a reply.
+      live.pendingTurnReactions = []
       live.currentTurnAttachments = []
       // Reset AFTER stopTypingHeartbeat: its final 'stop' tick reads the anchor
       // to clear a flat-DM status; clearing it first would strand the indicator.
@@ -3208,6 +3239,41 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       lastError = result
     }
     return lastError ?? { ok: false, error: 'no reaction callback handled request', code: 'unsupported' }
+  }
+
+  // Hold a model reaction until the turn proves it engaged (i.e. actually
+  // replied). Buffered on the live session for this target; drain's finally
+  // flushes it via react() on a real reply or drops it on silence. No live
+  // session (or a stale ref that is not this turn's trigger) → nothing to pair
+  // the reaction with, so it is refused rather than fired blind.
+  const queueReactionAfterReply = async (req: ReactionRequest): Promise<ReactionResult> => {
+    if (req.reactionRef.adapter !== req.adapter) {
+      return { ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' }
+    }
+    const live = liveSessions.get(
+      channelKeyId({ adapter: req.adapter, workspace: req.workspace, chat: req.chat, thread: req.thread ?? null }),
+    )
+    if (!live || live.destroyed) {
+      return { ok: false, error: 'no live turn to attach this reaction to', code: 'unsupported' }
+    }
+    live.pendingTurnReactions.push(req)
+    return { ok: true }
+  }
+
+  const flushPendingReactions = (live: LiveSession): void => {
+    const pending = live.pendingTurnReactions
+    live.pendingTurnReactions = []
+    for (const req of pending) {
+      void react(req)
+        .then((result) => {
+          if (!result.ok && result.code !== 'unsupported') {
+            logger.info(`[channels] react-after-reply failed adapter=${req.adapter} chat=${req.chat}: ${result.error}`)
+          }
+        })
+        .catch((err) => {
+          logger.info(`[channels] react-after-reply threw adapter=${req.adapter} chat=${req.chat}: ${describe(err)}`)
+        })
+    }
   }
 
   const removeReaction = async (req: RemoveReactionRequest): Promise<ReactionResult> => {
@@ -4848,6 +4914,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerReaction,
     unregisterReaction,
     react,
+    queueReactionAfterReply,
     registerRemoveReaction,
     unregisterRemoveReaction,
     removeReaction,
