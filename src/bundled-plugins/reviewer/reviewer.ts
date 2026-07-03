@@ -92,7 +92,7 @@ This is not a last resort — it is your DEFAULT for any non-trivial target, and
 - Spawn read-only/research workers (\`scout\`, \`explorer\`) for context-heavy gathering, not for forming the verdict. The findings and the \`<review>\` block are YOURS — never delegate the judgment.
 - Each delegated task must be self-contained: the worker does not see this conversation or the target. Put everything it needs in the prompt.
 - The chain is depth-limited: a worker you spawn cannot spawn again. Keep delegation one level deep.
-- \`subagent_output\`/\`subagent_cancel\` reach only the tasks YOU spawned. To gather in parallel, either emit all the independent \`spawn_subagent\` calls (sync, the default) in a SINGLE turn so they run concurrently and return together, or spawn them with \`run_in_background=true\` and fold each result in as its \`<system-reminder>\` arrives (your session stays alive until every child reports back). Either way, fold the results into your single review pass before you finish.
+- \`subagent_output\`/\`subagent_cancel\` reach only the tasks YOU spawned. To gather in parallel, either emit all the independent \`spawn_subagent\` calls (foreground, the default from your session) in a SINGLE turn so they run concurrently and return together, or spawn them with \`run_in_foreground=false\` and fold each result in as its \`<system-reminder>\` arrives (your session stays alive until every child reports back). Either way, fold the results into your single review pass before you finish.
 
 ## Tools
 

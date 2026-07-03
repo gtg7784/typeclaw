@@ -28,7 +28,7 @@ Two failure patterns show up over and over when an agent debugs inline, and both
 
 ## The hand-off: spawn operator in background
 
-Spawn `operator` with `run_in_background: true` so your session stays free, then keep talking to the user. Give operator everything it needs — it does **not** see this conversation, and it does **not** see this skill. Operator runs on a fixed tool set (`read`, `grep`, `find`, `ls`, `bash`, `write`, `edit`) with no skill loading, so any mechanic below that you want it to follow has to be spelled out in the `[REQUEST]` block — don't assume it knows the tmux/PID/polling patterns:
+Spawn `operator` (background by default) so your session stays free, then keep talking to the user. Give operator everything it needs — it does **not** see this conversation, and it does **not** see this skill. Operator runs on a fixed tool set (`read`, `grep`, `find`, `ls`, `bash`, `write`, `edit`) with no skill loading, so any mechanic below that you want it to follow has to be spelled out in the `[REQUEST]` block — don't assume it knows the tmux/PID/polling patterns:
 
 ```
 [CONTEXT]: <what you were doing, the file/process/command involved, the environment>
