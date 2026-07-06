@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises'
+
 import { DiscordBotClient, DiscordBotListener } from 'agent-messenger/discordbot'
 import {
   DiscordIntent,
@@ -742,13 +744,26 @@ function clampLimit(requested: number, max: number): number {
 // the upload error (the file the agent wanted to share is the load-bearing
 // part of the message). The text post is best-effort and only attempted
 // after every upload succeeds.
+//
+// Native reply on an attachment-only send: the SDK's `uploadFile` cannot carry
+// a `message_reference`, so a reply-arrow on a pure-attachment reply is
+// impossible through it. When `msg.replyTo` is set AND there is no text send to
+// carry the reference, the FIRST file upload goes through a raw multipart POST
+// with a `payload_json.message_reference` instead (uploadFirstFileWithReply) so
+// the file message itself is the native reply. Only the first file carries it —
+// otherwise Discord renders one reply-arrow per attachment. Remaining files, and
+// every upload on a send that also has text (the text send carries the
+// reference), stay on the SDK path.
 export function createOutboundCallback(deps: {
   client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
   logger: DiscordBotAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  token: string
   resolvePath?: (path: string) => string
+  fetchImpl?: typeof fetch
 }): OutboundCallback {
-  const { client, logger, formatChannelTag, resolvePath } = deps
+  const { client, logger, formatChannelTag, token, resolvePath } = deps
+  const fetchImpl = deps.fetchImpl ?? fetch
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'discord-bot') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
@@ -763,10 +778,25 @@ export function createOutboundCallback(deps: {
       `[discord-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${msg.thread ? ` thread=${msg.thread}` : ''}`,
     )
 
-    for (const attachment of attachments) {
+    // Only a textless send lets a file carry the native reply: when text is
+    // present, the reference rides on the text send instead (below), so files
+    // must NOT also reference the parent or Discord shows two reply-arrows.
+    const replyOnFirstFile = text === '' ? msg.replyTo?.externalMessageId : undefined
+
+    for (const [index, attachment] of attachments.entries()) {
       const path = resolvePath ? resolvePath(attachment.path) : attachment.path
+      const referenceThisFile = index === 0 ? replyOnFirstFile : undefined
       try {
-        const file = await client.uploadFile(msg.chat, path)
+        const file =
+          referenceThisFile !== undefined
+            ? await uploadFirstFileWithReply({
+                channelId: msg.chat,
+                path,
+                replyToId: referenceThisFile,
+                token,
+                fetchImpl,
+              })
+            : await client.uploadFile(msg.chat, path)
         logger.info(`[discord-bot] uploaded id=${file.id} filename=${file.filename} size=${file.size} ${tag}`)
         if (msg.thread) {
           logger.warn(
@@ -802,6 +832,47 @@ export function createOutboundCallback(deps: {
       return { ok: false, error: message }
     }
   }
+}
+
+type DiscordCreateMessageWithAttachments = {
+  attachments?: DiscordFile[]
+}
+
+// Raw multipart create-message so a pure-attachment reply carries a native
+// `message_reference`. Mirrors the SDK's `uploadFile` wire shape (`files[0]`)
+// and adds a `payload_json` field — Discord merges JSON body fields from
+// `payload_json` with the multipart file parts, which is the only documented
+// way to attach `message_reference` to a file upload. Returns the created
+// message's first attachment as a `DiscordFile`, matching `client.uploadFile`
+// so the caller's logging/typing is identical on both paths.
+async function uploadFirstFileWithReply(args: {
+  channelId: string
+  path: string
+  replyToId: string
+  token: string
+  fetchImpl: typeof fetch
+}): Promise<DiscordFile> {
+  const fileBuffer = await readFile(args.path)
+  const filename = args.path.split('/').pop() ?? 'file'
+  const form = new FormData()
+  form.append('payload_json', JSON.stringify({ message_reference: { message_id: args.replyToId } }))
+  form.append('files[0]', new Blob([new Uint8Array(fileBuffer)]), filename)
+
+  const response = await args.fetchImpl(`${DISCORD_API_BASE}/channels/${args.channelId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bot ${args.token}` },
+    body: form,
+  })
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`http ${response.status}${body ? `: ${body.slice(0, 200)}` : ''}`)
+  }
+  const message = (await response.json()) as DiscordCreateMessageWithAttachments
+  const first = message.attachments?.[0]
+  if (first === undefined) {
+    throw new Error('upload succeeded but no attachments returned')
+  }
+  return first
 }
 
 // Discord CDN URLs (`cdn.discordapp.com/attachments/...`) are signed and
@@ -999,6 +1070,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     client,
     logger,
     formatChannelTag,
+    token: options.token,
+    fetchImpl,
   })
 
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger })
