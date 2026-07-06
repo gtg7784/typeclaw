@@ -740,6 +740,13 @@ type LiveSession = {
   typingStartedAt: number
   typingTimedOut: boolean
   typingStopPromise: Promise<void> | null
+  // Monotonic heartbeat generation. Captured when a heartbeat starts and
+  // bumped when it stops. `clearInterval` cannot cancel a timer callback that
+  // already came due, so a stale 'tick' can still run AFTER stopTypingHeartbeat
+  // enqueued its clear — on Slack that re-sets "is typing..." after the empty-
+  // string clear and strands the indicator (Slack's status has no auto-expiry).
+  // A 'tick' fired with a stale epoch is dropped before it reaches the adapter.
+  typingEpoch: number
   // True only while `live.session.prompt()` is actively running. Gates the
   // deferred typing revival: a revival queued behind an in-flight cap-trip
   // 'stop' must NOT re-arm the heartbeat once the prompt has finished, or it
@@ -1243,6 +1250,8 @@ export type ChannelRouter = {
     flushDebounce: (key: ChannelKey) => Promise<void>
     fireTypingHeartbeat: (key: ChannelKey, phase?: 'tick' | 'stop') => Promise<void>
     fireTypingInterval: (key: ChannelKey) => Promise<void>
+    fireTypingTick: (key: ChannelKey, epoch: number) => Promise<void>
+    typingEpoch: (key: ChannelKey) => number | undefined
     isTypingActive: (key: ChannelKey) => boolean
     stopTyping: (key: ChannelKey) => Promise<void>
     runIdleGc: () => Promise<void>
@@ -1957,6 +1966,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingStartedAt: 0,
         typingTimedOut: false,
         typingStopPromise: null,
+        typingEpoch: 0,
         promptInFlight: false,
         lastInboundAt: now(),
         baseContextBytes: 0,
@@ -2223,7 +2233,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     await persist()
   }
 
-  const fireTyping = async (live: LiveSession, phase: 'tick' | 'stop'): Promise<void> => {
+  const fireTyping = async (live: LiveSession, phase: 'tick' | 'stop', epoch?: number): Promise<void> => {
+    // Drop a stale 'tick' that a since-cancelled interval still dispatched:
+    // once the heartbeat stopped (or a new one started) the captured epoch no
+    // longer matches, and forwarding it would re-set the indicator after the
+    // stop clear. 'stop' is never epoch-gated — it must always clear.
+    if (phase === 'tick' && epoch !== undefined && epoch !== live.typingEpoch) return
     const callbacks = typingCallbacks.get(live.key.adapter)
     if (!callbacks || callbacks.size === 0) return
     // Snapshot before iterating: a callback could unregister mid-call.
@@ -2389,11 +2404,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       bumpTypingActivity(live)
       return
     }
+    const epoch = ++live.typingEpoch
     live.typingStartedAt = now()
     // Fire immediately so the indicator appears on the very first inbound,
     // not 8 seconds later.
-    void fireTyping(live, 'tick')
+    void fireTyping(live, 'tick', epoch)
     live.typingTimer = setInterval(() => {
+      // A due callback can run one last time after stopTypingHeartbeat's
+      // clearInterval; the epoch mismatch makes fireTyping drop the tick so it
+      // can't re-set the indicator after the stop clear.
+      if (epoch !== live.typingEpoch) return
       if (live.destroyed) {
         void stopTypingHeartbeat(live)
         return
@@ -2406,11 +2426,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         void stopTypingHeartbeat(live)
         return
       }
-      void fireTyping(live, 'tick')
+      void fireTyping(live, 'tick', epoch)
     }, TYPING_HEARTBEAT_MS)
   }
 
   const stopTypingHeartbeat = async (live: LiveSession): Promise<void> => {
+    // Bump first, before any early return: a stop must invalidate the current
+    // generation so a due-but-not-yet-run interval tick is dropped by
+    // fireTyping's epoch guard even if the timer was already cleared.
+    live.typingEpoch++
     if (!live.typingTimer) {
       await live.typingStopPromise
       return
@@ -5127,6 +5151,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         await fireTyping(live, 'tick')
       },
+      fireTypingTick: async (key: ChannelKey, epoch: number) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (!live) return
+        await fireTyping(live, 'tick', epoch)
+      },
+      typingEpoch: (key: ChannelKey) => liveSessions.get(channelKeyId(key))?.typingEpoch,
       isTypingActive: (key: ChannelKey) => {
         const live = liveSessions.get(channelKeyId(key))
         return live?.typingTimer !== null && live?.typingTimer !== undefined
