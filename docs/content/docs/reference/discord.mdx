@@ -59,7 +59,7 @@ Each record under `accounts.<accountId>`:
 | `created_at` | Record creation timestamp                |
 | `updated_at` | Last-update timestamp                    |
 
-CLI: `typeclaw channel add discord` (interactive QR login). The `discord` adapter is not part of `channel set` or `channel reauth` today, so there is no dedicated re-auth command — see the [re-auth quirk](#quirks) below if the session expires.
+CLI: `typeclaw channel add discord` (interactive QR login). When the unofficial session expires, run `typeclaw channel reauth discord` to replay the QR login and refresh the token in `secrets.json` — see the [re-auth quirk](#quirks) below.
 
 ## Capabilities
 
@@ -92,7 +92,7 @@ In role match rules, DMs are addressed by the canonical `dm` **bucket** scope, n
 - **No typing indicator**: the adapter declares no typing capability, so delayed replies are anchored with a quoted-reply prefix instead of a live typing dot (see [Channel adapters](/docs/reference/channel-adapters)).
 - **No slash commands**: `/help`, `/stop`, `/reload`, `/restart` exist only on the [`discord-bot`](/docs/reference/discord-bot) adapter.
 - **Attachments post first, then text**: a failed upload won't leave a text-only message already posted.
-- **Re-auth has no dedicated CLI command**: the session can expire, but `discord` is excluded from both `channel set` and `channel reauth`, and `channel add discord` refuses an already-configured adapter. To re-authenticate today, remove the `channels.discord` block from `secrets.json` (and the `discord` entry from `typeclaw.json` if present), then run `typeclaw channel add discord` again to scan a fresh QR code.
+- **Re-auth replays the QR login**: the unofficial session can expire. Run `typeclaw channel reauth discord` to scan a fresh QR code and rotate the token in place — no need to remove and re-add the channel. (Credential rotation goes through `channel reauth`, not `channel set`, because there is no token field to paste; `channel set discord` redirects you to `reauth`.)
 
 ## Config
 
