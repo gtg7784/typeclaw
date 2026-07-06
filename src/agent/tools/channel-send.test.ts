@@ -526,6 +526,22 @@ describe('createChannelSendTool', () => {
       expect(result.details).toMatchObject({ ok: false })
       expect((result.details as { error: string }).error).toContain('silent-turn signal')
     })
+
+    for (const loud of ['**NO_REPLY**', '`NO_REPLY`', '*NO_REPLY*']) {
+      test(`blocks the loud ${loud} form (mirrors router lenience)`, async () => {
+        const calls: OutboundMessage[] = []
+        const tool = createChannelSendTool({
+          router: fakeRouter(async (msg) => {
+            calls.push(msg)
+            return { ok: true }
+          }),
+        })
+        const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: loud })
+        expect(calls).toHaveLength(0)
+        expect(result.details).toMatchObject({ ok: false })
+        expect((result.details as { error: string }).error).toContain('silent-turn signal')
+      })
+    }
   })
 
   describe('upstream empty-response sentinel guard', () => {

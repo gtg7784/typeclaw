@@ -6162,15 +6162,27 @@ function attemptMadeToolCall(session: AgentSession): boolean {
   return false
 }
 
+// Peels a single symmetric markdown-emphasis wrapper off a token: bold/italic
+// asterisks (`*`, `**`, `***`), underscores (`_`, `__`), or inline-code
+// backticks. Only strips when the SAME run brackets both ends, so `**NO_REPLY**`
+// → `NO_REPLY` while an asymmetric `*NO_REPLY` or a non-wrapping `NO_REPLY_MODE`
+// is returned unchanged. Not recursive — one layer is enough for the observed
+// `**...**` / `` `...` `` "loud" drift; anything more nested is not a real form.
+function stripEmphasisWrapper(token: string): string {
+  const match = /^([*_`]{1,3})([^*_`].*?[^*_`]|[^*_`])\1$/.exec(token)
+  return match ? match[2]! : token
+}
+
 // Lenient on purpose: distilled / smaller models routinely drift off the
 // documented `NO_REPLY` form. We additionally accept `(NO_REPLY)` (Claude-style
-// hedging) and empty visible text (e.g. Kimi-distilled models that emit only a
-// thinking block and end the turn) — without the empty case we'd recover an
-// empty string into the chat. The prompt contract still teaches the strict
+// hedging), markdown-emphasized "loud" forms (`**NO_REPLY**`, `` `NO_REPLY` ``,
+// `*NO_REPLY*`), and empty visible text (e.g. Kimi-distilled models that emit
+// only a thinking block and end the turn) — without the empty case we'd recover
+// an empty string into the chat. The prompt contract still teaches the strict
 // literal; this just widens what we accept. Shared with channel_send /
 // channel_reply so all three call sites stay in lockstep.
 export function isNoReplySignal(text: string): boolean {
-  const trimmed = text.trim()
+  const trimmed = stripEmphasisWrapper(text.trim())
   if (trimmed === '') return true
   if (trimmed === 'NO_REPLY') return true
   if (trimmed === '(NO_REPLY)') return true
@@ -6199,21 +6211,31 @@ export function isNoReplySignal(text: string): boolean {
 //   "... end with NO_REPLY."          (+ sentence punctuation)
 //   "... end with NO_REPLY.NO_REPLY"  (model-doubled terminator, glued)
 //   "... and stop. (NO_REPLY)"        (parenthesized at end)
+//   "... nothing to add. **NO_REPLY**"(markdown-emphasized "loud" form)
+//   "... nothing here. `NO_REPLY`"    (inline-code "loud" form)
 // Does not match (returns false):
 //   "NO_REPLY means do nothing"       (token at start, prose after)
 //   "the env var is NO_REPLY_MODE"    (substring, not whole token)
+//   "the flag is FOO_NO_REPLY"        (identifier — `_` is not a token boundary)
+//   "the **NO_REPLY** token is how..."(emphasized but mid-sentence, prose after)
 //   "no reply needed"                 (case-sensitive on purpose)
 export function endsWithNoReplySignal(text: string): boolean {
   if (isNoReplySignal(text)) return true
   const trimmed = text.trim()
   if (trimmed === '') return false
-  // Strip trailing sentence punctuation / closing brackets / whitespace, then
-  // check the last whitespace-or-punctuation-separated token. The leading
-  // boundary in the regex (`[\s.!?([]`) treats `.NO_REPLY` as a separate
-  // token from the preceding sentence, which covers the model-doubled
-  // `...NO_REPLY.NO_REPLY` shape.
+  // Isolate the final token, then defer to isNoReplySignal (which strips a
+  // symmetric emphasis wrapper). Boundaries are whitespace / sentence
+  // punctuation / opening bracket only — `.NO_REPLY` splits off the preceding
+  // sentence (covering the model-doubled `...NO_REPLY.NO_REPLY` shape), while
+  // `_` is deliberately NOT a boundary so an identifier like `FOO_NO_REPLY`
+  // stays one token and reads as prose, not a signal.
   const tail = trimmed.replace(/[.!?)\]\s]+$/, '')
-  return /(?:^|[\s.!?([])\(?NO_REPLY\)?$/.test(tail)
+  const lastToken = tail.split(/[\s.!?([]/).pop() ?? ''
+  // An empty final token means the text ended on an opening bracket (e.g. a
+  // leaked `skip_response()` call), not a signal — don't hand it to
+  // isNoReplySignal, whose empty-string case reads as deliberate silence.
+  if (lastToken === '') return false
+  return isNoReplySignal(lastToken)
 }
 
 // Detects the upstream "empty response" debug sentinel: when the LLM ends a

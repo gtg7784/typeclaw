@@ -573,6 +573,23 @@ describe('createChannelReplyTool', () => {
       expect(result.details).toMatchObject({ ok: false })
       expect((result.details as { error: string }).error).toContain('silent-turn signal')
     })
+
+    for (const loud of ['**NO_REPLY**', '`NO_REPLY`', '*NO_REPLY*']) {
+      test(`blocks the loud ${loud} form (mirrors router lenience)`, async () => {
+        const calls: OutboundMessage[] = []
+        const tool = createChannelReplyTool({
+          router: fakeRouter(async (msg) => {
+            calls.push(msg)
+            return { ok: true }
+          }),
+          origin: slackThreadOrigin,
+        })
+        const result = await runTool(tool, { text: loud })
+        expect(calls).toHaveLength(0)
+        expect(result.details).toMatchObject({ ok: false })
+        expect((result.details as { error: string }).error).toContain('silent-turn signal')
+      })
+    }
   })
 
   describe('upstream empty-response sentinel guard', () => {
