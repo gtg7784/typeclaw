@@ -9,6 +9,7 @@ export const ADAPTER_IDS = [
   'kakaotalk',
   'slack',
   'slack-bot',
+  'teams',
   'telegram-bot',
   'webex',
   'webex-bot',
@@ -35,6 +36,7 @@ export const ADAPTER_READ_CAPABILITIES: Record<AdapterId, readonly ReadCapabilit
   kakaotalk: ['history'],
   slack: ['history'],
   'slack-bot': ['history', 'message-get', 'list'],
+  teams: ['history'],
   'telegram-bot': [],
   webex: ['history'],
   'webex-bot': ['history'],
@@ -303,6 +305,13 @@ export const channelsSchema = z
     kakaotalk: adapterSchema.optional(),
     slack: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
+    // Teams is a personal-account channel: user-account auth (no bot token),
+    // credentials in secrets.json#channels.teams. v1 is chat-only (1:1/group/
+    // self chats) driven by agent-messenger's TeamsListener (trouter
+    // WebSocket); Teams team/channel messaging is out of scope because the
+    // realtime event carries only a chatId, no team/channel id. Plain-text
+    // sends only; standard adapterSchema (engagement + history + enabled).
+    teams: adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
     webex: adapterSchema.optional(),
     // Webex bots receive messages in real time over a Mercury WebSocket

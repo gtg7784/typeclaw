@@ -147,6 +147,7 @@ describe('ADAPTER_READ_CAPABILITIES', () => {
     kakaotalk: 'kakaotalk.ts',
     slack: 'slack.ts',
     'slack-bot': 'slack-bot.ts',
+    teams: 'teams.ts',
     'telegram-bot': 'telegram-bot.ts',
     webex: 'webex.ts',
     'webex-bot': 'webex-bot.ts',
