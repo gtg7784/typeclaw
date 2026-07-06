@@ -251,6 +251,35 @@ export const CHANNEL_EMPTY_TURN_RETRY_MAX_OUTPUT_TOKENS = 16384
 // thrashed the send path, so a re-prompt would just re-thrash; they skip
 // straight to the fallback. See validateChannelTurn's candidate===null branch.
 export const MAX_EMPTY_TURN_RETRIES = 2
+
+// Separate, tiny budget for the tool-call-leak self-correction retry. Kept
+// apart from MAX_EMPTY_TURN_RETRIES so a persistently-leaking model cannot
+// consume the empty-turn budget (or vice versa) and so it can't livelock: one
+// nudged retry, then on a second leak we suppress and stay silent. A leaked
+// call is a clean protocol miss, not budget exhaustion — one reminder is
+// usually enough, and silence is safer than an unbounded re-prompt loop.
+export const MAX_TOOL_LEAK_RETRIES = 1
+// Reminder-only nudge injected before a tool-call-leak retry. The model wrote a
+// tool call as its visible message text instead of actually calling the tool,
+// so we suppressed the plumbing and ask it to redo the turn properly. Same
+// SYSTEM MESSAGE framing as the other reminder-only nudges.
+export const TOOL_CALL_LEAK_NUDGE = [
+  '---',
+  '**[SYSTEM MESSAGE — not from a human]**',
+  '',
+  'Your previous turn wrote a tool call (e.g. `channel_reply(...)`,',
+  '`channel_react(...)`, `skip_response(...)`) as plain message TEXT instead of',
+  'actually invoking the tool. That text was suppressed — it was NOT sent to the',
+  'channel — because raw tool-call syntax must never be posted as a message. This',
+  'is an automated signal from the channel router, not a message from anyone in',
+  'the chat. **Do not acknowledge or reply to this notice itself.**',
+  '',
+  'Redo the turn correctly: to reply, call your channel reply tool; to react or',
+  'disengage, call that tool; to stay silent, call `skip_response({ reason })`.',
+  'Emit a real tool call — do not type its syntax as your answer.',
+  '',
+  '---',
+].join('\n')
 // Reminder-only nudge injected before an empty-turn retry. Uses the repo's
 // SYSTEM MESSAGE framing (see composeTurnPrompt) so persona-rich models do not
 // reply to the notice itself. Names the actual failure (the prior turn ran out
@@ -840,6 +869,11 @@ type LiveSession = {
   // increments it before injecting EMPTY_TURN_RETRY_NUDGE and reads it to decide
   // retry-vs-fallback. See the candidate===null branch.
   emptyTurnRetries: number
+  // Count of tool-call-leak self-correction re-prompts spent this logical turn,
+  // bounded by MAX_TOOL_LEAK_RETRIES. Separate from emptyTurnRetries so the two
+  // failure modes can't drain each other's budget. Reset with the rest on a
+  // fresh user batch.
+  toolLeakRetries: number
   // Latches once a bare-empty `stop` has been classified as empty-stop-after-tool-work
   // this logical turn. The recovery nudge tells the model NOT to re-run its tools, so
   // a compliant retry is expected to land another bare-empty `stop` with NO new tool
@@ -1956,6 +1990,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         inFlightToolSends: new Map(),
         policyDeniedToolSendsThisTurn: new Map(),
         emptyTurnRetries: 0,
+        toolLeakRetries: 0,
         emptyStopAfterToolWorkArmed: false,
         willingnessNudges: 0,
         lastTerminalReplyAbort: null,
@@ -2623,6 +2658,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // iterations the retry itself queues do not refill the budget and loop
           // forever (and the raised cap stays scoped to the turn that set it).
           live.emptyTurnRetries = 0
+          live.toolLeakRetries = 0
           live.emptyStopAfterToolWorkArmed = false
           live.willingnessNudges = 0
           live.abortReasonThisTurn = null
@@ -2672,6 +2708,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
         const emptyTurnRetriesBeforePrompt = live.emptyTurnRetries
+        const toolLeakRetriesBeforePrompt = live.toolLeakRetries
         const engageAddPromises = live.currentTurnEngageReactions
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
@@ -2721,14 +2758,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // usable assistant reply (real model prose the user saw) seeds the next
           // turn's escalation. Every other terminal outcome CLEARS lastQuestionSignal
           // so an older question can't leak across the failed/silent turn:
-          //   - retry queued (`length`/`aborted`, budget left): turn still in
-          //     flight → leave both for the reminder-only iteration that ends it.
+          //   - retry queued (`length`/`aborted`, budget left, OR a tool-call
+          //     leak nudged a self-correction retry): turn still in flight →
+          //     leave both for the reminder-only iteration that ends it.
           //   - usable reply → commit the pending signal.
           //   - provider error / empty-turn fallback / NO_REPLY / skip (no usable
           //     reply) → clear BOTH (pending and lastQuestionSignal).
           // A fallback sends via source:'system', which also bumps
-          // successfulChannelSends, so it must be excluded explicitly.
-          const retryQueuedThisTurn = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt
+          // successfulChannelSends, so it must be excluded explicitly. Both retry
+          // budgets keep the logical turn open, so both must count here — a
+          // tool-leak retry that later replies must commit the signal AT the
+          // successful retry, not clear it after the first suppressed attempt.
+          const retryQueuedThisTurn =
+            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt || live.toolLeakRetries > toolLeakRetriesBeforePrompt
           const providerErrorThisTurn = assistantLeafStopReason(live.session) === 'error'
           const fallbackPostedThisTurn = live.emptyTurnFallbackTurn === live.turnSeq
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
@@ -2778,8 +2820,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             assistantLeafStopReason(live.session) !== 'error'
           if (usableReplyThisTurn) flushPendingReactions(live)
           else live.pendingTurnReactions = []
-          const emptyTurnRetryQueued = live.emptyTurnRetries > emptyTurnRetriesBeforePrompt
-          await maybePostDeferredProviderError(live, sentReplyThisTurn, emptyTurnRetryQueued)
+          // Either retry budget keeps the turn in flight, so a deferred provider
+          // error must wait for the reminder-only iteration that actually ends it.
+          const retryQueuedThisTurn =
+            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt || live.toolLeakRetries > toolLeakRetriesBeforePrompt
+          await maybePostDeferredProviderError(live, sentReplyThisTurn, retryQueuedThisTurn)
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
@@ -4008,6 +4053,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
     }
 
+    // Suppress a leaked tool call (never post the plumbing) and, while budget
+    // remains, push a self-correction reminder so the same logical turn
+    // re-prompts and the model can redo it with a real tool call. On exhaustion
+    // we stay silent — a persistently-leaking model must not livelock, and
+    // silence is safer than posting a fallback the user didn't ask for.
+    const suppressToolLeakAndNudge = (live: LiveSession, leakedText: string): void => {
+      if (live.toolLeakRetries < MAX_TOOL_LEAK_RETRIES) {
+        live.toolLeakRetries++
+        logger.warn(
+          `[channels] ${live.keyId}: suppressed plain_text_tool_call_leak (nudge ` +
+            `attempt=${live.toolLeakRetries}/${MAX_TOOL_LEAK_RETRIES}) text_len=${leakedText.length}`,
+        )
+        live.pendingSystemReminders.push(TOOL_CALL_LEAK_NUDGE)
+        return
+      }
+      logger.warn(
+        `[channels] ${live.keyId}: suppressed plain_text_tool_call_leak (retries exhausted, silent) ` +
+          `text_len=${leakedText.length}`,
+      )
+    }
+
     // A send landed this turn, but the model may have posted a `continue: true`
     // progress reply, kept working, then ENDED with its final answer as plain
     // prose — never calling a channel tool again. The terminal-reply abort fires
@@ -4296,28 +4362,33 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    // Plain-text tool-call leak: the model serialized a channel tool call as
-    // ordinary prose instead of producing a real tool call (a Kimi-on-Fireworks
-    // failure mode — see `isLikelyPlainTextChannelToolCall`). We can't post the
-    // raw `channel_reply({...})` serialization to the channel, but for
-    // reply/send the model's *intent* is unambiguous: deliver the `text` arg.
-    // Extract it and recover the actual message. `skip_response` is the
-    // opposite — a genuine decline — so it stays suppressed.
+    // Plain-text tool-call leak: the model serialized a tool call as ordinary
+    // message text instead of producing a real tool call. Default is SUPPRESS —
+    // that raw plumbing must never reach the channel. The two exceptions are
+    // `channel_reply` / `channel_send`, whose leaked form carries a salvageable
+    // user message: extract the `text` arg and recover the actual reply.
+    // `suppress-silent` (skip_response) drops without a nudge because the model
+    // already got the silence it asked for; `suppress-warn` (every other leaked
+    // call) drops AND re-prompts the model to redo the turn with a real tool
+    // call, bounded by MAX_TOOL_LEAK_RETRIES so it can't livelock.
     const plainTextToolCallKind = getPlainTextChannelToolCallKind(assistantText)
-    if (plainTextToolCallKind === 'skip') {
+    if (plainTextToolCallKind === 'suppress-silent') {
       logger.warn(
-        `[channels] ${live.keyId}: suppressed plain_text_channel_skip_response text_len=${assistantText.length}`,
+        `[channels] ${live.keyId}: suppressed plain_text_tool_call_leak (silent) text_len=${assistantText.length}`,
       )
+      return
+    }
+    if (plainTextToolCallKind === 'suppress-warn') {
+      suppressToolLeakAndNudge(live, assistantText)
       return
     }
     if (plainTextToolCallKind !== null) {
       const extracted = extractPlainTextChannelToolCallText(assistantText)
-      // Unextractable (no `text` arg, empty value, or fully-truncated): fall
-      // back to the historical safe behavior — drop it rather than leak plumbing.
+      // A reply/send leak with no recoverable `text` (missing arg, empty value,
+      // or fully-truncated) still owes the user a real message — treat it as a
+      // warn-worthy leak, not a silent drop, so the model retries properly.
       if (extracted === null) {
-        logger.warn(
-          `[channels] ${live.keyId}: suppressed unextractable_plain_text_channel_tool_call text_len=${assistantText.length}`,
-        )
+        suppressToolLeakAndNudge(live, assistantText)
         return
       }
       // The extracted value is still untrusted model output: if it is itself a
@@ -6115,42 +6186,97 @@ export function isLikelyKimiChannelToolLeak(text: string): boolean {
 // posts its own "I'm staying silent" plumbing to the channel, the exact
 // opposite of the intended no-op. It is never a legitimate user-facing reply.
 //
-// Structural-only detection (NOT a substring search): the trimmed text must
-// *start* with `channel_reply(`, `channel_send(`, or `skip_response(`, and
-// that opening paren must enclose at least one quote — `"` or `'` (the
-// serialized argument). The single-quote arm matters because the extractor
-// recovers single-quoted values too; if the classifier only matched `"`, a
-// single-quoted leak like `channel_reply({text: 'hi'})` would bypass the
-// extractor and post raw plumbing. This deliberately matches the leak shape
-// while letting prose that merely
-// *mentions* a tool name (e.g. "I would normally call channel_reply here
-// but...") reach the user — that false-positive class is already locked in by
-// the `still recovers prose that mentions channel_reply` test.
+// Detection is a SINGLE whole-message boundary for every tool, then a per-name
+// disposition. reply/send RECOVER (their leaked form holds a salvageable user
+// message the extractor re-posts); everything else SUPPRESSES.
 //
-// The trailing close paren is NOT required: the model sometimes truncates
-// mid-serialization, and a half-leaked `channel_reply({"text":"..."` is
-// just as user-hostile as the full shape.
-const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^(channel_reply|channel_send|skip_response)\s*\(\s*[^)]*["']/
+// SUPPRESS is the default and is detected by SHAPE, not a curated name list — a
+// `toolname(...)` that is the model's ENTIRE turn output is always a protocol
+// malfunction (the model narrated a call instead of emitting it), and that raw
+// plumbing must never reach the channel. No allowlist to keep in sync as tools
+// are added.
+//
+// The false-positive boundary is "the WHOLE trimmed message is a single call
+// expression" — NOT "starts with a call". A developer-facing reply like
+// `read({ ... }) lets you load a file` has text after the closing paren, so it
+// is prose and reaches the user. Only a message that is *nothing but* the call
+// (`skip_response({ ... })`, `channel_react({ emoji: "eyes" })`, bare
+// `channel_disengage()`) is a leak. This is what lets the rule cover every tool
+// — including future ones and generic tools like `bash(...)` — without risking
+// legitimate replies, because a real reply is never *only* a bare tool call.
+//
+// `isWholeMessageToolCall` (below) is the bracket-aware parser; it returns the
+// called tool's name so the caller can apply the one intrinsic distinction that
+// survives: `skip_response` suppresses SILENTLY (the model wanted silence, and
+// suppression already delivered it — warning would be noise), while every other
+// suppressed leak pushes a self-correction reminder so the model retries with a
+// real tool call or a real reply.
+const SKIP_RESPONSE_TOOL_NAME = 'skip_response'
 
-export type PlainTextChannelToolCallKind = 'reply' | 'send' | 'skip'
+export type PlainTextChannelToolCallKind = 'reply' | 'send' | 'suppress-silent' | 'suppress-warn'
 
 export function getPlainTextChannelToolCallKind(text: string): PlainTextChannelToolCallKind | null {
-  const match = PLAIN_TEXT_CHANNEL_TOOL_CALL_RE.exec(text.trim())
-  if (match === null) return null
-  switch (match[1]) {
-    case 'channel_reply':
-      return 'reply'
-    case 'channel_send':
-      return 'send'
-    case 'skip_response':
-      return 'skip'
-    default:
-      return null
-  }
+  // Everything routes through the SAME whole-message boundary, including
+  // reply/send recovery — a prefix match there would false-positive prose like
+  // `channel_reply({"text":"hi"}) is the serialized form`, recovering `hi` and
+  // dropping the explanation. `isWholeMessageToolCall` returns the tool name
+  // only when the entire trimmed message is the call (or a truncated one), so a
+  // reply/send leak still recovers while a mention-with-trailing-prose falls
+  // through to the user.
+  const toolName = isWholeMessageToolCall(text)
+  if (toolName === null) return null
+  if (toolName === 'channel_reply') return 'reply'
+  if (toolName === 'channel_send') return 'send'
+  // `skip_response` already got what it wanted once suppressed (silence), so
+  // warning would be noise. Every other leaked call dropped a real action or
+  // reply, so nudge the model to redo it properly.
+  return toolName === SKIP_RESPONSE_TOOL_NAME ? 'suppress-silent' : 'suppress-warn'
 }
 
 export function isLikelyPlainTextChannelToolCall(text: string): boolean {
   return getPlainTextChannelToolCallKind(text) !== null
+}
+
+// Bracket-aware parser: returns the called tool's name when the ENTIRE trimmed
+// text is a single call expression `identifier(...)` — empty args `()` or a
+// single object-literal `({ ... })` — with nothing but optional whitespace and
+// a trailing `;` after the closing paren. Returns null for anything else, which
+// is what keeps prose safe: `read({...}) loads a file` has trailing text, and
+// `bash` alone (no parens) is a bare word, so neither is a call. A naive
+// `^ident\(.*\)$` regex can't tell the closing paren of the arg object from a
+// paren inside a quoted string, so this walks the string honoring quotes and
+// brace/bracket/paren depth.
+export function isWholeMessageToolCall(text: string): string | null {
+  const trimmed = text.trim()
+  const nameMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(trimmed)
+  if (nameMatch === null) return null
+  const name = nameMatch[1]!
+
+  let i = nameMatch[0].length - 1
+  let depth = 0
+  for (; i < trimmed.length; i++) {
+    const ch = trimmed[i]!
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i = skipStringLiteral(trimmed, i, ch)
+      continue
+    }
+    if (ch === '(' || ch === '{' || ch === '[') {
+      depth++
+      continue
+    }
+    if (ch === ')' || ch === '}' || ch === ']') {
+      depth--
+      if (depth === 0) break
+      continue
+    }
+  }
+
+  // Unbalanced (truncated mid-serialization) — still a leaked call, not prose.
+  if (depth !== 0) return name
+
+  const rest = trimmed.slice(i + 1).trim()
+  if (rest === '' || rest === ';') return name
+  return null
 }
 
 // Tolerant single-purpose scanner that pulls the `text` argument out of a

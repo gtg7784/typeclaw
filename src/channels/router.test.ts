@@ -50,6 +50,7 @@ import {
   sliceHeadTail,
   StaleLiveSessionError,
   stripThinkBlocks,
+  TOOL_CALL_LEAK_NUDGE,
   TURN_CAP_ERROR,
   WILLINGNESS_NUDGE,
   type ChannelRouter,
@@ -4003,8 +4004,10 @@ describe('ChannelRouter channel-turn protocol', () => {
     }
     await router.__testing!.flushDebounce(KEY)
 
+    // A reply leak with no salvageable text still owes the user a message, so it
+    // takes the suppress-AND-warn path (nudge to retry), not a silent drop.
     expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('suppressed unextractable_plain_text_channel_tool_call'))).toBe(true)
+    expect(logs.some((m) => m.includes('plain_text_tool_call_leak (nudge'))).toBe(true)
   })
 
   test('suppresses leaked plain-text skip_response(...) serialization instead of posting it to the channel', async () => {
@@ -4024,8 +4027,80 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(sent).toHaveLength(0)
-    expect(logs.some((m) => m.includes('suppressed plain_text_channel_skip_response'))).toBe(true)
+    expect(logs.some((m) => m.includes('suppressed plain_text_tool_call_leak (silent)'))).toBe(true)
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('suppresses a quote-free skip_response() leak SILENTLY (no self-correction nudge)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('skip_response()')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_tool_call_leak (silent)'))).toBe(true)
+    // skip already delivered the model's intent (silence) — no nudge, no retry.
+    expect(logs.some((m) => m.includes('plain_text_tool_call_leak (nudge'))).toBe(false)
+  })
+
+  test('suppresses a narrated channel_disengage() leak AND nudges the model to redo the turn', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'stop replying' }))
+    // Leak once, then on the nudged retry send a clean reply — proves the
+    // self-correction loop lets the model recover in the same logical turn.
+    let attempt = 0
+    sessions[0]!.onPrompt = () => {
+      attempt++
+      if (attempt === 1) {
+        sessions[0]!.setAssistantText('channel_disengage()')
+      } else {
+        sessions[0]!.setAssistantText('ok, backing off')
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('plain_text_tool_call_leak (nudge attempt=1/1)'))).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('ok, backing off')
+  })
+
+  test('a persistently-leaking whole-message tool call stays silent after the retry budget (no livelock)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'stop replying' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_disengage()')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('plain_text_tool_call_leak (nudge attempt=1/1)'))).toBe(true)
+    expect(logs.some((m) => m.includes('plain_text_tool_call_leak (retries exhausted, silent)'))).toBe(true)
   })
 
   test('still recovers prose that mentions skip_response in a non-call shape', async () => {
@@ -4071,15 +4146,55 @@ describe('ChannelRouter channel-turn protocol', () => {
   })
 
   describe('getPlainTextChannelToolCallKind', () => {
-    test('classifies anchored reply/send/skip serializations', () => {
+    test('recovers reply/send serializations (their args hold a user message)', () => {
       expect(getPlainTextChannelToolCallKind('channel_reply({"text":"hi"})')).toBe('reply')
       expect(getPlainTextChannelToolCallKind('channel_send({"chat":"c","text":"hi"})')).toBe('send')
-      expect(getPlainTextChannelToolCallKind('skip_response({ reason: "no content" })')).toBe('skip')
     })
 
-    test('returns null for prose that merely mentions a tool name', () => {
+    test('recovers a TRUNCATED reply/send serialization (unbalanced, still a leak)', () => {
+      expect(getPlainTextChannelToolCallKind('channel_reply({"text":"hi there')).toBe('reply')
+    })
+
+    test('delivers prose that STARTS with a reply/send call but continues as explanation', () => {
+      // Reply/send recovery is gated on the SAME whole-message boundary as
+      // suppression — a prefix match would recover `hi` and drop the rest.
+      expect(getPlainTextChannelToolCallKind('channel_reply({"text":"hi"}) is the serialized form')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('channel_send({"text":"x"}) — that is how you send')).toBeNull()
+    })
+
+    test('suppresses skip_response leaks SILENTLY (the model already got its silence)', () => {
+      expect(getPlainTextChannelToolCallKind('skip_response({ reason: "no content" })')).toBe('suppress-silent')
+      expect(getPlainTextChannelToolCallKind('skip_response()')).toBe('suppress-silent')
+      expect(getPlainTextChannelToolCallKind('skip_response({})')).toBe('suppress-silent')
+      expect(getPlainTextChannelToolCallKind('skip_response({ reason: not addressed to me })')).toBe('suppress-silent')
+    })
+
+    test('suppresses every OTHER whole-message tool call with a WARN (model owes a real turn)', () => {
+      // Default is suppress-warn for any leaked call that is the whole message —
+      // channel tools AND generic tools alike, no allowlist. The warn drives the
+      // self-correction retry.
+      expect(getPlainTextChannelToolCallKind('channel_disengage()')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('channel_react({ emoji: "eyes" })')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('channel_history({ limit: 20 })')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('channel_read({ message_id: "123" })')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('channel_fetch_attachment({ id: "a1" })')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('look_at_channel_attachment({ id: "a1" })')).toBe('suppress-warn')
+      // generic tools too — a whole-message `bash(...)` / `read(...)` is a leak
+      expect(getPlainTextChannelToolCallKind('bash("ls -la")')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('read({ path: "x" })')).toBe('suppress-warn')
+      expect(getPlainTextChannelToolCallKind('restart()')).toBe('suppress-warn')
+    })
+
+    test('delivers prose that merely mentions or explains a tool (whole message is NOT a call)', () => {
+      // The whole-message boundary is what protects real replies: a message with
+      // any text after the closing paren, or no call shape at all, is prose.
       expect(getPlainTextChannelToolCallKind('Use the channel_reply tool to send "text".')).toBeNull()
       expect(getPlainTextChannelToolCallKind('channel_reply does this')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('skip_response tool when there is nothing to add')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('channel_react whenever a message deserves an emoji')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('read({ path: "x" }) loads a file for you')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('You can use bash("ls") to list files')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('channel_disengagement is the noun')).toBeNull()
     })
   })
 
@@ -4481,6 +4596,50 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     // then: turn C did not escalate (no xhigh) — B overwrote A's question signal.
     expect(sessions[0]!.thinkingLevels).not.toContain('xhigh')
+  })
+
+  test('cross-turn escalation: a tool-leak-retried question turn seeds the next turn (retry accounting)', async () => {
+    // given: turn A is a QUESTION that leaks a tool call, then replies on the
+    // nudged self-correction retry; turn B is a question. The tool-leak retry
+    // keeps the logical turn in flight, so A must commit its question signal AT
+    // the successful retry — then B escalates. Before including toolLeakRetries
+    // in retryQueuedThisTurn, A's signal was cleared after the first suppressed
+    // attempt, and B would NOT escalate.
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn A — a question that leaks channel_disengage(), then replies on retry
+    await router.route(inbound({ text: 'why did the deployment fail on the staging cluster?' }))
+    let aAttempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      aAttempt++
+      if (aAttempt === 1) {
+        sessions[0]!.setAssistantText('channel_disengage()')
+        return
+      }
+      expect(text).toContain(TOOL_CALL_LEAK_NUDGE)
+      sessions[0]!.setAssistantText('A')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'because of X' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    sessions[0]!.thinkingLevels.length = 0
+
+    // turn B — a real question; predecessor A was a question with a usable reply
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('B')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+    }
+    await router.route(inbound({ text: 'so what exactly should i change to fix it?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: turn B escalated (xhigh) — A's question signal survived the leak retry.
+    expect(sessions[0]!.thinkingLevels).toContain('xhigh')
   })
 
   test('cross-turn escalation: a provider-error question turn does not seed the next turn', async () => {
