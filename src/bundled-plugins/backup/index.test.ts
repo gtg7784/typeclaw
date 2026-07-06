@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+
+import * as FakeTimers from '@sinonjs/fake-timers'
 
 import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports } from '@/plugin'
@@ -64,6 +66,31 @@ const tinyConfig = {
   networkTimeoutMs: 1000,
 }
 
+// Fake setTimeout/clearTimeout so the session.idle debounce (which schedules its
+// fire via the global setTimeout in index.ts) advances on virtual time instead of
+// the wall clock — the wall-clock version flaked on Windows CI where coarse timer
+// granularity let the debounce window fire more than once. Same seam the sibling
+// memory plugin's index.test.ts uses.
+let clock: FakeTimers.Clock | null = null
+
+beforeEach(() => {
+  clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout'] })
+})
+
+afterEach(() => {
+  clock?.uninstall()
+  clock = null
+})
+
+async function advance(ms: number): Promise<void> {
+  if (!clock) throw new Error('clock not installed; beforeEach did not run')
+  await clock.tickAsync(ms)
+  // Drain trailing microtasks the fire path awaits (fireIfQuiet's spawnSubagent
+  // and the pendingFire queueMicrotask re-entry) so a post-advance assertion
+  // observes the settled spawnCalls, not an in-flight chain.
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
+}
+
 describe('backup plugin', () => {
   test('exposes the three subagents (runner, message, diagnose)', async () => {
     const { ctx } = makeCtx({ config: tinyConfig })
@@ -98,7 +125,7 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
     const { idle } = await loadHooks(ctx)
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
     expect(spawnCalls[0]?.payload).toEqual({ agentDir: '/agent', pushToOrigin: false })
   })
@@ -109,7 +136,7 @@ describe('backup plugin', () => {
 
     await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls).toEqual([])
   })
 
@@ -119,12 +146,12 @@ describe('backup plugin', () => {
 
     await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(40)
+    await advance(40)
     expect(spawnCalls).toEqual([])
 
     await turnEnd({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
   })
 
@@ -142,7 +169,7 @@ describe('backup plugin', () => {
       hookCtx(),
     )
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
   })
 
@@ -150,11 +177,13 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
     const { idle } = await loadHooks(ctx)
 
+    // Each idle resets the 25ms debounce; the 5ms gaps stay inside the window so
+    // the timer never fires mid-loop, then one advance past the window fires once.
     for (let i = 0; i < 5; i++) {
       await idle({ sessionId: 's', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-      await sleep(5)
+      await advance(5)
     }
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls.length).toBe(1)
   })
 
@@ -162,7 +191,7 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: { ...tinyConfig, enabled: false } })
     const { idle } = await loadHooks(ctx)
     await idle({ sessionId: 's', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls).toEqual([])
   })
 
@@ -173,7 +202,7 @@ describe('backup plugin', () => {
     await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await sessionEnd({ sessionId: 's1' }, hookCtx())
     await idle({ sessionId: 's2', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
-    await sleep(80)
+    await advance(80)
     expect(spawnCalls.length).toBe(1)
   })
 
@@ -184,8 +213,6 @@ describe('backup plugin', () => {
     expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toMatch(/only the one push retry|only.*one.*retry/i)
   })
 })
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function hookCtx() {
   return {
