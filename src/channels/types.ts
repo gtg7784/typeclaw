@@ -365,7 +365,8 @@ export type FetchHistoryResult =
 // Registered per-adapter on the ChannelRouter alongside outbound/typing
 // callbacks. Adapters that cannot fetch history (e.g. webhook-only future
 // adapters) simply do not register one; the router answers
-// 'history-not-supported' for those.
+// 'history-not-supported' for those, or 'history-adapter-unavailable' when the
+// adapter is configured but failed to start (see setAdapterConfigured).
 export type HistoryCallback = (args: FetchHistoryArgs) => Promise<FetchHistoryResult>
 
 // Fetch a single message by its platform id from an arbitrary chat. Backs the
@@ -383,9 +384,11 @@ export type GetMessageArgs = {
 export type GetMessageResult =
   | { ok: true; message: ChannelHistoryMessage }
   // `code: 'not-found'` is an expected miss (deleted/wrong id) the tool surfaces
-  // as a soft error; `code: 'not-supported'` means no adapter callback is
-  // registered, mirroring `fetchHistory`'s 'history-not-supported' contract.
-  | { ok: false; error: string; code?: 'not-found' | 'not-supported' }
+  // as a soft error; `code: 'not-supported'` means the adapter is not configured
+  // at all; `code: 'adapter-unavailable'` means it IS configured but currently
+  // has no live callback (e.g. failed to start), mirroring `fetchHistory`'s
+  // 'message-get-adapter-unavailable' string contract.
+  | { ok: false; error: string; code?: 'not-found' | 'not-supported' | 'adapter-unavailable' }
 
 export type MessageGetCallback = (args: GetMessageArgs) => Promise<GetMessageResult>
 
@@ -408,7 +411,7 @@ export type ListChannelsArgs = {
 
 export type ListChannelsResult =
   | { ok: true; entries: ChannelListEntry[]; nextCursor?: string }
-  | { ok: false; error: string; code?: 'not-supported' }
+  | { ok: false; error: string; code?: 'not-supported' | 'adapter-unavailable' }
 
 // Backs the `channel_read` tool's `mode: "list"`. Opt-in per adapter like
 // history; the router answers 'list-not-supported' when none is registered.

@@ -27,6 +27,7 @@ function fakeRouter(
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

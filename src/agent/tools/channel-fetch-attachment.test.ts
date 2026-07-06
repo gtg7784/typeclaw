@@ -36,6 +36,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

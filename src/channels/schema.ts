@@ -16,6 +16,30 @@ export const ADAPTER_IDS = [
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
+export type ReadCapability = 'history' | 'message-get' | 'list'
+
+// Which arbitrary-read callbacks each adapter registers when it starts healthy.
+// A missing callback means "adapter-unavailable" (failed to start) ONLY for a
+// capability listed here; capabilities an adapter never implements stay
+// "not-supported" even when the adapter is configured and running. Kept as a
+// static table because the distinction must survive a failed start() (which
+// registers nothing), so it can't be derived from the live callback registry.
+// The guard test in schema.test.ts asserts this matches what each adapter's
+// start() actually registers — update both together or CI fails.
+export const ADAPTER_READ_CAPABILITIES: Record<AdapterId, readonly ReadCapability[]> = {
+  discord: ['history'],
+  'discord-bot': ['history', 'message-get', 'list'],
+  github: ['history'],
+  instagram: ['history'],
+  line: ['history'],
+  kakaotalk: ['history'],
+  slack: ['history'],
+  'slack-bot': ['history', 'message-get', 'list'],
+  'telegram-bot': [],
+  webex: ['history'],
+  'webex-bot': ['history'],
+}
+
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
 
 const stickinessSchema = z.union([

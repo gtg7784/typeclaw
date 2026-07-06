@@ -46,6 +46,7 @@ function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): Cha
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},

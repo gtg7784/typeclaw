@@ -1129,3 +1129,63 @@ describe('channel manager — kakaotalk credential preflight', () => {
     await mgr.stop()
   })
 })
+
+describe('channel manager — router adapter-configured wiring', () => {
+  test('a configured adapter whose start() fails still reports history as configured-but-unavailable', async () => {
+    cfg['discord-bot'] = enabledAdapterCfg()
+    const failing = makeFakeAdapter()
+    failing.start = async () => {
+      throw new Error('401: Unauthorized')
+    }
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { DISCORD_BOT_TOKEN: 'token' },
+      createDiscordAdapter: () => failing,
+    })
+
+    await mgr.start()
+
+    const result = await mgr.router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('history-adapter-unavailable')
+
+    await mgr.stop()
+  })
+
+  test('an adapter absent from config reports history as plain not-supported', async () => {
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+    })
+
+    await mgr.start()
+
+    const result = await mgr.router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
+
+    await mgr.stop()
+  })
+
+  test('reload dropping an adapter from config reverts it to not-supported', async () => {
+    cfg['discord-bot'] = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { DISCORD_BOT_TOKEN: 'token' },
+      createDiscordAdapter: () => fake,
+    })
+
+    await mgr.start()
+    delete cfg['discord-bot']
+    await mgr.reload()
+
+    const result = await mgr.router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
+
+    await mgr.stop()
+  })
+})
