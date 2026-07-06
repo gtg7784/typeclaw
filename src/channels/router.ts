@@ -5701,13 +5701,13 @@ const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'kakaotal
 
 // Webex's `parentId` rides on both `sendMessage` and `uploadFile`, so a reply is
 // native for every shape — including attachment-only, which the text-gated set
-// above cannot express. Discord joins this set because its adapter carries
+// above cannot express. Both Discord adapters join this set because each carries
 // `message_reference` on BOTH the text send (`sendMessage`) and the attachment
-// send (a raw multipart `payload_json` on the first file upload), so an
-// attachment-only Discord reply is a native reply-arrow, not a bare blockquote.
-// Special-cased before the text gate so the router sets `replyTo` (not a
-// blockquote) even when the reply carries no text.
-const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot', 'discord-bot'])
+// send (`payload_json` on the first file upload), so an attachment-only Discord
+// reply is a native reply-arrow, not a bare blockquote. Special-cased before the
+// text gate so the router sets `replyTo` (not a blockquote) even when the reply
+// carries no text.
+const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot', 'discord-bot', 'discord'])
 
 export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
   if (NATIVE_REPLY_EVERY_SHAPE_ADAPTERS.has(msg.adapter)) return 'native'

@@ -357,8 +357,8 @@ describe('resolveReplyRenderMode', () => {
     expect(resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
   })
 
-  test('Discord, KakaoTalk, and Webex with text use the native reply primitive', () => {
-    for (const adapter of ['discord-bot', 'kakaotalk', 'webex-bot'] as const) {
+  test('Discord (bot + user), KakaoTalk, and Webex with text use the native reply primitive', () => {
+    for (const adapter of ['discord', 'discord-bot', 'kakaotalk', 'webex-bot'] as const) {
       expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
     }
   })
@@ -371,8 +371,8 @@ describe('resolveReplyRenderMode', () => {
     }
   })
 
-  test('Webex and Discord stay native for an attachment-only reply (reply reference rides on the file upload)', () => {
-    for (const adapter of ['webex-bot', 'discord-bot'] as const) {
+  test('Webex and Discord (bot + user) stay native for an attachment-only reply (reference rides on the file upload)', () => {
+    for (const adapter of ['webex-bot', 'discord-bot', 'discord'] as const) {
       expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] })).toBe(
         'native',
       )
