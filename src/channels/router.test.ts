@@ -8605,6 +8605,30 @@ describe('ChannelRouter history dispatch', () => {
     expect(result).toEqual({ ok: false, error: 'history-not-supported' })
   })
 
+  test('returns an adapter-unavailable error when the adapter is configured but has no callback', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('discord', true)
+
+    const result = await router.fetchHistory('discord', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('history-adapter-unavailable')
+    expect(result.error).toContain('discord')
+  })
+
+  test('setAdapterConfigured(false) reverts to history-not-supported', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('discord', true)
+    router.setAdapterConfigured('discord', false)
+
+    const result = await router.fetchHistory('discord', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
+  })
+
   test('first ok callback wins; later callbacks are not invoked', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
@@ -8734,6 +8758,31 @@ describe('ChannelRouter message-get dispatch', () => {
     expect(result).toEqual({ ok: false, error: 'message-get-not-supported', code: 'not-supported' })
   })
 
+  test('returns code adapter-unavailable when a message-get-capable adapter is configured but has no callback', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('discord-bot', true)
+
+    const result = await router.getMessage('discord-bot', { chat: 'c1', thread: null, messageId: 'm1' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.code).toBe('adapter-unavailable')
+    expect(result.error).toContain('discord-bot')
+  })
+
+  test('keeps not-supported for a configured adapter that never implements message-get', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    // discord (personal) is configured and history-capable, but has no
+    // message-get callback by design — must stay not-supported, not unavailable.
+    router.setAdapterConfigured('discord', true)
+
+    const result = await router.getMessage('discord', { chat: 'c1', thread: null, messageId: 'm1' })
+
+    expect(result).toEqual({ ok: false, error: 'message-get-not-supported', code: 'not-supported' })
+  })
+
   test('unregisterMessageGet removes the callback so subsequent calls fall back to not-supported', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
@@ -8789,6 +8838,31 @@ describe('ChannelRouter channel-list dispatch', () => {
     const { router } = makeRouter(dir)
 
     const result = await router.listChannels('slack-bot', { workspace: 'T0', limit: 50 })
+
+    expect(result).toEqual({ ok: false, error: 'list-not-supported', code: 'not-supported' })
+  })
+
+  test('returns code adapter-unavailable when a list-capable adapter is configured but has no callback', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('slack-bot', true)
+
+    const result = await router.listChannels('slack-bot', { workspace: 'T0', limit: 50 })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.code).toBe('adapter-unavailable')
+    expect(result.error).toContain('slack-bot')
+  })
+
+  test('keeps not-supported for a configured adapter that never implements list', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    // slack (personal) is configured and history-capable but has no list
+    // callback by design — must stay not-supported, not unavailable.
+    router.setAdapterConfigured('slack', true)
+
+    const result = await router.listChannels('slack', { workspace: 'T0', limit: 50 })
 
     expect(result).toEqual({ ok: false, error: 'list-not-supported', code: 'not-supported' })
   })

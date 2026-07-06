@@ -62,7 +62,13 @@ import {
   saveChannelSessions,
   type ChannelSessionRecord,
 } from './persistence'
-import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type AdapterId, type ChannelAdapterConfig } from './schema'
+import {
+  ADAPTER_READ_CAPABILITIES,
+  QUOTED_REPLY_EXCERPT_MAX_CHARS,
+  type AdapterId,
+  type ChannelAdapterConfig,
+  type ReadCapability,
+} from './schema'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -1097,6 +1103,17 @@ export type ChannelRouter = {
   // the wrong signal. autoReactOnEngage reads this to post :eyes: only as a
   // fallback when no visible typing exists. Unset defaults to false.
   setTypingCapability: (adapter: ChannelKey['adapter'], supported: boolean) => void
+  // Set by the manager for every adapter present in typeclaw.json#channels,
+  // independent of whether the adapter's start() succeeded (a failed login never
+  // registers callbacks). Combined with the adapter's static read-capability set
+  // (ADAPTER_READ_CAPABILITIES), fetchHistory/getMessage/listChannels tell three
+  // cases apart for a missing callback: not configured → *-not-supported;
+  // configured but the capability isn't one this adapter implements →
+  // *-not-supported; configured AND the adapter should implement it but no
+  // callback is live (e.g. auth failure at startup) → *-adapter-unavailable. So
+  // the agent only sees the actionable error when re-auth would actually help.
+  // Unset defaults to not-configured.
+  setAdapterConfigured: (adapter: ChannelKey['adapter'], configured: boolean) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   // Self-identity is a per-adapter singleton (one bot account per adapter),
@@ -1454,6 +1471,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const removeReactionCallbacks = new Map<ChannelKey['adapter'], Set<RemoveReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const typingCapableAdapters = new Set<ChannelKey['adapter']>()
+  const configuredAdapters = new Set<ChannelKey['adapter']>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
   const selfIdentityResolvers = new Map<ChannelKey['adapter'], ChannelSelfIdentityResolver>()
@@ -3502,6 +3520,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     else typingCapableAdapters.delete(adapter)
   }
 
+  const setAdapterConfigured = (adapter: ChannelKey['adapter'], configured: boolean): void => {
+    if (configured) configuredAdapters.add(adapter)
+    else configuredAdapters.delete(adapter)
+  }
+
   const registerChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
     let set = channelNameResolvers.get(adapter)
     if (!set) {
@@ -3566,10 +3589,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     historyCallbacks.get(adapter)?.delete(cb)
   }
 
+  const isReadCapabilityUnavailable = (adapter: ChannelKey['adapter'], capability: ReadCapability): boolean =>
+    configuredAdapters.has(adapter) && ADAPTER_READ_CAPABILITIES[adapter].includes(capability)
+
+  const missingCallbackError = (adapter: ChannelKey['adapter'], capability: ReadCapability): string =>
+    isReadCapabilityUnavailable(adapter, capability)
+      ? `${capability}-adapter-unavailable: the "${adapter}" adapter is configured but not currently running (it likely failed to start, e.g. an expired token or auth error — check the container logs and re-authenticate)`
+      : `${capability}-not-supported`
+
   const fetchHistory = async (adapter: ChannelKey['adapter'], args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     const callbacks = historyCallbacks.get(adapter)
     if (!callbacks || callbacks.size === 0) {
-      return { ok: false, error: 'history-not-supported' }
+      return { ok: false, error: missingCallbackError(adapter, 'history') }
     }
     // Snapshot before iterating, mirroring `send`: a callback that mutates
     // the set (e.g. unregisters mid-call) must not skip siblings.
@@ -3598,7 +3629,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const getMessage = async (adapter: ChannelKey['adapter'], args: GetMessageArgs): Promise<GetMessageResult> => {
     const cb = messageGetCallbacks.get(adapter)
-    if (cb === undefined) return { ok: false, error: 'message-get-not-supported', code: 'not-supported' }
+    if (cb === undefined)
+      return isReadCapabilityUnavailable(adapter, 'message-get')
+        ? { ok: false, error: missingCallbackError(adapter, 'message-get'), code: 'adapter-unavailable' }
+        : { ok: false, error: 'message-get-not-supported', code: 'not-supported' }
     try {
       return await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} message get`)
     } catch (err) {
@@ -3617,7 +3651,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const listChannels = async (adapter: ChannelKey['adapter'], args: ListChannelsArgs): Promise<ListChannelsResult> => {
     const cb = listCallbacks.get(adapter)
-    if (cb === undefined) return { ok: false, error: 'list-not-supported', code: 'not-supported' }
+    if (cb === undefined)
+      return isReadCapabilityUnavailable(adapter, 'list')
+        ? { ok: false, error: missingCallbackError(adapter, 'list'), code: 'adapter-unavailable' }
+        : { ok: false, error: 'list-not-supported', code: 'not-supported' }
     try {
       return await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} list channels`)
     } catch (err) {
@@ -5074,6 +5111,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerTyping,
     unregisterTyping,
     setTypingCapability,
+    setAdapterConfigured,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
     registerSelfIdentity,

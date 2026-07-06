@@ -482,7 +482,13 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       // the sum of each adapter's connect latency instead of just the slowest.
       const starts = ADAPTER_IDS.flatMap((name) => {
         const adapterCfg = cfg[name]
-        return adapterCfg === undefined ? [] : [runSerially(name, () => startAdapter(name, adapterCfg))]
+        if (adapterCfg === undefined) return []
+        // Mark configured up front, regardless of start outcome: a failed start
+        // (e.g. expired token) never registers a history callback, and the router
+        // uses this flag to answer "configured but unavailable" instead of the
+        // misleading "not supported".
+        router.setAdapterConfigured(name, adapterCfg.enabled !== false)
+        return [runSerially(name, () => startAdapter(name, adapterCfg))]
       })
       // Await every launched start to settle BEFORE surfacing a failure.
       // `startAdapter` converts expected per-adapter failures to `false`, so a
@@ -528,11 +534,13 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         const desired = cfg[name]
         const current = live.get(name)
         if (desired === undefined || desired.enabled === false) {
+          router.setAdapterConfigured(name, false)
           if (current) {
             await runSerially(name, () => stopAdapter(name))
             stopped.push(name)
           }
         } else if (!current) {
+          router.setAdapterConfigured(name, true)
           const ok = await runSerially(name, () => startAdapter(name, desired))
           if (ok) started.push(name)
         } else {

@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-import { channelsSchema, DEFAULT_GITHUB_EVENT_ALLOWLIST, STICKY_DEFAULT_WINDOW_MS } from './schema'
+import {
+  ADAPTER_IDS,
+  ADAPTER_READ_CAPABILITIES,
+  channelsSchema,
+  DEFAULT_GITHUB_EVENT_ALLOWLIST,
+  type ReadCapability,
+  STICKY_DEFAULT_WINDOW_MS,
+} from './schema'
 
 describe('channelsSchema', () => {
   test('parses an empty channels record', () => {
@@ -114,4 +123,47 @@ describe('channelsSchema', () => {
     expect(parsed.github?.eventAllowlist).toEqual([...DEFAULT_GITHUB_EVENT_ALLOWLIST])
     expect(parsed.github?.eventAllowlist).toContain('pull_request.synchronize')
   })
+})
+
+describe('ADAPTER_READ_CAPABILITIES', () => {
+  test('declares every adapter id', () => {
+    for (const id of ADAPTER_IDS) {
+      expect(ADAPTER_READ_CAPABILITIES[id]).toBeDefined()
+    }
+  })
+
+  // The read-capability table is the fence that keeps a configured-but-broken
+  // adapter reporting `*-adapter-unavailable` only for modes it actually
+  // implements. It's a hand-maintained static table (it must survive a failed
+  // start() that registers nothing), so this test statically re-derives each
+  // adapter's capabilities from the register*() calls in its source and fails
+  // if the table drifts — add/remove a callback and you must update the table.
+  const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
+    discord: 'discord.ts',
+    'discord-bot': 'discord-bot.ts',
+    github: 'github/index.ts',
+    instagram: 'instagram.ts',
+    line: 'line.ts',
+    kakaotalk: 'kakaotalk.ts',
+    slack: 'slack.ts',
+    'slack-bot': 'slack-bot.ts',
+    'telegram-bot': 'telegram-bot.ts',
+    webex: 'webex.ts',
+    'webex-bot': 'webex-bot.ts',
+  }
+  const capabilityCall: Record<ReadCapability, RegExp> = {
+    history: /\.registerHistory\(/,
+    'message-get': /\.registerMessageGet\(/,
+    list: /\.registerList\(/,
+  }
+
+  for (const id of ADAPTER_IDS) {
+    test(`table matches the register*() calls in ${adapterSourcePath[id]}`, () => {
+      const source = readFileSync(join(import.meta.dir, 'adapters', adapterSourcePath[id]), 'utf8')
+      const derived = (Object.keys(capabilityCall) as ReadCapability[]).filter((cap) =>
+        capabilityCall[cap].test(source),
+      )
+      expect([...ADAPTER_READ_CAPABILITIES[id]].sort()).toEqual(derived.sort())
+    })
+  }
 })
