@@ -75,13 +75,26 @@ export function createDiscordOutboundCallback(deps: {
     if (text === '' && attachments.length === 0) return { ok: false, error: 'message has neither text nor attachments' }
     const tag = await deps.formatChannelTag(msg.chat)
     deps.logger.info(`[discord] outbound ${tag} text_len=${text.length} attachments=${attachments.length}`)
+
+    // The native reply reference rides on exactly ONE message so Discord shows a
+    // single reply-arrow: the first text chunk when there is text, otherwise the
+    // first file upload. Every later chunk/file posts bare.
+    const replyTo = msg.replyTo?.externalMessageId
+    const replyOnFirstFile = text === '' ? replyTo : undefined
+    const replyOption = (reference: string | undefined): { reply_to: string } | undefined =>
+      reference !== undefined ? { reply_to: reference } : undefined
     try {
       // Attachments first, then text — Discord's upstream uploadFile takes no
       // content body, so a failed upload must not leave a text-only message
       // already posted (see OutboundMessage.attachments contract).
-      for (const attachment of attachments) await deps.client.uploadFile(msg.chat, attachment.path)
+      for (const [index, attachment] of attachments.entries()) {
+        await deps.client.uploadFile(msg.chat, attachment.path, replyOption(index === 0 ? replyOnFirstFile : undefined))
+      }
       if (text !== '') {
-        for (const chunk of chunkMarkdown(text, 2_000)) await deps.client.sendMessage(msg.chat, chunk)
+        const chunks = chunkMarkdown(text, 2_000)
+        for (const [index, chunk] of chunks.entries()) {
+          await deps.client.sendMessage(msg.chat, chunk, replyOption(index === 0 ? replyTo : undefined))
+        }
       }
       return { ok: true }
     } catch (err) {

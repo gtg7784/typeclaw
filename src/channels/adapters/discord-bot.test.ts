@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { DiscordBotClient, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
 import { DiscordIntent } from 'agent-messenger/discordbot'
@@ -1414,10 +1417,14 @@ describe('discord-bot createOutboundCallback', () => {
 
   const tag = async (_w: string, _c: string) => 'guild=g1 channel=c1'
 
+  function makeOutbound(deps: Omit<Parameters<typeof createOutboundCallback>[0], 'token'> & { token?: string }) {
+    return createOutboundCallback({ token: 'bot-tok', ...deps })
+  }
+
   test('text-only path posts via sendMessage and never calls uploadFile', async () => {
     // given
     const { client, sends, uploads } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     // when
     const result = await cb(makeMsg({ text: 'hello' }))
     // then
@@ -1428,14 +1435,14 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('threaded text-only post forwards thread_id to sendMessage', async () => {
     const { client, sends } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     await cb(makeMsg({ text: 'hello', thread: 't1' }))
     expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: { thread_id: 't1' } }])
   })
 
   test('converts a markdown table into Discord inline-code rows before sending', async () => {
     const { client, sends } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     const table = ['| a | b |', '|---|---|', '| 1 | 2 |'].join('\n')
     await cb(makeMsg({ text: table }))
     expect(sends).toEqual([{ chat: 'c1', content: '**`a  b`**\n`1  2`', options: undefined }])
@@ -1443,21 +1450,21 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('forwards replyTo.externalMessageId as the reply_to send option (native reply)', async () => {
     const { client, sends } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     await cb(makeMsg({ text: 'on it', replyTo: { externalMessageId: 'parent-9' } }))
     expect(sends).toEqual([{ chat: 'c1', content: 'on it', options: { reply_to: 'parent-9' } }])
   })
 
   test('combines thread_id and reply_to when both apply', async () => {
     const { client, sends } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     await cb(makeMsg({ text: 'on it', thread: 't1', replyTo: { externalMessageId: 'parent-9' } }))
     expect(sends).toEqual([{ chat: 'c1', content: 'on it', options: { thread_id: 't1', reply_to: 'parent-9' } }])
   })
 
   test('attachments-only post uploads each file with no follow-up sendMessage', async () => {
     const { client, sends, uploads } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(
       makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }] }),
     )
@@ -1467,6 +1474,86 @@ describe('discord-bot createOutboundCallback', () => {
       { chat: 'c1', path: '/agent/b.pdf' },
     ])
     expect(sends).toHaveLength(0)
+  })
+
+  type MultipartCall = { url: string; init: RequestInit }
+
+  function makeReplyFetch(): { fetchImpl: typeof fetch; calls: MultipartCall[] } {
+    const calls: MultipartCall[] = []
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return new Response(JSON.stringify({ attachments: [{ id: 'f-reply', filename: 'screen.png', size: 3 }] }), {
+        status: 200,
+      })
+    }) as unknown as typeof fetch
+    return { fetchImpl, calls }
+  }
+
+  async function writeTempFile(name: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'discord-reply-'))
+    const path = join(dir, name)
+    await writeFile(path, 'png')
+    return path
+  }
+
+  test('attachment-only reply carries message_reference via raw multipart payload_json (native reply)', async () => {
+    const { client, sends, uploads } = makeFakeClient()
+    const { fetchImpl, calls } = makeReplyFetch()
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag, fetchImpl })
+    const path = await writeTempFile('screen.png')
+
+    const result = await cb(
+      makeMsg({ text: undefined, attachments: [{ path }], replyTo: { externalMessageId: 'parent-77' } }),
+    )
+
+    expect(result.ok).toBe(true)
+    expect(uploads).toHaveLength(0)
+    expect(sends).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url).toBe('https://discord.com/api/v10/channels/c1/messages')
+    const body = calls[0]?.init.body as FormData
+    expect(JSON.parse(body.get('payload_json') as string)).toEqual({
+      message_reference: { message_id: 'parent-77' },
+    })
+    expect(body.get('files[0]')).toBeInstanceOf(Blob)
+  })
+
+  test('only the FIRST file of a multi-attachment reply carries message_reference', async () => {
+    const { client, uploads } = makeFakeClient()
+    const { fetchImpl, calls } = makeReplyFetch()
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag, fetchImpl })
+    const first = await writeTempFile('a.png')
+    const second = await writeTempFile('b.png')
+
+    await cb(
+      makeMsg({
+        text: undefined,
+        attachments: [{ path: first }, { path: second }],
+        replyTo: { externalMessageId: 'parent-88' },
+      }),
+    )
+
+    expect(calls).toHaveLength(1)
+    expect(uploads).toEqual([{ chat: 'c1', path: second }])
+  })
+
+  test('text+attachment reply keeps the reference on the text send, not the file upload', async () => {
+    const { client, sends, uploads } = makeFakeClient()
+    const { fetchImpl, calls } = makeReplyFetch()
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag, fetchImpl })
+
+    await cb(
+      makeMsg({
+        text: 'here you go',
+        attachments: [{ path: '/agent/a.png' }],
+        replyTo: { externalMessageId: 'parent-99' },
+      }),
+    )
+
+    expect(calls).toHaveLength(0)
+    expect(uploads).toEqual([{ chat: 'c1', path: '/agent/a.png' }])
+    expect(sends).toEqual([{ chat: 'c1', content: 'here you go', options: { reply_to: 'parent-99' } }])
   })
 
   test('text+attachments uploads first, then posts text in same channel', async () => {
@@ -1483,7 +1570,7 @@ describe('discord-bot createOutboundCallback', () => {
         return client.uploadFile(...args)
       },
     }
-    const cb = createOutboundCallback({
+    const cb = makeOutbound({
       client: recordingClient,
       logger: silentLogger(),
       formatChannelTag: tag,
@@ -1500,7 +1587,7 @@ describe('discord-bot createOutboundCallback', () => {
     // given
     const { client, sends } = makeFakeClient()
     const warns: string[] = []
-    const cb = createOutboundCallback({
+    const cb = makeOutbound({
       client,
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
       formatChannelTag: tag,
@@ -1514,7 +1601,7 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('upload failure aborts before sendMessage runs', async () => {
     const { client, sends } = makeFakeClient({ uploadFile: 'reject' })
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }] }))
     expect(result.ok).toBe(false)
     expect(result.ok === false ? result.error : '').toContain('uploadFile failed')
@@ -1523,14 +1610,14 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('rejects when message has neither text nor attachments', async () => {
     const { client } = makeFakeClient()
-    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    const cb = makeOutbound({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(makeMsg({ text: undefined, attachments: [] }))
     expect(result.ok).toBe(false)
   })
 
   test('honors resolvePath for sandboxed-path translation before uploading', async () => {
     const { client, uploads } = makeFakeClient()
-    const cb = createOutboundCallback({
+    const cb = makeOutbound({
       client,
       logger: silentLogger(),
       formatChannelTag: tag,

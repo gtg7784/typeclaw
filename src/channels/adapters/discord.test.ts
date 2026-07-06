@@ -187,7 +187,92 @@ describe('createDiscordAdapter', () => {
     })
 
     expect(result).toEqual({ ok: true })
-    expect(sent).toEqual([['300000000000000003', 'hello']])
+    expect(sent).toEqual([['300000000000000003', 'hello', undefined]])
+  })
+
+  test('outbound forwards replyTo as the reply_to option on the first text chunk (native reply)', async () => {
+    const sent: unknown[] = []
+    const r = router()
+    const adapter = createDiscordAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () => fakeClient({ sendMessage: async (...args: unknown[]) => void sent.push(args) }),
+      createListener: () => new FakeListener() as unknown as DiscordListener,
+    })
+
+    await adapter.start()
+    const result = await r.outbound?.({
+      adapter: 'discord',
+      workspace: '200000000000000002',
+      chat: '300000000000000003',
+      text: 'on it',
+      replyTo: { externalMessageId: '900000000000000009' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(sent).toEqual([['300000000000000003', 'on it', { reply_to: '900000000000000009' }]])
+  })
+
+  test('attachment-only reply forwards reply_to on the first file upload (native reply)', async () => {
+    const uploads: unknown[] = []
+    const r = router()
+    const adapter = createDiscordAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () => fakeClient({ uploadFile: async (...args: unknown[]) => void uploads.push(args) }),
+      createListener: () => new FakeListener() as unknown as DiscordListener,
+    })
+
+    await adapter.start()
+    const result = await r.outbound?.({
+      adapter: 'discord',
+      workspace: '200000000000000002',
+      chat: '300000000000000003',
+      attachments: [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }],
+      replyTo: { externalMessageId: '900000000000000009' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(uploads).toEqual([
+      ['300000000000000003', '/tmp/a.png', { reply_to: '900000000000000009' }],
+      ['300000000000000003', '/tmp/b.png', undefined],
+    ])
+  })
+
+  test('text+attachment reply keeps reply_to on the text send, files upload bare', async () => {
+    const uploads: unknown[] = []
+    const sent: unknown[] = []
+    const r = router()
+    const adapter = createDiscordAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () =>
+        fakeClient({
+          uploadFile: async (...args: unknown[]) => void uploads.push(args),
+          sendMessage: async (...args: unknown[]) => void sent.push(args),
+        }),
+      createListener: () => new FakeListener() as unknown as DiscordListener,
+    })
+
+    await adapter.start()
+    const result = await r.outbound?.({
+      adapter: 'discord',
+      workspace: '200000000000000002',
+      chat: '300000000000000003',
+      text: 'here you go',
+      attachments: [{ path: '/tmp/a.png' }],
+      replyTo: { externalMessageId: '900000000000000009' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(uploads).toEqual([['300000000000000003', '/tmp/a.png', undefined]])
+    expect(sent).toEqual([['300000000000000003', 'here you go', { reply_to: '900000000000000009' }]])
   })
 
   test('outbound uploads attachments before posting text', async () => {

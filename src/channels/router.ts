@@ -5756,20 +5756,23 @@ export type ReplyRenderMode = 'native' | 'quote'
 // because native support is not uniform within an adapter — Telegram's
 // `sendMessage` accepts `reply_to_message_id` but `sendDocument` does not, so
 // an attachment-only Telegram reply must quote; the same text-only restriction
-// holds for Discord (`message_reference` rides on the text send, file uploads
-// land bare) and KakaoTalk. Slack's primitive is `thread`, not a per-message
+// holds for KakaoTalk. Slack's primitive is `thread`, not a per-message
 // reply, so it stays quote; GitHub's PR-review reply already rides on `thread`.
 //
 // KakaoTalk is `native` here even though its reply payload can fail to resolve
 // at send time — the adapter degrades to the blockquote fallback itself using
 // `replyTo.source`, so the router still routes it down the native branch.
-const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'discord-bot', 'kakaotalk'])
+const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'kakaotalk'])
 
 // Webex's `parentId` rides on both `sendMessage` and `uploadFile`, so a reply is
 // native for every shape — including attachment-only, which the text-gated set
-// above cannot express. Special-cased before the text gate so the router sets
-// `replyTo` (not a blockquote) even when the reply carries no text.
-const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot'])
+// above cannot express. Both Discord adapters join this set because each carries
+// `message_reference` on BOTH the text send (`sendMessage`) and the attachment
+// send (`payload_json` on the first file upload), so an attachment-only Discord
+// reply is a native reply-arrow, not a bare blockquote. Special-cased before the
+// text gate so the router sets `replyTo` (not a blockquote) even when the reply
+// carries no text.
+const NATIVE_REPLY_EVERY_SHAPE_ADAPTERS = new Set<AdapterId>(['webex', 'webex-bot', 'discord-bot', 'discord'])
 
 export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
   if (NATIVE_REPLY_EVERY_SHAPE_ADAPTERS.has(msg.adapter)) return 'native'
