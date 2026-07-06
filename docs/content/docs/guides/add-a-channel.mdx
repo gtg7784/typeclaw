@@ -218,7 +218,7 @@ LINE logs in as a real user account by QR or email/PIN and stores the resulting 
 
 <Accordion title="KakaoTalk — credentials that renew themselves">
 
-KakaoTalk is the only adapter whose login expires (about every 7 days). TypeClaw renews it for you automatically using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model.
+KakaoTalk is the only adapter TypeClaw re-authenticates for you _automatically_. Its login expires (about every 7 days) and is renewed using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model. Other account-login adapters (LINE, Discord user, Instagram, Webex user) can also expire, but you refresh those yourself with `typeclaw channel reauth <adapter>`.
 
 </Accordion>
 
@@ -229,9 +229,11 @@ KakaoTalk is the only adapter whose login expires (about every 7 days). TypeClaw
 If a token leaks or expires, swap it without re-adding the channel:
 
 ```sh
-typeclaw channel set slack-bot      # most adapters
-typeclaw channel reauth kakaotalk   # KakaoTalk needs an interactive re-login
+typeclaw channel set slack-bot      # token-based adapters — swap the saved token
+typeclaw channel reauth discord     # account-login adapters — replay the interactive login
 ```
+
+`channel set` covers the token-based adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`); `channel reauth` covers the account-login ones (`line`, `instagram`, `kakaotalk`, `webex`, `discord`). See the [channel-adapters capability table](/docs/reference/channel-adapters#cli-verbs) for the full split.
 
 <Accordions>
 

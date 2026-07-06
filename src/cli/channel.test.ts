@@ -7,6 +7,8 @@ import {
   holderSpinnerControl,
   printLinePincode,
   printLineQrUrl,
+  reauthAdapterRejectionMessage,
+  setAdapterRejectionMessage,
   SLACK_MODES,
   WEBEX_MODES,
   type LineAuthSpinnerHolder,
@@ -136,5 +138,67 @@ describe('holderSpinnerControl', () => {
       control.pause()
       control.resume('anything')
     }).not.toThrow()
+  })
+})
+
+describe('setAdapterRejectionMessage', () => {
+  test('redirects reauthable adapters to `channel reauth` instead of dead-ending', () => {
+    // given a user-mode adapter that rotates via full re-auth (the reported Discord bug)
+    // when
+    const message = setAdapterRejectionMessage('discord')
+
+    // then it points at the command that actually works, not a contradictory one
+    expect(message).toBe(
+      'Adapter "discord" does not support `channel set`. Use `typeclaw channel reauth discord` instead.',
+    )
+  })
+
+  test('sends other reauthable adapters (line) to `channel reauth` too', () => {
+    // when
+    const message = setAdapterRejectionMessage('line')
+
+    // then
+    expect(message).toContain('typeclaw channel reauth line')
+  })
+
+  test('gives a remove+add recipe for a known kind that is neither settable nor reauthable', () => {
+    // given slack user-mode has no in-place rotation path
+    // when
+    const message = setAdapterRejectionMessage('slack')
+
+    // then it does not falsely suggest reauth
+    expect(message).toContain('typeclaw channel remove slack && typeclaw channel add slack')
+    expect(message).not.toContain('reauth')
+  })
+
+  test('reports unknown adapters with the settable allow-list', () => {
+    // when
+    const message = setAdapterRejectionMessage('bogus')
+
+    // then
+    expect(message).toContain('Unknown adapter "bogus"')
+  })
+})
+
+describe('reauthAdapterRejectionMessage', () => {
+  test('redirects settable adapters to `channel set` instead of dead-ending', () => {
+    // given discord-bot rotates via a token field, not re-auth (mirror of the reported bug)
+    // when
+    const message = reauthAdapterRejectionMessage('discord-bot')
+
+    // then it points at the command that actually works
+    expect(message).toBe(
+      'Adapter "discord-bot" does not support reauth. Use `typeclaw channel set discord-bot` to rotate its credentials.',
+    )
+  })
+
+  test('lists the supported adapters (now including discord) for a neither-settable-nor-reauthable kind', () => {
+    // given slack user-mode is neither settable nor reauthable
+    // when
+    const message = reauthAdapterRejectionMessage('slack')
+
+    // then discord user-mode is advertised as reauth-capable
+    expect(message).toContain('does not support reauth. Supported:')
+    expect(message).toContain('discord')
   })
 })

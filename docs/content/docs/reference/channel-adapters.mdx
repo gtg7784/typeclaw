@@ -71,9 +71,9 @@ typeclaw channel reauth <adapter>   # replay the interactive login
 | Verb     | Supported adapters                                                | Notes                                                            |
 | -------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
 | `set`    | `slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github` | token-based adapters — swaps the saved token(s)                  |
-| `reauth` | `line`, `instagram`, `kakaotalk`, `webex`                         | account-login adapters — replays the full interactive login flow |
+| `reauth` | `line`, `instagram`, `kakaotalk`, `webex`, `discord`              | account-login adapters — replays the full interactive login flow |
 
-`slack` and `discord` (user-account) have no dedicated `set`/`reauth` command today. To re-authenticate, remove the adapter's `channels.<adapter>` block from **both** `secrets.json` and `typeclaw.json`, then run `channel add` again — `channel add` refuses an adapter that is still configured in `typeclaw.json`.
+`slack` (user-account) has no dedicated `set`/`reauth` command today. To re-authenticate, remove its `channels.slack` block from **both** `secrets.json` and `typeclaw.json`, then run `channel add slack` again — `channel add` refuses an adapter that is still configured in `typeclaw.json`. (`discord` user-account is reauthable: run `channel reauth discord` to replay the QR login in place.)
 
 ## Routing model
 

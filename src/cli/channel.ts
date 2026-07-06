@@ -183,7 +183,11 @@ const setSub = defineCommand({
   },
 })
 
-const REAUTHABLE_ADAPTERS = ['line', 'instagram', 'kakaotalk', 'webex'] as const
+// Adapters that re-authenticate through a full interactive login replay rather
+// than a token-field rotation (`channel set`). Discord (User) belongs here — its
+// unofficial QR session expires and is refreshed by replaying the QR login, the
+// same shape as LINE's QR flow. `discord-bot` stays in SETTABLE_ADAPTERS.
+const REAUTHABLE_ADAPTERS = ['line', 'instagram', 'kakaotalk', 'webex', 'discord'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
 const reauthSub = defineCommand({
@@ -405,9 +409,7 @@ async function resolveReauthableAdapter(
 ): Promise<ReauthableAdapter> {
   if (requested !== undefined) {
     if (!isReauthableAdapter(requested)) {
-      console.error(
-        errorLine(`Adapter "${requested}" does not support reauth. Supported: ${REAUTHABLE_ADAPTERS.join(', ')}.`),
-      )
+      console.error(errorLine(reauthAdapterRejectionMessage(requested)))
       process.exit(1)
     }
     if (!configured.has(requested)) {
@@ -448,6 +450,14 @@ function isReauthableAdapter(value: string): value is ReauthableAdapter {
   return (REAUTHABLE_ADAPTERS as ReadonlyArray<string>).includes(value)
 }
 
+// Returns the string (rather than exiting inline) so the routing stays testable.
+export function reauthAdapterRejectionMessage(adapter: string): string {
+  if (isSettableAdapter(adapter)) {
+    return `Adapter "${adapter}" does not support reauth. Use \`typeclaw channel set ${adapter}\` to rotate its credentials.`
+  }
+  return `Adapter "${adapter}" does not support reauth. Supported: ${REAUTHABLE_ADAPTERS.join(', ')}.`
+}
+
 async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void> {
   switch (adapter) {
     case 'line':
@@ -461,6 +471,9 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
       return
     case 'webex':
       await runWebexReauth(cwd)
+      return
+    case 'discord':
+      await runDiscordReauth(cwd)
       return
   }
 }
@@ -538,6 +551,17 @@ async function runWebexReauth(cwd: string): Promise<void> {
   s.stop('Webex credentials refreshed in secrets.json.')
 
   await maybePromptReauthRefresh(cwd, 'webex')
+}
+
+async function runDiscordReauth(cwd: string): Promise<void> {
+  const result = await runDiscordBootstrap({ agentDir: cwd, onQrUrl: renderDiscordQrToTerminal })
+  if (!result.ok) {
+    console.error(errorLine(`Discord login failed: ${result.reason}`))
+    process.exit(1)
+  }
+  process.stdout.write(`${successLine('Discord credentials refreshed in secrets.json.')}\n`)
+
+  await maybePromptReauthRefresh(cwd, 'discord')
 }
 
 async function readExistingKakaotalkEmail(cwd: string): Promise<string | undefined> {
@@ -771,17 +795,20 @@ function isSettableAdapter(value: string): value is SettableAdapter {
   return (SETTABLE_ADAPTERS as ReadonlyArray<string>).includes(value)
 }
 
+// Returns the string (rather than exiting inline) so the routing stays testable.
+export function setAdapterRejectionMessage(adapter: string): string {
+  if (isReauthableAdapter(adapter)) {
+    return `Adapter "${adapter}" does not support \`channel set\`. Use \`typeclaw channel reauth ${adapter}\` instead.`
+  }
+  if (isChannelKind(adapter)) {
+    return `Adapter "${adapter}" does not support \`channel set\`. Rotate its credentials by removing and re-adding it: \`typeclaw channel remove ${adapter} && typeclaw channel add ${adapter}\`.`
+  }
+  return `Unknown adapter "${adapter}". Expected one of: ${SETTABLE_ADAPTERS.join(', ')}.`
+}
+
 function validateSetAdapterArg(adapter: string, configured: Set<ChannelKind>): SettableAdapter {
   if (!isSettableAdapter(adapter)) {
-    if (isChannelKind(adapter)) {
-      console.error(
-        errorLine(
-          `Adapter "${adapter}" does not support \`channel set\`. Use \`typeclaw channel reauth ${adapter}\` instead.`,
-        ),
-      )
-    } else {
-      console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${SETTABLE_ADAPTERS.join(', ')}.`))
-    }
+    console.error(errorLine(setAdapterRejectionMessage(adapter)))
     process.exit(1)
   }
   if (!configured.has(adapter)) {
