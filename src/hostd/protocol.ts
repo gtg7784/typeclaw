@@ -6,6 +6,7 @@ import type {
   LineChannelBlock,
   McpCredential,
   SlackChannelBlock,
+  TeamsChannelBlock,
   WebexChannelBlock,
 } from '@/secrets/schema'
 
@@ -15,6 +16,7 @@ export type SecretsPatchChannels =
   | { instagram: InstagramChannelBlock }
   | { line: LineChannelBlock }
   | { webex: WebexChannelBlock }
+  | { teams: TeamsChannelBlock }
   | { slack: SlackChannelBlock }
 
 export type SecretsPatchMcp = { server: string; credential: McpCredential }

@@ -13,6 +13,7 @@ import {
   lineChannelBlockSchema,
   mcpCredentialSchema,
   slackChannelBlockSchema,
+  teamsChannelBlockSchema,
   webexChannelBlockSchema,
 } from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
@@ -536,6 +537,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             | { instagram: unknown }
             | { line: unknown }
             | { webex: unknown }
+            | { teams: unknown }
             | { slack: unknown }
           mcp?: never
         }
@@ -572,9 +574,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
               ? { key: 'discord' as const, parsed: discordChannelBlockSchema.safeParse(channelsPatch.discord) }
               : 'webex' in channelsPatch
                 ? { key: 'webex' as const, parsed: webexChannelBlockSchema.safeParse(channelsPatch.webex) }
-                : 'slack' in channelsPatch
-                  ? { key: 'slack' as const, parsed: slackChannelBlockSchema.safeParse(channelsPatch.slack) }
-                  : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
+                : 'teams' in channelsPatch
+                  ? { key: 'teams' as const, parsed: teamsChannelBlockSchema.safeParse(channelsPatch.teams) }
+                  : 'slack' in channelsPatch
+                    ? { key: 'slack' as const, parsed: slackChannelBlockSchema.safeParse(channelsPatch.slack) }
+                    : { key: 'kakaotalk' as const, parsed: kakaoChannelBlockSchema.safeParse(channelsPatch.kakaotalk) }
       if (!patch.parsed.success) {
         return { ok: false, reason: patch.parsed.error.issues.map((issue) => issue.message).join('; ') }
       }
