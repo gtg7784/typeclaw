@@ -20,6 +20,7 @@ function fakeRouter(queueReactionAfterReply: (req: ReactionRequest) => Promise<R
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
     registerSelfIdentity: () => {},
