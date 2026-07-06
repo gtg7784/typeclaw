@@ -16,7 +16,17 @@
 // error messages with typo suggestions; a single big regex would only ever
 // say "didn't match".
 
-export const PLATFORMS = ['slack', 'discord', 'telegram', 'webex', 'instagram', 'line', 'kakao', 'github'] as const
+export const PLATFORMS = [
+  'slack',
+  'discord',
+  'telegram',
+  'webex',
+  'teams',
+  'instagram',
+  'line',
+  'kakao',
+  'github',
+] as const
 export type Platform = (typeof PLATFORMS)[number]
 
 const SUBAGENT_NAME = /^[a-z][a-z0-9-]*$/

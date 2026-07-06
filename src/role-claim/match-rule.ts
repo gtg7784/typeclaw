@@ -27,7 +27,7 @@ export type PartialChannelOrigin = {
 
 const ADAPTER_TO_PLATFORM: Record<
   ChannelKey['adapter'],
-  'slack' | 'discord' | 'telegram' | 'webex' | 'kakao' | 'line' | 'github' | 'instagram'
+  'slack' | 'discord' | 'telegram' | 'webex' | 'teams' | 'kakao' | 'line' | 'github' | 'instagram'
 > = {
   slack: 'slack',
   'slack-bot': 'slack',
@@ -38,6 +38,7 @@ const ADAPTER_TO_PLATFORM: Record<
   'telegram-bot': 'telegram',
   webex: 'webex',
   'webex-bot': 'webex',
+  teams: 'teams',
   line: 'line',
   kakaotalk: 'kakao',
 }
