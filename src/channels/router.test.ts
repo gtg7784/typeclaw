@@ -3388,6 +3388,112 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent[0]!.text).toContain('NO_REPLY_MODE')
   })
 
+  test('still recovers prose ending in an identifier like FOO_NO_REPLY (underscore is not a token boundary)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'which flag?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('The flag is FOO_NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('FOO_NO_REPLY')
+  })
+
+  // Drift mode: models shout the silent-turn token in markdown emphasis
+  // (**NO_REPLY**, `NO_REPLY`, *NO_REPLY*) instead of the bare documented form.
+  for (const loud of ['**NO_REPLY**', '`NO_REPLY`', '*NO_REPLY*', '***NO_REPLY***', '__NO_REPLY__']) {
+    test(`allows loud ${loud} as a silent-turn signal`, async () => {
+      const dir = await tempDir()
+      const logs: string[] = []
+      const sent: Array<{ text: string }> = []
+      const { router, sessions } = makeRouter(dir, { logs })
+      router.registerOutbound('discord-bot', async (msg) => {
+        sent.push({ text: msg.text ?? '' })
+        return { ok: true }
+      })
+
+      await router.route(inbound({ text: 'just FYI' }))
+      sessions[0]!.onPrompt = () => {
+        sessions[0]!.setAssistantText(loud)
+      }
+      await router.__testing!.flushDebounce(KEY)
+
+      expect(sent).toHaveLength(0)
+      expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+      expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    })
+  }
+
+  test('suppresses recovery when assistant ends with loud **NO_REPLY** after prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Nothing to add here. **NO_REPLY**')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply (with_leaked_reasoning)'))).toBe(true)
+  })
+
+  test('suppresses recovery when assistant ends with loud `NO_REPLY` (inline code) after prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Nothing actionable here. `NO_REPLY`')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply (with_leaked_reasoning)'))).toBe(true)
+  })
+
+  test('still recovers prose where an emphasized **NO_REPLY** appears mid-sentence (not at end)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'what does NO_REPLY do?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('The **NO_REPLY** token is how the agent stays quiet — end your turn with it.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('stays quiet')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+  })
+
   test('skip_response: markTurnSkipped + skip-only turn produces no channel send, logs reason, no recovery', async () => {
     const dir = await tempDir()
     const logs: string[] = []
