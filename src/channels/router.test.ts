@@ -6954,6 +6954,53 @@ describe('ChannelRouter typing indicator', () => {
     await draining
   })
 
+  test('a stale-epoch tick is dropped so it cannot reach the adapter after a stop', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    // Model the Slack adapter: a 'tick' would set "is typing...", a 'stop' the
+    // empty-string clear. Recording the resolved status lets us assert the last
+    // value on the wire rather than an internal phase order.
+    const wire: string[] = []
+    router.registerTyping('discord-bot', async (target) => {
+      wire.push(target.phase === 'stop' ? '' : 'is typing...')
+    })
+
+    // given: an engaged turn with a live heartbeat at a known epoch
+    await router.route(inbound({ text: 'hi bot' }))
+    const staleEpoch = router.__testing!.typingEpoch(KEY)!
+    expect(wire).toEqual(['is typing...'])
+
+    // when: the turn ends (stop bumps the epoch and clears) and only THEN a
+    // due-but-not-yet-run interval tick from the old generation fires
+    await router.__testing!.stopTyping(KEY)
+    await router.__testing!.fireTypingTick(KEY, staleEpoch)
+
+    // then: the stale tick was dropped; the last status on the wire is the clear
+    expect(wire).toEqual(['is typing...', ''])
+    expect(wire.at(-1)).toBe('')
+  })
+
+  test('a NO_REPLY turn on a channel thread leaves the typing indicator cleared', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const wire: string[] = []
+    router.registerTyping('discord-bot', async (target) => {
+      wire.push(target.phase === 'stop' ? '' : 'is typing...')
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // given: a mention-engaged turn on a real channel thread that decides to
+    // stay silent — no channel send happens, so the only clear is the turn-end
+    // stop (the flat-DM/after-send clear paths never run)
+    await router.route(inbound({ thread: 'thread-9', text: 'hey bot' }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thread-9' })
+
+    // then: the turn ended with the indicator cleared, not stranded on "is typing..."
+    expect(wire.at(-1)).toBe('')
+    expect(router.__testing!.isTypingActive({ ...KEY, thread: 'thread-9' })).toBe(false)
+  })
+
   test('phase=stop carries the same chat/thread coordinates as ticks', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
