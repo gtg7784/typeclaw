@@ -364,17 +364,19 @@ describe('resolveReplyRenderMode', () => {
   })
 
   test('attachment-only sends degrade to quote on text-gated native adapters (file send has no reply param)', () => {
-    for (const adapter of ['telegram-bot', 'discord-bot', 'kakaotalk'] as const) {
+    for (const adapter of ['telegram-bot', 'kakaotalk'] as const) {
       expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] })).toBe(
         'quote',
       )
     }
   })
 
-  test('Webex stays native for an attachment-only reply (parentId rides on uploadFile)', () => {
-    expect(
-      resolveReplyRenderMode({ adapter: 'webex-bot', workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] }),
-    ).toBe('native')
+  test('Webex and Discord stay native for an attachment-only reply (reply reference rides on the file upload)', () => {
+    for (const adapter of ['webex-bot', 'discord-bot'] as const) {
+      expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] })).toBe(
+        'native',
+      )
+    }
   })
 
   test('Slack and GitHub fall back to quote (no per-message reply primitive)', () => {

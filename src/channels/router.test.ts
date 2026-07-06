@@ -11307,17 +11307,19 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent).toEqual(['sure'])
   })
 
-  test('attachments-only sends still anchor (the bare anchor stands alone as the message body)', async () => {
+  test('Discord attachment-only reply anchors via native replyTo, not a bare blockquote', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
-    const sent: Array<{ text: string | undefined; attachments: unknown }> = []
+    const sent: OutboundMessage[] = []
     const { router } = makeRouter(dir, { nowRef })
     router.registerOutbound('discord-bot', async (msg) => {
-      sent.push({ text: msg.text, attachments: msg.attachments })
+      sent.push(msg)
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'screenshot pls', authorId: 'U_ALICE', authorName: 'Alice' }))
+    await router.route(
+      inbound({ text: 'screenshot pls', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'd-700' }),
+    )
     nowRef.value += 100
     await router.route(
       inbound({
@@ -11337,6 +11339,44 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       chat: 'c1',
       attachments: [{ path: '/agent/screen.png' }],
     })
+    expect(sent[0]?.replyTo?.externalMessageId).toBe('d-700')
+    expect(sent[0]?.text).toBeUndefined()
+  })
+
+  test('Slack attachment-only reply still degrades to a standalone blockquote (no native per-message reply)', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: OutboundMessage[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('slack-bot', async (msg) => {
+      sent.push(msg)
+      return { ok: true }
+    })
+
+    await router.route(
+      inbound({ adapter: 'slack-bot', text: 'screenshot pls', authorId: 'U_ALICE', authorName: 'Alice' }),
+    )
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        adapter: 'slack-bot',
+        isBotMention: false,
+        externalMessageId: 'm-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'also curious',
+      }),
+    )
+    await router.__testing!.flushDebounce(SLACK_KEY)
+    nowRef.value += 60_000
+
+    await router.send({
+      adapter: 'slack-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      attachments: [{ path: '/agent/screen.png' }],
+    })
+    expect(sent[0]?.replyTo).toBeUndefined()
     expect(sent[0]?.text).toBe('> <@U_ALICE>: screenshot pls')
   })
 })
