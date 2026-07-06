@@ -2400,6 +2400,172 @@ describe('disengageReactionEmojiFor', () => {
   })
 })
 
+describe('ChannelRouter silent-ack :eyes: on deliberate silence', () => {
+  const REACTION_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
+
+  // discord-bot is typing-capable, so route() adds no eager engage :eyes: — every
+  // captured reaction is the silent-ack, keeping these assertions unambiguous.
+  const setupSilentTurn = async (
+    dir: string,
+  ): Promise<{
+    router: ReturnType<typeof makeRouter>['router']
+    sessions: ReturnType<typeof makeRouter>['sessions']
+    captured: ReactionRequest[]
+  }> => {
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    return { router, sessions, captured }
+  }
+
+  test('skip_response leaves an :eyes: on the triggering message', async () => {
+    const dir = await tempDir()
+    const { router, sessions, captured } = await setupSilentTurn(dir)
+    sessions[0]!.onPrompt = () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing to add' })
+      sessions[0]!.setAssistantText('Nothing actionable here.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  test('an explicit NO_REPLY leaves an :eyes: on the triggering message', async () => {
+    const dir = await tempDir()
+    const { router, sessions, captured } = await setupSilentTurn(dir)
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  test('(NO_REPLY) with parens leaves an :eyes:', async () => {
+    const dir = await tempDir()
+    const { router, sessions, captured } = await setupSilentTurn(dir)
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('(NO_REPLY)')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  test('a plain-text skip_response(...) leak leaves an :eyes: (deliberate silence)', async () => {
+    const dir = await tempDir()
+    const { router, sessions, captured } = await setupSilentTurn(dir)
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('skip_response({ reason: "not addressed to me" })')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  test('does not react when the silent turn carries no triggering reactionRef', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound())
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('a real reply leaves NO silent-ack :eyes:', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, text: 'here you go' })
+      sessions[0]!.setAssistantText('here you go')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(captured.some((r) => r.emoji === 'eyes')).toBe(false)
+  })
+
+  test('a model malfunction (upstream empty sentinel) leaves NO silent-ack :eyes:', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText("(Empty response: finish_reason 'stop_reason' with no content)")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('on a typing-less adapter, the silent-ack :eyes: is added AFTER the transient engage :eyes: is removed', async () => {
+    // given a typing-less adapter (engage :eyes: IS added on route, then removed
+    // at turn end) whose engage add resolves to a removable instance ref. Both
+    // the engage add and the silent-ack add target the SAME triggering message /
+    // emoji, so the guard is the ORDER: the final event must be the silent-ack
+    // add, never a removal. Pre-fix (fire-and-forget drop) the order raced to
+    // add,add,remove — the trailing remove would strip the ack on toggle adapters.
+    const dir = await tempDir()
+    const engageInstanceRef: ReactionRef = { adapter: 'discord-bot', value: 'engage-instance' }
+    const events: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerReaction('discord-bot', async (req) => {
+      events.push(`add-${req.emoji}`)
+      return { ok: true, reactionRef: engageInstanceRef }
+    })
+    router.registerRemoveReaction('discord-bot', async () => {
+      events.push('remove-eyes')
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => events.length === 3)
+    expect(events).toEqual(['add-eyes', 'remove-eyes', 'add-eyes'])
+  })
+})
+
 describe('ChannelRouter model react only when replying', () => {
   const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
 
@@ -2437,13 +2603,14 @@ describe('ChannelRouter model react only when replying', () => {
 
   test('drops a queued channel_react reaction when the turn stays silent', async () => {
     // given a typing-capable adapter (no eager engage :eyes:) whose model queues
-    // a reaction but sends no reply
+    // a reaction but sends no reply. The queued reaction uses a DISTINCT emoji so
+    // it is separable from the silent-ack :eyes: a NO_REPLY turn now leaves.
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
     router.setTypingCapability('discord-bot', true)
-    let added = 0
-    router.registerReaction('discord-bot', async () => {
-      added++
+    const emojis: string[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      emojis.push(req.emoji)
       return { ok: true }
     })
 
@@ -2455,14 +2622,15 @@ describe('ChannelRouter model react only when replying', () => {
         chat: 'c1',
         thread: null,
         reactionRef: TARGET_REF,
-        emoji: 'eyes',
+        emoji: 'thumbsup',
       })
       sessions[0]!.setAssistantText('NO_REPLY')
     }
     await router.__testing!.flushDebounce(KEY)
 
-    // then nothing is ever sent to the adapter — no reaction on a message it only looked at
-    expect(added).toBe(0)
+    // then the held channel_react reaction is never flushed — no reaction on a
+    // message it merely looked at
+    expect(emojis).not.toContain('thumbsup')
   })
 
   test('refuses to queue a reaction when there is no live session for the target', async () => {

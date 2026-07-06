@@ -179,6 +179,8 @@ export function disengageReactionEmojiFor(adapter: AdapterId): string {
   return DISENGAGE_REACTION_EMOJI_OVERRIDES[adapter] ?? DISENGAGE_REACTION_EMOJI
 }
 
+type SilentAckReason = 'skip_response' | 'no_reply' | 'skip_response_text_leak'
+
 // Wake nudge pushed into a resumed channel session at boot so drain() has a
 // non-empty batch and fires a turn. The substantive instruction the model acts
 // on is the `typeclaw.restart-self` entry already in the reopened JSONL (pi
@@ -782,6 +784,17 @@ type LiveSession = {
   // discarded on silence (skip_response / empty / errored turns) so the bot never
   // leaves a reaction on a message it merely looked at (e.g. cron lookaround).
   pendingTurnReactions: ReactionRequest[]
+  // Armed by `validateChannelTurn` on a DELIBERATE silent turn (skip_response or
+  // an explicit NO_REPLY), stamped with `turnSeq` so a stale flag from a crashed
+  // turn cannot leak into the next one. Read in drain's per-turn finally — AFTER
+  // the transient engage :eyes: is dropped — to leave a PERSISTENT :eyes: on the
+  // triggering message: "I saw this and intentionally chose not to reply." Null
+  // on every non-deliberate outcome (a real reply, a model malfunction, a
+  // plumbing leak, a retry, a synthetic turn). Firing after the engage-drop is
+  // load-bearing: adapters that collapse a same-actor same-emoji reaction into
+  // one toggle would otherwise have the engage-drop remove the only visible
+  // :eyes:. See `reactOnSilentAck`.
+  silentAckTurn: { turnSeq: number; reason: SilentAckReason } | null
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -1977,6 +1990,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnTypingThread: null,
         currentTurnEngageReactions: [],
         pendingTurnReactions: [],
+        silentAckTurn: null,
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -2830,7 +2844,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // also silence, skip_response, an empty turn, or a provider error
           // (observe-after-engage). Leaving it only on the reply path stranded the
           // ack permanently on messages the agent looked at but never answered.
-          dropEngageReactions(live, engageAddPromises)
+          const dropDone = dropEngageReactions(live, engageAddPromises)
+          // A DELIBERATE silent turn (skip_response / NO_REPLY) leaves a
+          // PERSISTENT :eyes: acking "seen, intentionally not replying". On a
+          // typing-less adapter it reuses the same message/emoji/actor as the
+          // transient engage :eyes:, and adapters that collapse that into one
+          // toggle would let a still-in-flight engage removal strip the ack — so
+          // the silent path AWAITS every engage removal reaching the adapter
+          // before adding the persistent one. Only silent turns pay that wait:
+          // normal/reply turns keep the engage drop fire-and-forget (`void`), so
+          // turn-end never blocks on the reaction API off the silent path.
+          if (live.silentAckTurn?.turnSeq === live.turnSeq) await dropDone
+          else void dropDone
+          reactOnSilentAck(live)
           // Held channel_react reactions apply only when the agent posted a
           // genuine reply this turn — NOT an empty-turn fallback or provider-
           // error notice, both of which send via source:'system' and bump
@@ -3438,8 +3464,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return addReactionRef
   }
 
-  const dropEngageReactions = (live: LiveSession, addPromises: Array<Promise<ReactionRef | null>>): void => {
-    for (const addPromise of addPromises) dropOneEngageReaction(live, addPromise)
+  // Returns a promise that settles only once every engage removal has REACHED
+  // the adapter, not merely been scheduled. The silent-ack path awaits this so
+  // its persistent :eyes: is added strictly AFTER the transient one is removed
+  // (see reactOnSilentAck). Fire-and-forget callers just `void` the result.
+  const dropEngageReactions = (live: LiveSession, addPromises: Array<Promise<ReactionRef | null>>): Promise<void> => {
+    return Promise.all(addPromises.map((addPromise) => dropOneEngageReaction(live, addPromise))).then(() => undefined)
   }
 
   // Only the LAST engaging inbound of a coalesced batch should carry the eager
@@ -3451,11 +3481,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const addPromises = live.promptQueue.flatMap((m) => (m.engageReaction !== undefined ? [m.engageReaction] : []))
     if (addPromises.length === 0) return
     for (const item of live.promptQueue) delete item.engageReaction
-    dropEngageReactions(live, addPromises)
+    void dropEngageReactions(live, addPromises)
   }
 
-  const dropOneEngageReaction = (live: LiveSession, addPromise: Promise<ReactionRef | null>): void => {
-    void addPromise
+  const dropOneEngageReaction = (live: LiveSession, addPromise: Promise<ReactionRef | null>): Promise<void> => {
+    return addPromise
       .then((reactionRef) => {
         if (reactionRef === null) return undefined
         return removeReaction({
@@ -4052,6 +4082,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const { reason } = live.skippedTurn
       live.skippedTurn = null
       logger.info(`[channels] ${live.keyId} skipped_by_tool reason=${JSON.stringify(reason)}`)
+      armSilentTurnAck(live, 'skip_response')
       return
     }
     if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
@@ -4371,6 +4402,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
       const leakedReasoning = !isNoReplySignal(assistantText)
       logger.info(`[channels] ${live.keyId} no_reply${leakedReasoning ? ' (with_leaked_reasoning)' : ''}`)
+      armSilentTurnAck(live, 'no_reply')
       return
     }
 
@@ -4400,6 +4432,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.warn(
         `[channels] ${live.keyId}: suppressed plain_text_tool_call_leak (silent) text_len=${assistantText.length}`,
       )
+      armSilentTurnAck(live, 'skip_response_text_leak')
       return
     }
     if (plainTextToolCallKind === 'suppress-warn') {
@@ -5053,6 +5086,38 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       .catch((err) => {
         logger.info(
           `[channels] disengage-react threw adapter=${live.key.adapter} chat=${live.key.chat}: ${describe(err)}`,
+        )
+      })
+  }
+
+  const armSilentTurnAck = (live: LiveSession, reason: SilentAckReason): void => {
+    live.silentAckTurn = { turnSeq: live.turnSeq, reason }
+  }
+
+  const reactOnSilentAck = (live: LiveSession): void => {
+    if (live.silentAckTurn?.turnSeq !== live.turnSeq) return
+    const { reason } = live.silentAckTurn
+    live.silentAckTurn = null
+    const reactionRef = live.currentTurnReactionRef
+    if (reactionRef === null) return
+    void react({
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+      reactionRef,
+      emoji: ENGAGE_REACTION_EMOJI,
+    })
+      .then((result) => {
+        if (!result.ok && result.code !== 'unsupported') {
+          logger.info(
+            `[channels] silent-ack-react failed reason=${reason} adapter=${live.key.adapter} chat=${live.key.chat}: ${result.error}`,
+          )
+        }
+      })
+      .catch((err) => {
+        logger.info(
+          `[channels] silent-ack-react threw reason=${reason} adapter=${live.key.adapter} chat=${live.key.chat}: ${describe(err)}`,
         )
       })
   }
