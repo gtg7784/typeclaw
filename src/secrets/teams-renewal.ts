@@ -91,15 +91,29 @@ export async function renewCurrentAccount(
   }
 
   const refreshFn = ctx.refreshDeviceCodeAccount ?? refreshDeviceCodeAccount
-  const refreshed = await enqueueRefresh(() => runBridgedRefresh(decision.account, refreshFn))
-  if (refreshed === null) {
-    // The SDK swallows the underlying error and only returns a boolean, so a
-    // false here could be a dead refresh token OR a transient AAD/network blip.
-    // The permanent case (no refresh token) is already caught in decideRenewal,
-    // so classify a failure past that gate as transient and retry next tick
-    // rather than permanently disabling the account.
-    return { kind: 'transient_failure', account_id: decision.account.account_id, reason: 'silent_refresh_failed' }
+  const outcome = await enqueueRefresh(() => runBridgedRefresh(decision.account, refreshFn))
+  if (outcome.kind === 'failed') {
+    // The SDK only returns a boolean, but its debug callback first reports the
+    // underlying AAD error. A revoked/expired refresh token (invalid_grant,
+    // interaction_required, the AADSTS7xxxx expiry/revocation family) can never
+    // recover without a human, so surface it as reauth_required rather than
+    // retrying it forever; a network/5xx blip stays transient and retries next
+    // tick.
+    if (isPermanentAadFailure(outcome.detail)) {
+      return {
+        kind: 'reauth_required',
+        account_id: decision.account.account_id,
+        reason: 'refresh_token_rejected',
+        message: `Teams silent refresh was rejected (${outcome.detail ?? 'invalid_grant'}) — run \`typeclaw channel reauth teams\`.`,
+      }
+    }
+    return {
+      kind: 'transient_failure',
+      account_id: decision.account.account_id,
+      reason: outcome.detail ?? 'silent_refresh_failed',
+    }
   }
+  const refreshed = outcome.fields
 
   const store = new SecretsTeamsCredentialStore({ mode: 'host', secretsPath })
   const previousExpiresAt = Date.parse(decision.account.token_expires_at ?? '')
@@ -125,17 +139,21 @@ export async function renewCurrentAccount(
 
 type RefreshedFields = Pick<TeamsAccountRecord, 'access_token' | 'token_expires_at' | 'aad_refresh_token' | 'region'>
 
+type BridgedRefreshResult = { kind: 'ok'; fields: RefreshedFields } | { kind: 'failed'; detail?: string }
+
 // The only public Teams refresh entry point writes through the SDK's own
 // file-backed TeamsCredentialManager, so bridge it: seed a throwaway manager in
 // a temp dir from our stored record, let the SDK exchange the AAD refresh token
 // for a fresh skype token, then read the refreshed account back out and hand
-// only the TypeClaw-owned fields to the caller. Returns null when the SDK could
-// not produce a usable token.
+// only the TypeClaw-owned fields to the caller. On failure the SDK just returns
+// false, but its debug callback reports the underlying AAD error first, so
+// capture that into `detail` for the caller's permanent-vs-transient split.
 async function runBridgedRefresh(
   account: TeamsAccountRecord,
   refreshFn: RefreshDeviceCodeAccountFn,
-): Promise<RefreshedFields | null> {
+): Promise<BridgedRefreshResult> {
   const dir = await mkdtemp(join(tmpdir(), 'typeclaw-teams-refresh-'))
+  let lastDebug: string | undefined
   try {
     const manager = new TeamsCredentialManager(dir)
     await manager.setDeviceCodeAccount({
@@ -153,25 +171,50 @@ async function runBridgedRefresh(
       makeCurrent: true,
     })
 
-    const ok = await refreshFn(account.account_type, manager)
-    if (!ok) return null
+    const ok = await refreshFn(account.account_type, manager, (message) => {
+      lastDebug = message
+    })
+    if (!ok) return { kind: 'failed', ...(lastDebug !== undefined ? { detail: lastDebug } : {}) }
 
     const refreshed = await manager.getCurrentAccount()
     // A true return with a null/tokenless readback is a malformed success — the
-    // caller treats null as a transient failure rather than persisting garbage.
-    if (!refreshed || !refreshed.token) return null
+    // caller treats a failure as transient rather than persisting garbage.
+    if (!refreshed || !refreshed.token) return { kind: 'failed' }
 
     return {
-      access_token: refreshed.token,
-      ...(refreshed.token_expires_at !== undefined ? { token_expires_at: refreshed.token_expires_at } : {}),
-      ...(refreshed.aad_refresh_token !== undefined ? { aad_refresh_token: refreshed.aad_refresh_token } : {}),
-      ...(refreshed.region !== undefined ? { region: refreshed.region } : {}),
+      kind: 'ok',
+      fields: {
+        access_token: refreshed.token,
+        ...(refreshed.token_expires_at !== undefined ? { token_expires_at: refreshed.token_expires_at } : {}),
+        ...(refreshed.aad_refresh_token !== undefined ? { aad_refresh_token: refreshed.aad_refresh_token } : {}),
+        ...(refreshed.region !== undefined ? { region: refreshed.region } : {}),
+      },
     }
-  } catch {
-    return null
+  } catch (err) {
+    return { kind: 'failed', detail: err instanceof Error ? err.message : lastDebug }
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+// AAD returns these for a refresh token that a human must re-mint: an explicit
+// invalid_grant / interaction_required, or the AADSTS token expiry/revocation
+// family (700082 expired, 70008 expired, 50173 changed-password, 700084/50076
+// re-auth). Anything else (network, 5xx, throttling) is transient. Matched
+// case-insensitively as a substring because the detail is a free-form
+// error_description line, not a stable code field.
+function isPermanentAadFailure(detail: string | undefined): boolean {
+  if (detail === undefined) return false
+  const haystack = detail.toLowerCase()
+  return [
+    'invalid_grant',
+    'interaction_required',
+    'aadsts700082',
+    'aadsts70008',
+    'aadsts50173',
+    'aadsts700084',
+    'aadsts50076',
+  ].some((needle) => haystack.includes(needle))
 }
 
 function enqueueRefresh<T>(op: () => Promise<T>): Promise<T> {

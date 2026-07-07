@@ -174,7 +174,7 @@ describe('renewCurrentAccount', () => {
     })
   })
 
-  test('classifies an SDK false (refresh material present) as transient_failure and leaves the token untouched', async () => {
+  test('classifies a bare SDK false (no error detail) as transient_failure and leaves the token untouched', async () => {
     await withAgentDir(async (dir) => {
       await writeSecrets(dir, block())
 
@@ -187,6 +187,42 @@ describe('renewCurrentAccount', () => {
       expect(result).toMatchObject({ kind: 'transient_failure', account_id: 'acc-1' })
       const persisted = await readTeamsBlock(dir)
       expect(persisted.accounts['acc-1']?.access_token).toBe('old-token')
+    })
+  })
+
+  test('classifies a permanent AAD failure (invalid_grant via the debug callback) as reauth_required', async () => {
+    await withAgentDir(async (dir) => {
+      await writeSecrets(dir, block())
+
+      const result = await renewCurrentAccount({
+        agentDir: dir,
+        now: () => NOW,
+        // Mirror the SDK: report the AAD error through the debug callback, then
+        // return false — a revoked refresh token needs a human, not a retry.
+        refreshDeviceCodeAccount: (async (_type, _mgr, debug) => {
+          debug?.('Silent refresh failed: AADSTS700082: The refresh token has expired due to inactivity.')
+          return false
+        }) as RefreshDeviceCodeAccountFn,
+      })
+
+      expect(result).toMatchObject({ kind: 'reauth_required', account_id: 'acc-1', reason: 'refresh_token_rejected' })
+    })
+  })
+
+  test('keeps a transient AAD failure (5xx via the debug callback) as transient_failure', async () => {
+    await withAgentDir(async (dir) => {
+      await writeSecrets(dir, block())
+
+      const result = await renewCurrentAccount({
+        agentDir: dir,
+        now: () => NOW,
+        refreshDeviceCodeAccount: (async (_type, _mgr, debug) => {
+          debug?.('Silent refresh failed: HTTP 503')
+          return false
+        }) as RefreshDeviceCodeAccountFn,
+      })
+
+      expect(result.kind).toBe('transient_failure')
     })
   })
 
