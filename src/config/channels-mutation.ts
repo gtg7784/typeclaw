@@ -191,7 +191,14 @@ function buildDetail(kind: ChannelKind, channelConfig: unknown, secretsBlock: un
     const repos = isObjectRecord(channelConfig) && Array.isArray(channelConfig.repos) ? channelConfig.repos.length : 0
     return { detail: `${repos} repo${repos === 1 ? '' : 's'}` }
   }
-  if (kind === 'line' || kind === 'instagram' || kind === 'kakaotalk' || kind === 'webex' || kind === 'discord') {
+  if (
+    kind === 'line' ||
+    kind === 'instagram' ||
+    kind === 'kakaotalk' ||
+    kind === 'webex' ||
+    kind === 'discord' ||
+    kind === 'teams'
+  ) {
     if (!isObjectRecord(secretsBlock)) return {}
     const accounts = isObjectRecord(secretsBlock.accounts) ? Object.keys(secretsBlock.accounts).length : 0
     const current = typeof secretsBlock.currentAccount === 'string' ? secretsBlock.currentAccount : undefined
