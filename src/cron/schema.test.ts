@@ -258,19 +258,46 @@ describe('parseCronFile timing boundaries (until / at / count)', () => {
     if (!result.ok) throw new Error(result.reason)
   })
 
-  test('rejects "until" in the past for an enabled job', () => {
-    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: PAST })] }, { now: NOW })
+  test('edit mode rejects "until" in the past for an enabled job', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: PAST })] }, { now: NOW, mode: 'edit' })
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/past/)
   })
 
-  test('rejects "until" before the first occurrence', () => {
+  test('load mode tolerates a past "until" so an expired recurring job does not brick cron.json on reload', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: PAST })] }, { now: NOW, mode: 'load' })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs[0]?.until).toBe(PAST)
+  })
+
+  test('load is the default mode (a past "until" still parses)', () => {
+    const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: PAST })] }, { now: NOW })
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('edit mode rejects "until" before the first occurrence', () => {
     const result = parseCronFile(
       { jobs: [job({ schedule: '0 9 1 1 *', until: '2026-06-09T00:00:00Z' })] },
-      { now: NOW },
+      { now: NOW, mode: 'edit' },
     )
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/no occurrence/)
+  })
+
+  test('load mode tolerates "until" before the first occurrence (job is inert, scheduler retires it)', () => {
+    const result = parseCronFile(
+      { jobs: [job({ schedule: '0 9 1 1 *', until: '2026-06-09T00:00:00Z' })] },
+      { now: NOW, mode: 'load' },
+    )
+    if (!result.ok) throw new Error(result.reason)
+  })
+
+  test('edit mode still accepts a disabled past "until" (an intentional tombstone)', () => {
+    const result = parseCronFile(
+      { jobs: [job({ schedule: '0 9 * * *', until: PAST, enabled: false })] },
+      { now: NOW, mode: 'edit' },
+    )
+    if (!result.ok) throw new Error(result.reason)
   })
 
   test('rejects an "at" without an explicit zone (local-time ambiguity)', () => {
@@ -308,6 +335,99 @@ describe('parseCronFile timing boundaries (until / at / count)', () => {
   test('accepts until + count together on one recurring job', () => {
     const result = parseCronFile({ jobs: [job({ schedule: '0 9 * * *', until: FUTURE, count: 5 })] }, { now: NOW })
     if (!result.ok) throw new Error(result.reason)
+  })
+})
+
+describe('parseCronFile boot mode (per-job isolation)', () => {
+  const good = (id: string) => ({
+    id,
+    schedule: '* * * * *',
+    kind: 'prompt' as const,
+    prompt: 'x',
+    scheduledByRole: 'owner',
+  })
+
+  test('skips a job with an invalid cron expression and keeps the valid ones', () => {
+    const result = parseCronFile(
+      {
+        jobs: [
+          good('a'),
+          { id: 'bad', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+          good('b'),
+        ],
+      },
+      { mode: 'boot' },
+    )
+    if (!result.ok) throw new Error('expected boot mode to isolate, not fail the whole file')
+    expect(result.file.jobs.map((j) => j.id)).toEqual(['a', 'b'])
+    expect(result.warnings?.map((w) => w.jobId)).toContain('bad')
+    expect(result.warnings?.[0]?.reason).toMatch(/not-a-cron/)
+  })
+
+  test('skips a job missing scheduledByRole and keeps the valid ones', () => {
+    const result = parseCronFile(
+      { jobs: [good('a'), { id: 'legacy', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }] },
+      { mode: 'boot' },
+    )
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs.map((j) => j.id)).toEqual(['a'])
+    expect(result.warnings?.some((w) => w.jobId === 'legacy' && /scheduledByRole/.test(w.reason))).toBe(true)
+  })
+
+  test('keeps the first occurrence of a duplicate id and warns on the later one', () => {
+    const result = parseCronFile(
+      {
+        jobs: [
+          { id: 'dup', schedule: '* * * * *', kind: 'prompt', prompt: 'first', scheduledByRole: 'owner' },
+          { id: 'dup', schedule: '0 * * * *', kind: 'prompt', prompt: 'second', scheduledByRole: 'owner' },
+        ],
+      },
+      { mode: 'boot' },
+    )
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs).toHaveLength(1)
+    const kept = result.file.jobs[0]
+    if (!kept || kept.kind !== 'prompt') throw new Error('expected a prompt job')
+    expect(kept.prompt).toBe('first')
+    expect(result.warnings?.some((w) => w.jobId === 'dup' && /duplicate/i.test(w.reason))).toBe(true)
+  })
+
+  test('tolerates an expired "until" job without a warning (inert, not invalid)', () => {
+    const NOW = new Date('2026-06-08T00:00:00Z').getTime()
+    const result = parseCronFile(
+      { jobs: [{ ...good('expired'), schedule: '0 9 * * *', until: '2020-01-01T00:00:00Z' }] },
+      { mode: 'boot', now: NOW },
+    )
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs.map((j) => j.id)).toEqual(['expired'])
+    expect(result.warnings ?? []).toHaveLength(0)
+  })
+
+  test('a fully valid file in boot mode produces no warnings', () => {
+    const result = parseCronFile({ jobs: [good('a'), good('b')] }, { mode: 'boot' })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.file.jobs.map((j) => j.id)).toEqual(['a', 'b'])
+    expect(result.warnings ?? []).toHaveLength(0)
+  })
+
+  test('still hard-fails on a top-level schema violation (not a per-job error)', () => {
+    const result = parseCronFile(
+      { jobs: [{ id: 'bad id with spaces', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }] },
+      { mode: 'boot' },
+    )
+    if (result.ok) throw new Error('expected top-level schema failure')
+    expect(result.reason).toMatch(/id/i)
+  })
+
+  test('load mode stays strict: one bad job fails the whole file (unchanged contract)', () => {
+    const result = parseCronFile(
+      {
+        jobs: [good('a'), { id: 'bad', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      },
+      { mode: 'load' },
+    )
+    if (result.ok) throw new Error('load mode must remain strict')
+    expect(result.reason).toMatch(/not-a-cron/)
   })
 })
 
