@@ -680,4 +680,164 @@ describe('createChannelSendTool', () => {
       expect(text).toContain('Send-cap reached')
     })
   })
+
+  describe('channel_send resolve_review_thread required-choice enforcement', () => {
+    test('denies a github PR review-thread text send that omits the resolve choice', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        thread: 'RC_kwABC',
+        text: 'okay I checked, it is addressed.',
+      })
+
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('resolve_review_thread')
+      const rendered = (result.content[0] as { text: string }).text
+      expect(rendered).toContain('channel_send denied')
+      expect(rendered).not.toContain('posted to')
+    })
+
+    test('denies a non-English (Korean) close-out send that omits the resolve choice', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        thread: 'RC_kwABC',
+        text: '확인했고 반영됐어요.',
+      })
+
+      expect(calls).toHaveLength(0)
+      expect((result.details as { error: string }).error).toContain('resolve_review_thread')
+    })
+
+    test('proceeds when the resolve choice is an explicit false (thread kept open)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        thread: 'RC_kwABC',
+        text: 'Still looking into this one.',
+        resolve_review_thread: false,
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('exempts an attachments-only github review-thread send (no text to acknowledge)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        thread: 'RC_kwABC',
+        attachments: [{ path: '/agent/diff.png' }],
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('does not require the choice on a github PR send outside a review thread (no thread)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        text: 'General note on the PR.',
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('does not require the choice on a non-github thread send', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: '1700.0001',
+        text: 'done',
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('an explicit true still drives the resolve-before-post path', async () => {
+      const order: string[] = []
+      const tool = createChannelSendTool({
+        router: {
+          ...fakeRouter(async () => {
+            order.push('send')
+            return { ok: true }
+          }),
+          resolveReviewThread: async (req) => {
+            order.push(`resolve:${req.rootCommentId}`)
+            return { ok: true }
+          },
+        },
+      })
+
+      const result = await runTool(tool, {
+        adapter: 'github',
+        workspace: 'acme/widgets',
+        chat: 'pr:585',
+        thread: 'RC_kwABC',
+        text: 'Verified — fix looks solid.',
+        resolve_review_thread: true,
+      })
+
+      expect(result.details).toEqual({ ok: true })
+      expect(order).toEqual(['resolve:RC_kwABC', 'send'])
+    })
+  })
 })

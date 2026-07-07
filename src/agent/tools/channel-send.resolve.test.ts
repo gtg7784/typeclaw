@@ -238,10 +238,15 @@ describe('channel_send resolve_review_thread', () => {
     expect((result.details as { error: string }).error).toContain('only supported on github')
   })
 
-  test('does not resolve when the flag is unset', async () => {
+  test('denies a thread text send that omits the resolve choice, resolving nothing', async () => {
     let resolved = 0
+    let sent = 0
     const tool = createChannelSendTool({
       router: fakeRouter({
+        onSend: () => {
+          sent++
+          return { ok: true }
+        },
         onResolve: () => {
           resolved++
           return { ok: true }
@@ -259,6 +264,39 @@ describe('channel_send resolve_review_thread', () => {
     })
 
     expect(resolved).toBe(0)
+    expect(sent).toBe(0)
+    expect((result.details as { ok: boolean }).ok).toBe(false)
+    expect((result.details as { error: string }).error).toContain('resolve_review_thread')
+  })
+
+  test('does not resolve when the flag is an explicit false (thread kept open)', async () => {
+    let resolved = 0
+    let sent = 0
+    const tool = createChannelSendTool({
+      router: fakeRouter({
+        onSend: () => {
+          sent++
+          return { ok: true }
+        },
+        onResolve: () => {
+          resolved++
+          return { ok: true }
+        },
+      }),
+      sessionId: SESSION,
+    })
+
+    const result = await run(tool, {
+      adapter: 'github',
+      workspace: 'acme/widgets',
+      chat: 'pr:12',
+      thread: '555',
+      text: 'just a comment, keeping open',
+      resolve_review_thread: false,
+    })
+
+    expect(resolved).toBe(0)
+    expect(sent).toBe(1)
     expect((result.details as { ok: boolean }).ok).toBe(true)
   })
 })

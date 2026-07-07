@@ -116,7 +116,8 @@ export function createChannelSendTool({
             'GitHub review threads ONLY — ignored on every other adapter and on a github send that has no `thread`. ' +
             'Set `true` to close out a review thread you authored once you have confirmed the new commits address your concern: pass the thread\'s root comment id as `thread`, an acknowledgement (e.g. "addressed in <sha> — resolving") as `text`, and this flag. ' +
             'This is the post-push close-out path: a `pull_request.synchronize` recheck lists your unresolved threads, and you call this once per addressed thread. ' +
-            "Safe by default — the runtime resolves BEFORE posting and ONLY if the thread's root comment is yours, refusing (and blocking the send) on a human reviewer's thread. Leave it unset to keep the thread open (not addressed, partial fix, disagreement).",
+            "Safe by default — the runtime resolves BEFORE posting and ONLY if the thread's root comment is yours, refusing (and blocking the send) on a human reviewer's thread. " +
+            'REQUIRED on a github PR review-thread send that has both a `thread` and `text`: pass `false` to post your reply while keeping the thread open (not addressed, partial fix, disagreement) — omitting it there is denied. Outside that scope (no `thread`, no `text`, or a non-github adapter) it may be left unset.',
         }),
       ),
     }),
@@ -159,6 +160,28 @@ export function createChannelSendTool({
         return {
           content: [{ type: 'text' as const, text: `channel_send denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
+        }
+      }
+
+      // Required-choice guard (mirrors channel_reply): a github PR review-thread
+      // send with text must make an explicit resolve_review_thread choice. The
+      // `pull_request.synchronize` recheck routes the post-push close-out HERE
+      // via channel_send, and the model kept acknowledging "addressed" without
+      // the flag, stranding the thread — channel_reply forced the choice but
+      // channel_send did not, so the most-used resolve path was the least
+      // guarded. A send is always terminal, so there is no continue exemption.
+      const missingResolveChoice = missingReviewThreadResolveChoiceError({
+        adapter,
+        chat: params.chat,
+        thread: params.thread ?? null,
+        text: bodyText,
+        resolveReviewThread: params.resolve_review_thread,
+      })
+      if (missingResolveChoice) {
+        logger.warn(formatChannelToolFailure('channel_send', missingResolveChoice))
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${missingResolveChoice}` }],
+          details: { ok: false, error: missingResolveChoice },
         }
       }
 
@@ -286,6 +309,26 @@ export function createChannelSendTool({
       }
     },
   })
+}
+
+function missingReviewThreadResolveChoiceError(input: {
+  adapter: AdapterId
+  chat: string
+  thread: string | null
+  text: string | undefined
+  resolveReviewThread: boolean | undefined
+}): string {
+  const isGithubPrReviewThread = input.adapter === 'github' && /^pr:\d+$/.test(input.chat) && input.thread !== null
+  const hasText = input.text !== undefined && input.text.trim() !== ''
+  if (!isGithubPrReviewThread || !hasText || input.resolveReviewThread !== undefined) {
+    return ''
+  }
+  return (
+    'This is a github PR review-thread send with text, so `resolve_review_thread` is required: ' +
+    'set it to `true` when the concern is fixed and this bot-authored thread should be closed (the runtime ' +
+    'resolves before posting and only on your own thread), or `false` to leave it open. You omitted it; ' +
+    're-call channel_send with an explicit boolean.'
+  )
 }
 
 async function resolveReviewThreadBeforeSend(
