@@ -29,17 +29,18 @@ CLI: `typeclaw channel add slack-bot` (interactive), `typeclaw channel set slack
 
 ## Capabilities
 
-| Feature                  | Supported | Notes                                                                                                                   |
-| ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Outbound messages        | yes       | Slack `markdown` block; ~11,500 char chunk limit                                                                        |
-| Multi-chunk messages     | yes       | Additional chunks thread under the first                                                                                |
-| Reactions (add + remove) | yes       | Requires `reactions:write` scope                                                                                        |
-| Typing indicator         | limited   | Only in Slack AI Assistant threads via `assistant.threads.setStatus`; top-level and non-threaded chats get no indicator |
-| Channel-name resolution  | yes       |                                                                                                                         |
-| Self identity            | yes       |                                                                                                                         |
-| History                  | yes       | Limit 200 messages                                                                                                      |
-| Attachments              | yes       |                                                                                                                         |
-| Membership               | yes       |                                                                                                                         |
+| Feature                  | Supported | Notes                                                                                                                                                                                                   |
+| ------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Outbound messages        | yes       | Slack `markdown` block; ~11,500 char chunk limit                                                                                                                                                        |
+| Multi-chunk messages     | yes       | Additional chunks thread under the first                                                                                                                                                                |
+| Reactions (add + remove) | yes       | Requires `reactions:write` scope                                                                                                                                                                        |
+| Typing indicator         | limited   | Only in Slack AI Assistant threads via `assistant.threads.setStatus`; top-level and non-threaded chats get no indicator                                                                                 |
+| Channel-name resolution  | yes       |                                                                                                                                                                                                         |
+| Self identity            | yes       |                                                                                                                                                                                                         |
+| History                  | yes       | Limit 200 messages                                                                                                                                                                                      |
+| Attachments              | yes       |                                                                                                                                                                                                         |
+| Membership               | yes       |                                                                                                                                                                                                         |
+| Cross-channel reads      | full      | One of only two adapters (with `discord-bot`) that back all three `channel_read` modes (`history`, `message`, `list`) — see [Cross-channel reads](/docs/reference/channel-adapters#cross-channel-reads) |
 
 ## Thread stickiness
 

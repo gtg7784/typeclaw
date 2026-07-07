@@ -12,17 +12,17 @@ Transport: **trouter WebSocket** for realtime inbound (no public URL required), 
 
 This is the **user-account** Microsoft Teams adapter (`teams`). It signs in as your own Teams user, so it hears every chat and team channel the account belongs to — no bot registration exists for Teams in agent-messenger, so this is the only variant.
 
-<Callout type="warn" title="Manual credential setup today">
-  There is no interactive `channel add teams` / `channel reauth teams` flow yet — Teams is configured by hand-populating
-  `secrets.json#channels.teams` with a token extracted from a signed-in Teams session (e.g. via the `agent-teams` CLI).
-  It hears every chat and channel message the account can see, so run it only on a dedicated agent account. Access
-  tokens live only 60–90 minutes and are not auto-refreshed, so a long-running session needs the token replaced by hand
-  when it lapses.
+<Callout type="warn" title="Use a dedicated account">
+  This adapter signs in as a real Microsoft Teams user via device-code (AAD) login. It hears every chat and team-channel
+  message the account can see, so run it only on a dedicated agent account. Access tokens live only 60–90 minutes; the
+  device-code login captures an AAD refresh trio used to mint the realtime `id_token`, but the short-lived access token
+  (skypetoken) itself is still refreshed by hand today — a long-running session needs `typeclaw channel reauth teams`
+  (or a manual token swap) when it lapses.
 </Callout>
 
 ## Auth
 
-Configured by hand today: populate `secrets.json#channels.teams` with a Teams user token (extract one with the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI's device-code login or token extraction, then copy it into the block below). There is no `typeclaw channel add teams` command yet.
+Device-code (AAD) login. `typeclaw channel add teams` prompts for the account type (work/school or personal), then walks you through a Microsoft device-code sign-in and stores the resulting token set in `secrets.json#channels.teams` as one or more account records. To rotate a stale token, replay the login with `typeclaw channel reauth teams`. (You can still populate the block by hand — e.g. from the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI — but the interactive flow is the supported path.)
 
 Unlike bot-token adapters, `secrets.json#channels.teams` is not a flat credential object — it wraps one or more account records:
 
@@ -72,9 +72,9 @@ Each record under `accounts.<accountId>`:
 | `created_at`        | Record creation timestamp                                                 |
 | `updated_at`        | Last-update timestamp                                                     |
 
-The `aad_refresh_token` / `aad_client_id` / `aad_tenant_id` trio is reserved for a future unattended-refresh path; the runtime adapter does not use it yet (see [Token renewal](#token-renewal)). At minimum a record needs `access_token`, `account_type`, `created_at`, and `updated_at`; the rest are optional.
+The `aad_refresh_token` / `aad_client_id` / `aad_tenant_id` trio is captured by the device-code login and consumed at runtime to mint the realtime `id_token` in-container (see [Realtime](#realtime-inbound)); it is not yet used to auto-refresh the short-lived `access_token` (see [Token renewal](#token-renewal)). At minimum a record needs `access_token`, `account_type`, `created_at`, and `updated_at`; the rest are optional.
 
-The `channel set` / `channel add` / `channel reauth` CLI verbs do not support Teams yet — manage the block by editing `secrets.json` directly.
+CLI: `typeclaw channel add teams` (interactive device-code login) and `typeclaw channel reauth teams` (replay the login to rotate a stale token). Teams is **not** part of `channel set` — its credentials are refreshed by replaying the login, not by pasting a token.
 
 ## Capabilities
 
@@ -91,7 +91,13 @@ The `channel set` / `channel add` / `channel reauth` CLI verbs do not support Te
 
 ## Token renewal
 
-Access tokens live 60–90 minutes. The adapter does **not** refresh them automatically today: on start it warns when the token is expired or expiring soon, and a long-running session stops delivering once the token lapses. To recover, extract a fresh token (e.g. with the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI) and replace `access_token` (and `token_expires_at`) in `secrets.json#channels.teams` by hand, then restart the agent.
+Access tokens live 60–90 minutes. The adapter does **not** refresh the access token automatically today: on start it warns when the token is expired or expiring soon, and a long-running session stops delivering once the token lapses. To recover, replay the device-code login:
+
+```sh
+typeclaw channel reauth teams
+```
+
+(Or replace `access_token` (and `token_expires_at`) in `secrets.json#channels.teams` by hand — e.g. from the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI — then restart the agent.)
 
 The record also holds an AAD refresh trio (`aad_refresh_token`, `aad_client_id`, `aad_tenant_id`). The runtime adapter uses it to mint the realtime **id_token** in-container (see [Realtime](#realtime-inbound) below); the short-lived `access_token` (skypetoken) itself is still refreshed manually today.
 
@@ -109,7 +115,7 @@ When the id_token can't be minted (no `aad_refresh_token`, an expired/revoked re
 - **Chats and channels both**: unlike most user adapters, Teams covers both 1:1/group chats and full team channels; channel messages carry `teamId`/`channelId` and parsed @mentions.
 - **Self-echo suppression**: the Teams user SDK has no self-identity boundary — `testAuth` returns the literal id `'ME'`, not a real MRI. Every successful send records a `(chat, normalized-text)` fingerprint, and a matching inbound arriving within a short window is dropped as the echo of our own send rather than routed as a new message.
 - **Realtime id_token is minted, not scraped**: the trouter socket needs an AAD Bearer id_token that the `agent-messenger` SDK would normally scrape from the Teams desktop app or a browser profile — neither of which exists in the container. TypeClaw mints it from the stored `aad_refresh_token` instead, and falls back to REST-only (send/read, no proactive inbound) when it can't. See [Realtime](#realtime-inbound).
-- **Short-lived tokens, manual refresh today**: `access_token` expires in 60–90 minutes; the adapter warns on expiry but does not yet auto-refresh the skypetoken, so a long-running session needs the token replaced by hand in `secrets.json#channels.teams`. (The AAD refresh trio IS consumed for the realtime id_token above.)
+- **Short-lived tokens, manual refresh today**: `access_token` expires in 60–90 minutes; the adapter warns on expiry but does not yet auto-refresh the skypetoken, so a long-running session needs the token rotated with `typeclaw channel reauth teams` (or replaced by hand in `secrets.json#channels.teams`). (The AAD refresh trio IS consumed for the realtime id_token above.)
 - **Work vs personal accounts**: `account_type` distinguishes work/school tenants from personal Microsoft accounts; `region` records which AAD region issued the token.
 
 ## Config
@@ -139,6 +145,7 @@ All fields above are shared across adapters. No adapter-specific extensions exis
 
 ## See also
 
+- [Add a channel](/docs/guides/add-a-channel) — device-code sign-in walkthrough
 - [Channel adapters overview](/docs/reference/channel-adapters)
 - [Permissions model](/docs/concepts/permissions-model)
 - [`typeclaw.json` reference](/docs/reference/typeclaw-json)
