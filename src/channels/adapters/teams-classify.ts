@@ -5,29 +5,30 @@ import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import type { TeamsChatInfo } from './teams'
+import { encodeTeamsChannelKey, encodeTeamsChatKey } from './teams-key'
 
 export type TeamsInboundEvent = TeamsRealtimeMessage
 
-export type InboundDropReason = 'self_author' | 'empty_content' | 'pre_connect' | 'unknown_chat'
+export type InboundDropReason = 'self_author' | 'empty_content' | 'pre_connect' | 'unknown_chat' | 'unknown_channel'
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
   | { kind: 'route'; payload: InboundMessage }
 
-// The realtime event only carries a chatId, so channel-message routing (which
-// needs a teamId + channelId) is out of scope; every routed inbound is a chat
-// message keyed as `chat:<chatId>`. `chat` is the caller's already-validated
-// TeamsChatInfo for that id (undefined ⇒ the adapter could not resolve it even
-// after a refresh, so drop as unknown_chat rather than guess isDm).
-//
-// The agent-messenger listener strips all HTML (including `<at id>` mention
-// tags) before emitting, so structured mention detection is impossible from a
-// realtime event. Engagement is therefore intentionally conservative: DMs
-// engage via the `dm` trigger; group chats engage ONLY when a configured alias
-// appears in the plain text. A group message with no alias hit is marked
-// `mentionsOthers` so the router's solo-human fallback does not make the agent
-// answer chatter it was never addressed in.
-export function classifyInbound(
+// Resolved (teamId, channelId) for a channel realtime event. The SDK only
+// emits `conversationType: 'channel'` once it has mapped the thread to a team,
+// so both ids are guaranteed present by the time the adapter builds this.
+export type TeamsChannelInfo = { teamId: string; channelId: string }
+
+// A message the agent's own account sent is delivered back over the socket.
+// Chat vs channel routing keys differ, but every routed inbound shares the
+// engagement contract below. Chat DMs engage via the `dm` trigger; group chats
+// and channels engage ONLY when the bot is explicitly addressed — by a
+// structured mention whose display name matches, or by the bot's alias in the
+// (mention-stripped) text — and otherwise fail closed via
+// `suppressSticky`/`mentionsOthers` so the agent never barges into a
+// conversation it was not named in.
+export function classifyChatInbound(
   event: TeamsInboundEvent,
   _config: ChannelAdapterConfig,
   self: TeamsUser | null,
@@ -41,37 +42,101 @@ export function classifyInbound(
   if (text === '') return { kind: 'drop', reason: 'empty_content' }
 
   const isDm = chat.type === 'oneOnOne' || chat.type === 'self'
-  const isBotMention = matchesAnyAlias(text, selfAliases)
-  const ts = Date.parse(event.timestamp)
+  const addressed = isAddressedToBot(event, self, selfAliases)
 
   return {
     kind: 'route',
-    payload: {
-      adapter: 'teams',
-      workspace: 'teams',
-      chat: `chat:${event.chatId}`,
-      thread: null,
-      text,
-      externalMessageId: event.id,
-      authorId: event.author.id,
-      authorName: event.author.displayName,
-      authorIsBot: false,
-      isBotMention,
-      // `sendChatMessage` has no reply/thread anchor and the realtime event
-      // exposes no parent id, so a reply can never be attributed.
-      replyToBotMessageId: null,
-      // Group messages carry no recoverable mention metadata. `mentionsOthers`
-      // suppresses the solo-human fallback, and `suppressSticky` stops a prior
-      // alias-triggered turn from keeping the agent engaged on later unaddressed
-      // messages — together they make an un-aliased group message fail closed.
-      // Neither fires in a DM, where the `dm` trigger always engages.
-      suppressSticky: !isDm && !isBotMention,
-      mentionsOthers: !isDm && !isBotMention,
-      replyToOtherMessageId: null,
+    payload: buildPayload({
+      event,
+      chat: encodeTeamsChatKey(event.chatId),
       isDm,
-      ts: Number.isFinite(ts) ? ts : 0,
-    },
+      addressed,
+      text,
+    }),
   }
+}
+
+export function classifyChannelInbound(
+  event: TeamsInboundEvent,
+  _config: ChannelAdapterConfig,
+  self: TeamsUser | null,
+  channel: TeamsChannelInfo,
+  selfAliases: readonly string[] = [],
+): InboundClassification {
+  if (self === null) return { kind: 'drop', reason: 'pre_connect' }
+
+  const text = event.content.trim()
+  if (text === '') return { kind: 'drop', reason: 'empty_content' }
+
+  const addressed = isAddressedToBot(event, self, selfAliases)
+
+  return {
+    kind: 'route',
+    payload: buildPayload({
+      event,
+      chat: encodeTeamsChannelKey(channel.teamId, channel.channelId),
+      isDm: false,
+      addressed,
+      text,
+    }),
+  }
+}
+
+function buildPayload(args: {
+  event: TeamsInboundEvent
+  chat: string
+  isDm: boolean
+  addressed: boolean
+  text: string
+}): InboundMessage {
+  const { event, chat, isDm, addressed, text } = args
+  const ts = Date.parse(event.timestamp)
+  return {
+    adapter: 'teams',
+    workspace: 'teams',
+    chat,
+    thread: null,
+    text,
+    externalMessageId: event.id,
+    authorId: event.author.id,
+    authorName: event.author.displayName,
+    authorIsBot: false,
+    isBotMention: addressed,
+    // Teams sends expose no parent id on the realtime event, so a reply can
+    // never be attributed to a specific prior message.
+    replyToBotMessageId: null,
+    // Non-DM traffic (group chat + channel) fails closed: an unaddressed
+    // message is marked `mentionsOthers` (suppresses the solo-human fallback)
+    // and `suppressSticky` (stops a prior addressed turn from keeping the agent
+    // engaged on later unaddressed messages). Neither fires in a DM.
+    suppressSticky: !isDm && !addressed,
+    mentionsOthers: !isDm && !addressed,
+    replyToOtherMessageId: null,
+    isDm,
+    ts: Number.isFinite(ts) ? ts : 0,
+  }
+}
+
+// The realtime `content` has had its `<at>` mention HTML stripped by the SDK,
+// but the structured `mentions[]` array survives — match the bot by a mention
+// whose display name is the bot's name or a configured alias. `mentions[].mri`
+// is NOT used for self-matching: `testAuth()` returns the placeholder id `'ME'`,
+// so the adapter cannot know its own MRI to compare against. Alias text
+// matching stays as a fallback for when a user types the bot's name without a
+// real @mention (in which case `mentions[]` is empty).
+function isAddressedToBot(event: TeamsInboundEvent, self: TeamsUser, selfAliases: readonly string[]): boolean {
+  const selfNames = [self.displayName, ...selfAliases].map((name) => name.trim().toLocaleLowerCase())
+  // A structured mention names one specific person, so it must match a self
+  // name EXACTLY — substring matching would wrongly treat a mention of
+  // "Build Bot" as addressing a bot named "Bot". The plain-text fallback below
+  // stays a substring match (matchesAnyAlias lowercases only the haystack, so
+  // its needles must be pre-lowercased), because free text has no such
+  // one-name-per-token guarantee.
+  const structuredSelfMention = event.mentions.some((mention) =>
+    selfNames.includes(mention.displayName.trim().toLocaleLowerCase()),
+  )
+  if (structuredSelfMention) return true
+  return matchesAnyAlias(event.content, selfNames)
 }
 
 export function normalizeTeamsText(text: string): string {
