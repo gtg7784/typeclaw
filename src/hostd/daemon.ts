@@ -36,6 +36,7 @@ import type {
 } from './protocol'
 import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
 import type { TailscaleServeEvent } from './tailscale'
+import type { TeamsRenewalCallbacks, TeamsRenewalLogEvent } from './teams-renewal-manager'
 import { UNVERSIONED_SENTINEL } from './version'
 import type { WebexRenewalCallbacks, WebexRenewalLogEvent } from './webex-renewal-manager'
 
@@ -79,6 +80,10 @@ export type DaemonOptions = {
   // ticks hourly because Webex password tokens live ~27h (see
   // webex-renewal-manager.ts). Omit when the agent has no webex channel.
   webexRenewal?: WebexRenewalCallbacks
+  // Teams credential renewal capability. Same lifecycle as webexRenewal but
+  // ticks every 5 minutes because Teams skype tokens live only 60-90 min (see
+  // teams-renewal-manager.ts). Omit when the agent has no teams channel.
+  teamsRenewal?: TeamsRenewalCallbacks
   // Populated once the daemon is booted so direct callers of the restart
   // (the renewal callbacks in cli/hostd.ts) get the in-process registration
   // path instead of the socket self-RPC. Omit in tests that don't exercise it.
@@ -126,6 +131,7 @@ export type DaemonLogEvent =
   | { kind: 'tailscale-serve-event'; event: TailscaleServeEvent }
   | KakaoRenewalLogEvent
   | WebexRenewalLogEvent
+  | TeamsRenewalLogEvent
 
 export type Daemon = {
   registered: () => string[]
@@ -397,6 +403,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         await withCleanupTimeout(opts.portbroker.stop(containerName, 'fatal-auth'), cleanupStepTimeoutMs)
       if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(containerName), cleanupStepTimeoutMs)
       if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(containerName), cleanupStepTimeoutMs)
+      if (opts.teamsRenewal) await withCleanupTimeout(opts.teamsRenewal.stop(containerName), cleanupStepTimeoutMs)
       await removeRegistrationFile(containerName)
       log({ kind: 'registration-skipped', containerName, reason: `fatal broker auth: ${reason}` })
     })
@@ -435,6 +442,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (opts.webexRenewal) {
       opts.webexRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
     }
+    if (opts.teamsRenewal) {
+      opts.teamsRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
+    }
   }
 
   const registerContainer = async (req: RegisterPayload): Promise<RpcResponse> => {
@@ -466,6 +476,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         await withCleanupTimeout(opts.portbroker.stop(req.containerName, 'deregistered'), cleanupStepTimeoutMs)
       if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(req.containerName), cleanupStepTimeoutMs)
       if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(req.containerName), cleanupStepTimeoutMs)
+      if (opts.teamsRenewal) await withCleanupTimeout(opts.teamsRenewal.stop(req.containerName), cleanupStepTimeoutMs)
       await removeRegistrationFile(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
@@ -819,6 +830,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         if (opts.portbroker) await withCleanupTimeout(opts.portbroker.stop(name, 'deregistered'), cleanupStepTimeoutMs)
         if (opts.kakaoRenewal) await withCleanupTimeout(opts.kakaoRenewal.stop(name), cleanupStepTimeoutMs)
         if (opts.webexRenewal) await withCleanupTimeout(opts.webexRenewal.stop(name), cleanupStepTimeoutMs)
+        if (opts.teamsRenewal) await withCleanupTimeout(opts.teamsRenewal.stop(name), cleanupStepTimeoutMs)
         await removeRegistrationFile(name)
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
@@ -861,6 +873,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (opts.webexRenewal) {
         const names = Array.from(cwds.keys())
         await withCleanupTimeout(Promise.allSettled(names.map((n) => opts.webexRenewal!.stop(n))), cleanupStepTimeoutMs)
+      }
+      if (opts.teamsRenewal) {
+        const names = Array.from(cwds.keys())
+        await withCleanupTimeout(Promise.allSettled(names.map((n) => opts.teamsRenewal!.stop(n))), cleanupStepTimeoutMs)
       }
       cwds.clear()
       restartTokens.clear()
