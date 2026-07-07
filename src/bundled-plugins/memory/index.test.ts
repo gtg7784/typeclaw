@@ -199,6 +199,14 @@ describe('memory plugin shape', () => {
       expect((parsed.data as { idleMs: number }).idleMs).toBe(60_000)
     }
 
+    // The idle-spawn gate defaults to a channel-native threshold: TypeClaw is
+    // channel-native, so the common session is a busy group chat where a
+    // 3-line bar barely dampened empty memory-logger spawns.
+    const gate = memoryPlugin.configSchema!.safeParse({})
+    if (gate.success) {
+      expect((gate.data as { minIdleDeltaLines: number }).minIdleDeltaLines).toBe(20)
+    }
+
     const { exports: noDream } = await bootMemoryPlugin(agentDir, {})
     expect(noDream.cronJobs?.dreaming?.schedule).toBe('*/30 * * * *')
 
@@ -711,6 +719,32 @@ describe('session.idle min-delta gate', () => {
     expect(spawned).toHaveLength(1)
   })
 
+  test('session.end sweeps a below-idle-threshold delta (catch-all keeps the raised gate loss-free)', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\nb\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 10_000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 20,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: an idle tick whose delta (2 lines) is far below the raised threshold
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(50)
+    expect(spawned).toHaveLength(0)
+
+    // when: the session closes before the idle timer would ever fire
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+
+    // then: session.end still spawns — the below-threshold span is not lost
+    await waitFor(() => spawned.length >= 1, 'session.end sweeps the idle-skipped span')
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]!.name).toBe('memory-logger')
+  })
+
   test('buffer-trip path is independent of minIdleDeltaLines', async () => {
     const transcript = join(agentDir, 'transcript.jsonl')
     await writeFile(transcript, 'a\n')
@@ -810,6 +844,39 @@ describe('session.end byte-equality skip', () => {
     await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
     // then: spawn fires (baseline === undefined means "always fire")
     await waitFor(() => spawned.length >= 1, 'session-end spawn fires with no baseline')
+    expect(spawned).toHaveLength(1)
+  })
+
+  test('still spawns on session.end when the byte baseline was only seeded by the buffer ceiling, not a real run', async () => {
+    // The buffer-ceiling path seeds bytesAtLastRun on the FIRST idle WITHOUT
+    // running the logger. session.end must not treat that seed as "already
+    // drained" — otherwise the seeded prefix (never read by any run) is lost.
+    // This is reachable in the default config: a below-threshold idle skips, so
+    // no real run ever overwrites the seed before the session closes.
+    const transcript = join(agentDir, 'transcript.jsonl')
+    // Two short lines: below the (raised) idle line-delta gate, so idle skips.
+    await writeFile(transcript, `${'a'.repeat(2500)}\n${'b'.repeat(2500)}\n`)
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 20,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: first idle seeds the buffer baseline (no spawn, growth under bufferBytes)
+    await exports.hooks!['session.idle']!(event, ctx)
+    // and: the debounce fires but the idle gate skips (delta 2 lines < 20)
+    await tickMs(1100)
+    await tickMs(50)
+    expect(spawned).toHaveLength(0)
+
+    // when: the session closes with the seeded-but-never-drained prefix still unread
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+
+    // then: session.end MUST spawn — the seed is not a real drained watermark
+    await waitFor(() => spawned.length >= 1, 'session-end spawn after buffer-seeded-only baseline')
     expect(spawned).toHaveLength(1)
   })
 })
