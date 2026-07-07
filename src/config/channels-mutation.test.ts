@@ -94,6 +94,29 @@ describe('channels mutation', () => {
       expect(list).toHaveLength(1)
       expect(list[0]?.detail).toBe('1 repo')
     })
+
+    test('includes an account-count detail for teams', async () => {
+      await writeConfig({ channels: { teams: {} } })
+      await writeSecrets({
+        teams: {
+          currentAccount: 'me',
+          accounts: {
+            me: {
+              account_id: 'me',
+              access_token: 't',
+              account_type: 'work',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+            },
+          },
+        },
+      })
+
+      const list = listChannels(cwd)
+
+      expect(list).toHaveLength(1)
+      expect(list[0]?.detail).toBe('1 account (active: me)')
+    })
   })
 
   describe('removeChannel', () => {

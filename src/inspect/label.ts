@@ -8,6 +8,7 @@ const ADAPTER_DISPLAY: Record<string, string> = {
   'telegram-bot': 'Telegram',
   webex: 'Webex',
   'webex-bot': 'Webex',
+  teams: 'Teams',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
 }
