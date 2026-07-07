@@ -21,14 +21,17 @@ afterEach(async () => {
 
 function recordingScheduler(): Scheduler & { replacements: CronJob[][] } {
   const replacements: CronJob[][] = []
+  let live: CronJob[] = []
   return {
     replacements,
     start: () => {},
     stop: () => {},
     replaceJobs: (jobs) => {
       replacements.push([...jobs])
+      live = [...jobs]
       return { added: jobs, removed: [], updated: [], unchanged: [] } as JobDiff
     },
+    currentJobs: () => live,
   }
 }
 
@@ -39,6 +42,7 @@ function failingScheduler(error: Error): Scheduler {
     replaceJobs: () => {
       throw error
     },
+    currentJobs: () => [],
   }
 }
 
@@ -112,21 +116,26 @@ describe('createCronReloadable', () => {
     expect(result.reason).toMatch(/id/i)
   })
 
-  test('does NOT touch the scheduler when cron expression is invalid', async () => {
+  test('isolates a job with an invalid cron expression and applies the rest (per-job survivability)', async () => {
     const scheduler = recordingScheduler()
     await writeFile(
       join(agentDir, 'cron.json'),
-      JSON.stringify({ jobs: [{ id: 'j', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x' }] }),
+      JSON.stringify({
+        jobs: [
+          { id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+          { id: 'bad', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+        ],
+      }),
     )
 
     const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
-    const result = await asFailure(reloadable.reload())
+    await asSuccess(reloadable.reload())
 
-    expect(scheduler.replacements).toEqual([])
-    expect(result.reason).toMatch(/not-a-cron/)
+    expect(scheduler.replacements).toHaveLength(1)
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['good'])
   })
 
-  test('does NOT touch the scheduler when ids are not unique', async () => {
+  test('isolates a duplicate id, keeps the first occurrence, and applies the rest', async () => {
     const scheduler = recordingScheduler()
     await writeFile(
       join(agentDir, 'cron.json'),
@@ -139,10 +148,114 @@ describe('createCronReloadable', () => {
     )
 
     const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
-    const result = await asFailure(reloadable.reload())
+    await asSuccess(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(1)
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['dup'])
+  })
+
+  test('still fails closed on file-level errors (invalid JSON already covered; top-level schema)', async () => {
+    const scheduler = recordingScheduler()
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'ok', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }, 42],
+      }),
+    )
+
+    const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
+    await asFailure(reloadable.reload())
 
     expect(scheduler.replacements).toEqual([])
-    expect(result.reason).toMatch(/duplicate/i)
+  })
+
+  test('preserves the live schedule when every user job is now invalid (no accidental wipe)', async () => {
+    const scheduler = recordingScheduler()
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+    const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
+    await asSuccess(reloadable.reload())
+    expect(scheduler.replacements).toHaveLength(1)
+
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'broken', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+    const result = await asFailure(reloadable.reload())
+
+    expect(result.reason).toMatch(/not-a-cron/)
+    expect(scheduler.replacements).toHaveLength(1)
+  })
+
+  test('a valid empty file is an intentional deletion and applies zero jobs (not a wipe-guard)', async () => {
+    const scheduler = recordingScheduler()
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+    const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
+    await asSuccess(reloadable.reload())
+
+    await writeFile(join(agentDir, 'cron.json'), JSON.stringify({ jobs: [] }))
+    await asSuccess(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(2)
+    expect(scheduler.replacements[1]).toEqual([])
+  })
+
+  test('all-invalid user jobs still apply when nothing was running before (no schedule to preserve)', async () => {
+    const scheduler = recordingScheduler()
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'broken', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+
+    const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
+    await asSuccess(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(1)
+    expect(scheduler.replacements[0]).toEqual([])
+  })
+
+  test('the wipe-guard still applies plugin jobs are unaffected: internal jobs survive a preserved reload', async () => {
+    const scheduler = recordingScheduler()
+    const internal: CronJob = {
+      id: '__internal_test_job',
+      schedule: '0 4 * * *',
+      enabled: true,
+      kind: 'prompt',
+      prompt: '(internal)',
+      subagent: 'dreaming',
+      payload: { agentDir: '/x' },
+    }
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+    const reloadable = createCronReloadable({ cwd: agentDir, scheduler, internalJobs: () => [internal] })
+    await asSuccess(reloadable.reload())
+
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'broken', schedule: 'not-a-cron', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
+    )
+    await asFailure(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(1)
   })
 
   test('returns an ok=false result when scheduler.replaceJobs throws (belt-and-suspenders)', async () => {
@@ -219,6 +332,7 @@ describe('createCronReloadable', () => {
       start: () => {},
       stop: () => {},
       replaceJobs: () => diff,
+      currentJobs: () => [],
     }
     diff = {
       added: [job('a')],
@@ -246,6 +360,7 @@ describe('createCronReloadable', () => {
         updated: [],
         unchanged: [],
       }),
+      currentJobs: () => [],
     }
     await writeFile(join(agentDir, 'cron.json'), JSON.stringify({ jobs: [] }))
 

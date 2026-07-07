@@ -52,6 +52,7 @@ import {
   createScheduler,
   type LoadCronResult,
   loadCron as loadCronDefault,
+  type ParseCronMode,
   type Scheduler,
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
@@ -91,7 +92,10 @@ type BunServer = ReturnType<Server['start']>
 
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<unknown> }
 
-export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
+export type LoadCronFn = (
+  agentDir: string,
+  options?: { subagents?: SubagentRegistry; mode?: ParseCronMode },
+) => Promise<LoadCronResult>
 export type SchedulerFactory = (options: {
   cwd: string
   file: CronFile
@@ -1133,7 +1137,10 @@ function reloadRolesFromDisk(cwd: string): ReturnType<typeof getConfig>['roles']
   return getConfig().roles
 }
 
-async function startScheduler({
+// Exported for the resilience regression test in `index.test.ts` (survives a
+// file-level cron.json failure by still scheduling plugin jobs). Not re-exported
+// from the package entry point, so this stays module-internal in practice.
+export async function startScheduler({
   cwd,
   loadCron,
   createSchedulerFor,
@@ -1155,17 +1162,27 @@ async function startScheduler({
   let result: LoadCronResult
   const subagents = getSubagents?.()
   try {
-    result = await loadCron(cwd, subagents !== undefined ? { subagents } : {})
+    result = await loadCron(cwd, { mode: 'boot', ...(subagents !== undefined ? { subagents } : {}) })
   } catch (err) {
-    console.error(`[cron] load failed: ${err instanceof Error ? err.message : err}`)
-    return null
+    result = { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
+
+  // A file-level cron.json failure (malformed JSON or top-level schema
+  // violation) must not take the whole scheduler down: plugin-registered jobs
+  // (e.g. memory dreaming) live outside cron.json and have to keep running.
+  // Boot with an empty user file so the factory still merges internal jobs;
+  // give up only when there is nothing to schedule at all.
   if (!result.ok) {
     console.error(`[cron] failed to load cron.json: ${result.reason}`)
-    return null
+    if (!hasInternalJobs) return null
+  } else {
+    for (const warning of result.warnings ?? []) {
+      console.error(`[cron] skipped invalid job at boot: ${warning.reason}`)
+    }
   }
-  const file: CronFile = result.file ?? { jobs: [] }
-  if (!result.file && !hasInternalJobs) return null
+
+  const file: CronFile = result.ok ? (result.file ?? { jobs: [] }) : { jobs: [] }
+  if (result.ok && !result.file && !hasInternalJobs) return null
 
   const onFire = (job: CronJob) => {
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })

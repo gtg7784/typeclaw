@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { AgentSession } from '@/agent'
-import { createCronReloadable, createScheduler, loadCron, type Scheduler } from '@/cron'
+import { createCronReloadable, createScheduler, type CronJob, loadCron, type Scheduler } from '@/cron'
 import { ReloadRegistry } from '@/reload'
 import { createServer } from '@/server'
 
@@ -46,13 +46,16 @@ async function startTestAgent(scheduler: Scheduler): Promise<{ url: string }> {
 describe('reload end-to-end via ws', () => {
   test('edit cron.json + requestReload -> scheduler.replaceJobs receives the new jobs', async () => {
     const replacements: Array<Array<{ id: string }>> = []
+    let liveJobs: CronJob[] = []
     const scheduler: Scheduler = {
       start: () => {},
       stop: () => {},
       replaceJobs: (jobs) => {
         replacements.push(jobs.map((j) => ({ id: j.id })))
+        liveJobs = [...jobs]
         return { added: jobs, removed: [], updated: [], unchanged: [] }
       },
+      currentJobs: () => liveJobs,
     }
     await writeFile(join(agentDir, 'cron.json'), JSON.stringify({ jobs: [] }))
     const { url } = await startTestAgent(scheduler)
@@ -121,14 +124,17 @@ describe('reload end-to-end via ws', () => {
   })
 
   test('removing cron.json reloads to zero jobs', async () => {
+    let liveJobs: CronJob[] = []
     const scheduler: Scheduler & { current: { id: string }[] } = {
       current: [],
       start: () => {},
       stop: () => {},
       replaceJobs: function (jobs) {
         this.current = jobs.map((j) => ({ id: j.id }))
+        liveJobs = [...jobs]
         return { added: jobs, removed: [], updated: [], unchanged: [] }
       },
+      currentJobs: () => liveJobs,
     } as Scheduler & { current: { id: string }[] }
 
     await writeFile(
@@ -149,13 +155,16 @@ describe('reload end-to-end via ws', () => {
 
   test('multiple reloads in succession each reflect the latest cron.json', async () => {
     const seen: string[][] = []
+    let liveJobs: CronJob[] = []
     const scheduler: Scheduler = {
       start: () => {},
       stop: () => {},
       replaceJobs: (jobs) => {
         seen.push(jobs.map((j) => j.id))
+        liveJobs = [...jobs]
         return { added: jobs, removed: [], updated: [], unchanged: [] }
       },
+      currentJobs: () => liveJobs,
     }
     await writeFile(join(agentDir, 'cron.json'), JSON.stringify({ jobs: [] }))
     const { url } = await startTestAgent(scheduler)
