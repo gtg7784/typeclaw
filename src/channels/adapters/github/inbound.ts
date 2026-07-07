@@ -10,7 +10,7 @@ import type { DeliveryDedup } from './dedup'
 import { isGithubEventAllowed } from './event-allowlist'
 import { encodeGithubReactionRef, type GithubReactionTarget } from './reactions'
 import { fetchSelfReviewBlocking } from './review-state'
-import { listUnresolvedSelfReviewThreads } from './review-thread-resolver'
+import { listUnresolvedSelfReviewThreads, type UnresolvedSelfReviewThread } from './review-thread-resolver'
 
 export type GithubInboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 
@@ -280,15 +280,14 @@ function scheduleReviewFollowup(input: {
         else options.logger.warn(`[github] review-state recheck failed for ${target}: ${blocking.error}`)
       }
 
-      const rootCommentIds = threads.threads.map((t) => t.rootCommentId)
-      if (rootCommentIds.length === 0 && !selfBlocking) return
+      if (threads.threads.length === 0 && !selfBlocking) return
       options.route(
         withApprovalPolicy(
           buildReviewFollowupInbound({
             repository,
             pullNumber,
             headSha,
-            rootCommentIds,
+            threads: threads.threads,
             selfBlocking,
             title: readString(pr, 'title'),
           }),
@@ -307,15 +306,15 @@ function buildReviewFollowupInbound(input: {
   repository: { owner: string; name: string }
   pullNumber: number
   headSha: string
-  rootCommentIds: readonly number[]
+  threads: readonly UnresolvedSelfReviewThread[]
   selfBlocking: boolean
   title: string | null
 }): InboundMessage {
-  const { repository, pullNumber, headSha, rootCommentIds, selfBlocking, title } = input
+  const { repository, pullNumber, headSha, threads, selfBlocking, title } = input
   const titleSegment = title !== null && title.trim() !== '' ? `: "${title}"` : ''
   const text =
     `PR #${pullNumber}${titleSegment} received new commits (now at ${headSha.slice(0, 7)}). ` +
-    followupInstruction(rootCommentIds, selfBlocking)
+    followupInstruction(threads, selfBlocking)
 
   return {
     adapter: 'github',
@@ -336,14 +335,15 @@ function buildReviewFollowupInbound(input: {
   }
 }
 
-function followupInstruction(rootCommentIds: readonly number[], selfBlocking: boolean): string {
+function followupInstruction(threads: readonly UnresolvedSelfReviewThread[], selfBlocking: boolean): string {
   const threadPart =
-    rootCommentIds.length > 0
-      ? `You have ${rootCommentIds.length} unresolved review thread(s) you authored on this PR ` +
-        `(root comment id(s): ${rootCommentIds.join(', ')}). For each, check whether the new commits ` +
-        `addressed your concern. If addressed, reply on that thread via channel_send with a short ` +
-        `acknowledgement and resolve_review_thread: true (the thread id is the root comment id); ` +
-        `if not, leave it open. `
+    threads.length > 0
+      ? `You have ${threads.length} unresolved review thread(s) you authored on this PR. ` +
+        `For each, check whether the new commits addressed your concern, then act on THAT thread ` +
+        `by passing its root comment id as \`thread\` to channel_send: if addressed, reply with a short ` +
+        `acknowledgement and resolve_review_thread: true; if not, reply with resolve_review_thread: false ` +
+        `(or leave it). Use the id — not the file/line — as \`thread\`; the file/line is only to tell the ` +
+        `threads apart:\n${threads.map(renderThreadLine).join('\n')}\n`
       : ''
   // A held CHANGES_REQUESTED never clears itself: GitHub keeps the block until a
   // fresh APPROVE/COMMENT/dismiss, so a blocking follow-up must always end with a
@@ -358,6 +358,12 @@ function followupInstruction(rootCommentIds: readonly number[], selfBlocking: bo
     : ''
   const tail = selfBlocking ? '' : 'If none are addressed, end your turn without replying.'
   return `${threadPart}${blockingPart}${tail}`
+}
+
+function renderThreadLine(thread: UnresolvedSelfReviewThread): string {
+  const where = thread.path !== null ? ` on ${thread.path}${thread.line !== null ? `:${thread.line}` : ''}` : ''
+  const concern = thread.snippet !== null ? ` — "${thread.snippet}"` : ''
+  return `- thread ${thread.rootCommentId}${where}${concern}`
 }
 
 export async function verifySignature(body: string, secret: string, sigHeader: string): Promise<boolean> {

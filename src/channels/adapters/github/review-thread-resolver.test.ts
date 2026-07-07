@@ -10,6 +10,9 @@ type ThreadFixture = {
   rootCommentId: number
   rootAuthorLogin: string
   rootAuthorType?: 'Bot' | 'User'
+  path?: string | null
+  line?: number | null
+  rootBody?: string
 }
 
 type Page = { threads: ThreadFixture[]; hasNextPage: boolean; endCursor: string | null }
@@ -23,10 +26,13 @@ const threadsPayload = (page: Page) => ({
           nodes: page.threads.map((t) => ({
             id: t.id,
             isResolved: t.isResolved,
+            path: t.path ?? null,
+            line: t.line ?? null,
             comments: {
               nodes: [
                 {
                   databaseId: t.rootCommentId,
+                  body: t.rootBody,
                   author: { __typename: t.rootAuthorType ?? 'Bot', login: t.rootAuthorLogin },
                 },
               ],
@@ -403,7 +409,47 @@ describe('listUnresolvedSelfReviewThreads', () => {
 
     const result = await list(fetchImpl)
 
-    expect(result).toEqual({ ok: true, threads: [{ threadId: 'T_OPEN_BOT', rootCommentId: 100 }] })
+    expect(result).toEqual({
+      ok: true,
+      threads: [{ threadId: 'T_OPEN_BOT', rootCommentId: 100, path: null, line: null, snippet: null }],
+    })
+  })
+
+  it('carries per-thread context (path, line, first-line snippet) when GraphQL reports it', async () => {
+    const fetchImpl = fakeGraphql({
+      pages: [
+        {
+          threads: [
+            {
+              id: 'T_CTX',
+              isResolved: false,
+              rootCommentId: 200,
+              rootAuthorLogin: 'bot[bot]',
+              path: 'src/api/auth.ts',
+              line: 42,
+              rootBody: 'This token never expires — set a TTL.\nMore detail on the next line.',
+            },
+          ],
+          hasNextPage: false,
+          endCursor: null,
+        },
+      ],
+    })
+
+    const result = await list(fetchImpl)
+
+    expect(result).toEqual({
+      ok: true,
+      threads: [
+        {
+          threadId: 'T_CTX',
+          rootCommentId: 200,
+          path: 'src/api/auth.ts',
+          line: 42,
+          snippet: 'This token never expires — set a TTL.',
+        },
+      ],
+    })
   })
 
   it('paginates across pages and aggregates self threads', async () => {
@@ -427,8 +473,8 @@ describe('listUnresolvedSelfReviewThreads', () => {
     expect(result).toEqual({
       ok: true,
       threads: [
-        { threadId: 'T1', rootCommentId: 1 },
-        { threadId: 'T2', rootCommentId: 2 },
+        { threadId: 'T1', rootCommentId: 1, path: null, line: null, snippet: null },
+        { threadId: 'T2', rootCommentId: 2, path: null, line: null, snippet: null },
       ],
     })
   })
@@ -448,7 +494,10 @@ describe('listUnresolvedSelfReviewThreads', () => {
 
     const result = await list(fetchImpl, 'typeey[bot]')
 
-    expect(result).toEqual({ ok: true, threads: [{ threadId: 'T_APP', rootCommentId: 9 }] })
+    expect(result).toEqual({
+      ok: true,
+      threads: [{ threadId: 'T_APP', rootCommentId: 9, path: null, line: null, snippet: null }],
+    })
   })
 
   it('returns an empty list when no bot-authored unresolved threads exist', async () => {
