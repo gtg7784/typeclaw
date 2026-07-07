@@ -60,6 +60,40 @@ The workflow is the only supported release path. The GHCR-first-then-npm orderin
 
 "channel" — or `channel_*` tool/code references — means **`src/channels/`**, this repo's channels subsystem (router, manager, persistence, Slack/Discord adapters). NOT Channel Talk, NOT abstract Slack channels, NOT the agent-messenger `agent-channeltalk*` skills. Only branch out when the user explicitly names a different platform.
 
+## Adding a channel adapter
+
+A new adapter is **not done when the adapter file compiles and the runtime routes it.** An adapter is a public surface with many enumeration sites, and the easy-to-miss ones are the CLI/init/docs touch-points — a half-wired adapter runs but is invisible to `channel add`, `channel list`, `doctor`, `inspect`, and every reader of the docs. When you add (or audit) an adapter, walk this checklist and name each site explicitly; skipping one is the single most common channel bug. The Teams adapter's initial landing is the worked cautionary example: the runtime was fully wired but `buildDetail`, `inspect/label.ts`, `doctor/channel-checks.ts`, the `channel add`/`reauth` flows, the init wizard, and **all docs** were missing.
+
+**Runtime + type system (the adapter won't route without these):**
+
+- `src/channels/schema.ts` — add the id to `ADAPTER_IDS`, a slot to `channelsSchema`, and an entry to `ADAPTER_READ_CAPABILITIES` (there's a guard test in `schema.test.ts` mapping id → adapter file).
+- `src/channels/manager.ts` — `buildAdapter` branch + credential-store wiring + credential-signature hashing for reload detection.
+- `src/channels/adapters/<name>.ts` (+ `-classify`, `-key`, etc.) — the adapter itself and its router-callback registrations. Register **every** capability the platform supports (outbound, history, message-get, list, membership, reactions, typing, fetch-attachment, channel-name resolver) — a missing registration is a silent capability gap, not a compile error.
+- `src/secrets/schema.ts` + `src/secrets/<name>-store.ts` — credential record + block schema and its store (host + container modes).
+- `src/config/channels-mutation.ts` — `CHANNEL_KINDS`.
+- `src/permissions/match-rule.ts`, `src/permissions/resolve.ts`, `src/role-claim/match-rule.ts`, `src/agent/session-origin.ts` — platform mapping for permissions, roles, provenance, prompt rendering.
+- `src/hostd/daemon.ts` + `src/hostd/protocol.ts` — if the adapter needs host-side credential write-back (token refresh).
+
+**CLI + init surface (the adapter is invisible without these):**
+
+- `src/cli/channel.ts` — `CHANNEL_LABELS`; then depending on auth model: `ADDABLE_CHANNEL_KINDS` + `collectCredentials` (for `channel add`), `SETTABLE_ADAPTERS` (token rotation via `channel set`), `REAUTHABLE_ADAPTERS` + `runReauth` (account-login replay), and any family picker (Slack/Discord/Webex-style bot-vs-user modes).
+- `src/init/<name>-auth.ts` — the interactive bootstrap (device-code / QR / password), mirroring `slack-auth.ts` / `webex-auth.ts` / `discord-auth.ts`.
+- `src/init/index.ts` — `runAddChannel` (`AddChannelOptions` union, `AddChannelStepEvent`, the auth-first ordering, `channelSecretsFromOptions`), plus the init-wizard path: `with<Name>` scaffold flag, `pickChannel`/`runChannelFlow`/`channelDisplayName`, and `configuredChannels`.
+- `src/config/channels-mutation.ts` `buildDetail` — the `channel list` DETAIL column (account count / repo count). Multi-account adapters share the `currentAccount`/`accounts` branch.
+- `src/inspect/label.ts` `ADAPTER_DISPLAY` — the human-readable name in `inspect`.
+- `src/doctor/channel-checks.ts` — a `buildChannelChecks()` entry verifying credentials resolve host-side (and update the `channel-checks.test.ts` names assertion).
+- `src/channels/router.ts` `NATIVE_REPLY_EVERY_SHAPE_ADAPTERS` — only if the platform's reply model needs it.
+
+**Docs (ships in the same PR as the code that motivates it):**
+
+- `docs/content/docs/reference/<name>.mdx` — reference page (model it on the closest existing adapter: bot-token → `slack-bot.mdx`; user-account → `webex.mdx`).
+- `docs/content/docs/reference/meta.json` — sidebar nav entry.
+- `docs/content/docs/reference/channel-adapters.mdx` — the master adapter table row, the `channels.<adapter>` shape example, the per-adapter quirks row, and the `set`/`reauth` CLI-verb split.
+- `docs/content/docs/guides/add-a-channel.mdx` — the CLI line under "Other platforms", an `<Accordion>` for the sign-in specifics, and the reauth list.
+- `README.md` — the "Supported channels" bullet.
+
+Multi-language rules (below) apply to any inbound classification / alias matching the adapter adds.
+
 ## Multi-language
 
 TypeClaw is a **multi-language project**: the agent lives in users' chats and reads messages in Korean, Japanese, Chinese, Arabic, Russian, every Latin-script language, and more — not just English. Any code that does **natural-language pattern matching over user/agent text** MUST work across languages, not just hardcoded English words or ASCII-only regex. This applies whenever you add or audit keyword detection, mention/alias matching, intent or engagement heuristics, suppressors, trigger-word lists, or verdict/sentiment classifiers.
