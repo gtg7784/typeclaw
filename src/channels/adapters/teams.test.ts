@@ -44,12 +44,27 @@ function realtime(overrides: Partial<TeamsRealtimeMessage> = {}): TeamsRealtimeM
   return {
     id: 'msg-1',
     chatId: 'chat-1',
+    conversationType: 'chat',
     content: 'hello typeclaw',
+    mentions: [],
     author: { id: 'user-1', displayName: 'Alice' },
     messageType: 'RichText/Html',
     timestamp: '2026-01-01T00:00:00.000Z',
     ...overrides,
   }
+}
+
+const CHANNEL_KEY = 'channel:team-guid:19:abc@thread.tacv2'
+
+function channelRealtime(overrides: Partial<TeamsRealtimeMessage> = {}): TeamsRealtimeMessage {
+  return realtime({
+    id: 'ch-1',
+    chatId: '19:abc@thread.tacv2',
+    conversationType: 'channel',
+    teamId: 'team-guid',
+    channelId: '19:abc@thread.tacv2',
+    ...overrides,
+  })
 }
 
 function teamsMessage(overrides: Partial<TeamsMessage> = {}): TeamsMessage {
@@ -139,26 +154,38 @@ function router(): TestRouter {
 
 type ClientOverrides = {
   chats?: TeamsChatInfo[]
+  channelTeamMap?: Map<string, string>
   sendChatMessage?: (chatId: string, content: string) => Promise<TeamsMessage>
+  sendMessage?: (teamId: string, channelId: string, content: string, rootMessageId?: string) => Promise<TeamsMessage>
   getChatMessages?: (chatId: string, limit?: number) => Promise<TeamsMessage[]>
+  getMessages?: (teamId: string, channelId: string, limit?: number) => Promise<TeamsMessage[]>
   testAuth?: () => Promise<TeamsUser>
 }
 
 function fakeClient(overrides: ClientOverrides = {}) {
   const sends: Array<{ chatId: string; content: string }> = []
+  const channelSends: Array<{ teamId: string; channelId: string; content: string; rootMessageId?: string }> = []
   const client = {
     login: async () => {},
     testAuth: overrides.testAuth ?? (async () => SELF),
     listChats: async () => overrides.chats ?? [groupChat],
+    buildChannelTeamMap: async () => overrides.channelTeamMap ?? new Map<string, string>(),
     sendChatMessage:
       overrides.sendChatMessage ??
       (async (chatId: string, content: string) => {
         sends.push({ chatId, content })
         return teamsMessage({ id: 'sent', content })
       }),
+    sendMessage:
+      overrides.sendMessage ??
+      (async (teamId: string, channelId: string, content: string, rootMessageId?: string) => {
+        channelSends.push({ teamId, channelId, content, rootMessageId })
+        return teamsMessage({ id: 'sent-ch', content })
+      }),
     getChatMessages: overrides.getChatMessages ?? (async () => []),
+    getMessages: overrides.getMessages ?? (async () => []),
   }
-  return { sends, client }
+  return { sends, channelSends, client }
 }
 
 function adapterWith(deps: {
@@ -194,13 +221,25 @@ describe('teams outbound', () => {
     expect(sends).toEqual([{ chatId: 'chat-1', content: 'hi' }])
   })
 
-  test('rejects a non chat: routing key', async () => {
+  test('sends a channel key via sendMessage(teamId, channelId, rootMessageId)', async () => {
+    const { channelSends, client } = fakeClient()
+    const cb = createOutboundCallback({ client, logger: logger() })
+
+    const result = await cb(outbound({ chat: CHANNEL_KEY, text: 'deploying', thread: 'root-9' }))
+
+    expect(result).toEqual({ ok: true, messageId: 'sent-ch', messageIds: ['sent-ch'] })
+    expect(channelSends).toEqual([
+      { teamId: 'team-guid', channelId: '19:abc@thread.tacv2', content: 'deploying', rootMessageId: 'root-9' },
+    ])
+  })
+
+  test('rejects an undecodable routing key', async () => {
     const { client } = fakeClient()
     const cb = createOutboundCallback({ client, logger: logger() })
 
-    expect(await cb(outbound({ chat: 'channel:team/ch' }))).toEqual({
+    expect(await cb(outbound({ chat: 'bogus/key' }))).toEqual({
       ok: false,
-      error: 'unsupported Teams chat id: channel:team/ch',
+      error: 'unsupported Teams conversation id: bogus/key',
     })
   })
 
@@ -212,14 +251,12 @@ describe('teams outbound', () => {
   })
 
   test('surfaces a send failure as ok false', async () => {
-    const cb = createOutboundCallback({
-      client: {
-        sendChatMessage: async () => {
-          throw new Error('send boom')
-        },
+    const { client } = fakeClient({
+      sendChatMessage: async () => {
+        throw new Error('send boom')
       },
-      logger: logger(),
     })
+    const cb = createOutboundCallback({ client, logger: logger() })
 
     await expect(cb(outbound({ text: 'hi' }))).resolves.toEqual({ ok: false, error: 'send boom' })
   })
@@ -248,12 +285,13 @@ describe('teams outbound', () => {
 
   test('rolls back the reserved echo when the send throws', async () => {
     let rolledBack = 0
-    const cb = createOutboundCallback({
-      client: {
-        sendChatMessage: async () => {
-          throw new Error('send boom')
-        },
+    const { client } = fakeClient({
+      sendChatMessage: async () => {
+        throw new Error('send boom')
       },
+    })
+    const cb = createOutboundCallback({
+      client,
       logger: logger(),
       reserveEcho: () => () => {
         rolledBack++
@@ -267,17 +305,14 @@ describe('teams outbound', () => {
 })
 
 describe('teams history', () => {
-  test('maps messages to chronological history', async () => {
-    const cb = createTeamsHistoryCallback({
-      client: {
-        getChatMessages: async () => [
-          teamsMessage({ id: 'newer', content: 'reply' }),
-          teamsMessage({ id: 'older', content: 'question' }),
-        ],
-      },
-      logger: logger(),
-      selfIdRef: () => 'ME',
+  test('maps chat messages to chronological history', async () => {
+    const { client } = fakeClient({
+      getChatMessages: async () => [
+        teamsMessage({ id: 'newer', content: 'reply' }),
+        teamsMessage({ id: 'older', content: 'question' }),
+      ],
     })
+    const cb = createTeamsHistoryCallback({ client, logger: logger(), selfIdRef: () => 'ME' })
 
     const res = await cb({ chat: 'chat:chat-1', thread: null, limit: 50 })
 
@@ -286,16 +321,29 @@ describe('teams history', () => {
     expect(res.messages.map((m) => m.externalMessageId)).toEqual(['older', 'newer'])
   })
 
-  test('rejects a non chat: routing key', async () => {
-    const cb = createTeamsHistoryCallback({
-      client: { getChatMessages: async () => [] },
-      logger: logger(),
-      selfIdRef: () => null,
+  test('fetches channel history via getMessages(teamId, channelId)', async () => {
+    const calls: Array<{ teamId: string; channelId: string }> = []
+    const { client } = fakeClient({
+      getMessages: async (teamId, channelId) => {
+        calls.push({ teamId, channelId })
+        return [teamsMessage({ id: 'ch-msg' })]
+      },
     })
+    const cb = createTeamsHistoryCallback({ client, logger: logger(), selfIdRef: () => 'ME' })
 
-    expect(await cb({ chat: 'channel:x', thread: null, limit: 50 })).toEqual({
+    const res = await cb({ chat: CHANNEL_KEY, thread: null, limit: 50 })
+
+    expect(res.ok).toBe(true)
+    expect(calls).toEqual([{ teamId: 'team-guid', channelId: '19:abc@thread.tacv2' }])
+  })
+
+  test('rejects an undecodable routing key', async () => {
+    const { client } = fakeClient()
+    const cb = createTeamsHistoryCallback({ client, logger: logger(), selfIdRef: () => null })
+
+    expect(await cb({ chat: 'bogus', thread: null, limit: 50 })).toEqual({
       ok: false,
-      error: 'unsupported Teams chat id: channel:x',
+      error: 'unsupported Teams conversation id: bogus',
     })
   })
 })
@@ -425,18 +473,16 @@ describe('createTeamsAdapter', () => {
     const r = router()
     const listener = new FakeListener()
     let listChatsCalls = 0
-    const client = {
-      login: async () => {},
-      testAuth: async () => SELF,
-      listChats: async () => {
-        listChatsCalls++
-        // first call (start) returns nothing; the on-miss refresh discovers the chat
-        return listChatsCalls === 1 ? [] : [{ id: 'chat-9', type: 'oneOnOne' } as TeamsChatInfo]
-      },
-      sendChatMessage: async () => teamsMessage(),
+    const { client } = fakeClient({
+      chats: [],
       getChatMessages: async () => [],
+    })
+    // first listChats (start) returns nothing; the on-miss refresh discovers the chat
+    client.listChats = async () => {
+      listChatsCalls++
+      return listChatsCalls === 1 ? [] : [{ id: 'chat-9', type: 'oneOnOne' } as TeamsChatInfo]
     }
-    const adapter = adapterWith({ r, listener, client: client as unknown as ReturnType<typeof fakeClient>['client'] })
+    const adapter = adapterWith({ r, listener, client })
 
     await adapter.start()
     listener.emit('message', realtime({ chatId: 'chat-9' }))
@@ -552,5 +598,38 @@ describe('createTeamsAdapter', () => {
     await adapter.stop()
 
     expect(r.routed).toHaveLength(1)
+  })
+
+  test('routes a channel message addressed by a structured mention', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const adapter = adapterWith({ r, listener, client: fakeClient().client })
+
+    await adapter.start()
+    listener.emit(
+      'message',
+      channelRealtime({ content: 'ship it', mentions: [{ id: '0', displayName: 'Typeey', mri: '8:orgid:self' }] }),
+    )
+    await adapter.stop()
+
+    expect(r.routed).toHaveLength(1)
+    expect(r.routed[0]?.chat).toBe(CHANNEL_KEY)
+    expect(r.routed[0]?.isDm).toBe(false)
+    expect(r.routed[0]?.isBotMention).toBe(true)
+  })
+
+  test('suppresses a channel self-echo keyed by channelId', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    let clock = 1_000
+    const adapter = adapterWith({ r, listener, client: fakeClient().client, now: () => clock })
+
+    await adapter.start()
+    await r.outboundCb!(outbound({ chat: CHANNEL_KEY, text: 'deploy done' }))
+    clock += 1_000
+    listener.emit('message', channelRealtime({ id: 'ch-echo', content: 'deploy done' }))
+    await adapter.stop()
+
+    expect(r.routed).toHaveLength(0)
   })
 })

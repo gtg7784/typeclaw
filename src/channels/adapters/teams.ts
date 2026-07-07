@@ -16,7 +16,14 @@ import type {
 import type { TeamsAccountRecord } from '@/secrets/schema'
 
 import { describeError } from './describe-error'
-import { classifyInbound, normalizeTeamsText, type InboundDropReason, type TeamsInboundEvent } from './teams-classify'
+import {
+  classifyChannelInbound,
+  classifyChatInbound,
+  normalizeTeamsText,
+  type InboundDropReason,
+  type TeamsInboundEvent,
+} from './teams-classify'
+import { decodeTeamsConversationKey } from './teams-key'
 
 // `TeamsChat` is not exported from agent-messenger/teams, so derive its shape
 // from the client method that returns it — this stays in lockstep with the SDK
@@ -59,7 +66,6 @@ export type TeamsAdapter = {
   isConnected: () => boolean
 }
 
-const CHAT_PREFIX = 'chat:'
 const TEAMS_LISTENER_START_TIMEOUT_MS = 20_000
 
 // The Teams user-account SDK has NO self-identity boundary: `testAuth()` returns
@@ -78,28 +84,33 @@ const MAX_SENT_ECHOES = 200
 type SentEcho = { chatId: string; textKey: string; sentAt: number; consumed: boolean }
 
 export function createOutboundCallback(deps: {
-  client: Pick<TeamsClient, 'sendChatMessage'>
+  client: Pick<TeamsClient, 'sendChatMessage' | 'sendMessage'>
   logger: TeamsAdapterLogger
   // Reserve the self-echo fingerprint BEFORE the send is awaited and return a
   // rollback. Teams delivers a send back over the listener socket, and that
-  // echo can arrive before `sendChatMessage` resolves — reserving after the
-  // await would leave a window where the agent's own message routes back in.
-  // The rollback drops the reservation if the send ultimately fails.
-  reserveEcho?: (chatId: string, text: string) => () => void
+  // echo can arrive before the send resolves — reserving after the await would
+  // leave a window where the agent's own message routes back in. The key is the
+  // conversation id the echo will carry (chatId for chats, channelId for
+  // channels). The rollback drops the reservation if the send ultimately fails.
+  reserveEcho?: (conversationId: string, text: string) => () => void
 }): OutboundCallback {
   const { client, logger } = deps
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'teams') return { ok: false, error: `unknown adapter: ${msg.adapter}` }
     const text = msg.text ?? ''
     if (text === '') return { ok: false, error: 'message has no text' }
-    if (!msg.chat.startsWith(CHAT_PREFIX)) return { ok: false, error: `unsupported Teams chat id: ${msg.chat}` }
-    const chatId = msg.chat.slice(CHAT_PREFIX.length)
+    const decoded = decodeTeamsConversationKey(msg.chat)
+    if (decoded === null) return { ok: false, error: `unsupported Teams conversation id: ${msg.chat}` }
 
-    logger.info(`[teams] outbound chat=${chatId} text_len=${text.length}`)
-    const rollbackEcho = deps.reserveEcho?.(chatId, text)
+    const conversationId = decoded.kind === 'chat' ? decoded.chatId : decoded.channelId
+    logger.info(`[teams] outbound ${decoded.kind}=${conversationId} text_len=${text.length}`)
+    const rollbackEcho = deps.reserveEcho?.(conversationId, text)
     try {
-      const sent = await client.sendChatMessage(chatId, text)
-      logger.info(`[teams] sent id=${sent.id} chat=${chatId}`)
+      const sent =
+        decoded.kind === 'chat'
+          ? await client.sendChatMessage(decoded.chatId, text)
+          : await client.sendMessage(decoded.teamId, decoded.channelId, text, msg.thread ?? undefined)
+      logger.info(`[teams] sent id=${sent.id} ${decoded.kind}=${conversationId}`)
       return { ok: true, messageId: sent.id, messageIds: [sent.id] }
     } catch (err) {
       rollbackEcho?.()
@@ -111,17 +122,19 @@ export function createOutboundCallback(deps: {
 }
 
 export function createTeamsHistoryCallback(deps: {
-  client: Pick<TeamsClient, 'getChatMessages'>
+  client: Pick<TeamsClient, 'getChatMessages' | 'getMessages'>
   logger: TeamsAdapterLogger
   selfIdRef: () => string | null
 }): HistoryCallback {
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
-    if (!args.chat.startsWith(CHAT_PREFIX)) {
-      return { ok: false, error: `unsupported Teams chat id: ${args.chat}` }
-    }
-    const chatId = args.chat.slice(CHAT_PREFIX.length)
+    const decoded = decodeTeamsConversationKey(args.chat)
+    if (decoded === null) return { ok: false, error: `unsupported Teams conversation id: ${args.chat}` }
+    const limit = clampLimit(args.limit, 100)
     try {
-      const messages = await deps.client.getChatMessages(chatId, clampLimit(args.limit, 100))
+      const messages =
+        decoded.kind === 'chat'
+          ? await deps.client.getChatMessages(decoded.chatId, limit)
+          : await deps.client.getMessages(decoded.teamId, decoded.channelId, limit)
       const selfId = deps.selfIdRef()
       return { ok: true, messages: messages.map((m) => mapTeamsHistoryMessage(m, selfId)).reverse() }
     } catch (err) {
@@ -141,6 +154,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
   let listener: TeamsListener | null = null
   let self: TeamsUser | null = null
   let chatsById = new Map<string, TeamsChatInfo>()
+  let channelTeamMap = new Map<string, string>()
   let sentEchoes: SentEcho[] = []
   let connected = false
   let started = false
@@ -161,12 +175,13 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
   }
 
   const isSelfEcho = (event: TeamsInboundEvent): boolean => {
+    const conversationId = echoConversationId(event)
     const textKey = normalizeTeamsText(event.content)
     const authorName = event.author.displayName.trim().toLocaleLowerCase()
     const selfName = (self?.displayName ?? '').trim().toLocaleLowerCase()
     const nowMs = now()
     for (const echo of sentEchoes) {
-      if (echo.consumed || echo.chatId !== event.chatId || echo.textKey !== textKey) continue
+      if (echo.consumed || echo.chatId !== conversationId || echo.textKey !== textKey) continue
       const age = nowMs - echo.sentAt
       if (age > SELF_ECHO_TTL_MS) continue
       const authorLooksSelf =
@@ -198,6 +213,17 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
     return chatsById.get(chatId)
   }
 
+  // For a channel event the SDK resolves teamId out-of-band and populates it on
+  // the event; `channelTeamMap` is only a defensive fallback for the rare case
+  // the SDK emits a channel-typed event with teamId missing. channelId always
+  // equals the conversation id (== event.chatId) for channels.
+  const resolveChannel = (event: TeamsInboundEvent): { teamId: string; channelId: string } | null => {
+    const channelId = event.channelId ?? event.chatId
+    const teamId = event.teamId ?? channelTeamMap.get(channelId)
+    if (teamId === undefined || channelId === '') return null
+    return { teamId, channelId }
+  }
+
   const handleMessage = async (event: TeamsInboundEvent): Promise<void> => {
     inflightInbounds++
     try {
@@ -205,14 +231,24 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
         logger.info(`[teams] dropped id=${event.id} reason=self_echo`)
         return
       }
-      const chat = await resolveChat(event.chatId)
-      const verdict = classifyInbound(event, options.configRef(), self, chat, options.selfAliasesRef?.() ?? [])
+      const aliases = options.selfAliasesRef?.() ?? []
+      let verdict
+      if (event.conversationType === 'channel') {
+        const channel = resolveChannel(event)
+        verdict =
+          channel === null
+            ? ({ kind: 'drop', reason: 'unknown_channel' } as const)
+            : classifyChannelInbound(event, options.configRef(), self, channel, aliases)
+      } else {
+        const chat = await resolveChat(event.chatId)
+        verdict = classifyChatInbound(event, options.configRef(), self, chat, aliases)
+      }
       if (verdict.kind === 'drop') {
         logger.info(`[teams] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
       }
       logger.info(
-        `[teams] routed id=${event.id} chat=${event.chatId} mention=${verdict.payload.isBotMention} dm=${verdict.payload.isDm}`,
+        `[teams] routed id=${event.id} ${event.conversationType}=${event.chatId} mention=${verdict.payload.isBotMention} dm=${verdict.payload.isDm}`,
       )
       await options.router.route(verdict.payload)
     } catch (err) {
@@ -245,11 +281,20 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
         })
         self = await client.testAuth()
         await refreshChats()
+        // Best-effort channelId->teamId map: the SDK already resolves teamId on
+        // channel events, so this only backs the defensive fallback in
+        // resolveChannel. A failure here must not block startup.
+        try {
+          channelTeamMap = await client.buildChannelTeamMap()
+        } catch (err) {
+          logger.warn(`[teams] channel-team map build failed: ${describeError(err)}`)
+        }
         logger.info(`[teams] authenticated as ${self.displayName}, ${chatsById.size} chats`)
       } catch (err) {
         started = false
         self = null
         chatsById = new Map()
+        channelTeamMap = new Map()
         logger.error(`[teams] login failed: ${describeError(err)}`)
         throw err
       }
@@ -278,6 +323,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
         listener = null
         self = null
         chatsById = new Map()
+        channelTeamMap = new Map()
         sentEchoes = []
         connected = false
         started = false
@@ -319,6 +365,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       }
       self = null
       chatsById = new Map()
+      channelTeamMap = new Map()
       sentEchoes = []
     },
 
@@ -374,12 +421,12 @@ function waitForTeamsConnected(
   return { promise, cancel }
 }
 
-// `getChatMessages` already strips HTML and sets `author.id` to the real MRI
-// (never `'ME'`), so bot-authored history can only be recognized when the
-// caller happens to know that MRI — which the SDK does not surface. `selfId`
-// is therefore best-effort: it flags nothing in practice today, but leaving the
-// comparison in place means history attribution starts working for free if a
-// future SDK version exposes the real self id.
+// Both `getChatMessages` and `getMessages` already strip HTML and set
+// `author.id` to the real MRI (never `'ME'`), so bot-authored history can only
+// be recognized when the caller knows that MRI — which the SDK does not
+// surface. `selfId` is therefore best-effort: it flags nothing in practice
+// today, but leaving the comparison in place means history attribution starts
+// working for free if a future SDK version exposes the real self id.
 function mapTeamsHistoryMessage(msg: TeamsMessage, selfId: string | null): ChannelHistoryMessage {
   const ts = Date.parse(msg.timestamp)
   return {
@@ -404,6 +451,15 @@ function warnIfTokenExpiring(account: TeamsAccountRecord, logger: TeamsAdapterLo
   }
 }
 
+// The echo the socket delivers back for our own send carries the conversation
+// id it was sent to: the channelId for a channel send, the chatId otherwise.
+// (channelId == chatId for channel events today, but prefer channelId so the
+// ledger stays correct if the SDK ever distinguishes them.)
+function echoConversationId(event: TeamsInboundEvent): string {
+  if (event.conversationType === 'channel') return event.channelId ?? event.chatId
+  return event.chatId
+}
+
 function clampLimit(requested: number, max: number): number {
   if (!Number.isFinite(requested) || requested <= 0) return max
   return Math.min(Math.floor(requested), max)
@@ -415,6 +471,8 @@ function dropHint(reason: InboundDropReason): string {
       return ' (message had no text)'
     case 'unknown_chat':
       return ' (chat id not found even after refresh)'
+    case 'unknown_channel':
+      return ' (channel message missing a resolvable teamId)'
     case 'pre_connect':
     case 'self_author':
       return ''
