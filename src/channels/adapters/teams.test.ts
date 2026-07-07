@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import { TeamsError } from 'agent-messenger/teams'
 import type { TeamsListener, TeamsMessage, TeamsRealtimeMessage, TeamsUser } from 'agent-messenger/teams'
 
 import type { ChannelRouter } from '@/channels/router'
@@ -493,49 +494,81 @@ describe('createTeamsAdapter', () => {
     expect(r.routed[0]?.chat).toBe('chat:chat-9')
   })
 
-  test('isConnected is false after a disconnected event', async () => {
+  test('stays usable (REST) even after a realtime disconnected event', async () => {
     const r = router()
     const listener = new FakeListener()
     const adapter = adapterWith({ r, listener, client: fakeClient().client })
 
     await adapter.start()
     expect(adapter.isConnected()).toBe(true)
+    // a realtime drop does not make the adapter unusable — send/read still work,
+    // so isConnected() stays true and the manager does not churn-restart it
     listener.emit('disconnected', undefined)
-    expect(adapter.isConnected()).toBe(false)
-
-    await adapter.stop()
-  })
-
-  test('isConnected recovers when the SDK re-emits connected after a reconnect', async () => {
-    const r = router()
-    const listener = new FakeListener()
-    const adapter = adapterWith({ r, listener, client: fakeClient().client })
-
-    await adapter.start()
-    // given a transient drop the SDK reports as disconnected
-    listener.emit('disconnected', undefined)
-    expect(adapter.isConnected()).toBe(false)
-    // when the SDK auto-reconnects and re-registers its endpoint
-    listener.emit('connected', { endpointId: 'ep-2' })
-    // then the adapter reports live again without a manager restart
     expect(adapter.isConnected()).toBe(true)
 
     await adapter.stop()
   })
 
-  test('a stale listener event after stop cannot flip connected state', async () => {
+  test('degrades to REST-only when the id_token becomes unmintable after a successful connect', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const log = logger()
+    const adapter = adapterWith({ r, listener, client: fakeClient().client, log })
+
+    // given the listener connected fine at start
+    await adapter.start()
+    expect(adapter.isConnected()).toBe(true)
+    const errorsBefore = log.lines.filter((l) => l.startsWith('error:')).length
+
+    // when a later reconnect can no longer mint the id_token (expired refresh
+    // token, outage): the SDK re-emits the same no_id_token error on every retry
+    listener.emit('error', new TeamsError('no id_token', 'no_id_token'))
+    listener.emit('error', new TeamsError('no id_token', 'no_id_token'))
+
+    // then the listener is torn down (stopping the SDK's unbounded reconnect
+    // loop) and no error lines are logged — it degrades to REST-only instead
+    expect(listener.stopped).toBe(true)
+    expect(log.lines.filter((l) => l.startsWith('error:')).length).toBe(errorsBefore)
+    expect(log.lines.some((l) => l.includes('continuing REST-only'))).toBe(true)
+    // REST send/read remain usable, callbacks stay registered
+    expect(adapter.isConnected()).toBe(true)
+    expect(r.unregistered).toEqual([])
+
+    await adapter.stop()
+  })
+
+  test('keeps the listener alive on a transient error so the SDK can reconnect', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const log = logger()
+    const adapter = adapterWith({ r, listener, client: fakeClient().client, log })
+
+    await adapter.start()
+    // a transient socket error is NOT the unrecoverable id_token failure, so the
+    // adapter leaves the listener running for the SDK's own reconnect to recover
+    listener.emit('error', new Error('websocket hiccup'))
+
+    expect(listener.stopped).toBe(false)
+    expect(log.lines.some((l) => l.startsWith('error:') && l.includes('websocket hiccup'))).toBe(true)
+
+    await adapter.stop()
+  })
+
+  test('is not usable after stop', async () => {
     const r = router()
     const listener = new FakeListener()
     const adapter = adapterWith({ r, listener, client: fakeClient().client })
 
     await adapter.start()
+    expect(adapter.isConnected()).toBe(true)
     await adapter.stop()
-    // a late event from the stopped listener must not resurrect connected state
+    expect(adapter.isConnected()).toBe(false)
+    // a late event from the stopped listener must not resurrect usable state
     listener.emit('connected', { endpointId: 'ep-stale' })
     expect(adapter.isConnected()).toBe(false)
   })
 
-  test('rolls back every registration when the listener errors before connecting', async () => {
+  test('degrades to REST-only when the listener errors before connecting', async () => {
     const r = router()
     const listener = new FakeListener()
     listener.startImpl = async () => {
@@ -543,44 +576,54 @@ describe('createTeamsAdapter', () => {
     }
     const adapter = adapterWith({ r, listener, client: fakeClient().client })
 
-    await expect(adapter.start()).rejects.toThrow('trouter down')
-    expect(adapter.isConnected()).toBe(false)
-    expect(r.unregistered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    // start() resolves (does not throw): REST send/read remain usable
+    await adapter.start()
+    // isConnected() reflects REST usability, so the manager won't churn-restart it
+    expect(adapter.isConnected()).toBe(true)
+    // the REST callbacks stay registered — only the listener is torn down
+    expect(r.registered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    expect(r.unregistered).toEqual([])
     expect(listener.stopped).toBe(true)
+
+    await adapter.stop()
   })
 
-  test('a listener error that arrives after start() resolves still rolls back', async () => {
+  test('degrades to REST-only when a listener error arrives after start() resolves', async () => {
     const r = router()
     const listener = new FakeListener()
     // start() resolves without connecting; the error lands on the next tick,
     // so the adapter must be awaiting the connected/error race (not sampling a
-    // flag synchronously) to observe it.
+    // flag synchronously) to observe it before degrading.
     listener.startImpl = async () => {
       queueMicrotask(() => listener.emit('error', new Error('late trouter failure')))
     }
     const adapter = adapterWith({ r, listener, client: fakeClient().client })
 
-    await expect(adapter.start()).rejects.toThrow('late trouter failure')
-    expect(adapter.isConnected()).toBe(false)
-    expect(r.unregistered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    await adapter.start()
+    expect(adapter.isConnected()).toBe(true)
+    expect(r.unregistered).toEqual([])
     expect(listener.stopped).toBe(true)
+
+    await adapter.stop()
   })
 
-  test('rolls back when listener.start() rejects synchronously without emitting error', async () => {
+  test('degrades to REST-only when listener.start() rejects synchronously', async () => {
     const r = router()
     const listener = new FakeListener()
     // start() rejects itself and never emits a `connected`/`error` event, so
     // the adapter must cancel the connected-wait in the rejection path (not
-    // hang for the full 20s timeout) and still roll back cleanly.
+    // hang for the full 20s timeout) and still degrade cleanly.
     listener.startImpl = async () => {
       throw new Error('start rejected')
     }
     const adapter = adapterWith({ r, listener, client: fakeClient().client })
 
-    await expect(adapter.start()).rejects.toThrow('start rejected')
-    expect(adapter.isConnected()).toBe(false)
-    expect(r.unregistered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    await adapter.start()
+    expect(adapter.isConnected()).toBe(true)
+    expect(r.unregistered).toEqual([])
     expect(listener.stopped).toBe(true)
+
+    await adapter.stop()
   })
 
   test('suppresses an echo delivered before the send promise resolves', async () => {

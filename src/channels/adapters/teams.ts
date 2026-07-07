@@ -1,4 +1,4 @@
-import { TeamsClient, TeamsListener } from 'agent-messenger/teams'
+import { TeamsClient, TeamsError, TeamsListener } from 'agent-messenger/teams'
 import type { TeamsListenerEventMap, TeamsMessage, TeamsUser } from 'agent-messenger/teams'
 
 import type { ChannelRouter } from '@/channels/router'
@@ -23,6 +23,7 @@ import {
   type InboundDropReason,
   type TeamsInboundEvent,
 } from './teams-classify'
+import { ContainerTeamsClient } from './teams-id-token'
 import { decodeTeamsConversationKey } from './teams-key'
 
 // `TeamsChat` is not exported from agent-messenger/teams, so derive its shape
@@ -148,7 +149,8 @@ export function createTeamsHistoryCallback(deps: {
 export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
   const logger = options.logger ?? consoleLogger
   const now = options.now ?? Date.now
-  const createClient = options.createClient ?? (() => new TeamsClient())
+  let loadedAccount: TeamsAccountRecord | null = null
+  const createClient = options.createClient ?? (() => new ContainerTeamsClient(() => loadedAccount))
   const createListener = options.createListener ?? ((client) => new TeamsListener(client))
   const client = createClient()
   let listener: TeamsListener | null = null
@@ -156,7 +158,6 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
   let chatsById = new Map<string, TeamsChatInfo>()
   let channelTeamMap = new Map<string, string>()
   let sentEchoes: SentEcho[] = []
-  let connected = false
   let started = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
@@ -280,6 +281,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
           ...(account.region !== undefined ? { region: account.region } : {}),
         })
         self = await client.testAuth()
+        loadedAccount = account
         await refreshChats()
         // Best-effort channelId->teamId map: the SDK already resolves teamId on
         // channel events, so this only backs the defensive fallback in
@@ -293,58 +295,66 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       } catch (err) {
         started = false
         self = null
+        loadedAccount = null
         chatsById = new Map()
         channelTeamMap = new Map()
         logger.error(`[teams] login failed: ${describeError(err)}`)
         throw err
       }
 
+      // REST auth succeeded, so send/history/self-identity work regardless of
+      // whether the realtime listener can connect. Register them now and NEVER
+      // unregister them on a listener failure — realtime is a best-effort
+      // add-on, not a precondition for the adapter being usable.
+      options.router.registerOutbound('teams', outboundCallback)
+      options.router.registerSelfIdentity('teams', selfIdentityResolver)
+      options.router.registerHistory('teams', historyCallback)
+
       listener = createListener(client)
-      // The SDK auto-reconnects on any WebSocket drop and re-emits `connected`
-      // each reconnect. This permanent handler is what tracks liveness across
-      // reconnects: the one-shot startup wait below only sees the FIRST
-      // `connected`, so without this the flag would stay stuck false after the
-      // first reconnect and the manager's recovery loop would needlessly
-      // restart the adapter. The identity guard stops a late event from a
-      // stopped/rolled-back listener from mutating a fresh adapter's state.
       const activeListener = listener
       const isActive = (): boolean => listener === activeListener && started
+
+      // The realtime trouter listener needs an id_token the container mints from
+      // the account's AAD refresh token. When that is unavailable (legacy
+      // extracted-token account, expired refresh token, or a genuine trouter
+      // outage) the SDK rejects — and, crucially, on a still-running listener it
+      // schedules an UNBOUNDED reconnect that re-fails and re-emits `error`
+      // forever. Rather than fail the whole adapter (or let it log-loop), tear
+      // the listener down and keep running REST-only: send/read still work, we
+      // just don't get proactively woken by inbound Teams messages.
+      const degradeToRestOnly = (cause: Error): void => {
+        if (listener !== activeListener) return
+        listener?.stop()
+        listener = null
+        logger.warn(
+          `[teams] realtime listener unavailable, continuing REST-only (send/read work, no proactive inbound): ${describeError(cause)}`,
+        )
+      }
+
       listener.on('connected', () => {
         if (!isActive()) return
-        connected = true
         logger.info('[teams] connected')
       })
       listener.on('disconnected', () => {
         if (!isActive()) return
-        connected = false
         logger.warn('[teams] disconnected')
       })
+      // A post-connect `error` for the unrecoverable id_token failure would
+      // otherwise loop forever through the SDK's reconnect (each retry re-mints
+      // nothing and re-emits `error`). Degrade to REST-only on that specific
+      // cause so the loop stops; transient socket errors keep just logging and
+      // let the SDK's own reconnect recover them.
       listener.on('error', (err: TeamsListenerEventMap['error'][0]) => {
+        if (!isActive()) return
+        if (isUnrecoverableRealtimeAuthError(err)) {
+          degradeToRestOnly(err)
+          return
+        }
         logger.error(`[teams] listener error: ${describeError(err)}`)
       })
       listener.on('message', (event: TeamsListenerEventMap['message'][0]) => {
         void handleMessage(event)
       })
-
-      options.router.registerOutbound('teams', outboundCallback)
-      options.router.registerSelfIdentity('teams', selfIdentityResolver)
-      options.router.registerHistory('teams', historyCallback)
-
-      const rollbackStart = (reason: string, cause: Error): never => {
-        options.router.unregisterOutbound('teams', outboundCallback)
-        options.router.unregisterSelfIdentity('teams', selfIdentityResolver)
-        options.router.unregisterHistory('teams', historyCallback)
-        listener?.stop()
-        listener = null
-        self = null
-        chatsById = new Map()
-        channelTeamMap = new Map()
-        sentEchoes = []
-        connected = false
-        started = false
-        logger.error(`[teams] ${reason}: ${describeError(cause)}`)
-        throw cause
-      }
 
       // The SDK emits `connected` asynchronously, only after the trouter
       // WebSocket registers an endpoint — it is NOT raised synchronously by
@@ -354,13 +364,13 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       try {
         await listener.start()
         await connectedWait.promise
-        connected = true
+        logger.info('[teams] realtime listener connected')
       } catch (err) {
         // Tear down the connected wait first: if `listener.start()` itself
         // rejected, `connectedWait.promise` was never awaited, so its timer and
         // handlers would otherwise linger and reject later unhandled.
         connectedWait.cancel()
-        rollbackStart('listener start failed', err instanceof Error ? err : new Error(describeError(err)))
+        degradeToRestOnly(err instanceof Error ? err : new Error(describeError(err)))
       }
     },
 
@@ -372,7 +382,6 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       options.router.unregisterHistory('teams', historyCallback)
       listener?.stop()
       listener = null
-      connected = false
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
@@ -384,8 +393,13 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       sentEchoes = []
     },
 
+    // REST auth being live is what makes the adapter usable (send/read); the
+    // realtime listener is a best-effort add-on. Returning true here even in
+    // REST-only mode is deliberate: the channel manager restarts any adapter
+    // whose isConnected() is false, which would pointlessly churn a healthy
+    // REST-only Teams adapter that can never get a realtime listener.
     isConnected(): boolean {
-      return started && self !== null && connected
+      return started && self !== null
     },
   }
 }
@@ -464,6 +478,16 @@ function warnIfTokenExpiring(account: TeamsAccountRecord, logger: TeamsAdapterLo
   } else if (expiresAt - nowMs <= 10 * 60_000) {
     logger.warn('[teams] access token expires soon; long-running sessions will stop until credentials are refreshed')
   }
+}
+
+// The SDK throws a `TeamsError` with code `no_id_token` when it cannot obtain
+// the trouter id_token. In the container that never self-heals (the token is
+// minted from the AAD refresh token, so if minting fails once it keeps failing
+// every reconnect), so treat it as the signal to stop the doomed reconnect loop
+// and degrade. Transient socket errors carry other codes / plain Errors and are
+// left for the SDK's own reconnect to recover.
+function isUnrecoverableRealtimeAuthError(err: unknown): boolean {
+  return err instanceof TeamsError && err.code === 'no_id_token'
 }
 
 // The echo the socket delivers back for our own send carries the conversation
