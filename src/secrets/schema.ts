@@ -183,6 +183,7 @@ export const webexChannelBlockSchema = z.object({
 })
 
 const teamsAccountTypeSchema = z.union([z.literal('work'), z.literal('personal')])
+export type TeamsAccountType = z.infer<typeof teamsAccountTypeSchema>
 const teamsRegionSchema = z.union([z.literal('amer'), z.literal('emea'), z.literal('apac')])
 
 // Teams user-account credentials. The short-lived `access_token` expires in
