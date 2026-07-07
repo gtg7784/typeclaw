@@ -35,20 +35,34 @@ const DEFAULT_BUFFER_BYTES = 500_000
 const MIN_BUFFER_BYTES = 10_000
 // Minimum JSONL line growth since the last memory-logger run required to spawn
 // on a plain `session.idle` tick. The hook fires after every prompt completion,
-// so a chatty channel session that goes briefly quiet 4 times in 7 minutes
-// would otherwise pay the full per-spawn floor (~50 KB context + 4-11 turns of
-// LLM decision-making) on each tick — even when the new transcript content is
-// a handful of lines almost certain to contain nothing memorable.
+// so a chatty channel session that goes briefly quiet several times in a few
+// minutes would otherwise pay the full per-spawn floor (~50 KB context + 4-11
+// turns of LLM decision-making) on each tick — even when the new transcript
+// content is a handful of lines almost certain to contain nothing memorable.
+//
+// TypeClaw is channel-native: nearly every real session is a group chat where
+// most exchanges are banter and memory accrues rarely. Measured on a live
+// agent, ~62% of memory-logger runs write zero fragments, concentrated in a few
+// busy human channels re-distilled every idle tick. A default of `3` lines is a
+// chat-message-sized bar, so it barely dampens that. `20` is tuned to the
+// channel reality without changing the buffer-trip / session-end catch-alls.
+//
+// Raising this is loss-free by construction: an idle skip does NOT advance the
+// watermark, so the skipped span stays unprocessed and is read in full by the
+// next catch-all — a later non-skipped idle spawn, the buffer-trip ceiling, or
+// `session.end` (which also fires on channel stale-rollover). Skipping delays
+// capture; it never drops it. That is why the gate is idle-only.
 //
 // Gate semantics: skip the spawn when (currentLines - linesAtLastRun) < N AND
 // the transcript file actually exists with at least one line. A zero-line
 // transcript (test dummies, brand-new sessions) is NOT gated — the existing
 // "fire and let memory-logger decide" behavior is preserved.
 //
-// The buffer-trip path (size-based ceiling) is independent and unaffected:
-// busy sessions that grow `bufferBytes` of unread transcript still spawn
-// regardless of the idle delta.
-const DEFAULT_MIN_IDLE_DELTA_LINES = 3
+// The buffer-trip path (size-based ceiling) and `session.end` are independent
+// and unaffected: busy sessions that grow `bufferBytes` of unread transcript
+// still spawn regardless of the idle delta, and session close/rollover always
+// sweeps the unprocessed tail.
+const DEFAULT_MIN_IDLE_DELTA_LINES = 20
 // 30-minute default. Fires short-circuit before any LLM call when nothing
 // sits past the watermark (`dreaming.ts` handler returns when
 // `snapshots.undreamed.length === 0`), so frequent no-op fires are cheap.
@@ -264,7 +278,17 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
 
       const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
       const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
+      // Byte size at the last memory-logger observation. NOTE: this is seeded by
+      // `shouldTripBufferCeiling` on a session's FIRST idle WITHOUT a logger run
+      // (the buffer-ceiling needs an initial baseline to measure growth against).
+      // It is therefore a buffer-ceiling delta baseline, NOT a "drained up to
+      // here" watermark — do not use it to decide session.end can skip.
       const bytesAtLastRun = new Map<string, number>()
+      // Byte size at the last ACTUAL memory-logger spawn (set only inside the
+      // chained spawn body). This is the real drained watermark: session.end's
+      // byte-equality skip trusts THIS, so a buffer-seeded baseline can never
+      // masquerade as "already logged" and drop an un-distilled prefix.
+      const bytesAtLastSpawn = new Map<string, number>()
       const linesAtLastRun = new Map<string, number>()
       // Per-session stream-file cursor: the JSONL line count of the daily
       // stream file at the END of this session's most recent memory-logger
@@ -331,6 +355,9 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
             const currentSize = await readSize(parentTranscriptPath)
             const currentLines = await readLineCount(parentTranscriptPath)
             bytesAtLastRun.set(sessionId, currentSize)
+            // Real drained watermark — set only here, inside an actual spawn, so
+            // session.end's byte-equality skip never trusts a buffer-only seed.
+            bytesAtLastSpawn.set(sessionId, currentSize)
             // Monotonic: never regress below a baseline the idle gate already
             // reserved. readLineCount returns 0 on a read error or a
             // missing/truncated file, so an unconditional set could undo the
@@ -538,7 +565,10 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
               const last = lastIdleEvent.get(sessionId)
               let skip = false
               if (last?.parentTranscriptPath !== undefined) {
-                const baseline = bytesAtLastRun.get(sessionId)
+                // Trust only a REAL drained watermark, not the buffer-ceiling
+                // seed — otherwise a session whose prefix was seeded but never
+                // logged would skip its final sweep and lose that prefix.
+                const baseline = bytesAtLastSpawn.get(sessionId)
                 if (baseline !== undefined && baseline > 0) {
                   const currentSize = await readSize(last.parentTranscriptPath)
                   if (currentSize === baseline) {
@@ -552,6 +582,7 @@ export function createMemoryPlugin(deps: MemoryPluginDeps = defaultDeps) {
               if (!skip) void fireMemoryLogger(sessionId, 'session-end')
               lastIdleEvent.delete(sessionId)
               bytesAtLastRun.delete(sessionId)
+              bytesAtLastSpawn.delete(sessionId)
               linesAtLastRun.delete(sessionId)
               streamCursorAtLastRun.delete(sessionId)
             })()
