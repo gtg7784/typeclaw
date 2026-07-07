@@ -1,12 +1,14 @@
 import { readFile } from 'node:fs/promises'
 
-import { recordReview } from '@/channels/github-review-turn-ledger'
+import { recordReview, recordReviewOutput } from '@/channels/github-review-turn-ledger'
 import type { ContentPart, ToolResult } from '@/plugin'
 
 import {
+  detectReviewOutput,
   detectReviewSubmission,
   detectReviewSubmissionAttempt,
   type DetectedReview,
+  type DetectedReviewOutput,
   type ReviewSubmissionAttempt,
 } from './gh-review-detect'
 import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-detect'
@@ -29,6 +31,10 @@ import { detectReviewDump, type ReviewDumpDecision } from './gh-review-inline-de
 
 const pending = new Map<string, DetectedReview>()
 const submissionAttempts = new Map<string, ReviewSubmissionAttempt>()
+// COMMENT-only submissions, stashed apart from `pending`: a decisive verdict is
+// credited to the false-receipt ledger via recordReview (which also fans to the
+// output observer), so only non-verdict COMMENTs need their own output credit.
+const pendingCommentOutput = new Map<string, DetectedReviewOutput>()
 
 const MAX_INPUT_BYTES = 1_000_000
 
@@ -45,8 +51,19 @@ export async function noteReviewCommand(args: { callId: string; command: string 
   // missed shape): only such a command may later arm the backstop, so a reviews
   // READ — which is not an attempt — can never be miscredited as a landed review.
   else {
-    const attempt = detectReviewSubmissionAttempt(args.command)
-    if (attempt !== null) submissionAttempts.set(args.callId, attempt)
+    // A COMMENT review carries no verdict, so it dodges `pending` above — stash it
+    // here so a successful COMMENT still credits review OUTPUT (not the verdict
+    // ledger) and suppresses the router's empty-turn fallback. It is stashed
+    // INSTEAD of a submission attempt: the backstop only ever credits a decisive
+    // verdict, so arming it for a COMMENT would just leave a stale attempt entry
+    // that `commitReviewIfSucceeded`'s COMMENT branch returns before clearing.
+    const output = detectReviewOutput({ command: args.command, inputFileContents })
+    if (output !== null && output.state === 'COMMENT') {
+      pendingCommentOutput.set(args.callId, output)
+    } else {
+      const attempt = detectReviewSubmissionAttempt(args.command)
+      if (attempt !== null) submissionAttempts.set(args.callId, attempt)
+    }
   }
   return { dump: detectReviewDump({ command: args.command, inputFileContents }), detected }
 }
@@ -77,6 +94,22 @@ export function commitReviewIfSucceeded(args: {
       verdict: detected.verdict,
     })
     return { committed: true, landedFromResult: null }
+  }
+
+  // A COMMENT review credits review OUTPUT only (never the verdict ledger). Same
+  // fail-closed success bias as verdicts: an ambiguous result stays uncredited.
+  const comment = pendingCommentOutput.get(args.callId)
+  if (comment !== undefined) {
+    pendingCommentOutput.delete(args.callId)
+    if (commentReviewSucceeded(text)) {
+      recordReviewOutput({
+        sessionId: args.sessionId,
+        workspace: comment.workspace,
+        prNumber: comment.prNumber,
+        state: 'COMMENT',
+      })
+    }
+    return { committed: false, landedFromResult: null }
   }
 
   // The backstop runs ONLY for a command that tool.before saw as a real
@@ -177,7 +210,15 @@ const API_SUCCESS_MARKERS = [
   '"state": "APPROVED"',
 ]
 const PR_REVIEW_SUCCESS_MARKERS = ['Approved pull request', 'Requested changes to pull request']
+// COMMENT vectors: REST echoes `"state":"COMMENTED"`; the `gh pr review --comment`
+// porcelain prints "Reviewed pull request …". Covers both spacings of the JSON.
+const COMMENT_SUCCESS_MARKERS = ['"state":"COMMENTED"', '"state": "COMMENTED"', 'Reviewed pull request']
 const FAILURE_MARKERS = ['gh: ', 'HTTP 4', 'HTTP 5', 'Bad credentials', 'Not Found', 'Validation Failed']
+
+function commentReviewSucceeded(text: string): boolean {
+  if (FAILURE_MARKERS.some((m) => text.includes(m))) return false
+  return COMMENT_SUCCESS_MARKERS.some((m) => text.includes(m))
+}
 
 // Require a success marker AND no failure marker, so a partial/garbled capture
 // fails closed (uncredited).
