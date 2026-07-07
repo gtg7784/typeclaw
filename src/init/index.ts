@@ -89,6 +89,7 @@ export type InitStep =
   | 'instagram-auth'
   | 'kakaotalk-auth'
   | 'webex-auth'
+  | 'teams-auth'
   | 'github-webhooks'
   | 'install'
   | 'dockerfile'
@@ -97,6 +98,7 @@ export type InitStep =
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 export type WebexAuthResult = { ok: true } | { ok: false; reason: string }
+export type TeamsAuthResult = { ok: true } | { ok: false; reason: string }
 export type SlackAuthResult = { ok: true } | { ok: false; reason: string }
 export type DiscordAuthResult = { ok: true } | { ok: false; reason: string }
 export type InstagramAuthResult = { ok: true } | { ok: false; reason: string }
@@ -137,6 +139,8 @@ export type InitStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
+  | { step: 'teams-auth'; phase: 'start' }
+  | { step: 'teams-auth'; phase: 'done'; result: TeamsAuthResult }
   | { step: 'discord-auth'; phase: 'start' }
   | { step: 'discord-auth'; phase: 'done'; result: DiscordAuthResult }
   | { step: 'instagram-auth'; phase: 'start' }
@@ -170,6 +174,7 @@ export type HatchRunner = (options: {
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 export type WebexAuthRunner = (options: { cwd: string }) => Promise<WebexAuthResult>
+export type TeamsAuthRunner = (options: { cwd: string }) => Promise<TeamsAuthResult>
 
 export type LineAuthResult = { ok: true } | { ok: false; reason: string }
 export type LineAuthRunner = (options: { cwd: string }) => Promise<LineAuthResult>
@@ -228,11 +233,13 @@ export type InitOptions = {
   withTelegram?: boolean
   withWebex?: boolean
   withWebexUser?: boolean
+  withTeams?: boolean
   withInstagram?: boolean
   withKakaotalk?: boolean
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   runWebexAuth?: WebexAuthRunner
+  runTeamsAuth?: TeamsAuthRunner
   runDiscordAuth?: DiscordAuthRunner
   runInstagramAuth?: InstagramAuthRunner
   // Structured GitHub credentials collected by the wizard. When omitted and
@@ -280,11 +287,13 @@ export async function runInit({
   withTelegram,
   withWebex,
   withWebexUser = false,
+  withTeams = false,
   withInstagram = false,
   withKakaotalk = false,
   withGithub = false,
   runKakaotalkAuth,
   runWebexAuth,
+  runTeamsAuth,
   runDiscordAuth,
   runInstagramAuth,
   githubCredentials,
@@ -367,6 +376,7 @@ export async function runInit({
     withTelegram: wantsTelegram,
     withWebex: wantsWebex,
     withWebexUser,
+    withTeams,
     withInstagram,
     withKakaotalk,
     platform,
@@ -409,6 +419,15 @@ export async function runInit({
     emit({ step: 'webex-auth', phase: 'done', result })
     if (!result.ok) {
       throw new Error(`Webex authentication failed: ${result.reason}`)
+    }
+  }
+
+  if (withTeams && runTeamsAuth !== undefined) {
+    emit({ step: 'teams-auth', phase: 'start' })
+    const result = await runTeamsAuth({ cwd })
+    emit({ step: 'teams-auth', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`Teams authentication failed: ${result.reason}`)
     }
   }
 
@@ -482,6 +501,7 @@ export async function runInit({
   if (wantsTelegram) configuredChannels.push('telegram-bot')
   if (wantsWebex) configuredChannels.push('webex-bot')
   if (withWebexUser) configuredChannels.push('webex')
+  if (withTeams) configuredChannels.push('teams')
   if (withInstagram) configuredChannels.push('instagram')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
   if (withGithub) configuredChannels.push('github')
@@ -653,6 +673,7 @@ export type ScaffoldOptions = {
   withTelegram?: boolean
   withWebex?: boolean
   withWebexUser?: boolean
+  withTeams?: boolean
   withInstagram?: boolean
   withKakaotalk?: boolean
   // Defaults to `process.platform`; controls the dev-mode typeclaw spec
@@ -692,6 +713,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withTelegram) channels['telegram-bot'] = {}
   if (options.withWebex) channels['webex-bot'] = {}
   if (options.withWebexUser) channels.webex = {}
+  if (options.withTeams) channels.teams = {}
   if (options.withInstagram) channels.instagram = {}
   if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
@@ -1008,7 +1030,7 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'instagram' | 'line' | 'kakaotalk' | 'github',
+  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'teams' | 'instagram' | 'line' | 'kakaotalk' | 'github',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -1021,6 +1043,8 @@ export async function hasExistingChannelSecrets(
       return hasSecretField(channels['telegram-bot'], 'token')
     case 'webex':
       return hasCurrentWebexAccount(channels.webex)
+    case 'teams':
+      return hasCurrentTeamsAccount(channels.teams)
     case 'github':
       // GitHub credentials alone are not enough to scaffold a working
       // channel: typeclaw.json#channels.github also needs webhookUrl and
@@ -1103,6 +1127,33 @@ function hasCurrentWebexAccount(block: unknown): boolean {
   const email = (account as { email?: unknown }).email
   const encryptedPassword = (account as { encryptedPassword?: unknown }).encryptedPassword
   return typeof token === 'string' && token.length > 0 && typeof email === 'string' && isObjectRecord(encryptedPassword)
+}
+
+// A Teams block is only reusable when the current account can survive
+// unattended: the Skype access token lapses in ~60-90min, so silent renewal
+// needs the full AAD refresh trio (refresh token + client id + tenant id). An
+// access-token-only block (e.g. a hand-pasted token) would go stale with no way
+// to re-mint, so treat it as not-configured and let the wizard re-run the
+// device-code login rather than wiring a channel that dies within the hour.
+function hasCurrentTeamsAccount(block: unknown): boolean {
+  if (!isObjectRecord(block)) return false
+  const current = (block as { currentAccount?: unknown }).currentAccount
+  if (typeof current !== 'string' || current.length === 0) return false
+  const accounts = (block as { accounts?: unknown }).accounts
+  if (!isObjectRecord(accounts)) return false
+  const account = accounts[current]
+  if (!isObjectRecord(account)) return false
+  return (
+    hasNonEmptyString(account, 'access_token') &&
+    hasNonEmptyString(account, 'aad_refresh_token') &&
+    hasNonEmptyString(account, 'aad_client_id') &&
+    hasNonEmptyString(account, 'aad_tenant_id')
+  )
+}
+
+function hasNonEmptyString(record: Record<string, unknown>, key: string): boolean {
+  const value = record[key]
+  return typeof value === 'string' && value.length > 0
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -1196,6 +1247,8 @@ export type AddChannelStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'webex-auth'; phase: 'start' }
   | { step: 'webex-auth'; phase: 'done'; result: WebexAuthResult }
+  | { step: 'teams-auth'; phase: 'start' }
+  | { step: 'teams-auth'; phase: 'done'; result: TeamsAuthResult }
   | { step: 'discord-auth'; phase: 'start' }
   | { step: 'discord-auth'; phase: 'done'; result: DiscordAuthResult }
   | { step: 'slack-auth'; phase: 'start' }
@@ -1219,6 +1272,7 @@ export type AddChannelOptions = {
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex-bot'; webexBotToken: string }
   | { channel: 'webex'; runWebexAuth: WebexAuthRunner }
+  | { channel: 'teams'; runTeamsAuth: TeamsAuthRunner }
   | { channel: 'instagram'; runInstagramAuth: InstagramAuthRunner }
   | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
@@ -1276,6 +1330,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     const result = await options.runWebexAuth({ cwd: options.cwd })
     emit({ step: 'webex-auth', phase: 'done', result })
     if (!result.ok) throw new Error(`Webex authentication failed: ${result.reason}`)
+  }
+
+  if (options.channel === 'teams') {
+    emit({ step: 'teams-auth', phase: 'start' })
+    const result = await options.runTeamsAuth({ cwd: options.cwd })
+    emit({ step: 'teams-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`Teams authentication failed: ${result.reason}`)
   }
 
   if (options.channel === 'discord') {
@@ -1372,6 +1433,10 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'webex-bot':
       return { token: options.webexBotToken }
     case 'webex':
+      return {}
+    case 'teams':
+      // Teams auth writes its structured account block directly to
+      // secrets.json#channels.teams before config mutation.
       return {}
     case 'instagram':
       return {}

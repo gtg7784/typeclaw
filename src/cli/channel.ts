@@ -34,6 +34,7 @@ import {
   type KakaotalkAuthResult,
   type LineAuthResult,
   type SlackAuthResult,
+  type TeamsAuthResult,
   type WebexAuthResult,
 } from '@/init'
 import { runDiscordBootstrap } from '@/init/discord-auth'
@@ -41,8 +42,10 @@ import { runInstagramBootstrap, type InstagramLoginCallbacks } from '@/init/inst
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
 import { runSlackBootstrap } from '@/init/slack-auth'
+import { runTeamsBootstrap, type TeamsDeviceCodeCallbacks } from '@/init/teams-auth'
 import { runWebexBootstrap } from '@/init/webex-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+import type { TeamsAccountType } from '@/secrets/schema'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
@@ -64,11 +67,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   github: 'GitHub',
 }
 
-// Teams has no interactive auth flow yet (device-code/AAD login isn't wired
-// into `channel add`), so it is hidden from the picker and the addable-arg
-// validation. It stays a first-class ChannelKind for list/remove/config; the
-// adapter runs from a manually-populated secrets.json#channels.teams block.
-const ADDABLE_CHANNEL_KINDS = CHANNEL_KINDS.filter((kind) => kind !== 'teams')
+const ADDABLE_CHANNEL_KINDS = CHANNEL_KINDS
 
 const addSub = defineCommand({
   meta: {
@@ -194,7 +193,7 @@ const setSub = defineCommand({
 // than a token-field rotation (`channel set`). Discord (User) belongs here — its
 // unofficial QR session expires and is refreshed by replaying the QR login, the
 // same shape as LINE's QR flow. `discord-bot` stays in SETTABLE_ADAPTERS.
-const REAUTHABLE_ADAPTERS = ['line', 'instagram', 'kakaotalk', 'webex', 'discord'] as const
+const REAUTHABLE_ADAPTERS = ['line', 'instagram', 'kakaotalk', 'webex', 'discord', 'teams'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
 const reauthSub = defineCommand({
@@ -482,7 +481,22 @@ async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void>
     case 'discord':
       await runDiscordReauth(cwd)
       return
+    case 'teams':
+      await runTeamsReauth(cwd)
+      return
   }
+}
+
+async function runTeamsReauth(cwd: string): Promise<void> {
+  const accountType = await promptTeamsAccountType()
+  const result = await runTeamsBootstrap({ agentDir: cwd, accountType, callbacks: teamsDeviceCodeCallbacks() })
+  if (!result.ok) {
+    console.error(errorLine(`Teams login failed: ${result.reason}`))
+    process.exit(1)
+  }
+  process.stdout.write(`${successLine('Teams credentials refreshed in secrets.json.')}\n`)
+
+  await maybePromptReauthRefresh(cwd, 'teams')
 }
 
 async function runInstagramReauth(cwd: string): Promise<void> {
@@ -1017,6 +1031,7 @@ type CollectedCredentials =
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'webex'; runWebexAuth: (options: { cwd: string }) => Promise<WebexAuthResult> }
   | { channel: 'webex-bot'; webexBotToken: string }
+  | { channel: 'teams'; runTeamsAuth: (options: { cwd: string }) => Promise<TeamsAuthResult> }
   | { channel: 'instagram'; runInstagramAuth: (options: { cwd: string }) => Promise<InstagramAuthResult> }
   | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
@@ -1064,14 +1079,14 @@ async function collectCredentials(
     }
     case 'webex-bot':
       return { channel, webexBotToken: await promptWebexToken() }
-    case 'teams':
-      // Unreachable in practice: `validateAdapterArg`/`pickChannel` exclude
-      // Teams from the addable set (ADDABLE_CHANNEL_KINDS). Kept as a guard so
-      // this exhaustive switch still compiles and fails loudly if that
-      // exclusion ever regresses.
-      throw new Error(
-        'Teams channel add is not yet supported interactively. Populate secrets.json#channels.teams manually.',
-      )
+    case 'teams': {
+      const accountType = await promptTeamsAccountType()
+      return {
+        channel,
+        runTeamsAuth: ({ cwd: agentDir }) =>
+          runTeamsBootstrap({ agentDir, accountType, callbacks: teamsDeviceCodeCallbacks() }),
+      }
+    }
     case 'instagram': {
       const creds = await promptInstagramCredentials()
       const callbacks = instagramLoginCallbacks(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)
@@ -1545,6 +1560,47 @@ async function promptWebexToken(): Promise<string> {
   return token
 }
 
+async function promptTeamsAccountType(): Promise<TeamsAccountType> {
+  note(
+    [
+      'Teams signs in as your own Microsoft account via device-code login —',
+      'no bot registration. You get a short code to enter at',
+      'microsoft.com/devicelogin, then approve the sign-in.',
+    ].join('\n'),
+    'About to log in to Teams',
+  )
+  const accountType = await select<TeamsAccountType>({
+    message: 'Which kind of Microsoft account?',
+    options: [
+      { value: 'work', label: 'Work or school (Microsoft 365 / Azure AD)' },
+      { value: 'personal', label: 'Personal Microsoft account (outlook.com, live.com, …)' },
+    ],
+    initialValue: 'work',
+  })
+  if (isCancel(accountType)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return accountType
+}
+
+export function teamsDeviceCodeCallbacks(): TeamsDeviceCodeCallbacks {
+  return {
+    onCode: (prompt) => {
+      note(
+        [
+          `Open ${prompt.verificationUri}`,
+          `Enter code: ${prompt.userCode}`,
+          '',
+          'Then approve the sign-in in your browser. Waiting for approval…',
+        ].join('\n'),
+        'Teams device-code login',
+      )
+    },
+    onPending: () => log.info('Approved — minting the Teams token…'),
+  }
+}
+
 async function promptKakaotalkCredentials(
   opts: { defaultEmail?: string } = {},
 ): Promise<{ email: string; password: string }> {
@@ -1842,6 +1898,9 @@ function reportProgress(
       case 'webex-auth':
         s.stop(reportWebexAuth(event.result))
         break
+      case 'teams-auth':
+        s.stop(reportTeamsAuth(event.result))
+        break
       case 'discord-auth':
         s.stop(reportDiscordAuth(event.result))
         break
@@ -1866,6 +1925,7 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'instagram-auth': 'Logging in to Instagram...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
+  'teams-auth': 'Logging in to Teams...',
   'discord-auth': 'Logging in to Discord...',
   'slack-auth': 'Logging in to Slack...',
   config: 'Updating typeclaw.json...',
@@ -1891,6 +1951,11 @@ function reportDiscordAuth(result: DiscordAuthResult): string {
 function reportWebexAuth(result: WebexAuthResult): string {
   if (result.ok) return 'Webex credentials saved to secrets.json.'
   return `Webex login failed: ${result.reason}`
+}
+
+function reportTeamsAuth(result: TeamsAuthResult): string {
+  if (result.ok) return 'Teams credentials saved to secrets.json.'
+  return `Teams login failed: ${result.reason}`
 }
 
 function reportLineAuth(result: LineAuthResult): string {
