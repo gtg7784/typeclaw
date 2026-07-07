@@ -43,6 +43,7 @@ export type Scheduler = {
   start: () => void
   stop: () => void
   replaceJobs: (jobs: CronJob[]) => JobDiff
+  currentJobs: () => readonly CronJob[]
 }
 
 const realClock: SchedulerClock = {
@@ -187,6 +188,9 @@ export function createScheduler({
       for (const job of result.added) scheduleNext(job.id)
 
       return result
+    },
+    currentJobs() {
+      return [...registry.values()]
     },
   }
 }

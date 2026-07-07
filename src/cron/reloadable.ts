@@ -36,11 +36,34 @@ async function doReload({
   getSubagents,
 }: CreateCronReloadableOptions): Promise<ReloadResult> {
   const subagents = getSubagents?.()
-  const loaded = await loadCron(cwd, subagents !== undefined ? { subagents } : {})
+  const loaded = await loadCron(cwd, { mode: 'boot', ...(subagents !== undefined ? { subagents } : {}) })
   if (!loaded.ok) {
     return { scope: 'cron', ok: false, reason: loaded.reason }
   }
+  const warnings = loaded.warnings ?? []
+  for (const warning of warnings) {
+    console.error(`[cron] skipped invalid job on reload: ${warning.reason}`)
+  }
   const userJobs = loaded.file?.jobs ?? []
+
+  // Wipe-guard: refuse a reload that would drop every user job *because they
+  // failed to parse* (not because the file was intentionally emptied) while a
+  // schedule is live, so a fat-fingered edit can't silently wipe running crons.
+  // A valid empty file has no warnings and passes through as intentional
+  // deletion. The live user-job baseline comes from the scheduler (single
+  // source of truth) minus the internal/plugin jobs, which are always present
+  // and must not count as "user jobs exist".
+  const internalIds = new Set((internalJobs?.() ?? []).map((job) => job.id))
+  const liveUserJobCount = scheduler.currentJobs().filter((job) => !internalIds.has(job.id)).length
+  if (warnings.length > 0 && userJobs.length === 0 && liveUserJobCount > 0) {
+    const reason = warnings.map((w) => w.reason).join('; ')
+    return {
+      scope: 'cron',
+      ok: false,
+      reason: `every configured user cron job is invalid; live schedule preserved: ${reason}`,
+    }
+  }
+
   const nextJobs: CronJob[] = [...userJobs, ...(internalJobs?.() ?? [])]
 
   let diff: JobDiff
@@ -51,12 +74,7 @@ async function doReload({
     return { scope: 'cron', ok: false, reason: `apply failed (schedule unchanged): ${message}` }
   }
 
-  return {
-    scope: 'cron',
-    ok: true,
-    summary: formatSummary(diff, nextJobs.length),
-    details: diff,
-  }
+  return { scope: 'cron', ok: true, summary: formatSummary(diff, nextJobs.length), details: diff }
 }
 
 function formatSummary(diff: JobDiff, total: number): string {

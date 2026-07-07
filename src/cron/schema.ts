@@ -66,15 +66,28 @@ export type HandlerJob = z.infer<typeof baseJob> & {
 export type CronJob = ParsedCronJob | HandlerJob
 export type CronFile = z.infer<typeof cronFileSchema>
 
-export type ParseCronResult = { ok: true; file: CronFile } | { ok: false; reason: string }
+export type CronParseWarning = { jobId?: string; index: number; reason: string }
 
-// `edit` is the strict path for an agent writing/editing cron.json: a past
-// enabled `at` is rejected so a reminder scheduled in the past surfaces as an
-// error instead of silently becoming a never-firing no-op. `load` is the
-// tolerant path the scheduler uses on boot/reload: a fired or missed one-shot
-// lingers on disk with a now-past `at`, and rejecting it would brick the whole
-// file — so `load` accepts it and lets the scheduler retire it passively.
-export type ParseCronMode = 'edit' | 'load'
+export type ParseCronResult =
+  | { ok: true; file: CronFile; warnings?: CronParseWarning[] }
+  | { ok: false; reason: string }
+
+// `edit` is the strict authoring path for an agent writing/editing cron.json: a
+// past enabled `at`/`until` is rejected so a job scheduled in the past surfaces
+// as an error instead of silently becoming a never-firing no-op, and any single
+// bad job fails the whole file so the author sees it.
+//
+// `load` is the strict programmatic/security path (cron-promotion inspection,
+// reload validation): it tolerates fired past `at`/`until` tombstones but still
+// fails the whole file on any structurally bad job, so a security policy never
+// reasons over a silently-filtered subset.
+//
+// `boot` is the runtime-survivability path used only by the scheduler on
+// container boot/reload: it isolates bad individual jobs (skips them, emits a
+// warning) and keeps the valid ones, so one malformed job can never brick every
+// cron — including the plugin-registered dreaming job that isn't even in the
+// file. It shares `load`'s tolerance for expired `at`/`until`.
+export type ParseCronMode = 'edit' | 'load' | 'boot'
 
 export type ParseCronOptions = {
   // When provided, prompt jobs with a `subagent` field are validated against
@@ -113,40 +126,56 @@ export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): Par
   }
 
   const file = parsed.data
+  const mode = options.mode ?? 'load'
+  const now = options.now ?? Date.now()
+
+  const validJobs: ParsedCronJob[] = []
+  const warnings: CronParseWarning[] = []
   const seen = new Set<string>()
-  for (const job of file.jobs) {
-    if (seen.has(job.id)) {
-      return { ok: false, reason: `duplicate job id: ${job.id}` }
+
+  for (const [index, job] of file.jobs.entries()) {
+    const duplicate = seen.has(job.id)
+    const reason = duplicate
+      ? `duplicate job id: ${job.id}`
+      : validateJob(job, { now, mode, subagents: options.subagents })
+
+    if (reason !== null) {
+      const scoped = duplicate ? reason : `job ${job.id}: ${reason}`
+      if (mode !== 'boot') return { ok: false, reason: scoped }
+      warnings.push({ jobId: job.id, index, reason: scoped })
+      continue
     }
+
     seen.add(job.id)
+    validJobs.push(job)
+  }
 
-    const timingError = validateTiming(job, options.now ?? Date.now(), options.mode ?? 'load')
-    if (timingError !== null) {
-      return { ok: false, reason: `job ${job.id}: ${timingError}` }
-    }
+  if (mode !== 'boot') return { ok: true, file }
+  return { ok: true, file: { ...file, jobs: validJobs }, ...(warnings.length > 0 ? { warnings } : {}) }
+}
 
-    if (job.scheduledByRole === undefined) {
-      return {
-        ok: false,
-        reason: `job ${job.id}: missing 'scheduledByRole'. Add "scheduledByRole": "owner" if you authored this entry manually.`,
-      }
-    }
+function validateJob(
+  job: ParsedCronJob,
+  { now, mode, subagents }: { now: number; mode: ParseCronMode; subagents?: SubagentRegistry },
+): string | null {
+  const timingError = validateTiming(job, now, mode)
+  if (timingError !== null) return timingError
 
-    if (job.kind === 'prompt' && job.subagent !== undefined && options.subagents !== undefined) {
-      const subagent = options.subagents[job.subagent]
-      if (!subagent) {
-        return { ok: false, reason: `job ${job.id}: unknown subagent "${job.subagent}"` }
-      }
-      try {
-        validateSubagentPayload(job.subagent, subagent, job.payload)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return { ok: false, reason: `job ${job.id}: ${message}` }
-      }
+  if (job.scheduledByRole === undefined) {
+    return `missing 'scheduledByRole'. Add "scheduledByRole": "owner" if you authored this entry manually.`
+  }
+
+  if (job.kind === 'prompt' && job.subagent !== undefined && subagents !== undefined) {
+    const subagent = subagents[job.subagent]
+    if (!subagent) return `unknown subagent "${job.subagent}"`
+    try {
+      validateSubagentPayload(job.subagent, subagent, job.payload)
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
     }
   }
 
-  return { ok: true, file }
+  return null
 }
 
 type TimingJob = {
@@ -181,7 +210,11 @@ function validateTiming(job: TimingJob, now: number = Date.now(), mode: ParseCro
   if (job.until !== undefined) {
     until = parseInstant(job.until)
     if (until === null) return `invalid "until": "${job.until}" is not an ISO datetime with an explicit zone/offset`
-    if (job.enabled && until <= now) return `"until" is in the past: "${job.until}"`
+    // Reject an expired boundary only on `edit`; `load`/`boot` tolerate an
+    // already-past `until` (the recurring counterpart of a fired one-shot `at`)
+    // so an expired job goes inert instead of bricking the whole file on reload.
+    // See ParseCronMode for the full rationale.
+    if (mode === 'edit' && job.enabled && until <= now) return `"until" is in the past: "${job.until}"`
   }
 
   let firstFire: number
@@ -199,7 +232,7 @@ function validateTiming(job: TimingJob, now: number = Date.now(), mode: ParseCro
     return `invalid schedule "${job.schedule}": ${message}`
   }
 
-  if (job.enabled && until !== null && firstFire > until) {
+  if (mode === 'edit' && job.enabled && until !== null && firstFire > until) {
     return `schedule has no occurrence at or before "until" ("${job.until}")`
   }
 

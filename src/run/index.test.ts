@@ -22,6 +22,7 @@ function stubScheduler(): Scheduler {
     start: () => {},
     stop: () => {},
     replaceJobs: () => ({ added: [], removed: [], updated: [], unchanged: [] }),
+    currentJobs: () => [],
   }
 }
 
@@ -260,6 +261,7 @@ describe('startAgent', () => {
         stopped = true
       },
       replaceJobs: () => ({ added: [], removed: [], updated: [], unchanged: [] }),
+      currentJobs: () => [],
     }
     const createSchedulerFor: SchedulerFactory = () => fakeScheduler
 
@@ -295,7 +297,11 @@ describe('startAgent', () => {
     expect(scopes.indexOf('providers')).toBeLessThan(scopes.indexOf('channels'))
   })
 
-  test('logs and continues when cron.json fails to load', async () => {
+  test('survives a file-level cron.json failure by still scheduling plugin jobs (dreaming stays alive)', async () => {
+    // startAgent loads the real bundled plugins, so the memory plugin's
+    // dreaming cron makes hasInternalJobs true: a broken cron.json must not
+    // take that down. The factory receives an empty user file plus the merged
+    // internal jobs.
     const loadCron: LoadCronFn = async () => ({ ok: false, reason: 'bad json' }) as LoadCronResult
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
@@ -305,8 +311,9 @@ describe('startAgent', () => {
 
     running = await startAgent({ port: 0, attachTui: false, cwd: testCwd, loadCron, createSchedulerFor })
 
-    expect(factoryCalls).toHaveLength(0)
-    expect(running.scheduler).toBeNull()
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.file.jobs).toEqual([])
+    expect(running.scheduler).not.toBeNull()
     expect(running.server.port).toBeGreaterThan(0)
   })
 
@@ -599,13 +606,16 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
         }),
       )
       const replacements: CronJob[][] = []
+      let liveJobs: CronJob[] = []
       const fakeScheduler: Scheduler = {
         start: () => {},
         stop: () => {},
         replaceJobs: (jobs) => {
           replacements.push([...jobs])
+          liveJobs = [...jobs]
           return { added: [], removed: [], updated: [], unchanged: [] }
         },
+        currentJobs: () => liveJobs,
       }
       const createSchedulerFor: SchedulerFactory = () => fakeScheduler
 
