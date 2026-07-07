@@ -300,7 +300,22 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       }
 
       listener = createListener(client)
+      // The SDK auto-reconnects on any WebSocket drop and re-emits `connected`
+      // each reconnect. This permanent handler is what tracks liveness across
+      // reconnects: the one-shot startup wait below only sees the FIRST
+      // `connected`, so without this the flag would stay stuck false after the
+      // first reconnect and the manager's recovery loop would needlessly
+      // restart the adapter. The identity guard stops a late event from a
+      // stopped/rolled-back listener from mutating a fresh adapter's state.
+      const activeListener = listener
+      const isActive = (): boolean => listener === activeListener && started
+      listener.on('connected', () => {
+        if (!isActive()) return
+        connected = true
+        logger.info('[teams] connected')
+      })
       listener.on('disconnected', () => {
+        if (!isActive()) return
         connected = false
         logger.warn('[teams] disconnected')
       })

@@ -506,6 +506,35 @@ describe('createTeamsAdapter', () => {
     await adapter.stop()
   })
 
+  test('isConnected recovers when the SDK re-emits connected after a reconnect', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const adapter = adapterWith({ r, listener, client: fakeClient().client })
+
+    await adapter.start()
+    // given a transient drop the SDK reports as disconnected
+    listener.emit('disconnected', undefined)
+    expect(adapter.isConnected()).toBe(false)
+    // when the SDK auto-reconnects and re-registers its endpoint
+    listener.emit('connected', { endpointId: 'ep-2' })
+    // then the adapter reports live again without a manager restart
+    expect(adapter.isConnected()).toBe(true)
+
+    await adapter.stop()
+  })
+
+  test('a stale listener event after stop cannot flip connected state', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const adapter = adapterWith({ r, listener, client: fakeClient().client })
+
+    await adapter.start()
+    await adapter.stop()
+    // a late event from the stopped listener must not resurrect connected state
+    listener.emit('connected', { endpointId: 'ep-stale' })
+    expect(adapter.isConnected()).toBe(false)
+  })
+
   test('rolls back every registration when the listener errors before connecting', async () => {
     const r = router()
     const listener = new FakeListener()
