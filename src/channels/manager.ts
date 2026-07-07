@@ -10,6 +10,7 @@ import { SecretsLineCredentialStore } from '@/secrets/line-store'
 import type { RuntimeSecretsProvider } from '@/secrets/secrets-provider'
 import { SecretsSlackCredentialStore } from '@/secrets/slack-store'
 import { SecretsBackend } from '@/secrets/storage'
+import { SecretsTeamsCredentialStore } from '@/secrets/teams-store'
 import { SecretsWebexCredentialStore } from '@/secrets/webex-store'
 import type { Stream } from '@/stream'
 
@@ -21,6 +22,7 @@ import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaot
 import { createLineAdapter, type LineAdapter } from './adapters/line'
 import { createSlackAdapter, type SlackAdapter } from './adapters/slack'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
+import { createTeamsAdapter, type TeamsAdapter } from './adapters/teams'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import { createWebexAdapter, type WebexAdapter } from './adapters/webex'
 import { createWebexBotAdapter, type WebexBotAdapter } from './adapters/webex-bot'
@@ -90,6 +92,7 @@ export type ChannelManagerOptions = {
   createLineAdapter?: typeof createLineAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createSlackUserAdapter?: typeof createSlackAdapter
+  createTeamsAdapter?: typeof createTeamsAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
   createWebexAdapter?: typeof createWebexAdapter
   createWebexBotAdapter?: typeof createWebexBotAdapter
@@ -161,6 +164,7 @@ type AnyAdapter =
   | KakaotalkAdapter
   | SlackAdapter
   | SlackBotAdapter
+  | TeamsAdapter
   | TelegramBotAdapter
   | WebexAdapter
   | WebexBotAdapter
@@ -205,6 +209,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createLine = options.createLineAdapter ?? createLineAdapter
   const createSlackBot = options.createSlackAdapter ?? createSlackBotAdapter
   const createSlackUser = options.createSlackUserAdapter ?? createSlackAdapter
+  const createTeams = options.createTeamsAdapter ?? createTeamsAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
   const createWebex = options.createWebexAdapter ?? createWebexAdapter
   const createWebexBot = options.createWebexBotAdapter ?? createWebexBotAdapter
@@ -235,6 +240,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     if (name === 'instagram') return buildInstagramSignature(options.agentDir)
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
     if (name === 'webex') return buildWebexSignature(options.agentDir)
+    if (name === 'teams') return buildTeamsSignature(options.agentDir)
     if (name === 'slack') return buildSlackSignature(options.agentDir)
     if (name === 'discord') return buildDiscordSignature(options.agentDir)
     if (name === 'github') return buildGithubSignature(options.agentDir)
@@ -336,6 +342,17 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const credentialsStore = createContainerWebexCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createWebex({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsStore,
+      })
+    }
+    if (name === 'teams') {
+      const credentialsStore = createContainerTeamsCredentialStore(options.agentDir, options.secretsProvider ?? null)
+      if (credentialsStore === null) return null
+      return createTeams({
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
@@ -562,6 +579,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
               name === 'line' ||
               name === 'instagram' ||
               name === 'webex' ||
+              name === 'teams' ||
               name === 'slack' ||
               name === 'discord'
                 ? 'credential rotation'
@@ -580,7 +598,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 // secrets.json#channels.<adapter>, not in env, so they go through
 // structured-block signatures instead.
 const TOKEN_ENV: Record<
-  Exclude<AdapterId, 'kakaotalk' | 'line' | 'instagram' | 'github' | 'webex' | 'slack' | 'discord'>,
+  Exclude<AdapterId, 'kakaotalk' | 'line' | 'instagram' | 'github' | 'webex' | 'teams' | 'slack' | 'discord'>,
   readonly string[]
 > = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
@@ -670,6 +688,32 @@ function buildWebexSignature(agentDir: string): { signature: string; missing: st
     return { signature: `secrets.json#channels.webex@sha256:${digest}`, missing: [] }
   } catch (err) {
     return { signature: '', missing: [`secrets.json#channels.webex (${describe(err)})`] }
+  }
+}
+
+function createContainerTeamsCredentialStore(
+  agentDir: string,
+  secretsProvider: RuntimeSecretsProvider | null,
+): SecretsTeamsCredentialStore | null {
+  if (secretsProvider === null) return null
+  return new SecretsTeamsCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostProvider: secretsProvider,
+  })
+}
+
+function buildTeamsSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.teams
+    if (!isTeamsCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.teams'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.teams@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`secrets.json#channels.teams (${describe(err)})`] }
   }
 }
 
@@ -823,6 +867,15 @@ function isDiscordCredentialBlock(value: unknown): value is { accounts: Record<s
 }
 
 function isWebexCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
+}
+
+function isTeamsCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   if (!('accounts' in value)) return false
   const accounts = value.accounts

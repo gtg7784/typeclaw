@@ -5558,6 +5558,7 @@ export function formatAuthorAttribution(adapter: AdapterId, authorId: string, au
     case 'telegram-bot':
     case 'webex':
     case 'webex-bot':
+    case 'teams':
     case 'instagram':
     case 'line':
     case 'kakaotalk':
@@ -5591,6 +5592,7 @@ function formatAuthorReference(adapter: AdapterId, authorId: string, authorName:
     case 'telegram-bot':
     case 'webex':
     case 'webex-bot':
+    case 'teams':
     case 'instagram':
     case 'line':
     case 'kakaotalk':

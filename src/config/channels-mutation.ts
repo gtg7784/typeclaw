@@ -15,6 +15,7 @@ export const CHANNEL_KINDS = [
   'telegram-bot',
   'webex',
   'webex-bot',
+  'teams',
   'instagram',
   'line',
   'kakaotalk',

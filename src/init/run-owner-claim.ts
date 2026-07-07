@@ -14,6 +14,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
   'webex-bot': 'Webex',
+  teams: 'Teams',
   instagram: 'Instagram',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',

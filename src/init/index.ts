@@ -1149,6 +1149,7 @@ export type ChannelKind =
   | 'telegram-bot'
   | 'webex'
   | 'webex-bot'
+  | 'teams'
   | 'instagram'
   | 'line'
   | 'kakaotalk'
@@ -1166,6 +1167,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'telegram-bot',
   'webex',
   'webex-bot',
+  'teams',
   'instagram',
   'line',
   'kakaotalk',

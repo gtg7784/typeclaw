@@ -57,11 +57,18 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
   'webex-bot': 'Webex',
+  teams: 'Teams',
   instagram: 'Instagram',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
   github: 'GitHub',
 }
+
+// Teams has no interactive auth flow yet (device-code/AAD login isn't wired
+// into `channel add`), so it is hidden from the picker and the addable-arg
+// validation. It stays a first-class ChannelKind for list/remove/config; the
+// adapter runs from a manually-populated secrets.json#channels.teams block.
+const ADDABLE_CHANNEL_KINDS = CHANNEL_KINDS.filter((kind) => kind !== 'teams')
 
 const addSub = defineCommand({
   meta: {
@@ -71,7 +78,7 @@ const addSub = defineCommand({
   args: {
     adapter: {
       type: 'positional',
-      description: `which adapter to add (${CHANNEL_KINDS.join(' | ')}); omit to pick interactively`,
+      description: `which adapter to add (${ADDABLE_CHANNEL_KINDS.join(' | ')}); omit to pick interactively`,
       required: false,
     },
   },
@@ -654,7 +661,15 @@ async function maybePromptCredentialRefresh(
 
 function validateAdapterArg(adapter: string, configured: Set<ChannelKind>): ChannelKind {
   if (!isChannelKind(adapter)) {
-    console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${CHANNEL_KINDS.join(', ')}.`))
+    console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${ADDABLE_CHANNEL_KINDS.join(', ')}.`))
+    process.exit(1)
+  }
+  if (!(ADDABLE_CHANNEL_KINDS as ReadonlyArray<string>).includes(adapter)) {
+    console.error(
+      errorLine(
+        `${CHANNEL_LABELS[adapter]} ("${adapter}") has no interactive auth yet. Populate secrets.json#channels.${adapter} manually.`,
+      ),
+    )
     process.exit(1)
   }
   if (configured.has(adapter)) {
@@ -673,7 +688,7 @@ function isChannelKind(value: string): value is ChannelKind {
 }
 
 async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
-  const available = CHANNEL_KINDS.filter((kind) => !configured.has(kind))
+  const available = ADDABLE_CHANNEL_KINDS.filter((kind) => !configured.has(kind))
   if (available.length === 0) {
     console.error(errorLine('All supported channel adapters are already configured in typeclaw.json. Nothing to add.'))
     process.exit(0)
@@ -1049,6 +1064,14 @@ async function collectCredentials(
     }
     case 'webex-bot':
       return { channel, webexBotToken: await promptWebexToken() }
+    case 'teams':
+      // Unreachable in practice: `validateAdapterArg`/`pickChannel` exclude
+      // Teams from the addable set (ADDABLE_CHANNEL_KINDS). Kept as a guard so
+      // this exhaustive switch still compiles and fails loudly if that
+      // exclusion ever regresses.
+      throw new Error(
+        'Teams channel add is not yet supported interactively. Populate secrets.json#channels.teams manually.',
+      )
     case 'instagram': {
       const creds = await promptInstagramCredentials()
       const callbacks = instagramLoginCallbacks(lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined)

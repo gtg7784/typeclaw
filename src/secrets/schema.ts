@@ -182,6 +182,34 @@ export const webexChannelBlockSchema = z.object({
   accounts: z.record(z.string(), webexAccountRecordSchema),
 })
 
+const teamsAccountTypeSchema = z.union([z.literal('work'), z.literal('personal')])
+const teamsRegionSchema = z.union([z.literal('amer'), z.literal('emea'), z.literal('apac')])
+
+// Teams user-account credentials. The short-lived `access_token` expires in
+// 60-90 minutes, so a long-running adapter relies on `aad_refresh_token` (+
+// client/tenant ids from the device-code login) to silently re-mint it through
+// the agent-messenger SDK. The refresh trio is optional so an extracted-token
+// account still parses, but such an account degrades to "reauth required" once
+// the access token lapses.
+export const teamsAccountRecordSchema = z.object({
+  account_id: z.string(),
+  access_token: z.string(),
+  token_expires_at: z.string().optional(),
+  account_type: teamsAccountTypeSchema,
+  region: teamsRegionSchema.optional(),
+  user_name: z.string().optional(),
+  aad_refresh_token: z.string().optional(),
+  aad_client_id: z.string().optional(),
+  aad_tenant_id: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const teamsChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), teamsAccountRecordSchema),
+})
+
 export const slackAccountRecordSchema = z.object({
   account_id: z.string(),
   token: z.string(),
@@ -221,6 +249,7 @@ export const channelsSchema = z
     instagram: instagramChannelBlockSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
     webex: webexChannelBlockSchema.optional(),
+    teams: teamsChannelBlockSchema.optional(),
     slack: slackChannelBlockSchema.optional(),
   })
   .catchall(z.unknown())
@@ -257,6 +286,8 @@ export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
 export type WebexAccountRecord = z.infer<typeof webexAccountRecordSchema>
 export type WebexChannelBlock = z.infer<typeof webexChannelBlockSchema>
 export type WebexEncryptedPassword = z.infer<typeof webexEncryptedPasswordSchema>
+export type TeamsAccountRecord = z.infer<typeof teamsAccountRecordSchema>
+export type TeamsChannelBlock = z.infer<typeof teamsChannelBlockSchema>
 export type SlackAccountRecord = z.infer<typeof slackAccountRecordSchema>
 export type SlackChannelBlock = z.infer<typeof slackChannelBlockSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
