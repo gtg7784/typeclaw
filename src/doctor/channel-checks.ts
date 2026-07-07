@@ -32,6 +32,7 @@ export function buildChannelChecks(): DoctorCheck[] {
     discordUserCredentials(),
     slackUserCredentials(),
     webexUserCredentials(),
+    teamsCredentials(),
     instagramCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
@@ -154,6 +155,32 @@ function webexUserCredentials(): DoctorCheck {
         }
       }
       return { status: 'ok', message: 'webex has a current account access_token' }
+    },
+  }
+}
+
+function teamsCredentials(): DoctorCheck {
+  return {
+    name: 'channel.teams.credentials',
+    category: 'channels',
+    description: 'teams adapter has a current account with an access token in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'teams')) {
+        return { status: 'skipped', message: 'teams not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.teams
+      if (!hasCurrentAccountTokenField(block, 'access_token')) {
+        return {
+          status: 'warning',
+          message: 'teams has no current account access_token in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Populate secrets.json#channels.teams manually with an access token to authenticate.' },
+        }
+      }
+      return { status: 'ok', message: 'teams has a current account access_token' }
     },
   }
 }

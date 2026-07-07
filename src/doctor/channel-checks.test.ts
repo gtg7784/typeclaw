@@ -72,6 +72,7 @@ describe('buildChannelChecks', () => {
       'channel.discord.credentials',
       'channel.slack.credentials',
       'channel.webex.credentials',
+      'channel.teams.credentials',
       'channel.instagram.credentials',
       'channel.line.credentials',
       'channel.kakaotalk.credentials',
@@ -285,6 +286,43 @@ describe('buildChannelChecks', () => {
       const result = await runCheck('channel.kakaotalk.credentials', ctxFor(cwd))
       expect(result.status).toBe('ok')
       expect(result.message).toContain('1 account')
+    })
+  })
+
+  describe('teams', () => {
+    test('skips when not configured', async () => {
+      const cwd = makeTmpAgentDir({})
+      const result = await runCheck('channel.teams.credentials', ctxFor(cwd))
+      expect(result.status).toBe('skipped')
+    })
+
+    test('warns when configured but current account has no access_token', async () => {
+      const cwd = makeTmpAgentDir({ teams: {} })
+      const result = await runCheck('channel.teams.credentials', ctxFor(cwd))
+      expect(result.status).toBe('warning')
+      expect(result.message).toMatch(/no current account access_token/)
+      expect(result.fix?.description).toContain('secrets.json#channels.teams')
+    })
+
+    test('passes when the current account has an access_token', async () => {
+      const cwd = makeTmpAgentDir({ teams: {} })
+      writeChannelsSecrets(cwd, {
+        teams: {
+          currentAccount: 'a',
+          accounts: {
+            a: {
+              account_id: 'a',
+              access_token: 't',
+              account_type: 'work',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+            },
+          },
+        },
+      })
+      const result = await runCheck('channel.teams.credentials', ctxFor(cwd))
+      expect(result.status).toBe('ok')
+      expect(result.message).toContain('access_token')
     })
   })
 
