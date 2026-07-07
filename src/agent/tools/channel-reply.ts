@@ -210,14 +210,21 @@ export function createChannelReplyTool({
       // flag fixes). Resolve-failure blocks the reply so the agent never posts
       // a "looks resolved" ack next to a still-open thread; the router enforces
       // that only the bot's own threads can be resolved.
+      let resolveMissNotice: string | null = null
       if (params.resolve_review_thread === true) {
-        const resolveError = await resolveReviewThreadBeforeReply(router, origin)
-        if (resolveError !== null) {
-          logger.warn(formatChannelToolFailure('channel_reply', resolveError))
+        const resolve = await resolveReviewThreadBeforeReply(router, origin)
+        if (resolve.kind === 'block') {
+          logger.warn(formatChannelToolFailure('channel_reply', resolve.error))
           return {
-            content: [{ type: 'text' as const, text: `channel_reply denied: ${resolveError}` }],
-            details: { ok: false, error: resolveError },
+            content: [{ type: 'text' as const, text: `channel_reply denied: ${resolve.error}` }],
+            details: { ok: false, error: resolve.error },
           }
+        }
+        // `no-match` stays non-blocking (the thread may be genuinely gone) but
+        // the resolve did NOT run, so tell the model instead of posting a clean
+        // receipt that hides the miss. Mirrors channel_send.
+        if (resolve.kind === 'no-match') {
+          resolveMissNotice = resolveMissHint(origin.thread)
         }
       }
 
@@ -287,8 +294,9 @@ export function createChannelReplyTool({
         // intentionally weaker and is safe ONLY because denials carry no echoed
         // prose; the success result does, and the weak prefix let Kimi loop.
         const warnNote = falseReceiptNotice !== null ? fenceRuntimeNotice(falseReceiptNotice) : ''
+        const missNote = resolveMissNotice ?? ''
         return {
-          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hint}${warnNote}` }],
+          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hint}${warnNote}${missNote}` }],
           details,
         }
       }
@@ -324,21 +332,25 @@ function missingReviewThreadResolveChoiceError(input: {
   )
 }
 
-// Returns an error string when the resolve should block the reply, or null
-// when it's safe to proceed. Only `no-match` (the thread is already gone, so
-// there's nothing to close) joins success as non-blocking; every hard failure
-// — wrong author, permission denial, HTTP 404 on a misdirected lookup,
-// transient API error — blocks, so the agent never claims a thread is settled
-// when the resolve did not actually run.
+// `block` when the resolve should stop the reply, `no-match` when the thread is
+// gone (non-blocking — the reply posts but the caller warns), `resolved` on
+// success. Every hard failure — wrong author, permission denial, HTTP 404 on a
+// misdirected lookup, transient API error — blocks, so the agent never claims a
+// thread is settled when the resolve did not actually run.
+type ResolveOutcome = { kind: 'resolved' } | { kind: 'no-match' } | { kind: 'block'; error: string }
+
 async function resolveReviewThreadBeforeReply(
   router: ChannelRouter,
   origin: ChannelReplyOrigin,
-): Promise<string | null> {
+): Promise<ResolveOutcome> {
   if (origin.adapter !== 'github') {
-    return 'resolve_review_thread is only supported on github sessions.'
+    return { kind: 'block', error: 'resolve_review_thread is only supported on github sessions.' }
   }
   if (origin.thread === null) {
-    return 'resolve_review_thread requires replying inside a review thread (no thread on this origin).'
+    return {
+      kind: 'block',
+      error: 'resolve_review_thread requires replying inside a review thread (no thread on this origin).',
+    }
   }
   const result = await router.resolveReviewThread({
     adapter: origin.adapter,
@@ -346,9 +358,20 @@ async function resolveReviewThreadBeforeReply(
     chat: origin.chat,
     rootCommentId: origin.thread,
   })
-  if (result.ok) return null
-  if (result.code === 'no-match') return null
-  return `could not resolve review thread: ${result.error}`
+  if (result.ok) return { kind: 'resolved' }
+  if (result.code === 'no-match') return { kind: 'no-match' }
+  return { kind: 'block', error: `could not resolve review thread: ${result.error}` }
+}
+
+// The model asked to resolve but no thread was rooted at this comment. Fenced
+// as a runtime notice (not chat prose) so a persona-rich model reads it as
+// tool feedback and re-targets, rather than replying to it in-character.
+function resolveMissHint(thread: string | null): string {
+  return fenceRuntimeNotice(
+    `you set resolve_review_thread but no unresolved review thread is rooted at comment ${JSON.stringify(thread)} — ` +
+      `your reply posted, but that thread was not resolved (it may be already gone, or the thread id is stale). ` +
+      `If a thread should still close, resolve it on the correct thread.`,
+  )
 }
 
 // Tool results reach the model as USER-role messages (OpenAI / Anthropic

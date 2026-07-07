@@ -1568,7 +1568,16 @@ function fakeFetch(fn: (input: string, init?: RequestInit) => Response): typeof 
 }
 
 describe('createGithubWebhookHandler — pull_request.synchronize recheck', () => {
-  type ThreadNode = { id: string; isResolved: boolean; rootCommentId: number; login: string; isBot?: boolean }
+  type ThreadNode = {
+    id: string
+    isResolved: boolean
+    rootCommentId: number
+    login: string
+    isBot?: boolean
+    path?: string | null
+    line?: number | null
+    body?: string
+  }
   type SelfReviewRow = { state: string; login?: string; type?: string }
 
   function threadsResponse(threads: ThreadNode[]): Response {
@@ -1582,10 +1591,13 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
                 nodes: threads.map((t) => ({
                   id: t.id,
                   isResolved: t.isResolved,
+                  path: t.path ?? null,
+                  line: t.line ?? null,
                   comments: {
                     nodes: [
                       {
                         databaseId: t.rootCommentId,
+                        body: t.body,
                         author: { __typename: t.isBot === false ? 'User' : 'Bot', login: t.login },
                       },
                     ],
@@ -1686,7 +1698,15 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
     const tasks: Array<() => Promise<void>> = []
     const handler = recheckHandler({
       fetchImpl: threadsFetch([
-        { id: 'T1', isResolved: false, rootCommentId: 100, login: 'typeclaw-bot' },
+        {
+          id: 'T1',
+          isResolved: false,
+          rootCommentId: 100,
+          login: 'typeclaw-bot',
+          path: 'src/api/auth.ts',
+          line: 42,
+          body: 'This token never expires — set a TTL.\nsecond line ignored',
+        },
         { id: 'T2', isResolved: false, rootCommentId: 200, login: 'typeclaw-bot' },
         { id: 'T_DONE', isResolved: true, rootCommentId: 300, login: 'typeclaw-bot' },
       ]),
@@ -1705,7 +1725,12 @@ describe('createGithubWebhookHandler — pull_request.synchronize recheck', () =
     expect(msg.workspace).toBe('acme/project')
     expect(msg.text).toContain('PR #7')
     expect(msg.text).toContain('deadbee')
-    expect(msg.text).toContain('100, 200')
+    // Per-thread context lets the model tell threads apart so it passes the
+    // right root comment id as `thread` (the resolve+reply pairing key).
+    expect(msg.text).toContain('thread 100 on src/api/auth.ts:42')
+    expect(msg.text).toContain('This token never expires — set a TTL.')
+    expect(msg.text).toContain('thread 200')
+    expect(msg.text).not.toContain('second line ignored')
     expect(msg.externalMessageId).toBe('pr-7-recheck-deadbeef999')
     expect(msg.text).toContain('end your turn without replying')
   })

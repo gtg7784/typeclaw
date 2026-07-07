@@ -9,7 +9,7 @@ const GRAPHQL_ENDPOINT = `${GITHUB_API_BASE}/graphql`
 // carry more, so the resolver paginates until it matches the root comment id
 // or exhausts the pages — stopping early on a 404-equivalent (thread absent)
 // rather than fabricating a node id.
-const THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{__typename login}}}}}}}}`
+const THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved path line comments(first:1){nodes{databaseId body author{__typename login}}}}}}}}`
 
 const RESOLVE_MUTATION = `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}`
 
@@ -19,6 +19,9 @@ type ReviewThreadNode = {
   rootCommentId: number | null
   rootAuthorLogin: string | null
   rootAuthorIsBot: boolean
+  path: string | null
+  line: number | null
+  rootBody: string | null
 }
 
 type ThreadLookup =
@@ -147,7 +150,25 @@ async function findThread(fetchImpl: typeof fetch, token: string, target: Resolv
   return lookup
 }
 
-export type UnresolvedSelfReviewThread = { threadId: string; rootCommentId: number }
+export type UnresolvedSelfReviewThread = {
+  threadId: string
+  rootCommentId: number
+  path: string | null
+  line: number | null
+  snippet: string | null
+}
+
+// One line of the root comment, capped, so the follow-up prompt can name each
+// thread by its concern instead of a bare id — without dumping a multi-paragraph
+// review comment into the system-facing instruction.
+const SNIPPET_MAX_CHARS = 140
+
+function firstLineSnippet(body: string | null): string | null {
+  if (body === null) return null
+  const firstLine = body.split('\n', 1)[0]?.trim() ?? ''
+  if (firstLine === '') return null
+  return firstLine.length > SNIPPET_MAX_CHARS ? `${firstLine.slice(0, SNIPPET_MAX_CHARS)}…` : firstLine
+}
 
 export type ListUnresolvedSelfReviewThreadsResult =
   | { ok: true; threads: UnresolvedSelfReviewThread[] }
@@ -174,7 +195,13 @@ export async function listUnresolvedSelfReviewThreads(deps: {
       for (const node of nodes) {
         if (node.isResolved || node.rootCommentId === null) continue
         if (!isSelfAuthor(node, deps.selfLogin)) continue
-        threads.push({ threadId: node.id, rootCommentId: node.rootCommentId })
+        threads.push({
+          threadId: node.id,
+          rootCommentId: node.rootCommentId,
+          path: node.path,
+          line: node.line,
+          snippet: firstLineSnippet(node.rootBody),
+        })
       }
       return 'continue'
     },
@@ -260,6 +287,9 @@ async function parseThreadsPage(response: Response): Promise<ThreadsPage> {
       rootCommentId: root?.databaseId ?? null,
       rootAuthorLogin: root?.author?.login ?? null,
       rootAuthorIsBot: root?.author?.__typename === 'Bot',
+      path: n.path ?? null,
+      line: n.line ?? null,
+      rootBody: root?.body ?? null,
     }
   })
   return { kind: 'ok', nodes, hasNextPage: connection.pageInfo.hasNextPage, endCursor: connection.pageInfo.endCursor }
@@ -316,7 +346,11 @@ type GraphqlThreadsResponse = {
           nodes: Array<{
             id: string
             isResolved: boolean
-            comments: { nodes: Array<{ databaseId?: number; author?: { __typename?: string; login?: string } }> }
+            path?: string | null
+            line?: number | null
+            comments: {
+              nodes: Array<{ databaseId?: number; body?: string; author?: { __typename?: string; login?: string } }>
+            }
           }>
         }
       }
