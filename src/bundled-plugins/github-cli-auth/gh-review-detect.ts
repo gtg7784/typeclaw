@@ -1,4 +1,4 @@
-import type { ReviewVerdict } from '@/channels/github-review-turn-ledger'
+import type { ReviewOutputState, ReviewVerdict } from '@/channels/github-review-turn-ledger'
 
 // Extracts the formal-review verdict a successful `gh` command landed, so the
 // false-receipt ledger can credit it. Covers the three vectors the agent uses to
@@ -46,6 +46,106 @@ export function detectReviewSubmission(input: GhReviewDetectInput): DetectedRevi
     const detected = detectInGhSegment(segment, fileContents)
     if (detected !== null) return detected
   }
+  return null
+}
+
+// A landed review of ANY state — the two decisive verdicts PLUS a COMMENT. Feeds
+// the router's empty-turn guard (a COMMENT is real user-facing output, so an empty
+// completion afterward must not fire the "I got stuck" fallback). Deliberately
+// SEPARATE from detectReviewSubmission, which stays verdict-only for the
+// false-receipt ledger: a COMMENT carries no verdict-claim risk and must never be
+// credited there. A bare create-review with no event (a PENDING draft, not a
+// submitted review) returns null — only a submitted state counts as output.
+export type DetectedReviewOutput = {
+  workspace: string
+  prNumber: number
+  state: ReviewOutputState
+  source: 'api' | 'pr-review'
+}
+
+export function detectReviewOutput(input: GhReviewDetectInput): DetectedReviewOutput | null {
+  const fileContents = input.inputFileContents ?? null
+  for (const args of ghSegments(input.command)) {
+    const sub = args[1]
+    if (sub === 'api') {
+      const out = detectApiReviewOutput(args, fileContents)
+      if (out !== null) return out
+    } else if (sub === 'pr' && args[2] === 'review') {
+      const out = detectPrReviewOutput(args)
+      if (out !== null) return out
+    }
+  }
+  return null
+}
+
+function detectApiReviewOutput(args: readonly string[], fileContents: string | null): DetectedReviewOutput | null {
+  const endpoint = args.find((a) => REVIEWS_ENDPOINT.test(a))
+  if (endpoint === undefined) return null
+  const m = REVIEWS_ENDPOINT.exec(endpoint)
+  if (m === null) return null
+  const prNumber = Number(m[3])
+  if (!Number.isSafeInteger(prNumber)) return null
+  const state = reviewStateFromInlineFields(args) ?? reviewStateFromFile(fileContents)
+  if (state === null) return null
+  return { workspace: `${m[1]}/${m[2]}`, prNumber, state, source: 'api' }
+}
+
+function detectPrReviewOutput(args: readonly string[]): DetectedReviewOutput | null {
+  const state: ReviewOutputState | null = args.includes('--approve')
+    ? 'APPROVE'
+    : args.includes('--request-changes')
+      ? 'REQUEST_CHANGES'
+      : args.includes('--comment') || args.includes('-c')
+        ? 'COMMENT'
+        : null
+  if (state === null) return null
+  const workspace = repoFromFlag(args)
+  const prNumber = prNumberArg(args)
+  if (workspace === null || prNumber === null) return null
+  return { workspace, prNumber, state, source: 'pr-review' }
+}
+
+function reviewStateFromInlineFields(args: readonly string[]): ReviewOutputState | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === undefined) continue
+    if (a === '-f' || a === '-F' || a === '--field' || a === '--raw-field') {
+      const v = parseEventState(args[i + 1])
+      if (v !== null) return v
+    }
+    if (a.startsWith('-f=') || a.startsWith('-F=') || a.startsWith('--field=') || a.startsWith('--raw-field=')) {
+      const v = parseEventState(a.slice(a.indexOf('=') + 1))
+      if (v !== null) return v
+    }
+  }
+  return null
+}
+
+function parseEventState(token: string | undefined): ReviewOutputState | null {
+  if (token === undefined) return null
+  const eq = token.indexOf('=')
+  if (eq === -1) return null
+  if (token.slice(0, eq).trim().toLowerCase() !== 'event') return null
+  return normalizeReviewState(token.slice(eq + 1))
+}
+
+function reviewStateFromFile(contents: string | null): ReviewOutputState | null {
+  if (contents === null || contents === '') return null
+  try {
+    const parsed = JSON.parse(contents) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const event = (parsed as Record<string, unknown>).event
+    return typeof event === 'string' ? normalizeReviewState(event) : null
+  } catch {
+    return null
+  }
+}
+
+function normalizeReviewState(value: string): ReviewOutputState | null {
+  const v = value.trim().toUpperCase()
+  if (v === 'APPROVE') return 'APPROVE'
+  if (v === 'REQUEST_CHANGES') return 'REQUEST_CHANGES'
+  if (v === 'COMMENT') return 'COMMENT'
   return null
 }
 
