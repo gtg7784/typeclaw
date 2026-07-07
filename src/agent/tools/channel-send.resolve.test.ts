@@ -161,7 +161,7 @@ describe('channel_send resolve_review_thread', () => {
     ).toBe(false)
   })
 
-  test('treats a no-match resolve as non-blocking and still posts', async () => {
+  test('posts a no-match resolve but warns and does not record the ledger', async () => {
     let sent = 0
     const tool = createChannelSendTool({
       router: fakeRouter({
@@ -183,8 +183,17 @@ describe('channel_send resolve_review_thread', () => {
       resolve_review_thread: true,
     })
 
+    // The reply still posts (no-match is non-blocking — the thread may be gone),
+    // but the model must be told the resolve did not fire so it can re-target,
+    // and the ledger must NOT record a resolution that never happened.
     expect(sent).toBe(1)
     expect((result.details as { ok: boolean }).ok).toBe(true)
+    const rendered = (result.content[0] as { text: string }).text
+    expect(rendered).toContain('555')
+    expect(rendered).toContain('was not resolved')
+    expect(
+      hasResolvedThread({ sessionId: SESSION, workspace: 'acme/widgets', prNumber: 12, rootCommentId: '555' }),
+    ).toBe(false)
   })
 
   test('rejects resolve_review_thread without a thread', async () => {

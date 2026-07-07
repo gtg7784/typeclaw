@@ -814,7 +814,7 @@ describe('channel_reply resolve_review_thread', () => {
     expect(result.details.ok).toBe(false)
   })
 
-  test('still posts when the thread is already gone (no-match is non-blocking)', async () => {
+  test('posts a no-match resolve (non-blocking) but warns the resolve did not fire', async () => {
     const calls: OutboundMessage[] = []
     const tool = createChannelReplyTool({
       router: fakeRouter(
@@ -831,6 +831,9 @@ describe('channel_reply resolve_review_thread', () => {
 
     expect(calls).toHaveLength(1)
     expect(result.details.ok).toBe(true)
+    const rendered = (result.content[0] as { text: string }).text
+    expect(rendered).toContain('3343107661')
+    expect(rendered).toContain('was not resolved')
   })
 
   test('blocks the reply on an HTTP 404 lookup (not-found is NOT no-match)', async () => {

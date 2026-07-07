@@ -230,21 +230,32 @@ export function createChannelSendTool({
       // block the acknowledgement so the bot never posts "addressed — resolving"
       // next to a still-open thread. The router enforces that only the bot's own
       // threads can be resolved.
+      let resolveMissNotice: string | null = null
       if (wantsResolve) {
-        const resolveError = await resolveReviewThreadBeforeSend(router, {
+        const resolve = await resolveReviewThreadBeforeSend(router, {
           adapter,
           workspace: params.workspace,
           chat: params.chat,
           thread: params.thread ?? null,
         })
-        if (resolveError !== null) {
-          logger.warn(formatChannelToolFailure('channel_send', resolveError))
+        if (resolve.kind === 'block') {
+          logger.warn(formatChannelToolFailure('channel_send', resolve.error))
           return {
-            content: [{ type: 'text' as const, text: `channel_send denied: ${resolveError}` }],
-            details: { ok: false, error: resolveError },
+            content: [{ type: 'text' as const, text: `channel_send denied: ${resolve.error}` }],
+            details: { ok: false, error: resolve.error },
           }
         }
-        recordResolvedThreadFromSend(sessionId, params.workspace, params.chat, params.thread ?? null)
+        // `no-match`: the thread listed cleanly but nothing is rooted at this
+        // comment (gone, or a mispaired id from the bare-id follow-up list). It
+        // stays non-blocking so a genuinely-deleted thread's ack still posts,
+        // but the resolve did NOT happen — surface it so the model re-targets,
+        // and skip the ledger so a phantom resolution can't suppress this
+        // thread on a later sweep.
+        if (resolve.kind === 'no-match') {
+          resolveMissNotice = resolveMissHint(params.thread ?? null)
+        } else {
+          recordResolvedThreadFromSend(sessionId, params.workspace, params.chat, params.thread ?? null)
+        }
       }
 
       const result = await router.send({
@@ -298,6 +309,8 @@ export function createChannelSendTool({
 
         if (falseReceiptNotice !== null) hints.push(fenceRuntimeNotice(falseReceiptNotice))
 
+        if (resolveMissNotice !== null) hints.push(resolveMissNotice)
+
         return {
           content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hints.join('')}` }],
           details,
@@ -331,15 +344,17 @@ function missingReviewThreadResolveChoiceError(input: {
   )
 }
 
+type ResolveOutcome = { kind: 'resolved' } | { kind: 'no-match' } | { kind: 'block'; error: string }
+
 async function resolveReviewThreadBeforeSend(
   router: ChannelRouter,
   target: { adapter: AdapterId; workspace: string; chat: string; thread: string | null },
-): Promise<string | null> {
+): Promise<ResolveOutcome> {
   if (target.adapter !== 'github') {
-    return 'resolve_review_thread is only supported on github sends.'
+    return { kind: 'block', error: 'resolve_review_thread is only supported on github sends.' }
   }
   if (target.thread === null) {
-    return 'resolve_review_thread requires a `thread` (the review thread root comment id).'
+    return { kind: 'block', error: 'resolve_review_thread requires a `thread` (the review thread root comment id).' }
   }
   const result = await router.resolveReviewThread({
     adapter: target.adapter,
@@ -347,9 +362,20 @@ async function resolveReviewThreadBeforeSend(
     chat: target.chat,
     rootCommentId: target.thread,
   })
-  if (result.ok) return null
-  if (result.code === 'no-match') return null
-  return `could not resolve review thread: ${result.error}`
+  if (result.ok) return { kind: 'resolved' }
+  if (result.code === 'no-match') return { kind: 'no-match' }
+  return { kind: 'block', error: `could not resolve review thread: ${result.error}` }
+}
+
+// The model asked to resolve but no thread was rooted at this comment. Fenced
+// as a runtime notice (not chat prose) so a persona-rich model reads it as
+// tool feedback and re-targets, rather than replying to it in-character.
+function resolveMissHint(thread: string | null): string {
+  return fenceRuntimeNotice(
+    `you set resolve_review_thread but no unresolved review thread is rooted at comment ${JSON.stringify(thread)} — ` +
+      `your reply posted, but that thread was not resolved (it may be already gone, or you passed the wrong root ` +
+      `comment id). If a different thread should close, re-call channel_send with the correct \`thread\`.`,
+  )
 }
 
 function recordResolvedThreadFromSend(sessionId: string, workspace: string, chat: string, thread: string | null): void {
