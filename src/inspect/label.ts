@@ -3,12 +3,15 @@ import { toRef } from '@/channels/adapters/webex-id-ref'
 
 const ADAPTER_DISPLAY: Record<string, string> = {
   'slack-bot': 'Slack',
+  slack: 'Slack',
   'discord-bot': 'Discord',
+  discord: 'Discord',
   github: 'GitHub',
   'telegram-bot': 'Telegram',
   webex: 'Webex',
   'webex-bot': 'Webex',
   teams: 'Teams',
+  instagram: 'Instagram',
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
 }
