@@ -20,7 +20,7 @@ export {
   type PrVerdictActivityBridge,
   type PrVerdictActivityBridgeOptions,
 } from './pr-verdict-activity-bridge'
-export { setReviewObserver } from './github-review-turn-ledger'
+export { setReviewObserver, setReviewOutputObserver, type ReviewOutputState } from './github-review-turn-ledger'
 export {
   createSubagentCompletionBridge,
   type SubagentCompletionBridge,

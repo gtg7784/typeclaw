@@ -6,8 +6,10 @@ import {
   hasReview,
   recordResolvedThread,
   recordReview,
+  recordReviewOutput,
   resetReviewTurn,
   setReviewObserver,
+  setReviewOutputObserver,
 } from './github-review-turn-ledger'
 
 const S1 = 'ses_one'
@@ -79,6 +81,46 @@ describe('review observer', () => {
     const seen: unknown[] = []
     setReviewObserver((args) => seen.push(args))
     recordResolvedThread({ sessionId: S1, workspace: WS, prNumber: 12, rootCommentId: '555' })
+    expect(seen).toEqual([])
+  })
+})
+
+describe('review-output observer', () => {
+  test('a recorded verdict also fires the output observer with the same state', () => {
+    const seen: unknown[] = []
+    setReviewOutputObserver((args) => seen.push(args))
+    recordReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })
+    expect(seen).toEqual([{ sessionId: S1, workspace: WS, prNumber: 12, state: 'APPROVE' }])
+  })
+
+  test('recordReviewOutput COMMENT fires the output observer but not the verdict ledger', () => {
+    const output: unknown[] = []
+    const verdicts: unknown[] = []
+    setReviewOutputObserver((args) => output.push(args))
+    setReviewObserver((args) => verdicts.push(args))
+
+    recordReviewOutput({ sessionId: S1, workspace: WS, prNumber: 12, state: 'COMMENT' })
+
+    // given a COMMENT: the router-facing output signal fires
+    expect(output).toEqual([{ sessionId: S1, workspace: WS, prNumber: 12, state: 'COMMENT' }])
+    // but the false-receipt ledger is untouched — a COMMENT must never satisfy hasReview
+    expect(verdicts).toEqual([])
+    expect(hasReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })).toBe(false)
+  })
+
+  test('a thrown output observer never breaks the ledger record', () => {
+    setReviewOutputObserver(() => {
+      throw new Error('boom')
+    })
+    expect(() => recordReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })).not.toThrow()
+    expect(hasReview({ sessionId: S1, workspace: WS, prNumber: 12, verdict: 'APPROVE' })).toBe(true)
+  })
+
+  test('__resetReviewObserverForTest detaches the output observer', () => {
+    const seen: unknown[] = []
+    setReviewOutputObserver((args) => seen.push(args))
+    __resetReviewObserverForTest()
+    recordReviewOutput({ sessionId: S1, workspace: WS, prNumber: 12, state: 'COMMENT' })
     expect(seen).toEqual([])
   })
 })

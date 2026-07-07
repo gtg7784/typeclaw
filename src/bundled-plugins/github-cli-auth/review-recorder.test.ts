@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { hasReview, resetReviewTurn } from '@/channels/github-review-turn-ledger'
+import {
+  __resetReviewObserverForTest,
+  hasReview,
+  resetReviewTurn,
+  type ReviewOutputState,
+  setReviewOutputObserver,
+} from '@/channels/github-review-turn-ledger'
 import type { ToolResult } from '@/plugin'
 
 import { __resetReviewVerdictGuardForTest, createApproveIdempotencyGuard } from './approve-idempotency'
@@ -15,6 +21,7 @@ const WS = 'acme/widgets'
 afterEach(() => {
   resetReviewTurn(SESSION)
   __resetReviewVerdictGuardForTest()
+  __resetReviewObserverForTest()
 })
 
 function textResult(text: string): ToolResult {
@@ -234,6 +241,60 @@ describe('review recorder', () => {
       // GitHub's reviews read still lags (NONE)
       const dup = await guard.guard({ callId: 'i2', workspace: WS, prNumber: 90, verdict: 'APPROVE' })
       expect(dup?.block).toBe(true)
+    })
+  })
+
+  describe('COMMENT review output', () => {
+    function captureOutput(): ReviewOutputState[] {
+      const states: ReviewOutputState[] = []
+      setReviewOutputObserver((args) => states.push(args.state))
+      return states
+    }
+
+    test('credits review output (not the verdict ledger) for a successful COMMENT', async () => {
+      const states = captureOutput()
+      await noteReviewCommand({
+        callId: 'cm1',
+        command: `gh api -X POST /repos/${WS}/pulls/91/reviews -f event=COMMENT -f body=notes`,
+      })
+      const out = `{"state":"COMMENTED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/91"}`
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'cm1', result: textResult(out) })
+
+      // the output observer sees the COMMENT, but it never enters the verdict ledger
+      expect(states).toEqual(['COMMENT'])
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 91, verdict: 'APPROVE' })).toBe(false)
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 91, verdict: 'REQUEST_CHANGES' })).toBe(false)
+    })
+
+    test('a POST COMMENT does not leave a stale submission-attempt entry behind', async () => {
+      captureOutput()
+      // given: a COMMENT POST that succeeds — this is also a POST to the reviews
+      // endpoint, so the OLD code armed the backstop attempt AND returned early,
+      // never clearing it
+      await noteReviewCommand({
+        callId: 'cm2',
+        command: `gh api -X POST /repos/${WS}/pulls/92/reviews -f event=COMMENT -f body=notes`,
+      })
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'cm2', result: textResult('{"state":"COMMENTED"}') })
+
+      // when: a later commit reuses the same callId with a decisive-verdict response,
+      // a stale attempt would let the backstop credit a verdict that no command posted
+      const landed = `{"state":"APPROVED","pull_request_url":"https://api.github.com/repos/${WS}/pulls/92"}`
+      const result = commitReviewIfSucceeded({ sessionId: SESSION, callId: 'cm2', result: textResult(landed) })
+
+      // then: no stale attempt remained, so nothing is credited
+      expect(result.committed).toBe(false)
+      expect(hasReview({ sessionId: SESSION, workspace: WS, prNumber: 92, verdict: 'APPROVE' })).toBe(false)
+    })
+
+    test('does NOT credit output when the COMMENT command failed (fail closed)', async () => {
+      const states = captureOutput()
+      await noteReviewCommand({
+        callId: 'cm3',
+        command: `gh api -X POST /repos/${WS}/pulls/93/reviews -f event=COMMENT -f body=notes`,
+      })
+      commitReviewIfSucceeded({ sessionId: SESSION, callId: 'cm3', result: textResult(FAILURE_OUTPUT) })
+      expect(states).toEqual([])
     })
   })
 })

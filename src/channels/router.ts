@@ -44,7 +44,7 @@ import {
 } from './engagement'
 import { checkFalseReceipt } from './github-false-receipt'
 import { evaluateRereviewGuard } from './github-rereview-guard'
-import { resetReviewTurn } from './github-review-turn-ledger'
+import { resetReviewTurn, type ReviewOutputState } from './github-review-turn-ledger'
 import { renderPrVerdictStandDownReminder } from './github-verdict-activity'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
@@ -185,7 +185,7 @@ export function disengageReactionEmojiFor(adapter: AdapterId): string {
   return DISENGAGE_REACTION_EMOJI_OVERRIDES[adapter] ?? DISENGAGE_REACTION_EMOJI
 }
 
-type SilentAckReason = 'skip_response' | 'no_reply' | 'skip_response_text_leak'
+type SilentAckReason = 'skip_response' | 'no_reply' | 'skip_response_text_leak' | 'github_review_output'
 
 // Wake nudge pushed into a resumed channel session at boot so drain() has a
 // non-empty batch and fires a turn. The substantive instruction the model acts
@@ -970,6 +970,19 @@ type LiveSession = {
   // question escalation. Compared by `turnSeq` so a stale value can't leak across
   // turns.
   emptyTurnFallbackTurn: number | null
+  // Stamped with `turnSeq` when a formal GitHub review (APPROVE / REQUEST_CHANGES /
+  // COMMENT) lands during this LOGICAL turn, via noteGithubReviewOutput off the
+  // review-output observer. On a github PR channel the agent's real deliverable is
+  // the review — posted through the GitHub API by the bash tool, NOT through
+  // channel_reply/channel_send — so it never bumps `successfulChannelSends`. An
+  // empty completion afterward would otherwise look like a dead turn and fire the
+  // "I got stuck" empty-turn fallback (a real verdict, then a contradictory fallback
+  // seconds later). validateChannelTurn reads this to treat such an empty stop as a
+  // legitimate silent completion. Reset ONLY on a real user batch (with the retry
+  // budgets) so it survives reminder-only retry iterations — the review lands in an
+  // EARLIER iteration than the fallback; resetting per-iteration (beside
+  // resetReviewTurn) would recreate the bug.
+  githubReviewOutputTurn: number | null
   // Captured by drain() at batch dequeue; read+cleared by send() on the
   // first tool-source send of the turn. The anchor decision (delay
   // threshold + intervening-observed check) is evaluated at SEND time
@@ -1224,6 +1237,12 @@ export type ChannelRouter = {
     verdict: 'APPROVE' | 'REQUEST_CHANGES'
     sessionId: string
   }) => { kind: 'delivered'; count: number }
+  noteGithubReviewOutput: (args: {
+    sessionId: string
+    workspace: string
+    prNumber: number
+    state: ReviewOutputState
+  }) => { kind: 'stamped' | 'no-live-session' }
   // Record that the agent invoked `skip_response` during the current turn
   // for the channel session identified by `parentSessionId`. The reason is
   // logged at INFO level inside `validateChannelTurn` (single log line per
@@ -2042,6 +2061,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         skipLockedSendTurn: null,
         disengagedTurn: null,
         emptyTurnFallbackTurn: null,
+        githubReviewOutputTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -2719,6 +2739,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.willingnessNudges = 0
           live.abortReasonThisTurn = null
           live.nextPromptMaxTokens = undefined
+          // Cleared with the retry budgets (NOT beside resetReviewTurn below) so a
+          // review landed earlier in this logical turn keeps suppressing the
+          // empty-turn fallback across the reminder-only retry iterations.
+          live.githubReviewOutputTurn = null
         } else if (live.lastTurnAuthorId !== null) {
           live.currentTurnEngageReactions = []
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
@@ -4145,6 +4169,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
     }
 
+    // A formal GitHub review already landed this logical turn (APPROVE /
+    // REQUEST_CHANGES / COMMENT, stamped via noteGithubReviewOutput). That review IS
+    // the turn's user-facing output — it just went through the GitHub review API, not
+    // channel_reply/channel_send, so `successfulChannelSends` never moved. An empty
+    // completion afterward is the agent legitimately having nothing more to say, NOT
+    // a dead turn: skip the empty-turn retries AND the "I got stuck" fallback and
+    // treat it as silent completion. Gated on no channel send this turn so a turn
+    // that ALSO replied in-channel still runs the normal reply-recovery below.
+    if (
+      live.githubReviewOutputTurn === live.turnSeq &&
+      live.successfulChannelSends === successfulSendsBeforePrompt &&
+      live.currentTurnAuthorId !== null
+    ) {
+      logger.info(`[channels] ${live.keyId} empty_turn_suppressed cause=github_review_output_this_turn`)
+      armSilentTurnAck(live, 'github_review_output')
+      return
+    }
+
     // Suppress a leaked tool call (never post the plumbing) and, while budget
     // remains, push a self-correction reminder so the same logical turn
     // re-prompts and the model can redo it with a real tool call. On exhaustion
@@ -5060,6 +5102,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'delivered', count }
   }
 
+  // Stamp the review-output flag on the session that just landed a formal GitHub
+  // review this turn. Matched by sessionId (the recorder records the exact
+  // event.sessionId), and confirmed to be the right github PR live session so a
+  // stray/mismatched signal can't suppress an unrelated turn's fallback. See
+  // `githubReviewOutputTurn`.
+  const noteGithubReviewOutput = (args: {
+    sessionId: string
+    workspace: string
+    prNumber: number
+    state: ReviewOutputState
+  }): { kind: 'stamped' | 'no-live-session' } => {
+    const chat = `pr:${args.prNumber}`
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.sessionId !== args.sessionId) continue
+      if (live.key.adapter !== 'github') continue
+      if (live.key.workspace !== args.workspace || live.key.chat !== chat) continue
+      live.githubReviewOutputTurn = live.turnSeq
+      logger.info(`[channels] ${live.keyId}: github_review_output state=${args.state} turn=${live.turnSeq}`)
+      return { kind: 'stamped' }
+    }
+    return { kind: 'no-live-session' }
+  }
+
   const markTurnSkipped = (args: {
     parentSessionId: string
     reason: string
@@ -5208,6 +5274,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
     injectPrVerdictActivity,
+    noteGithubReviewOutput,
     markTurnSkipped,
     clearSticky,
     reserveRestartHandoff,

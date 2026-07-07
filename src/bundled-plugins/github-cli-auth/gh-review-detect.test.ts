@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { detectReviewSubmission, detectReviewSubmissionAttempt } from './gh-review-detect'
+import { detectReviewOutput, detectReviewSubmission, detectReviewSubmissionAttempt } from './gh-review-detect'
 
 describe('detectReviewSubmission — REST --input', () => {
   test('APPROVE in the input file is detected', () => {
@@ -189,5 +189,43 @@ describe('detectReviewSubmissionAttempt — submission intent, verdict aside', (
 
   test('a non-reviews POST is NOT an attempt', () => {
     expect(detectReviewSubmissionAttempt('gh api -X POST /repos/acme/widgets/issues/12/comments -f body=hi')).toBeNull()
+  })
+})
+
+describe('detectReviewOutput — includes COMMENT', () => {
+  test('a COMMENT review via input file is detected as output', () => {
+    const result = detectReviewOutput({
+      command: 'gh api -X POST /repos/acme/widgets/pulls/7/reviews --input /tmp/r.json',
+      inputFileContents: '{"event":"COMMENT","body":"a few notes"}',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 7, state: 'COMMENT', source: 'api' })
+  })
+
+  test('a COMMENT review via -f event=COMMENT is detected as output', () => {
+    const result = detectReviewOutput({
+      command: 'gh api /repos/acme/widgets/pulls/3/reviews -f event=COMMENT -f body=notes',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 3, state: 'COMMENT', source: 'api' })
+  })
+
+  test('gh pr review --comment is detected as output', () => {
+    const result = detectReviewOutput({
+      command: 'gh pr review 42 --comment --body "some notes" -R acme/widgets',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 42, state: 'COMMENT', source: 'pr-review' })
+  })
+
+  test('a decisive verdict is still surfaced as output', () => {
+    const result = detectReviewOutput({
+      command: 'gh api /repos/acme/widgets/pulls/3/reviews -f event=APPROVE',
+    })
+    expect(result).toEqual({ workspace: 'acme/widgets', prNumber: 3, state: 'APPROVE', source: 'api' })
+  })
+
+  test('a bare create-review with no event (PENDING draft) is not output', () => {
+    const result = detectReviewOutput({
+      command: 'gh api -X POST /repos/acme/widgets/pulls/7/reviews -f body=draft',
+    })
+    expect(result).toBeNull()
   })
 })
