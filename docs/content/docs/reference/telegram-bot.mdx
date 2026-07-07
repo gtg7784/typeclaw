@@ -27,16 +27,16 @@ CLI: `typeclaw channel add telegram-bot` (interactive), `typeclaw channel set te
 
 ## Capabilities
 
-| Feature                 | Supported | Notes                                                                                                                                            |
-| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Outbound messages       | yes       | MarkdownV2 formatting; reserved chars are escaped automatically                                                                                  |
-| Reactions               | no        |                                                                                                                                                  |
-| Typing indicator        | yes       | `sendChatAction`; auto-expires ~5s; no explicit stop                                                                                             |
-| Channel-name resolution | yes       |                                                                                                                                                  |
-| Self identity           | yes       |                                                                                                                                                  |
-| History                 | no        | `channel_history` tool will fail for Telegram                                                                                                    |
-| Attachments             | yes       | Sent as separate calls; land in chat root even for forum topics (`sendDocument` ignores `message_thread_id`); caption shares the 1024-char limit |
-| Membership              | partial   | Bot API can't split bot/human counts; group reports humans = total-1, bots = 1                                                                   |
+| Feature                 | Supported | Notes                                                                                                                                                                                                         |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Outbound messages       | yes       | MarkdownV2 formatting; reserved chars are escaped automatically                                                                                                                                               |
+| Reactions               | no        |                                                                                                                                                                                                               |
+| Typing indicator        | yes       | `sendChatAction`; auto-expires ~5s; no explicit stop                                                                                                                                                          |
+| Channel-name resolution | yes       |                                                                                                                                                                                                               |
+| Self identity           | yes       |                                                                                                                                                                                                               |
+| History                 | no        | Bot API has no server-side history read — `channel_history` and all three `channel_read` modes are unsupported for Telegram (see [Cross-channel reads](/docs/reference/channel-adapters#cross-channel-reads)) |
+| Attachments             | yes       | Sent as separate calls; land in chat root even for forum topics (`sendDocument` ignores `message_thread_id`); caption shares the 1024-char limit                                                              |
+| Membership              | partial   | Bot API can't split bot/human counts; group reports humans = total-1, bots = 1                                                                                                                                |
 
 ## Config
 
