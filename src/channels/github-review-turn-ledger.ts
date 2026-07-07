@@ -15,6 +15,21 @@ export type ReviewObserver = (args: {
   verdict: ReviewVerdict
 }) => void
 
+// A formal review LANDED this turn, of ANY state — the two decisive verdicts PLUS
+// a non-decisive COMMENT. This signal ONLY tells the channel router "the agent
+// already delivered output via the GitHub review API this turn" so an empty
+// completion afterward doesn't fire the empty-turn fallback. It is deliberately
+// NOT stored in the false-receipt ledger (`reviewsByPr`): a COMMENT carries no
+// verdict-claim risk and must never satisfy `hasReview()`.
+export type ReviewOutputState = ReviewVerdict | 'COMMENT'
+
+export type ReviewOutputObserver = (args: {
+  sessionId: string
+  workspace: string
+  prNumber: number
+  state: ReviewOutputState
+}) => void
+
 type PrKey = string
 type ThreadKey = string
 
@@ -28,13 +43,19 @@ const resolvedThreads = new Set<ThreadKey>()
 // stays the single seam where "a formal verdict happened" is known across the
 // plugin/channels boundary, which is why it owns this hook.
 let reviewObserver: ReviewObserver | null = null
+let reviewOutputObserver: ReviewOutputObserver | null = null
 
 export function setReviewObserver(observer: ReviewObserver | null): void {
   reviewObserver = observer
 }
 
+export function setReviewOutputObserver(observer: ReviewOutputObserver | null): void {
+  reviewOutputObserver = observer
+}
+
 export function __resetReviewObserverForTest(): void {
   reviewObserver = null
+  reviewOutputObserver = null
 }
 
 function prKey(sessionId: string, workspace: string, prNumber: number): PrKey {
@@ -72,6 +93,28 @@ export function recordReview(args: {
     } catch {
       // swallow: a broken broadcast must not break verdict bookkeeping
     }
+  }
+  // A decisive verdict IS review output too — fan it to the output observer so the
+  // router's empty-turn guard sees it without a second detection path.
+  recordReviewOutput({
+    sessionId: args.sessionId,
+    workspace: args.workspace,
+    prNumber: args.prNumber,
+    state: args.verdict,
+  })
+}
+
+export function recordReviewOutput(args: {
+  sessionId: string
+  workspace: string
+  prNumber: number
+  state: ReviewOutputState
+}): void {
+  if (reviewOutputObserver === null) return
+  try {
+    reviewOutputObserver(args)
+  } catch {
+    // swallow: a broken router notification must not break review bookkeeping
   }
 }
 
