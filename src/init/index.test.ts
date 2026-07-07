@@ -1807,6 +1807,64 @@ describe('hasExistingChannelSecrets', () => {
     await seedChannels({ kakaotalk: { currentAccount: 'acc-missing', accounts: {} } })
     expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
   })
+
+  test('returns true when teams has a full account record with the AAD refresh trio', async () => {
+    await seedChannels({
+      teams: {
+        currentAccount: 'me',
+        accounts: {
+          me: {
+            account_id: 'me',
+            access_token: 'skype-tok',
+            account_type: 'work',
+            aad_refresh_token: 'aad-refresh',
+            aad_client_id: 'client-1',
+            aad_tenant_id: 'tenant-1',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      },
+    })
+    expect(await hasExistingChannelSecrets(root, 'teams')).toBe(true)
+  })
+
+  test('returns false when teams has an access_token but no AAD refresh trio (cannot silently renew)', async () => {
+    await seedChannels({
+      teams: {
+        currentAccount: 'me',
+        accounts: {
+          me: {
+            account_id: 'me',
+            access_token: 'skype-tok',
+            account_type: 'work',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      },
+    })
+    expect(await hasExistingChannelSecrets(root, 'teams')).toBe(false)
+  })
+
+  test('returns false when teams is missing any single AAD field', async () => {
+    const base = {
+      account_id: 'me',
+      access_token: 'skype-tok',
+      account_type: 'work',
+      aad_refresh_token: 'aad-refresh',
+      aad_client_id: 'client-1',
+      aad_tenant_id: 'tenant-1',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+    for (const drop of ['aad_refresh_token', 'aad_client_id', 'aad_tenant_id'] as const) {
+      const account: Record<string, unknown> = { ...base }
+      delete account[drop]
+      await seedChannels({ teams: { currentAccount: 'me', accounts: { me: account } } })
+      expect(await hasExistingChannelSecrets(root, 'teams')).toBe(false)
+    }
+  })
 })
 
 describe('channel secret reuse (init re-run preserves existing tokens)', () => {
@@ -1929,6 +1987,76 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
     expect(secrets.channels?.kakaotalk).toMatchObject({
       currentAccount: 'acc-1',
       accounts: { 'acc-1': { oauth_token: 'tok' } },
+    })
+  })
+
+  test('runInit with withTeams=true runs the teams auth runner and wires the adapter', async () => {
+    let ran = false
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withTeams: true,
+      runTeamsAuth: async () => {
+        ran = true
+        return { ok: true }
+      },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    expect(ran).toBe(true)
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.teams).toEqual({})
+  })
+
+  test('runInit with withTeams=true and no runTeamsAuth wires teams without re-authenticating', async () => {
+    await writeFile(
+      join(root, 'secrets.json'),
+      `${JSON.stringify(
+        {
+          version: 2,
+          providers: { fireworks: { type: 'api_key', key: { value: 'fw_seed' } } },
+          channels: {
+            teams: {
+              currentAccount: 'me',
+              accounts: {
+                me: {
+                  account_id: 'me',
+                  access_token: 'tok',
+                  account_type: 'work',
+                  created_at: '2026-01-01T00:00:00Z',
+                  updated_at: '2026-01-01T00:00:00Z',
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_seed',
+      withTeams: true,
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.teams).toEqual({})
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.teams).toMatchObject({
+      currentAccount: 'me',
+      accounts: { me: { access_token: 'tok' } },
     })
   })
 

@@ -21,7 +21,7 @@ export const INIT_CHECKPOINT_PATH = join('.typeclaw', 'init-progress.json')
 
 export const WIZARD_CHECKPOINT_VERSION = 1
 
-export type WizardChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'kakaotalk' | 'github' | 'none'
+export type WizardChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'teams' | 'kakaotalk' | 'github' | 'none'
 
 export type AuthMethod = 'api-key' | 'oauth'
 

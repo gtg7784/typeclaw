@@ -202,6 +202,54 @@ describe('runAddChannel', () => {
     expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(beforeSecrets)
   })
 
+  test('adds teams as an empty block and runs auth runner before config mutation', async () => {
+    const authCalls: string[] = []
+    const events: AddChannelStepEvent[] = []
+    const result = await runAddChannel({
+      cwd: root,
+      channel: 'teams',
+      runTeamsAuth: async ({ cwd }) => {
+        authCalls.push(cwd)
+        return { ok: true }
+      },
+      onProgress: (event) => events.push(event),
+    })
+
+    expect(result).toBeUndefined()
+    expect(authCalls).toEqual([root])
+    const cfg = await readConfig()
+    expect(cfg.channels?.teams).toEqual({})
+    // Auth must run and finish BEFORE config/secrets are touched, so a declined
+    // login never leaves a half-wired channel behind.
+    expect(events.map((event) => `${event.step}:${event.phase}`)).toEqual([
+      'teams-auth:start',
+      'teams-auth:done',
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+    ])
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
+  })
+
+  test('aborts and leaves typeclaw.json + secrets.json untouched when teams auth fails', async () => {
+    const beforeConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    const beforeSecrets = await readFile(join(root, 'secrets.json'), 'utf8')
+
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'teams',
+        runTeamsAuth: async () => ({ ok: false, reason: 'authorization declined' }),
+      }),
+    ).rejects.toThrow(/authorization declined/)
+
+    expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).toBe(beforeConfig)
+    expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(beforeSecrets)
+    const cfg = await readConfig()
+    expect(cfg.channels?.teams).toBeUndefined()
+  })
+
   test('adds kakaotalk as an empty block (no allow field) and runs auth runner', async () => {
     const authCalls: string[] = []
     await runAddChannel({
