@@ -34,6 +34,7 @@ import {
   createPrVerdictActivityBridge,
   createSubagentCompletionBridge,
   setReviewObserver,
+  setReviewOutputObserver,
   type ChannelManager,
   type PrVerdictActivityBridge,
   type SubagentCompletionBridge,
@@ -782,6 +783,15 @@ async function startAgentRuntime(
     })
   })
   registerBootCleanup(() => setReviewObserver(null))
+
+  // A landed review of ANY state (incl. COMMENT) marks the recording session so its
+  // empty-turn fallback is suppressed: the review IS the turn's output, but it goes
+  // through the GitHub API, not the channel send path. In-process router call — no
+  // stream fan-out, since this is the recording session's own bookkeeping.
+  setReviewOutputObserver((output) => {
+    channelManager.router.noteGithubReviewOutput(output)
+  })
+  registerBootCleanup(() => setReviewOutputObserver(null))
 
   // Registered before channels so its cache clear lands before any channel
   // session teardown observes it. secrets.json provider credentials are not

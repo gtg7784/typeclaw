@@ -3280,6 +3280,126 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
   })
 
+  test('github review output: an APPROVE landed this turn suppresses the empty-turn fallback (no dead-air apology)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', text: '@bot review' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // given: the agent lands a formal APPROVE via the GitHub API (never a channel
+      // send), then whiffs empty completions on every attempt — the prod failure shape
+      if (calls === 1) {
+        router.noteGithubReviewOutput({
+          sessionId: 'ses_fake_1',
+          workspace: 'acme/repo',
+          prNumber: 672,
+          state: 'APPROVE',
+        })
+      }
+      emptyStopAfterToolWork(sessions[0]!)
+    }
+    await router.__testing!.flushDebounce(githubKey)
+
+    // then: the review IS the turn's output — no retries, no visible "I got stuck"
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_retry'))).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_suppressed cause=github_review_output_this_turn'))).toBe(true)
+  })
+
+  test('github review output: a COMMENT landed this turn also suppresses the empty-turn fallback', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', text: '@bot review' }))
+    sessions[0]!.onPrompt = () => {
+      router.noteGithubReviewOutput({
+        sessionId: 'ses_fake_1',
+        workspace: 'acme/repo',
+        prNumber: 672,
+        state: 'COMMENT',
+      })
+      emptyStopAfterToolWork(sessions[0]!)
+    }
+    await router.__testing!.flushDebounce(githubKey)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+    expect(logs.some((m) => m.includes('empty_turn_suppressed cause=github_review_output_this_turn'))).toBe(true)
+  })
+
+  test('github review output: the review flag survives retries — landed in attempt 1, empty stops later still suppress', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', text: '@bot review' }))
+    let calls = 0
+    sessions[0]!.onPrompt = () => {
+      calls++
+      // given: the verdict lands only on attempt 1; per the prod timeline the review
+      // is in an EARLIER iteration than the empty completions that follow
+      if (calls === 1) {
+        router.noteGithubReviewOutput({
+          sessionId: 'ses_fake_1',
+          workspace: 'acme/repo',
+          prNumber: 672,
+          state: 'APPROVE',
+        })
+      }
+      emptyStopAfterToolWork(sessions[0]!)
+    }
+    await router.__testing!.flushDebounce(githubKey)
+
+    // then: a single prompt, suppressed immediately — the flag isn't wiped by the
+    // per-iteration resetReviewTurn, so no retry loop and no fallback ever fire
+    expect(calls).toBe(1)
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('empty_turn_fallback'))).toBe(false)
+  })
+
+  test('github review output: an unrelated empty turn (no review landed) still posts the fallback', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    const githubKey: ChannelKey = { adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', thread: null }
+    router.registerOutbound('github', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ adapter: 'github', workspace: 'acme/repo', chat: 'pr:672', text: '@bot review' }))
+    sessions[0]!.onPrompt = () => emptyStopAfterToolWork(sessions[0]!)
+    await router.__testing!.flushDebounce(githubKey)
+
+    // then: with no review this turn the guard doesn't fire — the visible fallback stands
+    expect(sent.map((s) => s.text)).toEqual([EMPTY_TURN_FALLBACK_TEXT])
+    expect(logs.some((m) => m.includes('empty_turn_suppressed'))).toBe(false)
+  })
+
   test('suppresses recovery when assistant ends with NO_REPLY after leaked reasoning', async () => {
     const dir = await tempDir()
     const logs: string[] = []
