@@ -7,6 +7,7 @@ import { startDaemon, type DaemonLogEvent, type RestartPreflight } from '@/hostd
 import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
+import { createTeamsRenewalManager } from '@/hostd/teams-renewal-manager'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
 import { createWebexRenewalManager } from '@/hostd/webex-renewal-manager'
 import { validateRestartDeps, type RestartDepsPreflightResult } from '@/init/restart-deps-preflight'
@@ -57,6 +58,19 @@ export const hostdCommand = defineCommand({
       },
       shouldRenew: ({ cwd }) => webexChannelConfigured(cwd),
     })
+    const teamsRenewal = createTeamsRenewalManager({
+      onLog: (event) => writeLogLine(formatLog(event)),
+      onRenewalOk: async ({ containerName, cwd }) => {
+        // Restart so the in-memory TeamsClient picks up the renewed token from
+        // secrets.json. Without this, the cron writes a fresh token but the
+        // running adapter keeps the old token in its login closure and still
+        // cannot obtain an id_token for the realtime listener.
+        const currentHostDaemon = await currentHostDaemonHolder.ready()
+        const result = await hostdRestart({ containerName, cwd, currentHostDaemon })
+        if (!result.ok) throw new Error(result.reason)
+      },
+      shouldRenew: ({ cwd }) => teamsChannelConfigured(cwd),
+    })
 
     const daemon = await startDaemon({
       onLog: (e) => writeLogLine(formatLog(e)),
@@ -65,6 +79,7 @@ export const hostdCommand = defineCommand({
       portbroker,
       kakaoRenewal,
       webexRenewal,
+      teamsRenewal,
       currentHostDaemonHolder,
       restartPreflight: buildHostdRestartPreflight(cliEntry, version, defaultPreflightDeps),
       restart: hostdRestart,
@@ -76,6 +91,7 @@ export const hostdCommand = defineCommand({
         .then(() => portbroker.drain())
         .then(() => kakaoRenewal.drain())
         .then(() => webexRenewal.drain())
+        .then(() => teamsRenewal.drain())
         .then(() => process.exit(0))
     }
     process.on('SIGTERM', shutdown)
@@ -242,6 +258,22 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] webex renewal scheduled container restart for ${event.containerName} account=${event.accountId}`
     case 'webex-renewal-restart-failed':
       return `[hostd] webex renewal container restart FAILED for ${event.containerName} account=${event.accountId}: ${event.reason}`
+    case 'teams-renewal-tick-start':
+      return `[hostd] teams renewal tick started for ${event.containerName}`
+    case 'teams-renewal-tick-skipped':
+      return `[hostd] teams renewal skipped for ${event.containerName}: ${event.reason}${event.expiresInMs !== undefined ? ` (expires in ${Math.round(event.expiresInMs / 1000 / 60)}m)` : ''}`
+    case 'teams-renewal-tick-ok':
+      return `[hostd] teams renewal OK for ${event.containerName} account=${event.accountId} (new token expires ${new Date(event.nextExpiresAt).toISOString()})`
+    case 'teams-renewal-tick-reauth-required':
+      return `[hostd] teams renewal REAUTH REQUIRED for ${event.containerName} account=${event.accountId} reason=${event.reason} — ${event.message}`
+    case 'teams-renewal-tick-transient-failure':
+      return `[hostd] teams renewal transient failure for ${event.containerName} account=${event.accountId}: ${event.reason}`
+    case 'teams-renewal-tick-error':
+      return `[hostd] teams renewal ERROR for ${event.containerName}: ${event.error}`
+    case 'teams-renewal-restart-scheduled':
+      return `[hostd] teams renewal scheduled container restart for ${event.containerName} account=${event.accountId}`
+    case 'teams-renewal-restart-failed':
+      return `[hostd] teams renewal container restart FAILED for ${event.containerName} account=${event.accountId}: ${event.reason}`
   }
 }
 
@@ -264,6 +296,15 @@ function webexChannelConfigured(cwd: string): boolean {
   try {
     const cfg = loadConfigSync(cwd)
     return cfg.channels?.webex !== undefined
+  } catch {
+    return false
+  }
+}
+
+function teamsChannelConfigured(cwd: string): boolean {
+  try {
+    const cfg = loadConfigSync(cwd)
+    return cfg.channels?.teams !== undefined
   } catch {
     return false
   }
