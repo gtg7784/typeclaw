@@ -1,6 +1,6 @@
 ---
 title: Add a channel
-description: Give the agent another inbox — Slack, Discord, Telegram, Webex, GitHub, LINE, or KakaoTalk
+description: Give the agent another inbox — Slack, Discord, Telegram, Webex, Teams, GitHub, LINE, or KakaoTalk
 icon: MessagesSquare
 ---
 
@@ -8,7 +8,7 @@ import { Accordion, Accordions } from 'fumadocs-ui/components/accordion'
 import { Callout } from 'fumadocs-ui/components/callout'
 import { Steps, Step } from 'fumadocs-ui/components/steps'
 
-A **channel** is any platform the agent talks through — Slack, Discord, Telegram, Webex, GitHub, LINE, KakaoTalk. Same agent, many inboxes.
+A **channel** is any platform the agent talks through — Slack, Discord, Telegram, Webex, Teams, GitHub, LINE, KakaoTalk. Same agent, many inboxes.
 
 You already wired your **first** channel during `typeclaw init` (and, if you accepted the claim prompt it offered, you're paired as its owner too). This guide is for adding **another** one — a second platform, or your first if you chose "skip" back in `init`. The flow is the same either way.
 
@@ -178,6 +178,7 @@ typeclaw channel add webex-bot       # bot token
 typeclaw channel add github          # PAT or GitHub App; needs a public URL
 typeclaw channel add line            # QR or email login, stored in secrets.json
 typeclaw channel add kakaotalk       # email + password, stored encrypted
+# teams has no `channel add` yet — populate secrets.json#channels.teams by hand (see the Teams accordion below)
 ```
 
 <Accordions>
@@ -218,7 +219,13 @@ LINE logs in as a real user account by QR or email/PIN and stores the resulting 
 
 <Accordion title="KakaoTalk — credentials that renew themselves">
 
-KakaoTalk is the only adapter TypeClaw re-authenticates for you _automatically_. Its login expires (about every 7 days) and is renewed using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model. Other account-login adapters (LINE, Discord user, Instagram, Webex user) can also expire, but you refresh those yourself with `typeclaw channel reauth <adapter>`.
+KakaoTalk is the only adapter TypeClaw re-authenticates for you _automatically_. Its login expires (about every 7 days) and is renewed using the email and password you provide — stored encrypted, with the key kept outside the agent folder. See [Secrets policy](/docs/concepts/secrets-policy) for the threat model. Other account-login adapters (LINE, Discord user, Instagram, Webex user) can also expire, but you refresh those yourself with `typeclaw channel reauth <adapter>`. (Teams has no `reauth` command yet — replace its token in `secrets.json#channels.teams` by hand.)
+
+</Accordion>
+
+<Accordion title="Teams — manual setup (no channel add yet)">
+
+Teams runs as your own Microsoft Teams user, but there's no `typeclaw channel add teams` command yet — you configure it by hand. Extract a Teams user token (the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI does a device-code login or token extraction), then add a `channels.teams` block to `secrets.json` and enable `channels.teams` in `typeclaw.json`. It sees whatever chats and team channels your account already has access to. Access tokens are short-lived (60–90 minutes) and aren't auto-refreshed, so when one lapses you replace it in `secrets.json#channels.teams` by hand. Both work and personal Microsoft accounts are supported. See the [Teams (user) adapter reference](/docs/reference/teams) for the exact block shape.
 
 </Accordion>
 
@@ -233,7 +240,7 @@ typeclaw channel set slack-bot      # token-based adapters — swap the saved to
 typeclaw channel reauth discord     # account-login adapters — replay the interactive login
 ```
 
-`channel set` covers the token-based adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`); `channel reauth` covers the account-login ones (`line`, `instagram`, `kakaotalk`, `webex`, `discord`). See the [channel-adapters capability table](/docs/reference/channel-adapters#cli-verbs) for the full split.
+`channel set` covers the token-based adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`); `channel reauth` covers the account-login ones (`line`, `instagram`, `kakaotalk`, `webex`, `discord`). See the [channel-adapters capability table](/docs/reference/channel-adapters#cli-verbs) for the full split. (Teams is managed by hand-editing `secrets.json` — no `set`/`reauth` yet.)
 
 <Accordions>
 

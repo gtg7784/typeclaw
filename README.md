@@ -26,7 +26,7 @@
 
 ## Channels — one agent, many inboxes
 
-- 📨 **Supported channels** — Slack, Discord, Telegram, Webex, Instagram, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
+- 📨 **Supported channels** — Slack, Discord, Telegram, Webex, Teams, Instagram, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
 - 🔎 **Cross-channel reading** — beyond the conversation it's in, it can read another channel's history, pull a single message by id, or list a workspace's channels on demand, so "check what's going on in #general" or "what do you make of this message?" just works
 - ✅ **Pull-request review** — treats a GitHub PR as a conversation, reviewing as a participant, with guards against claiming a verdict it didn't actually post and against leaving a PR stranded
 
