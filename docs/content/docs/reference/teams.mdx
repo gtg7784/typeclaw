@@ -8,7 +8,7 @@ import { Callout } from 'fumadocs-ui/components/callout'
 
 Part of the [channel adapters](/docs/reference/channel-adapters) family.
 
-Transport: **trouter WebSocket** over a user-token session (no public URL required). Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
+Transport: **trouter WebSocket** for realtime inbound (no public URL required), with a **REST-only fallback** when realtime can't authenticate. Setup walkthrough: [Add a channel](/docs/guides/add-a-channel).
 
 This is the **user-account** Microsoft Teams adapter (`teams`). It signs in as your own Teams user, so it hears every chat and team channel the account belongs to — no bot registration exists for Teams in agent-messenger, so this is the only variant.
 
@@ -93,14 +93,23 @@ The `channel set` / `channel add` / `channel reauth` CLI verbs do not support Te
 
 Access tokens live 60–90 minutes. The adapter does **not** refresh them automatically today: on start it warns when the token is expired or expiring soon, and a long-running session stops delivering once the token lapses. To recover, extract a fresh token (e.g. with the [`agent-teams`](https://agent-messenger.dev/docs/cli/teams) CLI) and replace `access_token` (and `token_expires_at`) in `secrets.json#channels.teams` by hand, then restart the agent.
 
-The record also holds an AAD refresh trio (`aad_refresh_token`, `aad_client_id`, `aad_tenant_id`) reserved for a future unattended-refresh path, but the runtime adapter does not consume it yet — until then, renewal is manual.
+The record also holds an AAD refresh trio (`aad_refresh_token`, `aad_client_id`, `aad_tenant_id`). The runtime adapter uses it to mint the realtime **id_token** in-container (see [Realtime](#realtime-inbound) below); the short-lived `access_token` (skypetoken) itself is still refreshed manually today.
+
+## Realtime inbound
+
+Realtime inbound rides Teams' internal **trouter WebSocket**. Authenticating that socket needs a second credential — an AAD Bearer "id_token" for the Teams/Skype spaces resource — separate from the `access_token` skypetoken. The upstream `agent-messenger` SDK obtains that id_token by scraping the Teams desktop app's cookie database (or a local browser profile), which is impossible in TypeClaw's headless container.
+
+Instead, TypeClaw mints the id_token in-container from the stored `aad_refresh_token` via a standard AAD `refresh_token` grant — no desktop app or browser required. This needs the AAD refresh trio to be present on the account record (device-code logins capture it; legacy extracted-token accounts may not).
+
+When the id_token can't be minted (no `aad_refresh_token`, an expired/revoked refresh token, or a trouter outage), the adapter **degrades to REST-only** rather than failing: outbound sends, history reads, and self-identity keep working, but the agent is no longer woken by inbound Teams messages until realtime recovers on the next start. A single warning is logged; there is no reconnect log-loop.
 
 ## Quirks
 
 - **User-account, not a bot**: hears every chat and team-channel message the account can see, not just @mentions — engagement is governed by your `engagement.trigger` and match rules, not by a bot-mention model.
 - **Chats and channels both**: unlike most user adapters, Teams covers both 1:1/group chats and full team channels; channel messages carry `teamId`/`channelId` and parsed @mentions.
 - **Self-echo suppression**: the Teams user SDK has no self-identity boundary — `testAuth` returns the literal id `'ME'`, not a real MRI. Every successful send records a `(chat, normalized-text)` fingerprint, and a matching inbound arriving within a short window is dropped as the echo of our own send rather than routed as a new message.
-- **Short-lived tokens, manual refresh today**: `access_token` expires in 60–90 minutes; the adapter warns on expiry but does not yet auto-refresh, so a long-running session needs the token replaced by hand in `secrets.json#channels.teams`. The AAD refresh trio is captured for a future unattended-refresh path.
+- **Realtime id_token is minted, not scraped**: the trouter socket needs an AAD Bearer id_token that the `agent-messenger` SDK would normally scrape from the Teams desktop app or a browser profile — neither of which exists in the container. TypeClaw mints it from the stored `aad_refresh_token` instead, and falls back to REST-only (send/read, no proactive inbound) when it can't. See [Realtime](#realtime-inbound).
+- **Short-lived tokens, manual refresh today**: `access_token` expires in 60–90 minutes; the adapter warns on expiry but does not yet auto-refresh the skypetoken, so a long-running session needs the token replaced by hand in `secrets.json#channels.teams`. (The AAD refresh trio IS consumed for the realtime id_token above.)
 - **Work vs personal accounts**: `account_type` distinguishes work/school tenants from personal Microsoft accounts; `region` records which AAD region issued the token.
 
 ## Config
