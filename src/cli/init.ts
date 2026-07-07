@@ -67,6 +67,7 @@ import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { customModelMetaFromOption, fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 import { detectInitProgress } from '@/init/progress'
+import { runTeamsBootstrap } from '@/init/teams-auth'
 import {
   API_KEY_DASHBOARD_URL,
   MINIMAX_TOKEN_PLAN_DASHBOARD_URL,
@@ -74,7 +75,9 @@ import {
   type KeyValidationResult,
 } from '@/init/validate-api-key'
 import { runWebexBootstrap } from '@/init/webex-auth'
+import type { TeamsAccountType } from '@/secrets/schema'
 
+import { teamsDeviceCodeCallbacks } from './channel'
 import { fuzzyMatch } from './fuzzy-filter'
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
@@ -225,6 +228,7 @@ export const init = defineCommand({
       kakaotalkPassword,
       webexEmail,
       webexPassword,
+      teamsAccountType,
       github: githubCredentials,
     } = channelSecrets
     const modelMeta = customModelMetaFromOption(model)
@@ -244,9 +248,11 @@ export const init = defineCommand({
     const reuseTelegram = reuseExistingChannel && channelChoice === 'telegram'
     const reuseKakaotalk = reuseExistingChannel && channelChoice === 'kakaotalk'
     const reuseWebex = reuseExistingChannel && channelChoice === 'webex'
+    const reuseTeams = reuseExistingChannel && channelChoice === 'teams'
     const reuseGithub = reuseExistingChannel && channelChoice === 'github'
     const wantsKakaotalk = (kakaotalkEmail !== undefined && kakaotalkPassword !== undefined) || reuseKakaotalk
     const wantsWebex = (webexEmail !== undefined && webexPassword !== undefined) || reuseWebex
+    const wantsTeams = teamsAccountType !== undefined || reuseTeams
     const wantsGithub = githubCredentials !== undefined || reuseGithub
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
@@ -296,6 +302,21 @@ export const init = defineCommand({
                 : {
                     runWebexAuth: ({ cwd: agentDir }) =>
                       runWebexBootstrap({ email: webexEmail!, password: webexPassword!, agentDir }),
+                  }),
+            }
+          : {}),
+        ...(wantsTeams
+          ? {
+              withTeams: true,
+              ...(reuseTeams
+                ? {}
+                : {
+                    runTeamsAuth: ({ cwd: agentDir }) =>
+                      runTeamsBootstrap({
+                        agentDir,
+                        accountType: teamsAccountType!,
+                        callbacks: teamsDeviceCodeCallbacks(),
+                      }),
                   }),
             }
           : {}),
@@ -407,7 +428,7 @@ interface WizardState {
   channelReuseExisting?: boolean
 }
 
-type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'kakaotalk' | 'github' | 'none'
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'teams' | 'kakaotalk' | 'github' | 'none'
 
 interface CollectedInputs {
   model: ModelOption
@@ -429,6 +450,7 @@ interface CollectedInputs {
     telegramBotToken?: string
     webexEmail?: string
     webexPassword?: string
+    teamsAccountType?: TeamsAccountType
     kakaotalkEmail?: string
     kakaotalkPassword?: string
     // Structured (auth union + webhook + repo allowlist) rather than flat
@@ -1141,6 +1163,8 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
       return 'Telegram'
     case 'webex':
       return 'Webex (User)'
+    case 'teams':
+      return 'Teams (User)'
     case 'kakaotalk':
       return 'KakaoTalk'
     case 'github':
@@ -1483,6 +1507,7 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
       { value: 'discord', label: 'Discord' },
       { value: 'telegram', label: 'Telegram' },
       { value: 'webex', label: 'Webex (User)' },
+      { value: 'teams', label: 'Teams (User)' },
       { value: 'kakaotalk', label: 'KakaoTalk' },
       { value: 'github', label: 'GitHub' },
       { value: 'none', label: 'Skip — no channel right now' },
@@ -1510,9 +1535,32 @@ async function runChannelFlow(
       return runTelegramFlow()
     case 'webex':
       return runWebexUserFlow()
+    case 'teams':
+      return runTeamsFlow()
     case 'github':
       return runGithubFlow(cwd)
   }
+}
+
+async function runTeamsFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  note(
+    [
+      'Teams signs in as your own Microsoft account via device-code login —',
+      'you get a short code to enter at microsoft.com/devicelogin, then approve.',
+      'The sign-in itself runs after scaffolding, not now.',
+    ].join('\n'),
+    'About to log in to Teams',
+  )
+  const accountType = await select<TeamsAccountType>({
+    message: 'Which kind of Microsoft account?',
+    options: [
+      { value: 'work', label: 'Work or school (Microsoft 365 / Azure AD)' },
+      { value: 'personal', label: 'Personal Microsoft account (outlook.com, live.com, …)' },
+    ],
+    initialValue: 'work',
+  })
+  if (isCancel(accountType)) return back()
+  return value({ teamsAccountType: accountType })
 }
 
 async function runDiscordFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
@@ -1903,6 +1951,9 @@ function reportProgress(
       case 'webex-auth':
         s.stop(reportWebexAuth(event.result))
         break
+      case 'teams-auth':
+        s.stop(reportTeamsAuth(event.result))
+        break
       case 'github-webhooks':
         s.stop(formatEagerGithubWebhookInstallResult(event.result))
         break
@@ -1965,6 +2016,11 @@ function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
 function reportWebexAuth(result: { ok: true } | { ok: false; reason: string }): string {
   if (result.ok) return 'Webex credentials saved to secrets.json.'
   return `Webex login failed: ${result.reason}`
+}
+
+function reportTeamsAuth(result: { ok: true } | { ok: false; reason: string }): string {
+  if (result.ok) return 'Teams credentials saved to secrets.json.'
+  return `Teams login failed: ${result.reason}`
 }
 
 // Hatching launches the container and foregrounds the TUI, so it steals stdin
@@ -2050,6 +2106,7 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   'instagram-auth': 'Logging in to Instagram...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   'webex-auth': 'Logging in to Webex...',
+  'teams-auth': 'Logging in to Teams...',
   'github-webhooks': 'Installing GitHub repository webhooks...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',
