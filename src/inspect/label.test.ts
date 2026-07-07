@@ -96,6 +96,47 @@ describe('originLabel', () => {
     ).toBe('Webex @dm/e354f6b0-2c2e-11f1-9f4f-fb975f3ebefb')
   })
 
+  test('slack user-account origin renders the Slack display name, not the raw id', () => {
+    expect(
+      originLabel({
+        kind: 'channel',
+        adapter: 'slack',
+        workspace: 'T0123',
+        workspaceName: 'Acme',
+        chat: 'C0ABC',
+        chatName: 'general',
+        thread: null,
+      }),
+    ).toBe('Slack Acme/general')
+  })
+
+  test('discord user-account origin renders the Discord display name, not the raw id', () => {
+    expect(
+      originLabel({
+        kind: 'channel',
+        adapter: 'discord',
+        workspace: '9999',
+        workspaceName: 'My Server',
+        chat: '8888',
+        chatName: 'dev-help',
+        thread: null,
+      }),
+    ).toBe('Discord My Server/dev-help')
+  })
+
+  test('instagram origin renders the Instagram display name, not the raw id', () => {
+    expect(
+      originLabel({
+        kind: 'channel',
+        adapter: 'instagram',
+        workspace: '@instagram-dm',
+        chat: '17841400000000000',
+        chatName: 'jane_doe',
+        thread: null,
+      }),
+    ).toBe('Instagram @instagram-dm/jane_doe')
+  })
+
   test('channel origin with unknown adapter renders adapter id verbatim', () => {
     expect(
       originLabel({
