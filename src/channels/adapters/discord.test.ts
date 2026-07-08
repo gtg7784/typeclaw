@@ -94,6 +94,8 @@ function router(): ChannelRouter & {
     unregisterReaction: (adapter: string) => unregistered.push(`reaction:${adapter}`),
     registerRemoveReaction: (adapter: string) => registered.push(`remove-reaction:${adapter}`),
     unregisterRemoveReaction: (adapter: string) => unregistered.push(`remove-reaction:${adapter}`),
+    registerEditMessage: (adapter: string) => registered.push(`edit:${adapter}`),
+    unregisterEditMessage: (adapter: string) => unregistered.push(`edit:${adapter}`),
   }
   return r as unknown as ChannelRouter & {
     routed: InboundMessage[]
@@ -130,6 +132,7 @@ describe('createDiscordAdapter', () => {
       'membership:discord',
       'reaction:discord',
       'remove-reaction:discord',
+      'edit:discord',
     ])
   })
 

@@ -149,6 +149,8 @@ function router(): TestRouter {
     unregisterSelfIdentity: (adapter: string) => unregistered.push(`self:${adapter}`),
     registerHistory: (adapter: string) => registered.push(`history:${adapter}`),
     unregisterHistory: (adapter: string) => unregistered.push(`history:${adapter}`),
+    registerEditMessage: (adapter: string) => registered.push(`edit:${adapter}`),
+    unregisterEditMessage: (adapter: string) => unregistered.push(`edit:${adapter}`),
     getSelfAliases: () => [],
   } as unknown as TestRouter
 }
@@ -358,7 +360,7 @@ describe('createTeamsAdapter', () => {
     await adapter.start()
 
     expect(adapter.isConnected()).toBe(true)
-    expect(r.registered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    expect(r.registered).toEqual(['outbound:teams', 'self:teams', 'history:teams', 'edit:teams'])
 
     await adapter.stop()
   })
@@ -581,7 +583,7 @@ describe('createTeamsAdapter', () => {
     // isConnected() reflects REST usability, so the manager won't churn-restart it
     expect(adapter.isConnected()).toBe(true)
     // the REST callbacks stay registered — only the listener is torn down
-    expect(r.registered).toEqual(['outbound:teams', 'self:teams', 'history:teams'])
+    expect(r.registered).toEqual(['outbound:teams', 'self:teams', 'history:teams', 'edit:teams'])
     expect(r.unregistered).toEqual([])
     expect(listener.stopped).toBe(true)
 

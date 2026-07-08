@@ -52,7 +52,7 @@ export type WriteCapability = 'message-edit'
 // schema.test.ts guard re-derives each entry from the adapter's
 // `.registerEditMessage(` call and fails if the table drifts.
 export const ADAPTER_WRITE_CAPABILITIES: Record<AdapterId, readonly WriteCapability[]> = {
-  discord: [],
+  discord: ['message-edit'],
   'discord-bot': ['message-edit'],
   github: [],
   instagram: [],
@@ -60,7 +60,7 @@ export const ADAPTER_WRITE_CAPABILITIES: Record<AdapterId, readonly WriteCapabil
   kakaotalk: [],
   slack: ['message-edit'],
   'slack-bot': ['message-edit'],
-  teams: [],
+  teams: ['message-edit'],
   'telegram-bot': ['message-edit'],
   webex: ['message-edit'],
   'webex-bot': ['message-edit'],
