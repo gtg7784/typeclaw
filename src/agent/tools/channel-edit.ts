@@ -29,14 +29,18 @@ export function createChannelEditTool({ router, logger = consoleChannelLogger }:
       'Pass the `message_id` a prior `channel_send` returned (Slack thread ts, Discord message id), plus the same ' +
       'adapter/workspace/chat you sent it to, and the new `text`. Use this to fix a typo, correct a wrong answer, ' +
       'or append a result to a status message you posted earlier — not to carry on a conversation (send a new ' +
-      'message for that). Editing is supported on "slack-bot" and "discord-bot"; other adapters return ' +
+      'message for that). Editing is supported on "slack-bot", "slack", "discord-bot", "telegram-bot", "webex", and ' +
+      '"webex-bot"; other adapters return ' +
       '{ ok: false, error, code: "not-supported" }. You can only edit messages YOU authored; editing someone ' +
       'else\'s returns code "permission-denied". On success returns { ok: true }; a missing/deleted target returns ' +
       'code "not-found".',
     parameters: Type.Object({
       adapter: Type.Union(
         ADAPTER_IDS.map((a) => Type.Literal(a)),
-        { description: 'Adapter id. Editing is supported on "slack-bot" and "discord-bot".' },
+        {
+          description:
+            'Adapter id. Editing is supported on "slack-bot", "slack", "discord-bot", "telegram-bot", "webex", "webex-bot".',
+        },
       ),
       workspace: Type.String({
         description:
