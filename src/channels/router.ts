@@ -957,6 +957,18 @@ type LiveSession = {
   // turn can never trigger a nudge on a later one. `null` when no such reply
   // ended this turn.
   lastTerminalReplyAbort: { turnSeq: number; text: string } | null
+  // Stamped by `installChannelReplyTerminalHook` when a successful `channel_reply`
+  // set `continue: true` — the machine-readable "I'll keep working this turn"
+  // promise. `validateChannelTurn` reads it to recover a turn that made that promise,
+  // did more work, then ended on a fresh empty `stop` (dropped its conclusion) —
+  // independent of what natural-language phrase the ack used, so a persona speaking
+  // any language/register is covered where the willingness phrase table would miss.
+  // `turnSeq`-stamped so a stale promise can't fire on a later turn. `sendCount` is
+  // `successfulChannelSends` AT the ack (which already counts the ack itself); the
+  // recovery fires only while it still equals the live count — a later substantive
+  // send (e.g. a `channel_send` final answer) bumps the count and invalidates the
+  // promise, so an empty stop after the real answer is NOT re-nudged.
+  continueReplyTurn: { turnSeq: number; sendCount: number } | null
   // Stamped by router abort sites and read by `validateChannelTurn` for
   // reason-specific stranded-toolUse recovery logs. `turnSeq`-stamped so stale
   // abort provenance from an earlier turn can never leak into a later retry.
@@ -2114,6 +2126,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         emptyStopAfterToolWorkArmed: false,
         willingnessNudges: 0,
         lastTerminalReplyAbort: null,
+        continueReplyTurn: null,
         abortReasonThisTurn: null,
         nextPromptMaxTokens: undefined,
         skippedTurn: null,
@@ -2502,6 +2515,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const details = context.result.details as { ok?: unknown; continue?: unknown } | undefined
       const succeeded = context.toolCall.name === 'channel_reply' && !context.isError && details?.ok === true
       const keepTurnAlive = details?.continue === true
+      if (succeeded && keepTurnAlive) {
+        live.continueReplyTurn = { turnSeq: live.turnSeq, sendCount: live.successfulChannelSends }
+      }
       if (succeeded && !keepTurnAlive && agent.signal?.aborted !== true) {
         logger.info(`[channels] ${live.keyId} terminal_after_channel_reply`)
         const replyText = (context.toolCall.arguments as { text?: unknown } | undefined)?.text
@@ -2898,6 +2914,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.skipLockedSendTurn = null
         live.disengagedTurn = null
         live.emptyTurnFallbackTurn = null
+        live.continueReplyTurn = null
         live.policyDeniedToolSendsThisTurn.clear()
         resetReviewTurn(live.sessionId)
         const isRealUserTurn = batch.length > 0
@@ -4435,6 +4452,47 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // landed — suppress it, as before.
     if (live.successfulChannelSends > successfulSendsBeforePrompt) {
       maybeNudgeContinuationWillingness(live)
+
+      // A `channel_reply({ continue: true })` progress ack landed this turn (the
+      // machine-readable "I'll keep working" promise — `continueReplyTurn` is stamped
+      // by installChannelReplyTerminalHook), the model did more work, then ended on a
+      // FRESH empty `stop` — dropping its conclusion. This is the SAME degeneration as
+      // the phrase-gated `channel_send` branch below, but keyed on the `continue: true`
+      // FLAG instead of a natural-language willingness phrase. The flag is the robust
+      // signal: it fires regardless of the ack's language or register, closing the gap
+      // where a persona speaking a phrasing outside the willingness table (e.g. casual
+      // Korean "확인해볼게") stranded the user in silence. The `attemptMadeToolCall`
+      // half ties the first trigger to real post-ack work; `willingnessNudges > 0`
+      // lets a retry that re-emitted `continue: true` and re-stranded spend the shared
+      // budget toward the visible fallback instead of bailing silent. Same
+      // MAX_WILLINGNESS_NUDGES bound, same empty-`promptQueue` gate (a coalesced live
+      // inbound supersedes this turn's silence), and same nudge/fallback path as the
+      // send-ack branch. Placed FIRST so the flag catch wins when both signals are
+      // present; the phrase branch remains the only recovery for `channel_send`, which
+      // stamps no flag. The `sendCount === successfulChannelSends` check requires the
+      // continue-reply to STILL be the latest successful send: if a later substantive
+      // send (e.g. a `channel_send` final answer) landed after the ack, the user was
+      // already answered and a trailing empty stop must NOT be re-nudged.
+      if (
+        live.promptQueue.length === 0 &&
+        live.currentTurnAuthorId !== null &&
+        live.continueReplyTurn?.turnSeq === live.turnSeq &&
+        live.continueReplyTurn.sendCount === live.successfulChannelSends &&
+        isFreshEmptyStopAfterSend(live) &&
+        (attemptMadeToolCall(live.session) || live.willingnessNudges > 0)
+      ) {
+        if (live.willingnessNudges < MAX_WILLINGNESS_NUDGES) {
+          live.willingnessNudges++
+          logger.warn(
+            `[channels] ${live.keyId} send_willingness_nudge attempt=${live.willingnessNudges}/${MAX_WILLINGNESS_NUDGES} ` +
+              `cause=empty_stop_after_continue_reply`,
+          )
+          live.pendingSystemReminders.push(SEND_WILLINGNESS_NUDGE)
+        } else {
+          await postEmptyTurnFallback('empty_stop_after_continue_reply_nudges_exhausted')
+        }
+        return
+      }
 
       // A `channel_send` ack that promised to keep working, fresh post-ack work,
       // then an EMPTY `stop` leaf: the model computed the answer in its reasoning
@@ -6474,20 +6532,29 @@ function leafIsStrandedToolUse(session: AgentSession): boolean {
   return false
 }
 
-// True when the turn-end leaf is a FRESH empty `stop` (no text, no tool call,
-// distinct from the leaf in place at the last successful send) AND the most
-// recent send to this target was a continuation-willingness ack. This is the
-// `channel_send` analogue of the `channel_reply` willingness path: the model
-// acked "I'll check…", did post-ack work, then the follow-up came back as a
-// clean empty completion that would otherwise be read as a deliberate `NO_REPLY`.
-// The fresh-leaf check (`!== lastSendLeafId`) is what separates this degeneration
-// from a legitimate ack-then-stop where the model meant to wait for the user.
-function isEmptyStopAfterWillingnessAck(live: LiveSession): boolean {
+// The turn-end leaf is a FRESH empty `stop` — an assistant message with no visible
+// text and no tool call, distinct from the leaf in place at the last successful
+// send. "Fresh" (`!== lastSendLeafId`) is what separates a post-send degeneration
+// (the model did more work, then dropped its conclusion) from a legitimate
+// ack-then-stop where the model meant to wait for the user (leaf unchanged since
+// the send). The two willingness paths below layer their own promise-signal on top
+// of this shape: `channel_reply({ continue: true })` via `continueReplyTurn`, and
+// `channel_send` acks via the willingness phrase table.
+function isFreshEmptyStopAfterSend(live: LiveSession): boolean {
   const leaf = live.session.sessionManager.getLeafEntry()
   if (!leaf || leaf.type !== 'message' || leaf.message.role !== 'assistant') return false
   if (leaf.message.stopReason !== 'stop') return false
   if (hasToolCall(leaf.message) || visibleAssistantText(leaf.message).trim() !== '') return false
-  if (leaf.id === live.lastSendLeafId) return false
+  return leaf.id !== live.lastSendLeafId
+}
+
+// The `channel_send` analogue of the `continue: true` recovery: the most recent
+// send to this target was a continuation-willingness ack (by phrase), then the
+// model produced a fresh empty stop. `channel_send` keeps the turn alive without a
+// `continue: true` flag and stamps no semantic marker, so the phrase table is the
+// only "I promised to keep working" signal available for that shape.
+function isEmptyStopAfterWillingnessAck(live: LiveSession): boolean {
+  if (!isFreshEmptyStopAfterSend(live)) return false
   const ackText = live.lastSentText.get(consecutiveSendKey(live.key.chat, live.key.thread))
   return ackText !== undefined && detectContinuationWillingness(ackText)
 }

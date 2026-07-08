@@ -12851,6 +12851,163 @@ describe('ChannelRouter channel_send willingness nudge', () => {
   })
 })
 
+describe('ChannelRouter continue:true empty-stop recovery (phrase-independent)', () => {
+  function continueReplyContext(replyText: string): AfterToolCallContext {
+    return {
+      assistantMessage: assistantMessage('') as AfterToolCallContext['assistantMessage'],
+      toolCall: {
+        type: 'toolCall',
+        id: 'tc1',
+        name: 'channel_reply',
+        arguments: { text: replyText },
+      } as AfterToolCallContext['toolCall'],
+      args: { text: replyText },
+      result: {
+        content: [{ type: 'text' as const, text: 'ignored' }],
+        details: { ok: true, continue: true },
+      } as AfterToolCallContext['result'],
+      isError: false,
+      context: { systemPrompt: '', messages: [], tools: [] },
+    }
+  }
+
+  // Reproduce the production order for a channel_reply({ continue: true }): the tool's
+  // execute() calls router.send() (which bumps successfulChannelSends) BEFORE the
+  // runtime fires afterToolCall (which stamps continueReplyTurn with that post-send
+  // count). Then install a fresh empty-stop-after-tool-work leaf — the degeneration.
+  async function continueReplyThenStrand(
+    session: FakeSession,
+    router: ChannelRouter,
+    ackText: string,
+    id: string,
+  ): Promise<void> {
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: ackText })
+    await session.agent.afterToolCall!(continueReplyContext(ackText))
+    emptyStopAfterToolWork(session, id)
+  }
+
+  test('recovers a continue:true ack whose phrasing is OUTSIDE the willingness table', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'persona 파일들 좀 봐줘' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      attempt++
+      if (attempt === 1) {
+        // given: a continue:true progress ack with NO willingness phrase (casual
+        // Korean "훑어볼게" is not in the phrase table), then tool work, then a
+        // fresh empty stop — the phrase-gated path can't see this promise.
+        await continueReplyThenStrand(sessions[0]!, router, '응 persona 흔적 파일들 훑어볼게', String(attempt))
+        return
+      }
+      // then: the flag-gated recovery re-prompts, and the model delivers the answer
+      expect(text).toContain(SEND_WILLINGNESS_NUDGE)
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'persona 파일 3개 찾았어.' })
+      sessions[0]!.setAssistantText('')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent).toEqual(['응 persona 흔적 파일들 훑어볼게', 'persona 파일 3개 찾았어.'])
+    expect(
+      logs.some((m) => m.includes('send_willingness_nudge') && m.includes('cause=empty_stop_after_continue_reply')),
+    ).toBe(true)
+  })
+
+  test('posts the fallback instead of looping when the continue:true retry re-strands', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '확인해줘' }))
+    let attempt = 0
+    sessions[0]!.onPrompt = async () => {
+      attempt++
+      // Every turn re-acks continue:true (distinct text to dodge the send dup-guard)
+      // and re-strands on an empty stop. Bound = MAX_WILLINGNESS_NUDGES: one nudge,
+      // then the visible fallback instead of silence.
+      await continueReplyThenStrand(sessions[0]!, router, `바로 볼게 (${attempt})`, String(attempt))
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1 + MAX_WILLINGNESS_NUDGES)
+    expect(sent.filter((s) => s === EMPTY_TURN_FALLBACK_TEXT)).toHaveLength(1)
+    expect(
+      logs.some((m) => m.includes('empty_turn_fallback cause=empty_stop_after_continue_reply_nudges_exhausted')),
+    ).toBe(true)
+  })
+
+  test('does NOT recover when the continue:true ack leaf is unchanged since the send (ack-then-await-user)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: '확인 좀' }))
+    sessions[0]!.onPrompt = async () => {
+      // Install the leaf BEFORE the send so lastSendLeafId === the turn-end leaf:
+      // the model acked continue:true and stopped to await the user, no post-ack
+      // work — must stay on the historical no_reply path, not recover.
+      const entry: SessionEntry = {
+        type: 'message',
+        id: 'ack-leaf',
+        parentId: null,
+        timestamp: '2026-07-08T12:27:40.000Z',
+        message: { ...assistantMessage(''), content: [{ type: 'text', text: '' }], stopReason: 'stop' },
+      }
+      sessions[0]!.entriesById.set(entry.id, entry)
+      sessions[0]!.leafEntry = entry
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('바로 볼게'))
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '바로 볼게' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+  })
+
+  test('does NOT recover when a substantive channel_send answered the user after the continue:true ack', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '레포 확인해줘' }))
+    sessions[0]!.onPrompt = async () => {
+      // given: continue:true ack (stamps continueReplyTurn with the ack's send count),
+      // tool work, then a SUBSTANTIVE channel_send final answer — which bumps
+      // successfulChannelSends past the stamped count — and finally a fresh empty stop.
+      // The user was already answered, so the trailing empty stop must NOT be nudged.
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '확인해볼게' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('확인해볼게'))
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ADMIN 권한 있어, 접근 가능해.' })
+      emptyStopAfterToolWork(sessions[0]!, 'mixed')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sent).toEqual(['확인해볼게', 'ADMIN 권한 있어, 접근 가능해.'])
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+    expect(sent.some((s) => s === EMPTY_TURN_FALLBACK_TEXT)).toBe(false)
+  })
+})
+
 describe('ChannelRouter output-token cap', () => {
   async function invokeStream(session: FakeSession, options: { maxTokens?: number } | undefined): Promise<void> {
     await session.agent.streamFn(
