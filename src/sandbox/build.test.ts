@@ -308,6 +308,32 @@ describe('buildSandboxedCommand protected re-binds', () => {
   })
 })
 
+describe('buildSandboxedCommand blockedCreation', () => {
+  test('binds /dev/null over each blocked path to prevent creation', () => {
+    const joined = argvOf('bun add foo', {
+      blockedCreation: { files: ['/agent/cron.json', '/agent/typeclaw.json'] },
+    }).join(' ')
+    expect(joined).toContain('--ro-bind /dev/null /agent/cron.json')
+    expect(joined).toContain('--ro-bind /dev/null /agent/typeclaw.json')
+  })
+
+  test('renders blocked binds AFTER the RW root so last-op-wins occupies the path', () => {
+    const argv = argvOf('bun add foo', {
+      writableRoot: { dir: '/agent' },
+      blockedCreation: { files: ['/agent/cron.json'] },
+    })
+    const rwRoot = argv.indexOf('--bind')
+    const blocked = argv.indexOf('/agent/cron.json')
+    expect(rwRoot).toBeGreaterThanOrEqual(0)
+    expect(blocked).toBeGreaterThan(rwRoot)
+  })
+
+  test('emits no blocked binds when the policy omits them', () => {
+    const argv = argvOf('true', { writableRoot: { dir: '/agent' } })
+    expect(argv.join(' ')).not.toContain('/dev/null /agent')
+  })
+})
+
 describe('buildSandboxedCommand symlinks', () => {
   test('emits --dir <parent> then --symlink <target> <dest> for each op', () => {
     const joined = argvOf('true', {

@@ -112,6 +112,18 @@ export type SandboxWritableRootPolicy = {
   dir: string
 }
 
+// Paths whose CREATION must be blocked under a writable root, rendered as
+// `--ro-bind /dev/null <path>`. Used by the package-install path for the
+// semantically-guarded managed files (cron.json / typeclaw.json) when they are
+// ABSENT: the RW root would otherwise let a postinstall lifecycle script create
+// them, bypassing the write/edit-tool guards. Binding /dev/null occupies the
+// path with an empty read-only object (blocking creation) WITHOUT manufacturing
+// a real invalid file on the host FS. Renders after writableRoot, with the
+// protected binds, so last-op-wins keeps the path occupied.
+export type SandboxBlockedCreationPolicy = {
+  files?: string[]
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
@@ -128,6 +140,7 @@ export type SandboxPolicy = {
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy
   protected?: SandboxProtectedPolicy
+  blockedCreation?: SandboxBlockedCreationPolicy
   symlinks?: SandboxSymlinkOp[]
   network?: SandboxNetwork
   env?: SandboxEnvPolicy

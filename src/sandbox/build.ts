@@ -171,6 +171,7 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
   appendMasks(argv, policy)
   appendWritable(argv, policy)
   appendProtected(argv, policy)
+  appendBlockedCreation(argv, policy)
   appendSymlinks(argv, policy)
 
   if (policy.cwd !== undefined) {
@@ -214,6 +215,17 @@ function appendProtected(argv: string[], policy: SandboxPolicy): void {
   }
   for (const file of policy.protected?.files ?? []) {
     argv.push('--ro-bind', file, file)
+  }
+}
+
+// Occupies each path with an empty read-only object so a writable-root install
+// script cannot CREATE a real file there. /dev/null always exists (bwrap mounts
+// --dev), so unlike --ro-bind-data this needs no manufactured placeholder on the
+// host FS. Renders after appendProtected: both are RO carve-outs of the RW root,
+// last-op-wins.
+function appendBlockedCreation(argv: string[], policy: SandboxPolicy): void {
+  for (const file of policy.blockedCreation?.files ?? []) {
+    argv.push('--ro-bind', '/dev/null', file)
   }
 }
 

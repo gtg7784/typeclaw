@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -42,11 +43,23 @@ describe('resolveWritableZones', () => {
 
   test('includes only the allowed root files that exist', async () => {
     await writeFile(join(agentDir, 'AGENTS.md'), '# agents')
+    await writeFile(join(agentDir, 'IDENTITY.md'), '# identity')
+
+    const { files } = await resolveWritableZones(agentDir)
+
+    expect(files).toEqual([join(agentDir, 'AGENTS.md'), join(agentDir, 'IDENTITY.md')])
+  })
+
+  test('excludes the semantically-guarded managed files (cron.json, typeclaw.json)', async () => {
+    await writeFile(join(agentDir, 'AGENTS.md'), '# agents')
+    await writeFile(join(agentDir, 'cron.json'), '{"jobs":[]}')
     await writeFile(join(agentDir, 'typeclaw.json'), '{}')
 
     const { files } = await resolveWritableZones(agentDir)
 
-    expect(files).toEqual([join(agentDir, 'AGENTS.md'), join(agentDir, 'typeclaw.json')])
+    expect(files).not.toContain(join(agentDir, 'cron.json'))
+    expect(files).not.toContain(join(agentDir, 'typeclaw.json'))
+    expect(files).toContain(join(agentDir, 'AGENTS.md'))
   })
 
   test('rejects a zone dir that is a symlink (RW bind would follow it outside)', async () => {
@@ -65,13 +78,13 @@ describe('resolveWritableZones', () => {
   test('rejects a root file that is a symlink', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
     try {
-      const target = join(outside, 'real.json')
-      await writeFile(target, '{}')
-      await symlink(target, join(agentDir, 'typeclaw.json'))
+      const target = join(outside, 'real.md')
+      await writeFile(target, '# real')
+      await symlink(target, join(agentDir, 'AGENTS.md'))
 
       const { files } = await resolveWritableZones(agentDir)
 
-      expect(files).not.toContain(join(agentDir, 'typeclaw.json'))
+      expect(files).not.toContain(join(agentDir, 'AGENTS.md'))
     } finally {
       await rm(outside, { recursive: true, force: true })
     }
@@ -415,6 +428,53 @@ describe('resolvePackageInstallZones', () => {
     } finally {
       await rm(outside, { recursive: true, force: true })
     }
+  })
+
+  // SECURITY: the RW package-install root would let a postinstall lifecycle
+  // script CREATE an absent managed file (cron.json/typeclaw.json), bypassing the
+  // write/edit-tool guards. Absent managed files must land in blockedCreation
+  // (rendered as --ro-bind /dev/null) so their path is occupied.
+  test('blocks creation of ABSENT managed files (cron.json, typeclaw.json)', async () => {
+    const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(blockedCreation).toContain(join(agentDir, 'cron.json'))
+    expect(blockedCreation).toContain(join(agentDir, 'typeclaw.json'))
+    // Absent files are not (and cannot be) RO-bound — /dev/null occupies them.
+    expect(prot.files).not.toContain(join(agentDir, 'cron.json'))
+    expect(prot.files).not.toContain(join(agentDir, 'typeclaw.json'))
+  })
+
+  test('does NOT block-create a PRESENT managed file (it is RO-bound with real content instead)', async () => {
+    await writeFile(join(agentDir, 'cron.json'), '{"jobs":[]}')
+
+    const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
+
+    expect(blockedCreation).not.toContain(join(agentDir, 'cron.json'))
+    expect(prot.files).toContain(join(agentDir, 'cron.json'))
+    // typeclaw.json is still absent, so it stays blocked.
+    expect(blockedCreation).toContain(join(agentDir, 'typeclaw.json'))
+  })
+
+  test('blocks a managed file that exists only as a symlink (an RO bind would follow it out)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
+    try {
+      await writeFile(join(outside, 'real.json'), '{}')
+      await symlink(join(outside, 'real.json'), join(agentDir, 'cron.json'))
+
+      const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
+
+      expect(blockedCreation).toContain(join(agentDir, 'cron.json'))
+      expect(prot.files).not.toContain(join(agentDir, 'cron.json'))
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('does not leave an empty placeholder on the real FS for an absent managed file', async () => {
+    await resolvePackageInstallZones(agentDir)
+
+    expect(existsSync(join(agentDir, 'cron.json'))).toBe(false)
+    expect(existsSync(join(agentDir, 'typeclaw.json'))).toBe(false)
   })
 })
 

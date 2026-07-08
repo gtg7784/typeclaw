@@ -59,15 +59,19 @@ const PROTECTED_GIT_FILES = ['.git/config'] as const
 
 // Bash may EDIT these when present; creating a MISSING root file goes through
 // write/edit (bwrap cannot RW-bind a non-existent source without pre-creating it).
-const WRITABLE_ROOT_FILES = [
-  'AGENTS.md',
-  'IDENTITY.md',
-  'SOUL.md',
-  'USER.md',
-  'cron.json',
-  'package.json',
-  'typeclaw.json',
-] as const
+//
+// SECURITY: the semantically-guarded managed files (`cron.json`, `typeclaw.json`)
+// are deliberately EXCLUDED. Those two are the only files gated by the
+// managedConfig / cronPromotion guards, which fire on the `write`/`edit` tools
+// only. Granting bash a blanket RW bind to them opened a bypass: an agent
+// blocked from writing cron.json through the guarded tools could just
+// `echo … > cron.json` from bash and defeat the guard entirely. Keeping them off
+// this list forces every mutation of a guarded file through the one guarded path
+// (the write/edit tool), so a managed file has exactly one mutation boundary.
+// `package.json` stays writable: it is NOT a semantically-guarded managed file
+// (only cron.json/typeclaw.json are), and `bun add`/manual dep edits legitimately
+// touch it from bash.
+const WRITABLE_ROOT_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'package.json'] as const
 
 // SECURITY: the symlink rejection is load-bearing. An RW bind follows symlinks,
 // so a `workspace -> /etc` symlink at a zone root would grant write access to an
@@ -152,7 +156,22 @@ function dedupe(values: string[]): string[] {
 export type PackageInstallZones = {
   root: string
   protected: ProtectedZones
+  // Guarded managed files that are ABSENT at jail-build time. The RW package-
+  // install root would otherwise let a `bun install` postinstall lifecycle
+  // script CREATE them (a guard bypass — see the SECURITY note on
+  // MANAGED_ROOT_FILES). Rendered as `--ro-bind /dev/null <path>` so the path is
+  // occupied by an empty read-only object that blocks creation, without
+  // manufacturing a real (invalid) file on the host FS the way the secret-mask
+  // placeholder pattern would. Present managed files go in `protected.files`.
+  blockedCreation: string[]
 }
+
+// SECURITY: the semantically-guarded managed files. They are gated by the
+// managedConfig / cronPromotion guards (write/edit tools only), so bash must
+// never be able to write OR create them. The normal jail already excludes them
+// from WRITABLE_ROOT_FILES; the package-install RW root needs the extra step of
+// blocking their CREATION when absent (see PackageInstallZones.blockedCreation).
+const MANAGED_ROOT_FILES = ['cron.json', 'typeclaw.json'] as const
 
 // SECURITY: the package-install RW root is governed by an ALLOWLIST, not a
 // denylist. `bun add` writes exactly these and nothing else: `node_modules/`
@@ -214,7 +233,24 @@ export async function resolvePackageInstallZones(agentDir: string): Promise<Pack
   const runtime = join(agentDir, 'node_modules', 'typeclaw')
   if (await isRealEntry(runtime, 'dir')) dirs.push(runtime)
 
-  return { root: agentDir, protected: { dirs: dedupe(dirs), files: dedupe(files) } }
+  // Guarded managed files: a PRESENT real one is already RO-bound by the readdir
+  // loop above (it is not in the writable set). The gap is a managed file ABSENT
+  // at jail-build time — readdir never sees it, so nothing occupies its path and
+  // a postinstall script could CREATE it under the RW root. Block that path with
+  // `--ro-bind /dev/null`. A managed file that exists as a SYMLINK is also blocked
+  // here rather than RO-bound (the readdir loop skipped it, and an RO bind would
+  // follow it out of the jail) — occupying the path with /dev/null is safe.
+  const blockedCreation: string[] = []
+  for (const name of MANAGED_ROOT_FILES) {
+    const target = join(agentDir, name)
+    if (!(await isRealEntry(target, 'file'))) blockedCreation.push(target)
+  }
+
+  return {
+    root: agentDir,
+    protected: { dirs: dedupe(dirs), files: dedupe(files) },
+    blockedCreation: dedupe(blockedCreation),
+  }
 }
 
 async function exists(target: string): Promise<boolean> {
