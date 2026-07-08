@@ -21,7 +21,13 @@ const onWindows = isWindows()
 // fake binary reads it out of argv (the value following '-w') and renders
 // a fake metadata block back. See fetch.test.ts for the rationale on the
 // argv positional-access pattern.
-const FAKE_BINARY_BODY = (body: string, status = 200, finalUrl = 'https://example.com', contentType = 'text/html') => `
+const FAKE_BINARY_BODY = (
+  body: string,
+  status = 200,
+  finalUrl = 'https://example.com',
+  contentType = 'text/html',
+  headerJson = '{}',
+) => `
 ARGV_FILE="$SCRATCH_ARGV"
 printf '%s\\n' "$@" > "$ARGV_FILE"
 WTPL=""
@@ -34,9 +40,9 @@ for arg in "$@"; do
   fi
   i=$((i + 1))
 done
-RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/${status}/' -e 's|%{url_effective}|${finalUrl}|' -e 's|%{content_type}|${contentType}|' -e 's/%{size_download}/${body.length}/')
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/${status}/' -e 's|%{url_effective}|${finalUrl}|' -e 's|%{content_type}|${contentType}|' -e 's/%{size_download}/${body.length}/' -e 's|%{header_json}|@@HJ@@|')
 printf '%s' '${body}'
-printf '%s' "$RENDERED"
+printf '%s' "$RENDERED" | sed "s|@@HJ@@|$(printf '%s' '${headerJson.replace(/'/g, `'\\''`).replace(/\|/g, '\\\\|')}')|"
 `
 
 // POSIX-only fake shell binary without .exe/.cmd; Windows cannot spawn it (#899).
@@ -213,6 +219,48 @@ describe.skipIf(onWindows)('curlImpersonate', () => {
     const idx = a.indexOf('--max-filesize')
     expect(idx).toBeGreaterThanOrEqual(0)
     expect(a[idx + 1]).toBe('5000000')
+  })
+
+  test('passes -b and -c with the same jar path when cookieJarPath is set', async () => {
+    installFakeBinary(FAKE_BINARY_BODY('ok'))
+
+    await curlImpersonate({ url: 'https://example.com', cookieJarPath: '/tmp/jar.txt' })
+
+    const a = await argv()
+    const readIdx = a.indexOf('-b')
+    const writeIdx = a.indexOf('-c')
+    expect(readIdx).toBeGreaterThanOrEqual(0)
+    expect(a[readIdx + 1]).toBe('/tmp/jar.txt')
+    expect(writeIdx).toBeGreaterThanOrEqual(0)
+    expect(a[writeIdx + 1]).toBe('/tmp/jar.txt')
+  })
+
+  test('omits cookie-jar flags when cookieJarPath is not set', async () => {
+    installFakeBinary(FAKE_BINARY_BODY('ok'))
+
+    await curlImpersonate({ url: 'https://example.com' })
+
+    const a = await argv()
+    expect(a).not.toContain('-b')
+    expect(a).not.toContain('-c')
+  })
+
+  test('parses Set-Cookie names from header_json', async () => {
+    const headerJson = '{"set-cookie":["_abck=xyz; Path=/","bm_sz=abc; Path=/"],"content-type":["text/html"]}'
+    installFakeBinary(FAKE_BINARY_BODY('blocked', 403, 'https://example.com', 'text/html', headerJson))
+
+    const result = await curlImpersonate({ url: 'https://example.com' })
+
+    expect(result.httpStatus).toBe(403)
+    expect(result.setCookieNames).toEqual(['_abck', 'bm_sz'])
+  })
+
+  test('returns empty setCookieNames when the server sets no cookies', async () => {
+    installFakeBinary(FAKE_BINARY_BODY('ok', 200, 'https://example.com', 'text/html', '{"content-type":["text/html"]}'))
+
+    const result = await curlImpersonate({ url: 'https://example.com' })
+
+    expect(result.setCookieNames).toEqual([])
   })
 
   test('aborts when the AbortSignal fires', async () => {
