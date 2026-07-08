@@ -291,6 +291,28 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('already-acknowledged gaps')
   })
 
+  test('code-review skill reviews the PR title/body as a first-class artifact, not just context (drift guard)', () => {
+    // The core behavior of this skill's PR-record dimension: the title/body is a
+    // review target in its own right (a record of the why), and the reviewer must
+    // catch a diff change whose rationale is silently dropped. Without these, the
+    // section can be neutralized back to "body is only input to verify code against".
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('review the pr title and body as an artifact')
+    expect(lower).toContain('a pr is a record')
+    expect(lower).toContain('rationale for every meaningful change')
+    expect(lower).toContain('meaning-unit separation')
+  })
+
+  test('code-review skill reconciles restating-vs-reviewing the description as echo-vs-evaluate (drift guard)', () => {
+    // The load-bearing reconciliation: the new PR-body review must not collide with
+    // the pre-existing "restating the change description = noise" rule. The distinction
+    // is echo (noise) vs. evaluate (in scope). Without this the two sections read as a
+    // direct contradiction and the new dimension gets suppressed as restatement.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('echo vs. evaluate')
+    expect(lower).toContain('do not confuse restating the description with reviewing it')
+  })
+
   test('code-review skill demands blast-radius + pinned evidence on findings (drift guard)', () => {
     // A line anchor says where; these say how far it reaches and where the evidence lives.
     const lower = CODE_REVIEW_SKILL.content.toLowerCase()

@@ -3,7 +3,7 @@ import type { LoadableSkill } from '@/plugin'
 export const CODE_REVIEW_SKILL_NAME = 'code-review'
 
 export const CODE_REVIEW_SKILL_DESCRIPTION =
-  'Review code: a pull request, a commit, a single file, or a module. Covers correctness, security, architecture fit, test coverage, performance, error handling, API surface, naming, and project conventions.'
+  'Review code: a pull request, a commit, a single file, or a module. Covers correctness, security, architecture fit, test coverage, performance, error handling, API surface, naming, project conventions, and the PR title/body itself as a record — whether it captures the why behind each change for future readers.'
 
 export const CODE_REVIEW_SKILL_CONTENT = `# code-review
 
@@ -55,6 +55,26 @@ A finding without context is noise. Before forming findings:
 3. **Read the project's conventions.** \`AGENTS.md\`, \`CONTRIBUTING.md\`, \`CLAUDE.md\`, \`README.md\`, the test layout, the linter config. Deviation from established convention is a finding worth raising; following convention is not worth praising.
 4. **Read the tests.** Existing tests show what the project considers important to verify. New tests show what the author considers important to lock in. The gap between them is often where the bugs hide.
 
+## Review the PR title and body as an artifact, not just as context
+
+Steps above use the PR title and body as *input* — the author's stated intent, which you check the code against. But the description is also a **deliverable in its own right, and it is part of your review scope.** Most harnesses only diff code and never review the prose; you are the one pass that can, so treat the title and body as a first-class review target alongside the diff.
+
+Why this matters — the frame that decides your findings here:
+
+- **A PR is a record, not a showcase.** Its dominant purpose is not to display the code or even to solicit code review — it is to **record the translation from the business need into the code change**: *why* this change became necessary, what business or product context forced it, what decision was made and what was rejected. The code shows *what* changed; the body is the only place *why* survives. When the why is absent, it is gone the moment the author forgets it.
+- **The audience is the reviewer and future-self, who do NOT share the author's context.** The current reviewer, a teammate six months from now, or the author themselves later, all read this record under real cognitive load, missing the context that was obvious the day it was written. A good body exists to *lower that load*. Judge the body by whether a reader without the author's head can reconstruct why each change was made.
+- **The concrete failure is a change whose context is silently dropped.** A large task drags in incidental side changes; the low-importance ones lose their rationale first, and later someone does redundant or wrong work because the record never explained the earlier decision (e.g. a field added in one PR with no note that it duplicates an existing one, so a later PR "fixes" a problem that was actually intentional). This is the highest-value thing to catch: a change in the diff that the body leaves **unexplained or unconnected to its reason**.
+
+What to look for in the title and body:
+
+1. **Rationale for every meaningful change, not just the headline one.** The primary change is usually explained. The finding is the *secondary* change — a schema tweak, a config flip, a "while I was here" refactor, a new field — that appears in the diff with no corresponding why in the body. Anchor the finding to the diff hunk whose rationale is missing, and name what a future reader would fail to reconstruct.
+2. **Title accuracy and scope match.** Does the title name what the change actually does? Does the body's described scope match the diff — nothing significant in the diff that the body never mentions, and nothing promised in the body that the diff never delivers? A title that says A while the diff also does B is a scope/record defect: the B change is now unfindable by anyone searching the history for it.
+3. **Meaning-unit separation.** When the diff bundles several unrelated logical changes under one description, the context for each is harder to recover and the record is degraded even if every line is correct. Flag it as a record problem — the fix may be to split the PR, or at minimum to give each logical unit its own explained section in the body — not as a code defect.
+4. **Decision and trade-off capture.** For a change that chose one approach over an obvious alternative, or that is a deliberate one-way door (schema, public API, migration), does the body record the decision and why? A silent irreversible decision is a record gap worth raising even when the code is correct.
+5. **Linked context integrity.** Referenced issues/tickets/prior PRs actually correspond to this change; a load-bearing claim in the body ("as decided in #123") points where it says it does. A dangling or wrong reference breaks the record's chain.
+
+Keep the anti-noise line from below firmly in view: **do not confuse restating the description with reviewing it.** Summarizing what the PR does back to the author is noise (see "What NOT to find"). The review work here is the *gap* — a change with no recorded reason, a title that misleads, a bundled scope that buries context, a decision left unexplained. Anchor these to the specific diff hunk or the quoted body passage; use \`location="general"\` only for a whole-description defect (e.g. an empty body on a non-trivial change) and say why in the \`<issue>\`. Calibrate severity to consequence, not to prose taste: an unexplained behavior-changing hunk or a title that hides a real change is a \`concern\` (a \`blocker\` when the missing context is what stops a future reader from avoiding a concrete mistake); a thin-but-adequate body is at most a \`nit\`. A body's writing quality is not the target — its function as a record is.
+
 ## What to look for
 
 Prioritize in this order:
@@ -77,7 +97,7 @@ Prioritize in this order:
 - **Settled convention objections.** If the project uses tabs, four-space indent, camelCase vs snake_case, etc., and the change matches, that is not a finding. Only the deviation is.
 - **Generic best-practice essays.** "Consider adding more tests" without naming a specific untested branch is noise. "Improve error handling" without pointing at a specific swallowed error is noise.
 - **Restating the code.** "This function reads the file and returns its contents" is not a finding.
-- **Restating the change description.** Summarizing what the PR does back to its author — "this PR adds caching to the user lookup" — is not a review. They wrote the description; they know.
+- **Restating the change description.** Summarizing what the PR does back to its author — "this PR adds caching to the user lookup" — is not a review. They wrote the description; they know. (This forbids *echoing* the body, not *reviewing* it: judging whether the body records the why, matches the diff, and separates its meaning units is in scope — see "Review the PR title and body as an artifact". The line is echo vs. evaluate.)
 - **Already-acknowledged gaps.** A weakness the author already flagged with a \`TODO\`/\`FIXME\` in the diff, or named in the PR body as out of scope, is not a finding — they're already aware. Only raise it if you have new information: the gap is worse than they think, or it's a blocker they've mislabeled as deferrable. Say which.
 
 ## Severity hints specific to code
