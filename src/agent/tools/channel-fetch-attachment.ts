@@ -150,6 +150,11 @@ export function createChannelFetchAttachmentTool({
 // the save location can never drift out of sync with what privateSurfaceRead
 // will let the same role read back: if workspace/inbox lands under a hidden dir
 // the file goes to the guest-visible public/ inbox instead.
+//
+// The hidden-check joins with the OS-native separator to stay byte-identical to
+// resolveHiddenPaths' own dirs, but the RETURNED path is normalized to POSIX:
+// this value names a location inside the Linux container (agentDir is /agent),
+// so a win32 CI host must not leak backslashes into it.
 export function resolveInboxBaseDir(
   permissions: PermissionService,
   origin: SessionOrigin | undefined,
@@ -158,7 +163,11 @@ export function resolveInboxBaseDir(
   const privateInbox = join(agentDir, 'workspace', 'inbox')
   const { dirs } = resolveHiddenPaths(permissions, origin, agentDir)
   const hidden = dirs.some((dir) => privateInbox === dir || privateInbox.startsWith(`${dir}${sep}`))
-  return hidden ? join(agentDir, 'public', 'inbox') : privateInbox
+  return toPosix(hidden ? join(agentDir, 'public', 'inbox') : privateInbox)
+}
+
+function toPosix(p: string): string {
+  return p.split(sep).join('/')
 }
 
 function errorResult(message: string) {
