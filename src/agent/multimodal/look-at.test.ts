@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildGlmVisionMessages, extractGlmVisionText, lookAtTool } from './look-at'
+import {
+  buildGlmVisionMessages,
+  extractGlmVisionText,
+  GLM_VISION_TTFB_MS,
+  lookAtTool,
+  resolveGlmVisionTtfbMs,
+} from './look-at'
 import { buildMultimodalLookerSystemPrompt } from './looker'
 
 type ImageParam = { url?: string; path?: string; data?: string; mimeType?: string } | Record<string, never>
@@ -127,5 +133,22 @@ describe('buildGlmVisionMessages — GLM payload preserves looker behavior', () 
     expect(user.role).toBe('user')
     expect(user.content[0]).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } })
     expect(user.content[1]).toEqual({ type: 'text', text: 'Please describe the attached image(s).' })
+  })
+})
+
+describe('resolveGlmVisionTtfbMs — vision TTFB budget', () => {
+  test('defaults to 45s when the env var is unset', () => {
+    expect(resolveGlmVisionTtfbMs({})).toBe(GLM_VISION_TTFB_MS)
+    expect(GLM_VISION_TTFB_MS).toBe(45_000)
+  })
+
+  test('a valid TYPECLAW_GLM_VISION_TTFB_MS overrides the default', () => {
+    expect(resolveGlmVisionTtfbMs({ TYPECLAW_GLM_VISION_TTFB_MS: '60000' })).toBe(60_000)
+  })
+
+  test('an invalid or empty env value falls back to the default', () => {
+    expect(resolveGlmVisionTtfbMs({ TYPECLAW_GLM_VISION_TTFB_MS: '' })).toBe(GLM_VISION_TTFB_MS)
+    expect(resolveGlmVisionTtfbMs({ TYPECLAW_GLM_VISION_TTFB_MS: 'abc' })).toBe(GLM_VISION_TTFB_MS)
+    expect(resolveGlmVisionTtfbMs({ TYPECLAW_GLM_VISION_TTFB_MS: '-5' })).toBe(GLM_VISION_TTFB_MS)
   })
 })

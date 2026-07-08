@@ -9,6 +9,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
 import { providerForModelRef } from '@/config/providers'
+import { LLM_FETCH_OBSERVER_TIMEOUTS, type LlmFetchObservedRequestInit } from '@/run/llm-fetch-observer'
 import { SecretsBackend } from '@/secrets'
 
 import { buildMultimodalLookerSystemPrompt, resolveImage, type ImageInput } from './looker'
@@ -207,6 +208,21 @@ const GLM_VISION_MODEL = 'glm-4.6v'
 const GLM_VISION_ENDPOINT = 'https://api.z.ai/api/coding/paas/v4/chat/completions'
 const GLM_VISION_MAX_TOKENS = 32768
 
+// Vision requests carry a base64 image body the server must decode before it can
+// send response headers, so the observer's 15s default TTFB (tuned for ~1s text
+// completions) is too tight and flakes on cold connections. 45s is 3x the
+// observed-under-load window; env-overridable for operators who need more.
+export const GLM_VISION_TTFB_MS = 45_000
+const ENV_GLM_VISION_TTFB_MS = 'TYPECLAW_GLM_VISION_TTFB_MS'
+
+export function resolveGlmVisionTtfbMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[ENV_GLM_VISION_TTFB_MS]
+  if (raw === undefined || raw === '') return GLM_VISION_TTFB_MS
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return GLM_VISION_TTFB_MS
+  return parsed
+}
+
 function shouldUseGlmCodingPlanVision(): boolean {
   const ref = resolveProfile(getConfig().models, 'vision').ref
   return providerForModelRef(ref) === GLM_VISION_PROVIDER && !resolveModel(ref).input.includes('image')
@@ -219,17 +235,19 @@ async function analyzeWithGlmCodingPlanVision(imageContents: ImageContent[], pro
     return errorResult('GLM Coding Plan vision unavailable: no zai-coding API key', details)
   }
 
+  const requestInit: LlmFetchObservedRequestInit = {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: GLM_VISION_MODEL,
+      max_tokens: GLM_VISION_MAX_TOKENS,
+      messages: buildGlmVisionMessages(imageContents, prompt),
+    }),
+    [LLM_FETCH_OBSERVER_TIMEOUTS]: { ttfbMs: resolveGlmVisionTtfbMs() },
+  }
   let response: Response
   try {
-    response = await fetch(GLM_VISION_ENDPOINT, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: GLM_VISION_MODEL,
-        max_tokens: GLM_VISION_MAX_TOKENS,
-        messages: buildGlmVisionMessages(imageContents, prompt),
-      }),
-    })
+    response = await fetch(GLM_VISION_ENDPOINT, requestInit)
   } catch (error) {
     return errorResult(`GLM vision request failed: ${error instanceof Error ? error.message : String(error)}`, details)
   }
