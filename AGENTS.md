@@ -56,6 +56,8 @@ The workflow is the only supported release path. The GHCR-first-then-npm orderin
 
 **Re-running after partial failure.** Every step is idempotent at the same version (GHCR overwrites, `npm publish` is gated by `npm view`, `git tag -f`, `gh release` is gated by `gh release view`). Re-run the workflow at the same version and it cleans up whatever didn't finish.
 
+**Announce the release.** After the workflow completes successfully (`gh release view <version>` returns the tag), post a release note to the **TypeClaw Discord `#releases` channel** via the `agent-discord` skill (`bunx agent-messenger discord`; server `TypeClaw`, channel `releases`). Do this only once the GitHub release actually exists — never pre-announce a release still in flight. Pull the highlights from the generated GitHub release body (`gh release view <version> --json body`), lead with the headline user-facing change, keep it energetic, and include the install line (`bun add -g typeclaw@<version>`) and the changelog URL. If the announcement fails, the release itself still stands — re-post the note; don't re-run the release workflow.
+
 ## Vocabulary
 
 "channel" — or `channel_*` tool/code references — means **`src/channels/`**, this repo's channels subsystem (router, manager, persistence, Slack/Discord adapters). NOT Channel Talk, NOT abstract Slack channels, NOT the agent-messenger `agent-channeltalk*` skills. Only branch out when the user explicitly names a different platform.
