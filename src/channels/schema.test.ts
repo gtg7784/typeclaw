@@ -5,11 +5,28 @@ import { join } from 'node:path'
 import {
   ADAPTER_IDS,
   ADAPTER_READ_CAPABILITIES,
+  ADAPTER_WRITE_CAPABILITIES,
   channelsSchema,
   DEFAULT_GITHUB_EVENT_ALLOWLIST,
   type ReadCapability,
   STICKY_DEFAULT_WINDOW_MS,
+  type WriteCapability,
 } from './schema'
+
+const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
+  discord: 'discord.ts',
+  'discord-bot': 'discord-bot.ts',
+  github: 'github/index.ts',
+  instagram: 'instagram.ts',
+  line: 'line.ts',
+  kakaotalk: 'kakaotalk.ts',
+  slack: 'slack.ts',
+  'slack-bot': 'slack-bot.ts',
+  teams: 'teams.ts',
+  'telegram-bot': 'telegram-bot.ts',
+  webex: 'webex.ts',
+  'webex-bot': 'webex-bot.ts',
+}
 
 describe('channelsSchema', () => {
   test('parses an empty channels record', () => {
@@ -138,20 +155,6 @@ describe('ADAPTER_READ_CAPABILITIES', () => {
   // start() that registers nothing), so this test statically re-derives each
   // adapter's capabilities from the register*() calls in its source and fails
   // if the table drifts — add/remove a callback and you must update the table.
-  const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
-    discord: 'discord.ts',
-    'discord-bot': 'discord-bot.ts',
-    github: 'github/index.ts',
-    instagram: 'instagram.ts',
-    line: 'line.ts',
-    kakaotalk: 'kakaotalk.ts',
-    slack: 'slack.ts',
-    'slack-bot': 'slack-bot.ts',
-    teams: 'teams.ts',
-    'telegram-bot': 'telegram-bot.ts',
-    webex: 'webex.ts',
-    'webex-bot': 'webex-bot.ts',
-  }
   const capabilityCall: Record<ReadCapability, RegExp> = {
     history: /\.registerHistory\(/,
     'message-get': /\.registerMessageGet\(/,
@@ -165,6 +168,28 @@ describe('ADAPTER_READ_CAPABILITIES', () => {
         capabilityCall[cap].test(source),
       )
       expect([...ADAPTER_READ_CAPABILITIES[id]].sort()).toEqual(derived.sort())
+    })
+  }
+})
+
+describe('ADAPTER_WRITE_CAPABILITIES', () => {
+  test('declares every adapter id', () => {
+    for (const id of ADAPTER_IDS) {
+      expect(ADAPTER_WRITE_CAPABILITIES[id]).toBeDefined()
+    }
+  })
+
+  const capabilityCall: Record<WriteCapability, RegExp> = {
+    'message-edit': /\.registerEditMessage\(/,
+  }
+
+  for (const id of ADAPTER_IDS) {
+    test(`table matches the register*() calls in ${adapterSourcePath[id]}`, () => {
+      const source = readFileSync(join(import.meta.dir, 'adapters', adapterSourcePath[id]), 'utf8')
+      const derived = (Object.keys(capabilityCall) as WriteCapability[]).filter((cap) =>
+        capabilityCall[cap].test(source),
+      )
+      expect([...ADAPTER_WRITE_CAPABILITIES[id]].sort()).toEqual(derived.sort())
     })
   }
 })

@@ -272,6 +272,42 @@ export type SendResult =
 
 export type OutboundCallback = (msg: OutboundMessage) => Promise<SendResult>
 
+// A request to edit (replace the text of) a message the bot already posted.
+// `messageId` is the platform-native id the send handed back as
+// `SendResult.messageId` (Slack `ts`, Discord snowflake, Telegram `message_id`,
+// Webex message id) — the same id shape an inbound carries as
+// `externalMessageId`. `thread` is context only: none of the supported SDK edit
+// calls require it (Slack/Discord/Telegram/Webex address the message by
+// channel+id or room+id), so adapters may ignore it. Editing is opt-in per
+// adapter — only adapters whose SDK exposes an edit primitive register a
+// callback; the rest resolve to `code: 'not-supported'`.
+export type EditMessageRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  thread?: string | null
+  messageId: string
+  text: string
+}
+
+// `not-found` is an expected miss (message deleted, wrong id, or too old to
+// edit) the tool surfaces as a soft error. `not-supported` means the adapter
+// does not implement editing at all. `adapter-unavailable` means the adapter IS
+// configured and DOES implement editing, but currently has no live callback
+// (e.g. it failed to start), mirroring `getMessage`'s three-way distinction so
+// the agent only sees the actionable re-auth hint when re-auth would help.
+// `permission-denied` is a hard refusal from the platform (e.g. editing a
+// message the bot does not own).
+export type EditMessageResult =
+  | { ok: true }
+  | {
+      ok: false
+      error: string
+      code?: 'not-found' | 'not-supported' | 'adapter-unavailable' | 'permission-denied'
+    }
+
+export type EditMessageCallback = (req: EditMessageRequest) => Promise<EditMessageResult>
+
 export type TypingTarget = {
   adapter: AdapterId
   workspace: string
