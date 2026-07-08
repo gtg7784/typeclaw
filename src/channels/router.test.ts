@@ -7281,10 +7281,20 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
   test('name lookup is case-insensitive (defensive — slash-command sources may send mixed case)', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
+    let releasePrompt: (() => void) | undefined
 
     await router.route(inbound({ text: 'hi' }))
-    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length === 1)
+
     const result = await router.executeCommand(KEY, 'STOP', { invokerId: 'alice' })
+    releasePrompt!()
+    await draining
 
     expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
@@ -7333,11 +7343,20 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
   test('falls back to a thread-keyed session when slash command carries thread:null (Slack)', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
+    let releasePrompt: (() => void) | undefined
 
     await router.route(inbound({ text: 'hi', thread: 'thr-1', isBotMention: true }))
-    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+    await waitFor(() => sessions[0]!.prompts.length === 1)
 
     const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
+    releasePrompt!()
+    await draining
 
     expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
@@ -7346,13 +7365,22 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
   test('exact key match wins over fallback when both apply', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
+    let releaseTopLevel: (() => void) | undefined
 
     await router.route(inbound({ text: 'top-level' }))
-    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releaseTopLevel = resolve
+      })
+    }
+    const drainingTopLevel = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length === 1)
     await router.route(inbound({ text: 'in thread', thread: 'thr-1', isBotMention: true, externalMessageId: 'm2' }))
     await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
 
     const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
+    releaseTopLevel!()
+    await drainingTopLevel
 
     expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
@@ -7403,6 +7431,89 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
 
     expect(result).toEqual({ kind: 'no-live-session' })
     expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('thread-keyed stop does NOT fall back to a session in a different thread (multi-agent bystander bug)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'in thread A', thread: 'thr-A', isBotMention: true, externalMessageId: 'mA' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-A' })
+
+    const result = await router.executeCommand({ ...KEY, thread: 'thr-B' }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('thread-keyed stop does NOT fall back to a channel-level (thread:null) session', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'top level' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = await router.executeCommand({ ...KEY, thread: 'thr-B' }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('stop on an observe-only exact-thread session reports no-live-session and aborts nothing', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    // Prime a second human so the strict multi-human gate applies and an
+    // unaddressed thread message observes (creating a live session) rather than
+    // engaging — the bystander state the fix must treat as "nothing to stop".
+    await router.route(inbound({ thread: 'thr-1', isBotMention: true, authorId: 'carol', authorName: 'carol' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+    const engagedSessions = sessions.length
+    await router.route(
+      inbound({ thread: 'thr-1', isBotMention: false, authorId: 'bob', authorName: 'bob', externalMessageId: 'm-obs' }),
+    )
+
+    const result = await router.executeCommand({ ...KEY, thread: 'thr-1' }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    // The observe-only inbound created no new session that got aborted, and the
+    // earlier engaged session already drained (nothing in flight, empty queue).
+    for (let i = 0; i < engagedSessions; i++) expect(sessions[i]!.aborted).toBe(0)
+  })
+
+  test('stop on a draining exact-thread session aborts it', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let releasePrompt: (() => void) | undefined
+
+    await router.route(inbound({ text: 'long task', thread: 'thr-1', isBotMention: true }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+    await waitFor(() => sessions[0]!.prompts.length === 1)
+
+    const result = await router.executeCommand({ ...KEY, thread: 'thr-1' }, 'stop', { invokerId: 'alice' })
+    releasePrompt!()
+    await draining
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('stop on a queued (pre-drain) exact-thread session clears the queue and aborts', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'queued', thread: 'thr-1', isBotMention: true }))
+
+    const result = await router.executeCommand({ ...KEY, thread: 'thr-1' }, 'stop', { invokerId: 'alice' })
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.prompts).toEqual([])
   })
 })
 
@@ -10966,9 +11077,16 @@ describe('ChannelRouter channel.respond gate', () => {
       stranger: ['channel.respond'],
     })
     const { router, sessions } = makeRouter(dir, { permissions })
+    let releasePrompt: (() => void) | undefined
 
     await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
-    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length === 1)
     expect(sessions).toHaveLength(1)
 
     const denied = await router.executeCommand(KEY, 'stop', { invokerId: 'stranger' })
@@ -10976,6 +11094,8 @@ describe('ChannelRouter channel.respond gate', () => {
     expect(sessions[0]!.aborted).toBe(0)
 
     const allowed = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
+    releasePrompt!()
+    await draining
     expect(allowed).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
   })

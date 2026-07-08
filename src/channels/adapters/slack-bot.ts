@@ -211,22 +211,29 @@ export function createThreadCommandHandler(
       `[slack-bot] thread-command !${command.name} invoker=${command.invokerId} team=${command.key.workspace} channel=${command.key.chat} thread=${command.key.thread ?? '(none)'}`,
     )
 
-    let reply: string
+    // null = stay silent. A shared Slack channel can host many agents; each one
+    // receives this message and runs its own executeCommand. Only the agent that
+    // actually had a running turn gets 'handled'; every bystander gets
+    // 'no-live-session'. Posting "Nothing to stop" from each bystander would spam
+    // the thread, so a no-live-session outcome posts nothing at all.
+    let reply: string | null
     try {
       const result = await deps.router.executeCommand(command.key, command.name, {
         invokerId: command.invokerId,
       })
-      reply = commandResultReply(result)
+      reply = result.kind === 'no-live-session' ? null : commandResultReply(result)
       deps.logger.info(`[slack-bot] thread-command !${command.name} result=${result.kind}`)
     } catch (err) {
       deps.logger.error(`[slack-bot] thread-command !${command.name} failed: ${describeError(err)}`)
       reply = SLACK_SLASH_REPLY_FAILED
     }
 
-    try {
-      await deps.postReply({ chat: input.channel, thread: input.threadTs, text: reply })
-    } catch (err) {
-      deps.logger.warn(`[slack-bot] thread-command reply post failed: ${describeError(err)}`)
+    if (reply !== null) {
+      try {
+        await deps.postReply({ chat: input.channel, thread: input.threadTs, text: reply })
+      } catch (err) {
+        deps.logger.warn(`[slack-bot] thread-command reply post failed: ${describeError(err)}`)
+      }
     }
     return { kind: 'executed' }
   }
