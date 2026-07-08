@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { defaultLlmFetchEndpoints, installLlmFetchObserver, type TimeoutScheduler } from './llm-fetch-observer'
+import {
+  defaultLlmFetchEndpoints,
+  installLlmFetchObserver,
+  LLM_FETCH_OBSERVER_TIMEOUTS,
+  type LlmFetchObservedRequestInit,
+  type TimeoutScheduler,
+} from './llm-fetch-observer'
 
 // Programmable scheduler for tests. Tasks scheduled for time T fire when the
 // test calls `fire(T)`. Out-of-order T values (T must be monotonically
@@ -1250,5 +1256,112 @@ describe('installLlmFetchObserver', () => {
     // then: the 40ms Codex-specific TTFB fired, not the 70ms generic one
     expect(caught).not.toBeNull()
     expect(caught!.message).toContain('40ms')
+  })
+
+  test('a per-request TTFB override beats the endpoint default on the SAME url', async () => {
+    // given: generic default TTFB is 50ms, but this ONE request carries a 500ms
+    // per-request override (the GLM-vision path on a URL it shares with GLM text)
+    process.env.TYPECLAW_LLM_TTFB_MS = '50'
+    const { logger } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    let firedAt50 = false
+    let caught: Error | null = null
+    const init: LlmFetchObservedRequestInit = { method: 'POST', [LLM_FETCH_OBSERVER_TIMEOUTS]: { ttfbMs: 500 } }
+    try {
+      clock.set(0)
+      const pending = fetch('https://api.z.ai/api/coding/paas/v4/chat/completions', init)
+      // the endpoint default would have fired here; the override must suppress it
+      clock.set(50)
+      await scheduler.fire(50)
+      firedAt50 = underlyingSignal?.aborted ?? false
+      clock.set(500)
+      await scheduler.fire(500)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    expect(firedAt50).toBe(false)
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('500ms')
+  })
+
+  test('an identical url WITHOUT the override still uses the endpoint default (GLM text stays aggressive)', async () => {
+    // given: same z.ai coding URL as vision, but no per-request override
+    process.env.TYPECLAW_LLM_TTFB_MS = '50'
+    const { logger } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      clock.set(0)
+      const pending = fetch('https://api.z.ai/api/coding/paas/v4/chat/completions', { method: 'POST' })
+      clock.set(50)
+      await scheduler.fire(50)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    // then: the 50ms default fired — the override mechanism did not loosen text
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('50ms')
+  })
+
+  test('a per-request override still gets the body-timing tap + log on a healthy response', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(10)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    const init: LlmFetchObservedRequestInit = { method: 'POST', [LLM_FETCH_OBSERVER_TIMEOUTS]: { ttfbMs: 500 } }
+    try {
+      clock.set(0)
+      const response = await fetch('https://api.z.ai/api/coding/paas/v4/chat/completions', init)
+      const drainPromise = drainQuiet(response.body)
+      clock.set(50)
+      await ctrl.push(new TextEncoder().encode('ok'))
+      clock.set(100)
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    const observed = entries.filter((e) => e.msg.startsWith('[llm-fetch]'))
+    expect(observed.length).toBe(1)
+    expect(observed[0]!.msg).toContain('status=200')
+    expect(observed[0]!.msg).toContain('provider=openai-compatible')
   })
 })

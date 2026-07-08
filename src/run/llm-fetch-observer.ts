@@ -3,6 +3,24 @@ export type LlmFetchObserverLogger = {
   warn: (msg: string) => void
 }
 
+// Per-request timeout override, attached to a RequestInit under a Symbol key so
+// it travels with a single fetch() without leaking a wire header to the provider
+// and without widening the endpoint matcher. Used where one call on a SHARED
+// endpoint URL needs a different deadline than its siblings — e.g. GLM vision and
+// GLM text hit the identical /chat/completions URL, so a URL/header match cannot
+// tell them apart, but the vision caller owns its fetch and can tag it directly.
+export const LLM_FETCH_OBSERVER_TIMEOUTS = Symbol.for('typeclaw.llmFetchObserverTimeouts')
+
+export type LlmFetchObserverTimeoutOverrides = {
+  ttfbMs?: number
+  idleMs?: number
+  overallMs?: number
+}
+
+export type LlmFetchObservedRequestInit = RequestInit & {
+  [LLM_FETCH_OBSERVER_TIMEOUTS]?: LlmFetchObserverTimeoutOverrides
+}
+
 // A provider endpoint the observer should instrument. `match` is host-agnostic
 // on purpose: base URLs are user-configured (ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
 // OpenRouter/LiteLLM/Fireworks/arbitrary proxies), so a host allowlist would be
@@ -442,12 +460,15 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
   // "force this across all endpoints" (the test seam and any global override),
   // so it must beat a per-endpoint tuned value. The master `timeoutsEnabled=off`
   // switch forces every timer to 0 regardless.
-  const resolveTimeouts = (endpoint: LlmFetchEndpoint): ResolvedTimeouts => {
+  const resolveTimeouts = (
+    endpoint: LlmFetchEndpoint,
+    perRequest: LlmFetchObserverTimeoutOverrides | undefined,
+  ): ResolvedTimeouts => {
     if (!timeoutsEnabled) return { ttfbMs: 0, idleMs: 0, overallMs: 0 }
     return {
-      ttfbMs: opts.ttfbMs ?? endpoint.ttfbMs ?? envDefaults.ttfbMs,
-      idleMs: opts.idleMs ?? endpoint.idleMs ?? envDefaults.idleMs,
-      overallMs: opts.overallMs ?? endpoint.overallMs ?? envDefaults.overallMs,
+      ttfbMs: opts.ttfbMs ?? perRequest?.ttfbMs ?? endpoint.ttfbMs ?? envDefaults.ttfbMs,
+      idleMs: opts.idleMs ?? perRequest?.idleMs ?? endpoint.idleMs ?? envDefaults.idleMs,
+      overallMs: opts.overallMs ?? perRequest?.overallMs ?? endpoint.overallMs ?? envDefaults.overallMs,
     }
   }
 
@@ -459,7 +480,8 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     if (endpoint === null) {
       return originalFetch(input, init)
     }
-    const timeouts = resolveTimeouts(endpoint)
+    const perRequest = (init as LlmFetchObservedRequestInit | undefined)?.[LLM_FETCH_OBSERVER_TIMEOUTS]
+    const timeouts = resolveTimeouts(endpoint, perRequest)
     const provider = endpoint.label
     const start = now()
 
