@@ -619,7 +619,12 @@ async function applyBashSandbox(
       { type: 'bind', source: sessionTmp, dest: '/tmp' },
     ],
     ...(packageInstall !== undefined
-      ? { writableRoot: { dir: packageInstall.root }, masks: maskTargets, protected: packageInstall.protected }
+      ? {
+          writableRoot: { dir: packageInstall.root },
+          masks: maskTargets,
+          protected: packageInstall.protected,
+          blockedCreation: { files: packageInstall.blockedCreation },
+        }
       : { masks: maskTargets, writable, protected: protectedZones }),
     symlinks,
     network: 'inherit',
@@ -652,11 +657,11 @@ function buildRoleScopedConfigEnv(
 }
 
 function subtractMaskedProtected(
-  zones: { root: string; protected: { dirs: string[]; files: string[] } },
+  zones: { root: string; protected: { dirs: string[]; files: string[] }; blockedCreation: string[] },
   masked: { dirs: string[]; files: string[] },
-): { root: string; protected: { dirs: string[]; files: string[] } } {
+): { root: string; protected: { dirs: string[]; files: string[] }; blockedCreation: string[] } {
   const filtered = subtractMasked(zones.protected, masked)
-  return { root: zones.root, protected: filtered }
+  return { root: zones.root, protected: filtered, blockedCreation: zones.blockedCreation }
 }
 
 // Picks the /proc strategy for a sandboxed bash call. The branch order is:
