@@ -2355,6 +2355,19 @@ describe('createThreadCommandHandler', () => {
     expect(replies[0]!.text).toContain('permission')
   })
 
+  test('no-live-session posts nothing (a bystander agent stays silent in a shared channel)', async () => {
+    const { handler, routerCalls, replies, logs } = setup({
+      routerImpl: async () => ({ kind: 'no-live-session' }),
+    })
+
+    const outcome = await handler(baseInput, makeReserve().reserve)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(routerCalls).toHaveLength(1)
+    expect(replies).toHaveLength(0)
+    expect(logs.info.some((l) => l.includes('result=no-live-session'))).toBe(true)
+  })
+
   test('top-level !stop (no thread) targets a thread:null key', async () => {
     const { handler, routerCalls } = setup()
 
