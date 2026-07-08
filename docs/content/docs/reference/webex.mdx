@@ -76,6 +76,7 @@ CLI: `typeclaw channel add webex` (interactive). **Do not use `channel set`** fo
 | ----------------------- | --------- | ---------------------------------------------------------------------------------------------- |
 | Outbound messages       | yes       | Sent as Webex markdown                                                                         |
 | Reactions               | no        |                                                                                                |
+| Message editing         | yes       | `channel_edit` maps to `PUT /messages/{id}`; own messages only                                 |
 | Typing indicator        | yes       | Per-room FIFO queue preserves on-the-wire ordering                                             |
 | Channel-name resolution | yes       | Resolves space titles via the Spaces API, 24h cache                                            |
 | Self identity           | yes       |                                                                                                |

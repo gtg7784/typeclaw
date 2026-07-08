@@ -58,12 +58,12 @@ export const ADAPTER_WRITE_CAPABILITIES: Record<AdapterId, readonly WriteCapabil
   instagram: [],
   line: [],
   kakaotalk: [],
-  slack: [],
+  slack: ['message-edit'],
   'slack-bot': ['message-edit'],
   teams: [],
-  'telegram-bot': [],
-  webex: [],
-  'webex-bot': [],
+  'telegram-bot': ['message-edit'],
+  webex: ['message-edit'],
+  'webex-bot': ['message-edit'],
 }
 
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])

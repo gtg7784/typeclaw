@@ -37,6 +37,7 @@ import type { WebexAccountRecord } from '@/secrets/schema'
 import { describeError } from './describe-error'
 import { createWebexChannelNameResolver } from './webex-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-classify'
+import { createWebexEditMessageCallback } from './webex-edit'
 import { resolveWebexBodyText } from './webex-format'
 import { createWebexPrefetchLimiter, isWebexRateLimitError, type WebexPrefetchLimiter } from './webex-prefetch-limiter'
 import { enrichWebexMessageReference } from './webex-reference'
@@ -365,6 +366,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
   const typingCallback = createTypingCallback({ client, logger, formatChannelTag })
   const fetchAttachmentCallback = createFetchAttachmentCallback({ tokenRef: () => currentToken, logger, fetchImpl })
+  const editMessageCallback = createWebexEditMessageCallback({ adapter: 'webex', client })
 
   const handleMessage = async (event: WebexInboundMessage): Promise<void> => {
     inflightInbounds++
@@ -457,6 +459,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
       options.router.registerHistory('webex', historyCallback)
       options.router.registerFetchAttachment('webex', fetchAttachmentCallback)
       options.router.registerMembership('webex', membershipResolver)
+      options.router.registerEditMessage('webex', editMessageCallback)
 
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('webex', outboundCallback)
@@ -467,6 +470,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
         options.router.unregisterHistory('webex', historyCallback)
         options.router.unregisterFetchAttachment('webex', fetchAttachmentCallback)
         options.router.unregisterMembership('webex', membershipResolver)
+        options.router.unregisterEditMessage('webex', editMessageCallback)
         listener?.stop()
         listener = null
         botPerson = null
@@ -501,6 +505,7 @@ export function createWebexAdapter(options: WebexAdapterOptions): WebexAdapter {
       options.router.unregisterHistory('webex', historyCallback)
       options.router.unregisterFetchAttachment('webex', fetchAttachmentCallback)
       options.router.unregisterMembership('webex', membershipResolver)
+      options.router.unregisterEditMessage('webex', editMessageCallback)
       listener?.stop()
       listener = null
       connected = false

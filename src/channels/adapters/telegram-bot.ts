@@ -18,6 +18,7 @@ import type {
 
 import { describeError } from './describe-error'
 import { classifyInbound, type InboundDropReason, TELEGRAM_WORKSPACE } from './telegram-bot-classify'
+import { createTelegramEditMessageCallback } from './telegram-bot-edit'
 import { toTelegramMarkdownV2 } from './telegram-bot-format'
 
 export const TELEGRAM_API_BASE = 'https://api.telegram.org'
@@ -420,6 +421,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
   })
 
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger })
+  const editMessageCallback = createTelegramEditMessageCallback({ client })
 
   const handleMessage = async (event: TelegramMessage): Promise<void> => {
     inflightInbounds++
@@ -536,6 +538,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.registerSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.registerFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.registerMembership('telegram-bot', membershipResolver)
+      options.router.registerEditMessage('telegram-bot', editMessageCallback)
 
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('telegram-bot', outboundCallback)
@@ -545,6 +548,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
         options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('telegram-bot', membershipResolver)
+        options.router.unregisterEditMessage('telegram-bot', editMessageCallback)
         listener?.stop()
         listener = null
         botUser = null
@@ -574,6 +578,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.unregisterSelfIdentity('telegram-bot', selfIdentityResolver)
       options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('telegram-bot', membershipResolver)
+      options.router.unregisterEditMessage('telegram-bot', editMessageCallback)
       // Stop the listener BEFORE waiting for inflight handlers. The SDK's
       // `stop()` aborts the in-flight `getUpdates` long-poll and
       // increments its generation counter so any pending dispatch is

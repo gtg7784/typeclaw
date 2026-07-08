@@ -31,6 +31,7 @@ CLI: `typeclaw channel add webex-bot` (interactive), `typeclaw channel set webex
 | ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------ |
 | Outbound messages       | yes       | Sent as Webex markdown                                                                                       |
 | Reactions               | no        | The Webex bot API exposes no message-reaction endpoint                                                       |
+| Message editing         | yes       | `channel_edit` maps to `PUT /messages/{id}`; own messages only                                               |
 | Typing indicator        | no        | Webex has no bot typing API                                                                                  |
 | Channel-name resolution | yes       | Resolves room titles via the Spaces API                                                                      |
 | Self identity           | yes       | From `testAuth` (the bot's own person record)                                                                |

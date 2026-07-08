@@ -2479,9 +2479,11 @@ describe('ChannelRouter editMessage', () => {
   test('reports not-supported when no callback is registered and the adapter cannot edit', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
-    router.setAdapterConfigured('telegram-bot', true)
+    // instagram is configured but has no edit primitive, so a missing callback
+    // is genuinely not-supported (never adapter-unavailable).
+    router.setAdapterConfigured('instagram', true)
 
-    const result = await router.editMessage({ ...editReq, adapter: 'telegram-bot' })
+    const result = await router.editMessage({ ...editReq, adapter: 'instagram' })
 
     expect(result).toEqual({ ok: false, error: 'message-edit-not-supported', code: 'not-supported' })
   })

@@ -37,6 +37,7 @@ import { createSlackAuthorResolver } from './slack-author-resolver'
 import { slackTsToMillis } from './slack-bot-time'
 import { createSlackChannelResolver } from './slack-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './slack-classify'
+import { createSlackUserEditMessageCallback } from './slack-edit'
 import { createSlackReactionCallback, createSlackRemoveReactionCallback } from './slack-reactions'
 
 export type SlackAdapterLogger = {
@@ -223,6 +224,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
   const fetchAttachmentCallback = createSlackFetchAttachmentCallback({ client, logger })
   const reactionCallback = createSlackReactionCallback({ client })
   const removeReactionCallback = createSlackRemoveReactionCallback({ client })
+  const editMessageCallback = createSlackUserEditMessageCallback({ client })
 
   const handleMessage = async (event: SlackRTMMessageEvent): Promise<void> => {
     inflightInbounds++
@@ -339,6 +341,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
       options.router.registerMembership('slack', membershipResolver)
       options.router.registerReaction('slack', reactionCallback)
       options.router.registerRemoveReaction('slack', removeReactionCallback)
+      options.router.registerEditMessage('slack', editMessageCallback)
 
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('slack', outboundCallback)
@@ -350,6 +353,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
         options.router.unregisterMembership('slack', membershipResolver)
         options.router.unregisterReaction('slack', reactionCallback)
         options.router.unregisterRemoveReaction('slack', removeReactionCallback)
+        options.router.unregisterEditMessage('slack', editMessageCallback)
         clearTimeout(startupTimer)
         listener?.stop()
         listener = null
@@ -381,6 +385,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
       options.router.unregisterMembership('slack', membershipResolver)
       options.router.unregisterReaction('slack', reactionCallback)
       options.router.unregisterRemoveReaction('slack', removeReactionCallback)
+      options.router.unregisterEditMessage('slack', editMessageCallback)
       listener?.stop()
       listener = null
       connected = false
