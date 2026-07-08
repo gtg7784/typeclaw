@@ -1058,6 +1058,13 @@ type LiveSession = {
   // crashed prior turn can't leak into the next.
   pendingProviderError: { turnSeq: number; safeMessage: string } | null
   destroyed: boolean
+  // Set by tearDownAllLive when a reload/roles/auth swap wants to recreate this
+  // session but a turn is mid-flight. Aborting now would strand the in-flight
+  // reply (the reload's own turn goes silent). Instead the session stays live
+  // and finishes its current reply with pre-reload state; the drain loop's
+  // finally tears it down once the turn drains, so the next inbound rehydrates
+  // with fresh role/auth/prompt state. Idle sessions are torn down immediately.
+  pendingTeardown: boolean
   unsubProviderErrors: (() => void) | null
   unsubTypingActivity: (() => void) | null
   unsubTodoOutcome: (() => void) | null
@@ -2101,6 +2108,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         membershipFetch,
         pendingProviderError: null,
         destroyed: false,
+        pendingTeardown: false,
         unsubProviderErrors: null,
         unsubTypingActivity: null,
         unsubTodoOutcome: null,
@@ -2744,7 +2752,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live.draining || live.destroyed) return
     live.draining = true
     try {
-      while ((live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) && !live.destroyed) {
+      // `!live.pendingTeardown`: once a reload marks this draining session for
+      // teardown, finish ONLY the in-flight prompt (its batch was already
+      // spliced out of promptQueue at the top of the current iteration) and
+      // stop — do NOT splice a fresh batch of post-reload inbounds onto the
+      // stale, about-to-be-recreated session. Those queued inbounds are handed
+      // to the fresh successor in the teardown block below.
+      while (
+        (live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) &&
+        !live.destroyed &&
+        !live.pendingTeardown
+      ) {
         live.typingTimedOut = false
         // Each turn starts with no held reactions; the model re-requests them
         // via channel_react during this turn, and the finally flushes or drops.
@@ -2999,6 +3017,60 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       await stopTypingHeartbeat(live)
       live.currentTurnTypingThread = null
     }
+    // A reload deferred this session's teardown so its in-flight reply could
+    // land; now that the turn drained (and the loop stopped BEFORE draining any
+    // post-reload inbound), complete the recreate so the fresh session picks up
+    // the swapped role/auth/prompt state. Guarded on !destroyed so a concurrent
+    // stop()/idle-gc that already tore it down wins the race without a double
+    // teardown.
+    if (live.pendingTeardown && !live.destroyed) {
+      live.pendingTeardown = false
+      // Snapshot the post-reload inbounds that arrived during the held prompt
+      // BEFORE tearDownLive (its clearQueuedEngageReactions must not drop the
+      // engage acks we are handing to the successor). Clear the source arrays so
+      // the dying session owns nothing we are moving forward.
+      const carriedInbounds = live.promptQueue.splice(0, live.promptQueue.length)
+      const carriedObserved = live.contextBuffer.splice(0, live.contextBuffer.length)
+      const carriedReminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
+      liveSessions.delete(live.keyId)
+      await tearDownLive(live)
+      await handOffToSuccessor(live.key, carriedInbounds, carriedObserved, carriedReminders)
+    }
+  }
+
+  // Rebuild a live session for a channel key after a reload tore its predecessor
+  // down mid-drain, and replay the post-reload work that predecessor never got
+  // to process. The carried inbounds already have their engagement decided (they
+  // were enqueued while draining), so they are transplanted straight onto the
+  // fresh session's queues rather than re-routed through route() — re-routing
+  // would re-run the claim/command/permission gates and re-derive engagement
+  // from a lossy QueuedInbound projection. Best-effort: a recreate failure logs
+  // and drops the batch rather than throwing out of the predecessor's drain.
+  const handOffToSuccessor = async (
+    key: ChannelKey,
+    inbounds: QueuedInbound[],
+    observed: ObservedInbound[],
+    reminders: string[],
+  ): Promise<void> => {
+    // Observed context alone is carried too: observe() can buffer post-reload
+    // messages onto contextBuffer with no queued prompt, and dropping them would
+    // lose the successor's "recent context". Only skip when nothing at all was
+    // carried.
+    if (inbounds.length === 0 && reminders.length === 0 && observed.length === 0) return
+    let successor: LiveSession
+    try {
+      successor = await ensureLive(key)
+    } catch (err) {
+      logger.warn(`[channels] ${channelKeyId(key)}: successor recreate after reload failed: ${describe(err)}`)
+      return
+    }
+    if (successor.destroyed) return
+    successor.promptQueue.push(...inbounds)
+    successor.contextBuffer.push(...observed)
+    successor.pendingSystemReminders.push(...reminders)
+    // Observed-only context is NOT a turn trigger — it waits on contextBuffer for
+    // a real inbound. Drain only when there is actual work (a prompt or reminder).
+    if ((inbounds.length > 0 || reminders.length > 0) && !successor.draining) void drain(successor)
   }
 
   const scheduleDebouncedDrain = (live: LiveSession): void => {
@@ -4839,11 +4911,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const tearDownAllLive = async (): Promise<void> => {
     liveGeneration++
     const all = Array.from(liveSessions.values())
+    // A session mid-turn is deferred, not aborted: tearing it down here calls
+    // session.abort(), which kills the in-flight reply — including the very turn
+    // that triggered this reload, leaving the user in silence. Such a session
+    // stays in liveSessions (so a concurrent inbound coalesces into the running
+    // turn instead of spawning a duplicate) and is torn down by the drain
+    // finally once its turn drains. Idle sessions tear down immediately below.
+    const deferred: LiveSession[] = []
+    const immediate: LiveSession[] = []
+    for (const live of all) {
+      if (live.draining && !live.destroyed) {
+        live.pendingTeardown = true
+        deferred.push(live)
+      } else immediate.push(live)
+    }
     liveSessions.clear()
+    for (const live of deferred) liveSessions.set(live.keyId, live)
     // Seal only around the flush — unlike stop() the router keeps serving after a
     // roles reload, so re-enable persist() once pending writes have drained.
     closing = true
-    for (const live of all) {
+    for (const live of immediate) {
       await tearDownLive(live)
     }
     await persistChain
