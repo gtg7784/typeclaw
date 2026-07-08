@@ -93,43 +93,44 @@ const EN_PHRASES: readonly string[] = [
   'let me handle',
 ]
 
-// Korean: the -겠습니다/-겠어요 and -ㄹ게요 verb endings are first-person
+// Korean: the -겠습니다/-겠어요 and -ㄹ게(요) verb endings are first-person
 // volitional — they cannot address the listener, so they are safe self-direction
 // anchors. The -겠습니다/-겠어요 form is matched by MORPHEME_PATTERNS below (it
-// generalizes across all action verbs), so only the -게요/-게여 forms and stall
-// idioms are enumerated here. Bare adverb+noun fragments ("바로 확인", "계속 확인",
-// "곧 알려") are deliberately NOT listed: without the volitional ending they match
-// other-directed requests ("바로 확인 부탁드려요" = "please check") and descriptive
-// progressives ("계속 확인 중입니다" = "I'm still checking") — the exact false
-// positives the design forbids. Their volitional forms are caught by the morpheme
-// regex regardless.
+// generalizes across all action verbs), so only the -ㄹ게 forms and stall idioms
+// are enumerated here. Each entry is the CASUAL (banmal) -게 base; the polite -게요
+// / -게여 forms match too because the substring pass tests `includes` (볼게 ⊂
+// 볼게요). Enumerating the casual base is deliberate over a broad `[ㄹ-final]게`
+// morpheme regex: that would also fire on the adverbial -게 of adjective stems
+// (힘들게 "hard-ly", 멀게 "far-ly", 길게 "long-ly"), violating the file's
+// prefer-false-negatives bias. Bare adverb+noun fragments ("바로 확인", "계속 확인")
+// are still excluded: without the -게 volitional they match other-directed requests
+// ("바로 확인 부탁드려요" = "please check") and descriptive progressives ("계속 확인
+// 중입니다" = "I'm still checking"). The persona speaking banmal ("확인해볼게!") was
+// the production miss that closed a Discord turn in silence.
 const KO_PHRASES: readonly string[] = [
-  '확인해볼게요',
-  '확인해 볼게요',
-  '확인할게요',
-  '확인할게여',
-  '계속 진행할게요',
-  '계속할게요',
-  '바로 볼게요',
-  '살펴볼게요',
-  '볼게요',
-  '볼게여',
-  '검토할게요',
-  '검토해볼게요',
-  '조회해볼게요',
-  '찾아볼게요',
-  '알아볼게요',
-  '처리할게요',
-  '알려드릴게요',
-  // Action/config verb -게요 forms (the -겠습니다 siblings are covered by the
-  // morpheme regex; these are the casual-polite variants chat models also emit).
-  '업데이트할게요',
-  '수정할게요',
-  '설정할게요',
-  '반영할게요',
-  '적용할게요',
-  '추가할게요',
-  '생성할게요',
+  '확인해볼게',
+  '확인해 볼게',
+  '확인할게',
+  '계속 진행할게',
+  '계속할게',
+  '살펴볼게',
+  '볼게',
+  '검토할게',
+  '검토해볼게',
+  '조회해볼게',
+  '찾아볼게',
+  '알아볼게',
+  '처리할게',
+  '알려드릴게',
+  // Action/config verb -게 forms (the -겠습니다 siblings are covered by the
+  // morpheme regex; these are the casual/casual-polite variants chat models emit).
+  '업데이트할게',
+  '수정할게',
+  '설정할게',
+  '반영할게',
+  '적용할게',
+  '추가할게',
+  '생성할게',
   '잠시만요',
   '잠깐만요',
 ]

@@ -33,6 +33,19 @@ describe('detectContinuationWillingness — positive (self-directed future inten
     '검토해볼게요',
     '찾아볼게요',
     '바로 처리할게요',
+    // Casual (banmal) -ㄹ게 volitional — the same first-person promise WITHOUT the
+    // polite -요. A persona that speaks informally ("확인해볼게!") hit nothing
+    // because every KO entry was polite-form; the morpheme pass now covers both.
+    // The first entry mirrors the production ack that ended a Discord turn in silence.
+    '확인해볼게! GitHub 접근이랑 gh 인증 기준으로 둘 다 빠르게 봐볼게',
+    '확인해볼게',
+    '살펴볼게',
+    '검토해볼게',
+    '찾아볼게',
+    '계속 진행할게',
+    '바로 처리할게',
+    '업데이트할게',
+    '수정할게',
     // Action/config verb family (English) — "I'll DO X" promises beyond the
     // retrieval verbs. The cron-update production miss is the canonical case.
     "I'll update the cron timing logic.",
@@ -144,6 +157,13 @@ describe('detectContinuationWillingness — negative (final / descriptive / othe
     // other-directed requests and descriptive progressives, not self-intent.
     '바로 확인 부탁드려요.',
     '계속 확인 중입니다.',
+    // Casual (banmal) idiomatic -겠어 acks — 알겠어 = "got it", 모르겠어 = "dunno".
+    // The verb-anchored volitional regex must not read these casual forms as work
+    // promises, exactly as it excludes their polite -겠어요/-겠습니다 siblings.
+    '알겠어, 고마워!',
+    '잘 모르겠어.',
+    // Descriptive casual past — an already-done report, not a promise to act.
+    '이미 확인했어, 문제 없어.',
     '',
     '...',
   ]
