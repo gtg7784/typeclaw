@@ -2451,6 +2451,125 @@ describe('ChannelRouter auto-react on engage', () => {
   })
 })
 
+describe('ChannelRouter editMessage', () => {
+  const editReq = {
+    adapter: 'slack-bot' as const,
+    workspace: 'T1',
+    chat: 'C1',
+    thread: null,
+    messageId: '1700000000.000100',
+    text: 'new body',
+  }
+
+  test('dispatches to the registered callback and returns its result', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const captured: (typeof editReq)[] = []
+    router.registerEditMessage('slack-bot', async (req) => {
+      captured.push(req as typeof editReq)
+      return { ok: true }
+    })
+
+    const result = await router.editMessage(editReq)
+
+    expect(result).toEqual({ ok: true })
+    expect(captured).toEqual([editReq])
+  })
+
+  test('reports not-supported when no callback is registered and the adapter cannot edit', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('telegram-bot', true)
+
+    const result = await router.editMessage({ ...editReq, adapter: 'telegram-bot' })
+
+    expect(result).toEqual({ ok: false, error: 'message-edit-not-supported', code: 'not-supported' })
+  })
+
+  test('reports adapter-unavailable when the adapter can edit but has no live callback', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setAdapterConfigured('slack-bot', true)
+
+    const result = await router.editMessage(editReq)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('adapter-unavailable')
+      expect(result.error).toContain('message-edit-adapter-unavailable')
+    }
+  })
+
+  test('surfaces a failure result from the callback verbatim', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerEditMessage('slack-bot', async () => ({
+      ok: false,
+      error: 'cant_update_message',
+      code: 'permission-denied',
+    }))
+
+    const result = await router.editMessage(editReq)
+
+    expect(result).toEqual({ ok: false, error: 'cant_update_message', code: 'permission-denied' })
+  })
+
+  test('converts a throwing callback into a failure result, not a rejection', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerEditMessage('slack-bot', async () => {
+      throw new Error('edit api exploded')
+    })
+
+    const result = await router.editMessage(editReq)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('edit api exploded')
+  })
+
+  test('unregister removes the callback so editMessage falls back to not-supported', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const cb = async () => ({ ok: true }) as const
+    router.registerEditMessage('slack-bot', cb)
+    router.unregisterEditMessage('slack-bot', cb)
+
+    const result = await router.editMessage(editReq)
+
+    expect(result).toEqual({ ok: false, error: 'message-edit-not-supported', code: 'not-supported' })
+  })
+
+  test('strips a leaked <think> block from the replacement before it reaches the adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const captured: string[] = []
+    router.registerEditMessage('slack-bot', async (req) => {
+      captured.push(req.text)
+      return { ok: true }
+    })
+
+    const result = await router.editMessage({ ...editReq, text: '<think>secret reasoning</think>visible answer' })
+
+    expect(result).toEqual({ ok: true })
+    expect(captured).toEqual(['visible answer'])
+  })
+
+  test('refuses an edit whose replacement is empty after removing a think block, before dispatch', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let called = false
+    router.registerEditMessage('slack-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+
+    const result = await router.editMessage({ ...editReq, text: '<think>only reasoning, no answer</think>' })
+
+    expect(called).toBe(false)
+    expect(result).toEqual({ ok: false, error: 'message-edit-empty-after-normalization', code: 'not-found' })
+  })
+})
+
 describe('ChannelRouter react on disengage', () => {
   const REACTION_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
 

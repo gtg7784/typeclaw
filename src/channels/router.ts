@@ -64,10 +64,12 @@ import {
 } from './persistence'
 import {
   ADAPTER_READ_CAPABILITIES,
+  ADAPTER_WRITE_CAPABILITIES,
   QUOTED_REPLY_EXCERPT_MAX_CHARS,
   type AdapterId,
   type ChannelAdapterConfig,
   type ReadCapability,
+  type WriteCapability,
 } from './schema'
 import type {
   ChannelHistoryMessage,
@@ -75,6 +77,9 @@ import type {
   ChannelNameResolver,
   ChannelSelfIdentity,
   ChannelSelfIdentityResolver,
+  EditMessageCallback,
+  EditMessageRequest,
+  EditMessageResult,
   FetchAttachmentArgs,
   FetchAttachmentCallback,
   FetchAttachmentResult,
@@ -1203,6 +1208,16 @@ export type ChannelRouter = {
   registerList: (adapter: ChannelKey['adapter'], cb: ListCallback) => void
   unregisterList: (adapter: ChannelKey['adapter'], cb: ListCallback) => void
   listChannels: (adapter: ChannelKey['adapter'], args: ListChannelsArgs) => Promise<ListChannelsResult>
+  // Message editing is opt-in per adapter, Set-based like reactions/outbound so
+  // future multi-account setups can register more than one. A missing callback
+  // resolves to `code: 'not-supported'`, or `code: 'adapter-unavailable'` when
+  // the static write-capability table (ADAPTER_WRITE_CAPABILITIES) says this
+  // adapter edits but no live callback exists (failed start). Kept off the
+  // outbound path: an edit mutates an existing post, so it must not flow through
+  // send()'s flood/cap/dup/sticky guards.
+  registerEditMessage: (adapter: ChannelKey['adapter'], cb: EditMessageCallback) => void
+  unregisterEditMessage: (adapter: ChannelKey['adapter'], cb: EditMessageCallback) => void
+  editMessage: (req: EditMessageRequest) => Promise<EditMessageResult>
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
@@ -1550,6 +1565,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const messageGetCallbacks = new Map<ChannelKey['adapter'], MessageGetCallback>()
   const listCallbacks = new Map<ChannelKey['adapter'], ListCallback>()
+  const editMessageCallbacks = new Map<ChannelKey['adapter'], Set<EditMessageCallback>>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const reviewThreadResolvers = new Map<ChannelKey['adapter'], ReviewThreadResolver>()
   const reviewStateResolvers = new Map<ChannelKey['adapter'], ReviewStateResolver>()
@@ -3786,6 +3802,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ? `${capability}-adapter-unavailable: the "${adapter}" adapter is configured but not currently running (it likely failed to start, e.g. an expired token or auth error — check the container logs and re-authenticate)`
       : `${capability}-not-supported`
 
+  const isWriteCapabilityUnavailable = (adapter: ChannelKey['adapter'], capability: WriteCapability): boolean =>
+    configuredAdapters.has(adapter) && ADAPTER_WRITE_CAPABILITIES[adapter].includes(capability)
+
   const fetchHistory = async (adapter: ChannelKey['adapter'], args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
     const callbacks = historyCallbacks.get(adapter)
     if (!callbacks || callbacks.size === 0) {
@@ -3850,6 +3869,59 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.warn(`[channels] list channels threw for ${adapter}: ${describe(err)}`)
       return { ok: false, error: 'list-not-supported', code: 'not-supported' }
     }
+  }
+
+  const registerEditMessage = (adapter: ChannelKey['adapter'], cb: EditMessageCallback): void => {
+    let set = editMessageCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      editMessageCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterEditMessage = (adapter: ChannelKey['adapter'], cb: EditMessageCallback): void => {
+    editMessageCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const editMessage = async (req: EditMessageRequest): Promise<EditMessageResult> => {
+    // Strip leaked `<think>` blocks before the edit reaches any adapter, exactly
+    // as the send path does via normalizeSendText — an edit is another way text
+    // reaches the chat, so it must not become a hole that writes raw reasoning a
+    // send would have suppressed. A replacement that is ONLY a think block leaves
+    // nothing visible, so refuse rather than blank the message.
+    const normalized = normalizeSendText(req.text)
+    if (normalized === undefined) {
+      return { ok: false, error: 'message-edit-empty-after-normalization', code: 'not-found' }
+    }
+    const normalizedReq = normalized === req.text ? req : { ...req, text: normalized }
+    const callbacks = editMessageCallbacks.get(req.adapter)
+    if (!callbacks || callbacks.size === 0) {
+      return isWriteCapabilityUnavailable(req.adapter, 'message-edit')
+        ? {
+            ok: false,
+            error: `message-edit-adapter-unavailable: the "${req.adapter}" adapter is configured but not currently running (it likely failed to start, e.g. an expired token or auth error — check the container logs and re-authenticate)`,
+            code: 'adapter-unavailable',
+          }
+        : { ok: false, error: 'message-edit-not-supported', code: 'not-supported' }
+    }
+    const snapshot = Array.from(callbacks)
+    let lastError: EditMessageResult & { ok: false } = { ok: false, error: 'message-edit-not-supported' }
+    for (const cb of snapshot) {
+      try {
+        const result = await raceWithTimeout(
+          cb(normalizedReq),
+          fetchHistoryTimeoutMs,
+          `[channels] ${req.adapter} edit message`,
+        )
+        if (result.ok) return result
+        lastError = result
+      } catch (err) {
+        logger.warn(`[channels] edit message threw for ${req.adapter}: ${describe(err)}`)
+        lastError = { ok: false, error: `edit message failed: ${describe(err)}` }
+      }
+    }
+    return lastError
   }
 
   const registerFetchAttachment = (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback): void => {
@@ -5452,6 +5524,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerList,
     unregisterList,
     listChannels,
+    registerEditMessage,
+    unregisterEditMessage,
+    editMessage,
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,
