@@ -72,7 +72,7 @@ import {
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import { createBudgetState, type ToolResultBudget, wrapToolDefinitionWithBudget } from './tool-result-budget'
 import { createChannelDisengageTool } from './tools/channel-disengage'
-import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
+import { createChannelFetchAttachmentTool, resolveInboxBaseDir } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
 import { createChannelReadTool } from './tools/channel-read'
@@ -390,7 +390,14 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId(), getOrigin),
+            ...buildChannelTools(
+              options.channelRouter,
+              options.origin,
+              sessionManager.getSessionId(),
+              getOrigin,
+              options.permissions,
+              options.plugins?.agentDir,
+            ),
             ...(options.containerName
               ? [
                   createRestartTool({
@@ -669,6 +676,8 @@ export function buildChannelTools(
   origin: SessionOrigin | undefined,
   sessionId?: string,
   getOrigin?: () => SessionOrigin | undefined,
+  permissions?: PermissionService,
+  agentDir?: string,
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
@@ -713,6 +722,9 @@ export function buildChannelTools(
       createChannelFetchAttachmentTool({
         router: channelRouter,
         origin: channelOrigin,
+        ...(permissions !== undefined && agentDir !== undefined
+          ? { resolveBaseDir: () => resolveInboxBaseDir(permissions, getOrigin?.() ?? origin, agentDir) }
+          : {}),
       }),
     )
     tools.push(createChannelLookAtTool(channelRouter, channelOrigin))

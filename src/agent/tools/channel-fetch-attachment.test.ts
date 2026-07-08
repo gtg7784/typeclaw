@@ -3,11 +3,18 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import type { FetchAttachmentArgs, FetchAttachmentResult, InboundAttachment } from '@/channels/types'
+import { createPermissionService } from '@/permissions/permissions'
 
-import { createChannelFetchAttachmentTool } from './channel-fetch-attachment'
+import {
+  createChannelFetchAttachmentTool,
+  DEFAULT_INBOX_DIR,
+  PUBLIC_INBOX_DIR,
+  resolveInboxBaseDir,
+} from './channel-fetch-attachment'
 
 const origin = { adapter: 'slack-bot' as const, workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null }
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelFetchAttachmentTool>['execute']>[4]
@@ -178,5 +185,55 @@ describe('channel_fetch_attachment', () => {
     const result = await runTool(tool, { attachment_id: 1 })
 
     expect(result.details).toEqual({ ok: false, error: 'invalid Slack file id: F-bogus' })
+  })
+
+  test('resolveBaseDir wins over inboxDir and steers the write per role', async () => {
+    const router = makeRouter({
+      attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: 'shot.png' }],
+      fetch: async () => ({ ok: true, buffer: Buffer.from('x'), filename: 'shot.png', size: 1 }),
+    })
+    const tool = createChannelFetchAttachmentTool({
+      router,
+      origin,
+      inboxDir,
+      resolveBaseDir: () => join(inboxDir, 'redirected'),
+    })
+
+    const result = await runTool(tool, { attachment_id: 1 })
+
+    const expectedPath = join(inboxDir, 'redirected', 'slack-bot', 'F1', 'shot.png')
+    expect(result.details?.path).toBe(expectedPath)
+    expect(readFileSync(expectedPath, 'utf8')).toBe('x')
+  })
+})
+
+describe('resolveInboxBaseDir — per-role download location', () => {
+  const AGENT = '/agent'
+  const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+  const spawnedBy = (role: string): SessionOrigin => ({
+    kind: 'subagent',
+    subagent: 'x',
+    parentSessionId: 'p',
+    spawnedByRole: role,
+  })
+
+  test('owner (sees workspace/) keeps the private-surface inbox', () => {
+    const svc = createPermissionService()
+    expect(resolveInboxBaseDir(svc, tui, AGENT)).toBe(DEFAULT_INBOX_DIR)
+  })
+
+  test('member (sees workspace/) keeps the private-surface inbox', () => {
+    const svc = createPermissionService()
+    expect(resolveInboxBaseDir(svc, spawnedBy('member'), AGENT)).toBe(DEFAULT_INBOX_DIR)
+  })
+
+  test('guest (hidden from workspace/) is redirected to the public inbox', () => {
+    const svc = createPermissionService()
+    expect(resolveInboxBaseDir(svc, spawnedBy('guest'), AGENT)).toBe(PUBLIC_INBOX_DIR)
+  })
+
+  test('undefined origin fails safe to the public inbox', () => {
+    const svc = createPermissionService()
+    expect(resolveInboxBaseDir(svc, undefined, AGENT)).toBe(PUBLIC_INBOX_DIR)
   })
 })
