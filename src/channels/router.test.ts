@@ -7093,6 +7093,72 @@ describe('ChannelRouter typing indicator', () => {
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
   })
 
+  test('clears every flat-DM typingThread that got a status before the anchor migrated', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    // Record the LAST status per typingThread so a stranded "is typing..." on an
+    // anchor the turn migrated away from surfaces as a non-empty final value.
+    const lastStatus = new Map<string, string>()
+    router.registerTyping('discord-bot', async (target) => {
+      const key = target.typingThread ?? target.thread ?? 'none'
+      lastStatus.set(key, target.phase === 'stop' ? '' : 'is typing...')
+    })
+
+    // given: a flat-DM turn on ts=A held mid-prompt, so ts=A already has a live
+    // "is typing..." status while a second inbound can coalesce a new turn
+    let releasePrompt: (() => void) | undefined
+    const firstHeld = new Promise<void>((resolve) => {
+      releasePrompt = resolve
+    })
+    await router.route(inbound({ isDm: true, thread: null, typingThread: 'dm-ts-a', text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstHeld
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    expect(lastStatus.get('dm-ts-a')).toBe('is typing...')
+
+    // when: a second flat-DM inbound (ts=B) arrives before A's turn ends and the
+    // drain migrates the anchor to ts=B, then the turn ends
+    await router.route(
+      inbound({ isDm: true, thread: null, typingThread: 'dm-ts-b', text: 'second', externalMessageId: 'm2' }),
+    )
+    releasePrompt!()
+    await draining
+
+    // then: BOTH anchors are cleared — ts=A is not stranded on "is typing..."
+    expect(lastStatus.get('dm-ts-a')).toBe('')
+    expect(lastStatus.get('dm-ts-b')).toBe('')
+  })
+
+  test('clears each dirty flat-DM typingThread once at turn end', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const stops: string[] = []
+    router.registerTyping('discord-bot', async (target) => {
+      if (target.phase === 'stop') stops.push(target.typingThread ?? 'none')
+    })
+
+    let releasePrompt: (() => void) | undefined
+    const firstHeld = new Promise<void>((resolve) => {
+      releasePrompt = resolve
+    })
+    await router.route(inbound({ isDm: true, thread: null, typingThread: 'dm-ts-a', text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstHeld
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    await router.route(
+      inbound({ isDm: true, thread: null, typingThread: 'dm-ts-b', text: 'second', externalMessageId: 'm2' }),
+    )
+    releasePrompt!()
+    await draining
+
+    // each dirty anchor is cleared exactly once — no empty-string clear storm
+    expect(stops.sort()).toEqual(['dm-ts-a', 'dm-ts-b'])
+  })
+
   test('awaits phase=stop when a turn is dropped without an outbound reply', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
