@@ -110,6 +110,8 @@ function router(): ChannelRouter & { routed: InboundMessage[]; registered: strin
     unregisterFetchAttachment: (adapter: string) => unregistered.push(`fetch:${adapter}`),
     registerMembership: (adapter: string) => registered.push(`membership:${adapter}`),
     unregisterMembership: (adapter: string) => unregistered.push(`membership:${adapter}`),
+    registerEditMessage: (adapter: string) => registered.push(`edit:${adapter}`),
+    unregisterEditMessage: (adapter: string) => unregistered.push(`edit:${adapter}`),
   } as unknown as ChannelRouter & { routed: InboundMessage[]; registered: string[]; unregistered: string[] }
 }
 
@@ -271,6 +273,7 @@ describe('createWebexAdapter', () => {
       'history:webex',
       'fetch:webex',
       'membership:webex',
+      'edit:webex',
     ])
   })
 

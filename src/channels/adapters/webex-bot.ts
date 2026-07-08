@@ -33,6 +33,7 @@ import { describeError } from './describe-error'
 import { createWebexChannelNameResolver } from './webex-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason, type WebexInboundMessage } from './webex-bot-classify'
 import { enrichWebexMessageReference } from './webex-bot-reference'
+import { createWebexEditMessageCallback } from './webex-edit'
 import { resolveWebexBodyText } from './webex-format'
 import { createWebexPrefetchLimiter, isWebexRateLimitError, type WebexPrefetchLimiter } from './webex-prefetch-limiter'
 
@@ -312,6 +313,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
   })
   const outboundCallback = createOutboundCallback({ client, logger, formatChannelTag })
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger, fetchImpl })
+  const editMessageCallback = createWebexEditMessageCallback({ adapter: 'webex-bot', client })
 
   const handleMessage = async (event: WebexInboundMessage): Promise<void> => {
     inflightInbounds++
@@ -395,6 +397,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       options.router.registerHistory('webex-bot', historyCallback)
       options.router.registerFetchAttachment('webex-bot', fetchAttachmentCallback)
       options.router.registerMembership('webex-bot', membershipResolver)
+      options.router.registerEditMessage('webex-bot', editMessageCallback)
 
       const rollbackStart = (reason: string, cause: Error): never => {
         options.router.unregisterOutbound('webex-bot', outboundCallback)
@@ -403,6 +406,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
         options.router.unregisterHistory('webex-bot', historyCallback)
         options.router.unregisterFetchAttachment('webex-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('webex-bot', membershipResolver)
+        options.router.unregisterEditMessage('webex-bot', editMessageCallback)
         listener?.stop()
         listener = null
         botPerson = null
@@ -434,6 +438,7 @@ export function createWebexBotAdapter(options: WebexBotAdapterOptions): WebexBot
       options.router.unregisterHistory('webex-bot', historyCallback)
       options.router.unregisterFetchAttachment('webex-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('webex-bot', membershipResolver)
+      options.router.unregisterEditMessage('webex-bot', editMessageCallback)
       listener?.stop()
       listener = null
       connected = false

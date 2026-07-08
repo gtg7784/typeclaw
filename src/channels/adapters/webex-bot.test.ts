@@ -537,6 +537,7 @@ describe('webex lifecycle', () => {
       'history',
       'fetchAttachment',
       'membership',
+      'editMessage',
     ])
     expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-ref-1', username: 'bot@example.com' })
 
@@ -669,6 +670,8 @@ class FakeRouter {
     unregisterFetchAttachment: () => this.unregistered.push('fetchAttachment'),
     registerMembership: () => this.registered.push('membership'),
     unregisterMembership: () => this.unregistered.push('membership'),
+    registerEditMessage: () => this.registered.push('editMessage'),
+    unregisterEditMessage: () => this.unregistered.push('editMessage'),
   } as unknown as ChannelRouter
 
   async waitForRoutes(count: number): Promise<void> {
