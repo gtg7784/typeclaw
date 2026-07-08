@@ -15,10 +15,12 @@ already downloaded, so the CLI is ready to use out of the box.
 
 ## Human-in-the-loop via the dashboard
 
-You run inside a Docker container with no display, no clipboard, and no way to
-hand the keyboard over directly. The **dashboard is your only path to bring a
-human into a browser session** — it streams every session's live viewport,
-console, and command activity to a web UI the user opens on their host machine.
+You run inside a Docker container. Chrome renders to the in-container virtual X
+display (Xvfb, `DISPLAY=:99`), but there is no human-accessible display or
+clipboard and no way to hand the keyboard over directly. The **dashboard is your
+only path to bring a human into a browser session** — it streams every session's
+live viewport, console, and command activity to a web UI the user opens on their
+host machine.
 
 **Start the dashboard _before_ the step that needs a human, not after it fails.**
 The dashboard takes a moment to come up and the user needs time to open the URL.
@@ -91,13 +93,28 @@ you just want to show the user a single page or a captured state:
 Reserve the dashboard for cases that genuinely need live interaction or
 watching a multi-step flow unfold.
 
-### Headless only
+### Headed vs headless
 
-Never pass `--headed` to any `agent-browser` command — the container has no X
-server or `$DISPLAY`, and a headed launch fails with `Missing X server or
-$DISPLAY / The platform failed to initialize.` The dashboard is the substitute
-for a headed browser. Use the default headless mode for everything, including
-dogfooding and Electron flows.
+By default the container ships a virtual X server: the entrypoint spawns Xvfb
+and exports `DISPLAY=:99`, so `--headed` (or `AGENT_BROWSER_HEADED=1`) launches a
+real headed Chrome. Headless is fine for ordinary automation — dogfooding, form
+filling, Electron flows, capturing a page you can already reach.
+
+Prefer `--headed` when a site is guarded by a WAF/anti-bot layer (Akamai Bot
+Manager, Cloudflare, PerimeterX — common on large e-commerce and portal sites).
+Chrome's `--headless`/`--headless=new` modes are fingerprinted by these stacks
+via signals no UA spoof can patch, so a headless launch draws a `403 Access
+Denied` / CAPTCHA where a headed one under Xvfb passes. This is the whole reason
+the container runs Xvfb. For a hard case, combine headed mode with a persistent
+`--profile` and warm the session (land on the homepage, then navigate
+organically) so the site's trust cookie is issued before you hit the target
+page.
+
+The one exception: if the agent folder sets `docker.file.xvfb: false`, there is
+no `DISPLAY` and a headed launch fails with `Missing X server or $DISPLAY / The
+platform failed to initialize.` In that configuration, stay headless and use the
+dashboard for anything that needs a human. If a `--headed` command ever returns
+that error, the toggle is off — fall back to headless rather than retrying.
 
 ## Start here
 
