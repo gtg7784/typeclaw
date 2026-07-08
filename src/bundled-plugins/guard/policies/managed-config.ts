@@ -2,7 +2,7 @@ import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { parseConfigJson } from '@/config'
-import { parseCronJson } from '@/cron'
+import { validateCronEdit } from '@/cron'
 
 import type { GuardBlock } from '../policy'
 
@@ -30,7 +30,8 @@ export async function checkManagedConfigGuard(options: {
   const contentResult = await intendedContent(tool, args, targetPath)
   if ('block' in contentResult) return contentResult
 
-  const validation = validateManagedContent(managed.file, contentResult.content)
+  const existing = await readExisting(targetPath)
+  const validation = validateManagedContent(managed.file, contentResult.content, existing)
   if (validation.ok) return undefined
 
   return {
@@ -66,13 +67,28 @@ async function resolveManagedTarget(agentDir: string, targetPath: string): Promi
   return undefined
 }
 
-function validateManagedContent(file: ManagedFile, content: string): { ok: true } | { ok: false; reason: string } {
+function validateManagedContent(
+  file: ManagedFile,
+  content: string,
+  existing: string | undefined,
+): { ok: true } | { ok: false; reason: string } {
   if (file === 'typeclaw.json') {
     const result = parseConfigJson(content, { migrate: false })
     return result.ok ? { ok: true } : { ok: false, reason: result.reason }
   }
-  const result = parseCronJson(content, { mode: 'edit' })
+  // Delta validation: a stale `at`/`until` on a job carried over unchanged from
+  // the existing file must not block the edit (esp. an edit that removes it),
+  // but a newly-added or re-timed past job is still rejected. See validateCronEdit.
+  const result = validateCronEdit(content, existing)
   return result.ok ? { ok: true } : { ok: false, reason: result.reason }
+}
+
+async function readExisting(targetPath: string): Promise<string | undefined> {
+  try {
+    return await readFile(targetPath, 'utf8')
+  } catch {
+    return undefined
+  }
 }
 
 async function intendedContent(

@@ -299,6 +299,104 @@ describe('managedConfig guard — cron.json', () => {
   })
 })
 
+// Delta-timing regression: a stale enabled job (expired `until` from the past)
+// used to fail the whole file in strict edit mode, so it held the file hostage —
+// the agent could not remove it, add a valid job, or touch any sibling. The
+// guard now strict-checks timing only on newly-authored jobs, tolerating a stale
+// boundary that is carried over unchanged.
+describe('managedConfig guard — cron.json stale-job delta validation', () => {
+  const staleJob = {
+    id: 'expired',
+    schedule: '0 9 * * *',
+    until: '2020-01-01T00:00:00Z',
+    kind: 'prompt',
+    prompt: 'x',
+    scheduledByRole: 'owner',
+  }
+  const freshJob = {
+    id: 'fresh',
+    schedule: '0 10 * * *',
+    kind: 'prompt',
+    prompt: 'y',
+    scheduledByRole: 'owner',
+  }
+
+  async function withExisting(jobs: unknown[]): Promise<string> {
+    const agentDir = await makeAgentDir()
+    await writeFile(path.join(agentDir, 'cron.json'), JSON.stringify({ jobs }, null, 2))
+    return agentDir
+  }
+
+  test('allows removing a stale pre-existing job', async () => {
+    const agentDir = await withExisting([staleJob, freshJob])
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [freshJob] }) },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('allows editing an unrelated job while a stale job persists unchanged', async () => {
+    const agentDir = await withExisting([staleJob, freshJob])
+    const editedFresh = { ...freshJob, schedule: '0 11 * * *' }
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [staleJob, editedFresh] }) },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('still blocks adding a NEW job with a past until', async () => {
+    const agentDir = await withExisting([freshJob])
+    const newStale = { ...staleJob, id: 'new-expired' }
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [freshJob, newStale] }) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('past')
+  })
+
+  test('still blocks re-timing an existing job into the past', async () => {
+    const agentDir = await withExisting([freshJob])
+    const reTimed = { ...freshJob, until: '2020-01-01T00:00:00Z' }
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [reTimed] }) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('past')
+  })
+
+  test('still blocks re-enabling a stale disabled job (enabled flip re-arms the check)', async () => {
+    const disabledStale = { ...staleJob, enabled: false }
+    const agentDir = await withExisting([disabledStale])
+    const reEnabled = { ...staleJob, enabled: true }
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [reEnabled] }) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('past')
+  })
+
+  test('on first-init (no existing file) a past job is still blocked', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify({ jobs: [staleJob] }) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('past')
+  })
+})
+
 describe('managedConfig guard — scope', () => {
   test('ignores tools other than write/edit', async () => {
     const agentDir = await makeAgentDir()
