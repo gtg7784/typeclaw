@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -257,5 +257,150 @@ describe.skipIf(onWindows)('fetchWithLimits — curl-impersonate path', () => {
     // then: globalThis.fetch was the actual transport
     expect(result.body).toBe('fallback body')
     expect(fetchCalls).toHaveLength(1)
+  })
+})
+
+// A fake curl that renders a single response including %{header_json}, so the
+// primitive can parse Set-Cookie names. headerJson is baked in via a @@HJ@@
+// placeholder to dodge sed metacharacter issues (see curl-impersonate.test.ts).
+function fakeCurlWithHeaders(body: string, status: number, headerJson: string): string {
+  return `
+ARGV_FILE="\${SCRATCH_ARGV:-/tmp/argv.txt}"
+printf '%s\\n' "$@" > "$ARGV_FILE"
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then
+    j=$((i + 1))
+    eval "WTPL=\\"\\\${$j}\\""
+    break
+  fi
+  i=$((i + 1))
+done
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/${status}/' -e 's|%{url_effective}|https://example.com|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/${body.length}/' -e 's|%{header_json}|@@HJ@@|')
+printf '%s' '${body}'
+printf '%s' "$RENDERED" | sed "s|@@HJ@@|$(printf '%s' '${headerJson.replace(/'/g, `'\\''`).replace(/\|/g, '\\\\|')}')|"
+`
+}
+
+// POSIX-only fake shell binary. Windows cannot spawn it (#899).
+describe.skipIf(onWindows)('fetchWithLimits — antibot cookie warmup', () => {
+  let scratchDir: string
+  let curlPath: string
+  let countPath: string
+
+  beforeEach(() => {
+    scratchDir = mkdtempSync(join(tmpdir(), 'webfetch-warmup-test-'))
+    curlPath = join(scratchDir, 'fake-curl')
+    countPath = join(scratchDir, 'count')
+    _setForceFallbackForTest(false)
+  })
+
+  afterEach(() => {
+    rmSync(scratchDir, { recursive: true, force: true })
+  })
+
+  function install(script: string): void {
+    writeFileSync(
+      curlPath,
+      `#!/bin/sh\nSCRATCH_ARGV="${join(scratchDir, 'argv.txt')}"\nif [ "$1" = "--version" ]; then exit 0; fi\n${script}\n`,
+      'utf8',
+    )
+    chmodSync(curlPath, 0o755)
+    _setCurlBinaryForTest(curlPath)
+    _resetAvailabilityCacheForTest()
+  }
+
+  // A two-call fake: first invocation emits `first`, second emits `second`.
+  // State is a counter file so the two curlImpersonate() spawns diverge.
+  function installTwoCall(first: string, second: string): void {
+    const dispatch = `
+if [ "$1" = "--version" ]; then exit 0; fi
+COUNT_FILE="${countPath}"
+N=$(cat "$COUNT_FILE" 2>/dev/null || printf '0')
+printf '%s' "$((N + 1))" > "$COUNT_FILE"
+if [ "$N" = "0" ]; then
+${first}
+else
+${second}
+fi
+`
+    writeFileSync(curlPath, `#!/bin/sh\nSCRATCH_ARGV="${join(scratchDir, 'argv.txt')}"\n${dispatch}\n`, 'utf8')
+    chmodSync(curlPath, 0o755)
+    _setCurlBinaryForTest(curlPath)
+    _resetAvailabilityCacheForTest()
+  }
+
+  test('plain 200: no warmup attempted flag surfaced as triggered', async () => {
+    install(fakeCurlWithHeaders('<html>ok</html>', 200, '{"content-type":["text/html"]}'))
+
+    const result = await fetchWithLimits('https://example.com', 30)
+
+    expect(result.httpStatus).toBe(200)
+    expect(result.antibotWarmup?.triggered).toBe(false)
+  })
+
+  test('403 with bot-manager Set-Cookie: replays once and returns the 200', async () => {
+    const first = fakeCurlWithHeaders('blocked', 403, '{"set-cookie":["_abck=xyz; Path=/","bm_sz=abc"]}')
+    const second = fakeCurlWithHeaders('<html>product</html>', 200, '{"content-type":["text/html"]}')
+    installTwoCall(first, second)
+
+    const result = await fetchWithLimits('https://example.com', 30)
+
+    expect(result.httpStatus).toBe(200)
+    expect(result.body).toBe('<html>product</html>')
+    expect(result.antibotWarmup?.triggered).toBe(true)
+    expect(result.antibotWarmup?.initialStatus).toBe(403)
+    expect(result.antibotWarmup?.initialSetCookieNames).toEqual(['_abck', 'bm_sz'])
+    expect(result.antibotWarmup?.replayStatus).toBe(200)
+  })
+
+  test('403 WITHOUT a bot-manager cookie: no replay, throws HTTP 403', async () => {
+    install(fakeCurlWithHeaders('nope', 403, '{"set-cookie":["session=abc"]}'))
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('401 with a bot cookie present: no replay (only 403 triggers), throws HTTP 401', async () => {
+    install(fakeCurlWithHeaders('unauth', 401, '{"set-cookie":["_abck=xyz"]}'))
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 401/)
+  })
+
+  test('403 with only a normal app cookie: no replay, throws HTTP 403', async () => {
+    install(fakeCurlWithHeaders('blocked', 403, '{"set-cookie":["JSESSIONID=abc; Path=/"]}'))
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('403 with bot cookie, replay still 403: throws final HTTP 403', async () => {
+    const first = fakeCurlWithHeaders('blocked', 403, '{"set-cookie":["_abck=xyz"]}')
+    const second = fakeCurlWithHeaders('blocked again', 403, '{"set-cookie":["_abck=xyz2"]}')
+    installTwoCall(first, second)
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('antibotWarmup="off": a bot-manager 403 is NOT replayed, throws HTTP 403', async () => {
+    const first = fakeCurlWithHeaders('blocked', 403, '{"set-cookie":["_abck=xyz"]}')
+    const second = fakeCurlWithHeaders('<html>product</html>', 200, '{"content-type":["text/html"]}')
+    installTwoCall(first, second)
+
+    await expect(fetchWithLimits('https://example.com', 30, undefined, 'off')).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('replay is charged the remaining budget, not a fresh timeout', async () => {
+    // given: the first request eats the whole 1s budget before returning a
+    // bot-manager 403, so no time is left to replay.
+    const first = `sleep 1.2\n${fakeCurlWithHeaders('blocked', 403, '{"set-cookie":["_abck=xyz"]}')}`
+    const second = fakeCurlWithHeaders('<html>product</html>', 200, '{"content-type":["text/html"]}')
+    installTwoCall(first, second)
+
+    // when / then: it surfaces the initial 403 rather than spending a second
+    // full budget on the replay.
+    await expect(fetchWithLimits('https://example.com', 1)).rejects.toThrow(/HTTP 403/)
+
+    // and: the replay never ran (counter advanced only for the first call).
+    expect(readFileSync(countPath, 'utf8')).toBe('1')
   })
 })
