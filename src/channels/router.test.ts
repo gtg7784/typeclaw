@@ -46,7 +46,7 @@ import {
   OBSERVED_MESSAGE_MAX_CHARS,
   SESSION_GRACE_HARD_TTL_MS,
   SESSION_IDLE_MS,
-  SESSION_CHILD_PIN_MAX_MS,
+  SESSION_CHILD_STUCK_BACKSTOP_MS,
   sliceHeadTail,
   StaleLiveSessionError,
   stripThinkBlocks,
@@ -961,8 +961,8 @@ describe('ChannelRouter session lifecycle', () => {
     expect(sessions[0]!.disposed).toBe(0)
   })
 
-  test('rollover fires anyway once the running child exceeds SESSION_CHILD_PIN_MAX_MS', async () => {
-    // given: a child that started long enough ago to exceed the pin ceiling
+  test('rollover fires anyway once the running child exceeds SESSION_CHILD_STUCK_BACKSTOP_MS', async () => {
+    // given: a child that started long enough ago to exceed the stuck backstop
     const dir = await tempDir()
     const nowRef = { value: 1000 }
     const logs: string[] = []
@@ -975,21 +975,21 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound({ externalMessageId: 'm1' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // when: the follow-up arrives after the pin cap has elapsed
-    nowRef.value = childStartedAt + SESSION_CHILD_PIN_MAX_MS + 1
+    // when: the follow-up arrives after the stuck backstop has elapsed
+    nowRef.value = childStartedAt + SESSION_CHILD_STUCK_BACKSTOP_MS + 1
     await router.route(inbound({ externalMessageId: 'm2', text: 'are you stuck?' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then: pin is overridden, rollover proceeds with the past-cap annotation
-    expect(logs.some((l) => l.includes('stale-rollover') && l.includes('past child-pin cap'))).toBe(true)
+    // then: pin is overridden, rollover proceeds with the stuck-child annotation
+    expect(logs.some((l) => l.includes('stale-rollover') && l.includes('suspected stuck running child'))).toBe(true)
     expect(sessions).toHaveLength(2)
     expect(sessions[0]!.disposed).toBe(1)
   })
 
-  test('rollover stays pinned when the oldest child is past cap but a newer child is still within it', async () => {
-    // given: two running children — one past the cap, one fresh. The production
-    //   seam reports the NEWEST start time, so an over-cap older child must not
-    //   unpin the session while the newer child is still inside its window.
+  test('rollover stays pinned when the oldest child is past backstop but a newer child is still within it', async () => {
+    // given: two running children — one past the backstop, one fresh. The
+    //   production seam reports the NEWEST start time, so an over-backstop older
+    //   child must not unpin the session while the newer child is still in window.
     const dir = await tempDir()
     const nowRef = { value: 1000 }
     const logs: string[] = []
@@ -1009,8 +1009,8 @@ describe('ChannelRouter session lifecycle', () => {
     await router.route(inbound({ externalMessageId: 'm1' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // when: the follow-up arrives after the OLDEST child has crossed the cap
-    nowRef.value = startOfTurn + SESSION_CHILD_PIN_MAX_MS + 1
+    // when: the follow-up arrives after the OLDEST child has crossed the backstop
+    nowRef.value = startOfTurn + SESSION_CHILD_STUCK_BACKSTOP_MS + 1
     await router.route(inbound({ externalMessageId: 'm2', text: 'still going?' }))
     await router.__testing!.flushDebounce(KEY)
 
@@ -9913,8 +9913,8 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(factoryCalls[0]?.existingSessionId).toBe('ses_preexisting')
   })
 
-  test('persisted stale-rollover fires once the old session child outlives the pin cap', async () => {
-    // given: same stale mapping, but the child started past SESSION_CHILD_PIN_MAX_MS ago
+  test('persisted stale-rollover fires once the old session child outlives the stuck backstop', async () => {
+    // given: same stale mapping, but the child started past SESSION_CHILD_STUCK_BACKSTOP_MS ago
     const dir = await tempDir()
     const nowRef = { value: 10_000_000 }
     const logs: string[] = []
@@ -9935,15 +9935,17 @@ describe('ChannelRouter cold-start prefetch', () => {
       logs,
       factoryCalls,
       newestRunningChildSubagentStartedAt: (sessionId) =>
-        sessionId === 'ses_preexisting' ? nowRef.value - SESSION_CHILD_PIN_MAX_MS - 1 : null,
+        sessionId === 'ses_preexisting' ? nowRef.value - SESSION_CHILD_STUCK_BACKSTOP_MS - 1 : null,
     })
 
     // when
     await router.route(inbound({ externalMessageId: 'engage', text: 'are you stuck?' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then: the past-cap override lets the persisted rollover proceed (fresh session)
-    expect(logs.some((l) => l.includes('stale-rollover (persisted') && l.includes('past child-pin cap'))).toBe(true)
+    // then: the stuck-child override lets the persisted rollover proceed (fresh session)
+    expect(
+      logs.some((l) => l.includes('stale-rollover (persisted') && l.includes('suspected stuck running child')),
+    ).toBe(true)
     expect(factoryCalls[0]?.existingSessionId).toBeUndefined()
   })
 
@@ -10220,8 +10222,62 @@ describe('ChannelRouter idle session GC', () => {
     expect(sessions[0]!.aborted).toBe(0)
   })
 
-  test('evicts a session whose background child has outlived SESSION_CHILD_PIN_MAX_MS', async () => {
-    // given: a session whose child started long enough ago to exceed the pin cap
+  test('keeps a session pinned when a background child runs past the old 45m cap (65m completion regression)', async () => {
+    // given: the reported incident — a background child running ~65 minutes, well
+    //   past the retired 45m pin cap that used to evict the parent mid-run and drop
+    //   the child's completion reminder. It must stay pinned below the 6h backstop.
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const childStartedAt = 1000
+    const sixtyFiveMinutes = 65 * 60 * 1000
+    const { router, sessions } = makeRouter(dir, {
+      nowRef,
+      newestRunningChildSubagentStartedAt: (sessionId) => (sessionId === 'ses_fake_1' ? childStartedAt : null),
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when: GC runs 65 minutes later, long past both SESSION_IDLE_MS and the old cap
+    nowRef.value = childStartedAt + sixtyFiveMinutes
+    await router.__testing!.runIdleGc!()
+
+    // then: still pinned, so a completion landing now would have a live session
+    expect(router.liveCount()).toBe(1)
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('unpins and evicts once the child completes and the session then goes idle', async () => {
+    // given: a child that pins the session while running, then completes (the seam
+    //   reports null once no child is running — mirrors recordCompletion flipping
+    //   status off 'running')
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const childStartedAt = 1000
+    let childRunning = true
+    const { router, sessions } = makeRouter(dir, {
+      nowRef,
+      newestRunningChildSubagentStartedAt: (sessionId) =>
+        sessionId === 'ses_fake_1' && childRunning ? childStartedAt : null,
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when: well past idle but the child still runs → pinned
+    nowRef.value = childStartedAt + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+    expect(router.liveCount()).toBe(1)
+
+    // and: the child completes, then another idle sweep runs
+    childRunning = false
+    await router.__testing!.runIdleGc!()
+
+    // then: no longer pinned → the idle session is evicted normally
+    expect(router.liveCount()).toBe(0)
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('evicts a session whose background child has outlived SESSION_CHILD_STUCK_BACKSTOP_MS', async () => {
+    // given: a session whose child started long enough ago to exceed the stuck backstop
     const dir = await tempDir()
     const nowRef = { value: 1000 }
     const logs: string[] = []
@@ -10234,14 +10290,14 @@ describe('ChannelRouter idle session GC', () => {
     await router.route(inbound({ text: 'hi bot' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // when: GC runs after both the idle threshold AND the pin cap have elapsed
-    nowRef.value = childStartedAt + SESSION_CHILD_PIN_MAX_MS + 1
+    // when: GC runs after both the idle threshold AND the stuck backstop have elapsed
+    nowRef.value = childStartedAt + SESSION_CHILD_STUCK_BACKSTOP_MS + 1
     await router.__testing!.runIdleGc!()
 
     // then: the pin is overridden and the stuck session is evicted
     expect(router.liveCount()).toBe(0)
     expect(sessions[0]!.aborted).toBe(1)
-    expect(logs.some((l) => l.includes('idle_gc evicting') && l.includes('past child-pin cap'))).toBe(true)
+    expect(logs.some((l) => l.includes('idle_gc evicting') && l.includes('suspected stuck running child'))).toBe(true)
   })
 
   test('next inbound after eviction creates a fresh session and rehydrates the persisted sessionId', async () => {
