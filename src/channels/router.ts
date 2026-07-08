@@ -482,21 +482,26 @@ export const SESSION_FRESHNESS_TTL_MS = 5 * 60 * 1000
 export const SESSION_GRACE_HARD_TTL_MS = 10 * 60 * 1000
 
 /**
- * Absolute ceiling on how long a running background subagent may pin its parent
- * channel session against idle GC and stale-rollover. A still-running child defers
- * teardown because the next inbound otherwise starts a fresh session that has lost
- * track of the in-flight task and spawns a DUPLICATE child for the same work. The
- * pin is bounded so a stuck/never-completing child cannot make the session
- * immortal: past this age the session is GC'd / rolled over anyway, falling back
- * to the completion-reroute behavior. Measured from the child's start.
+ * Leak guard — NOT a freshness cap. A running background subagent pins its parent
+ * channel session against idle GC and stale-rollover for as long as the child is
+ * actually running, because the next inbound would otherwise start a fresh session
+ * that has lost track of the in-flight task and spawns a DUPLICATE child, and — the
+ * bug this backstop is sized around — a completion arriving after teardown has no
+ * live session to deliver its system-reminder to and is silently dropped.
  *
- * Set above SESSION_IDLE_MS (30m) — not equal — so a child spawned at session
- * birth still pins the session through its first idle sweep instead of the two
- * windows coinciding. Comfortably above SESSION_GRACE_HARD_TTL_MS (10m) too:
- * real research runs can exceed it (an observed run took 9m18s), so the 10m cap
- * is far too tight to bound the pin.
+ * The pin is bounded only so a genuinely stuck/wedged child cannot make the session
+ * immortal. Subagent `timeoutMs` is optional (operator declares none), so a hung
+ * child stays `status: 'running'` forever; without this ceiling its parent session
+ * would leak indefinitely. Past this age the child is treated as stuck: GC/rollover
+ * proceeds and the session falls back to completion-reroute.
+ *
+ * Sized as an ANOMALY threshold, deliberately far above any legitimate run (deep
+ * operator work is minutes-to-an-hour, not hours), so it never fires for real work.
+ * The prior 45m value was close enough to plausible deep work to turn a legitimate
+ * long run into a routine drop — the reported 65m completion loss. 6h is clearly
+ * "this child is wedged," not "this child is busy".
  */
-export const SESSION_CHILD_PIN_MAX_MS = 45 * 60 * 1000
+export const SESSION_CHILD_STUCK_BACKSTOP_MS = 6 * 60 * 60 * 1000
 
 /**
  * Cost-aware grace decision for the soft→hard TTL band. Returns true when reusing
@@ -1442,12 +1447,12 @@ export type CreateChannelRouterOptions = {
   // Returns the start time (epoch ms) of the NEWEST still-running background
   // subagent spawned from `sessionId`, or null when none is running. Lets idle
   // GC and stale-rollover pin a session whose child is still working (the next
-  // inbound would otherwise spawn a duplicate child), bounded by
-  // SESSION_CHILD_PIN_MAX_MS measured from that start. Newest — not oldest — so a
-  // long-running child that crossed the cap cannot unpin the session while a more
-  // recently spawned child is still inside its own protection window. Production
-  // wiring forwards the LiveSubagentRegistry; omitted (tests, no-subagent setups)
-  // means no pin.
+  // inbound would otherwise spawn a duplicate child, and a completion arriving
+  // after teardown is dropped), bounded only by SESSION_CHILD_STUCK_BACKSTOP_MS
+  // measured from that start. Newest — not oldest — so a long-running child that
+  // crossed the stuck backstop cannot unpin the session while a more recently
+  // spawned child is still inside its window. Production wiring forwards the
+  // LiveSubagentRegistry; omitted (tests, no-subagent setups) means no pin.
   newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
 }
 
@@ -1777,19 +1782,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   // True while a background child spawned from this session is still running AND
-  // the newest such child is within SESSION_CHILD_PIN_MAX_MS of its start. Using
-  // the newest child keeps the session pinned as long as ANY running child is
-  // still inside its protection window — an older child that already crossed the
-  // cap must not unpin the session out from under a freshly spawned one. Tearing
-  // the session down mid-child lets the next inbound spawn a duplicate child, so
-  // GC/rollover defer to this. `label` only annotates the override log.
+  // the newest such child has not outlived the stuck backstop. Using the newest
+  // child keeps the session pinned as long as ANY running child is still inside
+  // its window — an older child past the backstop must not unpin the session out
+  // from under a freshly spawned one. Tearing the session down mid-child lets the
+  // next inbound spawn a duplicate child AND drops the child's completion when it
+  // lands after teardown, so GC/rollover defer to this. Crossing the backstop is
+  // an anomaly (a wedged, timeout-less child), logged at warn. `label` only
+  // annotates the override log.
   const isPinnedByRunningChild = (sessionId: string, keyId: string, label: string): boolean => {
     const childStartedAt = newestRunningChildSubagentStartedAt(sessionId)
     if (childStartedAt === null) return false
     const pinnedForMs = now() - childStartedAt
-    if (pinnedForMs <= SESSION_CHILD_PIN_MAX_MS) return true
-    logger.info(
-      `[channels] ${keyId}: ${label} despite running child (newest pinned ${pinnedForMs}ms, past child-pin cap)`,
+    if (pinnedForMs <= SESSION_CHILD_STUCK_BACKSTOP_MS) return true
+    logger.warn(
+      `[channels] ${keyId}: ${label} despite running child (newest pinned ${pinnedForMs}ms, past stuck-child backstop; suspected stuck running child)`,
     )
     return false
   }
