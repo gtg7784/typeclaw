@@ -780,6 +780,15 @@ type LiveSession = {
   // carried only to the typing path; null when the triggering inbound supplied
   // none (every non-DM inbound, and reminder-only turns).
   currentTurnTypingThread: string | null
+  // Every flat-DM typingThread anchor a 'tick' set a non-expiring status on but
+  // that has not yet been cleared. In a flat DM each inbound stamps its OWN ts
+  // as `typingThread`, so `currentTurnTypingThread` migrates from ts=A to ts=B
+  // when a second message coalesces a new turn before the first turn's stop. A
+  // single-anchor stop would then clear only B and strand A's "is typing..."
+  // forever (Slack has no auto-expiry). Recording every ticked anchor lets the
+  // stop clear ALL of them, not just the latest. An anchor is added when its
+  // 'tick' dispatches and removed when its 'stop' clear dispatches.
+  dirtyTypingThreads: Set<string>
   // One engage-:eyes:-add promise per inbound coalesced into THIS turn, each
   // resolving to its removable per-instance ref (or null). A debounced turn can
   // batch several inbounds that each got their own :eyes:, so every entry is
@@ -2043,6 +2052,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
         currentTurnTypingThread: null,
+        dirtyTypingThreads: new Set(),
         currentTurnEngageReactions: [],
         pendingTurnReactions: [],
         silentAckTurn: null,
@@ -2304,14 +2314,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     await persist()
   }
 
-  const fireTyping = async (live: LiveSession, phase: 'tick' | 'stop', epoch?: number): Promise<void> => {
+  const fireTyping = async (
+    live: LiveSession,
+    phase: 'tick' | 'stop',
+    epoch?: number,
+    typingThreadOverride?: string,
+  ): Promise<void> => {
     // Drop a stale 'tick' that a since-cancelled interval still dispatched:
     // once the heartbeat stopped (or a new one started) the captured epoch no
     // longer matches, and forwarding it would re-set the indicator after the
-    // stop clear. 'stop' is never epoch-gated — it must always clear.
+    // stop clear. 'stop' is never epoch-gated — it must always clear. Marking
+    // dirty happens after this gate so a dropped tick is never recorded.
     if (phase === 'tick' && epoch !== undefined && epoch !== live.typingEpoch) return
     const callbacks = typingCallbacks.get(live.key.adapter)
     if (!callbacks || callbacks.size === 0) return
+    // A 'stop' clears an explicit anchor (fireTypingStop's per-dirty-thread
+    // clear); a 'tick' always targets the live turn anchor.
+    const typingThread = typingThreadOverride ?? live.currentTurnTypingThread
+    if (phase === 'tick' && typingThread !== null) live.dirtyTypingThreads.add(typingThread)
     // Snapshot before iterating: a callback could unregister mid-call.
     const snapshot = Array.from(callbacks)
     const target = {
@@ -2319,7 +2339,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       workspace: live.key.workspace,
       chat: live.key.chat,
       thread: live.key.thread,
-      ...(live.currentTurnTypingThread !== null ? { typingThread: live.currentTurnTypingThread } : {}),
+      ...(typingThread !== null ? { typingThread } : {}),
       phase,
     }
     await Promise.all(
@@ -2329,6 +2349,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }),
       ),
     )
+    if (phase === 'stop' && typingThread !== null) live.dirtyTypingThreads.delete(typingThread)
+  }
+
+  // A 'stop' must clear EVERY flat-DM typingThread a tick set a status on this
+  // session — not just the current anchor — or a migrated-away anchor strands
+  // its "is typing..." (see `dirtyTypingThreads`). Clears run concurrently; each
+  // dirty thread is dispatched once and removed by fireTyping's stop path.
+  const fireTypingStop = async (live: LiveSession): Promise<void> => {
+    const dirty = new Set(live.dirtyTypingThreads)
+    if (live.currentTurnTypingThread !== null) dirty.add(live.currentTurnTypingThread)
+    if (dirty.size === 0) {
+      await fireTyping(live, 'stop')
+      return
+    }
+    await Promise.all(Array.from(dirty, (typingThread) => fireTyping(live, 'stop', undefined, typingThread)))
   }
 
   const bumpTypingActivity = (live: LiveSession): void => {
@@ -2517,7 +2552,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // clear platform-side state (e.g. Slack's 2-min server timeout) on
     // teardown. The FIFO inside the slack adapter ensures this clear lands
     // AFTER any in-flight 'tick' from the heartbeat that just stopped.
-    const stopped = fireTyping(live, 'stop').finally(() => {
+    const stopped = fireTypingStop(live).finally(() => {
       if (live.typingStopPromise === stopped) live.typingStopPromise = null
     })
     live.typingStopPromise = stopped
