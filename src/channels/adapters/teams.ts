@@ -23,6 +23,7 @@ import {
   type InboundDropReason,
   type TeamsInboundEvent,
 } from './teams-classify'
+import { createTeamsEditMessageCallback } from './teams-edit'
 import { ContainerTeamsClient } from './teams-id-token'
 import { decodeTeamsConversationKey } from './teams-key'
 
@@ -197,6 +198,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
 
   const outboundCallback = createOutboundCallback({ client, logger, reserveEcho })
   const historyCallback = createTeamsHistoryCallback({ client, logger, selfIdRef: () => self?.id ?? null })
+  const editMessageCallback = createTeamsEditMessageCallback({ client })
 
   const refreshChats = async (): Promise<void> => {
     const chats = await client.listChats()
@@ -309,6 +311,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       options.router.registerOutbound('teams', outboundCallback)
       options.router.registerSelfIdentity('teams', selfIdentityResolver)
       options.router.registerHistory('teams', historyCallback)
+      options.router.registerEditMessage('teams', editMessageCallback)
 
       listener = createListener(client)
       const activeListener = listener
@@ -380,6 +383,7 @@ export function createTeamsAdapter(options: TeamsAdapterOptions): TeamsAdapter {
       options.router.unregisterOutbound('teams', outboundCallback)
       options.router.unregisterSelfIdentity('teams', selfIdentityResolver)
       options.router.unregisterHistory('teams', historyCallback)
+      options.router.unregisterEditMessage('teams', editMessageCallback)
       listener?.stop()
       listener = null
       if (inflightInbounds > 0) {
