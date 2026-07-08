@@ -1,11 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
+import type { PermissionService } from '@/permissions'
+import { resolveHiddenPaths } from '@/sandbox'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 
@@ -20,24 +23,37 @@ export type CreateChannelFetchAttachmentToolOptions = {
   router: ChannelRouter
   origin: ChannelFetchAttachmentOrigin
   inboxDir?: string
+  // Resolved at execute time (role is a property of the live origin, not of
+  // construction), and wins over inboxDir/DEFAULT_INBOX_DIR. Lets the save
+  // location follow the caller's role so a role hidden from workspace/ never
+  // gets a file it can write but not read back (privateSurfaceRead would block
+  // its follow-up look_at/read). See buildChannelTools for the decision.
+  resolveBaseDir?: () => string
   logger?: ChannelToolLogger
 }
 
+// workspace/ is private-surface: readable only by roles with fs.see.private.
 export const DEFAULT_INBOX_DIR = '/agent/workspace/inbox'
+// public/ is the guest-visible counterpart, so a redirected file stays readable
+// back through look_at/read by the same role that fetched it.
+export const PUBLIC_INBOX_DIR = '/agent/public/inbox'
 
 export function createChannelFetchAttachmentTool({
   router,
   origin,
   inboxDir,
+  resolveBaseDir,
   logger = consoleChannelLogger,
 }: CreateChannelFetchAttachmentToolOptions) {
-  const baseDir = inboxDir ?? DEFAULT_INBOX_DIR
+  const fallbackBaseDir = inboxDir ?? DEFAULT_INBOX_DIR
   const adapter = origin.adapter
   return defineTool({
     name: 'channel_fetch_attachment',
     label: 'Channel Fetch Attachment',
     description:
-      'Download a file attached to a channel message and save it to disk. Inbound channel ' +
+      'Download a file attached to a channel message and save it to disk. Use this only when you need the ' +
+      'file ON DISK (to edit it, re-upload it, or run a tool over it); to simply VIEW an image, use ' +
+      '`look_at_channel_attachment` instead — it returns a description without a disk write. Inbound channel ' +
       'messages with attachments show `[<Platform> attachment #N: <kind> <metadata>]` in the text. Pass `N` as ' +
       '`attachment_id`; do not invent ids that are not present in the message. The router resolves the private ' +
       'platform ref itself. Attachments on the CURRENT inbound message resolve directly; for one from an EARLIER ' +
@@ -102,6 +118,7 @@ export function createChannelFetchAttachmentTool({
 
       const safeFilename = sanitizeFilename(result.filename)
       const refSlug = sanitizeRefSlug(ref)
+      const baseDir = resolveBaseDir?.() ?? fallbackBaseDir
       const targetDir = join(baseDir, adapter, refSlug)
       const targetPath = join(targetDir, safeFilename)
       try {
@@ -126,6 +143,22 @@ export function createChannelFetchAttachmentTool({
       return { content: [{ type: 'text' as const, text }], details }
     },
   })
+}
+
+// Picks the inbox root for the caller's live role. Reuses the guard's own
+// deny-list resolution (resolveHiddenPaths) as the single source of truth, so
+// the save location can never drift out of sync with what privateSurfaceRead
+// will let the same role read back: if workspace/inbox lands under a hidden dir
+// the file goes to the guest-visible public/ inbox instead.
+export function resolveInboxBaseDir(
+  permissions: PermissionService,
+  origin: SessionOrigin | undefined,
+  agentDir: string,
+): string {
+  const privateInbox = join(agentDir, 'workspace', 'inbox')
+  const { dirs } = resolveHiddenPaths(permissions, origin, agentDir)
+  const hidden = dirs.some((dir) => privateInbox === dir || privateInbox.startsWith(`${dir}${sep}`))
+  return hidden ? join(agentDir, 'public', 'inbox') : privateInbox
 }
 
 function errorResult(message: string) {
