@@ -2566,6 +2566,178 @@ describe('ChannelRouter silent-ack :eyes: on deliberate silence', () => {
   })
 })
 
+describe('ChannelRouter retires the persistent silent-ack :eyes: on a later reply', () => {
+  const REF_A: ReactionRef = { adapter: 'discord-bot', value: 'msg-a' }
+  const REF_B: ReactionRef = { adapter: 'discord-bot', value: 'msg-b' }
+  const SILENT_ACK_INSTANCE: ReactionRef = { adapter: 'discord-bot', value: 'silent-ack-instance' }
+
+  // discord-bot is typing-capable, so route() adds no eager engage :eyes: — every
+  // add is the silent-ack, and the add resolves to a removable instance ref so a
+  // later reply can retire it. Removals are captured to assert cleanup.
+  const setup = (
+    dir: string,
+  ): {
+    router: ReturnType<typeof makeRouter>['router']
+    sessions: ReturnType<typeof makeRouter>['sessions']
+    added: ReactionRequest[]
+    removed: ReactionRef[]
+  } => {
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const added: ReactionRequest[] = []
+    const removed: ReactionRef[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      added.push(req)
+      return { ok: true, reactionRef: SILENT_ACK_INSTANCE }
+    })
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req.reactionRef)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    return { router, sessions, added, removed }
+  }
+
+  test('a silent turn plants an :eyes: that a later reply removes', async () => {
+    const dir = await tempDir()
+    const { router, sessions, added, removed } = setup(dir)
+
+    // given a first turn that deliberately stays silent
+    await router.route(inbound({ reactionRef: REF_A }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.some((r) => r.emoji === 'eyes'))
+
+    // when a later turn in the same conversation replies for real
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'here you go' })
+      sessions[0]!.setAssistantText('here you go')
+    }
+    await router.route(inbound({ externalMessageId: 'm2', reactionRef: REF_B }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the stale silent-ack :eyes: is retired
+    await waitFor(() => removed.length > 0)
+    expect(removed).toContainEqual(SILENT_ACK_INSTANCE)
+  })
+
+  test('a reply retires ALL outstanding silent-ack :eyes: in the conversation', async () => {
+    const dir = await tempDir()
+    const { router, sessions, added, removed } = setup(dir)
+
+    // given two separate silent turns, each planting its own :eyes:
+    await router.route(inbound({ reactionRef: REF_A }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.filter((r) => r.emoji === 'eyes').length === 1)
+
+    await router.route(inbound({ externalMessageId: 'm2', reactionRef: REF_B }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.filter((r) => r.emoji === 'eyes').length === 2)
+
+    // when a third turn finally replies
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'done' })
+      sessions[0]!.setAssistantText('done')
+    }
+    await router.route(inbound({ externalMessageId: 'm3', reactionRef: REF_A }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then both silent-ack markers are removed, not just the latest
+    await waitFor(() => removed.length === 2)
+    expect(removed).toEqual([SILENT_ACK_INSTANCE, SILENT_ACK_INSTANCE])
+  })
+
+  test('a later silent turn does NOT remove the earlier silent-ack :eyes:', async () => {
+    const dir = await tempDir()
+    const { router, sessions, added, removed } = setup(dir)
+
+    await router.route(inbound({ reactionRef: REF_A }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.filter((r) => r.emoji === 'eyes').length === 1)
+
+    // when a second turn is ALSO silent
+    await router.route(inbound({ externalMessageId: 'm2', reactionRef: REF_B }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.filter((r) => r.emoji === 'eyes').length === 2)
+
+    // then nothing is removed — silence never contradicts a prior "seen" ack
+    expect(removed).toHaveLength(0)
+  })
+
+  test('a Korean silent turn then a reply retires the :eyes: (language-agnostic)', async () => {
+    const dir = await tempDir()
+    const { router, sessions, added, removed } = setup(dir)
+
+    // given a Korean inbound the agent silently acks
+    await router.route(inbound({ text: '확인만 해주세요', reactionRef: REF_A }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => added.some((r) => r.emoji === 'eyes'))
+
+    // when a later Korean turn replies
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '네, 처리했어요' })
+      sessions[0]!.setAssistantText('네, 처리했어요')
+    }
+    await router.route(inbound({ externalMessageId: 'm2', text: '고마워요', reactionRef: REF_B }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the marker is retired regardless of message language
+    await waitFor(() => removed.length > 0)
+    expect(removed).toContainEqual(SILENT_ACK_INSTANCE)
+  })
+
+  test('a reply removes the :eyes: even when the silent-ack add resolves AFTER cleanup starts', async () => {
+    // Regression for the race: reactOnSilentAck stores the add PROMISE (not its
+    // resolved ref), so a reply that runs cleanup before a slow add resolves
+    // still awaits it and removes the mark. Here the add is held open until the
+    // reply turn has already drained, forcing cleanup to see an unresolved entry.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const removed: ReactionRef[] = []
+    let releaseSilentAckAdd: (() => void) | null = null
+    const silentAckAddGate = new Promise<void>((resolve) => {
+      releaseSilentAckAdd = resolve
+    })
+    let addCount = 0
+    router.registerReaction('discord-bot', async () => {
+      addCount++
+      await silentAckAddGate
+      return { ok: true, reactionRef: SILENT_ACK_INSTANCE }
+    })
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req.reactionRef)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // given a silent turn whose :eyes: add is still in flight (gated)
+    await router.route(inbound({ reactionRef: REF_A }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => addCount === 1)
+
+    // when a later turn replies while the add is STILL unresolved
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'done' })
+      sessions[0]!.setAssistantText('done')
+    }
+    await router.route(inbound({ externalMessageId: 'm2', reactionRef: REF_B }))
+    await router.__testing!.flushDebounce(KEY)
+    // let the gated add resolve only now — after cleanup has already begun
+    releaseSilentAckAdd!()
+
+    // then cleanup still awaits the add and retires the mark (no strand)
+    await waitFor(() => removed.length > 0)
+    expect(removed).toContainEqual(SILENT_ACK_INSTANCE)
+  })
+})
+
 describe('ChannelRouter model react only when replying', () => {
   const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
 

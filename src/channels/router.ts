@@ -801,6 +801,24 @@ type LiveSession = {
   // one toggle would otherwise have the engage-drop remove the only visible
   // :eyes:. See `reactOnSilentAck`.
   silentAckTurn: { turnSeq: number; reason: SilentAckReason } | null
+  // One silent-ack-:eyes:-add promise per PERSISTENT ack `reactOnSilentAck` has
+  // planted on a trigger message, each resolving to its removable ref (or null).
+  // Mirrors `currentTurnEngageReactions`: the PROMISE is pushed synchronously at
+  // arm time, so a later replied-turn cleanup that snapshots this array always
+  // sees every in-flight add and awaits it before removing — storing only the
+  // resolved ref raced (cleanup could snapshot an empty array, then a slow add
+  // append its ref afterward, stranding the :eyes:). Cross-turn state on purpose:
+  // a silent turn means "seen, not replying FOR NOW", and once the same sticky
+  // conversation gets a genuine reply those marks read as stale/contradictory —
+  // so they are retired on the next replied turn (see dropSilentAckReactions).
+  // Conversation-scoped, NOT per-trigger-message: coalescing means the silent
+  // turn's trigger (message N) and the eventual reply's trigger (message N+1)
+  // routinely differ, so exact-message scoping would strand the mark. NOT reset
+  // in drain's outer per-turn finally. On teardown the entries are dropped
+  // WITHOUT removing the reactions: a session that ends without ever replying
+  // legitimately keeps its "seen, not replying" ack, unlike the transient
+  // engage :eyes: which teardown must strip.
+  activeSilentAckReactions: Array<Promise<ReactionRef | null>>
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -2028,6 +2046,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnEngageReactions: [],
         pendingTurnReactions: [],
         silentAckTurn: null,
+        activeSilentAckReactions: [],
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -2910,8 +2929,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             sentReplyThisTurn &&
             live.emptyTurnFallbackTurn !== live.turnSeq &&
             assistantLeafStopReason(live.session) !== 'error'
-          if (usableReplyThisTurn) flushPendingReactions(live)
-          else live.pendingTurnReactions = []
+          if (usableReplyThisTurn) {
+            flushPendingReactions(live)
+            void dropSilentAckReactions(live)
+          } else live.pendingTurnReactions = []
           // Either retry budget keeps the turn in flight, so a deferred provider
           // error must wait for the reminder-only iteration that actually ends it.
           const retryQueuedThisTurn =
@@ -5203,7 +5224,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.silentAckTurn = null
     const reactionRef = live.currentTurnReactionRef
     if (reactionRef === null) return
-    void react({
+    const addResult = react({
       adapter: live.key.adapter,
       workspace: live.key.workspace,
       chat: live.key.chat,
@@ -5211,6 +5232,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       reactionRef,
       emoji: ENGAGE_REACTION_EMOJI,
     })
+    void addResult
       .then((result) => {
         if (!result.ok && result.code !== 'unsupported') {
           logger.info(
@@ -5223,6 +5245,49 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           `[channels] silent-ack-react threw reason=${reason} adapter=${live.key.adapter} chat=${live.key.chat}: ${describe(err)}`,
         )
       })
+    // Register the add promise (not its resolved ref) SYNCHRONOUSLY, so a later
+    // replied-turn cleanup can never race ahead of a still-in-flight add.
+    live.activeSilentAckReactions.push(addResult.then((r) => (r.ok ? (r.reactionRef ?? null) : null)).catch(() => null))
+  }
+
+  // Retire every persistent silent-ack :eyes: outstanding in this live session
+  // once the agent posts a genuine reply — the "seen, not replying" mark is now
+  // contradicted. Snapshot-and-clear the promise array BEFORE awaiting, so a
+  // concurrent later silent turn appending a fresh add is never swept by this
+  // in-flight cleanup. Each entry is AWAITED to its resolved ref before removal,
+  // so an add still in flight when the reply lands is still retired. Failures are
+  // logged, never retried: stale emoji cleanup must never block routing.
+  const dropSilentAckReactions = (live: LiveSession): Promise<void> => {
+    const addPromises = live.activeSilentAckReactions
+    if (addPromises.length === 0) return Promise.resolve()
+    live.activeSilentAckReactions = []
+    return Promise.all(
+      addPromises.map((addPromise) =>
+        addPromise
+          .then((reactionRef) => {
+            if (reactionRef === null) return undefined
+            return removeReaction({
+              adapter: live.key.adapter,
+              workspace: live.key.workspace,
+              chat: live.key.chat,
+              thread: live.key.thread,
+              reactionRef,
+            })
+          })
+          .then((result) => {
+            if (result && !result.ok && result.code !== 'unsupported' && result.code !== 'not-found') {
+              logger.info(
+                `[channels] silent-ack-unreact failed adapter=${live.key.adapter} chat=${live.key.chat}: ${result.error}`,
+              )
+            }
+          })
+          .catch((err) => {
+            logger.info(
+              `[channels] silent-ack-unreact threw adapter=${live.key.adapter} chat=${live.key.chat}: ${describe(err)}`,
+            )
+          }),
+      ),
+    ).then(() => undefined)
   }
 
   return {
