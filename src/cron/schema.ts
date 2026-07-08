@@ -119,6 +119,81 @@ export function parseCronJson(raw: string, options: ParseCronJsonOptions = {}): 
   })
 }
 
+// Authoring-delta validation for a cron.json edit. Strict `edit` mode fails the
+// whole file on any enabled job with a past `at`/`until`, which lets a single
+// stale pre-existing job (an expired `until` from weeks ago) brick EVERY edit —
+// including the edit that would remove it, or an edit to a completely unrelated
+// job. That is the trap: expired history holds the file hostage.
+//
+// This validator parses the proposed content in tolerant `load` mode (so it
+// still catches structural errors and duplicate ids), then applies the strict
+// `edit` timing check ONLY to jobs whose timing is newly-authored — a job that
+// is new, or whose timing fields changed versus the on-disk baseline. A job
+// carried over unchanged keeps its stale boundary tolerated, so removing it or
+// editing a sibling is never blocked. Adding a new past job, or re-timing an
+// existing one into the past, is still rejected exactly as before.
+//
+// `existingRaw` is the current on-disk cron.json (undefined on first-init). If
+// it is missing or unparseable the baseline is empty, so every proposed job is
+// treated as new and strict-checked — the safe direction (fail closed).
+export function validateCronEdit(
+  proposedRaw: string,
+  existingRaw: string | undefined,
+  options: ParseCronOptions = {},
+): ParseCronResult {
+  const now = options.now ?? Date.now()
+  const proposed = parseCronJson(proposedRaw, { ...options, mode: 'load' })
+  if (!proposed.ok) return proposed
+
+  const baselineTiming = existingRaw !== undefined ? timingSignaturesByJobId(existingRaw) : new Map<string, string>()
+
+  for (const job of proposed.file.jobs) {
+    const prior = baselineTiming.get(job.id)
+    const timingUnchanged = prior !== undefined && prior === timingSignature(job)
+    if (timingUnchanged) continue
+    const timingError = validateTiming(job, now, 'edit')
+    if (timingError !== null) return { ok: false, reason: `job ${job.id}: ${timingError}` }
+  }
+
+  return proposed
+}
+
+// The timing fields whose change re-arms the strict past-boundary check. A job
+// is exempt from the stale-boundary rejection only when ALL of these match the
+// baseline; touching any of them (including flipping `enabled` back on) counts
+// as re-authoring the schedule and is strict-checked afresh.
+function timingSignature(job: {
+  schedule?: string | undefined
+  at?: string | undefined
+  until?: string | undefined
+  count?: number | undefined
+  timezone?: string | undefined
+  enabled: boolean
+}): string {
+  return JSON.stringify([
+    job.schedule ?? null,
+    job.at ?? null,
+    job.until ?? null,
+    job.count ?? null,
+    job.timezone ?? null,
+    job.enabled,
+  ])
+}
+
+function timingSignaturesByJobId(raw: string): Map<string, string> {
+  const signatures = new Map<string, string>()
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch {
+    return signatures
+  }
+  const parsed = cronFileSchema.safeParse(json)
+  if (!parsed.success) return signatures
+  for (const job of parsed.data.jobs) signatures.set(job.id, timingSignature(job))
+  return signatures
+}
+
 export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): ParseCronResult {
   const parsed = cronFileSchema.safeParse(raw)
   if (!parsed.success) {

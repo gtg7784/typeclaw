@@ -24,6 +24,7 @@ export {
   type ParseCronResult,
   type ParsedCronJob,
   type PromptJob,
+  validateCronEdit,
 } from './schema'
 
 const CRON_FILE = 'cron.json'

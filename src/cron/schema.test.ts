@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import type { Subagent, SubagentRegistry } from '@/agent/subagents'
 
-import { cronFileSchema, parseCronFile } from './schema'
+import { cronFileSchema, parseCronFile, validateCronEdit } from './schema'
 
 describe('cronFileSchema', () => {
   test('accepts an empty jobs list', () => {
@@ -534,5 +534,70 @@ describe('parseCronFile with subagents registry', () => {
       ],
     })
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('validateCronEdit (authoring-delta timing)', () => {
+  const NOW = new Date('2026-06-08T00:00:00Z').getTime()
+  const PAST = '2020-01-01T00:00:00Z'
+
+  const jobJson = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    id: 'j',
+    kind: 'prompt',
+    prompt: 'x',
+    scheduledByRole: 'owner',
+    ...extra,
+  })
+  const file = (...jobs: Record<string, unknown>[]): string => JSON.stringify({ jobs })
+
+  test('tolerates a stale until carried over unchanged from the baseline', () => {
+    const stale = jobJson({ id: 'expired', schedule: '0 9 * * *', until: PAST })
+    const existing = file(stale)
+    const result = validateCronEdit(existing, existing, { now: NOW })
+    expect(result.ok).toBe(true)
+  })
+
+  test('allows removing a stale job (proposed omits it)', () => {
+    const stale = jobJson({ id: 'expired', schedule: '0 9 * * *', until: PAST })
+    const fresh = jobJson({ id: 'fresh', schedule: '0 10 * * *' })
+    const result = validateCronEdit(file(fresh), file(stale, fresh), { now: NOW })
+    expect(result.ok).toBe(true)
+  })
+
+  test('blocks a newly-added job with a past until', () => {
+    const fresh = jobJson({ id: 'fresh', schedule: '0 10 * * *' })
+    const newStale = jobJson({ id: 'new-expired', schedule: '0 9 * * *', until: PAST })
+    const result = validateCronEdit(file(fresh, newStale), file(fresh), { now: NOW })
+    if (result.ok) throw new Error('expected block')
+    expect(result.reason).toContain('past')
+  })
+
+  test('blocks re-timing an existing job into the past', () => {
+    const fresh = jobJson({ id: 'j', schedule: '0 10 * * *' })
+    const reTimed = jobJson({ id: 'j', schedule: '0 10 * * *', until: PAST })
+    const result = validateCronEdit(file(reTimed), file(fresh), { now: NOW })
+    if (result.ok) throw new Error('expected block')
+    expect(result.reason).toContain('past')
+  })
+
+  test('treats every job as new when no baseline is provided (fail closed)', () => {
+    const stale = jobJson({ schedule: '0 9 * * *', until: PAST })
+    const result = validateCronEdit(file(stale), undefined, { now: NOW })
+    if (result.ok) throw new Error('expected block')
+    expect(result.reason).toContain('past')
+  })
+
+  test('treats every job as new when the baseline is unparseable (fail closed)', () => {
+    const stale = jobJson({ schedule: '0 9 * * *', until: PAST })
+    const result = validateCronEdit(file(stale), 'not json', { now: NOW })
+    if (result.ok) throw new Error('expected block')
+    expect(result.reason).toContain('past')
+  })
+
+  test('still reports structural errors in the proposed content', () => {
+    const bad = jobJson({ schedule: 'bogus' })
+    const result = validateCronEdit(file(bad), undefined, { now: NOW })
+    if (result.ok) throw new Error('expected block')
+    expect(result.reason).toContain('bogus')
   })
 })
