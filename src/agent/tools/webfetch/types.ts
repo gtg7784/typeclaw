@@ -1,5 +1,12 @@
 export type CompactionStrategy = 'readability' | 'jq' | 'selector' | 'grep' | 'snapshot' | 'raw'
 
+export type AntibotWarmupDetails = {
+  triggered: boolean
+  initialStatus?: number
+  initialSetCookieNames?: string[]
+  replayStatus?: number
+}
+
 export type WebFetchDetails = {
   url: string
   finalUrl: string
@@ -11,6 +18,7 @@ export type WebFetchDetails = {
   bytesOut: number
   truncated: boolean
   durationMs: number
+  antibotWarmup?: AntibotWarmupDetails
   error?: boolean
   message?: string
 }

@@ -21,14 +21,29 @@
 // translates non-2xx into a tool-level error message that's useful to the
 // model.
 
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import {
   CurlImpersonateError,
   curlImpersonate,
+  type CurlImpersonateResponse,
   isCurlExitFilesizeExceeded,
   isCurlExitTimeout,
   isCurlImpersonateAvailable,
 } from '../curl-impersonate'
 import { MAX_RESPONSE_BYTES } from './types'
+
+export type AntibotWarmup = 'auto' | 'off'
+
+export type AntibotWarmupInfo = {
+  attempted: boolean
+  triggered: boolean
+  initialStatus?: number
+  initialSetCookieNames?: string[]
+  replayStatus?: number
+}
 
 export type FetchResult = {
   body: string
@@ -36,6 +51,19 @@ export type FetchResult = {
   finalUrl: string
   httpStatus: number
   bytesIn: number
+  antibotWarmup?: AntibotWarmupInfo
+}
+
+// Cookie names Akamai Bot Manager sets in the Set-Cookie of its 403 challenge.
+// A 403 carrying one of these is a state-bootstrap handshake (absorb cookies,
+// replay once), NOT an authorization failure — that distinction is what makes
+// the auto-retry safe. Scoped to Akamai on purpose: Cloudflare/DataDome use
+// different challenge semantics (JS/redirects/CAPTCHA) that a blind replay
+// would not satisfy.
+const AKAMAI_BOTMANAGER_COOKIE = /^(_abck|bm_sz|bm_s|bm_ss|bm_so|ak_bmsc)$/i
+
+function isAntibotWarmup403(response: CurlImpersonateResponse): boolean {
+  return response.httpStatus === 403 && response.setCookieNames.some((name) => AKAMAI_BOTMANAGER_COOKIE.test(name))
 }
 
 export class WebFetchError extends Error {
@@ -76,10 +104,11 @@ export async function fetchWithLimits(
   url: string,
   timeoutSeconds: number,
   parentSignal?: AbortSignal,
+  antibotWarmup: AntibotWarmup = 'auto',
 ): Promise<FetchResult> {
   const useImpersonate = !forceFallbackForTest && (await isCurlImpersonateAvailable())
   if (useImpersonate) {
-    return fetchWithCurlImpersonate(url, timeoutSeconds, parentSignal)
+    return fetchWithCurlImpersonate(url, timeoutSeconds, antibotWarmup, parentSignal)
   }
   return fetchWithBunFetch(url, timeoutSeconds, parentSignal)
 }
@@ -87,15 +116,66 @@ export async function fetchWithLimits(
 async function fetchWithCurlImpersonate(
   url: string,
   timeoutSeconds: number,
+  antibotWarmup: AntibotWarmup,
   parentSignal?: AbortSignal,
 ): Promise<FetchResult> {
-  let response
+  if (antibotWarmup === 'off') {
+    const response = await runCurl(url, timeoutSeconds, undefined, parentSignal)
+    return toFetchResult(url, response)
+  }
+
+  // Warmup needs a jar shared across both requests: request 1 (`-c`) captures
+  // the bot-manager cookies the 403 sets; request 2 (`-b`) replays them.
+  const jarDir = await mkdtemp(join(tmpdir(), 'typeclaw-webfetch-jar-'))
+  const jarPath = join(jarDir, 'cookies.txt')
+  const startedAt = Date.now()
   try {
-    response = await curlImpersonate({
+    const first = await runCurl(url, timeoutSeconds, jarPath, parentSignal)
+    if (!isAntibotWarmup403(first)) {
+      return toFetchResult(url, first, { attempted: true, triggered: false })
+    }
+
+    // `timeoutSeconds` is the budget for the WHOLE web_fetch call, not per
+    // attempt: charge the replay only the time the first request left, so a
+    // warmed fetch can't run for ~2x the requested timeout. If the first
+    // request already spent the budget, surface its 403 instead of forcing a
+    // zero-time replay that would just time out.
+    const remaining = timeoutSeconds - (Date.now() - startedAt) / 1000
+    if (remaining < 1) {
+      return toFetchResult(url, first, {
+        attempted: true,
+        triggered: false,
+        initialStatus: first.httpStatus,
+        initialSetCookieNames: first.setCookieNames,
+      })
+    }
+
+    const replay = await runCurl(url, Math.floor(remaining), jarPath, parentSignal)
+    return toFetchResult(url, replay, {
+      attempted: true,
+      triggered: true,
+      initialStatus: first.httpStatus,
+      initialSetCookieNames: first.setCookieNames,
+      replayStatus: replay.httpStatus,
+    })
+  } finally {
+    await rm(jarDir, { recursive: true, force: true })
+  }
+}
+
+async function runCurl(
+  url: string,
+  timeoutSeconds: number,
+  cookieJarPath: string | undefined,
+  parentSignal?: AbortSignal,
+): Promise<CurlImpersonateResponse> {
+  try {
+    return await curlImpersonate({
       url,
       method: 'GET',
       timeoutSeconds,
       maxBytes: MAX_RESPONSE_BYTES,
+      cookieJarPath,
       signal: parentSignal,
     })
   } catch (error) {
@@ -114,7 +194,9 @@ async function fetchWithCurlImpersonate(
     const message = error instanceof Error ? error.message : String(error)
     throw new WebFetchError(`Fetch failed: ${message}`)
   }
+}
 
+function toFetchResult(url: string, response: CurlImpersonateResponse, antibotWarmup?: AntibotWarmupInfo): FetchResult {
   if (response.httpStatus < 200 || response.httpStatus >= 300) {
     throw new WebFetchError(`Fetch failed: HTTP ${response.httpStatus}`)
   }
@@ -132,6 +214,7 @@ async function fetchWithCurlImpersonate(
     finalUrl: response.finalUrl || url,
     httpStatus: response.httpStatus,
     bytesIn: bodyByteLength,
+    ...(antibotWarmup ? { antibotWarmup } : {}),
   }
 }
 

@@ -27,8 +27,11 @@ export const webFetchTool = defineTool({
     'If `spawn_subagent` is available to you, PREFER delegating to the `scout` subagent by default: spawn it whenever you expect more than one fetch, an "across multiple sources" task, or any search-then-fetch loop. Scout runs the noisy fetching in its own context window and returns a distilled, citation-backed answer, keeping bulky page bodies out of yours. Only call this tool directly for a single known URL whose content you will cite immediately — or whenever you cannot spawn subagents (e.g. you are yourself a subagent), in which case fetch here. ' +
     'Outbound requests impersonate Chrome 136 at the TLS, HTTP/2, and header layers ' +
     '(via curl-impersonate), which helps with TLS/header fingerprint gates on sites behind Cloudflare/Akamai. ' +
-    'It does NOT solve JavaScript challenges, behavioural fingerprinting (mouse/scroll/timing), interactive CAPTCHAs, ' +
-    'or IP-reputation blocks — a 403 from those layers is expected and unrecoverable from this tool. ' +
+    'For Akamai Bot Manager specifically, it auto-warms the session: a first-request 403 that sets bot-manager ' +
+    'cookies (_abck/bm_sz/…) is absorbed and replayed once, which returns 200 on many Akamai-fronted sites ' +
+    '(disable with `antibotWarmup: "off"`). It still does NOT solve JavaScript challenges, behavioural ' +
+    'fingerprinting (mouse/scroll/timing), interactive CAPTCHAs, or IP-reputation blocks — a 403 from those ' +
+    'layers is expected and unrecoverable from this tool. ' +
     'Strategy guide:\n' +
     '- "readability": extract article content as markdown (blogs, docs, news). Default for HTML.\n' +
     '- "jq": query JSON APIs (npm registry, GitHub API). Pass `query` (e.g. ".items[].name").\n' +
@@ -62,6 +65,15 @@ export const webFetchTool = defineTool({
         maximum: MAX_TIMEOUT_SECONDS,
       }),
     ),
+    antibotWarmup: Type.Optional(
+      Type.Union([Type.Literal('auto'), Type.Literal('off')], {
+        description:
+          'Akamai Bot Manager warmup. "auto" (default): if the first request is a 403 that sets bot-manager cookies ' +
+          '(_abck/bm_sz/…), absorb them and replay once — many Akamai-fronted sites (e.g. Coupang) only serve content ' +
+          'on the second, cookie-bearing request. "off": disable the replay; a bot-manager 403 then surfaces as the ' +
+          'normal HTTP 403 error (use to confirm the block without the warmup).',
+      }),
+    ),
   }),
 
   async execute(_toolCallId, params, signal) {
@@ -80,7 +92,7 @@ export const webFetchTool = defineTool({
 
     let response
     try {
-      response = await fetchWithLimits(normalizedUrl, timeout, signal)
+      response = await fetchWithLimits(normalizedUrl, timeout, signal, params.antibotWarmup ?? 'auto')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return errorResult(normalizedUrl, message, { startedAt, finalUrl: normalizedUrl })
@@ -141,6 +153,16 @@ export const webFetchTool = defineTool({
       bytesOut: byteLength(capped.text),
       truncated: capped.truncated,
       durationMs: Date.now() - startedAt,
+      ...(response.antibotWarmup?.triggered
+        ? {
+            antibotWarmup: {
+              triggered: true,
+              initialStatus: response.antibotWarmup.initialStatus,
+              initialSetCookieNames: response.antibotWarmup.initialSetCookieNames,
+              replayStatus: response.antibotWarmup.replayStatus,
+            },
+          }
+        : {}),
     }
 
     return {
@@ -153,6 +175,7 @@ export const webFetchTool = defineTool({
 type WebFetchParams = {
   url: string
   strategy?: CompactionStrategy
+  antibotWarmup?: 'auto' | 'off'
   query?: string
   selector?: string
   pattern?: string

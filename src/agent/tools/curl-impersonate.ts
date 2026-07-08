@@ -47,6 +47,11 @@ export type CurlImpersonateRequest = {
   // bail early instead of streaming gigabytes.
   maxBytes?: number
   timeoutSeconds?: number
+  // Read/write cookies to this jar (curl `-b`+`-c`, same path). Enables a
+  // two-request sequence sharing one jar. Cookie plumbing does NOT alter the
+  // TLS/HTTP-2/header-order impersonation, so it is exempt from the no-`-H`
+  // doctrine above.
+  cookieJarPath?: string
   signal?: AbortSignal
 }
 
@@ -56,6 +61,10 @@ export type CurlImpersonateResponse = {
   httpStatus: number
   contentType: string
   bytesIn: number
+  // Cookie names the server set via Set-Cookie on this response (from curl
+  // %{header_json}); lets the policy layer detect a bot-manager 403 without
+  // parsing the jar file format.
+  setCookieNames: string[]
 }
 
 // Specific curl exit codes we map to typed errors. The full list is in
@@ -113,7 +122,10 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
   // response and replay it; last-match alone fails if the attacker can
   // append text after curl's write-out (they can't, but defense in depth).
   const sentinel = generateSentinel()
-  const writeOutTemplate = `${sentinel}%{http_code}\n%{url_effective}\n%{content_type}\n%{size_download}\n`
+  // %{header_json} is the LAST field so the existing status/url/type/size
+  // positions stay byte-compatible with the old parser. It is a single-line
+  // JSON object of response headers; we read only Set-Cookie names from it.
+  const writeOutTemplate = `${sentinel}%{http_code}\n%{url_effective}\n%{content_type}\n%{size_download}\n%{header_json}\n`
 
   const cmd: string[] = [
     curlBinary,
@@ -154,6 +166,10 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
 
   if (req.maxBytes !== undefined) {
     cmd.push('--max-filesize', String(req.maxBytes))
+  }
+
+  if (req.cookieJarPath !== undefined) {
+    cmd.push('-b', req.cookieJarPath, '-c', req.cookieJarPath)
   }
 
   if (req.formFields) {
@@ -248,6 +264,7 @@ function parseCurlOutput(buf: ArrayBuffer, sentinel: string, stderr: string): Cu
   const finalUrl = (meta[1] ?? '').trim()
   const contentType = (meta[2] ?? '').trim().toLowerCase()
   const declaredBytes = Number(meta[3]?.trim() ?? '0') || bodyBytes.byteLength
+  const setCookieNames = parseSetCookieNames(meta[4] ?? '')
 
   const body = new TextDecoder('utf-8', { fatal: false }).decode(bodyBytes)
 
@@ -257,7 +274,29 @@ function parseCurlOutput(buf: ArrayBuffer, sentinel: string, stderr: string): Cu
     httpStatus,
     contentType,
     bytesIn: declaredBytes,
+    setCookieNames,
   }
+}
+
+function parseSetCookieNames(headerJson: string): string[] {
+  const trimmed = headerJson.trim()
+  if (!trimmed) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return []
+  }
+  if (typeof parsed !== 'object' || parsed === null) return []
+  const setCookie = (parsed as Record<string, unknown>)['set-cookie']
+  const values = Array.isArray(setCookie) ? setCookie : setCookie === undefined ? [] : [setCookie]
+  const names: string[] = []
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const name = value.split('=', 1)[0]?.trim()
+    if (name) names.push(name)
+  }
+  return names
 }
 
 function lastIndexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
