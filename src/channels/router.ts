@@ -2705,6 +2705,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // ensureLive() installs a session BEFORE the engage/observe decision, so a
+  // bystander agent that only OBSERVED a thread still holds an exact-thread
+  // session with nothing running. Without this gate that agent aborts its idle
+  // session and posts "stopped" in a multi-agent channel. Mirrors exactly what
+  // stopCurrentChannelTurn cancels: in-flight drain, queued prompts, reminders.
+  const hasStoppableWork = (live: LiveSession): boolean =>
+    live.draining || live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0
+
   const maybePostDeferredProviderError = async (
     live: LiveSession,
     sentReplyThisTurn: boolean,
@@ -5130,6 +5138,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (resolved.kind === 'ambiguous') {
         return { kind: 'ambiguous', matchCount: resolved.count }
       }
+      // A resolved session that isn't actually running has nothing for /stop to
+      // cancel; report it as no-live-session so bystander agents stay silent.
+      if (lowered === 'stop' && !hasStoppableWork(resolved.session)) {
+        return { kind: 'no-live-session' }
+      }
       live = resolved.session
     } else if (commandInfo.wantsLiveSession) {
       // Best-effort: resolve a session if exactly one matches, but never fail
@@ -6097,10 +6110,19 @@ export type ResolveLiveSessionResult =
 // return 'ambiguous' so the caller can refuse to act rather than abort an
 // arbitrary session.
 //
-// Why the fallback: Slack slash commands carry channel_id but no thread_ts,
-// so a slash invocation from a thread-keyed live session would otherwise
-// report no-live-session. Discord doesn't hit this — Discord treats threads
-// as channels, so the exact-key path already resolves.
+// Why the fallback: Slack slash commands carry channel_id but no thread_ts
+// (`thread: null`), so a slash invocation from a thread-keyed live session
+// would otherwise report no-live-session. Discord doesn't hit this — Discord
+// treats threads as channels, so the exact-key path already resolves.
+//
+// Why the fallback is thread-null-ONLY: a `!stop` typed INSIDE a Slack thread
+// carries the real `thread_ts`, so it pinpoints one exact thread. Falling back
+// to "any session in this channel" for a thread-specific key would let the
+// command hit an UNRELATED session in a different thread (or a channel-level
+// observe-only session) — the multi-agent bug where a bystander bot that only
+// observed the thread aborts its own idle session and posts "stopped". A
+// non-null thread that misses the exact lookup therefore returns 'none', never
+// the cross-thread fallback.
 //
 // Why ambiguity-rejection: "first match wins" map-iteration semantics would
 // abort an arbitrary thread when multiple thread-keyed sessions coexist in
@@ -6113,6 +6135,8 @@ export function resolveLiveSessionForCommand(
 ): ResolveLiveSessionResult {
   const exact = liveSessions.get(channelKeyId(key))
   if (exact && !exact.destroyed) return { kind: 'found', session: exact }
+
+  if (key.thread !== null) return { kind: 'none' }
 
   const matches: LiveSession[] = []
   for (const candidate of liveSessions.values()) {
