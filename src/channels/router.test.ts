@@ -936,6 +936,153 @@ describe('ChannelRouter session lifecycle', () => {
     expect(sessions[0]!.disposed).toBe(1)
   })
 
+  // Regression for the reload-silence incident: a reload (roles/provider swap)
+  // ran tearDownAllLive() while the reload's own turn was mid-flight, aborting
+  // the in-flight prompt so the closing reply was never sent — the user saw
+  // silence. tearDownAllLive must defer teardown of a draining session until
+  // the turn drains, then recreate it.
+  test('tearDownAllLive() defers an in-flight session: no abort, reply lands, torn down after drain', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let releaseFirstPrompt: () => void = () => {}
+    const firstPromptHeld = new Promise<void>((resolve) => {
+      releaseFirstPrompt = resolve
+    })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstPromptHeld
+    }
+    // Fire drain without awaiting so the held onPrompt leaves the turn mid-flight
+    // (live.draining=true, blocked at session.prompt()).
+    const drainPromise = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    // A reload tears down all live sessions while this turn is in flight.
+    await router.tearDownAllLive()
+
+    // The in-flight session is NOT aborted or disposed yet — it stays live so
+    // its reply can land, and no duplicate is spawned.
+    expect(sessions[0]!.aborted).toBe(0)
+    expect(sessions[0]!.disposed).toBe(0)
+    expect(router.liveCount()).toBe(1)
+
+    // Once the held turn drains, the deferred teardown fires: the session is
+    // disposed and recreated on the next inbound. The abort() that runs here is
+    // benign — it lands AFTER the turn already finished (aborted stayed 0 for
+    // the whole in-flight window above, which is the property that matters).
+    releaseFirstPrompt()
+    await drainPromise
+    await waitFor(() => sessions[0]!.disposed === 1)
+    expect(router.liveCount()).toBe(0)
+
+    // A fresh inbound after the deferred teardown creates a new live session.
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(2)
+    expect(router.liveCount()).toBe(1)
+  })
+
+  // Reviewer regression (#1174): a message that arrives AFTER a reload marks the
+  // draining session for teardown but BEFORE the held prompt finishes must not be
+  // processed by the stale session — the reload's whole point is to recreate with
+  // fresh state. The stale session finishes only its in-flight prompt; the queued
+  // post-reload message is handed to the freshly-recreated successor.
+  test('tearDownAllLive() does not let the stale session process a post-reload inbound', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let releaseFirstPrompt: () => void = () => {}
+    const firstPromptHeld = new Promise<void>((resolve) => {
+      releaseFirstPrompt = resolve
+    })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstPromptHeld
+    }
+    const drainPromise = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    // Reload marks the draining session for teardown.
+    await router.tearDownAllLive()
+
+    // A second message arrives while the first prompt is still held.
+    await router.route(inbound({ externalMessageId: 'm2', text: 'after reload' }))
+
+    // The stale session must NOT pick up the post-reload message: it still has
+    // exactly its one in-flight prompt, and it was never aborted mid-turn.
+    expect(sessions[0]!.prompts.length).toBe(1)
+    expect(sessions[0]!.aborted).toBe(0)
+
+    // Release the held prompt: the stale session tears down (finishing only the
+    // in-flight prompt), and a fresh successor is created that processes the
+    // post-reload message exactly once.
+    releaseFirstPrompt()
+    await drainPromise
+    await waitFor(() => sessions.length === 2)
+    await waitFor(() => sessions[1]!.prompts.length > 0)
+    expect(sessions[0]!.prompts.length).toBe(1)
+    expect(sessions[1]!.prompts.some((p) => p.includes('after reload'))).toBe(true)
+    expect(router.liveCount()).toBe(1)
+  })
+
+  // Reviewer follow-up (#1174): observe-only messages (buffered to contextBuffer
+  // with no queued prompt) that arrive during the held prompt must be carried to
+  // the successor, not dropped — and must NOT themselves trigger a turn on the
+  // successor. They surface as "Recent context" on the next real inbound.
+  test('tearDownAllLive() carries observe-only context to the successor without triggering a turn', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    // Prime a second human so the strict engagement gate applies and an
+    // unaddressed message observes instead of engaging.
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    let releaseFirstPrompt: () => void = () => {}
+    const firstPromptHeld = new Promise<void>((resolve) => {
+      releaseFirstPrompt = resolve
+    })
+    await router.route(inbound({ externalMessageId: 'm-hold', text: 'address me' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstPromptHeld
+    }
+    const drainPromise = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+
+    await router.tearDownAllLive()
+
+    // An observe-only message arrives during the held prompt.
+    await router.route(inbound({ isBotMention: false, externalMessageId: 'm-observed', text: 'ambient chatter' }))
+
+    releaseFirstPrompt()
+    await drainPromise
+
+    // A fresh successor exists, but the observe-only message did NOT trigger a
+    // turn on it (no prompt yet — observed context waits for a real inbound).
+    await waitFor(() => sessions.length === 2)
+    expect(sessions[1]!.prompts).toHaveLength(0)
+
+    // A subsequent addressed inbound surfaces the carried context as "Recent
+    // context", proving the observe-only message was not dropped.
+    await router.route(inbound({ externalMessageId: 'm-next', text: 'now answer' }))
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[1]!.prompts.length > 0)
+    expect(sessions[1]!.prompts.some((p) => p.includes('ambient chatter'))).toBe(true)
+  })
+
+  // An idle session (no turn in flight) must still tear down immediately on a
+  // reload — the deferral is scoped strictly to draining sessions.
+  test('tearDownAllLive() tears down an idle session immediately', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    await router.tearDownAllLive()
+
+    expect(sessions[0]!.disposed).toBe(1)
+    expect(router.liveCount()).toBe(0)
+  })
+
   test('rollover does NOT fire while a background child of the session is still running', async () => {
     // given: a session with a running background subagent that started at t=1000
     const dir = await tempDir()
