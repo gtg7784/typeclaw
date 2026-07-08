@@ -42,6 +42,30 @@ export const ADAPTER_READ_CAPABILITIES: Record<AdapterId, readonly ReadCapabilit
   'webex-bot': ['history'],
 }
 
+export type WriteCapability = 'message-edit'
+
+// Mirror of ADAPTER_READ_CAPABILITIES for write-side capabilities that must
+// survive a failed start(). Only adapters whose underlying SDK exposes a
+// message-edit primitive appear here; the router uses this to answer
+// `adapter-unavailable` (configured but not running — re-auth may help) vs
+// `not-supported` (this adapter never edits) for a missing callback. The
+// schema.test.ts guard re-derives each entry from the adapter's
+// `.registerEditMessage(` call and fails if the table drifts.
+export const ADAPTER_WRITE_CAPABILITIES: Record<AdapterId, readonly WriteCapability[]> = {
+  discord: [],
+  'discord-bot': ['message-edit'],
+  github: [],
+  instagram: [],
+  line: [],
+  kakaotalk: [],
+  slack: [],
+  'slack-bot': ['message-edit'],
+  teams: [],
+  'telegram-bot': [],
+  webex: [],
+  'webex-bot': [],
+}
+
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
 
 const stickinessSchema = z.union([

@@ -1161,6 +1161,7 @@ describe('buildChannelTools', () => {
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual([
       'channel_disengage',
+      'channel_edit',
       'channel_fetch_attachment',
       'channel_history',
       'channel_react',
@@ -1180,7 +1181,7 @@ describe('buildChannelTools', () => {
 
     // then
     const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(['channel_read', 'channel_send'])
+    expect(names).toEqual(['channel_edit', 'channel_read', 'channel_send'])
   })
 
   test('exposes channel_send and channel_read when origin is cron (not channel-routed)', () => {
@@ -1192,7 +1193,7 @@ describe('buildChannelTools', () => {
 
     // then
     const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(['channel_read', 'channel_send'])
+    expect(names).toEqual(['channel_edit', 'channel_read', 'channel_send'])
   })
 
   test('exposes no channel tools when channelRouter is undefined', () => {
@@ -1213,7 +1214,7 @@ describe('buildChannelTools', () => {
     // when
     const tools = buildChannelTools(makeRouter(), undefined)
     // then
-    expect(tools.map((t) => t.name).sort()).toEqual(['channel_read', 'channel_send'])
+    expect(tools.map((t) => t.name).sort()).toEqual(['channel_edit', 'channel_read', 'channel_send'])
   })
 })
 

@@ -72,6 +72,7 @@ import {
 import { attachToolNotFoundNudge } from './tool-not-found-nudge'
 import { createBudgetState, type ToolResultBudget, wrapToolDefinitionWithBudget } from './tool-result-budget'
 import { createChannelDisengageTool } from './tools/channel-disengage'
+import { createChannelEditTool } from './tools/channel-edit'
 import { createChannelFetchAttachmentTool, resolveInboxBaseDir } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReactTool } from './tools/channel-react'
@@ -704,6 +705,7 @@ export function buildChannelTools(
         ...(sessionId !== undefined ? { sessionId } : {}),
       }),
     )
+    tools.push(createChannelEditTool({ router: channelRouter }))
     // Read the live turn origin, falling back to the static snapshot when no
     // getter is wired (composition tests). `reactionRef` is per-turn, so the
     // getter is what makes reactions work outside tests.
@@ -735,6 +737,7 @@ export function buildChannelTools(
   } else {
     tools.push(createChannelSendTool({ router: channelRouter }))
     tools.push(createChannelReadTool({ router: channelRouter }))
+    tools.push(createChannelEditTool({ router: channelRouter }))
   }
   return tools
 }

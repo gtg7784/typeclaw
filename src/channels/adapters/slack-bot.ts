@@ -53,6 +53,7 @@ import {
   type SlackInboundMessageEvent,
 } from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
+import { createSlackEditMessageCallback } from './slack-bot-edit'
 import { createSlackReactionCallback, createSlackRemoveReactionCallback } from './slack-bot-reactions'
 import { enrichSlackReferenceContext } from './slack-bot-reference'
 import {
@@ -1180,6 +1181,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
   const reactionCallback = createSlackReactionCallback({ client })
   const removeReactionCallback = createSlackRemoveReactionCallback({ client })
+  const editMessageCallback = createSlackEditMessageCallback({ client })
 
   const dedupe = createSlackDedupe()
 
@@ -1400,6 +1402,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerHistory('slack-bot', historyCallback)
       options.router.registerMessageGet('slack-bot', messageGetCallback)
       options.router.registerList('slack-bot', listCallback)
+      options.router.registerEditMessage('slack-bot', editMessageCallback)
       options.router.registerFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.registerMembership('slack-bot', membershipResolver)
 
@@ -1420,6 +1423,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         options.router.unregisterHistory('slack-bot', historyCallback)
         options.router.unregisterMessageGet('slack-bot', messageGetCallback)
         options.router.unregisterList('slack-bot', listCallback)
+        options.router.unregisterEditMessage('slack-bot', editMessageCallback)
         options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('slack-bot', membershipResolver)
         listener = null
@@ -1444,6 +1448,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterHistory('slack-bot', historyCallback)
       options.router.unregisterMessageGet('slack-bot', messageGetCallback)
       options.router.unregisterList('slack-bot', listCallback)
+      options.router.unregisterEditMessage('slack-bot', editMessageCallback)
       options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('slack-bot', membershipResolver)
       if (inflightInbounds > 0) {

@@ -48,6 +48,7 @@ import {
   type InboundDropReason,
   renderPlaceholder,
 } from './discord-bot-classify'
+import { createDiscordEditMessageCallback } from './discord-bot-edit'
 import { convertDiscordTables } from './discord-bot-format'
 import { createDiscordReactionCallback, createDiscordRemoveReactionCallback } from './discord-bot-reactions'
 import { enrichDiscordMessageReferences } from './discord-bot-reference'
@@ -1078,6 +1079,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
   const reactionCallback = createDiscordReactionCallback({ client })
   const removeReactionCallback = createDiscordRemoveReactionCallback({ client })
+  const editMessageCallback = createDiscordEditMessageCallback({ client })
 
   const interactionHandler = createInteractionHandler({
     router: options.router,
@@ -1231,6 +1233,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerHistory('discord-bot', historyCallback)
       options.router.registerMessageGet('discord-bot', messageGetCallback)
       options.router.registerList('discord-bot', listCallback)
+      options.router.registerEditMessage('discord-bot', editMessageCallback)
       options.router.registerFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.registerMembership('discord-bot', membershipResolver)
 
@@ -1251,6 +1254,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         options.router.unregisterHistory('discord-bot', historyCallback)
         options.router.unregisterMessageGet('discord-bot', messageGetCallback)
         options.router.unregisterList('discord-bot', listCallback)
+        options.router.unregisterEditMessage('discord-bot', editMessageCallback)
         options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
         options.router.unregisterMembership('discord-bot', membershipResolver)
         listener = null
@@ -1274,6 +1278,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterHistory('discord-bot', historyCallback)
       options.router.unregisterMessageGet('discord-bot', messageGetCallback)
       options.router.unregisterList('discord-bot', listCallback)
+      options.router.unregisterEditMessage('discord-bot', editMessageCallback)
       options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('discord-bot', membershipResolver)
       if (inflightInbounds > 0) {
