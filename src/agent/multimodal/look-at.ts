@@ -12,6 +12,7 @@ import { providerForModelRef } from '@/config/providers'
 import { LLM_FETCH_OBSERVER_TIMEOUTS, type LlmFetchObservedRequestInit } from '@/run/llm-fetch-observer'
 import { SecretsBackend } from '@/secrets'
 
+import { promptWithSameRefRetryOnly } from '../retry-same-ref'
 import { buildMultimodalLookerSystemPrompt, resolveImage, type ImageInput } from './looker'
 
 type ImageParam = { url: string } | { path: string } | { data: string; mimeType: string }
@@ -188,7 +189,7 @@ async function runLookAtImages(imageContents: ImageContent[], prompt: string | u
   })
 
   try {
-    await session.prompt(userText, { images: imageContents })
+    await promptWithSameRefRetryOnly(session, userText, { images: imageContents })
     const text = extractLastAssistantText(session.messages)
     if (text === null) {
       return errorResult('multimodal-looker returned no text response', {

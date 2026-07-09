@@ -11,6 +11,7 @@ import { type AgentSession, createSession, type PluginSessionWiring } from './in
 import { resolveFallbackChain } from './model-fallback'
 import { applyModelRuntimeOverrides } from './model-overrides'
 import { isFailoverWorthy, subscribeProviderErrors } from './provider-error'
+import { promptWithSameRefRetryOnly } from './retry-same-ref'
 import type { SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
 import {
@@ -375,7 +376,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
         await runSubagentDrain(drainWatch, {
           drain: backgroundDrain,
           prompt: async (text) => {
-            await session.prompt(`${renderTurnTimeAnchor()}\n\n${text}`)
+            await promptWithSameRefRetryOnly(session, `${renderTurnTimeAnchor()}\n\n${text}`)
           },
           cancelled: () => aborted,
         })
@@ -395,7 +396,10 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           console.warn(
             `[subagent] ${name} required_block_retry attempt=${attempt}/${MAX_REQUIRED_BLOCK_RETRIES} tag=${requiredBlockTag}`,
           )
-          await session.prompt(`${renderTurnTimeAnchor()}\n\n${renderRequiredBlockRetryNudge(requiredBlockTag)}`)
+          await promptWithSameRefRetryOnly(
+            session,
+            `${renderTurnTimeAnchor()}\n\n${renderRequiredBlockRetryNudge(requiredBlockTag)}`,
+          )
         }
         if (!aborted && !capture.hasRequiredBlock()) {
           console.warn(`[subagent] ${name} required_block_fallback tag=${requiredBlockTag}`)
