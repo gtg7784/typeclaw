@@ -149,6 +149,21 @@ describe('channel_edit tool', () => {
     expect(res.details).toMatchObject({ ok: false, code: 'not-supported' })
   })
 
+  test('passes the adapter-unavailable code through so agents can retry after re-auth', async () => {
+    const tool = createChannelEditTool({
+      router: fakeRouter(async () => ({
+        ok: false,
+        error: 'message-edit-adapter-unavailable',
+        code: 'adapter-unavailable',
+      })),
+      logger: silentLogger,
+    })
+
+    const res = await run(tool, params({ adapter: 'telegram-bot' }))
+
+    expect(res.details).toMatchObject({ ok: false, code: 'adapter-unavailable' })
+  })
+
   test('strips a leaked <think> block from the replacement before calling the router', async () => {
     const captured: EditMessageRequest[] = []
     const tool = createChannelEditTool({
