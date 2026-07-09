@@ -377,13 +377,16 @@ jobs:
       - name: Ensure npm CLI supports OIDC trusted publishing
         # npm trusted publishing requires npm ≥ 11.5.1. Node 24's bundled npm
         # has been past that threshold since 24.5.0 (Aug 2025), but Node 24.0.x
-        # ships npm 11.3.0 — too old. Pinning to npm@latest sidesteps any
-        # future bundled-npm regression and is a no-op when the bundled
-        # version is already current. A 404 on `npm publish` is the failure
-        # mode this prevents (npm returns 404 when OIDC isn't supported by
-        # the CLI sending the request — confusingly identical to "package
-        # missing").
-        run: npm install -g npm@latest && npm --version
+        # ships npm 11.3.0 — too old, so we upgrade explicitly.
+        #
+        # Pin to 11.18.0 (last stable 11.x), NOT npm@latest. npm@latest is
+        # 12.0.0 as of this pin, and the 12.0.0 global install strips the
+        # `sigstore` package, which the `--provenance` publish path requires —
+        # `npm publish --provenance` then dies with `Cannot find module
+        # 'sigstore'`. 11.18.0 supports OIDC trusted publishing and ships
+        # sigstore intact. Bump this pin deliberately once a fixed npm 12.x
+        # is verified to keep sigstore under a global install.
+        run: npm install -g npm@11.18.0 && npm --version
 
       - name: Bump version
         # TypeClaw publishes raw TS sources (no build step), and has no
