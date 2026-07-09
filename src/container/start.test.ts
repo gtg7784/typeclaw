@@ -4,7 +4,10 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
-import * as ts from 'typescript'
+// Stable TypeScript 7.0 ships no programmatic API (returns in 7.1); this meta-test
+// walks its own source AST, so it pulls the classic compiler API from the TS6 compat
+// package while `tsc` typechecking stays on typescript@7.
+import * as ts from '@typescript/typescript6'
 
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { startDaemon, type Daemon } from '@/hostd/daemon'

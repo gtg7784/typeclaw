@@ -19,6 +19,8 @@ export type ChannelFetchAttachmentOrigin = {
   thread: string | null
 }
 
+type FetchAttachmentDetails = { ok: boolean; error?: string; path?: string; mimetype?: string; size?: number }
+
 export type CreateChannelFetchAttachmentToolOptions = {
   router: ChannelRouter
   origin: ChannelFetchAttachmentOrigin
@@ -75,7 +77,6 @@ export function createChannelFetchAttachmentTool({
     }),
 
     async execute(_toolCallId, params) {
-      type Details = { ok: boolean; error?: string; path?: string; mimetype?: string; size?: number }
       const found = router.lookupInboundAttachment({
         adapter,
         workspace: origin.workspace,
@@ -112,7 +113,7 @@ export function createChannelFetchAttachmentTool({
       if (!result.ok) {
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: ${result.error}`))
         const text = `channel_fetch_attachment error: ${result.error}`
-        const details: Details = { ok: false, error: result.error }
+        const details: FetchAttachmentDetails = { ok: false, error: result.error }
         return { content: [{ type: 'text' as const, text }], details }
       }
 
@@ -128,13 +129,13 @@ export function createChannelFetchAttachmentTool({
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: write failed: ${message}`))
         const text = `channel_fetch_attachment error: write failed: ${message}`
-        const details: Details = { ok: false, error: `write failed: ${message}` }
+        const details: FetchAttachmentDetails = { ok: false, error: `write failed: ${message}` }
         return { content: [{ type: 'text' as const, text }], details }
       }
 
       const mimetypePart = result.mimetype !== undefined ? ` (${result.mimetype})` : ''
       const text = `saved ${result.size} bytes to ${targetPath}${mimetypePart}`
-      const details: Details = {
+      const details: FetchAttachmentDetails = {
         ok: true,
         path: targetPath,
         ...(result.mimetype !== undefined ? { mimetype: result.mimetype } : {}),
@@ -171,7 +172,7 @@ function toPosix(p: string): string {
 }
 
 function errorResult(message: string) {
-  const details = { ok: false, error: message }
+  const details: FetchAttachmentDetails = { ok: false, error: message }
   return { content: [{ type: 'text' as const, text: `channel_fetch_attachment error: ${message}` }], details }
 }
 
