@@ -121,6 +121,19 @@ describe('detectProviderError safeMessage redaction', () => {
     )
   })
 
+  test('maps a transport/session failure to a transport-safe sentence without echoing the wss URL', () => {
+    const raw =
+      "WebSocket connection to 'wss://chatgpt.com/backend-api/codex/responses' failed: Expected 101 status code"
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+
+    expect(result?.safeMessage).toMatch(/session\/transport failure|dropped/i)
+    expect(result?.safeMessage).not.toContain('wss://')
+    expect(result?.safeMessage).not.toContain('chatgpt.com')
+    expect(result?.safeMessage).not.toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+  })
+
   test('collapses unknown / malformed-response failures to a generic notice (no raw leak)', () => {
     const raw = 'malformed response: {"id":"resp_abc","debug":"Bearer sk-live-LEAK","body":"<html>500</html>"}'
     const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
@@ -157,6 +170,16 @@ describe('detectHardProviderError', () => {
     expect(detectHardProviderError(new Error('429 All tokens rate limited'))?.safeMessage).toMatch(/rate-limited/i)
     expect(detectHardProviderError(new Error('insufficient quota'))?.safeMessage).toMatch(/billing\/quota/i)
     expect(detectHardProviderError(new Error('401 Unauthorized'))?.safeMessage).toMatch(/unauthorized/i)
+  })
+
+  test('maps a transport/session hard throw to the transport-safe sentence (the cron-report incident)', () => {
+    const raw =
+      "WebSocket connection to 'wss://chatgpt.com/backend-api/codex/responses' failed: Expected 101 status code (provider_transport_failure). Your ChatGPT session expired before this request finished."
+    const result = detectHardProviderError(new Error(raw))
+
+    expect(result?.safeMessage).toMatch(/session\/transport failure|dropped/i)
+    expect(result?.safeMessage).not.toContain('chatgpt.com')
+    expect(result?.message).toBe(raw)
   })
 
   test('returns null for internal / network errors so the caller stays silent-with-log', () => {
@@ -271,6 +294,36 @@ describe('isFailoverWorthy', () => {
     expect(isFailoverWorthy('insufficient quota')).toBe(false)
     expect(isFailoverWorthy('401 Unauthorized')).toBe(false)
     expect(isFailoverWorthy('network unreachable')).toBe(false)
+  })
+
+  test('a provider transport / expired-session failure IS failover-worthy (the cron-report incident)', () => {
+    expect(isFailoverWorthy('provider_transport_failure')).toBe(true)
+    expect(
+      isFailoverWorthy(
+        "WebSocket connection to 'wss://chatgpt.com/backend-api/codex/responses' failed: Expected 101 status code",
+      ),
+    ).toBe(true)
+    expect(isFailoverWorthy('Your ChatGPT session expired before this request finished.')).toBe(true)
+  })
+
+  test('a transport failure carrying an auth reason still surfaces (auth exclusion wins)', () => {
+    expect(isFailoverWorthy('session expired: 401 unauthorized, invalid api key')).toBe(false)
+  })
+
+  test('a `session expired` message carrying an api-key fault does NOT fail over (shared AUTH_FAULT source)', () => {
+    // The transport matcher matches "session expired", but an expired/invalid/missing
+    // API key is an account-wide auth fault — a different ref shares it, so it must
+    // surface, not rotate. Regression: NON_FAILOVER_FAULT once omitted the
+    // `api key ... expired` shape the safe-message auth class matched.
+    expect(isFailoverWorthy('session expired: api key expired')).toBe(false)
+    expect(isFailoverWorthy('session expired - api key invalid')).toBe(false)
+    expect(isFailoverWorthy('session expired, api key missing')).toBe(false)
+  })
+
+  test('the api-key-fault-carrying transport error redacts to the auth safe sentence, not the transport one', () => {
+    const result = detectHardProviderError(new Error('session expired: api key expired'))
+    expect(result?.safeMessage).toMatch(/unauthorized|API key/i)
+    expect(result?.safeMessage).not.toMatch(/session\/transport failure|dropped/i)
   })
 })
 

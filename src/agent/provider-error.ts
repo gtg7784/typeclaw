@@ -33,19 +33,36 @@ const GENERIC_SAFE_NOTICE = 'The upstream LLM provider failed. Operators can che
 // and surface it. The literal is the system's own token — English by design.
 const OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
 
+// Transport-layer failure: the request died at the connection/session before a
+// usable response — an expired live session, a WebSocket upgrade that never
+// reached `101 Switching Protocols`, or a dropped transport. Unlike an
+// account-wide auth/billing fault, this is transient AND ref-specific: a
+// different ref opens its own session, so failing OVER can succeed. Observed from
+// Codex/ChatGPT (`provider_transport_failure`, expired ChatGPT session, a
+// `wss://…/codex/responses` non-101 upgrade). Provider protocol tokens — English
+// by design (the system-token exception to the multi-language rule).
+const TRANSPORT_FAILURE =
+  /provider[_ -]?transport[_ -]?failure|(?:websocket|ws) connection.*failed|expected 101|session expired/i
+
+// Auth failure: the provider rejected our credentials (bad/expired/missing API
+// key, 401, failed authentication). Account-wide — a different ref shares the
+// same credential problem — so this is BOTH a redacted safe-message class (a
+// 401 body can carry a Bearer token) AND a NON_FAILOVER_FAULT reason. Shared as
+// one constant so the two uses can never drift: previously the safe-message copy
+// matched `api key ... expired` but the failover copy didn't, letting
+// `session expired: api key expired` wrongly fail over past the auth guard.
+const AUTH_FAULT =
+  /\b(401|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|authentication failed|invalid bearer)\b/i
+
 // Each entry pairs a narrow matcher against the raw provider text with the
 // canonical, leak-free sentence shown in channels. Matchers are intentionally
 // specific: a miss falls through to GENERIC_SAFE_NOTICE rather than echoing raw
 // text, so adding a new class is opt-in and never widens what we expose.
 const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
   {
-    // Auth failure: the provider rejected our credentials (bad/expired/missing
-    // API key). Matched first because a 401 body can also mention "account",
-    // which would otherwise fall into the billing class below. The safe text
-    // names the operator action (check the API key) without echoing the raw
-    // error, whose body can carry a Bearer token.
-    match:
-      /\b(401|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|authentication failed|invalid bearer)\b/i,
+    // Matched first because a 401 body can also mention "account", which would
+    // otherwise fall into the billing class below.
+    match: AUTH_FAULT,
     safe: 'The upstream LLM provider rejected the request as unauthorized. Operators should check the provider API key configuration and `typeclaw logs`.',
   },
   {
@@ -71,6 +88,10 @@ const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
     match: OBSERVER_TIMEOUT,
     safe: 'The upstream LLM provider stopped responding and the request timed out. Try again shortly.',
   },
+  {
+    match: TRANSPORT_FAILURE,
+    safe: 'The connection to the upstream LLM provider dropped (session/transport failure). Try again shortly.',
+  },
 ]
 
 function toSafeMessage(raw: string): string {
@@ -92,9 +113,12 @@ const THROTTLE_OR_OVERLOAD =
 // help (same account) and would mask a config error the operator must fix. This
 // is checked BEFORE the throttle match because providers often pair a `429`
 // status with a quota/billing/auth reason (e.g. `429 insufficient quota`) — the
-// status code alone must not force a pointless failover.
-const NON_FAILOVER_FAULT =
-  /\bcyber_policy\b|insufficient.*(?:quota|credit|fund|balance)|\bquota\b|billing|payment|account is not active|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|authentication failed|invalid bearer/i
+// status code alone must not force a pointless failover. The auth arm reuses the
+// shared `AUTH_FAULT` source so it stays in lockstep with the safe-message class.
+const NON_FAILOVER_FAULT = new RegExp(
+  `\\bcyber_policy\\b|insufficient.*(?:quota|credit|fund|balance)|\\bquota\\b|billing|payment|account is not active|${AUTH_FAULT.source}`,
+  'i',
+)
 
 export function isThrottleOrOverload(raw: string): boolean {
   if (NON_FAILOVER_FAULT.test(raw)) return false
@@ -102,14 +126,15 @@ export function isThrottleOrOverload(raw: string): boolean {
 }
 
 // Failover predicate for turn-drivers' `shouldFailover`: rotate to the next model
-// ref on a transient capacity signal (throttle/overload) OR an observer stall
-// timeout. A stall — the provider accepted the stream but stopped sending bytes —
-// is as transient as an overload and another ref may well succeed, so it must
-// fail OVER before the caller surfaces a failure notice. Account-wide faults
-// (billing/quota/auth) still return false via `isThrottleOrOverload` — a
-// different ref shares the same account problem.
+// ref on a transient capacity signal (throttle/overload), an observer stall
+// timeout, or a transport/session failure. A stall or a dropped session is as
+// transient as an overload and another ref (its own session/transport) may well
+// succeed, so it must fail OVER before the caller surfaces a failure notice.
+// Account-wide faults (billing/quota/auth) are excluded up front — a different
+// ref shares the same account problem, so switching can't help.
 export function isFailoverWorthy(raw: string): boolean {
-  return isThrottleOrOverload(raw) || OBSERVER_TIMEOUT.test(raw)
+  if (NON_FAILOVER_FAULT.test(raw)) return false
+  return isThrottleOrOverload(raw) || OBSERVER_TIMEOUT.test(raw) || TRANSPORT_FAILURE.test(raw)
 }
 
 export function detectProviderError(message: unknown): DetectedProviderError | null {
@@ -134,7 +159,10 @@ export function detectProviderError(message: unknown): DetectedProviderError | n
 export function detectHardProviderError(err: unknown): DetectedProviderError | null {
   const message = err instanceof Error ? err.message : String(err)
   const isProviderFailure =
-    isThrottleOrOverload(message) || NON_FAILOVER_FAULT.test(message) || OBSERVER_TIMEOUT.test(message)
+    isThrottleOrOverload(message) ||
+    NON_FAILOVER_FAULT.test(message) ||
+    OBSERVER_TIMEOUT.test(message) ||
+    TRANSPORT_FAILURE.test(message)
   if (!isProviderFailure) return null
   return { message, safeMessage: toSafeMessage(message) }
 }
