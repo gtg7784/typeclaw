@@ -1,0 +1,212 @@
+import { describe, expect, test } from 'bun:test'
+
+import type { AgentSession } from './index'
+import {
+  promptWithSameRefRetryOnly,
+  retryBackoffMs,
+  retryTurnOnPersistentSession,
+  RETRIES_PER_REF,
+} from './retry-same-ref'
+
+describe('retryBackoffMs', () => {
+  test('is full-jitter: random in [0, min(cap, base·2^attempt))', () => {
+    // given random()=1 (upper bound), attempt 0 -> ceiling = base(1000)
+    expect(retryBackoffMs(0, () => 0.999999)).toBe(999)
+    // attempt 1 -> ceiling = min(5000, 2000) = 2000
+    expect(retryBackoffMs(1, () => 0.5)).toBe(1000)
+    // attempt grows past the cap -> clamped to MAX_DELAY_MS (5000)
+    expect(retryBackoffMs(10, () => 0.999999)).toBe(4999)
+  })
+
+  test('random()=0 yields no delay (immediate retry allowed)', () => {
+    expect(retryBackoffMs(3, () => 0)).toBe(0)
+  })
+})
+
+type FakeAgent = {
+  state: { messages: Array<{ role: string; stopReason?: string }> }
+  continue: () => Promise<void>
+  continued: number
+}
+
+function sessionWith(messages: Array<{ role: string; stopReason?: string }>, continueImpl?: () => Promise<void>) {
+  const agent: FakeAgent = {
+    state: { messages },
+    continued: 0,
+    continue: async () => {
+      agent.continued++
+      await continueImpl?.()
+    },
+  }
+  return { session: { agent } as unknown as AgentSession, agent }
+}
+
+describe('retryTurnOnPersistentSession', () => {
+  test('pops the trailing assistant error leaf, then continues (no user-message re-append)', async () => {
+    const messages = [{ role: 'user' }, { role: 'assistant', stopReason: 'error' }]
+    const { session, agent } = sessionWith(messages)
+
+    const ok = await retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })
+
+    expect(ok).toBe(true)
+    expect(agent.continued).toBe(1)
+    // the failed assistant leaf is gone; the user message is untouched (not duplicated)
+    expect(agent.state.messages).toEqual([{ role: 'user' }])
+  })
+
+  test('retries a trailing USER leaf WITHOUT popping — the pre-stream incident shape', async () => {
+    // given: the provider died before writing any assistant message, so the turn
+    // is still just the user message (no assistant error leaf to pop)
+    const messages = [{ role: 'user' }]
+    const { session, agent } = sessionWith(messages)
+
+    const ok = await retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })
+
+    expect(ok).toBe(true)
+    expect(agent.continued).toBe(1)
+    expect(agent.state.messages).toEqual([{ role: 'user' }]) // untouched, not re-appended
+  })
+
+  test('fails closed when the trailing message is neither user nor assistant', async () => {
+    const { session, agent } = sessionWith([{ role: 'user' }, { role: 'toolResult' }])
+
+    const ok = await retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })
+
+    expect(ok).toBe(false)
+    expect(agent.continued).toBe(0)
+  })
+
+  test('fails closed when the session exposes no agent.continue', async () => {
+    const session = {
+      agent: { state: { messages: [{ role: 'assistant', stopReason: 'error' }] } },
+    } as unknown as AgentSession
+    expect(await retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })).toBe(false)
+  })
+
+  test('fails closed on an empty transcript', async () => {
+    const { session } = sessionWith([])
+    expect(await retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })).toBe(false)
+  })
+
+  test('propagates a throw from continue() so the caller can surface it', async () => {
+    const { session } = sessionWith([{ role: 'user' }, { role: 'assistant', stopReason: 'error' }], async () => {
+      throw new Error('socket hang up')
+    })
+    await expect(retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })).rejects.toThrow(
+      'socket hang up',
+    )
+  })
+})
+
+describe('RETRIES_PER_REF', () => {
+  test('defaults to a single conservative same-ref replay', () => {
+    expect(RETRIES_PER_REF).toBe(1)
+  })
+})
+
+type PromptScript = Array<'soft-transient' | 'hard-transient' | 'hard-auth' | 'success'>
+
+function promptFake(script: PromptScript) {
+  const listeners = new Set<(event: { type: string; message?: unknown }) => void>()
+  const messages: Array<{ role: string; stopReason?: string }> = []
+  let idx = 0
+  const step = (viaContinue: boolean) => {
+    const behavior = script[Math.min(idx, script.length - 1)]!
+    idx++
+    if (!viaContinue) messages.push({ role: 'user' })
+    if (behavior === 'hard-auth') throw new Error('401 unauthorized')
+    if (behavior === 'hard-transient') {
+      messages.push({ role: 'assistant', stopReason: 'error' })
+      throw new Error('socket hang up')
+    }
+    if (behavior === 'soft-transient') {
+      messages.push({ role: 'assistant', stopReason: 'error' })
+      for (const cb of listeners)
+        cb({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'ECONNRESET' } })
+      return
+    }
+    messages.push({ role: 'assistant', stopReason: 'stop' })
+  }
+  const session = {
+    subscribe: (cb: (event: { type: string; message?: unknown }) => void) => {
+      listeners.add(cb)
+      return () => listeners.delete(cb)
+    },
+    prompt: async () => step(false),
+    agent: {
+      state: {
+        get messages() {
+          return messages
+        },
+        set messages(v: Array<{ role: string; stopReason?: string }>) {
+          messages.length = 0
+          messages.push(...v)
+        },
+      },
+      continue: async () => step(true),
+    },
+  } as unknown as AgentSession
+  return { session, userMessages: () => messages.filter((m) => m.role === 'user').length, attempts: () => idx }
+}
+
+describe('promptWithSameRefRetryOnly', () => {
+  test('recovers a transient soft error via continue without duplicating the user message', async () => {
+    const fake = promptFake(['soft-transient', 'success'])
+    await promptWithSameRefRetryOnly(fake.session, 'hi')
+    expect(fake.attempts()).toBe(2)
+    expect(fake.userMessages()).toBe(1)
+  })
+
+  test('recovers a transient hard throw via continue', async () => {
+    const fake = promptFake(['hard-transient', 'success'])
+    await promptWithSameRefRetryOnly(fake.session, 'hi')
+    expect(fake.attempts()).toBe(2)
+    expect(fake.userMessages()).toBe(1)
+  })
+
+  test('propagates a non-retryable hard throw (bare-prompt semantics preserved)', async () => {
+    const fake = promptFake(['hard-auth'])
+    await expect(promptWithSameRefRetryOnly(fake.session, 'hi')).rejects.toThrow('401 unauthorized')
+    expect(fake.attempts()).toBe(1)
+  })
+
+  test('does not retry when the first attempt succeeds', async () => {
+    const fake = promptFake(['success'])
+    await promptWithSameRefRetryOnly(fake.session, 'hi')
+    expect(fake.attempts()).toBe(1)
+  })
+
+  test('surfaces the original hard error when the retry recipe cannot apply (no phantom success)', async () => {
+    // given: a RETRYABLE hard throw, but the transcript leaf is an unsafe shape
+    // (tool-result) so retryTurnOnPersistentSession fails closed and never replays
+    const messages = [{ role: 'user' }, { role: 'toolResult' }]
+    let promptCalls = 0
+    let continueCalls = 0
+    const session = {
+      subscribe: () => () => {},
+      prompt: async () => {
+        promptCalls++
+        throw new Error('socket hang up')
+      },
+      agent: {
+        state: {
+          get messages() {
+            return messages
+          },
+          set messages(v: Array<{ role: string }>) {
+            messages.length = 0
+            messages.push(...v)
+          },
+        },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    // then: the original hard error propagates — it is NOT swallowed as success
+    await expect(promptWithSameRefRetryOnly(session, 'hi')).rejects.toThrow('socket hang up')
+    expect(promptCalls).toBe(1)
+    expect(continueCalls).toBe(0) // unsafe leaf → continue() never runs
+  })
+})
