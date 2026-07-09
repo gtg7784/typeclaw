@@ -314,3 +314,137 @@ describe('promptPersistentTurnWithFallback', () => {
     expect(turn2.setModels).toEqual([REF_A])
   })
 })
+
+// A persistent-session fake that supports same-ref retry via agent.continue().
+// `prompt` runs the first behavior; `continue` runs subsequent ones WITHOUT
+// re-appending a user message — mirroring the real SDK recipe we depend on.
+// `userMessages` lets tests assert the user message is never duplicated.
+type RetryBehavior = 'throw-transient' | 'throw-before-assistant' | 'soft-transient' | 'success'
+
+function retryableFakeSession(behaviors: RetryBehavior[]) {
+  const listeners: Array<(event: FakeEvent) => void> = []
+  const messages: Array<{ role: string; stopReason?: string }> = []
+  let idx = 0
+  const run = (viaContinue: boolean) => {
+    const behavior = behaviors[Math.min(idx, behaviors.length - 1)]!
+    idx++
+    if (!viaContinue) messages.push({ role: 'user' })
+    if (behavior === 'throw-before-assistant') {
+      // provider dies before writing any assistant message: trailing leaf stays 'user'
+      throw new Error('provider_transport_failure')
+    }
+    if (behavior === 'throw-transient') {
+      messages.push({ role: 'assistant', stopReason: 'error' })
+      throw new Error('socket hang up')
+    }
+    if (behavior === 'soft-transient') {
+      messages.push({ role: 'assistant', stopReason: 'error' })
+      for (const cb of listeners)
+        cb({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'ECONNRESET' } })
+      return
+    }
+    messages.push({ role: 'assistant', stopReason: 'stop' })
+  }
+  const session = {
+    prompt: async () => run(false),
+    subscribe: (cb: (event: FakeEvent) => void) => {
+      listeners.push(cb)
+      return () => {
+        const i = listeners.indexOf(cb)
+        if (i >= 0) listeners.splice(i, 1)
+      }
+    },
+    setModel: async () => {},
+    agent: {
+      state: {
+        get messages() {
+          return messages
+        },
+        set messages(v: Array<{ role: string; stopReason?: string }>) {
+          messages.length = 0
+          messages.push(...v)
+        },
+      },
+      continue: async () => run(true),
+    },
+  } as unknown as AgentSession
+  return { session, userMessages: () => messages.filter((m) => m.role === 'user').length, attempts: () => idx }
+}
+
+describe('promptPersistentTurnWithFallback same-ref retry', () => {
+  test('a transient soft error recovers via agent.continue without duplicating the user message', async () => {
+    const fake = retryableFakeSession(['soft-transient', 'success'])
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_A)
+    expect(fake.attempts()).toBe(2) // one prompt + one continue-retry
+    expect(fake.userMessages()).toBe(1) // continue() did NOT re-append the user message
+  })
+
+  test('a transient hard throw recovers via agent.continue on the same ref', async () => {
+    const fake = retryableFakeSession(['throw-transient', 'success'])
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+    })
+
+    expect(result.success).toBe(true)
+    expect(fake.userMessages()).toBe(1)
+  })
+
+  test('recovers a transport failure that died BEFORE the assistant stream started (the reported incident)', async () => {
+    // given: first attempt throws provider_transport_failure with only a user leaf
+    // in state (no assistant message written); the same-ref continue() then succeeds
+    const fake = retryableFakeSession(['throw-before-assistant', 'success'])
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_A)
+    expect(fake.attempts()).toBe(2) // prompt threw pre-stream, continue() recovered
+    expect(fake.userMessages()).toBe(1) // no duplicate user message
+  })
+
+  test('a single turn does not self-trip the throttle circuit across same-ref retries', async () => {
+    // given: the ref keeps failing transiently for the whole retry budget
+    const circuit = new ThrottleCircuit()
+    const fake = retryableFakeSession(['soft-transient', 'soft-transient', 'soft-transient'])
+    await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      profile: 'default',
+      session: fake.session,
+      text: 'hello',
+      circuit,
+      // ECONNRESET is retryable-same-ref but NOT failover-worthy, so shouldFailover
+      // is false — no throttle should be recorded at all here.
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+    })
+
+    // one throttle record would need THRESHOLD(2) to open; a single turn must not
+    // reach it — the circuit stays closed for REF_A.
+    expect(circuit.isOpen({ profile: 'default', ref: REF_A })).toBe(false)
+  })
+})
