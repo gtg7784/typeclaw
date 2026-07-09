@@ -33,6 +33,19 @@ describe('detectContinuationWillingness — positive (self-directed future inten
     '검토해볼게요',
     '찾아볼게요',
     '바로 처리할게요',
+    // Casual (banmal) -ㄹ게 volitional — the same first-person promise WITHOUT the
+    // polite -요. A persona that speaks informally ("확인해볼게!") hit nothing
+    // because every KO entry was polite-form; the morpheme pass now covers both.
+    // The first entry mirrors the production ack that ended a Discord turn in silence.
+    '확인해볼게! GitHub 접근이랑 gh 인증 기준으로 둘 다 빠르게 봐볼게',
+    '확인해볼게',
+    '살펴볼게',
+    '검토해볼게',
+    '찾아볼게',
+    '계속 진행할게',
+    '바로 처리할게',
+    '업데이트할게',
+    '수정할게',
     // Action/config verb family (English) — "I'll DO X" promises beyond the
     // retrieval verbs. The cron-update production miss is the canonical case.
     "I'll update the cron timing logic.",
@@ -118,6 +131,80 @@ describe('detectContinuationWillingness — positive (multilingual self-directed
   }
 })
 
+describe('detectContinuationWillingness — positive (casual / informal register across languages)', () => {
+  const willing: readonly string[] = [
+    // English contractions/slang
+    'lemme dig into the logs',
+    'imma check the config',
+    'gonna check the diff now',
+    'ima look at the rest',
+    'let me go check the tests',
+    'gimme a sec',
+    // Spanish casual (déjame ver/checar, ya lo + present, checar)
+    'déjame ver los otros archivos',
+    'déjame checar eso',
+    'ya lo reviso y te digo',
+    'ahora mismo reviso los logs',
+    // French casual (check anglicism, laisse-moi voir, je m'en charge)
+    'je check ça tout de suite',
+    'laisse-moi voir le reste',
+    "je m'en charge maintenant",
+    // Italian casual (fammi vedere, vedo subito, ci guardo io)
+    'fammi vedere il resto',
+    'vedo subito i log',
+    'ci guardo io adesso',
+    // Portuguese casual (vou ver, deixa eu ver/checar, deixa comigo)
+    'vou ver isso agora',
+    'deixa eu ver os arquivos',
+    'deixa comigo, já checo',
+    // German casual (ich schau mal, ich guck nach, ich kümmere mich)
+    'ich schau mal nach',
+    'ich guck nach den logs',
+    'ich kümmere mich darum',
+    'das übernehm ich',
+    // Russian colloquial (щас/гляну + perfective)
+    'щас гляну логи',
+    'сейчас гляну остальное',
+    'дай гляну быстро',
+    'щас разберусь с этим',
+    // Chinese spoken (去/来 + verb)
+    '我去看下日志',
+    '我来处理这个',
+    '我去核实一下',
+    // Arabic colloquial (راح/رح/هـ future, خليني)
+    'راح أشوف الباقي',
+    'رح أتأكد من هالشي',
+    'خليني أشوف الكود',
+    // Hindi casual (अभी + habitual, completive ले)
+    'अभी देखता हूँ',
+    'मैं देख लेता हूँ',
+    'जरा देखता हूँ बाकी फाइलें',
+    // Turkish optative (-eyim/-ayım)
+    'şuna bakayım',
+    'bir göz atayım',
+    'şimdi bakayım hemen',
+    // Vietnamese casual/Southern (coi, thử)
+    'để tôi coi thử',
+    'coi thử cái này',
+    'tôi coi thử phần còn lại',
+    // Indonesian casual (coba/dulu/aja)
+    'coba saya cek dulu',
+    'saya liat dulu ya',
+    'saya cek sekarang',
+    // Japanese plain form (particle-anchored)
+    '確認するね',
+    '調べとくね、ちょっと待って',
+    '見てみるね',
+    'すぐ見るね',
+  ]
+
+  for (const text of willing) {
+    test(`detects: ${JSON.stringify(text)}`, () => {
+      expect(detectContinuationWillingness(text)).toBe(true)
+    })
+  }
+})
+
 describe('detectContinuationWillingness — negative (final / descriptive / other-directed)', () => {
   const notWilling: readonly string[] = [
     'Done. The diff looks good, no issues.',
@@ -144,6 +231,13 @@ describe('detectContinuationWillingness — negative (final / descriptive / othe
     // other-directed requests and descriptive progressives, not self-intent.
     '바로 확인 부탁드려요.',
     '계속 확인 중입니다.',
+    // Casual (banmal) idiomatic -겠어 acks — 알겠어 = "got it", 모르겠어 = "dunno".
+    // The verb-anchored volitional regex must not read these casual forms as work
+    // promises, exactly as it excludes their polite -겠어요/-겠습니다 siblings.
+    '알겠어, 고마워!',
+    '잘 모르겠어.',
+    // Descriptive casual past — an already-done report, not a promise to act.
+    '이미 확인했어, 문제 없어.',
     '',
     '...',
   ]
@@ -181,6 +275,37 @@ describe('detectContinuationWillingness — negative (multilingual final / descr
     'どうしますか？',
     'どうします？',
     '更新します？',
+  ]
+
+  for (const text of notWilling) {
+    test(`ignores: ${JSON.stringify(text)}`, () => {
+      expect(detectContinuationWillingness(text)).toBe(false)
+    })
+  }
+})
+
+describe('detectContinuationWillingness — negative (casual-register false-positive guards)', () => {
+  // Ambiguous casual forms deliberately EXCLUDED when the casual tables were widened:
+  // bare present that reads descriptive, other-directed imperatives, and short forms
+  // that collide. Each asserts the widening did not overreach past the false-negative bias.
+  const notWilling: readonly string[] = [
+    // Bare present-as-descriptive (no temporal/volitional anchor) — omitted on purpose
+    'je regarde les résultats maintenant',
+    'guardo la TV',
+    'saya cek email tiap pagi',
+    // Present-continuous = "I'm doing it now", descriptive not future
+    'şimdi bakıyorum ekrana',
+    // Other-directed imperatives ("you look" / "let's see what happens")
+    'baksana şuna',
+    '你看看这个文件',
+    'để coi sao đã',
+    // Chinese 2-char descriptive that must not fire ("I see you're right" / receipt ack)
+    '我看你说得对',
+    '我查收了邮件',
+    // Japanese bare dictionary form (no committing particle) stays out
+    '確認する',
+    // Arabic other-directed ("do YOU want to look?")
+    'بدك أشوف هالشي',
   ]
 
   for (const text of notWilling) {

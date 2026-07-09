@@ -91,45 +91,57 @@ const EN_PHRASES: readonly string[] = [
   'let me add',
   'let me create',
   'let me handle',
+  // Casual/contracted acks chat models emit. "imma"/"ima"/"gonna" are the
+  // spoken-future contractions; in an assistant reply "gonna VERB" is self-directed
+  // (a rival "you're gonna" is other-directed and never a willingness signal here).
+  'lemme dig',
+  'imma check',
+  'gonna check',
+  'gonna look',
+  'ima look',
+  'let me go check',
+  'let me peek',
+  'gimme a sec',
 ]
 
-// Korean: the -겠습니다/-겠어요 and -ㄹ게요 verb endings are first-person
+// Korean: the -겠습니다/-겠어요 and -ㄹ게(요) verb endings are first-person
 // volitional — they cannot address the listener, so they are safe self-direction
 // anchors. The -겠습니다/-겠어요 form is matched by MORPHEME_PATTERNS below (it
-// generalizes across all action verbs), so only the -게요/-게여 forms and stall
-// idioms are enumerated here. Bare adverb+noun fragments ("바로 확인", "계속 확인",
-// "곧 알려") are deliberately NOT listed: without the volitional ending they match
-// other-directed requests ("바로 확인 부탁드려요" = "please check") and descriptive
-// progressives ("계속 확인 중입니다" = "I'm still checking") — the exact false
-// positives the design forbids. Their volitional forms are caught by the morpheme
-// regex regardless.
+// generalizes across all action verbs), so only the -ㄹ게 forms and stall idioms
+// are enumerated here. Each entry is the CASUAL (banmal) -게 base; the polite -게요
+// / -게여 forms match too because the substring pass tests `includes` (볼게 ⊂
+// 볼게요). Enumerating the casual base is deliberate over a broad `[ㄹ-final]게`
+// morpheme regex: that would also fire on the adverbial -게 of adjective stems
+// (힘들게 "hard-ly", 멀게 "far-ly", 길게 "long-ly"), violating the file's
+// prefer-false-negatives bias. Bare adverb+noun fragments ("바로 확인", "계속 확인")
+// are still excluded: without the -게 volitional they match other-directed requests
+// ("바로 확인 부탁드려요" = "please check") and descriptive progressives ("계속 확인
+// 중입니다" = "I'm still checking"). The persona speaking banmal ("확인해볼게!") was
+// the production miss that closed a Discord turn in silence.
 const KO_PHRASES: readonly string[] = [
-  '확인해볼게요',
-  '확인해 볼게요',
-  '확인할게요',
-  '확인할게여',
-  '계속 진행할게요',
-  '계속할게요',
-  '바로 볼게요',
-  '살펴볼게요',
-  '볼게요',
-  '볼게여',
-  '검토할게요',
-  '검토해볼게요',
-  '조회해볼게요',
-  '찾아볼게요',
-  '알아볼게요',
-  '처리할게요',
-  '알려드릴게요',
-  // Action/config verb -게요 forms (the -겠습니다 siblings are covered by the
-  // morpheme regex; these are the casual-polite variants chat models also emit).
-  '업데이트할게요',
-  '수정할게요',
-  '설정할게요',
-  '반영할게요',
-  '적용할게요',
-  '추가할게요',
-  '생성할게요',
+  '확인해볼게',
+  '확인해 볼게',
+  '확인할게',
+  '계속 진행할게',
+  '계속할게',
+  '살펴볼게',
+  '볼게',
+  '검토할게',
+  '검토해볼게',
+  '조회해볼게',
+  '찾아볼게',
+  '알아볼게',
+  '처리할게',
+  '알려드릴게',
+  // Action/config verb -게 forms (the -겠습니다 siblings are covered by the
+  // morpheme regex; these are the casual/casual-polite variants chat models emit).
+  '업데이트할게',
+  '수정할게',
+  '설정할게',
+  '반영할게',
+  '적용할게',
+  '추가할게',
+  '생성할게',
   '잠시만요',
   '잠깐만요',
 ]
@@ -181,6 +193,21 @@ const ES_PHRASES: readonly string[] = [
   'voy a aplicar',
   'déjame actualizar',
   'déjame corregir',
+  // Casual register: "déjame ver/checar" (the colloquial twins of the déjame-forms
+  // above), and "ya lo"/"ahora mismo" + bare present, whose temporal anchor pins the
+  // present-as-future so it can't read as the descriptive "reviso [cada mañana]".
+  // "checar" is the LatAm colloquial for "revisar".
+  'déjame ver',
+  'déjame checar',
+  'ya lo reviso',
+  'lo reviso ya',
+  'ya lo checo',
+  'lo checo ya',
+  'me pongo a revisar',
+  'ahora mismo reviso',
+  'voy a darle un vistazo',
+  'reviso y te digo',
+  'lo checo enseguida',
 ]
 
 // French: "je vais" + work verb; "laisse-moi" idioms.
@@ -213,6 +240,17 @@ const FR_PHRASES: readonly string[] = [
   'je vais appliquer',
   'laisse-moi corriger',
   'laisse-moi mettre à jour',
+  // Casual: the "check" anglicism (not a native French word, so zero descriptive
+  // ambiguity), "laisse-moi voir" (colloquial twin of laisse-moi vérifier),
+  // present+"rapidement" (the adverb forces future intent), and "je m'en charge"
+  // ("I'll take charge of it"). Bare "je regarde"/"je vérifie" are deliberately
+  // omitted — present tense alone reads as descriptive "I'm looking [right now]".
+  'je check ça',
+  'laisse-moi voir',
+  'je vais checker',
+  'je regarde rapidement',
+  'je vérifie rapidement',
+  "je m'en charge",
 ]
 
 // Italian: "vado a" / "fammi" + work verb; "controllo subito" idioms.
@@ -242,6 +280,16 @@ const IT_PHRASES: readonly string[] = [
   'vado ad applicare',
   'fammi aggiornare',
   'fammi correggere',
+  // Casual: "fammi vedere" (colloquial twin of fammi controllare), present+"subito"/
+  // "adesso" (temporal anchor forces future), "vado a vedere", and "ci guardo io"
+  // (the "io" makes it emphatically self-directed). Bare "controllo"/"guardo" are
+  // omitted — present alone reads descriptive ("guardo la TV" = I'm watching TV).
+  'fammi vedere',
+  'vedo subito',
+  'vado a vedere',
+  'ci guardo io',
+  'controllo adesso',
+  'verifico adesso',
 ]
 
 // Portuguese: "vou" + work verb; "deixa eu" idioms.
@@ -272,6 +320,18 @@ const PT_PHRASES: readonly string[] = [
   'vou aplicar',
   'deixa eu atualizar',
   'deixa eu corrigir',
+  // Casual (BR-leaning): "vou ver" (the most common informal ack), "deixa eu ver/
+  // checar" and "deixa que eu vejo" (colloquial "let me"), "deixa comigo" ("leave it
+  // to me"), and "já vou ver"/"já dou uma olhada"/"...agora" (the já/agora temporal
+  // anchor forces future). "checar" is the BR colloquial for "verificar".
+  'vou ver',
+  'deixa eu ver',
+  'deixa eu checar',
+  'deixa comigo',
+  'já vou ver',
+  'verifico agora',
+  'deixa que eu vejo',
+  'já dou uma olhada',
 ]
 
 // German: "ich werde" / "lass mich" + work verb; "ich schaue gleich" idioms.
@@ -306,6 +366,22 @@ const DE_PHRASES: readonly string[] = [
   'ich werde anwenden',
   'lass mich aktualisieren',
   'lass mich korrigieren',
+  // Casual: present-as-future with the "mal"/"kurz"/"nach" particles ("ich schau
+  // mal", "ich guck nach"), the V2-inverted "schau ich mir" (word order flags 1sg),
+  // the Germanized "ich check das", and the take-responsibility forms ("ich kümmere
+  // mich", "das übernehm ich", "ich nehm das"). Bare "ich schau" is omitted — it also
+  // fits "ich schau dir zu" (I'm watching you), which is not a work promise.
+  'ich schau mal',
+  'ich guck mal',
+  'ich schau nach',
+  'ich guck nach',
+  'schau ich mir',
+  'ich kümmere mich',
+  'ich check das',
+  'das übernehm ich',
+  'ich nehm das',
+  'ich geh das checken',
+  'ich schau kurz',
 ]
 
 // Russian: first-person-future verbs (проверю/посмотрю/продолжу) — the -ю/-у
@@ -333,6 +409,24 @@ const RU_PHRASES: readonly string[] = [
   'я применю',
   'сейчас обновлю',
   'сейчас исправлю',
+  // Colloquial: "щас" is the ubiquitous informal spelling of "сейчас"; "гляну" is
+  // bare 1sg perfective of глянуть — morphologically locked to "I will" (2sg is
+  // глянешь, 3sg глянет), so it's self-directed even without a pronoun. All entries
+  // pair a 1sg-perfective verb (гляну/посмотрю/проверю/разберусь/сделаю/поправлю)
+  // with щас/сейчас/дай, none of which can read as descriptive or other-directed.
+  'гляну',
+  'щас гляну',
+  'сейчас гляну',
+  'щас посмотрю',
+  'щас проверю',
+  'дай гляну',
+  'дай посмотреть',
+  'сейчас разберусь',
+  'щас разберусь',
+  'сейчас сделаю',
+  'щас сделаю',
+  'сейчас поправлю',
+  'щас поправлю',
 ]
 
 // Chinese: 我会/我来/我再 + work verb. Full multi-character intent phrases only;
@@ -370,6 +464,17 @@ const ZH_PHRASES: readonly string[] = [
   '我马上更新',
   '让我更新',
   '让我改一下',
+  // Casual/spoken: 去+verb (我去看下/我去核实) and 来+verb (我来处理/我来瞧瞧) mark quick
+  // self-initiated action. Entries are ≥4 chars ending in a volitional suffix. The
+  // 2-char 我看/我查 are omitted (descriptive 我看你说的对 = "I see you're right"), and
+  // the 3-char reduplications 我看看/我查查 are omitted too: they fall under MIN_LENGTH
+  // as standalone acks, and embedded they risk the past-narrative 我看看了 ("I glanced").
+  '我去看下',
+  '我来处理',
+  '我搜一下',
+  '我确认下',
+  '我去核实',
+  '我来瞧瞧',
 ]
 
 // Japanese: handled by the JA_VOLITIONAL morpheme check below (-します/-いたします/
@@ -383,6 +488,24 @@ const JA_PHRASES: readonly string[] = [
   '続けます',
   '少々お待ちください',
   'ちょっと待ってください',
+  // Casual plain form (タメ口), particle-anchored. Bare dictionary forms (見る/確認する)
+  // are the SAME as descriptive present and far too ambiguous, so each entry pins a
+  // work verb to a self-commitment sentence-final particle: 〜ね (volitional), 〜わ
+  // (soft assertion), or the 〜とく/〜てくる/〜てみる auxiliaries that already imply
+  // "I'll take care of / go do / try". 〜よ is excluded (it can be merely informational).
+  '確認するね',
+  '調べるね',
+  '見てみるね',
+  '確認しとくね',
+  '調べとくね',
+  'チェックしとくね',
+  '見とくね',
+  '見てみるわ',
+  '調べてみるね',
+  '確認してみるね',
+  '見てくるね',
+  '調べてくるね',
+  'すぐ見るね',
 ]
 
 // Arabic: future particle سـ prefixed first-person verb (سأتحقق = "I will
@@ -408,12 +531,45 @@ const AR_PHRASES: readonly string[] = [
   'سأصلح',
   'سأنشئ',
   'سأضيف',
+  // Colloquial dialects: explicit future markers راح/رح (Gulf/Levantine) and هـ
+  // (Egyptian) + verb, plus خليني ("let me") and بدي ("I want to", Levantine
+  // volitional). Bare بشوف is omitted — بـ+imperfect is present-habitual in some
+  // dialects, so it can read descriptive. شيك only appears prefixed (هاشيك/راح أشيك)
+  // so it can't collide with the noun شيك ("cheque").
+  'راح أشوف',
+  'رح أشوف',
+  'هشوف',
+  'هأشوف',
+  'خليني أشوف',
+  'رح أتأكد',
+  'هاشيك',
+  'راح أشيك',
+  'رح أتحقق',
+  'بدي أشوف',
+  'هجيب المعلومة',
+  'راح أراجع',
 ]
 
 // Hindi: first-person-future is the -ūṅgā/-ūṅgī suffix, matched by
 // MORPHEME_PATTERNS below (it covers all X-करना compounds). Only the stall idiom
 // is enumerated here.
-const HI_PHRASES: readonly string[] = ['एक मिनट रुकिए']
+// Casual Hindi uses the habitual present (देखता हूँ) for immediate intent, but only
+// with an immediacy anchor (अभी "now", जरा "just") or the completive ले, which mark
+// volition; bare देखता हूँ / करता हूँ are omitted (descriptive "I'm looking / I do").
+// Both genders (-ता/-ती) are listed since the ending marks speaker gender. The formal
+// -ऊँगा future is already covered by MORPHEME_PATTERNS. एक मिनट रुकिए is the stall idiom.
+const HI_PHRASES: readonly string[] = [
+  'एक मिनट रुकिए',
+  'अभी देखता हूँ',
+  'देख लेता हूँ',
+  'मैं देख लेता हूँ',
+  'अभी चेक करता हूँ',
+  'चेक कर लेता हूँ',
+  'अभी देख लेता हूँ',
+  'जरा देखता हूँ',
+  'देख लेती हूँ',
+  'चेक कर लेती हूँ',
+]
 
 // Turkish: first-person-future "-eceğim/-acağım" is matched by MORPHEME_PATTERNS
 // below. The present-progressive ("ediyorum" = "I'm checking now"), optative
@@ -428,6 +584,16 @@ const TR_PHRASES: readonly string[] = [
   'hemen bakıyorum',
   'bir saniye',
   'bir dakika',
+  // Casual: the -eyim/-ayım optative ("let me VERB") is the safest volition anchor
+  // (bakayım/edeyim/atayım/inceleyeyim); the -ır/-ar aorist (bakarım) is only added
+  // with hemen/şimdi to force future over habitual. -yor present-continuous
+  // (bakıyorum) is NOT extended — it's descriptive "I'm looking [now]". baksana is
+  // excluded (imperative "look!", other-directed).
+  'şuna bakayım',
+  'bir inceleyeyim',
+  'bir göz atayım',
+  'şimdi bakayım',
+  'hemen bakarım',
 ]
 
 // Vietnamese: "tôi sẽ" / "để tôi" (I will / let me) + work verb.
@@ -449,6 +615,16 @@ const VI_PHRASES: readonly string[] = [
   'tôi sẽ thêm',
   'để tôi cập nhật',
   'để tôi sửa',
+  // Casual/Southern: "coi" is the Southern colloquial for "xem" (look); "thử" (try)
+  // is a strong volition marker, so coi/xem/kiểm tra + thử are safe. Bare "để coi" is
+  // omitted — it can mean "let's see [what happens]" (观望), not a work promise.
+  'coi thử',
+  'để tôi coi',
+  'xem thử',
+  'tôi coi thử',
+  'kiểm tra thử',
+  'coi một lúc',
+  'để tôi coi thử',
 ]
 
 // Indonesian: "saya akan" / "biar saya" (I will / let me) + work verb.
@@ -473,6 +649,22 @@ const ID_PHRASES: readonly string[] = [
   'saya akan tambah',
   'biar saya perbaiki',
   'biar saya perbarui',
+  // Casual/spoken: "coba" (let/try) leads a volitional; "dulu"/"aja"/"sekarang" anchor
+  // the bare present as imminent ("saya cek dulu" = "I'll check first"). "liat" is the
+  // casual "lihat". Bare "saya cek"/"saya liat" are omitted (present/past ambiguous),
+  // and the Javanese "tak" prefix is excluded (3-char substring collides with takut
+  // "afraid", menata "arrange").
+  'coba saya cek',
+  'saya cek dulu',
+  'liat dulu',
+  'saya liat dulu',
+  'coba saya liat',
+  'saya cek aja',
+  'liat dulu ya',
+  'saya cek sekarang',
+  'saya bantu cek',
+  'saya usahakan cek',
+  'liat sebentar',
 ]
 
 const ALL_PHRASES: readonly string[] = [
