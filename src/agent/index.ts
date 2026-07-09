@@ -481,6 +481,14 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
     ...(thinkingLevel ? { thinkingLevel } : {}),
   })
+  // typeclaw owns retry/fallback in its turn drivers, so the SDK's own
+  // same-model auto-retry must be OFF. Leaving it on races typeclaw's
+  // soft-error capture: the SDK can silently recover a `stopReason:'error'` turn
+  // while typeclaw has already latched the failure, reporting a recovered turn as
+  // failed (and burning an unnecessary failover). Disabling it makes a soft error
+  // a deterministic, typeclaw-owned signal. Compaction/context-overflow recovery
+  // is independent (gated on compaction settings), so this does not disable those.
+  ;(session as { setAutoRetryEnabled?: (enabled: boolean) => void }).setAutoRetryEnabled?.(false)
   const getAbortReason = () => abortHolder.reason
   const sessionWithAbortReason = Object.assign(session, { getAbortReason })
 

@@ -333,3 +333,98 @@ describe('promptWithFallback shouldFailover gate', () => {
     expect(created).toHaveLength(2)
   })
 })
+
+// A createSessionForRef factory that plays a scripted behavior per invocation,
+// so we can assert same-ref retry: e.g. first attempt fails transiently, the
+// recreated session for the SAME ref succeeds.
+function scriptedFactory(script: Array<'success' | 'throw' | 'soft-error'>, errorMessage: string) {
+  const created: SessionFake[] = []
+  let call = 0
+  const createSessionForRef = async (ref: KnownModelRef) => {
+    const behavior = script[Math.min(call, script.length - 1)]!
+    call++
+    const { session, fake } = fakeSession({ ref, behavior, errorMessage })
+    created.push(fake)
+    return { session, dispose: async () => void (fake.disposed = true) }
+  }
+  return { createSessionForRef, created }
+}
+
+describe('promptWithFallback same-ref retry', () => {
+  test('a transient failure on a single ref is retried on a fresh session and recovers', async () => {
+    // given: the ONLY ref fails transiently, then its recreated session succeeds
+    const { createSessionForRef, created } = scriptedFactory(['throw', 'success'], 'socket hang up')
+
+    const result = await promptWithFallback({ refs: [REF_A], text: 'hi', createSessionForRef })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_A)
+    // one attempt recorded (the recovering one); two sessions created (retry recreated it)
+    expect(result.attempts).toEqual([{ ref: REF_A, outcome: 'success' }])
+    expect(created).toHaveLength(2)
+    expect(created[0]!.disposed).toBe(true)
+  })
+
+  test('a persistent transient failure on a single ref exhausts the retry then surfaces', async () => {
+    const { createSessionForRef, created } = scriptedFactory(['throw', 'throw', 'throw'], 'socket hang up')
+
+    const result = await promptWithFallback({ refs: [REF_A], text: 'hi', createSessionForRef })
+
+    expect(result.success).toBe(false)
+    expect(result.lastError?.message).toBe('socket hang up')
+    // 1 initial + RETRIES_PER_REF(1) same-ref retry = 2 sessions
+    expect(created).toHaveLength(2)
+  })
+
+  test('a NON-retryable failure (auth) is not same-ref retried — it fails over instead', async () => {
+    const created: SessionFake[] = []
+    let call = 0
+    const result = await promptWithFallback({
+      refs: [REF_A, REF_B],
+      text: 'hi',
+      createSessionForRef: async (ref) => {
+        call++
+        const { session, fake } = fakeSession({
+          ref,
+          behavior: ref === REF_A ? 'soft-error' : 'success',
+          errorMessage: '401 unauthorized',
+        })
+        created.push(fake)
+        return { session, dispose: async () => void (fake.disposed = true) }
+      },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_B)
+    // REF_A tried once (no same-ref retry for auth), then REF_B — exactly 2 sessions
+    expect(created).toHaveLength(2)
+    expect(call).toBe(2)
+  })
+
+  test('a throttle/overload failure is not same-ref retried — it fails over immediately', async () => {
+    const { createSessionForRef, created } = (() => {
+      const c: SessionFake[] = []
+      let call = 0
+      return {
+        created: c,
+        createSessionForRef: async (ref: KnownModelRef) => {
+          call++
+          const { session, fake } = fakeSession({
+            ref,
+            behavior: ref === REF_A ? 'soft-error' : 'success',
+            errorMessage: 'server_is_overloaded',
+          })
+          c.push(fake)
+          return { session, dispose: async () => void (fake.disposed = true) }
+        },
+      }
+    })()
+
+    const result = await promptWithFallback({ refs: [REF_A, REF_B], text: 'hi', createSessionForRef })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(REF_B)
+    // no wasted same-ref retry on REF_A: 1 (REF_A) + 1 (REF_B) = 2
+    expect(created).toHaveLength(2)
+  })
+})

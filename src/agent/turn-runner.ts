@@ -1,7 +1,8 @@
 import type { ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
-import { detectProviderError, subscribeProviderErrors } from './provider-error'
+import { detectProviderError, isRetryableSameRef, subscribeProviderErrors } from './provider-error'
+import { RETRIES_PER_REF, retryTurnOnPersistentSession } from './retry-same-ref'
 import { modelThrottleCircuit, type ThrottleCircuit } from './throttle-circuit'
 
 export type PersistentTurnAttempt = {
@@ -73,50 +74,78 @@ export async function promptPersistentTurnWithFallback(opts: {
           if (softError === undefined) softError = new Error(err.message)
         })
     try {
-      try {
-        await opts.session.prompt(opts.text)
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err))
-        const attempt: PersistentTurnAttempt = { ref, outcome: 'hard', errorMessage: error.message }
-        attempts.push(attempt)
-        lastError = error
-        if (opts.shouldFailover(error)) circuit.recordThrottle({ profile: opts.profile, ref })
-        if (isLast || !canAdvance(error, activity, opts.shouldFailover)) throw error
-        opts.onAttemptFailed?.(attempt)
-        continue
-      }
-      if (softError !== undefined) {
-        const attempt: PersistentTurnAttempt = { ref, outcome: 'soft', errorMessage: softError.message }
-        attempts.push(attempt)
-        lastError = softError
-        if (opts.shouldFailover(softError)) circuit.recordThrottle({ profile: opts.profile, ref })
-        if (isLast || !canAdvance(softError, activity, opts.shouldFailover)) {
-          return { success: false, refUsed: ref, attempts, lastError }
+      // Same-ref retry loop: replay this ref on a transient failure before
+      // advancing the chain. `retry === 0` is the first, prompt()-driven attempt;
+      // later iterations resume via agent.continue() (no user-message re-append).
+      let outcome: AttemptOutcome | undefined
+      for (let retry = 0; ; retry++) {
+        softError = undefined
+        let outcomeThisAttempt: AttemptOutcome | undefined
+        try {
+          if (retry === 0) {
+            await opts.session.prompt(opts.text)
+          } else {
+            const retried = await retryTurnOnPersistentSession(opts.session, { attempt: retry - 1 })
+            // The safe continue-recipe couldn't apply: keep the PREVIOUS failure
+            // outcome (never cleared) and let it drive the advance/return below.
+            if (!retried) break
+          }
+          outcomeThisAttempt = classifySoftOutcome(softError, opts)
+        } catch (err) {
+          outcomeThisAttempt = { kind: 'hard', error: err instanceof Error ? err : new Error(String(err)) }
         }
-        opts.onAttemptFailed?.(attempt)
-        continue
+        outcome = outcomeThisAttempt
+        if (outcome === undefined) break
+        // Only keep retrying while the failure is same-ref retryable, the turn
+        // stayed idempotent (no output/tool-exec yet), and budget remains.
+        const mayRetry =
+          retry < RETRIES_PER_REF &&
+          isRetryableSameRef(outcome.error.message) &&
+          !activity.producedAssistantOutput &&
+          !activity.startedToolExecution
+        if (!mayRetry) break
       }
-      const leafSoftError = opts.detectSoftErrorFromLeaf ? detectLeafSoftError(opts.session) : undefined
-      if (leafSoftError !== undefined) {
-        const attempt: PersistentTurnAttempt = { ref, outcome: 'soft', errorMessage: leafSoftError.message }
-        attempts.push(attempt)
-        lastError = leafSoftError
-        if (opts.shouldFailover(leafSoftError)) circuit.recordThrottle({ profile: opts.profile, ref })
-        if (isLast || !canAdvance(leafSoftError, activity, opts.shouldFailover)) {
-          return { success: false, refUsed: ref, attempts, lastError }
-        }
-        opts.onAttemptFailed?.(attempt)
-        continue
+
+      if (outcome === undefined) {
+        attempts.push({ ref, outcome: 'success' })
+        circuit.recordSuccess({ profile: opts.profile, ref })
+        return { success: true, refUsed: ref, attempts }
       }
-      attempts.push({ ref, outcome: 'success' })
-      circuit.recordSuccess({ profile: opts.profile, ref })
-      return { success: true, refUsed: ref, attempts }
+
+      // Ref abandoned after exhausting same-ref retries. Record throttle ONCE
+      // here (not per internal retry) so a single turn can't self-trip the
+      // circuit breaker.
+      const attempt: PersistentTurnAttempt = { ref, outcome: outcome.kind, errorMessage: outcome.error.message }
+      attempts.push(attempt)
+      lastError = outcome.error
+      if (opts.shouldFailover(outcome.error)) circuit.recordThrottle({ profile: opts.profile, ref })
+      if (isLast || !canAdvance(outcome.error, activity, opts.shouldFailover)) {
+        if (outcome.kind === 'hard') throw outcome.error
+        return { success: false, refUsed: ref, attempts, lastError }
+      }
+      opts.onAttemptFailed?.(attempt)
+      continue
     } finally {
       unsubProvider()
       unsubActivity()
     }
   }
   return { success: false, refUsed: opts.refs[opts.refs.length - 1]!, attempts, lastError }
+}
+
+type AttemptOutcome = { kind: 'hard' | 'soft'; error: Error }
+
+// Classify a completed (non-throwing) attempt: a captured soft error, else a
+// leaf soft error (subagent path), else success (undefined). Mirrors the two
+// soft-error sources the loop handled inline before the retry refactor.
+function classifySoftOutcome(
+  softError: Error | undefined,
+  opts: { session: AgentSession; detectSoftErrorFromLeaf?: boolean },
+): AttemptOutcome | undefined {
+  if (softError !== undefined) return { kind: 'soft', error: softError }
+  const leafSoftError = opts.detectSoftErrorFromLeaf ? detectLeafSoftError(opts.session) : undefined
+  if (leafSoftError !== undefined) return { kind: 'soft', error: leafSoftError }
+  return undefined
 }
 
 function canAdvance(error: Error, activity: AttemptActivity, shouldFailover: (err: Error) => boolean): boolean {

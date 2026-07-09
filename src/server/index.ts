@@ -18,6 +18,7 @@ import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { detectProviderError, isFailoverWorthy } from '@/agent/provider-error'
 import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
+import { promptWithSameRefRetryOnly } from '@/agent/retry-same-ref'
 import { sessionMetaPayload } from '@/agent/session-meta'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -816,7 +817,7 @@ export function createServer({
                   ? `${renderTurnTimeAnchor()}\n\n${msg.text}\n\n${retrievalContext.results}`
                   : `${renderTurnTimeAnchor()}\n\n${msg.text}`
               applyTurnThinkingLevel(state.session, msg.text, state.turnThinkingDefault, state.lastQuestionSignal)
-              await state.session.prompt(turnText)
+              await promptWithSameRefRetryOnly(state.session, turnText)
               // A usable turn seeds the next turn's escalation; a failed leaf must
               // CLEAR the prior signal (not just skip), else an older question
               // leaks across the failed turn and wrongly escalates the next one.

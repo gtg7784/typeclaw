@@ -8,6 +8,7 @@ import {
   type SessionOrigin,
 } from '@/agent'
 import { applyTurnThinkingLevel } from '@/agent/attention-escalation'
+import { promptWithSameRefRetryOnly } from '@/agent/retry-same-ref'
 import type { ChannelRouter } from '@/channels/router'
 import type { McpManager } from '@/mcp'
 import type { PermissionService } from '@/permissions'
@@ -427,7 +428,7 @@ export async function runPromptForCommand(args: {
         : `${renderTurnTimeAnchor()}\n\n${args.text}`
     applyTurnThinkingLevel(session, args.text, session.thinkingLevel)
     try {
-      await session.prompt(turnText)
+      await promptWithSameRefRetryOnly(session, turnText)
     } finally {
       await snapshot.hooks.runSessionTurnEnd(turnEvent)
     }

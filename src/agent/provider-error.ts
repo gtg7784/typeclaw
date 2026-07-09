@@ -137,6 +137,31 @@ export function isFailoverWorthy(raw: string): boolean {
   return isThrottleOrOverload(raw) || OBSERVER_TIMEOUT.test(raw) || TRANSPORT_FAILURE.test(raw)
 }
 
+// Transient network / upstream 5xx signals that a same-model replay may clear.
+// Distinct from THROTTLE_OR_OVERLOAD (429/503/overload) on purpose: an overload
+// means the model is out of capacity NOW, so the right move is to fail OVER to a
+// different ref, not hammer the same one — whereas a socket hang-up or a 500 is a
+// one-off blip a replay against the SAME ref often fixes. `\b` anchors the 5xx
+// codes so they don't match digit runs in prose. Provider protocol tokens —
+// English by design (the system-token exception to the multi-language rule).
+const NETWORK_OR_5XX =
+  /econnreset|econnrefused|etimedout|enetunreach|socket hang up|network.?error|connection.?(?:error|refused|reset|lost)|fetch failed|other side closed|reset before headers|http2 request did not get a response|\b(?:500|502|504)\b/i
+
+// Retry predicate for typeclaw-owned SAME-REF retry: replay the SAME model ref
+// before advancing the chain. Deliberately NARROWER than `isFailoverWorthy` —
+// only transient failures a same-model replay can plausibly clear: transport/
+// session drops, observer stalls, and network/5xx blips. It intentionally EXCLUDES
+// throttle/overload (429/503) — those mean "this ref is out of capacity now", so
+// they should fail OVER to another ref rather than burn same-ref retries — and
+// account-wide faults (auth/billing/quota/cyber_policy), which must surface. It
+// does NOT match context-overflow: that stays on the SDK compaction path and must
+// never be treated as a retryable provider failure.
+export function isRetryableSameRef(raw: string): boolean {
+  if (NON_FAILOVER_FAULT.test(raw)) return false
+  if (isThrottleOrOverload(raw)) return false
+  return TRANSPORT_FAILURE.test(raw) || OBSERVER_TIMEOUT.test(raw) || NETWORK_OR_5XX.test(raw)
+}
+
 export function detectProviderError(message: unknown): DetectedProviderError | null {
   if (typeof message !== 'object' || message === null) return null
   const m = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown }

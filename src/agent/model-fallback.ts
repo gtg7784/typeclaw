@@ -3,7 +3,8 @@ import type { Models } from '@/config/config'
 import type { KnownModelRef, ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
-import { subscribeProviderErrors } from './provider-error'
+import { isRetryableSameRef, subscribeProviderErrors } from './provider-error'
+import { RETRIES_PER_REF, sleepBackoff } from './retry-same-ref'
 import { renderTurnTimeAnchor } from './system-prompt'
 
 // Result of a single fallback-aware prompt run.
@@ -87,53 +88,71 @@ export async function promptWithFallback<TRef extends FallbackModelRef>(opts: {
   for (let i = 0; i < opts.refs.length; i++) {
     const ref = opts.refs[i]!
     const isLast = i === opts.refs.length - 1
+    // Try this ref, replaying the SAME ref on a transient failure before we give
+    // up on it. Cron sessions are cheap and fresh-per-attempt, so a same-ref
+    // retry just recreates the session — no state surgery needed.
+    const outcome = await attemptRefWithRetry(ref, opts)
+    if (outcome.kind === 'success') {
+      attempts.push({ ref, outcome: 'success' })
+      return { success: true, refUsed: ref, attempts, session: outcome.session, dispose: outcome.dispose }
+    }
+    attempts.push({ ref, outcome: outcome.kind, errorMessage: outcome.error.message })
+    lastError = outcome.error
+    const stop = isLast || !failoverGate(outcome.error)
+    if (!stop) opts.onAttemptFailed?.({ ref, outcome: outcome.kind, errorMessage: outcome.error.message })
+    // The failed ref's session is spent either way — dispose it. On stop we still
+    // hand the caller the (now-disposed) session for its final surface, with a
+    // no-op dispose so a double-dispose can't happen.
+    await outcome.dispose()
+    if (stop) {
+      return { success: false, refUsed: ref, attempts, session: outcome.session, dispose: async () => {}, lastError }
+    }
+  }
+  throw new Error('promptWithFallback: unreachable — loop terminated without returning')
+}
+
+type RefAttemptOutcome =
+  | { kind: 'success'; session: AgentSession; dispose: () => Promise<void> }
+  | { kind: 'hard' | 'soft'; error: Error; session: AgentSession; dispose: () => Promise<void> }
+
+// One ref, with same-ref retry. Each attempt gets a fresh session (cron's
+// pattern); a retryable failure disposes it and recreates the same ref up to
+// RETRIES_PER_REF times before returning failure to the chain. The returned
+// session/dispose is always from the LAST attempt so the caller can surface or
+// keep it exactly as before.
+async function attemptRefWithRetry<TRef extends FallbackModelRef>(
+  ref: TRef,
+  opts: {
+    text: string
+    createSessionForRef: (ref: TRef) => Promise<{ session: AgentSession; dispose: () => Promise<void> }>
+  },
+): Promise<RefAttemptOutcome> {
+  for (let attempt = 0; ; attempt++) {
     const { session, dispose } = await opts.createSessionForRef(ref)
-    // Capture the first soft error per attempt. The `subscribeProviderErrors`
-    // listener fires synchronously off the `message_end` event, which lands
-    // BEFORE `session.prompt()` resolves — so by the time `await` returns,
-    // `softError` is populated if a soft error occurred.
+    // Capture the first soft error per attempt. The listener fires synchronously
+    // off `message_end`, which lands BEFORE `session.prompt()` resolves, so by
+    // the time `await` returns `softError` is populated if one occurred.
     let softError: Error | undefined
     const unsub = subscribeProviderErrors(session, (err) => {
       if (!softError) softError = new Error(err.message)
     })
+    let outcome: RefAttemptOutcome
     try {
-      try {
-        await session.prompt(`${renderTurnTimeAnchor()}\n\n${opts.text}`)
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err))
-        const attempt: FallbackAttempt<TRef> = { ref, outcome: 'hard', errorMessage: error.message }
-        attempts.push(attempt)
-        lastError = error
-        const stop = isLast || !failoverGate(error)
-        if (!stop) opts.onAttemptFailed?.(attempt)
-        unsub()
-        await dispose()
-        if (stop) {
-          return { success: false, refUsed: ref, attempts, session, dispose: async () => {}, lastError }
-        }
-        continue
-      }
-      if (softError !== undefined) {
-        const attempt: FallbackAttempt<TRef> = { ref, outcome: 'soft', errorMessage: softError.message }
-        attempts.push(attempt)
-        lastError = softError
-        const stop = isLast || !failoverGate(softError)
-        if (!stop) opts.onAttemptFailed?.(attempt)
-        unsub()
-        await dispose()
-        if (stop) {
-          return { success: false, refUsed: ref, attempts, session, dispose: async () => {}, lastError }
-        }
-        continue
-      }
-      attempts.push({ ref, outcome: 'success' })
-      unsub()
-      return { success: true, refUsed: ref, attempts, session, dispose }
+      await session.prompt(`${renderTurnTimeAnchor()}\n\n${opts.text}`)
+      outcome =
+        softError === undefined
+          ? { kind: 'success', session, dispose }
+          : { kind: 'soft', error: softError, session, dispose }
     } catch (err) {
+      outcome = { kind: 'hard', error: err instanceof Error ? err : new Error(String(err)), session, dispose }
+    } finally {
       unsub()
-      await dispose()
-      throw err
     }
+    if (outcome.kind === 'success') return outcome
+    const canRetry = attempt < RETRIES_PER_REF && isRetryableSameRef(outcome.error.message)
+    if (!canRetry) return outcome
+    // Retryable and budget remains: drop this session and replay the same ref.
+    await dispose()
+    await sleepBackoff(attempt)
   }
-  throw new Error('promptWithFallback: unreachable — loop terminated without returning')
 }

@@ -7,6 +7,7 @@ import {
   detectHardProviderError,
   detectProviderError,
   isFailoverWorthy,
+  isRetryableSameRef,
   isThrottleOrOverload,
   subscribeProviderErrors,
 } from './provider-error'
@@ -324,6 +325,35 @@ describe('isFailoverWorthy', () => {
     const result = detectHardProviderError(new Error('session expired: api key expired'))
     expect(result?.safeMessage).toMatch(/unauthorized|API key/i)
     expect(result?.safeMessage).not.toMatch(/session\/transport failure|dropped/i)
+  })
+})
+
+describe('isRetryableSameRef', () => {
+  test('retries transport/session, observer-stall, and network/5xx blips (same-model replay)', () => {
+    expect(isRetryableSameRef('provider_transport_failure')).toBe(true)
+    expect(isRetryableSameRef('Your ChatGPT session expired before this request finished.')).toBe(true)
+    expect(isRetryableSameRef('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')).toBe(true)
+    expect(isRetryableSameRef('socket hang up')).toBe(true)
+    expect(isRetryableSameRef('ECONNRESET')).toBe(true)
+    expect(isRetryableSameRef('fetch failed')).toBe(true)
+    expect(isRetryableSameRef('500 Internal Server Error')).toBe(true)
+  })
+
+  test('does NOT same-ref retry throttle/overload — those fail OVER to another ref', () => {
+    expect(isRetryableSameRef('server_is_overloaded')).toBe(false)
+    expect(isRetryableSameRef('429 too many requests')).toBe(false)
+    expect(isRetryableSameRef('503 Service Unavailable')).toBe(false)
+  })
+
+  test('does NOT same-ref retry account-wide faults (auth/billing/quota) — those surface', () => {
+    expect(isRetryableSameRef('401 Unauthorized')).toBe(false)
+    expect(isRetryableSameRef('insufficient quota')).toBe(false)
+    expect(isRetryableSameRef('session expired: api key expired')).toBe(false)
+  })
+
+  test('does NOT same-ref retry context-overflow or generic errors (compaction / surface own it)', () => {
+    expect(isRetryableSameRef('context length exceeded')).toBe(false)
+    expect(isRetryableSameRef('malformed response')).toBe(false)
   })
 })
 
