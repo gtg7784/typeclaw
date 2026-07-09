@@ -30,11 +30,13 @@ export function createChannelEditTool({ router, logger = consoleChannelLogger }:
       'adapter/workspace/chat you sent it to, and the new `text`. Use this to fix a typo, correct a wrong answer, ' +
       'or append a result to a status message you posted earlier — not to carry on a conversation (send a new ' +
       'message for that). Editing is supported on "slack-bot", "slack", "discord-bot", "discord", "telegram-bot", ' +
-      '"webex", "webex-bot", and "teams" (chats/DMs only — Teams team-channel posts cannot be edited); other ' +
-      'adapters return ' +
+      '"webex", "webex-bot", and "teams" (chats/DMs only — Teams team-channel posts cannot be edited); an adapter ' +
+      'that does not implement editing at all returns ' +
       '{ ok: false, error, code: "not-supported" }. You can only edit messages YOU authored; editing someone ' +
       'else\'s returns code "permission-denied". On success returns { ok: true }; a missing/deleted target returns ' +
-      'code "not-found".',
+      'code "not-found". Code "adapter-unavailable" is distinct from "not-supported": the adapter DOES support ' +
+      'editing but is not currently running (e.g. it failed to start on an expired token) — re-authenticating and ' +
+      'retrying may fix it, so do not treat it as permanently unsupported.',
     parameters: Type.Object({
       adapter: Type.Union(
         ADAPTER_IDS.map((a) => Type.Literal(a)),
