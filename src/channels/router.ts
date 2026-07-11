@@ -4758,6 +4758,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
+    // Prose-then-trailing-call leak: the model wrote a real reply and then
+    // serialized a tool decision as a trailing block (the Discord skip_response
+    // incident). Strip the plumbing and keep the prose BEFORE the whole-message
+    // classification below, so a message that was ONLY the call still reaches the
+    // existing name-dependent suppress/recover path, while a message with real
+    // prose keeps that prose. Prefix-first: no arg-recovery, no nudge, no ack.
+    const trailingLeak = stripTrailingLeakedToolCall(assistantText)
+    if (trailingLeak !== null && trailingLeak.text !== '') {
+      logger.warn(
+        `[channels] ${live.keyId}: stripped trailing_tool_call_leak tool=${trailingLeak.toolName} ` +
+          `text_len=${trailingLeak.text.length}`,
+      )
+      assistantText = trailingLeak.text
+    }
+
     if (isUpstreamEmptyResponseSentinel(assistantText)) {
       logger.warn(
         `[channels] ${live.keyId}: suppressed upstream_empty_response_sentinel text_len=${assistantText.length}`,
@@ -6864,6 +6879,233 @@ export function isWholeMessageToolCall(text: string): string | null {
   const rest = trimmed.slice(i + 1).trim()
   if (rest === '' || rest === ';') return name
   return null
+}
+
+export type TrailingToolCallLeak = { text: string; toolName: string; leakedCall: string }
+
+// Catches the sibling leak that `isWholeMessageToolCall` cannot: the model wrote
+// a REAL reply, then serialized a tool decision as a trailing block instead of
+// emitting a real tool call. The production incident (Discord) was Korean prose,
+// a blank line, then `skip_response({ reason: "..." })` — the whole-message
+// parser saw prose before the call, returned null, and the plumbing shipped
+// verbatim, confirming to probing users that it's a bot and exposing an internal
+// tool name.
+//
+// The whole-message contract of `isWholeMessageToolCall` is deliberately NOT
+// broadened: it stays "the entire message is a call" so a name-dependent
+// disposition (reply/send recover, skip silent, else nudge) still applies to a
+// message that is nothing but a call. This is the STRICTLY narrower sibling —
+// "prose, THEN a trailing standalone call block" — with a prefix-first
+// disposition: the prose is a legitimate reply the user must see, so we post it
+// and drop only the trailing plumbing, regardless of which tool leaked. No
+// arg-recovery, no nudge, no silent-turn ack — the prose already satisfied the
+// turn.
+//
+// The false-positive surface is contained by three STRUCTURAL (language-agnostic,
+// per the repo's multi-language rule) signals, none of which interpret prose:
+//   1. a BLANK line must separate prefix from the trailing block — an adjacent
+//      final line (`Explanation:\nskip_response()`) is left untouched, since a
+//      model teaching a tool inline never blank-line-separates the example;
+//   2. the trailing block must independently satisfy `isWholeMessageToolCall`
+//      (bracket-aware, quote-honoring) — a bare `channel_react whenever…` word or
+//      `read({...}) loads a file` mid-sentence is not a whole call;
+//   3. the block must NOT begin inside a Markdown fenced code block — a fenced
+//      ``` example ending in a call is legitimate teaching output.
+// The prefix must stay non-empty after trimming, else this is the whole-message
+// case and belongs to the existing parser.
+//
+// Multiple contiguous trailing call blocks are stripped iteratively (each must
+// independently pass the predicate); the loop stops at the first non-call block.
+export function stripTrailingLeakedToolCall(text: string): TrailingToolCallLeak | null {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  let body = normalized
+  let outerToolName: string | null = null
+  let outerLeakedCall = ''
+
+  for (;;) {
+    // Locate the final blank-line-separated block: <prefix>\n[ \t]*\n<candidate>,
+    // where <candidate> is the trailing run with no interior blank line.
+    const match = /\n[ \t]*\n([^\n]*(?:\n(?![ \t]*\n)[^\n]*)*)[ \t\n]*$/.exec(body)
+    if (match === null) break
+    const rawCandidate = match[1]!
+    const candidate = rawCandidate.trim()
+    if (candidate === '') break
+    const prefix = body.slice(0, match.index)
+    if (prefix.trim() === '') break
+
+    // Classify BEFORE the fence check: a whole-message tool call can never itself
+    // be a fence marker, which is what lets the fence scanner treat the
+    // candidate's first line purely as a container-continuation signal.
+    const toolName = isWholeMessageToolCall(candidate)
+    if (toolName === null) break
+
+    // The candidate's own first line decides whether it still continues an open
+    // list/blockquote container: an unquoted or dedented candidate has LEFT the
+    // container, so a container-owned fence no longer protects it.
+    const candidateFirstLine = rawCandidate.split('\n', 1)[0]!
+    if (startsInsideFencedCodeBlock(prefix, candidateFirstLine)) break
+
+    if (outerToolName === null) {
+      outerToolName = toolName
+      outerLeakedCall = candidate
+    }
+    body = prefix
+  }
+
+  if (outerToolName === null) return null
+  return { text: body.trimEnd(), toolName: outerToolName, leakedCall: outerLeakedCall }
+}
+
+// A fence carries the container requirements it was opened under. Both are
+// independent: a `> - ``` ` opener requires BOTH a blockquote (`requiresQuote`)
+// and the list content column, so leaving EITHER container abandons the fence.
+// This captures at most one blockquote requirement + one post-blockquote list
+// column — a bounded stack, not an arbitrary container parser.
+type FenceOwner = { requiresQuote: boolean; listContentColumn: number | null }
+type OpenFence = { char: '`' | '~'; len: number; owner: FenceOwner }
+
+// Best-effort fenced-code detection for the trailing-tool-call safety guard.
+// Returns true when the candidate (whose first raw line is `candidateFirstLine`)
+// sits inside a still-open Markdown fence — meaning the trailing call is fenced
+// example content and must NOT be stripped.
+//
+// Top-level and blockquote-prefixed fences use normal opener/closer bookkeeping;
+// list-marker-prefixed fences are recognized as OPENERS only. An open
+// blockquote-owned fence is abandoned by an unquoted non-blank line, and an open
+// list-owned fence by a non-blank line indented before the marker's recorded
+// content column (see `abandonIfLeftContainer`). The candidate's OWN first line is
+// run through the same abandon check last: an unquoted/dedented candidate has left
+// its container, so a container-owned fence no longer protects it and the call is
+// stripped. Blank lines never abandon; top-level fences are never abandoned, so a
+// column-zero candidate under an ordinary open top-level fence stays protected.
+//
+// This deliberately approximates container continuity: a fence tracks at most one
+// blockquote requirement plus one post-blockquote list content column (so a
+// `> - ``` ` fence requires BOTH), while paragraph lazy continuation, exact
+// CommonMark list padding, DEEPER nested stacks (list-in-list, quote-in-list-in-
+// quote), and container re-entry are out of scope. The safety bias is toward "in a
+// fence" (a missed close leaves a legitimate example unstripped, safer than
+// stripping it), bounded by the container-exit rules so a real leak that has left
+// its container is still caught.
+function startsInsideFencedCodeBlock(prefix: string, candidateFirstLine: string): boolean {
+  let open: OpenFence | null = null
+  // The list item currently in effect (measured post-blockquote-strip), so a
+  // fence that opens on a list item's CONTINUATION line — `- item`\n`  ``` `,
+  // not the `- ``` ` marker line — inherits the item's content column and is
+  // abandoned when a later line dedents out of it. Tracks its own quote
+  // requirement so an unquoted line can't inherit a list started inside `> …`.
+  let activeListItem: { contentColumn: number; requiresQuote: boolean } | null = null
+
+  for (const rawLine of prefix.split('\n')) {
+    open = abandonIfLeftContainer(open, rawLine)
+    const { line, quoted } = stripBlockquoteMarkers(rawLine)
+
+    // Maintain the active list item only outside a fence (fenced content must not
+    // create list state): a marker line replaces it; a non-blank line that leaves
+    // its quote context or dedents before its content column expires it; blank
+    // lines preserve it.
+    if (open === null) {
+      const listItem = /^( {0,3})((?:[-+*]|\d{1,9}[.)])[ \t]+)/.exec(line)
+      if (listItem !== null) {
+        activeListItem = { contentColumn: columnWidth(listItem[1]! + listItem[2]!), requiresQuote: quoted }
+      } else if (
+        line.trim() !== '' &&
+        activeListItem !== null &&
+        (activeListItem.requiresQuote !== quoted || leadingIndentColumns(line) < activeListItem.contentColumn)
+      ) {
+        activeListItem = null
+      }
+    }
+
+    const plainFence = /^( {0,3})(`{3,}|~{3,})([^\n]*)$/.exec(line)
+    if (plainFence !== null) {
+      const indent = plainFence[1]!
+      const run = plainFence[2]!
+      const char = run[0] as '`' | '~'
+      const rest = plainFence[3]!
+      if (open === null) {
+        if (char === '`' && rest.includes('`')) continue
+        // A plain opener indented into the active list item inherits its content
+        // column (continuation-line fence); a genuinely top-level opener keeps null.
+        const listContentColumn =
+          activeListItem !== null &&
+          activeListItem.requiresQuote === quoted &&
+          columnWidth(indent) >= activeListItem.contentColumn
+            ? activeListItem.contentColumn
+            : null
+        open = { char, len: run.length, owner: { requiresQuote: quoted, listContentColumn } }
+      } else if (char === open.char && run.length >= open.len && rest.trim() === '') {
+        open = null
+      }
+      continue
+    }
+
+    // A list-marker-prefixed fence only ever OPENS; inside an open fence it is
+    // fenced content, not a closer. It records BOTH requirements it was opened
+    // under: the blockquote (`> - ``` `) and the list content column — the full
+    // width of the marker prefix (`- `, `1. `, nested chains, post-quote-strip),
+    // tabs expanded — so a later line that leaves EITHER has left the item.
+    if (open !== null) continue
+    const listFence = /^((?: {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+)+) {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line)
+    if (listFence === null) continue
+    const markerPrefix = listFence[1]!
+    const run = listFence[2]!
+    const char = run[0] as '`' | '~'
+    const rest = listFence[3]!
+    if (char === '`' && rest.includes('`')) continue
+    open = { char, len: run.length, owner: { requiresQuote: quoted, listContentColumn: columnWidth(markerPrefix) } }
+  }
+  // The candidate's own first line is the final container-continuation signal: an
+  // unquoted (blockquote) or dedented (list) candidate has left the container, so
+  // a container-owned fence no longer protects it. The candidate is never itself a
+  // fence marker (it already passed isWholeMessageToolCall), so only the abandon
+  // check applies here — no fence open/close bookkeeping.
+  return abandonIfLeftContainer(open, candidateFirstLine) !== null
+}
+
+// Returns the fence with its owning container(s) still intact, or null when the
+// given raw line has LEFT any required container: a fence that requires a
+// blockquote is abandoned by an unquoted non-blank line, and a fence with a list
+// content column is abandoned by a non-blank line indented before it. The two
+// requirements are independent (OR), so a `> - ``` ` fence is abandoned by leaving
+// EITHER the blockquote or the list. A fence with no requirements (top-level) and
+// blank lines never abandon.
+function abandonIfLeftContainer(open: OpenFence | null, rawLine: string): OpenFence | null {
+  if (open === null) return null
+  const { line, quoted } = stripBlockquoteMarkers(rawLine)
+  if (line.trim() === '') return open
+  if (open.owner.requiresQuote && !quoted) return null
+  if (open.owner.listContentColumn !== null && leadingIndentColumns(line) < open.owner.listContentColumn) return null
+  return open
+}
+
+// Removes one or more leading blockquote markers so a `> ```` fence participates
+// in bookkeeping as if unquoted, and reports whether the line was quoted so the
+// caller can detect the blockquote-exit that abandons a blockquote-owned fence.
+function stripBlockquoteMarkers(line: string): { line: string; quoted: boolean } {
+  const match = /^(?: {0,3}>[ \t]?)+(.*)$/.exec(line)
+  return match === null ? { line, quoted: false } : { line: match[1]!, quoted: true }
+}
+
+// Leading-indent width in columns (whitespace only, stopping at the first
+// non-space), expanding tabs to the next 4-column stop. Used to compare a later
+// line's indentation against a list item's content column.
+function leadingIndentColumns(line: string): number {
+  let column = 0
+  for (const char of line) {
+    if (char === ' ') column += 1
+    else if (char === '\t') column += 4 - (column % 4)
+    else break
+  }
+  return column
+}
+
+// Full display width of a string in columns, expanding tabs to the next 4-column
+// stop. Used to measure a list marker prefix so the content column lands after it.
+function columnWidth(s: string): number {
+  let column = 0
+  for (const char of s) column += char === '\t' ? 4 - (column % 4) : 1
+  return column
 }
 
 // Tolerant single-purpose scanner that pulls the `text` argument out of a
