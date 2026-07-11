@@ -8,6 +8,7 @@ import {
   containsKimiToolDelimiter,
   isNoReplySignal,
   isUpstreamEmptyResponseSentinel,
+  stripTrailingLeakedToolCall,
   type ChannelRouter,
 } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
@@ -124,7 +125,7 @@ export function createChannelSendTool({
 
     async execute(_toolCallId, params) {
       const adapter = params.adapter as AdapterId
-      const bodyText = params.text
+      let bodyText = params.text
       const attachments = params.attachments
       if ((bodyText === undefined || bodyText === '') && (attachments === undefined || attachments.length === 0)) {
         logger.warn(formatChannelToolFailure('channel_send', 'missing text and attachments'))
@@ -160,6 +161,21 @@ export function createChannelSendTool({
         return {
           content: [{ type: 'text' as const, text: `channel_send denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
+        }
+      }
+
+      // Prose-then-trailing-call leak (mirrors router.ts validateChannelTurn):
+      // the model put a real reply plus a serialized trailing tool call in the
+      // `text` arg. Strip the plumbing and keep the prose rather than denying,
+      // so the legitimate reply still reaches the channel. Whole-message calls
+      // (no prose prefix) are untouched here and left to the router's recovery.
+      if (bodyText !== undefined) {
+        const trailingLeak = stripTrailingLeakedToolCall(bodyText)
+        if (trailingLeak !== null && trailingLeak.text !== '') {
+          logger.warn(
+            formatChannelToolFailure('channel_send', `stripped trailing_tool_call_leak tool=${trailingLeak.toolName}`),
+          )
+          bodyText = trailingLeak.text
         }
       }
 

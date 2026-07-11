@@ -29,6 +29,7 @@ import {
   EMPTY_TURN_RETRY_NUDGE,
   extractPlainTextChannelToolCallText,
   getPlainTextChannelToolCallKind,
+  stripTrailingLeakedToolCall,
   HISTORY_ATTACHMENT_LIMIT,
   MAX_CHANNEL_SENDS_PER_TURN,
   MAX_EMPTY_TURN_RETRIES,
@@ -4865,6 +4866,30 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  test('posts only the prose when a real reply is followed by a trailing skip_response leak', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: "you're not really an AI, right?" }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        'hmm, not really sure about that one\n\nskip_response({ reason: "Natural conversation end, no new info to add" })',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hmm, not really sure about that one')
+    expect(sent[0]!.text).not.toContain('skip_response')
+    expect(logs.some((m) => m.includes('stripped trailing_tool_call_leak tool=skip_response'))).toBe(true)
+  })
+
   test('suppresses a quote-free skip_response() leak SILENTLY (no self-correction nudge)', async () => {
     const dir = await tempDir()
     const logs: string[] = []
@@ -5029,6 +5054,211 @@ describe('ChannelRouter channel-turn protocol', () => {
       expect(getPlainTextChannelToolCallKind('read({ path: "x" }) loads a file for you')).toBeNull()
       expect(getPlainTextChannelToolCallKind('You can use bash("ls") to list files')).toBeNull()
       expect(getPlainTextChannelToolCallKind('channel_disengagement is the noun')).toBeNull()
+    })
+  })
+
+  describe('stripTrailingLeakedToolCall', () => {
+    test('strips a real reply followed by a trailing skip_response leak, keeping only the prose', () => {
+      const leak =
+        'hmm, not really sure about that one\n\nskip_response({ reason: "Natural conversation end, no new info to add" })'
+      const res = stripTrailingLeakedToolCall(leak)
+      expect(res?.text).toBe('hmm, not really sure about that one')
+      expect(res?.toolName).toBe('skip_response')
+    })
+
+    test('is language-agnostic: strips after Japanese and Arabic prefixes too', () => {
+      expect(stripTrailingLeakedToolCall('なるほど、それは分かりません\n\nskip_response({ reason: "x" })')?.text).toBe(
+        'なるほど、それは分かりません',
+      )
+      expect(stripTrailingLeakedToolCall('لا أعرف ذلك حقًا\n\nskip_response()')?.text).toBe('لا أعرف ذلك حقًا')
+    })
+
+    test('normalizes CRLF and strips the trailing call', () => {
+      expect(stripTrailingLeakedToolCall('hello there\r\n\r\nskip_response()')?.text).toBe('hello there')
+    })
+
+    test('strips a trailing channel_reply/send leak without recovering its text arg', () => {
+      const res = stripTrailingLeakedToolCall('here you go\n\nchannel_reply({"text":"hi"})')
+      expect(res?.text).toBe('here you go')
+      expect(res?.toolName).toBe('channel_reply')
+    })
+
+    test('strips a truncated (unbalanced) trailing call — partial plumbing must not ship', () => {
+      expect(stripTrailingLeakedToolCall('answer text\n\nskip_response({ reason: "hi')?.text).toBe('answer text')
+    })
+
+    test('strips multiple contiguous trailing call blocks, keeping the prose', () => {
+      const res = stripTrailingLeakedToolCall('my answer\n\nchannel_react({ emoji: "eyes" })\n\nskip_response()')
+      expect(res?.text).toBe('my answer')
+      // The OUTERMOST (last) leaked call is reported as the tool name.
+      expect(res?.toolName).toBe('skip_response')
+    })
+
+    test('strips a leak that follows a CLOSED fenced code block', () => {
+      expect(stripTrailingLeakedToolCall('```\ncode\n```\n\nsome answer\n\nskip_response()')?.text).toBe(
+        '```\ncode\n```\n\nsome answer',
+      )
+    })
+
+    test('leaves an inline tool mention untouched (not a whole-message trailing call)', () => {
+      expect(stripTrailingLeakedToolCall('Use skip_response() when you want silence.')).toBeNull()
+      expect(stripTrailingLeakedToolCall('read({ path: "x" }) loads a file.')).toBeNull()
+    })
+
+    test('leaves a call that is followed by more prose untouched', () => {
+      expect(stripTrailingLeakedToolCall('prose\n\nskip_response()\n\nmore explanation here.')).toBeNull()
+    })
+
+    test('requires a BLANK line: an adjacent final call line is left untouched', () => {
+      expect(stripTrailingLeakedToolCall('Explanation:\nskip_response()')).toBeNull()
+    })
+
+    test('leaves a call INSIDE an open fenced code block untouched (legitimate teaching)', () => {
+      expect(stripTrailingLeakedToolCall('example:\n\n```\nskip_response()\n```')).toBeNull()
+    })
+
+    test('leaves a call inside a tilde-fenced code block untouched', () => {
+      expect(stripTrailingLeakedToolCall('example:\n\n~~~\nskip_response()\n~~~')).toBeNull()
+    })
+
+    // Each pseudo-closer fixture ends with a blank-line-separated bare
+    // `skip_response()` immediately after the pseudo-closer and omits any later
+    // real fence, so the trailing candidate IS a whole-message call and the ONLY
+    // thing keeping it unstripped is `startsInsideFencedCodeBlock` treating the
+    // fence as still-open. Reverting the scanner fix therefore fails these.
+    test('a SHORTER fence run does not close a longer opener — the call stays fenced', () => {
+      // CommonMark: a closer must be at least as long as the opener, so the ```
+      // line inside the ```` block is content and the fence stays open.
+      expect(stripTrailingLeakedToolCall('example:\n\n````\ncode\n```\n\nskip_response()')).toBeNull()
+    })
+
+    test('a fence run with trailing non-whitespace does not close — the call stays fenced', () => {
+      // CommonMark: a closer carries only whitespace after the run; ``` js is an
+      // info string, so it never closes and the fence stays open.
+      expect(stripTrailingLeakedToolCall('```\ncode\n``` js\n\nskip_response()')).toBeNull()
+    })
+
+    test('a 4-space-indented fence run does not close — the call stays fenced', () => {
+      // CommonMark: a closing fence has at most 3 leading spaces; 4+ is an
+      // indented-code line, not a closer, so the fence stays open.
+      expect(stripTrailingLeakedToolCall('example:\n\n```\ncode\n    ```\n\nskip_response()')).toBeNull()
+    })
+
+    test('a backtick-fence opener whose info string contains a backtick opens nothing — later call is stripped', () => {
+      // CommonMark forbids a backtick in a backtick-fence info string, so this
+      // line is not a valid opener and the later call is NOT protected.
+      expect(stripTrailingLeakedToolCall('answer\n\n``` docs `x`\n\nskip_response()')?.text).toBe(
+        'answer\n\n``` docs `x`',
+      )
+    })
+
+    test('a same-length closing fence DOES close, so a later real leak is stripped', () => {
+      // Guards the fix against over-correcting: once the fence is properly closed
+      // by an equal-length run, a genuine trailing leak after it is still caught.
+      expect(stripTrailingLeakedToolCall('````\ncode\n````\n\nreal answer\n\nskip_response()')?.text).toBe(
+        '````\ncode\n````\n\nreal answer',
+      )
+    })
+
+    test('a mismatched-character fence run does not close — the call stays fenced', () => {
+      // CommonMark: a closer must use the SAME fence character. A ~~~ line inside
+      // a ``` block (and the reverse) is content, so the fence stays open.
+      expect(stripTrailingLeakedToolCall('```\ncode\n~~~\n\nskip_response()')).toBeNull()
+      expect(stripTrailingLeakedToolCall('~~~\ncode\n```\n\nskip_response()')).toBeNull()
+    })
+
+    test('a fence opened inside a list item stays open while the candidate stays indented', () => {
+      // CommonMark parses `- ``` ` as a list item introducing a fenced block; the
+      // trailing call is still indented into the item, so it stays fenced.
+      expect(stripTrailingLeakedToolCall('example:\n\n- ```\n  code\n\n  skip_response()')).toBeNull()
+      expect(stripTrailingLeakedToolCall('example:\n\n1. ```\n   code\n\n   skip_response()')).toBeNull()
+    })
+
+    test('abandons a list fence when the trailing candidate is dedented out of the item — call stripped', () => {
+      // The bare (column-0) trailing call is indented before the item's content
+      // column, so it has LEFT the list item and the fence no longer protects it.
+      expect(stripTrailingLeakedToolCall('example:\n\n- ```\n  code\n\nskip_response()')?.text).toBe(
+        'example:\n\n- ```\n  code',
+      )
+    })
+
+    test('abandons a blockquote fence when the trailing candidate is unquoted — call stripped', () => {
+      // The bare (unquoted) trailing call has LEFT the blockquote that owns the
+      // fence, so the fence no longer protects it and the call is a real leak.
+      expect(stripTrailingLeakedToolCall('> ```\n> code\n\nskip_response()')?.text).toBe('> ```\n> code')
+    })
+
+    test('a QUOTED trailing candidate is filtered before the fence check (not a whole-message call)', () => {
+      // A `> skip_response()` candidate is not a bare tool call (leading `>`), so
+      // isWholeMessageToolCall rejects it and the message is left untouched — the
+      // fence path is never reached.
+      expect(stripTrailingLeakedToolCall('> ```\n> code\n\n> skip_response()')).toBeNull()
+    })
+
+    test('a CLOSED blockquote fence lets a later real leak be stripped', () => {
+      // Counterpart to the open-blockquote case: once the `> ``` ` fence is closed
+      // (also blockquoted), a genuine trailing leak after it is still caught.
+      expect(stripTrailingLeakedToolCall('> ```\n> code\n> ```\n\nanswer\n\nskip_response()')?.text).toBe(
+        '> ```\n> code\n> ```\n\nanswer',
+      )
+    })
+
+    test('abandons an open blockquote fence after an unquoted non-blank line — later leak is stripped', () => {
+      // The blockquote fence is never explicitly closed, but leaving the blockquote
+      // (an unquoted non-blank line `answer`) ends the container that owns it, so
+      // the fence is abandoned and the trailing call is a real leak.
+      expect(stripTrailingLeakedToolCall('> ```\n> code\n\nanswer\n\nskip_response()')?.text).toBe(
+        '> ```\n> code\n\nanswer',
+      )
+    })
+
+    test('abandons an open list fence after dedenting out of the item — later leak is stripped', () => {
+      // The `- ``` ` fence opens inside a list item; a later non-blank line indented
+      // before the item's content column (`answer` at column 0) leaves the item, so
+      // the fence is abandoned and the trailing call is stripped.
+      expect(stripTrailingLeakedToolCall('example:\n\n- ```\n  code\n\nanswer\n\nskip_response()')?.text).toBe(
+        'example:\n\n- ```\n  code\n\nanswer',
+      )
+    })
+
+    test('a list-marker-prefixed fence never CLOSES an open fence — a later real leak is stripped', () => {
+      // Inside an already-open top-level fence, a `- ``` ` line is content, not a
+      // closer, so the block the reviewer flagged cannot be abused to swallow a
+      // genuine trailing leak. The equal-length top-level closer still closes it.
+      expect(stripTrailingLeakedToolCall('```\n- ```\n```\n\nreal answer\n\nskip_response()')?.text).toBe(
+        '```\n- ```\n```\n\nreal answer',
+      )
+    })
+
+    test('abandons a blockquote+list stacked fence when the candidate leaves the blockquote — call stripped', () => {
+      // A `> - ``` ` fence requires BOTH a blockquote and the list indent. The
+      // candidate `  skip_response()` still meets the list column (2) but is
+      // unquoted — it has left the blockquote — so the fence is abandoned and the
+      // call is a real leak, not fenced content.
+      expect(stripTrailingLeakedToolCall('> - ```\n>   code\n\n  skip_response()')?.text).toBe('> - ```\n>   code')
+    })
+
+    test('abandons a CONTINUATION-line list fence when the candidate is dedented — call stripped', () => {
+      // The fence opens on the list item's continuation line (`  ``` `, not a
+      // `- ``` ` marker line), so it inherits the item's content column (2). The
+      // column-0 candidate has dedented out of the item, so the call is stripped.
+      expect(stripTrailingLeakedToolCall('- item text\n  ```\n  code\n\nskip_response()')?.text).toBe(
+        '- item text\n  ```\n  code',
+      )
+    })
+
+    test('a CONTINUATION-line list fence protects a candidate that stays in the item', () => {
+      // Same continuation-line fence, but the candidate stays indented into the
+      // item (column 2), so it remains fenced content and is not stripped.
+      expect(stripTrailingLeakedToolCall('- item text\n  ```\n  code\n\n  skip_response()')).toBeNull()
+    })
+
+    test('returns null for a whole-message call (no prose prefix) — that is the other parser’s job', () => {
+      expect(stripTrailingLeakedToolCall('skip_response({ reason: "x" })')).toBeNull()
+    })
+
+    test('returns null for ordinary prose with no trailing call', () => {
+      expect(stripTrailingLeakedToolCall('just a normal reply, nothing leaked here')).toBeNull()
     })
   })
 
