@@ -4,10 +4,21 @@ import { expectStable, waitFor } from './wait-for'
 
 describe('waitFor', () => {
   test('resolves immediately when predicate is already truthy (fast path, no timer tick)', async () => {
-    const start = Date.now()
-    const result = await waitFor(() => 'ready')
+    // Assert the fast-path BEHAVIOR (return on the first predicate call, no
+    // polling loop) instead of a wall-clock bound. History: the timing
+    // assertion was 5ms (74be577-era), widened to 50ms (86abb5f) after CI
+    // flakes, then STILL flaked at 108ms under 18-worker `bun test --parallel`
+    // contention — a saturated scheduler stretches even one `await` microtask
+    // past any fixed budget. Counting invocations is scheduler-independent:
+    // the loop pays one `setTimeout` per extra call, so "called once" IS
+    // "no timer tick".
+    let calls = 0
+    const result = await waitFor(() => {
+      calls++
+      return 'ready'
+    })
     expect(result).toBe('ready')
-    expect(Date.now() - start).toBeLessThan(50)
+    expect(calls).toBe(1)
   })
 
   test('resolves with the truthy value when predicate flips during polling', async () => {
