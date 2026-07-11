@@ -108,6 +108,26 @@ describe('createChannelSendTool', () => {
     expect(result.details).toEqual({ ok: true })
   })
 
+  test('strips a trailing tool-call leak from text, sending only the prose', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelSendTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: 'hmm, not really sure about that one\n\nskip_response({ reason: "no new info" })',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.text).toBe('hmm, not really sure about that one')
+    expect(calls[0]!.text).not.toContain('skip_response')
+    expect(result.details).toMatchObject({ ok: true })
+  })
+
   test('surfaces messageId and messageIds from the router result in details', async () => {
     const tool = createChannelSendTool({
       router: fakeRouter(async () => ({ ok: true, messageId: '1700.0001', messageIds: ['1700.0001', '1700.0002'] })),

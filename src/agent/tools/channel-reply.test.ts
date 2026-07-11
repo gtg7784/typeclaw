@@ -149,6 +149,24 @@ describe('createChannelReplyTool', () => {
     expect(result.details).toEqual({ ok: true, messageId: 'ts1', messageIds: ['ts1', 'ts2'] })
   })
 
+  test('strips a trailing tool-call leak from text, sending only the prose', async () => {
+    const calls: OutboundMessage[] = []
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async (msg) => {
+        calls.push(msg)
+        return { ok: true }
+      }),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, {
+      text: 'hmm, not really sure about that one\n\nskip_response({ reason: "no new info" })',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.text).toBe('hmm, not really sure about that one')
+    expect(calls[0]!.text).not.toContain('skip_response')
+    expect(result.details).toMatchObject({ ok: true })
+  })
+
   test('combines continue with messageId when a mid-turn ack carries an id', async () => {
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true, messageId: 'ts9', messageIds: ['ts9'] })),

@@ -7,6 +7,7 @@ import {
   containsKimiToolDelimiter,
   isNoReplySignal,
   isUpstreamEmptyResponseSentinel,
+  stripTrailingLeakedToolCall,
   type ChannelRouter,
 } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
@@ -100,7 +101,7 @@ export function createChannelReplyTool({
     }),
 
     async execute(_toolCallId, params) {
-      const text = params.text
+      let text = params.text
       const attachments = params.attachments
       const keepTurnAlive = params.continue === true
       if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
@@ -137,6 +138,19 @@ export function createChannelReplyTool({
         return {
           content: [{ type: 'text' as const, text: `channel_reply denied: ${kimiLeakError}` }],
           details: { ok: false, error: kimiLeakError },
+        }
+      }
+
+      // Prose-then-trailing-call leak (mirrors router.ts + channel-send.ts):
+      // strip a serialized trailing tool call while keeping the real reply
+      // prose, rather than denying and stranding the user's answer.
+      if (text !== undefined) {
+        const trailingLeak = stripTrailingLeakedToolCall(text)
+        if (trailingLeak !== null && trailingLeak.text !== '') {
+          logger.warn(
+            formatChannelToolFailure('channel_reply', `stripped trailing_tool_call_leak tool=${trailingLeak.toolName}`),
+          )
+          text = trailingLeak.text
         }
       }
 
