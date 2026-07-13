@@ -1431,6 +1431,10 @@ export type CreateChannelRouterOptions = {
   logger?: RouterLogger
   // Test seam: clock for sticky/debounce/participants. Defaults to Date.now.
   now?: () => number
+  // Test seams for synchronizing strict post-tool retry backoff without global
+  // random/timer mutation. Production defaults remain Math.random and no hook.
+  retryRandom?: () => number
+  onRetryBackoffStart?: () => void
   // Test seam: measure a transcript file's byte size for the soft-TTL grace
   // decision. Defaults to a stat()-based reader returning 0 for a missing or
   // unreadable file (grace then fails closed to roll-over-at-soft-TTL).
@@ -2742,6 +2746,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.firstUnprocessedAt = 0
     live.promptQueue.length = 0
     live.pendingSystemReminders.length = 0
+    live.continueReplyTurn = null
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
@@ -2934,6 +2939,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const successfulSendsBeforePrompt = live.successfulChannelSends
         const emptyTurnRetriesBeforePrompt = live.emptyTurnRetries
         const toolLeakRetriesBeforePrompt = live.toolLeakRetries
+        const willingnessNudgesBeforePrompt = live.willingnessNudges
         const engageAddPromises = live.currentTurnEngageReactions
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
@@ -2964,6 +2970,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
             session: live.session,
             text: promptText,
             shouldFailover: (err) => isFailoverWorthy(err.message),
+            authorizeRetryAfterCompletedToolResult: () => hasPendingContinueReply(live),
+            ...(options.retryRandom !== undefined ? { retryRandom: options.retryRandom } : {}),
+            ...(options.onRetryBackoffStart !== undefined ? { onRetryBackoffStart: options.onRetryBackoffStart } : {}),
             setModelForRef: async (ref) => {
               await live.session.setModel(applyModelRuntimeOverrides(resolveModel(ref), ref))
               live.activeModelRef = ref
@@ -2996,7 +3005,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // tool-leak retry that later replies must commit the signal AT the
           // successful retry, not clear it after the first suppressed attempt.
           const retryQueuedThisTurn =
-            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt || live.toolLeakRetries > toolLeakRetriesBeforePrompt
+            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt ||
+            live.toolLeakRetries > toolLeakRetriesBeforePrompt ||
+            live.willingnessNudges > willingnessNudgesBeforePrompt
           const providerErrorThisTurn = assistantLeafStopReason(live.session) === 'error'
           const fallbackPostedThisTurn = live.emptyTurnFallbackTurn === live.turnSeq
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
@@ -3063,7 +3074,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // Either retry budget keeps the turn in flight, so a deferred provider
           // error must wait for the reminder-only iteration that actually ends it.
           const retryQueuedThisTurn =
-            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt || live.toolLeakRetries > toolLeakRetriesBeforePrompt
+            live.emptyTurnRetries > emptyTurnRetriesBeforePrompt ||
+            live.toolLeakRetries > toolLeakRetriesBeforePrompt ||
+            live.willingnessNudges > willingnessNudgesBeforePrompt
           await maybePostDeferredProviderError(
             live,
             sentReplyThisTurn && !hasPendingContinueReply(live),
