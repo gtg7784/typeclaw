@@ -2759,9 +2759,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const hasStoppableWork = (live: LiveSession): boolean =>
     live.draining || live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0
 
+  const hasPendingContinueReply = (live: LiveSession): boolean => {
+    const progressReply = live.continueReplyTurn
+    return (
+      progressReply !== null &&
+      progressReply.turnSeq === live.turnSeq &&
+      progressReply.sendCount === live.successfulChannelSends
+    )
+  }
+
   const maybePostDeferredProviderError = async (
     live: LiveSession,
-    sentReplyThisTurn: boolean,
+    completedReplyThisTurn: boolean,
     retryQueued: boolean,
   ): Promise<void> => {
     const pending = live.pendingProviderError
@@ -2771,7 +2780,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
     // The turn recovered and replied — the provider blip was transient, so a
     // failure notice would be a false alarm stranded above the real reply.
-    if (sentReplyThisTurn) {
+    if (completedReplyThisTurn) {
       live.pendingProviderError = null
       return
     }
@@ -3055,7 +3064,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // error must wait for the reminder-only iteration that actually ends it.
           const retryQueuedThisTurn =
             live.emptyTurnRetries > emptyTurnRetriesBeforePrompt || live.toolLeakRetries > toolLeakRetriesBeforePrompt
-          await maybePostDeferredProviderError(live, sentReplyThisTurn, retryQueuedThisTurn)
+          await maybePostDeferredProviderError(
+            live,
+            sentReplyThisTurn && !hasPendingContinueReply(live),
+            retryQueuedThisTurn,
+          )
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)

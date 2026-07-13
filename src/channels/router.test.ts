@@ -13323,6 +13323,59 @@ describe('ChannelRouter continue:true empty-stop recovery (phrase-independent)',
     ).toBe(true)
   })
 
+  test('surfaces a provider error after a continue:true progress reply', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toBe('찾아볼게.')
+    expect(sent[1]).toMatch(/upstream LLM provider failed/i)
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+  })
+
+  test('suppresses a provider error after a final reply follows the continue:true progress reply', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지난 기록은 이 내용이야.' })
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toEqual(['찾아볼게.', '지난 기록은 이 내용이야.'])
+  })
+
   test('does NOT recover when the continue:true ack leaf is unchanged since the send (ack-then-await-user)', async () => {
     const dir = await tempDir()
     const logs: string[] = []
