@@ -4,6 +4,7 @@ import type { AgentSession } from './index'
 import {
   promptWithSameRefRetryOnly,
   retryBackoffMs,
+  retryTurnAfterCompletedToolResult,
   retryTurnOnPersistentSession,
   RETRIES_PER_REF,
 } from './retry-same-ref'
@@ -29,13 +30,16 @@ type FakeAgent = {
   continued: number
 }
 
-function sessionWith(messages: Array<{ role: string; stopReason?: string }>, continueImpl?: () => Promise<void>) {
+function sessionWith(
+  messages: Array<{ role: string; stopReason?: string }>,
+  continueImpl?: (agent: FakeAgent) => Promise<void>,
+) {
   const agent: FakeAgent = {
     state: { messages },
     continued: 0,
     continue: async () => {
       agent.continued++
-      await continueImpl?.()
+      await continueImpl?.(agent)
     },
   }
   return { session: { agent } as unknown as AgentSession, agent }
@@ -95,6 +99,130 @@ describe('retryTurnOnPersistentSession', () => {
     await expect(retryTurnOnPersistentSession(session, { attempt: 0, random: () => 0 })).rejects.toThrow(
       'socket hang up',
     )
+  })
+})
+
+describe('retryTurnAfterCompletedToolResult', () => {
+  test('removes only an error assistant after a completed tool result, then continues', async () => {
+    const messages = [
+      { role: 'user' },
+      { role: 'assistant', stopReason: 'toolUse' },
+      { role: 'toolResult' },
+      { role: 'assistant', stopReason: 'error' },
+    ]
+    const { session, agent } = sessionWith(messages)
+
+    const ok = await retryTurnAfterCompletedToolResult(session, {
+      attempt: 0,
+      random: () => 0,
+      authorize: () => true,
+    })
+
+    expect(ok).toBe(true)
+    expect(agent.continued).toBe(1)
+    expect(agent.state.messages).toEqual(messages.slice(0, -1))
+  })
+
+  test('signals backoff after tail eligibility and before jitter/authorization', async () => {
+    const order: string[] = []
+    const { session } = sessionWith([{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }], async () => {
+      order.push('continue')
+    })
+
+    expect(
+      await retryTurnAfterCompletedToolResult(session, {
+        attempt: 0,
+        onBackoffStart: () => order.push('backoff-start'),
+        random: () => {
+          order.push('random')
+          return 0
+        },
+        authorize: () => {
+          order.push('authorize')
+          return true
+        },
+      }),
+    ).toBe(true)
+    expect(order).toEqual(['backoff-start', 'random', 'authorize', 'continue'])
+  })
+
+  test('fails closed without mutation for unsafe transcript tails', async () => {
+    const unsafeTails = [
+      [{ role: 'toolResult' }],
+      [{ role: 'user' }, { role: 'assistant', stopReason: 'error' }],
+      [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'stop' }],
+      [{ role: 'user' }, { role: 'toolResult' }],
+    ]
+
+    for (const messages of unsafeTails) {
+      const original = messages.map((message) => ({ ...message }))
+      const { session, agent } = sessionWith(messages)
+      expect(
+        await retryTurnAfterCompletedToolResult(session, {
+          attempt: 0,
+          random: () => 0,
+          authorize: () => true,
+        }),
+      ).toBe(false)
+      expect(agent.continued).toBe(0)
+      expect(agent.state.messages).toEqual(original)
+    }
+  })
+
+  test('reauthorizes after backoff and fails closed when authorization was revoked', async () => {
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    const { session, agent } = sessionWith(messages)
+    let authorized = true
+
+    const retry = retryTurnAfterCompletedToolResult(session, {
+      attempt: 0,
+      random: () => 0.001,
+      authorize: () => authorized,
+    })
+    authorized = false
+
+    expect(await retry).toBe(false)
+    expect(agent.continued).toBe(0)
+    expect(agent.state.messages).toBe(messages)
+  })
+
+  test('restores the removed error leaf when continue throws without transcript progress', async () => {
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    const { session, agent } = sessionWith(messages, async () => {
+      throw new Error('socket hang up')
+    })
+
+    await expect(
+      retryTurnAfterCompletedToolResult(session, {
+        attempt: 0,
+        random: () => 0,
+        authorize: () => true,
+      }),
+    ).rejects.toThrow('socket hang up')
+
+    expect(agent.continued).toBe(1)
+    expect(agent.state.messages).toBe(messages)
+  })
+
+  test('preserves newer transcript progress when continue appends state before throwing', async () => {
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    const progress = { role: 'assistant', stopReason: 'error' }
+    const { session, agent } = sessionWith(messages, async (currentAgent) => {
+      currentAgent.state.messages = [...currentAgent.state.messages, progress]
+      throw new Error('socket hang up after progress')
+    })
+
+    await expect(
+      retryTurnAfterCompletedToolResult(session, {
+        attempt: 0,
+        random: () => 0,
+        authorize: () => true,
+      }),
+    ).rejects.toThrow('socket hang up after progress')
+
+    expect(agent.continued).toBe(1)
+    expect(agent.state.messages).toEqual([{ role: 'toolResult' }, progress])
+    expect(agent.state.messages).not.toBe(messages)
   })
 })
 
