@@ -2833,6 +2833,150 @@ describe('ChannelRouter silent-ack :eyes: on deliberate silence', () => {
     await waitFor(() => events.length === 3)
     expect(events).toEqual(['add-eyes', 'remove-eyes', 'add-eyes'])
   })
+
+  test('an ambient (unaddressed) NO_REPLY leaves NO :eyes:', async () => {
+    // given a message NOT addressed to the bot (no mention, no DM, no reply-to-bot)
+    // — human-to-human chatter the bot only observed — that the model NO_REPLYs
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF, isBotMention: false }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then no silent-ack :eyes: is planted — the bot stays invisible in chatter
+    expect(called).toBe(false)
+  })
+
+  test('an ambient (unaddressed) skip_response leaves NO :eyes:', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF, isBotMention: false }))
+    sessions[0]!.onPrompt = () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'not addressed to me' })
+      sessions[0]!.setAssistantText('Just observing.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('a DM NO_REPLY still leaves an :eyes: (explicitly addressed)', async () => {
+    const dir = await tempDir()
+    const { router, sessions, captured } = await (async () => {
+      const { router, sessions } = makeRouter(dir)
+      router.setTypingCapability('discord-bot', true)
+      const captured: ReactionRequest[] = []
+      router.registerReaction('discord-bot', async (req) => {
+        captured.push(req)
+        return { ok: true }
+      })
+      router.registerOutbound('discord-bot', async () => ({ ok: true }))
+      await router.route(inbound({ reactionRef: REACTION_REF, isBotMention: false, isDm: true }))
+      return { router, sessions, captured }
+    })()
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  test('a reply-to-bot NO_REPLY still leaves an :eyes: (explicitly addressed)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: REACTION_REF, isBotMention: false, replyToBotMessageId: 'bot-msg-1' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: REACTION_REF })
+  })
+
+  const ADDRESSED_REF: ReactionRef = { adapter: 'discord-bot', value: 'addressed-msg' }
+  const AMBIENT_REF: ReactionRef = { adapter: 'discord-bot', value: 'ambient-msg' }
+
+  test('addressed then ambient coalesced: the final ambient message leaves NO :eyes:', async () => {
+    // given an addressed message and a later ambient one coalescing into ONE turn
+    // (single-author harness engages both via the solo-human fallback, so both
+    // land in the batch). Eligibility must follow batch[last] — the ambient tail —
+    // NOT "any addressed message in the batch".
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // when both arrive before the debounce flush, so they coalesce
+    await router.route(inbound({ reactionRef: ADDRESSED_REF, isBotMention: true }))
+    await router.route(inbound({ reactionRef: AMBIENT_REF, isBotMention: false, externalMessageId: 'm2' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the trailing ambient message drives the (in)eligibility: no ack
+    expect(called).toBe(false)
+  })
+
+  test('ambient then addressed coalesced: the :eyes: lands on the final addressed message', async () => {
+    // given an ambient message and a later addressed one coalescing into ONE turn.
+    // batch[last] is the addressed tail, so the ack must fire AND target its ref.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.setTypingCapability('discord-bot', true)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // when both arrive before the debounce flush, so they coalesce
+    await router.route(inbound({ reactionRef: AMBIENT_REF, isBotMention: false }))
+    await router.route(inbound({ reactionRef: ADDRESSED_REF, isBotMention: true, externalMessageId: 'm2' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the ack fires on the final addressed message's ref, not the ambient one
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ emoji: 'eyes', reactionRef: ADDRESSED_REF })
+  })
 })
 
 describe('ChannelRouter retires the persistent silent-ack :eyes: on a later reply', () => {
