@@ -785,6 +785,19 @@ type LiveSession = {
   // origin so `channel_react` reacts to the triggering message, not whichever
   // inbound happens to be latest in the queue. Null on reminder-only turns.
   currentTurnReactionRef: ReactionRef | null
+  // True when the inbound that triggered THIS turn (the message
+  // `currentTurnReactionRef` points at — last item of the drained batch) was
+  // EXPLICITLY addressed to the bot: a DM, an @-mention/alias (`isBotMention`
+  // folds plain-name matching in at the adapter classify layer), or a reply to
+  // the bot's own message. Gates the PERSISTENT silent-ack :eyes: (see
+  // `armSilentTurnAck`): a deliberate silence on a message aimed AT us earns a
+  // courteous "seen, nothing to add" 👀, but staying quiet during ambient
+  // human-to-human chatter (sticky observation, solo-human fallback) must leave
+  // NO mark — otherwise a busy room accumulates stale 👀 on messages the bot
+  // was never part of. Computed from the SAME message the reaction targets so
+  // eligibility and target can never disagree. Reset with `currentTurnReactionRef`
+  // in the drain finally; preserved across reminder-only iterations exactly like it.
+  currentTurnExplicitlyAddressed: boolean
   // Typing-status anchor of the inbound that triggered THIS turn (last item in
   // the drained batch, mirroring `currentTurnReactionRef`). Adapter-opaque ts
   // carried only to the typing path; null when the triggering inbound supplied
@@ -2093,6 +2106,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
+        currentTurnExplicitlyAddressed: false,
         currentTurnTypingThread: null,
         dirtyTypingThreads: new Set(),
         currentTurnEngageReactions: [],
@@ -2838,6 +2852,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
+          const trigger = batch[batch.length - 1]!
+          live.currentTurnExplicitlyAddressed =
+            trigger.isDm || trigger.isBotMention || trigger.replyToBotMessageId !== null
           live.currentTurnTypingThread = batch[batch.length - 1]!.typingThread ?? null
           live.currentTurnEngageReactions = batch.flatMap((m) =>
             m.engageReaction !== undefined ? [m.engageReaction] : [],
@@ -3054,6 +3071,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
+      live.currentTurnExplicitlyAddressed = false
       live.currentTurnEngageReactions = []
       // Drop any still-held reactions if the loop exited without running the
       // per-turn finally (e.g. session destroyed mid-drain): never leave a
@@ -5502,6 +5520,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const armSilentTurnAck = (live: LiveSession, reason: SilentAckReason): void => {
+    // A GitHub review IS its own emoji-shaped output, so it always earns the
+    // 👀; every other deliberate silence earns one ONLY when the triggering
+    // message was addressed to the bot. Staying quiet in ambient chatter leaves
+    // no mark, so a busy room never accumulates stale 👀 on messages the bot
+    // was never part of.
+    const eligible =
+      reason === 'github_review_output' ? live.key.adapter === 'github' : live.currentTurnExplicitlyAddressed
+    if (!eligible) return
     live.silentAckTurn = { turnSeq: live.turnSeq, reason }
   }
 
