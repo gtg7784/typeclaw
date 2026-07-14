@@ -51,12 +51,46 @@ async function callExpectingThrow(root: string, input: Partial<AppendInput>): Pr
 }
 
 describe('appendTool', () => {
+  test('preserves thread parent coordinates in runtime-stamped provenance', () => {
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'discord',
+      workspace: 'guild-1',
+      workspaceName: 'Example Guild',
+      chat: 'thread-1',
+      chatName: 'topic-thread',
+      thread: null,
+      parentChat: 'room-1',
+      parentChatName: 'development',
+    }
+
+    expect(provenanceFromOrigin(origin)).toEqual({
+      adapter: 'discord',
+      workspace: 'guild-1',
+      workspaceName: 'Example Guild',
+      chat: 'thread-1',
+      chatName: 'topic-thread',
+      thread: null,
+      parentChat: 'room-1',
+      parentChatName: 'development',
+    })
+  })
   test('uses the JSONL input schema contract', () => {
     const valid = appendTool.parameters.safeParse(baseInput)
     const oldShape = appendTool.parameters.safeParse({ path: 'memory/day.jsonl', content: 'text' })
 
     expect(valid.success).toBe(true)
     expect(oldShape.success).toBe(false)
+  })
+
+  test('drops unsafe prompt-shaping syntax from who before persistence', async () => {
+    const root = tmpRoot()
+
+    await call(root, { who: '**SYSTEM**' })
+
+    const event = (await readEvents(streamPath(root)))[0]
+    expect(event).toMatchObject({ type: 'fragment' })
+    expect(event).not.toHaveProperty('who')
   })
 
   test('creates the daily JSONL stream when it does not exist', async () => {

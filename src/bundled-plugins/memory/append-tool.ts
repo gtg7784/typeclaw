@@ -9,6 +9,7 @@ import { formatLocalDate } from '@/shared'
 
 import { fragmentContentHash } from './fragment-parser'
 import { streamFilePath } from './paths'
+import { sanitizeProvenanceName } from './provenance-sanitize'
 import { detectSecrets } from './secret-detector'
 import { newEventId, timestampFromId } from './stream-events'
 import type { FragmentEvent, FragmentProvenance, WatermarkEvent } from './stream-events'
@@ -52,16 +53,14 @@ export function provenanceFromOrigin(origin: SessionOrigin | undefined): Fragmen
   // so a credential-shaped name is dropped rather than thrown — keep the raw id,
   // never let the leaky display string reach git. Raw ids are platform-issued
   // identifiers, not free text, so they are not scanned.
-  const workspaceName = redactIfSecret(origin.workspaceName)
-  const chatName = redactIfSecret(origin.chatName)
+  const workspaceName = sanitizeProvenanceName(origin.workspaceName)
+  const chatName = sanitizeProvenanceName(origin.chatName)
+  const parentChatName = sanitizeProvenanceName(origin.parentChatName)
   if (workspaceName !== undefined) where.workspaceName = workspaceName
   if (chatName !== undefined) where.chatName = chatName
+  if (origin.parentChat !== undefined) where.parentChat = origin.parentChat
+  if (parentChatName !== undefined) where.parentChatName = parentChatName
   return where
-}
-
-function redactIfSecret(name: string | undefined): string | undefined {
-  if (name === undefined) return undefined
-  return detectSecrets(name).length === 0 ? name : undefined
 }
 
 export function createAppendTool(options: CreateAppendToolOptions = {}) {
@@ -116,7 +115,8 @@ export function createAppendTool(options: CreateAppendToolOptions = {}) {
       if (validReferences.length > 0) {
         fragment.references = validReferences
       }
-      if (who !== undefined) fragment.who = who
+      const safeWho = sanitizeProvenanceName(who)
+      if (safeWho !== undefined) fragment.who = safeWho
       if (where !== undefined) fragment.where = where
       const watermark: WatermarkEvent = {
         type: 'watermark',
