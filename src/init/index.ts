@@ -27,6 +27,7 @@ import {
   type StartResult,
   stop,
 } from '@/container'
+import { hooklessGitArgs } from '@/git/hookless'
 import { commitSystemFile } from '@/git/system-commit'
 import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { hostLocaleIsCjk } from '@/shared/host-locale'
@@ -653,7 +654,12 @@ export async function isHatched(dir: string): Promise<boolean> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return false
   try {
-    const proc = bun.spawn({ cmd: ['git', 'log', '--format=%s'], cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({
+      cmd: ['git', ...hooklessGitArgs(['log', '--format=%s'])],
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
     if ((await proc.exited) !== 0) return false
     const subjects = (await new Response(proc.stdout).text()).split('\n')
     return subjects.includes(HATCHED_COMMIT_SUBJECT)
@@ -858,7 +864,7 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   try {
     if (hasGit) {
       const head = bun.spawn({
-        cmd: ['git', 'rev-parse', '--verify', 'HEAD'],
+        cmd: ['git', ...hooklessGitArgs(['rev-parse', '--verify', 'HEAD'])],
         cwd,
         env,
         stdout: 'pipe',
@@ -866,21 +872,27 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
       })
       if ((await head.exited) === 0) return { ok: true, skipped: true }
     } else {
-      const init = bun.spawn({ cmd: ['git', 'init', '-b', 'main'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+      const init = bun.spawn({
+        cmd: ['git', ...hooklessGitArgs(['init', '-b', 'main'])],
+        cwd,
+        env,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
       if ((await init.exited) !== 0) {
         const stderr = await new Response(init.stderr).text()
         return { ok: false, reason: `git init failed: ${stderr.trim() || 'no stderr'}` }
       }
     }
 
-    const add = bun.spawn({ cmd: ['git', 'add', '.'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+    const add = bun.spawn({ cmd: ['git', ...hooklessGitArgs(['add', '.'])], cwd, env, stdout: 'pipe', stderr: 'pipe' })
     if ((await add.exited) !== 0) {
       const stderr = await new Response(add.stderr).text()
       return { ok: false, reason: `git add failed: ${stderr.trim() || 'no stderr'}` }
     }
 
     const commit = bun.spawn({
-      cmd: ['git', 'commit', '-m', 'Initial commit 🥚'],
+      cmd: ['git', ...hooklessGitArgs(['commit', '-m', 'Initial commit 🥚'])],
       cwd,
       env,
       stdout: 'pipe',
