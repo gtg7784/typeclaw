@@ -36,6 +36,7 @@ import type {
 } from '@/plugin'
 import {
   buildSandboxedCommand,
+  canWriteAgentRootInSandbox,
   canMountRealProc,
   commandNeedsRealProc,
   DEFAULT_SANDBOX_ENV,
@@ -530,16 +531,15 @@ async function applyBashSandbox(
   if (typeof command !== 'string') return
 
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
-  if (dirs.length === 0 && files.length === 0) return
 
   const sandboxEnvOverlay = buildRoleScopedConfigEnv(agentDir, dirs, envOverlay)
 
-  await ensureBwrapAvailable()
   // bwrap's --ro-bind-data/--tmpfs mask ops abort when the target does not exist
   // on the (read-only, virtiofs/OrbStack) agent-folder bind. Materialize the mask
   // targets on the real host FS first; the full {dirs, files} still feeds
   // subtractMasked below so a masked path is never re-exposed by a later RW bind.
   const maskTargets = await ensureHiddenMaskTargets({ dirs, files })
+  await ensureBwrapAvailable()
   // Per-session /tmp: bind this session's scratch dir over the default
   // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
   // match what the write/edit wrapper redirected a /tmp path to. The bind is
@@ -576,9 +576,11 @@ async function applyBashSandbox(
   // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)
   // would re-expose the hidden real dir. A masked path is already non-writable
   // for this role, so it needs no protection anyway.
-  const protectedZones = writable.dirs.includes(join(agentDir, '.git'))
-    ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
-    : { dirs: [], files: [] }
+  const writableRoot = canWriteAgentRootInSandbox(permissions, origin)
+  const protectedZones =
+    writableRoot || writable.dirs.includes(join(agentDir, '.git'))
+      ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
+      : { dirs: [], files: [] }
   // A recognized standalone `bun add`/`bun install` needs DIRECTORY write at the
   // root (node_modules/ + temp lockfile), which the narrow carve-out model can't
   // grant. Widen to an RW root for that command class only, then re-hide secrets
@@ -633,7 +635,9 @@ async function applyBashSandbox(
           protected: packageInstall.protected,
           blockedCreation: { files: packageInstall.blockedCreation },
         }
-      : { masks: maskTargets, writable, protected: protectedZones }),
+      : writableRoot
+        ? { writableRoot: { dir: agentDir }, masks: maskTargets, protected: protectedZones }
+        : { masks: maskTargets, writable, protected: protectedZones }),
     symlinks,
     network: 'inherit',
     cwd: agentDir,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { lstat, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -7,7 +7,8 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { createPermissionService } from '@/permissions/permissions'
 import { rolesConfigSchema, type RolesConfig } from '@/permissions/schema'
 
-import { ensureHiddenMaskTargets, resolveHiddenPaths } from './hidden-paths'
+import { CANONICAL_AGENT_SECRET_DIRS, CANONICAL_AGENT_SECRET_FILES } from './canonical-secrets'
+import { canWriteAgentRootInSandbox, ensureHiddenMaskTargets, resolveHiddenPaths } from './hidden-paths'
 
 const AGENT = '/agent'
 const hiddenDirs = (agentDir: string) => [
@@ -15,7 +16,8 @@ const hiddenDirs = (agentDir: string) => [
   join(agentDir, 'memory'),
   join(agentDir, 'sessions'),
 ]
-const secretFiles = (agentDir: string) => [join(agentDir, '.env'), join(agentDir, 'secrets.json')]
+const canonicalDirs = (agentDir: string) => CANONICAL_AGENT_SECRET_DIRS.map((dir) => join(agentDir, dir))
+const secretFiles = (agentDir: string) => CANONICAL_AGENT_SECRET_FILES.map((file) => join(agentDir, file))
 
 function parseRoles(raw: unknown): RolesConfig {
   const result = rolesConfigSchema.safeParse(raw)
@@ -29,19 +31,29 @@ function spawnedBy(role: string): SessionOrigin {
 
 const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
 
+describe('canWriteAgentRootInSandbox', () => {
+  test('preserves root writes only for owner and trusted roles', () => {
+    const svc = createPermissionService()
+    expect(canWriteAgentRootInSandbox(svc, tui)).toBe(true)
+    expect(canWriteAgentRootInSandbox(svc, spawnedBy('trusted'))).toBe(true)
+    expect(canWriteAgentRootInSandbox(svc, spawnedBy('member'))).toBe(false)
+    expect(canWriteAgentRootInSandbox(svc, spawnedBy('guest'))).toBe(false)
+  })
+})
+
 describe('resolveHiddenPaths — builtin tiers', () => {
-  test('owner (tui) hides nothing', () => {
+  test('owner (tui) always hides canonical credentials', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, tui, AGENT)
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
-  test('trusted hides nothing (sees private surface and secrets)', () => {
+  test('trusted always hides canonical credentials', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('trusted'), AGENT)
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('system origin hides nothing even when triggered by a guest channel turn', () => {
@@ -52,21 +64,21 @@ describe('resolveHiddenPaths — builtin tiers', () => {
       triggeredBy: { kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null },
     }
     const { dirs, files } = resolveHiddenPaths(svc, origin, AGENT)
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('member sees private surface but hides the secret files', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('member'), AGENT)
-    expect(dirs).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
     expect(files).toEqual(secretFiles(AGENT))
   })
 
   test('guest hides the private surface AND the secret files', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('guest'), AGENT)
-    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(dirs).toEqual([...hiddenDirs(AGENT), ...canonicalDirs(AGENT)])
     expect(files).toEqual(secretFiles(AGENT))
   })
 
@@ -81,7 +93,7 @@ describe('resolveHiddenPaths — fail-safe', () => {
   test('undefined origin is treated as guest (everything hidden)', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, undefined, AGENT)
-    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(dirs).toEqual([...hiddenDirs(AGENT), ...canonicalDirs(AGENT)])
     expect(files).toEqual(secretFiles(AGENT))
   })
 
@@ -96,7 +108,7 @@ describe('resolveHiddenPaths — fail-safe', () => {
       lastInboundAuthorId: 'U_STRANGER',
     }
     const { dirs, files } = resolveHiddenPaths(svc, stranger, AGENT)
-    expect(dirs).toEqual(hiddenDirs(AGENT))
+    expect(dirs).toEqual([...hiddenDirs(AGENT), ...canonicalDirs(AGENT)])
     expect(files).toEqual(secretFiles(AGENT))
   })
 })
@@ -106,18 +118,18 @@ describe('resolveHiddenPaths — custom roles via fs.see grants', () => {
     const roles = parseRoles({ contributor: { match: ['slack:T0 author:U_C'], permissions: ['fs.see.private'] } })
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('contributor'), AGENT)
-    expect(dirs).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
     expect(files).toEqual(secretFiles(AGENT))
   })
 
-  test('custom role with both fs.see grants hides nothing', () => {
+  test('custom role with both fs.see grants still hides canonical credentials', () => {
     const roles = parseRoles({
       steward: { match: ['slack:T0 author:U_S'], permissions: ['fs.see.private', 'fs.see.secrets'] },
     })
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('steward'), AGENT)
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 })
 
@@ -128,7 +140,7 @@ describe('resolveHiddenPaths — legacy security.bypass fallback', () => {
     })
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('legacymember'), AGENT)
-    expect(dirs).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
     expect(files).toEqual(secretFiles(AGENT))
   })
 
@@ -138,8 +150,8 @@ describe('resolveHiddenPaths — legacy security.bypass fallback', () => {
     })
     const svc = createPermissionService({ roles })
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('legacytrusted'), AGENT)
-    expect(dirs).toEqual([])
-    expect(files).toEqual([])
+    expect(dirs).toEqual(canonicalDirs(AGENT))
+    expect(files).toEqual(secretFiles(AGENT))
   })
 })
 
@@ -147,7 +159,7 @@ describe('resolveHiddenPaths — agentDir relativity', () => {
   test('masks are rooted at the given agentDir, not a hardcoded /agent', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, undefined, '/srv/app')
-    expect(dirs).toEqual(hiddenDirs('/srv/app'))
+    expect(dirs).toEqual([...hiddenDirs('/srv/app'), ...canonicalDirs('/srv/app')])
     expect(files).toEqual(secretFiles('/srv/app'))
   })
 })
@@ -191,27 +203,19 @@ describe('ensureHiddenMaskTargets', () => {
     expect(await Bun.file(secrets).text()).toBe('{"real":"content"}')
   })
 
-  test('drops a symlinked mask target — a bind would follow it outside the jail', async () => {
-    // given: a symlink squatting the .env mask target
+  test('fails closed when a canonical file mask target is a symlink', async () => {
     const outside = join(dir, 'outside')
     await writeFile(outside, 'secret')
     const env = join(dir, '.env')
     await symlink(outside, env)
-    // when
-    const result = await ensureHiddenMaskTargets({ dirs: [], files: [env] })
-    // then: the symlink is refused, so it never becomes a --ro-bind-data target
-    expect(result.files).toEqual([])
+    await expect(ensureHiddenMaskTargets({ dirs: [], files: [env] })).rejects.toThrow(/mask target/i)
   })
 
-  test('degrades per target: one unmaterializable entry drops out, the rest survive', async () => {
-    // given: .env is a symlink (dropped), secrets.json is absent (created)
-    const badEnv = join(dir, '.env')
-    await symlink(join(dir, 'nowhere'), badEnv)
-    const secrets = join(dir, 'secrets.json')
-    // when
-    const result = await ensureHiddenMaskTargets({ dirs: [], files: [badEnv, secrets] })
-    // then
-    expect(result.files).toEqual([secrets])
-    expect(await isRegularFile(secrets)).toBe(true)
+  test('fails closed when a canonical directory mask target is a symlink', async () => {
+    const outside = join(dir, 'outside-dir')
+    await mkdir(outside)
+    const credentials = join(dir, 'credentials')
+    await symlink(outside, credentials)
+    await expect(ensureHiddenMaskTargets({ dirs: [credentials], files: [] })).rejects.toThrow(/mask target/i)
   })
 })

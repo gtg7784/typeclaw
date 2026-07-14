@@ -14,10 +14,10 @@ import githubCliAuthPlugin from './index'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
-// resolveHiddenPaths checks fs.see.private + fs.see.secrets; granting both
-// yields empty masks => runsUnsandboxed() true, matching owner/trusted. The
-// default noopPermissionService grants nothing => sandboxed (member/guest).
-const unsandboxedPermissions: PermissionService = {
+// fs.see.secrets authorizes runtime-owned PAT injection for owner/trusted even
+// though canonical credential files remain masked. The default permission
+// service grants nothing, matching member/guest credential withholding.
+const credentialEntitledPermissions: PermissionService = {
   ...noopPermissionService,
   has: (_origin, permission) => permission === 'fs.see.private' || permission === 'fs.see.secrets',
 }
@@ -209,7 +209,7 @@ describe('github-cli-auth plugin', () => {
     expect(resolverCalled).toBe(false)
   })
 
-  test('classic PAT (unsandboxed): injects the PAT for a repo-targeting gh, does not mint', async () => {
+  test('classic PAT (credential-entitled): injects the PAT for a repo-targeting gh, does not mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
     const hook = await hookFor(
@@ -218,7 +218,7 @@ describe('github-cli-auth plugin', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('gh pr view -R acme/widgets')
 
@@ -226,15 +226,14 @@ describe('github-cli-auth plugin', () => {
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh pr view -R acme/widgets')
-    // Unsandboxed: the PAT already rides inherited env; we re-assert it in the
-    // overlay (no minting) so behavior is explicit and matches the git path.
+    // Runtime-owned injection keeps the PAT out of the command and raw files.
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghp_classic' })
     expect(resolverCalled).toBe(false)
   })
 
-  test('classic PAT (unsandboxed): non-repo-targeting gh passes through (nothing to inject)', async () => {
+  test('classic PAT (credential-entitled): non-repo-targeting gh passes through', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
-    const hook = await hookFor(tokenResolver('ghs_minted'), true, { permissions: unsandboxedPermissions })
+    const hook = await hookFor(tokenResolver('ghs_minted'), true, { permissions: credentialEntitledPermissions })
     const event = bashEvent('gh pr view 12')
 
     const result = await hook(event, hookCtx)
@@ -244,7 +243,7 @@ describe('github-cli-auth plugin', () => {
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 
-  test('fine-grained PAT (unsandboxed): leaves command as-is, injects the PAT, does not mint', async () => {
+  test('fine-grained PAT (credential-entitled): leaves command as-is, injects the PAT, does not mint', async () => {
     process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
     const hook = await hookFor(
@@ -253,7 +252,7 @@ describe('github-cli-auth plugin', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('gh pr view -R acme/widgets')
 
@@ -277,7 +276,7 @@ describe('github-cli-auth plugin', () => {
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
   })
 
-  test('classic PAT (unsandboxed): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
+  test('classic PAT (credential-entitled): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
     const hook = await hookFor(
@@ -286,7 +285,7 @@ describe('github-cli-auth plugin', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('gh api repos/acme/widgets/issues -R acme/widgets')
 
@@ -298,7 +297,7 @@ describe('github-cli-auth plugin', () => {
     expect(resolverCalled).toBe(false)
   })
 
-  test('fine-grained PAT (unsandboxed): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
+  test('fine-grained PAT (credential-entitled): strips a redundant -R on gh api, injects the PAT, no mint', async () => {
     process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
     const hook = await hookFor(
@@ -307,7 +306,7 @@ describe('github-cli-auth plugin', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('gh api repos/acme/widgets/issues --repo=acme/widgets')
 
@@ -640,7 +639,7 @@ describe('github-cli-auth plugin — git path', () => {
     expect(JSON.stringify(event.args.command)).not.toContain('ghs_minted')
   })
 
-  test('classic PAT (unsandboxed): injects GIT_ASKPASS with the PAT, does not mint', async () => {
+  test('classic PAT (credential-entitled): injects GIT_ASKPASS with the PAT, does not mint', async () => {
     process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
     const hook = await hookFor(
@@ -649,7 +648,7 @@ describe('github-cli-auth plugin — git path', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('git clone https://github.com/acme/widgets.git')
 
@@ -663,7 +662,7 @@ describe('github-cli-auth plugin — git path', () => {
     expect(resolverCalled).toBe(false)
   })
 
-  test('fine-grained PAT (unsandboxed): injects GIT_ASKPASS with the PAT, does not mint', async () => {
+  test('fine-grained PAT (credential-entitled): injects GIT_ASKPASS with the PAT, does not mint', async () => {
     process.env.GH_TOKEN = 'github_pat_xyz'
     let resolverCalled = false
     const hook = await hookFor(
@@ -672,7 +671,7 @@ describe('github-cli-auth plugin — git path', () => {
         return { kind: 'token', token: 'ghs_minted' }
       },
       true,
-      { permissions: unsandboxedPermissions },
+      { permissions: credentialEntitledPermissions },
     )
     const event = bashEvent('git clone https://github.com/acme/widgets.git')
 
