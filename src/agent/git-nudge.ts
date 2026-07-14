@@ -1,3 +1,4 @@
+import { hooklessGitArgs } from '@/git/hookless'
 import { resolveAgentGit } from '@/git/resolve-agent-git'
 
 const MAX_LISTED_PATHS = 10
@@ -71,7 +72,7 @@ const defaultDeps: GitNudgeDeps = {
     if (!bun) return null
     try {
       const proc = bun.spawn({
-        cmd: ['git', ...gitArgs, 'status', '--porcelain=v1'],
+        cmd: ['git', ...hooklessGitArgs([...gitArgs, 'status', '--porcelain=v1'])],
         cwd: agentDir,
         stdout: 'pipe',
         stderr: 'pipe',
