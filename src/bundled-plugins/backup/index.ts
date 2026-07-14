@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { hooklessGitArgs } from '@/git/hookless'
 import { withGitLock } from '@/git/mutex'
 import { resolveAgentGit } from '@/git/resolve-agent-git'
 import { definePlugin, type PluginContext, type SpawnSubagentOptions, type Subagent } from '@/plugin'
@@ -265,7 +266,7 @@ export async function resolveOriginPushUrl(cwd: string): Promise<string | null> 
   if (!repo) return null
   try {
     const proc = bun.spawn({
-      cmd: ['git', '-C', cwd, ...repo.gitArgs, 'remote', 'get-url', '--push', 'origin'],
+      cmd: ['git', ...hooklessGitArgs(['-C', cwd, ...repo.gitArgs, 'remote', 'get-url', '--push', 'origin'])],
       stdout: 'pipe',
       stderr: 'ignore',
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },

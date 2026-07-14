@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { hooklessGitArgs } from '@/git/hookless'
 import { type AgentGit, resolveAgentGit } from '@/git/resolve-agent-git'
 
 export const COMMIT_TIMEOUT_MS = 30_000
@@ -328,7 +329,7 @@ export function makeDefaultGitSpawn(): GitSpawn {
       // GIT_TERMINAL_PROMPT wins; NONINTERACTIVE_ENV's pager/GCM settings still
       // apply to every call. Local commands pass no `env` and stay token-free.
       const proc = bun.spawn({
-        cmd: ['git', ...args],
+        cmd: ['git', ...hooklessGitArgs(args)],
         cwd,
         stdout: 'pipe',
         stderr: 'pipe',
