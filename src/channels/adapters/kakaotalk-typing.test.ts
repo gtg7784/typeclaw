@@ -4,6 +4,10 @@ import type { KakaoTypingResult } from 'agent-messenger/kakaotalk'
 
 import { createKakaoTypingCallback, type KakaoTypingLogger } from './kakaotalk-typing'
 
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
 const logger = (): KakaoTypingLogger & { lines: string[] } => {
   const lines: string[] = []
   return {
@@ -19,7 +23,7 @@ const ok = (chatId: string): KakaoTypingResult => ({ success: true, status_code:
 describe('createKakaoTypingCallback', () => {
   test('phase=tick sends an ACTION packet for the chat', async () => {
     const calls: Array<{ chatId: string; opts?: { linkId?: string } }> = []
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId, opts) => {
         calls.push({ chatId, ...(opts !== undefined ? { opts } : {}) })
@@ -34,7 +38,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('phase=stop does NOT send an ACTION packet (KakaoTalk auto-expires; no stop API)', async () => {
     const calls: string[] = []
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId) => {
         calls.push(chatId)
@@ -49,7 +53,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('ignores targets for other adapters', async () => {
     let called = false
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId) => {
         called = true
@@ -64,7 +68,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('swallows sendTyping transport failures and logs a warning rather than throwing', async () => {
     const log = logger()
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: log,
       sendTyping: async () => {
         throw new Error('loco disconnected')
@@ -78,7 +82,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('logs a warning when the ACTION packet is rejected (non-zero status_code)', async () => {
     const log = logger()
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: log,
       sendTyping: async (chatId) => ({ success: false, status_code: -1, chat_id: chatId }),
     })
@@ -90,7 +94,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('uses formatChannelTag for the warning label when provided', async () => {
     const log = logger()
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: log,
       sendTyping: async () => {
         throw new Error('boom')
@@ -110,7 +114,7 @@ describe('createKakaoTypingCallback', () => {
       releaseFirst = resolve
     })
     let n = 0
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId) => {
         const id = `t${++n}`
@@ -134,7 +138,7 @@ describe('createKakaoTypingCallback', () => {
     const gateA = new Promise<void>((resolve) => {
       releaseA = resolve
     })
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId) => {
         if (chatId === 'chat-A') await gateA
@@ -155,7 +159,7 @@ describe('createKakaoTypingCallback', () => {
   test('skips typing for @kakao-open (linkId unsupported) and logs once per chat', async () => {
     const calls: string[] = []
     const log = logger()
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: log,
       sendTyping: async (chatId) => {
         calls.push(chatId)
@@ -172,7 +176,7 @@ describe('createKakaoTypingCallback', () => {
 
   test('still emits for @kakao-group and @kakao-dm', async () => {
     const calls: string[] = []
-    const callback = createKakaoTypingCallback({
+    const { callback } = createKakaoTypingCallback({
       logger: logger(),
       sendTyping: async (chatId) => {
         calls.push(chatId)
@@ -184,5 +188,64 @@ describe('createKakaoTypingCallback', () => {
     await callback({ adapter: 'kakaotalk', workspace: '@kakao-dm', chat: 'dm-1', thread: null, phase: 'tick' })
 
     expect(calls).toEqual(['grp-1', 'dm-1'])
+  })
+
+  test('a tick queued behind an in-flight send is dropped once a stop lands (only the in-flight packet ships)', async () => {
+    const completed: string[] = []
+    let releaseFirst: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let n = 0
+    const { callback } = createKakaoTypingCallback({
+      logger: logger(),
+      sendTyping: async (chatId) => {
+        const id = `send${++n}`
+        if (id === 'send1') await gate
+        completed.push(id)
+        return ok(chatId)
+      },
+    })
+
+    // given: tick 1 has passed the generation gate and is stalled mid-flight
+    const first = callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'tick' })
+    await flush()
+    // when: tick 2 queues behind the in-flight send1, then stop lands before send1 resolves
+    const second = callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'tick' })
+    await callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'stop' })
+    releaseFirst?.()
+    await Promise.all([first, second])
+    await flush()
+
+    // then: send1 ships (already on the wire); the queued send2 is dropped by the generation gate
+    expect(completed).toEqual(['send1'])
+  })
+
+  test('reset() drops a tick queued behind an in-flight send (adapter shutdown path)', async () => {
+    const completed: string[] = []
+    let releaseFirst: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let n = 0
+    const { callback, reset } = createKakaoTypingCallback({
+      logger: logger(),
+      sendTyping: async (chatId) => {
+        const id = `send${++n}`
+        if (id === 'send1') await gate
+        completed.push(id)
+        return ok(chatId)
+      },
+    })
+
+    const first = callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'tick' })
+    await flush()
+    const second = callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'tick' })
+    reset()
+    releaseFirst?.()
+    await Promise.all([first, second])
+    await flush()
+
+    expect(completed).toEqual(['send1'])
   })
 })

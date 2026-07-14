@@ -16,12 +16,19 @@ export type KakaoTypingLogger = {
 // `linkId` unless it's an OpenChat room.
 export type KakaoTypingSender = (chatId: string, opts?: { linkId?: string }) => Promise<KakaoTypingResult>
 
+export type KakaoTypingCallbackHandle = {
+  callback: TypingCallback
+  // Invalidate every in-flight/queued pulse. Called on adapter stop so a pulse
+  // already accepted into a per-chat queue cannot reach the wire after teardown.
+  reset: () => void
+}
+
 // KakaoTalk auto-expires the composing indicator ~5s after the last ACTION
-// packet. The router paces the refresh via a 5s heartbeat registered by the
-// adapter (setTypingHeartbeatInterval), so this callback stays stateless: each
-// tick sends one packet, and there is no stop API — a delivered message clears
-// the indicator client-side, so 'stop' is a no-op (mirrors telegram-bot).
-export const KAKAO_TYPING_HEARTBEAT_MS = 5000
+// packet. The router paces the refresh via a heartbeat the adapter registers
+// (setTypingHeartbeatInterval), so this callback holds no timer of its own.
+// 4000ms sits ~20% below the ~5s expiry so a replacement packet lands before
+// expiry even with scheduler/network jitter (a 5000ms interval has no margin).
+export const KAKAO_TYPING_HEARTBEAT_MS = 4000
 
 // OpenChat ACTION packets require the LOCO `linkId` field, which the channel
 // resolver does not surface today (the same limitation `markReadIfSupported`
@@ -34,19 +41,30 @@ export function createKakaoTypingCallback(deps: {
   logger: KakaoTypingLogger
   sendTyping: KakaoTypingSender
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
-}): TypingCallback {
+}): KakaoTypingCallbackHandle {
   const { logger, sendTyping, formatChannelTag } = deps
   // Per-chat FIFO mirrors the webex/slack pattern: chaining each request through
   // the per-chat tail keeps on-the-wire order matching enqueue order even under
   // network jitter, so a slow send can't reorder behind a later tick.
   const queues = new Map<string, Promise<void>>()
+  // Per-chat generation token, independent of any timer. A pulse captures the
+  // chat's generation when it's accepted and re-checks it immediately before
+  // sending; 'stop' and `reset` delete the generation, so a pulse already queued
+  // behind an in-flight send is dropped instead of raising the indicator after
+  // the turn (or the adapter) has stopped.
+  const activeGeneration = new Map<string, number>()
   const openChatSkipLogged = new Set<string>()
+  let generationCounter = 0
 
-  return async (target) => {
+  const callback: TypingCallback = async (target) => {
     if (target.adapter !== 'kakaotalk') return
     // No stop API: the indicator auto-expires ~5s after the last packet and a
-    // delivered message clears it client-side, so 'stop' needs no packet.
-    if (target.phase !== 'tick') return
+    // delivered message clears it client-side, so 'stop' sends no packet. It
+    // must still invalidate any queued pulse for this chat.
+    if (target.phase !== 'tick') {
+      activeGeneration.delete(target.chat)
+      return
+    }
     if (target.workspace === OPEN_CHAT_WORKSPACE) {
       if (!openChatSkipLogged.has(target.chat)) {
         openChatSkipLogged.add(target.chat)
@@ -55,10 +73,13 @@ export function createKakaoTypingCallback(deps: {
       return
     }
 
+    if (!activeGeneration.has(target.chat)) activeGeneration.set(target.chat, ++generationCounter)
+    const generation = activeGeneration.get(target.chat)
     const prev = queues.get(target.chat) ?? Promise.resolve()
     const next = prev
       .catch(() => {})
       .then(async () => {
+        if (activeGeneration.get(target.chat) !== generation) return
         const result = await sendTyping(target.chat)
         if (!result.success) {
           throw new Error(`kakaotalk ACTION rejected: status_code=${result.status_code}`)
@@ -76,4 +97,10 @@ export function createKakaoTypingCallback(deps: {
     })
     await next
   }
+
+  const reset = (): void => {
+    activeGeneration.clear()
+  }
+
+  return { callback, reset }
 }

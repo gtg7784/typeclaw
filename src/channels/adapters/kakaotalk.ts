@@ -406,7 +406,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     formatChannelTag,
   })
 
-  const typingCallback = createKakaoTypingCallback({
+  const typing = createKakaoTypingCallback({
     logger,
     sendTyping: (chatId, opts) => client.sendTyping(chatId, opts),
     formatChannelTag,
@@ -678,11 +678,11 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       // but outboundCallback would still send via a dead client). Stop()
       // unregisters in the inverse order.
       options.router.registerOutbound('kakaotalk', outboundCallback)
-      options.router.registerTyping('kakaotalk', typingCallback)
+      options.router.registerTyping('kakaotalk', typing.callback)
       options.router.setTypingCapability('kakaotalk', true)
       // KakaoTalk expires the indicator ~5s after the last packet, faster than
-      // the default 8s heartbeat, so the router paces our refresh at 5s and the
-      // callback stays stateless.
+      // the default 8s heartbeat, so the router paces our refresh at 4s and the
+      // callback holds no timer of its own.
       options.router.setTypingHeartbeatInterval('kakaotalk', KAKAO_TYPING_HEARTBEAT_MS)
       options.router.registerChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.registerHistory('kakaotalk', historyCallback)
@@ -694,8 +694,9 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       if (!started) return
       started = false
       options.router.unregisterOutbound('kakaotalk', outboundCallback)
-      options.router.unregisterTyping('kakaotalk', typingCallback)
+      options.router.unregisterTyping('kakaotalk', typing.callback)
       options.router.setTypingCapability('kakaotalk', false)
+      typing.reset()
       options.router.unregisterChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.unregisterHistory('kakaotalk', historyCallback)
       options.router.unregisterFetchAttachment('kakaotalk', fetchAttachmentCallback)

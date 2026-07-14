@@ -164,7 +164,9 @@ class FakeClient implements KakaoTalkClient {
   sendTypingCalls: Array<{ chatId: string; opts?: { linkId?: string } }> = []
   sendTypingResult: KakaoTypingResult = { success: true, status_code: 0, chat_id: '111' }
   sendTypingError: Error | null = null
+  sendTypingGate: Promise<void> | null = null
   async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {
+    if (this.sendTypingGate !== null) await this.sendTypingGate
     this.sendTypingCalls.push({ chatId, ...(opts !== undefined ? { opts } : {}) })
     if (this.sendTypingError !== null) throw this.sendTypingError
     return this.sendTypingResult
@@ -326,7 +328,7 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await router.stop()
   })
 
-  test('registers a stateless typing callback + 5s heartbeat on start, routes a tick to client.sendTyping, and unregisters + disables on stop', async () => {
+  test('registers a stateless typing callback + 4s heartbeat on start, routes a tick to client.sendTyping, and unregisters + disables on stop', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
@@ -372,9 +374,9 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     expect(registeredTyping).not.toBeNull()
     expect(events).toContain('register:kakaotalk')
     expect(events).toContain('cap:kakaotalk=true')
-    // The adapter must register a heartbeat faster than the default 8s so the
-    // router itself paces the refresh (KakaoTalk expires the indicator ~5s).
-    expect(heartbeatInterval).toBe(5000)
+    // The adapter must register a heartbeat below the ~5s expiry so the router
+    // paces the refresh with margin against scheduler/network jitter.
+    expect(heartbeatInterval).toBe(4000)
 
     // A tick reaches client.sendTyping; the callback holds no timer of its own.
     await registeredTyping!({
@@ -386,19 +388,44 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     })
     expect(client.sendTypingCalls).toEqual([{ chatId: '111' }])
 
+    // Prove adapter.stop() invalidates queued typing work (via typing.reset()),
+    // driving the exact callback the router holds: block tick 1 mid-send, queue
+    // tick 2 behind it, stop the adapter, then release tick 1. Only the
+    // in-flight tick 1 may reach the client; the queued tick 2 must be dropped.
+    let releaseBlocked: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseBlocked = resolve
+    })
+    client.sendTypingGate = gate
+    const blockedChat = '222'
+    const firstTick = registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: blockedChat,
+      thread: null,
+      phase: 'tick',
+    })
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    const beforeQueued = client.sendTypingCalls.length
+    const secondTick = registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: blockedChat,
+      thread: null,
+      phase: 'tick',
+    })
+
     await adapter.stop()
 
     expect(events).toContain('unregister:kakaotalk')
     expect(events).toContain('cap:kakaotalk=false')
 
-    // After stop the callback is unregistered from the router, so a heartbeat
-    // dispatched through the real router path no longer reaches the client.
-    const before = client.sendTypingCalls.length
-    await router.__testing?.fireTypingHeartbeat(
-      { adapter: 'kakaotalk', workspace: '@kakao-group', chat: '111', thread: null },
-      'tick',
-    )
-    expect(client.sendTypingCalls.length).toBe(before)
+    releaseBlocked?.()
+    await Promise.all([firstTick, secondTick])
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    // Exactly one more packet (the in-flight tick 1); tick 2 was dropped by the
+    // generation reset adapter.stop() performed.
+    expect(client.sendTypingCalls.length).toBe(beforeQueued + 1)
 
     await router.stop()
   })
