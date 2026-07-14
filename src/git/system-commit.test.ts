@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -29,6 +29,35 @@ async function gitInit(cwd: string): Promise<void> {
 }
 
 describe('commitSystemFile (async)', () => {
+  test('does not execute a planted hook or expose runtime env to it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sys-commit-hookless-'))
+    try {
+      await gitInit(dir)
+      await writeFile(join(dir, 'typeclaw.json'), '{"a":1}\n')
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await writeFile(join(dir, 'typeclaw.json'), '{"a":2}\n')
+      await mkdir(join(dir, '.git', 'hooks'), { recursive: true })
+      const marker = join(dir, 'hook-ran')
+      const hook = join(dir, '.git', 'hooks', 'pre-commit')
+      await writeFile(hook, `#!/bin/sh\nprintf '%s' "$TYPECLAW_HOOK_SECRET" > "${marker}"\n`)
+      await chmod(hook, 0o755)
+      const previous = process.env.TYPECLAW_HOOK_SECRET
+      process.env.TYPECLAW_HOOK_SECRET = 'must-not-leak'
+      try {
+        await commitSystemFile(dir, 'typeclaw.json', 'hookless update')
+      } finally {
+        if (previous === undefined) delete process.env.TYPECLAW_HOOK_SECRET
+        else process.env.TYPECLAW_HOOK_SECRET = previous
+      }
+
+      expect(await runGit(dir, ['log', '-1', '--format=%s'])).toBe('hookless update')
+      expect(existsSync(marker)).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('commits a dirty tracked file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sys-commit-async-'))
     try {
