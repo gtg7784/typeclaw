@@ -125,6 +125,22 @@ function isSingleBareGhCommand(command: string): boolean {
   return quote === null
 }
 
+function containsUnquotedPathnameExpansion(command: string): boolean {
+  let quote: '"' | "'" | null = null
+  for (const ch of command) {
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '*' || ch === '?' || ch === '[') return true
+  }
+  return false
+}
+
 // GENUINELY repo-less subcommands (account/global, no -R/--repo): they need no
 // token injection and pass through. The set is intentionally minimal —
 // anything not listed (label, ruleset, secret, variable, cache, run, workflow,
@@ -173,6 +189,9 @@ export function analyzeGhCommand(command: string, fallbackRepo?: string): GhComm
   const tokens = tokenize(command)
   const ghStarts = findGhInvocations(tokens)
   if (ghStarts.length === 0) return { kind: 'pass-through' }
+  if (containsUnquotedPathnameExpansion(command)) {
+    return { kind: 'block', code: 'credential-exposure', reason: CREDENTIAL_EXPOSURE_REASON }
+  }
 
   for (let i = 0; i < ghStarts.length; i++) {
     const start = ghStarts[i] as number
@@ -263,7 +282,7 @@ function containsReviewGraphqlMutation(command: string): boolean {
     const start = ghStarts[i] as number
     const end = ghStarts[i + 1] ?? tokens.length
     const args = tokens.slice(start + 1, end)
-    if (findApiEndpoint(args) !== 'graphql') continue
+    if (!isGraphqlEndpoint(args)) continue
     if (extractGraphqlQueries(args).some((query) => REVIEW_GRAPHQL_MUTATION.test(query))) return true
   }
   return false
@@ -288,7 +307,8 @@ function extractGraphqlQueries(args: readonly string[]): string[] {
     }
     for (const prefix of ['--raw-field=', '--field=', '-f', '-F']) {
       if (arg.startsWith(prefix)) {
-        addGraphqlQuery(queries, arg.slice(prefix.length))
+        const field = arg.slice(prefix.length)
+        addGraphqlQuery(queries, field.startsWith('=') ? field.slice(1) : field)
         break
       }
     }
@@ -302,20 +322,7 @@ function addGraphqlQuery(queries: string[], field: string): void {
 
 const SAFE_GH_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   api: new Set(['']),
-  pr: new Set([
-    'view',
-    'list',
-    'status',
-    'checks',
-    'diff',
-    'review',
-    'comment',
-    'close',
-    'reopen',
-    'ready',
-    'merge',
-    'create',
-  ]),
+  pr: new Set(['view', 'list', 'status', 'checks', 'diff', 'review', 'comment', 'close', 'reopen', 'ready', 'merge']),
   issue: new Set(['view', 'list', 'status', 'comment', 'close', 'reopen', 'create']),
   label: new Set(['list', 'create', 'edit', 'delete', 'clone']),
   release: new Set(['view', 'list']),
@@ -329,7 +336,15 @@ const SAFE_GH_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   secret: new Set(['list', 'delete']),
 }
 
-const CREDENTIAL_UNSAFE_FLAGS = new Set(['--input', '--template', '-t', '--hostname', '--body-file', '--web'])
+const CREDENTIAL_UNSAFE_FLAGS = new Set([
+  '--input',
+  '--template',
+  '-t',
+  '--hostname',
+  '--body-file',
+  '--web',
+  '--delete-branch',
+])
 
 const CREDENTIAL_SAFE_FLAGS = new Set([
   '-R',
@@ -364,7 +379,6 @@ const CREDENTIAL_SAFE_FLAGS = new Set([
   '--approve',
   '--request-changes',
   '--comment',
-  '--delete-branch',
   '--merge',
   '--squash',
   '--rebase',
@@ -410,7 +424,7 @@ function isCredentialSafeGhArgs(args: readonly string[]): boolean {
     if (endpoint === null || endpoint.includes('://')) return false
   }
   if (!SAFE_GH_OPERATIONS[command]?.has(operation)) return false
-  if ((command === 'issue' || command === 'pr') && operation === 'create' && !isSafeCreateArgs(command, args)) {
+  if (command === 'issue' && operation === 'create' && !isSafeCreateArgs(args)) {
     return false
   }
 
@@ -435,7 +449,7 @@ function isCredentialSafeGhArgs(args: readonly string[]): boolean {
   return true
 }
 
-function isSafeCreateArgs(command: 'issue' | 'pr', args: readonly string[]): boolean {
+function isSafeCreateArgs(args: readonly string[]): boolean {
   if (extractRepoFlag(args) === null) return false
   const title = findFlagValue(args, ['--title'])
   const body = findFlagValue(args, ['--body', '-b'])
@@ -453,12 +467,6 @@ function isSafeCreateArgs(command: 'issue' | 'pr', args: readonly string[]): boo
     '--fill-verbose',
   ])
   if (args.some((arg) => forbidden.has(arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg))) return false
-  if (command === 'pr') {
-    const head = findFlagValue(args, ['--head'])
-    const base = findFlagValue(args, ['--base'])
-    if (head !== null && head.startsWith('@')) return false
-    if (base !== null && base.startsWith('@')) return false
-  }
   return true
 }
 
@@ -1120,7 +1128,15 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
 }
 
 function isGraphqlEndpoint(args: readonly string[]): boolean {
-  return findApiEndpoint(args) === 'graphql'
+  const endpoint = findApiEndpoint(args)
+  if (endpoint === null) return false
+  const base = new URL('https://api.github.invalid/')
+  try {
+    const parsed = new URL(endpoint, base)
+    return parsed.origin === base.origin && parsed.pathname === '/graphql'
+  } catch {
+    return false
+  }
 }
 
 export type GhAuthEnv = {

@@ -121,13 +121,14 @@ describe('wrapSystemTools', () => {
         return { content: [], details: undefined }
       },
     })
-    const tools = wrapSystemTools(
-      [lookAt],
-      { registry: emptyRegistry(), hooks: createHookBus(), sessionId: 'hookless', agentDir },
-      () => undefined,
-      () => undefined,
-      () => undefined,
-    )
+    const tools = wrapSystemTools([lookAt], {
+      hooks: createHookBus(),
+      sessionId: 'hookless',
+      agentDir,
+      getOrigin: () => undefined,
+      getAbort: () => undefined,
+      getLoopGuardTurn: () => undefined,
+    })
 
     await expect(
       tools[0]!.execute('call', { images: [{ path: '.env' }] }, undefined, undefined, {} as never),
@@ -1208,6 +1209,13 @@ describe('buildChannelTools', () => {
     chat: 'C0',
     thread: '1700000000.000100',
   }
+  const githubOrigin: SessionOrigin = {
+    kind: 'channel',
+    adapter: 'github',
+    workspace: 'acme/widgets',
+    chat: 'pr:7',
+    thread: null,
+  }
 
   const tuiOrigin: SessionOrigin = { kind: 'tui', sessionId: 'ses-tui-1' }
   const cronOrigin: SessionOrigin = { kind: 'cron', jobId: 'j1', jobKind: 'prompt' }
@@ -1244,6 +1252,13 @@ describe('buildChannelTools', () => {
     // then
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(['channel_edit', 'channel_read', 'channel_send'])
+  })
+
+  test('exposes post_github_review only for GitHub channel origins', () => {
+    expect(buildChannelTools(makeRouter(), githubOrigin, 'github-session').map((tool) => tool.name)).toContain(
+      'post_github_review',
+    )
+    expect(buildChannelTools(makeRouter(), channelOrigin).map((tool) => tool.name)).not.toContain('post_github_review')
   })
 
   test('exposes channel_send and channel_read when origin is cron (not channel-routed)', () => {

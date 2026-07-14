@@ -110,7 +110,6 @@ describe('github-cli-auth plugin', () => {
       "gh api /repos/acme/widgets/pulls --jq '.[].number'",
       'gh api graphql -R acme/widgets -F number=7 -f query=x',
       "gh issue create --repo acme/widgets --title 'Bug' --body 'Details'",
-      "gh pr create --repo acme/widgets --title 'Fix' --body 'Details' --head fix --base main",
     ]
 
     for (const command of commands) {
@@ -130,12 +129,50 @@ describe('github-cli-auth plugin', () => {
     })
     for (const command of [
       "gh issue create --repo acme/widgets --title 'Bug' --body-file /tmp/body.md",
+      "gh pr create --repo acme/widgets --title 'Fix' --body 'Details' --head fix --base main",
       "gh pr create --repo acme/widgets --title 'Fix' --body 'Details' --fill",
       "gh issue create --repo acme/widgets --title 'Bug' --body 'Details' && gh auth token",
       'gh api /repos/acme/widgets/issues -F body=@/proc/self/environ',
       'gh pr checkout 7 --repo acme/widgets',
+      'gh pr merge 7 --repo acme/widgets --merge --delete-branch',
     ]) {
       const event = bashEvent(command)
+      expect(await hook(event, hookCtx)).toMatchObject({ block: true })
+      expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    }
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('classic PAT blocks unquoted pathname expansion without adding an env overlay', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
+    let resolverCalled = false
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: privilegedPermissions },
+    )
+
+    for (const command of ['gh auth status -?', 'gh auth status -*', 'gh auth status -[t]']) {
+      const event = bashEvent(command)
+      expect(await hook(event, hookCtx)).toMatchObject({ block: true })
+      expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    }
+    expect(resolverCalled).toBe(false)
+  })
+
+  test('GitHub-origin fallback blocks local-git PR operations before minting', async () => {
+    delete process.env.GH_TOKEN
+    let resolverCalled = false
+    const hook = await hookFor(async () => {
+      resolverCalled = true
+      return { kind: 'token', token: 'ghs_minted' }
+    }, true)
+
+    for (const command of ['gh pr checkout 7', 'gh pr merge 7 --merge --delete-branch']) {
+      const event = githubOriginBashEvent(command, 'acme/widgets')
       expect(await hook(event, hookCtx)).toMatchObject({ block: true })
       expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
     }
@@ -354,24 +391,34 @@ describe('github-cli-auth plugin', () => {
     expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_repo_scoped' })
   })
 
-  test('App auth blocks GraphQL review mutations before minting a token', async () => {
+  test('classic PAT blocks both GraphQL endpoint spellings before adding an env overlay', async () => {
+    process.env.GH_TOKEN = 'ghp_classic'
     let resolverCalled = false
-    const hook = await hookFor(async () => {
-      resolverCalled = true
-      return { kind: 'token', token: 'ghs_minted' }
-    })
-    for (const mutation of [
-      "addPullRequest'Review",
-      "submitPullRequest'Review",
-      "addPullRequestReview'Comment",
-      "addPullRequestReview'Thread",
-      "addPullRequestReviewThread'Reply",
-    ]) {
-      const event = bashEvent(
-        `gh api graphql -R acme/widgets -f query='mutation { ${mutation}'(input: $input) { clientMutationId } }'`,
-      )
-      expect(await hook(event, hookCtx)).toMatchObject({ block: true })
-      expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+    const hook = await hookFor(
+      async () => {
+        resolverCalled = true
+        return { kind: 'token', token: 'ghs_minted' }
+      },
+      true,
+      { permissions: privilegedPermissions },
+    )
+    const mutations = [
+      'addPullRequestReview',
+      'submitPullRequestReview',
+      'addPullRequestReviewComment',
+      'addPullRequestReviewThread',
+      'addPullRequestReviewThreadReply',
+    ]
+    for (const mutation of mutations) {
+      for (const endpoint of ['graphql', '/graphql', "'/graphql?probe=1'", "'/graphql#fragment'"]) {
+        for (const flag of ['-f', '-F']) {
+          const event = bashEvent(
+            `gh api ${endpoint} -R acme/widgets ${flag}=query='mutation { ${mutation}(input: $input) { clientMutationId } }'`,
+          )
+          expect(await hook(event, hookCtx)).toMatchObject({ block: true })
+          expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+        }
+      }
     }
     expect(resolverCalled).toBeFalse()
   })

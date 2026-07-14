@@ -24,7 +24,7 @@ import { defaultThinkingLevelForRef, isOpenAiFamilyRef, providerForModelRef, typ
 import { renderMcpCatalog } from '@/mcp/catalog'
 import type { McpManager } from '@/mcp/manager'
 import { createMcpDispatcherTools, MCP_DISPATCHER_TOOL_NAMES } from '@/mcp/tools'
-import type { PermissionService, RolesConfig } from '@/permissions'
+import { noopPermissionService, type PermissionService, type RolesConfig } from '@/permissions'
 import type {
   BuiltinToolRef,
   HookBus,
@@ -44,7 +44,7 @@ import { renderGitNudge } from './git-nudge'
 import type { LiveSubagentRegistry } from './live-subagents'
 import { sanitizeMessagesForLlmReplay } from './llm-replay-sanitizer'
 import { applyModelRuntimeOverrides } from './model-overrides'
-import { createChannelLookAtTool, lookAtTool } from './multimodal'
+import { createChannelLookAtTool, createLookAtTool } from './multimodal'
 import {
   buildBuiltinPiToolOverrides,
   isPiCodingBuiltinName,
@@ -80,6 +80,7 @@ import { createChannelReadTool } from './tools/channel-read'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createGrantRoleTool } from './tools/grant-role'
+import { createPostGithubReviewTool } from './tools/post-github-review'
 import { createRestartTool } from './tools/restart'
 import { createSkipResponseTool } from './tools/skip-response'
 import { createSpawnSubagentTool, renderPublicSubagentRoster } from './tools/spawn-subagent'
@@ -405,7 +406,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
         : [
             webSearchTool,
             webFetchTool,
-            lookAtTool,
+            createLookAtTool(options.permissions),
             ...(options.mcpManager ? buildMcpDispatcherToolDefinitions(options.mcpManager) : []),
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
@@ -452,7 +453,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // unwrapped copies are never the active implementation. Built unconditionally
   // — the sandbox and bash policy are security behavior independent of whether
   // any plugin registered a tool hook, so gating on hooks would leave an
-  // unsandboxed bash path. `wrapBuiltinToolDefinition` no-ops the optional
+  // unwrapped bash path. `wrapBuiltinToolDefinition` no-ops the optional
   // stages (plugin hooks, permissions, bashPolicy) when they are absent.
   const builtinPiToolOverrides = buildBuiltinPiToolOverrides({
     agentDir: options.plugins?.agentDir ?? process.cwd(),
@@ -461,16 +462,17 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     getOrigin,
     getAbort,
     getLoopGuardTurn,
-    ...(options.permissions ? { permissions: options.permissions } : {}),
+    permissions: options.permissions ?? noopPermissionService,
     ...(options.bashPolicy !== undefined ? { bashPolicy: options.bashPolicy } : {}),
   })
-  const wrappedCustomSystemTools = wrapSystemTools(
-    customSystemTools,
-    options.plugins,
+  const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, {
+    agentDir: options.plugins?.agentDir ?? process.cwd(),
+    sessionId: options.plugins?.sessionId ?? sessionManager.getSessionId(),
+    hooks: options.plugins?.hooks ?? createHookBus(),
     getOrigin,
     getAbort,
     getLoopGuardTurn,
-  )
+  })
   const customToolsPreBudget = [...wrappedCustomSystemTools, ...pluginCustomTools, ...builtinPiToolOverrides]
   const customTools =
     sessionBudget && sessionBudgetState
@@ -733,6 +735,8 @@ export function buildChannelTools(
         ...(sessionId !== undefined ? { sessionId } : {}),
       }),
     )
+    if (origin.adapter === 'github' && sessionId !== undefined)
+      tools.push(createPostGithubReviewTool({ router: channelRouter, origin: channelOrigin, sessionId }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelReadTool({ router: channelRouter }))
     tools.push(
@@ -767,7 +771,7 @@ export function buildChannelTools(
           : {}),
       }),
     )
-    tools.push(createChannelLookAtTool(channelRouter, channelOrigin))
+    tools.push(createChannelLookAtTool(channelRouter, channelOrigin, permissions))
     tools.push(createChannelDisengageTool({ router: channelRouter, origin: channelOrigin }))
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
@@ -915,19 +919,23 @@ function wrapRegistryTools(
 
 export function wrapSystemTools(
   tools: ToolDefinition[],
-  plugins: PluginSessionWiring | undefined,
-  getOrigin: () => SessionOrigin | undefined,
-  getAbort: () => ((reason?: string) => void) | undefined,
-  getLoopGuardTurn: () => number | undefined,
+  options: {
+    agentDir: string
+    sessionId: string
+    hooks: HookBus
+    getOrigin: () => SessionOrigin | undefined
+    getAbort: () => ((reason?: string) => void) | undefined
+    getLoopGuardTurn?: () => number | undefined
+  },
 ): ToolDefinition[] {
   return tools.map((tool) =>
     wrapSystemTool(tool, {
-      agentDir: plugins?.agentDir ?? process.cwd(),
-      sessionId: plugins?.sessionId ?? 'system-tools',
-      hooks: plugins?.hooks ?? createHookBus(),
-      getOrigin,
-      getAbort,
-      getLoopGuardTurn,
+      agentDir: options.agentDir,
+      sessionId: options.sessionId,
+      hooks: options.hooks,
+      getOrigin: options.getOrigin,
+      getAbort: options.getAbort,
+      getLoopGuardTurn: options.getLoopGuardTurn,
     }),
   )
 }
