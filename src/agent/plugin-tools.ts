@@ -37,6 +37,7 @@ import type {
 import {
   buildSandboxedCommand,
   canWriteAgentRootInSandbox,
+  cleanupPrivilegedSandboxRuntime,
   canMountRealProc,
   commandNeedsRealProc,
   DEFAULT_SANDBOX_ENV,
@@ -44,10 +45,10 @@ import {
   ensureHiddenMaskTargets,
   ensureSessionTmpDir,
   getProcBindSafetyVerdict,
-  isPackageInstallCommand,
   mapVirtualTmpPath,
+  type PrivilegedSandboxRuntime,
   resolveHiddenPaths,
-  resolvePackageInstallZones,
+  resolvePrivilegedSandboxRuntime,
   resolveProcBindSafetyWithRetry,
   resolveProcSelfExe,
   resolveProtectedZones,
@@ -56,6 +57,8 @@ import {
   SandboxDegradedProcError,
   SandboxProcProbeUnverifiedError,
   subtractMasked,
+  verifyHiddenMaskTargets,
+  verifyPrivilegedSandboxRuntime,
 } from '@/sandbox'
 
 import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-guard'
@@ -77,13 +80,17 @@ let sharedLoopGuard: LoopGuard = createLoopGuard()
 // a bash call's args to inject env vars into the spawned process WITHOUT
 // putting them in the command string (where they would leak through logs and
 // later hooks). The wrapper extracts and deletes it before the bash tool runs,
-// then threads it to the spawn (non-sandboxed) and to bwrap --setenv
-// (sandboxed). Used by github-cli-auth to inject a per-repo GH_TOKEN. The key
+// then threads it to the spawn. Sandboxed secret values stay in bwrap's parent
+// environment and are inherited by name rather than rendered into argv. Used
+// by github-cli-auth to inject a per-repo GH_TOKEN. The key
 // is stripped from client-supplied args before tool.before so only trusted
 // hooks can set it.
 export const TYPECLAW_INTERNAL_BASH_ENV = '__typeclawBashEnv'
 
 type BashEnvOverlay = Record<string, string>
+
+const SECRET_ENV_NAME_PATTERN =
+  /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|API_KEY|ACCESS_KEY(?:_ID)?|SECRET_KEY|PRIVATE_KEY|AUTH)$/
 
 const bashEnvStore = new AsyncLocalStorage<BashEnvOverlay | undefined>()
 
@@ -204,6 +211,19 @@ export type WrapToolOptions = {
   getLoopGuardTurn?: () => number | undefined
 }
 
+export type BashSandboxBoundary = {
+  ensureAvailable: () => Promise<void>
+  buildCommand: typeof buildSandboxedCommand
+  resolveRuntime?: typeof resolvePrivilegedSandboxRuntime
+  verifyRuntime?: typeof verifyPrivilegedSandboxRuntime
+  cleanupRuntime?: typeof cleanupPrivilegedSandboxRuntime
+}
+
+const DEFAULT_BASH_SANDBOX_BOUNDARY: BashSandboxBoundary = {
+  ensureAvailable: ensureBwrapAvailable,
+  buildCommand: buildSandboxedCommand,
+}
+
 export type WrapSystemToolOptions = {
   agentDir: string
   sessionId: string
@@ -221,6 +241,7 @@ export type WrapSystemToolOptions = {
   // read-only subagent keep its bash read-only no matter who spawned it. See
   // `src/agent/reviewer-bash-policy.ts`.
   bashPolicy?: SubagentBashPolicy
+  bashSandboxBoundary?: BashSandboxBoundary
 }
 
 // Zod 4 emits a top-level `"$schema": "https://json-schema.org/draft/2020-12/schema"`
@@ -444,27 +465,54 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
         if (typeof command === 'string') enforceSubagentBashPolicy(opts.bashPolicy, command)
       }
 
-      if (tool.name === 'bash' && opts.permissions !== undefined) {
-        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId, bashEnvOverlay)
-      }
+      const sandboxBoundary = opts.bashSandboxBoundary ?? DEFAULT_BASH_SANDBOX_BOUNDARY
+      const privilegedRuntime =
+        tool.name === 'bash' && opts.permissions !== undefined
+          ? await applyBashSandbox(
+              mutableArgs,
+              opts.permissions,
+              liveOrigin,
+              opts.agentDir,
+              opts.sessionId,
+              bashEnvOverlay,
+              sandboxBoundary,
+            )
+          : undefined
 
       const tmpRedirect =
         TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined
           ? await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
           : undefined
 
-      let rawResult: ToolResult
+      let rawResult: ToolResult | undefined
+      let executionError: unknown
       try {
+        if (privilegedRuntime !== undefined) {
+          await (sandboxBoundary.verifyRuntime ?? verifyPrivilegedSandboxRuntime)(privilegedRuntime)
+        }
         rawResult = await bashEnvStore.run(bashEnvOverlay, () =>
           tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx),
         )
       } catch (error) {
-        // A throwing tool (pi's bash rejects on non-zero exit) must still run
-        // tool.after so cleanup hooks fire — e.g. the github approve guard's
-        // release, whose absence stranded a PR as "already approved" (PR #672).
-        await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(error))
-        throw error
+        executionError = error
       }
+      let cleanupError: unknown
+      if (privilegedRuntime !== undefined) {
+        try {
+          await (sandboxBoundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime)
+        } catch (error) {
+          cleanupError = error
+        }
+      }
+      const finalError = executionError ?? cleanupError
+      if (finalError !== undefined) {
+        // A throwing tool or cleanup must still run tool.after exactly once so
+        // lifecycle hooks release reservations. The execution error remains the
+        // primary failure when both phases reject.
+        await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(finalError))
+        throw finalError
+      }
+      if (rawResult === undefined) throw new Error('tool execution returned no result')
       const result = tmpRedirect !== undefined ? restoreTmpPathInResult(rawResult, tmpRedirect) : rawResult
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
@@ -526,9 +574,10 @@ async function applyBashSandbox(
   agentDir: string,
   sessionId: string,
   envOverlay: BashEnvOverlay | undefined,
-): Promise<void> {
+  boundary: BashSandboxBoundary,
+): Promise<PrivilegedSandboxRuntime | undefined> {
   const command = mutableArgs.command
-  if (typeof command !== 'string') return
+  if (typeof command !== 'string') return undefined
 
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
 
@@ -539,7 +588,7 @@ async function applyBashSandbox(
   // targets on the real host FS first; the full {dirs, files} still feeds
   // subtractMasked below so a masked path is never re-exposed by a later RW bind.
   const maskTargets = await ensureHiddenMaskTargets({ dirs, files })
-  await ensureBwrapAvailable()
+  await boundary.ensureAvailable()
   // Per-session /tmp: bind this session's scratch dir over the default
   // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
   // match what the write/edit wrapper redirected a /tmp path to. The bind is
@@ -581,19 +630,6 @@ async function applyBashSandbox(
     writableRoot || writable.dirs.includes(join(agentDir, '.git'))
       ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
       : { dirs: [], files: [] }
-  // A recognized standalone `bun add`/`bun install` needs DIRECTORY write at the
-  // root (node_modules/ + temp lockfile), which the narrow carve-out model can't
-  // grant. Widen to an RW root for that command class only, then re-hide secrets
-  // (masks) and re-RO the executable surfaces (resolvePackageInstallZones) on top
-  // — subtractMasked drops any protected path a mask already hides so the RW root
-  // never re-exposes it. The default jail's `writable`/`protected` are skipped
-  // here: writableRoot supersedes them for this command, and the same masks +
-  // package-install protected set cover the confidentiality and escalation
-  // boundaries.
-  const packageInstall = isPackageInstallCommand(command)
-    ? subtractMaskedProtected(await resolvePackageInstallZones(agentDir), { dirs, files })
-    : undefined
-
   // Only emit an in-jail symlink for a target that actually survived as a
   // writable dir: a symlink to a target that was dropped (missing, masked for
   // this role, or filtered by the writable-zone guardrails) would dangle onto an
@@ -606,9 +642,9 @@ async function applyBashSandbox(
   const symlinks = resolveSandboxSymlinks(agentDir, config.sandbox.symlinks, sandboxHome).filter((op) =>
     writableDirSet.has(op.target),
   )
-  // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
-  // it would never reach the sandboxed process (the non-sandboxed spawnHook
-  // path does not run when the command is rewritten to a bwrap invocation).
+  // The spawn hook gives bwrap the command-scoped overlay as its parent env.
+  // Secret names are inherited through bwrap without putting their values in
+  // --setenv argv; only non-secret overlay/runtime values are rendered.
   const { strategy: proc, degradeReason } = await resolveProcStrategy()
   // Fail fast with an actionable error when /proc degraded to tmpfs AND the
   // command needs a real /proc: under tmpfs Bun would otherwise abort deep in its
@@ -623,29 +659,54 @@ async function applyBashSandbox(
   if (proc === 'tmpfs' && commandNeedsRealProc(command)) {
     throw degradeReason === 'unverified' ? new SandboxProcProbeUnverifiedError() : new SandboxDegradedProcError()
   }
-  const { commandString } = buildSandboxedCommand(command, {
-    mounts: [
-      { type: 'ro-bind', source: agentDir, dest: agentDir },
-      { type: 'bind', source: sessionTmp, dest: '/tmp' },
-    ],
-    ...(packageInstall !== undefined
-      ? {
-          writableRoot: { dir: packageInstall.root },
-          masks: maskTargets,
-          protected: packageInstall.protected,
-          blockedCreation: { files: packageInstall.blockedCreation },
-        }
-      : writableRoot
+  const privilegedRuntime = await (boundary.resolveRuntime ?? resolvePrivilegedSandboxRuntime)({
+    agentDir,
+    command,
+    env: sandboxEnvOverlay,
+  })
+  try {
+    await verifyHiddenMaskTargets(maskTargets)
+    const { commandString } = boundary.buildCommand(command, {
+      mounts: [
+        { type: 'ro-bind', source: agentDir, dest: agentDir },
+        { type: 'bind', source: sessionTmp, dest: '/tmp' },
+        ...(privilegedRuntime?.mounts ?? []),
+      ],
+      ...(writableRoot
         ? { writableRoot: { dir: agentDir }, masks: maskTargets, protected: protectedZones }
         : { masks: maskTargets, writable, protected: protectedZones }),
-    symlinks,
-    network: 'inherit',
-    cwd: agentDir,
-    proc,
-    procSelfExe: resolveProcSelfExe(),
-    ...(sandboxEnvOverlay !== undefined ? { env: { set: sandboxEnvOverlay } } : {}),
-  })
-  mutableArgs.command = commandString
+      symlinks,
+      network: 'inherit',
+      cwd: agentDir,
+      proc,
+      procSelfExe: resolveProcSelfExe(),
+      ...(sandboxEnvOverlay !== undefined || privilegedRuntime !== undefined
+        ? { env: buildSandboxEnvPolicy(sandboxEnvOverlay, privilegedRuntime?.env) }
+        : {}),
+    })
+    mutableArgs.command = commandString
+    return privilegedRuntime
+  } catch (error) {
+    await (boundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime).catch(() => undefined)
+    throw error
+  }
+}
+
+function buildSandboxEnvPolicy(
+  overlay: BashEnvOverlay | undefined,
+  runtimeEnv: Record<string, string> | undefined,
+): { inherit?: string[]; set?: Record<string, string> } {
+  const set = { ...runtimeEnv }
+  const inherit: string[] = []
+  for (const [key, value] of Object.entries(overlay ?? {})) {
+    if (Object.hasOwn(set, key)) continue
+    if (SECRET_ENV_NAME_PATTERN.test(key)) inherit.push(key)
+    else set[key] = value
+  }
+  return {
+    ...(inherit.length > 0 ? { inherit } : {}),
+    ...(Object.keys(set).length > 0 ? { set } : {}),
+  }
 }
 
 function buildRoleScopedConfigEnv(
@@ -666,14 +727,6 @@ function buildRoleScopedConfigEnv(
     XDG_CONFIG_HOME: '/tmp/.config',
     GWS_CONFIG_HOME: '/tmp/.config/gws',
   }
-}
-
-function subtractMaskedProtected(
-  zones: { root: string; protected: { dirs: string[]; files: string[] }; blockedCreation: string[] },
-  masked: { dirs: string[]; files: string[] },
-): { root: string; protected: { dirs: string[]; files: string[] }; blockedCreation: string[] } {
-  const filtered = subtractMasked(zones.protected, masked)
-  return { root: zones.root, protected: filtered, blockedCreation: zones.blockedCreation }
 }
 
 // Picks the /proc strategy for a sandboxed bash call. The branch order is:

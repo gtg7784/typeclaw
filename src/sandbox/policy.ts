@@ -99,9 +99,9 @@ export type SandboxSymlinkOp = {
   dest: string
 }
 
-// A single RW bind of the project root used for trusted/owner compatibility.
-// Model-driven package installs are denied before sandbox construction; this
-// preserves ordinary root writes without granting lifecycle-script persistence.
+// A single RW bind that preserves ordinary agent-root writes for trusted/owner
+// callers. Masks and protected zones overlay it; writableRoot provides no
+// package-install isolation.
 //
 // CRITICAL ordering: unlike `writable` (rendered AFTER masks), `writableRoot`
 // renders BEFORE masks so the broad RW root does not re-expose secrets. With
