@@ -49,12 +49,14 @@ describe('AppAuthStrategy', () => {
 
   it('resolves a repo installation, then mints and caches its token', async () => {
     const calls: string[] = []
+    const mintRequests: RequestInit[] = []
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      fetchImpl: fakeFetch(async (url) => {
+      fetchImpl: fakeFetch(async (url, init) => {
         calls.push(String(url))
         if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        mintRequests.push(init ?? {})
         return Response.json({ token: 'cached-token', expires_at: '2026-05-18T13:00:00Z' })
       }),
     })
@@ -66,6 +68,73 @@ describe('AppAuthStrategy', () => {
       'https://api.github.com/repos/acme/api/installation',
       'https://api.github.com/app/installations/99/access_tokens',
     ])
+    expect(new Headers(mintRequests[0]?.headers).get('content-type')).toBe('application/json')
+    expect(mintRequests[0]?.body).toBe(JSON.stringify({ repositories: ['api'] }))
+  })
+
+  it('mints and caches separate repository-scoped tokens under one installation', async () => {
+    const mintedBodies: string[] = []
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url, init) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        const body = String(init?.body)
+        mintedBodies.push(body)
+        const repository = (JSON.parse(body) as { repositories: string[] }).repositories[0]
+        return Response.json({ token: `${repository}-token`, expires_at: '2026-05-18T13:00:00Z' })
+      }),
+    })
+
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('api-token')
+    await expect(strategy.token({ repoSlug: 'acme/web' })).resolves.toBe('web-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('api-token')
+    await expect(strategy.token({ repoSlug: 'acme/web' })).resolves.toBe('web-token')
+
+    expect(mintedBodies).toEqual([JSON.stringify({ repositories: ['api'] }), JSON.stringify({ repositories: ['web'] })])
+  })
+
+  it('canonicalizes repository case for installation lookup and token caching', async () => {
+    const calls: string[] = []
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url, init) => {
+        calls.push(String(url))
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        expect(init?.body).toBe(JSON.stringify({ repositories: ['api'] }))
+        return Response.json({ token: 'case-token', expires_at: '2026-05-18T13:00:00Z' })
+      }),
+    })
+
+    await expect(strategy.token({ repoSlug: 'Acme/API' })).resolves.toBe('case-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('case-token')
+
+    expect(calls).toHaveLength(2)
+  })
+
+  it('keeps installation-level owner tokens separate from repository-scoped tokens', async () => {
+    const bodies: string[] = []
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url, init) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        const body = String(init?.body)
+        bodies.push(body)
+        const scoped = body.includes('repositories')
+        return Response.json({
+          token: scoped ? 'repo-token' : 'installation-token',
+          expires_at: '2026-05-18T13:00:00Z',
+        })
+      }),
+    })
+
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('repo-token')
+    await expect(strategy.token({ owner: 'acme' })).resolves.toBe('installation-token')
+    await expect(strategy.token({ owner: 'ACME' })).resolves.toBe('installation-token')
+
+    expect(bodies).toEqual([JSON.stringify({ repositories: ['api'] }), JSON.stringify({})])
   })
 
   it('mints separate tokens for repos under different installations', async () => {
