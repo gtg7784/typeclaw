@@ -717,7 +717,3 @@ async function raceSpawn(work: Promise<void>, ms: number): Promise<void> {
     if (timer !== null) clearTimeout(timer)
   }
 }
-
-function isEnoent(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT'
-}

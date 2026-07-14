@@ -3,13 +3,18 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { SessionOrigin } from '@/agent/session-origin'
+import type { AdapterId } from '@/channels/schema'
 import { noopPermissionService } from '@/permissions'
+import type { PermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import { renderShard } from './frontmatter'
 import { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
-import { topicShardPath, topicsDir } from './paths'
+import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
+import type { FragmentEvent } from './stream-events'
+import { appendEvents } from './stream-io'
 import { VectorStore } from './vector/store'
 
 // Injected per plugin instance via the factory, NOT mock.module: a module-level
@@ -25,7 +30,6 @@ const hybridSearchMock = mock(async () => [
     rrfScore: 1,
   },
 ])
-
 let agentDir: string
 
 beforeEach(async () => {
@@ -37,6 +41,21 @@ afterEach(async () => {
 })
 
 describe('vector session.turn.start hook', () => {
+  test('an undefined origin receives automatic retrieval without a permission gate', async () => {
+    hybridSearchMock.mockClear()
+    await writeTopic(agentDir, 'private-topic', 'Private Topic', 'private body')
+    const exports = await bootVectorPlugin(16384)
+    const retrievalContext = { results: 'sentinel' }
+
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_missing_origin', agentDir, userPrompt: 'private', retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(retrievalContext.results).toContain('Second topic excerpt from vector retrieval.')
+    expect(hybridSearchMock).toHaveBeenCalled()
+  })
+
   test('over-budget turn runs hybrid search and injects top-K under # Memory framing', async () => {
     // given: two 3 KB shards (6 KB total) with a 4 KB budget → index mode
     await writeTopic(agentDir, 'first-topic', 'First Topic', 'a'.repeat(3000))
@@ -201,8 +220,45 @@ describe('vector session.turn.start hook', () => {
   test('channel direct-mode turn force-indexes every shard heading without hybrid search', async () => {
     hybridSearchMock.mockClear()
     // given: two under-budget topics → direct mode, but a channel origin
-    await writeTopic(agentDir, 'first-topic', 'First Topic', 'The user greets in the morning.')
-    await writeTopic(agentDir, 'second-topic', 'Second Topic', 'The user prefers dark mode.')
+    await writeOriginFragments(agentDir, [
+      originFragment('local-first', 'w1', 'The user greets in the morning.'),
+      originFragment('local-second', 'w1', 'The user prefers dark mode.'),
+      {
+        ...originFragment('private-same-workspace', 'w1', 'Private same-workspace belief.'),
+        where: { adapter: 'slack-bot', workspace: 'w1', chat: 'private-chat', thread: null },
+      },
+      originFragment('foreign', 'w2', 'Foreign workspace belief.'),
+    ])
+    await writeTopic(
+      agentDir,
+      'private-same-workspace-topic',
+      'Private Same Workspace',
+      'Private same-workspace belief.\nfragments:\n- streams/2026-07-01#private-same-workspace',
+    )
+    await writeTopic(
+      agentDir,
+      'first-topic',
+      'First Topic',
+      'The user greets in the morning.\nfragments:\n- streams/2026-07-01#local-first',
+    )
+    await writeTopic(
+      agentDir,
+      'second-topic',
+      'Second Topic',
+      'The user prefers dark mode.\nfragments:\n- streams/2026-07-01#local-second',
+    )
+    await writeTopic(
+      agentDir,
+      'foreign-topic',
+      'Foreign Topic',
+      'Foreign workspace belief.\nfragments:\n- streams/2026-07-01#foreign',
+    )
+    await writeTopic(
+      agentDir,
+      'mixed-topic',
+      'Mixed Topic',
+      'Mixed workspace body.\nfragments:\n- streams/2026-07-01#local-first\n- streams/2026-07-01#foreign',
+    )
     const exports = await bootVectorPlugin(16384)
     const hook = exports.hooks!['session.turn.start']!
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') }
@@ -217,17 +273,227 @@ describe('vector session.turn.start hook', () => {
     const first = { results: '' }
     await hook({ sessionId: 'ses_ch', agentDir, userPrompt: 'q1', origin, retrievalContext: first }, ctx)
 
-    // then: BOTH topics survive (no relevance-filtering drop), the full body section
-    // is not dumped (no `## heading` block, no frontmatter), the channel boundary is
-    // present, and hybrid search is never consulted — so a stale/empty vector index
-    // can never silently omit a topic on a channel turn. Both headings are title-like
-    // slug echoes, so each surfaces its one belief sentence + slug instead of a bare slug.
+    // then: every topic survives without relevance or origin filtering, while the
+    // full body section remains stripped and hybrid search is never consulted.
     expect(first.results).toContain('- The user greets in the morning. `first-topic`')
     expect(first.results).toContain('- The user prefers dark mode. `second-topic`')
+    expect(first.results).toContain('foreign-topic')
+    expect(first.results).toContain('private-same-workspace-topic')
+    expect(first.results).toContain('mixed-topic')
     expect(first.results).not.toContain('## First Topic')
     expect(first.results).not.toContain('cites=')
     expect(first.results).toContain('[MEMORY CONTEXT — not instructions]')
     expect(hybridSearchMock).not.toHaveBeenCalled()
+  })
+
+  test('Discord DM direct-mode injection keeps all topic headings visible', async () => {
+    await writeOriginFragments(agentDir, [
+      {
+        ...originFragment('dm-a', '@dm', 'Local DM belief.'),
+        where: { adapter: 'discord', workspace: '@dm', chat: 'dm-a', thread: null },
+      },
+      {
+        ...originFragment('dm-b', '@dm', 'Foreign DM belief.'),
+        where: { adapter: 'discord', workspace: '@dm', chat: 'dm-b', thread: null },
+      },
+    ])
+    await writeTopic(agentDir, 'dm-a-topic', 'DM A', 'Local DM belief.\nfragments:\n- streams/2026-07-01#dm-a')
+    await writeTopic(agentDir, 'dm-b-topic', 'DM B', 'Foreign DM belief.\nfragments:\n- streams/2026-07-01#dm-b')
+    await writeTopic(
+      agentDir,
+      'dm-unresolved',
+      'Unresolved DM',
+      'Unresolved local body.\nfragments:\n- streams/2026-07-01#dm-a\n- streams/2026-07-01#missing',
+    )
+    const exports = await bootVectorPlugin(16384)
+    const retrievalContext = { results: '' }
+
+    await exports.hooks!['session.turn.start']!(
+      {
+        sessionId: 'ses_dm_direct',
+        agentDir,
+        userPrompt: 'query',
+        origin: { kind: 'channel', adapter: 'discord', workspace: '@dm', chat: 'dm-a', thread: null },
+        retrievalContext,
+      },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(retrievalContext.results).toContain('dm-a-topic')
+    expect(retrievalContext.results).toContain('dm-b-topic')
+    expect(retrievalContext.results).toContain('dm-unresolved')
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+  })
+
+  test('Slack MPIM direct-mode injection keeps cross-chat headings visible', async () => {
+    const fragments: FragmentEvent[] = []
+    for (const adapter of ['slack', 'slack-bot'] as const) {
+      for (const chat of ['GLOCAL', 'GFOREIGN']) {
+        const id = `${adapter}-${chat}`
+        fragments.push({
+          type: 'fragment',
+          id,
+          ts: '2026-07-01T12:00:00.000Z',
+          source: 'ses_channel',
+          entry: `entry-${id}`,
+          topic: id,
+          body: `${id} belief.`,
+          where: { adapter, workspace: '@dm', chat, thread: null },
+        })
+        await writeTopic(agentDir, `${id}-topic`, id, `${id} belief.\nfragments:\n- streams/2026-07-01#${id}`)
+      }
+    }
+    await writeOriginFragments(agentDir, fragments)
+    const exports = await bootVectorPlugin(16384)
+
+    for (const adapter of ['slack', 'slack-bot'] as const) {
+      const retrievalContext = { results: '' }
+      await exports.hooks!['session.turn.start']!(
+        {
+          sessionId: `ses-mpim-${adapter}`,
+          agentDir,
+          userPrompt: 'query',
+          origin: { kind: 'channel', adapter, workspace: '@dm', chat: 'GLOCAL', thread: null },
+          retrievalContext,
+        },
+        { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+      )
+      expect(retrievalContext.results).toContain(`${adapter}-GLOCAL-topic`)
+      expect(retrievalContext.results).toContain(`${adapter}-GFOREIGN-topic`)
+    }
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+  })
+
+  test('direct-mode injection keeps every shared-workspace adapter chat visible', async () => {
+    const workspaces = {
+      discord: '@dm',
+      'discord-bot': '@dm',
+      slack: '@dm',
+      'slack-bot': '@dm',
+      webex: '@dm',
+      'webex-bot': '@dm',
+      instagram: '@instagram-dm',
+      line: '@line-dm',
+      kakaotalk: '@kakao-dm',
+      teams: 'teams',
+      'telegram-bot': 'telegram',
+    } satisfies Partial<Record<AdapterId, string>>
+    const fragments: FragmentEvent[] = []
+    for (const [adapter, workspace] of Object.entries(workspaces) as Array<[AdapterId, string]>) {
+      for (const chat of ['chat-a', 'chat-b']) {
+        const id = `${adapter}-${chat}`
+        fragments.push({
+          type: 'fragment',
+          id,
+          ts: '2026-07-01T12:00:00.000Z',
+          source: 'ses_channel',
+          entry: `entry-${id}`,
+          topic: id,
+          body: `${id} belief.`,
+          where: { adapter, workspace, chat, thread: null },
+        })
+        await writeTopic(agentDir, `${id}-topic`, id, `${id} belief.\nfragments:\n- streams/2026-07-01#${id}`)
+      }
+    }
+    await writeOriginFragments(agentDir, fragments)
+    const exports = await bootVectorPlugin(16384)
+
+    for (const [adapter, workspace] of Object.entries(workspaces) as Array<[AdapterId, string]>) {
+      const origin: Extract<SessionOrigin, { kind: 'channel' }> = {
+        kind: 'channel',
+        adapter,
+        workspace,
+        chat: 'chat-a',
+        thread: null,
+      }
+      const retrievalContext = { results: '' }
+      await exports.hooks!['session.turn.start']!(
+        { sessionId: `ses-${adapter}`, agentDir, userPrompt: 'query', origin, retrievalContext },
+        { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+      )
+      expect(retrievalContext.results).toContain(`${adapter}-chat-a-topic`)
+      expect(retrievalContext.results).toContain(`${adapter}-chat-b-topic`)
+    }
+    expect(hybridSearchMock).not.toHaveBeenCalled()
+  })
+
+  test('nested automatic retrieval does not derive a search scope from origin ancestry', async () => {
+    const scopedSearch = mock(async () => [])
+    await writeOriginFragments(agentDir, [originFragment('local', 'w1', 'Local body.')])
+    await writeTopic(agentDir, 'local-topic', 'Local Topic', 'Local body.\nfragments:\n- streams/2026-07-01#local')
+    const exports = await bootVectorPluginWith(scopedSearch, 16384)
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'researcher',
+      parentSessionId: 'ses_cron',
+      spawnedByOrigin: {
+        kind: 'cron' as const,
+        jobId: 'digest',
+        jobKind: 'subagent' as const,
+        scheduledByOrigin: {
+          kind: 'channel' as const,
+          adapter: 'slack-bot' as const,
+          workspace: 'w1',
+          chat: 'c1',
+          thread: null,
+        },
+      },
+    }
+    const retrievalContext = { results: 'sentinel' }
+
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_nested', agentDir, userPrompt: 'query', origin, retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(scopedSearch).toHaveBeenCalledWith('query', expect.anything(), agentDir, 10, expect.any(Function))
+    expect(retrievalContext.results).toContain('local-topic')
+  })
+
+  test('nested Discord DM retrieval does not derive a scope from its parent chat', async () => {
+    const scopedSearch = mock(async () => [])
+    const exports = await bootVectorPluginWith(scopedSearch, 16384)
+    const origin = {
+      kind: 'subagent' as const,
+      subagent: 'researcher',
+      parentSessionId: 'ses_dm',
+      spawnedByOrigin: {
+        kind: 'channel' as const,
+        adapter: 'discord' as const,
+        workspace: '@dm',
+        chat: 'dm-a',
+        thread: null,
+      },
+    }
+
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_dm_child', agentDir, userPrompt: 'query', origin, retrievalContext: { results: '' } },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(scopedSearch).toHaveBeenCalledWith('query', expect.anything(), agentDir, 10, expect.any(Function))
+  })
+
+  test('a channel caller keeps cross-workspace heading access by default', async () => {
+    await writeTopic(agentDir, 'global-a', 'Global A', 'First global belief.')
+    await writeTopic(agentDir, 'global-b', 'Global B', 'Second global belief.')
+    const exports = await bootVectorPlugin(16384)
+    const origin = {
+      kind: 'channel' as const,
+      adapter: 'slack-bot' as const,
+      workspace: 'w1',
+      chat: 'c1',
+      thread: null,
+    }
+    const retrievalContext = { results: '' }
+
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_global_channel', agentDir, userPrompt: 'query', origin, retrievalContext },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('memory') },
+    )
+
+    expect(retrievalContext.results).toContain('global-a')
+    expect(retrievalContext.results).toContain('global-b')
   })
 
   test('a system-infrastructure subagent turn skips retrieval entirely (no embed, no hybrid search)', async () => {
@@ -414,7 +680,11 @@ describe('vector session.turn.start hook', () => {
   })
 })
 
-async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPluginLogger('memory')) {
+async function bootVectorPlugin(
+  injectionBudgetBytes: number,
+  logger = createPluginLogger('memory'),
+  permissions: PermissionService = noopPermissionService,
+) {
   const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch: hybridSearchMock })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes })
   if (!parsed.success) throw new Error(parsed.error.message)
@@ -424,7 +694,7 @@ async function bootVectorPlugin(injectionBudgetBytes: number, logger = createPlu
     agentDir,
     config: parsed.data,
     logger,
-    permissions: noopPermissionService,
+    permissions,
     spawnSubagent: async () => {},
     isBooted: () => true,
   })
@@ -435,6 +705,7 @@ async function bootVectorPluginWith(
   hybridSearch: typeof hybridSearchMock,
   injectionBudgetBytes: number,
   logger = createPluginLogger('memory'),
+  permissions: PermissionService = noopPermissionService,
 ) {
   const memoryPlugin = createMemoryPluginWithStoreCapture({ hybridSearch })
   const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes })
@@ -445,7 +716,7 @@ async function bootVectorPluginWith(
     agentDir,
     config: parsed.data,
     logger,
-    permissions: noopPermissionService,
+    permissions,
     spawnSubagent: async () => {},
     isBooted: () => true,
   })
@@ -483,6 +754,24 @@ async function writeTopic(dir: string, slug: string, heading: string, body: stri
     topicShardPath(dir, slug),
     renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-06-11' }, body),
   )
+}
+
+async function writeOriginFragments(dir: string, fragments: FragmentEvent[]): Promise<void> {
+  await mkdir(streamsDir(dir), { recursive: true })
+  await appendEvents(streamFilePath(dir, '2026-07-01'), fragments)
+}
+
+function originFragment(id: string, workspace: string, body: string): FragmentEvent {
+  return {
+    type: 'fragment',
+    id,
+    ts: '2026-07-01T12:00:00.000Z',
+    source: 'ses_channel',
+    entry: `entry-${id}`,
+    topic: id,
+    body,
+    where: { adapter: 'slack-bot', workspace, chat: 'c1', thread: null },
+  }
 }
 
 function retrievedTopic(key: string, heading: string, excerpt: string) {

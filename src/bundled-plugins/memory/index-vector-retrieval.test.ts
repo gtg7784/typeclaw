@@ -9,7 +9,7 @@ import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import { renderShard } from './frontmatter'
 import { createMemoryPluginForTests, type MemoryPluginDeps } from './index'
-import { topicShardPath, topicsDir } from './paths'
+import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { EMBEDDING_MODEL_ID } from './vector/embedder'
 import type { EmbedFn } from './vector/hybrid'
 import { buildStartupVectorIndex } from './vector/startup'
@@ -22,7 +22,6 @@ const DIMS = 8
 // search. It must also be absent from the render so we can confirm the injected
 // memory is the retrieved topic, not an echo of the user prompt.
 const QUERY = 'zzqxvtrprobe'
-
 let agentDir: string
 
 beforeEach(async () => {
@@ -91,6 +90,46 @@ describe('vector retrieval end-to-end through session.turn.start', () => {
     expect(retrievalContext.results).toContain('## Orbital Mechanics')
     expect(retrievalContext.results).toContain('Satellites remain in orbit')
     expect(retrievalContext.results).not.toContain(QUERY)
+  })
+
+  test('index-mode vector retrieval remains globally visible across chats', async () => {
+    await writeTopic(
+      agentDir,
+      'private-plans',
+      'Private Plans',
+      `Confidential launch plans. ${pad(5000)}\nfragments:\n- streams/2026-07-01#private-child`,
+    )
+    await mkdir(streamsDir(agentDir), { recursive: true })
+    await writeFile(
+      streamFilePath(agentDir, '2026-07-01'),
+      `${JSON.stringify({
+        type: 'fragment',
+        id: 'private-child',
+        ts: '2026-07-01T00:00:00.000Z',
+        source: 'ses_private',
+        entry: 'private entry',
+        topic: 'Private Plans',
+        body: 'Confidential launch plans.',
+        where: { adapter: 'discord', workspace: 'guild-a', chat: 'private-room', thread: null },
+      })}\n`,
+    )
+    seedVector(agentDir, 'topic:private-plans', 'private-plans')
+
+    const exports = await bootVectorPlugin(4096)
+    const retrievalContext = { results: '' }
+    await exports.hooks!['session.turn.start']!(
+      {
+        sessionId: 'ses_public',
+        agentDir,
+        userPrompt: QUERY,
+        origin: { kind: 'channel', adapter: 'discord', workspace: 'guild-a', chat: 'public-room', thread: null },
+        retrievalContext,
+      },
+      hookCtx(),
+    )
+
+    expect(retrievalContext.results).toContain('`private-plans`')
+    expect(retrievalContext.results).toContain('Confidential launch plans.')
   })
 })
 

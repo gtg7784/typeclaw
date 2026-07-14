@@ -971,6 +971,7 @@ async function startAgentRuntime(
     ...mcpManagerOpt,
     agentDir: cwd,
     pluginRuntime,
+    permissions: pluginsLoaded.permissions,
     getFiredCount: (job) => cronCountStore?.get(job.id, job) ?? 0,
     claimController,
     commandRunnerFactory,

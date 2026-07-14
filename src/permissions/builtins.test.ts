@@ -25,7 +25,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn.operator')
   })
 
-  test('trusted has empty default match and core perms + fs.see.private + fs.see.secrets + bypass.low + bypass.medium + subagent perms + operator-specific spawn', () => {
+  test('trusted has empty default match and core perms + fs grants + medium-tier operator capabilities', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',

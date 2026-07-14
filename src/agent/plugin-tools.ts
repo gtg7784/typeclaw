@@ -196,6 +196,7 @@ export type WrapToolOptions = {
   // origin mutates per turn surface the current-turn `lastInboundAuthorId`
   // to `tool.before`. Sessions with a fixed origin can pass `() => origin`.
   getOrigin?: () => SessionOrigin | undefined
+  permissions?: PermissionService
   // Resolves the current turn's abort handle. Resolved lazily (not at wrap
   // time) because tools are wrapped BEFORE `createAgentSession` returns the
   // session whose `agent.abort` this points at. See `fireLoopAbort`.
