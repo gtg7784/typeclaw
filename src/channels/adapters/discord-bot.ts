@@ -11,6 +11,10 @@ import {
 } from 'agent-messenger/discordbot'
 
 import {
+  enrichHistoricalProvenance,
+  type HistoricalProvenanceResolver,
+} from '@/bundled-plugins/memory/provenance-index'
+import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
   type MembershipResolverFailure,
@@ -113,6 +117,7 @@ const consoleLogger: DiscordBotAdapterLogger = {
 }
 
 export type DiscordBotAdapterOptions = {
+  agentDir?: string
   router: ChannelRouter
   configRef: () => ChannelAdapterConfig
   token: string
@@ -123,6 +128,7 @@ export type DiscordBotAdapterOptions = {
   fetchImpl?: typeof fetch
   createClient?: () => DiscordBotClient
   createListener?: (client: DiscordBotClient, options: DiscordBotListenerOptions) => DiscordBotListener
+  enrichHistoricalProvenance?: typeof enrichHistoricalProvenance
 }
 
 export type DiscordBotAdapter = {
@@ -1032,7 +1038,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
 
-  const channelResolver = createDiscordChannelResolver({ token: options.token })
+  const channelResolver = createDiscordChannelResolver({ token: options.token, fetchImpl })
   const threadRoomResolver = createDiscordThreadRoomResolver({ token: options.token, fetchImpl })
 
   // Discord mentions by snowflake id (`<@id>`/`<@!id>`), so no username form.
@@ -1148,7 +1154,16 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       // stays null), so the engagement gate cannot see "this is a thread" from
       // the payload alone. Resolve the channel's type/parent and stamp the
       // structural `room` signal for guild inbounds; DMs are never thread rooms.
-      const room = event.guild_id !== undefined ? await threadRoomResolver(event.channel_id) : undefined
+      let room = event.guild_id !== undefined ? await threadRoomResolver(event.channel_id) : undefined
+      if (room?.parentChat !== undefined && event.guild_id !== undefined) {
+        const parentNames = await channelResolver({
+          adapter: 'discord-bot',
+          workspace: event.guild_id,
+          chat: room.parentChat,
+          thread: null,
+        })
+        if (parentNames.chatName !== undefined) room = { ...room, parentChatName: parentNames.chatName }
+      }
       const basePayload =
         referenceResult.referenceContext === undefined
           ? { ...verdict.payload, text: hintedText }
@@ -1276,6 +1291,47 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         started = false
         logger.error(`[discord-bot] listener start failed: ${describe(err)}`)
         throw err
+      }
+
+      if (options.agentDir !== undefined) {
+        const runEnrichment = options.enrichHistoricalProvenance ?? enrichHistoricalProvenance
+        const resolveHistorical: HistoricalProvenanceResolver = async (where) => {
+          const key = {
+            adapter: 'discord-bot' as const,
+            workspace: where.workspace,
+            chat: where.chat,
+            thread: where.thread ?? null,
+          }
+          const [names, roomStatus] = await Promise.all([
+            channelResolver(key),
+            threadRoomResolver.resolveStatus(where.chat),
+          ])
+          const room = roomStatus.room
+          let parentChatName = room?.parentChatName
+          if (parentChatName === undefined && room?.parentChat !== undefined) {
+            const parentNames = await channelResolver({ ...key, chat: room.parentChat })
+            parentChatName = parentNames.chatName
+          }
+          return {
+            where: {
+              ...where,
+              ...names,
+              ...(room?.parentChat !== undefined ? { parentChat: room.parentChat } : {}),
+              ...(parentChatName !== undefined ? { parentChatName } : {}),
+            },
+            parentChecked: roomStatus.parentChecked,
+          }
+        }
+        void runEnrichment(options.agentDir, resolveHistorical, { adapter: 'discord-bot' }).then(
+          (result) => {
+            logger.info(
+              `[discord-bot] historical provenance enrichment scanned=${result.scanned} attempted=${result.attempted} resolved=${result.resolved} failed=${result.failed} timed_out=${result.timedOut} changed=${String(result.changed)}`,
+            )
+          },
+          (error: unknown) => {
+            logger.warn(`[discord-bot] historical provenance enrichment failed: ${describe(error)}`)
+          },
+        )
       }
     },
 
