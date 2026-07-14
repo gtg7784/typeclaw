@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto'
 
 import { loadAllShards, type TopicShard } from '../load-shards'
 import { buildParentLinks } from '../parent-link'
+import {
+  buildProvenanceIndexFrom,
+  type MemoryScope,
+  type ProvenanceChild,
+  type ProvenanceIndex,
+} from '../provenance-index'
 import { loadAllReferences, type Reference } from '../references/load-references'
 import {
   buildMatcher,
@@ -13,7 +19,7 @@ import {
   type StreamMatch,
 } from '../search-tool'
 import type { FragmentProvenance, StreamEvent } from '../stream-events'
-import { readAllUndreamedStreamDays, type UndreamedStreamDay } from '../stream-io'
+import { filterUndreamedEvents, readAllStreamDays, type UndreamedStreamDay } from '../stream-io'
 import { embed, EMBEDDING_MODEL_ID, type EmbedType } from './embedder'
 import type { Passage } from './passages'
 import { clearsBaseline, gateRelevance, MARGIN, streamAdmissionBaseline } from './relevance-gate'
@@ -49,9 +55,11 @@ export type HybridSearchResult = {
   who?: string
   when?: string
   where?: FragmentProvenance
+  provenance?: ProvenanceChild[]
 }
 
 export type EmbedFn = (texts: string[], type: EmbedType) => Promise<Float32Array[]>
+export type HybridSearchOptions = { scope?: MemoryScope }
 
 export async function hybridSearch(
   query: string,
@@ -59,22 +67,69 @@ export async function hybridSearch(
   agentDir: string,
   topK: number,
   embedFn: EmbedFn = embed,
+  options: HybridSearchOptions = {},
 ): Promise<HybridSearchResult[]> {
   if (topK <= 0) return []
 
   const queryChunks = queryEmbeddingChunks(query)
-  const [shards, streamDays, references, queryEmbeddings] = await Promise.all([
+  const [shards, allStreamDays, references, queryEmbeddings] = await Promise.all([
     loadAllShards(agentDir),
-    readAllUndreamedStreamDays(agentDir),
+    readAllStreamDays(agentDir),
     loadAllReferences(agentDir),
     embedFn(queryChunks, 'query'),
   ])
+  const allUndreamedDays: UndreamedStreamDay[] = allStreamDays.flatMap((day) => {
+    const events = filterUndreamedEvents(day.events, day.dreamedIds)
+    return events.length === 0 ? [] : [{ date: day.date, path: day.path, name: day.name, events }]
+  })
+  const provenanceIndex = await buildProvenanceIndexFrom(agentDir, shards, allStreamDays)
+  const scope = options.scope ?? {}
+  const scoped = hasScope(scope)
+  const eligibleCitations = new Set(provenanceIndex.undreamedChildren(scope).map((child) => child.citation))
+  const streamDays = allUndreamedDays.flatMap((day) => {
+    const events = day.events.filter((event) => {
+      if (!scoped) return true
+      if (event.type !== 'fragment') return false
+      return eligibleCitations.has(`streams/${day.date}#${event.id}`)
+    })
+    return events.length === 0 ? [] : [{ ...day, events }]
+  })
+  const eligibleShards = shards.filter((shard) => provenanceIndex.topicEligible(shard.slug, scope))
+  const eligibleReferences = scoped ? [] : references
 
-  const { parentSlugsByFragmentId, supersededFragmentIds } = buildParentLinks(shards)
-  const index = buildContentIndex(shards, streamDays, references, supersededFragmentIds)
+  const { supersededFragmentIds } = buildParentLinks(shards)
+  const { parentSlugsByFragmentId } = buildParentLinks(eligibleShards)
+  if (scoped) {
+    const eligibleFragmentIds = new Set(
+      eligibleShards.flatMap((shard) =>
+        provenanceIndex.childrenForTopic(shard.slug, scope).flatMap((child) => fragmentIdFromKey(child.citation) ?? []),
+      ),
+    )
+    for (const fragmentId of parentSlugsByFragmentId.keys()) {
+      if (!eligibleFragmentIds.has(fragmentId)) parentSlugsByFragmentId.delete(fragmentId)
+    }
+  }
+  const index = buildContentIndex(
+    eligibleShards,
+    streamDays,
+    eligibleReferences,
+    supersededFragmentIds,
+    provenanceIndex,
+    scope,
+  )
   const vectorRows =
-    queryEmbeddings.length === 0 ? [] : gatedVectorLane(queryEmbeddings, queryChunks, store, topK, index)
-  const keywordMatches = keywordLane(query, shards, streamDays, references, topK * 2)
+    queryEmbeddings.length === 0
+      ? []
+      : gatedVectorLane(queryEmbeddings, queryChunks, store, topK, index, parentSlugsByFragmentId)
+  const keywordMatches = keywordLane(
+    query,
+    eligibleShards,
+    streamDays,
+    eligibleReferences,
+    topK * 2,
+    provenanceIndex,
+    scope,
+  )
 
   return fuseLanes(vectorRows, keywordMatches, index, parentSlugsByFragmentId).slice(0, topK)
 }
@@ -107,8 +162,11 @@ function gatedVectorLane(
   store: VectorStore,
   topK: number,
   index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+  parentSlugsByFragmentId: Map<string, Set<string>>,
 ): VectorRow[] {
-  const { scored, winnerChunkByRowId } = maxScoreAcrossChunks(queryEmbeddings, store)
+  const allScored = maxScoreAcrossChunks(queryEmbeddings, store)
+  const scored = allScored.scored.filter(({ row }) => vectorRowIsAuthorized(row, index, parentSlugsByFragmentId))
+  const { winnerChunkByRowId } = allScored
   const bandDefiningRows = scored.filter(({ row }) => row.source === 'topic' || row.source === 'reference')
   const streamRows = scored.filter(({ row }) => row.source === 'stream')
 
@@ -140,6 +198,18 @@ function gatedVectorLane(
   const keptStreams = streamRows.filter(({ score }) => clearsBaseline(score, streamBaseline)).slice(0, topK * 2)
 
   return [...keptBandDefiningRows, ...keptStreams].sort((a, b) => b.score - a.score).map(({ row }) => row)
+}
+
+function vectorRowIsAuthorized(
+  row: VectorRow,
+  index: Map<string, Omit<HybridSearchResult, 'rrfScore'>>,
+  parentSlugsByFragmentId: Map<string, Set<string>>,
+): boolean {
+  if (row.source === 'reference') return index.has(laneKey('reference', referenceSlugFromKey(row.key)))
+  if (row.source === 'topic') return index.has(laneKey('topic', row.key))
+  if (index.has(laneKey('stream', row.key))) return true
+  const fragmentId = fragmentIdFromKey(row.key)
+  return fragmentId !== null && (parentSlugsByFragmentId.get(fragmentId)?.size ?? 0) > 0
 }
 
 // The scripts of the HEAD band-defining rows (the gate examines the top of the
@@ -215,10 +285,39 @@ function keywordLane(
   streamDays: UndreamedStreamDay[],
   references: Reference[],
   maxResults: number,
+  provenanceIndex: ProvenanceIndex,
+  scope: MemoryScope,
 ): MemorySearchMatch[] {
   const matcher = buildMatcher(query, false)
   if (typeof matcher === 'string') return []
-  const phrase = searchAll(shards, streamDays, matcher, { full: false, maxResults, references })
+  const topicDocuments = new Map(
+    shards.map((shard) => [
+      shard.slug,
+      `${shard.slug}\n${shard.frontmatter.heading}\n${shard.body}\n${provenanceIndex.lexicalTextForTopic(shard.slug, scope)}`,
+    ]),
+  )
+  const topicProvenance = new Map(
+    shards.map((shard) => [shard.slug, provenanceIndex.childrenForTopic(shard.slug, scope)]),
+  )
+  const streamDocuments = new Map<string, string>()
+  for (const day of streamDays) {
+    for (const event of day.events) {
+      if (event.type !== 'fragment') continue
+      const citation = `streams/${day.date}#${event.id}`
+      streamDocuments.set(
+        citation,
+        `${event.topic}\n${event.body}\n${provenanceIndex.lexicalTextForUndreamed(citation, scope)}`,
+      )
+    }
+  }
+  const phrase = searchAll(shards, streamDays, matcher, {
+    full: false,
+    maxResults,
+    references,
+    topicDocuments,
+    topicProvenance,
+    streamDocuments,
+  })
   const phraseMatches = 'matches' in phrase ? phrase.matches : []
   if (phraseMatches.length > 0) return phraseMatches
 
@@ -230,6 +329,9 @@ function keywordLane(
     maxResults,
     references,
     tokenMatchMode: 'ascii-boundary',
+    topicDocuments,
+    topicProvenance,
+    streamDocuments,
   })
   return 'matches' in ranked ? ranked.matches : []
 }
@@ -470,21 +572,26 @@ function buildContentIndex(
   streamDays: UndreamedStreamDay[],
   references: Reference[],
   supersededFragmentIds: Set<string>,
+  provenanceIndex: ProvenanceIndex,
+  scope: MemoryScope,
 ): Map<string, Omit<HybridSearchResult, 'rrfScore'>> {
   const index = new Map<string, Omit<HybridSearchResult, 'rrfScore'>>()
+  const undreamedByCitation = new Map(provenanceIndex.undreamedChildren(scope).map((child) => [child.citation, child]))
 
   for (const shard of shards) {
+    const provenance = provenanceIndex.childrenForTopic(shard.slug, scope)
     index.set(laneKey('topic', shard.slug), {
       source: 'topic',
       key: shard.slug,
       heading: shard.frontmatter.heading,
       excerpt: excerpt(shard.body, shard.frontmatter.heading),
+      ...(provenance.length > 0 ? { provenance } : {}),
     })
   }
 
   for (const day of streamDays) {
     for (const event of day.events) {
-      const item = streamIndexItem(day, event, supersededFragmentIds)
+      const item = streamIndexItem(day, event, supersededFragmentIds, undreamedByCitation)
       if (item !== null) index.set(laneKey('stream', item.key), item)
     }
   }
@@ -502,10 +609,15 @@ function buildContentIndex(
   return index
 }
 
+function hasScope(scope: MemoryScope): boolean {
+  return scope.workspace !== undefined || scope.chat !== undefined || scope.thread !== undefined
+}
+
 function streamIndexItem(
   day: UndreamedStreamDay,
   event: StreamEvent,
   supersededFragmentIds: Set<string>,
+  undreamedByCitation: Map<string, ProvenanceChild>,
 ): Omit<HybridSearchResult, 'rrfScore'> | null {
   if (event.type === 'watermark') return null
   if (event.type === 'fragment') {
@@ -517,8 +629,9 @@ function streamIndexItem(
       excerpt: excerpt(event.body, event.topic),
       when: event.ts,
     }
-    if (event.who !== undefined) item.who = event.who
-    if (event.where !== undefined) item.where = event.where
+    const child = undreamedByCitation.get(`streams/${day.date}#${event.id}`)
+    if (child?.who !== undefined) item.who = child.who
+    if (child?.where !== undefined) item.where = child.where
     return item
   }
   return {

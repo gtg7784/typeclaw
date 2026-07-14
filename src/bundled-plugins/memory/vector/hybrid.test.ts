@@ -4,6 +4,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { AdapterId } from '@/channels/schema'
+
 import { renderShard } from '../frontmatter'
 import { renderReference } from '../references/frontmatter'
 import { EMBEDDING_MODEL_ID } from './embedder'
@@ -271,6 +273,371 @@ describe('hybridSearch', () => {
 })
 
 describe('hybridSearch keyword lane', () => {
+  it('matches dreamed topic provenance and collapses the keyword hit to its parent topic', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      const fragmentId = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
+      writeTopic(
+        agentDir,
+        'shared-workspace-policy',
+        'Server policy',
+        `Keep replies concise.\nfragments:\n- streams/2026-06-10#${fragmentId}`,
+      )
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: fragmentId,
+          topic: 'Unrelated capture topic',
+          body: 'No workspace words in content.',
+          where: {
+            adapter: 'discord',
+            workspace: 'guild-example',
+            workspaceName: 'Example Guild',
+            chat: 'room-1',
+            thread: null,
+          },
+        },
+      ])
+      store.upsert(row('topic:shared-workspace-policy', 'shared-workspace-policy', vector({ 5: 1 })))
+
+      const results = await hybridSearch('Example Guild', store, agentDir, 5, embedFrom({ 0: 1 }))
+
+      expect(results.map((result) => result.key)).toContain('shared-workspace-policy')
+      expect(results.find((result) => result.key === 'shared-workspace-policy')?.provenance?.[0]).toMatchObject({
+        citation: `streams/2026-06-10#${fragmentId}`,
+        where: { workspaceName: 'Example Guild' },
+      })
+    } finally {
+      store.close()
+    }
+  })
+
+  it('workspace scope filters provenance without hiding a topic that has matching evidence', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: 'local-child',
+          topic: 'Marker',
+          body: 'scope marker local',
+          where: { adapter: 'discord', workspace: '201', chat: '301', thread: null },
+        },
+        {
+          id: 'foreign-child',
+          topic: 'Marker',
+          body: 'scope marker foreign',
+          where: { adapter: 'discord', workspace: '202', chat: '302', thread: null },
+        },
+      ])
+      writeTopic(
+        agentDir,
+        'mixed-topic',
+        'Mixed topic',
+        'scope marker mixed body\nfragments:\n- streams/2026-06-10#local-child\n- streams/2026-06-10#foreign-child',
+      )
+      writeTopic(
+        agentDir,
+        'local-topic',
+        'Local topic',
+        'scope marker local body\nfragments:\n- streams/2026-06-10#local-child',
+      )
+
+      const results = await hybridSearch('scope marker', store, agentDir, 10, embedFrom({ 7: 1 }), {
+        scope: { workspace: '201' },
+      })
+
+      expect(results.map((result) => result.key)).toContain('local-topic')
+      expect(results.map((result) => result.key)).toContain('mixed-topic')
+      expect(results.some((result) => result.where?.workspace === '202')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('workspace scope rejects a mixed topic reached only through a foreign child vector', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: 'mixed-local-child',
+          topic: 'Mixed local',
+          body: 'Local evidence.',
+          where: { adapter: 'discord', workspace: '201', chat: '301', thread: null },
+        },
+        {
+          id: 'mixed-foreign-child',
+          topic: 'Mixed foreign',
+          body: 'Foreign evidence.',
+          where: { adapter: 'discord', workspace: '202', chat: '302', thread: null },
+        },
+        {
+          id: 'local-baseline-a',
+          topic: 'Local baseline A',
+          body: 'Local baseline A.',
+          where: { adapter: 'discord', workspace: '201', chat: '301', thread: null },
+        },
+        {
+          id: 'local-baseline-b',
+          topic: 'Local baseline B',
+          body: 'Local baseline B.',
+          where: { adapter: 'discord', workspace: '201', chat: '301', thread: null },
+        },
+      ])
+      writeTopic(
+        agentDir,
+        'mixed-vector-topic',
+        'Mixed vector topic',
+        'Mixed belief.\nfragments:\n- streams/2026-06-10#mixed-local-child\n- streams/2026-06-10#mixed-foreign-child',
+      )
+      writeTopic(
+        agentDir,
+        'local-baseline-a',
+        'Local baseline A',
+        'Local baseline A.\nfragments:\n- streams/2026-06-10#local-baseline-a',
+      )
+      writeTopic(
+        agentDir,
+        'local-baseline-b',
+        'Local baseline B',
+        'Local baseline B.\nfragments:\n- streams/2026-06-10#local-baseline-b',
+      )
+      store.upsert(
+        row('stream:2026-06-10#mixed-foreign-child', '2026-06-10#mixed-foreign-child', vector({ 0: 1 }), 'stream'),
+      )
+      store.upsert(row('topic:local-baseline-a', 'local-baseline-a', vector({ 0: 0.8, 1: 0.6 })))
+      store.upsert(row('topic:local-baseline-b', 'local-baseline-b', vector({ 0: 0.79, 1: 0.61 })))
+
+      const results = await hybridSearch('zz-foreign-vector-only', store, agentDir, 10, embedFrom({ 0: 1 }), {
+        scope: { workspace: '201' },
+      })
+
+      expect(results.map((result) => result.key)).not.toContain('mixed-vector-topic')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('derives superseded state from excluded shards before scoped stream eligibility', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: 'local-stale',
+          topic: 'Old policy',
+          body: 'superseded-only-marker',
+          where: { adapter: 'discord', workspace: '201', chat: '301', thread: null },
+        },
+        {
+          id: 'foreign-active',
+          topic: 'Current policy',
+          body: 'foreign current evidence',
+          where: { adapter: 'discord', workspace: '202', chat: '302', thread: null },
+        },
+      ])
+      writeTopic(
+        agentDir,
+        'excluded-parent',
+        'Excluded parent',
+        'Foreign current policy.\nfragments:\n- streams/2026-06-10#foreign-active\nsuperseded:\n- streams/2026-06-10#local-stale',
+      )
+
+      const results = await hybridSearch('superseded-only-marker', store, agentDir, 10, embedFrom({ 7: 1 }), {
+        scope: { workspace: '201' },
+      })
+
+      expect(results.some((result) => result.source === 'stream' && result.key.endsWith('#local-stale'))).toBe(false)
+      expect(results.some((result) => result.key === 'excluded-parent')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('treats Discord DM chat scope as immutable inside the shared @dm workspace', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: 'dm-a-child',
+          topic: 'DM A',
+          body: 'local-dm-marker',
+          where: { adapter: 'discord', workspace: '@dm', chat: 'dm-a', thread: null },
+        },
+        {
+          id: 'dm-b-child',
+          topic: 'DM B',
+          body: 'foreign-dm-marker',
+          where: { adapter: 'discord', workspace: '@dm', chat: 'dm-b', thread: null },
+        },
+      ])
+      writeTopic(agentDir, 'dm-a-topic', 'DM A', 'local-dm-marker\nfragments:\n- streams/2026-06-10#dm-a-child')
+      writeTopic(agentDir, 'dm-b-topic', 'DM B', 'foreign-dm-marker\nfragments:\n- streams/2026-06-10#dm-b-child')
+
+      const results = await hybridSearch('foreign-dm-marker', store, agentDir, 10, embedFrom({ 7: 1 }), {
+        scope: { workspace: '@dm', chat: 'dm-a' },
+      })
+
+      expect(results.some((result) => result.key === 'dm-b-topic')).toBe(false)
+      expect(results.some((result) => result.where?.chat === 'dm-b')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('isolates every shared-workspace adapter shape inside hybrid retrieval', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      const workspaces = {
+        discord: '@dm',
+        'discord-bot': '@dm',
+        slack: '@dm',
+        'slack-bot': '@dm',
+        webex: '@dm',
+        'webex-bot': '@dm',
+        instagram: '@instagram-dm',
+        line: '@line-dm',
+        kakaotalk: '@kakao-dm',
+        teams: 'teams',
+        'telegram-bot': 'telegram',
+      } satisfies Partial<Record<AdapterId, string>>
+      const fragments: Parameters<typeof writeStreamFragments>[2] = []
+      for (const [adapter, workspace] of Object.entries(workspaces) as Array<[AdapterId, string]>) {
+        fragments.push(
+          {
+            id: `${adapter}-local`,
+            topic: 'Local',
+            body: `${adapter}-local-hybrid-marker`,
+            where: { adapter, workspace, chat: 'chat-a', thread: null },
+          },
+          {
+            id: `${adapter}-foreign`,
+            topic: 'Foreign',
+            body: `${adapter}-foreign-hybrid-marker`,
+            where: { adapter, workspace, chat: 'chat-b', thread: null },
+          },
+        )
+        writeTopic(
+          agentDir,
+          `${adapter}-local-hybrid`,
+          'Local',
+          `${adapter}-local-hybrid-marker\nfragments:\n- streams/2026-06-10#${adapter}-local`,
+        )
+        writeTopic(
+          agentDir,
+          `${adapter}-foreign-hybrid`,
+          'Foreign',
+          `${adapter}-foreign-hybrid-marker\nfragments:\n- streams/2026-06-10#${adapter}-foreign`,
+        )
+      }
+      writeStreamFragments(agentDir, '2026-06-10', fragments)
+
+      for (const [adapter, workspace] of Object.entries(workspaces) as Array<[AdapterId, string]>) {
+        const results = await hybridSearch(
+          `${adapter}-foreign-hybrid-marker`,
+          store,
+          agentDir,
+          10,
+          embedFrom({ 7: 1 }),
+          {
+            scope: { workspace, chat: 'chat-a' },
+          },
+        )
+        expect(results.some((result) => result.key === `${adapter}-foreign-hybrid`)).toBe(false)
+        expect(results.some((result) => result.where?.chat === 'chat-b')).toBe(false)
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('isolates Slack MPIM group-DM topics by immutable chat ID', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      const fragments: Parameters<typeof writeStreamFragments>[2] = []
+      for (const adapter of ['slack', 'slack-bot'] as const) {
+        fragments.push(
+          {
+            id: `${adapter}-mpim-local`,
+            topic: 'Local MPIM',
+            body: `${adapter}-mpim-local-hybrid`,
+            where: { adapter, workspace: '@dm', chat: 'GLOCAL', thread: null },
+          },
+          {
+            id: `${adapter}-mpim-foreign`,
+            topic: 'Foreign MPIM',
+            body: `${adapter}-mpim-foreign-hybrid`,
+            where: { adapter, workspace: '@dm', chat: 'GFOREIGN', thread: null },
+          },
+        )
+        writeTopic(
+          agentDir,
+          `${adapter}-mpim-local-topic`,
+          'Local MPIM',
+          `${adapter}-mpim-local-hybrid\nfragments:\n- streams/2026-06-10#${adapter}-mpim-local`,
+        )
+        writeTopic(
+          agentDir,
+          `${adapter}-mpim-foreign-topic`,
+          'Foreign MPIM',
+          `${adapter}-mpim-foreign-hybrid\nfragments:\n- streams/2026-06-10#${adapter}-mpim-foreign`,
+        )
+      }
+      writeStreamFragments(agentDir, '2026-06-10', fragments)
+
+      for (const adapter of ['slack', 'slack-bot'] as const) {
+        const results = await hybridSearch(`${adapter}-mpim-foreign-hybrid`, store, agentDir, 10, embedFrom({ 7: 1 }), {
+          scope: { workspace: '@dm', chat: 'GLOCAL' },
+        })
+        expect(results.some((result) => result.key === `${adapter}-mpim-foreign-topic`)).toBe(false)
+        expect(results.some((result) => result.where?.chat === 'GFOREIGN')).toBe(false)
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('explicit scope excludes a foreign standalone undreamed stream', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeStreamFragments(agentDir, '2026-06-10', [
+        {
+          id: 'local-standalone',
+          topic: 'Local standalone',
+          body: 'shared-standalone-marker local',
+          where: { adapter: 'slack', workspace: '@dm', chat: 'chat-a', thread: null },
+        },
+        {
+          id: 'foreign-standalone',
+          topic: 'Foreign standalone',
+          body: 'shared-standalone-marker foreign',
+          where: { adapter: 'slack', workspace: '@dm', chat: 'chat-b', thread: null },
+        },
+      ])
+
+      const results = await hybridSearch('shared-standalone-marker', store, agentDir, 10, embedFrom({ 7: 1 }), {
+        scope: { workspace: '@dm', chat: 'chat-a' },
+      })
+
+      expect(results.some((result) => result.source === 'stream' && result.where?.chat === 'chat-a')).toBe(true)
+      expect(results.some((result) => result.source === 'stream' && result.where?.chat === 'chat-b')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('explicit scope excludes standalone references without channel provenance', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      writeReference(agentDir, 'foreign-reference', 'Foreign Reference', 'foreign-reference-marker')
+
+      const results = await hybridSearch('foreign-reference-marker', store, agentDir, 10, embedFrom({ 7: 1 }), {
+        scope: { workspace: '@dm', chat: 'chat-a' },
+      })
+
+      expect(results.some((result) => result.source === 'reference')).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
   it('retrieves a shard via token-OR fallback for a full natural-language prompt', async () => {
     const { agentDir, store } = createFixture()
     try {
@@ -463,6 +830,55 @@ describe('hybridSearch keyword lane', () => {
 })
 
 describe('hybridSearch relevance gate', () => {
+  it('computes the relevance baseline only from authorized candidates', async () => {
+    const { agentDir, store } = createFixture()
+    try {
+      const fragments: Parameters<typeof writeStreamFragments>[2] = [
+        {
+          id: 'local-evidence',
+          topic: 'Local semantic fact',
+          body: 'A locally authorized semantic fact.',
+          where: { adapter: 'discord', workspace: 'local-workspace', chat: 'local-chat', thread: null },
+        },
+      ]
+      writeTopic(
+        agentDir,
+        'local-semantic-topic',
+        'Local semantic topic',
+        'A locally authorized semantic fact.\nfragments:\n- streams/2026-06-10#local-evidence',
+      )
+      store.upsert(row('topic:local-semantic-topic', 'local-semantic-topic', bandedVector(0.79)))
+
+      for (let index = 0; index < 30; index++) {
+        const id = `foreign-evidence-${index}`
+        const slug = `foreign-semantic-${index}`
+        fragments.push({
+          id,
+          topic: 'Foreign semantic fact',
+          body: `Foreign fact ${index}.`,
+          where: { adapter: 'discord', workspace: 'foreign-workspace', chat: `foreign-${index}`, thread: null },
+        })
+        writeTopic(
+          agentDir,
+          slug,
+          `Foreign semantic ${index}`,
+          `Foreign fact ${index}.\nfragments:\n- streams/2026-06-10#${id}`,
+        )
+        store.upsert(row(`topic:${slug}`, slug, bandedVector(0.8 + (index % 3) * 0.001)))
+      }
+      writeStreamFragments(agentDir, '2026-06-10', fragments)
+
+      const results = await hybridSearch('zz-scoped-semantic-probe', store, agentDir, 5, embedFrom({ 0: 1 }), {
+        scope: { workspace: 'local-workspace', chat: 'local-chat' },
+      })
+
+      expect(results.map((result) => result.key)).toContain('local-semantic-topic')
+      expect(results.some((result) => result.key.startsWith('foreign-semantic-'))).toBe(false)
+    } finally {
+      store.close()
+    }
+  })
+
   it('suppresses the vector lane when no topic clears the per-query baseline (no-match)', async () => {
     const { agentDir, store } = createFixture()
     try {
@@ -843,12 +1259,24 @@ function writeStreamFragment(agentDir: string, date: string, id: string, topic: 
 function writeStreamFragments(
   agentDir: string,
   date: string,
-  fragments: Array<{ id: string; topic: string; body: string }>,
+  fragments: Array<{
+    id: string
+    topic: string
+    body: string
+    where?: {
+      adapter: string
+      workspace: string
+      workspaceName?: string
+      chat: string
+      chatName?: string
+      thread?: string | null
+    }
+  }>,
 ): void {
   const streamsDir = join(agentDir, 'memory', 'streams')
   mkdirSync(streamsDir, { recursive: true })
   const lines = fragments
-    .map(({ id, topic, body }) =>
+    .map(({ id, topic, body, where }) =>
       JSON.stringify({
         type: 'fragment',
         id,
@@ -857,6 +1285,7 @@ function writeStreamFragments(
         entry: 'e1',
         topic,
         body,
+        ...(where === undefined ? {} : { where }),
       }),
     )
     .join('\n')
