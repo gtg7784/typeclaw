@@ -23,6 +23,7 @@ import {
   checkSkillAuthoringGuard,
 } from '@/bundled-plugins/guard/policy'
 import { config, getSandboxWritablePathSpecs } from '@/config/config'
+import { assertNoCanonicalSecretsInGit } from '@/git/secret-history'
 import type { PermissionService } from '@/permissions/permissions'
 import type {
   BuiltinToolRef,
@@ -578,6 +579,8 @@ async function applyBashSandbox(
 ): Promise<PrivilegedSandboxRuntime | undefined> {
   const command = mutableArgs.command
   if (typeof command !== 'string') return undefined
+
+  await assertNoCanonicalSecretsInGit(agentDir)
 
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
 
