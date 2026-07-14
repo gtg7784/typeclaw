@@ -46,12 +46,12 @@ describe('parseSlashCommand', () => {
     expect(result.command.key.chat).toBe('D-bob')
   })
 
-  test('private channel ids (G prefix) map to the team workspace (NOT @dm)', () => {
-    const result = parseSlashCommand(body({ channel_id: 'G-secret' }), known)
+  test('MPIM and private channel ids (G prefix) map to the team workspace (NOT @dm)', () => {
+    const result = parseSlashCommand(body({ channel_id: 'G0MPIM' }), known)
     expect(result.kind).toBe('parsed')
     if (result.kind !== 'parsed') return
     expect(result.command.key.workspace).toBe('T-acme')
-    expect(result.command.key.chat).toBe('G-secret')
+    expect(result.command.key.chat).toBe('G0MPIM')
   })
 
   test('lowercases the command name', () => {
@@ -133,6 +133,18 @@ describe('parseThreadCommand', () => {
     if (result.kind !== 'parsed') return
     expect(result.command.key.workspace).toBe('@dm')
     expect(result.command.key.chat).toBe('D-bob')
+  })
+
+  test('MPIM thread commands target the team-scoped group conversation', () => {
+    const result = parseThreadCommand(input({ channel: 'G0MPIM', isDm: false }), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command.key).toEqual({
+      adapter: 'slack-bot',
+      workspace: 'T-acme',
+      chat: 'G0MPIM',
+      thread: '1700.0001',
+    })
   })
 
   test('lowercases the command name (!STOP)', () => {

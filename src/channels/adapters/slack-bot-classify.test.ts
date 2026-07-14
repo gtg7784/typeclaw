@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
+import { decideEngagement, StickyLedger } from '@/channels/engagement'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
+import { isDmChannelOrigin } from '@/permissions'
 
 import { classifyInbound, type SlackInboundMessageEvent } from './slack-bot-classify'
 import { encodeSlackReactionRef } from './slack-bot-reactions'
@@ -470,6 +472,30 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload).toMatchObject({ workspace: '@dm', chat: 'D0DMID', isDm: true })
+  })
+
+  test('MPIM group DMs retain team, grant, and multi-human engagement semantics', () => {
+    const event = buildEvent({ channel_type: 'mpim', channel: 'G0MPIM', text: '여러분 안녕하세요' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload).toMatchObject({ workspace: TEAM_ID, chat: 'G0MPIM', isDm: false })
+    expect(isDmChannelOrigin(verdict.payload)).toBe(false)
+    expect(
+      decideEngagement({
+        message: verdict.payload,
+        config: { trigger: ['dm'], stickiness: 'off' },
+        key: `slack-bot:${TEAM_ID}:G0MPIM:`,
+        ledger: new StickyLedger(),
+        now: 0,
+        participants: [],
+        membership: { humans: 3, bots: 1, fetchedAt: 0, truncated: false },
+        selfAliases: [],
+        botInThread: false,
+      }),
+    ).toBe('observe')
   })
 
   test('thread reply to the bot surfaces thread_ts as both thread and replyToBotMessageId', () => {

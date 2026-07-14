@@ -441,6 +441,54 @@ describe('createSlackMembershipResolver', () => {
     expect(calls).toHaveLength(0)
   })
 
+  test('MPIM classification drives real multi-human membership enumeration', async () => {
+    const verdict = classifyInbound(
+      {
+        type: 'message',
+        channel: 'G0MPIM',
+        channel_type: 'mpim',
+        user: 'U1',
+        text: '함께 확인해 주세요',
+        ts: '1700000000.000100',
+      },
+      {
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      },
+      { teamId: 'T1', botUserId: 'UBOT' },
+    )
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    const { fn } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 3 } }),
+      slackResponse({ ok: true, members: ['U1', 'U2', 'UBOT'] }),
+      slackResponse({ ok: true, members: [{ id: 'UBOT', is_bot: true }] }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 15,
+    })
+
+    await expect(
+      resolver({
+        adapter: verdict.payload.adapter,
+        workspace: verdict.payload.workspace,
+        chat: verdict.payload.chat,
+        thread: verdict.payload.thread,
+      }),
+    ).resolves.toEqual({
+      humans: 2,
+      bots: 1,
+      fetchedAt: 15,
+      truncated: false,
+      humanMemberIds: ['U1', 'U2'],
+    })
+  })
+
   test('small channel classifies members against the bulk users.list bot set', async () => {
     const { fn, calls } = fakeFetch([
       slackResponse({ ok: true, channel: { num_members: 3 } }),
