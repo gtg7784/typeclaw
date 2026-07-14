@@ -27,3 +27,15 @@ Edit the four `CURL_IMPERSONATE_*` constants in `src/init/dockerfile.ts`, verify
 - `curl_chrome136` not on PATH → `ENOENT` → tool error. Container is broken; `typeclaw start --build` is the fix.
 - CAPTCHA despite impersonation → `DdgCaptchaError`. Mitigations: cookie warmup, vqd preflight, request jitter.
 - Network timeout (>30s) → curl exits non-zero. Cap is `REQUEST_TIMEOUT_SECONDS`.
+
+## `web_fetch` uses the safe Node transport
+
+The separate `web_fetch` page reader does not use curl impersonation. It uses
+`src/agent/network/safe-http.ts`, which installs a validated socket `lookup`,
+rejects the entire DNS answer set when any A/AAAA record is non-public, retains
+the original hostname for Host/SNI/TLS verification, and follows redirects
+manually under the same policy on every hop. Curl impersonation was deliberately
+removed from this path because hostname-only validation plus `--location` cannot
+prevent DNS rebinding. Akamai cookie warmup remains available, but its replay
+travels through the same pinned transport and credentials are stripped if a
+redirect crosses origins.
