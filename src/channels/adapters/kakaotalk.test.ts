@@ -14,6 +14,7 @@ import type {
   KakaoSendResult,
   KakaoTalkListenerEventMap,
   KakaoTalkPushMessageEvent,
+  KakaoTypingResult,
 } from 'agent-messenger/kakaotalk'
 
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
@@ -157,6 +158,15 @@ class FakeClient implements KakaoTalkClient {
     this.markReadCalls.push({ chatId, logId, ...(opts !== undefined ? { opts } : {}) })
     if (this.markReadError !== null) throw this.markReadError
     return this.markReadResult
+  }
+
+  sendTypingCalls: Array<{ chatId: string; opts?: { linkId?: string } }> = []
+  sendTypingResult: KakaoTypingResult = { success: true, status_code: 0, chat_id: '111' }
+  sendTypingError: Error | null = null
+  async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {
+    this.sendTypingCalls.push({ chatId, ...(opts !== undefined ? { opts } : {}) })
+    if (this.sendTypingError !== null) throw this.sendTypingError
+    return this.sendTypingResult
   }
 
   profileError: Error | null = null

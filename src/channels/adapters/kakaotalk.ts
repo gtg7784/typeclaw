@@ -15,6 +15,7 @@ import {
   type KakaoTalkListenerEventMap,
   type KakaoTalkPushEmoticonEvent,
   type KakaoTalkPushMessageEvent,
+  type KakaoTypingResult,
 } from 'agent-messenger/kakaotalk'
 import type { KakaoAccountCredentials, KakaoConfig, PendingLoginState } from 'agent-messenger/kakaotalk'
 
@@ -45,6 +46,7 @@ import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
 import { toKakaoPlainText } from './kakaotalk-format'
 import { createKakaoMembershipResolver } from './kakaotalk-membership'
+import { createKakaoTypingCallback } from './kakaotalk-typing'
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
@@ -68,6 +70,7 @@ export interface KakaoTalkClient {
   ): Promise<KakaoSendResult>
   sendAttachment(chatId: string, attachments: ReadonlyArray<AttachmentInput>): Promise<KakaoSendResult>
   markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult>
+  sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult>
   getProfile(): Promise<KakaoProfile>
   getMembers(chatId: string): Promise<KakaoMember[]>
   lookupAuthorName(chatId: string, authorId: number): string | null
@@ -403,6 +406,12 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     formatChannelTag,
   })
 
+  const typing = createKakaoTypingCallback({
+    logger,
+    sendTyping: (chatId, opts) => client.sendTyping(chatId, opts),
+    formatChannelTag,
+  })
+
   const fetchAttachmentCallback = createFetchAttachmentCallback({ logger })
 
   const handleMessageEvent = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
@@ -669,6 +678,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       // but outboundCallback would still send via a dead client). Stop()
       // unregisters in the inverse order.
       options.router.registerOutbound('kakaotalk', outboundCallback)
+      options.router.registerTyping('kakaotalk', typing.callback)
+      options.router.setTypingCapability('kakaotalk', true)
       options.router.registerChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.registerHistory('kakaotalk', historyCallback)
       options.router.registerFetchAttachment('kakaotalk', fetchAttachmentCallback)
@@ -679,6 +690,9 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       if (!started) return
       started = false
       options.router.unregisterOutbound('kakaotalk', outboundCallback)
+      options.router.unregisterTyping('kakaotalk', typing.callback)
+      options.router.setTypingCapability('kakaotalk', false)
+      typing.shutdown()
       options.router.unregisterChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.unregisterHistory('kakaotalk', historyCallback)
       options.router.unregisterFetchAttachment('kakaotalk', fetchAttachmentCallback)
