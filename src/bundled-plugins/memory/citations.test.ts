@@ -8,6 +8,7 @@ import {
   normalizeCitation,
   parseCitations,
   splitCitationsBySection,
+  splitCitationRefsBySection,
   stripCitationLines,
 } from './citations'
 
@@ -146,6 +147,17 @@ describe('normalizeCitation', () => {
 })
 
 describe('splitCitationsBySection', () => {
+  test('preserves date coordinates while routing direct section references', () => {
+    const body = ['fragments:', `- streams/2026-05-16#${ID_A}`, 'superseded:', `- streams/2026-05-15#${ID_C}`].join(
+      '\n',
+    )
+
+    expect(splitCitationRefsBySection(body)).toEqual({
+      active: [{ date: '2026-05-16', fragmentId: ID_A }],
+      superseded: [{ date: '2026-05-15', fragmentId: ID_C }],
+    })
+  })
+
   test('routes citations under fragments: to active and superseded: to superseded', () => {
     // given
     const body = [
