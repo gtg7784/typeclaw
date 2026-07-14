@@ -39,6 +39,8 @@ export type SessionOrigin =
       chat: string
       chatName?: string
       thread: string | null
+      parentChat?: string
+      parentChatName?: string
       lastInboundAuthorId?: string
       reactionRef?: ReactionRef
       participants?: readonly ChannelParticipant[]

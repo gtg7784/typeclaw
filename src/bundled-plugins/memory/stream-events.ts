@@ -42,6 +42,8 @@ export const fragmentProvenanceSchema = z
     chat: z.string(),
     chatName: z.string().optional(),
     thread: z.string().nullable().optional(),
+    parentChat: z.string().optional(),
+    parentChatName: z.string().optional(),
   })
   .passthrough()
 
