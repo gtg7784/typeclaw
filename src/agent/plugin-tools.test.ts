@@ -8,6 +8,7 @@ import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import { Type } from 'typebox'
 import { z } from 'zod'
 
+import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
 import { _resetBwrapAvailabilityCacheForTests, _resetRealProcProbeCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
@@ -84,6 +85,42 @@ describe('zodToToolParameters', () => {
 })
 
 describe('wrapPluginTool', () => {
+  test('blocks a declared filename operand that targets a canonical secret', async () => {
+    const calls: string[] = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ filename: z.string() }),
+      fileOperands: { input: ['filename'] },
+      async execute(args) {
+        calls.push(args.filename)
+        return { content: [] }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('security', '/agent', noopLogger, {
+      'tool.before': (event) =>
+        checkPrivateSurfaceReadGuard({
+          tool: event.tool,
+          args: event.args,
+          agentDir: '/agent',
+          hidden: { dirs: [], files: [] },
+        }),
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'plugin_reader',
+      agentDir: '/agent',
+      sessionId: 's',
+      logger: noopLogger,
+      hooks,
+    })
+
+    const result = await wrapped.execute('c', { filename: '/agent/.env' }, undefined, undefined, {} as never)
+
+    expect(calls).toEqual([])
+    expect(result).toMatchObject({ isError: true })
+  })
+
   test('passes parsed args to plugin execute and exposes ToolContext', async () => {
     const seen: { args: unknown; ctx: { sessionId: string; agentDir: string } }[] = []
     const tool = defineTool({

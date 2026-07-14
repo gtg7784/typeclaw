@@ -22,6 +22,7 @@ const SENSITIVE_BASENAMES = new Set([
   'service-account.json',
   'gha-creds.json',
   'token.json',
+  'secrets.json',
 ])
 
 const SENSITIVE_BASENAME_PATTERNS: ReadonlyArray<RegExp> = [
