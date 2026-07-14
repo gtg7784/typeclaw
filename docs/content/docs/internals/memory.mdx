@@ -95,9 +95,21 @@ Memory is injected per turn into the user prompt; the system prompt never contai
 
 The `session.turn.start` hook renders memory into `event.retrievalContext.results`, which the turn-drivers append to the user message. Tiny direct-mode memory sets render topic headings directly, with repeated excerpts de-duplicated across turns; over-budget sets run top-K `hybridSearch` over topics, undreamed stream fragments, and references. Keeping memory out of the system prompt stabilizes the cache prefix and lets retrieval track the current turn instead of a stale session-start snapshot.
 
-**Channel-origin always uses index mode** regardless of shard size — a memory-bleed defense, since the agent can treat injected memory as instructions when channel users can see it.
+**Channel-origin always uses index mode** regardless of shard size — a memory-bleed defense, since the agent can treat injected memory as instructions when channel users can see it. Direct-mode channel turns keep every topic discoverable as a heading; over-budget turns use top-K hybrid retrieval. Both paths strip full bodies until the agent explicitly opens a topic.
 
 For the vector store, embedder, and parent-child hybrid-search internals, see the [memory README](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).
+
+## Provenance-aware lexical recall and scoping
+
+`ProvenanceIndex` (`provenance-index.ts`) is rebuilt from the authoritative `readAllStreamDays` stream view plus each shard's canonical active `fragments:` citations. It is a child-posting index: a topic's searchable origin text, scope eligibility, and returned provenance all come from the same resolved active cited children. `superseded:` children never participate. A citation whose stream event is unavailable remains an explicit `{ citation, resolved: false }` result; the runtime never fabricates an origin for it.
+
+Both `memory_search` and the hybrid keyword lane add child `who`, workspace/chat/thread IDs, names, and Discord parent-room coordinates to their **lexical documents only**. `fragmentEmbeddableText` and topic passage text are unchanged, so adding or renaming origin metadata cannot change embedding inputs or vector scores. A keyword hit on child provenance collapses to its parent topic through the same parent-child path as a fragment hit.
+
+`memory_search` accepts optional `workspace`, `chat`, and `thread` scopes in both query and exact-topic modes; the older `where` parameter remains a `chat` alias. Recall is globally visible by default across roles and origins. IDs and captured names are matched case-insensitively (with an optional leading `#` for room names) as additive lexical metadata, not authorization predicates. Automatic hybrid retrieval and channel heading injection likewise remain global and do not derive hidden scopes from channel, cron, or subagent ancestry.
+
+When an explicit scope is supplied, a topic remains eligible when any resolved active child matches every requested coordinate, and returned provenance contains only matching children. Undreamed streams use the same optional scope. References are excluded from scoped results because they have no workspace provenance.
+
+Historical JSONL remains append-only. Missing names and Discord thread-parent coordinates live in a bounded process-local registry populated by both adapters' startup maintenance and rebuilt after every restart. Nothing is persisted to a provenance sidecar, eliminating parent-directory and destination races. Each pass considers at most 100 unique origins, scanning days and events newest-first so repeatedly unresolved old entries cannot monopolize the bounded batch and starve newer channels. Confirmed non-thread checks retain `parentChecked=true` for the process lifetime and avoid duplicate work within that runtime. Names are bounded and rejected when they contain secrets, controls, bidi overrides, zero-width characters, or Markdown prompt-shaping syntax. The pass is observable as `[discord] historical provenance enrichment ...` or `[discord-bot] historical provenance enrichment ...`; restart retries historical resolution. Resolver or timeout failure degrades to raw-ID search—stream JSONL is never rewritten, and retrieval performs no network calls. New Discord thread messages capture parent ID/name before routing. Both adapters validate positive uint64 snowflakes and treat successful metadata with absent/non-numeric channel types as transient/fail-closed rather than as confirmed non-thread channels.
 
 ## Safety properties
 
@@ -109,4 +121,5 @@ Why a bad LLM run can't corrupt memory:
 - **Dreamed-ids advance even on revert** — conscious anti-loop tradeoff; a repeatedly-failing LLM can't wedge the system.
 - **Runtime owns frontmatter** — the LLM can't corrupt the strength signals; they're re-derived from citations every run.
 - **Atomic writes** — tmp+rename for streams, byte-comparison for shards; crash-safe mid-loop.
+- **Origin enrichment is runtime-only** — no provenance file is written; historical stream JSONL is never rewritten, and timeout/failure leaves raw IDs usable.
 - **`inFlightKey: agentDir`** — per-agent coalescing collapses concurrent cron fires into one run.
