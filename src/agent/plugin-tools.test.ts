@@ -1462,6 +1462,8 @@ describe('wrapSystemTool', () => {
     )
     await Promise.all(files.map(async (file) => await writeFile(file, 'x')))
     const controllers: AbortController[] = []
+    type WaiterOutcome = { error: unknown } | { pinned: Awaited<ReturnType<typeof enforceAndPinToolFiles>> }
+    let waiters: Array<Promise<WaiterOutcome>> = []
     let holder: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
     try {
       holder = await enforceAndPinToolFiles({
@@ -1469,7 +1471,7 @@ describe('wrapSystemTool', () => {
         args: { attachments: files.slice(0, PINNED_SNAPSHOT_GLOBAL_MAX_COUNT).map((file) => ({ path: file })) },
         agentDir,
       })
-      const waiters = Array.from({ length: PINNED_SNAPSHOT_MAX_WAITERS }, () => {
+      waiters = Array.from({ length: PINNED_SNAPSHOT_MAX_WAITERS + 1 }, () => {
         const controller = new AbortController()
         controllers.push(controller)
         return enforceAndPinToolFiles({
@@ -1477,18 +1479,19 @@ describe('wrapSystemTool', () => {
           args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
           agentDir,
           signal: controller.signal,
-        })
+        }).then<WaiterOutcome, WaiterOutcome>(
+          (pinned) => ({ pinned }),
+          (error: unknown) => ({ error }),
+        )
       })
-      await expect(
-        enforceAndPinToolFiles({
-          tool: 'read',
-          args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
-          agentDir,
-        }),
-      ).rejects.toThrow(/waiter|queue/i)
-      for (const controller of controllers) controller.abort()
-      await Promise.allSettled(waiters)
+      const overflow = await Promise.race(waiters)
+      if (!('error' in overflow)) throw new Error('a queued snapshot waiter acquired capacity unexpectedly')
+      expect(overflow.error).toBeInstanceOf(Error)
+      expect((overflow.error as Error).message).toMatch(/waiter|queue/i)
     } finally {
+      for (const controller of controllers) controller.abort()
+      const outcomes = await Promise.all(waiters)
+      await Promise.all(outcomes.flatMap((outcome) => ('pinned' in outcome ? [outcome.pinned.cleanup()] : [])))
       await holder?.cleanup()
       await rm(agentDir, { recursive: true, force: true })
     }

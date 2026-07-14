@@ -1,6 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 
+import { enforceAndPinToolFiles } from '@/agent/tool-file-safety'
 import { defineTool } from '@/plugin/define'
 import type { ContentPart, Tool, ToolResult } from '@/plugin/types'
 
@@ -87,13 +88,25 @@ function createCallTool(manager: McpManager): Tool<McpCallArgs> {
       tool: z.string().describe('The bare tool name or namespaced server__tool id.'),
       args: z.record(z.string(), z.unknown()).optional().describe('Arguments matching the tool input schema.'),
     }),
-    async execute(args) {
+    async execute(args, ctx) {
       const resolved = resolveToolArgs(args.server, args.tool)
       const connection = await manager.ensureConnected(resolved.server)
       if (connection === undefined) return textResult(unknownServerMessage(manager, resolved.server))
 
-      const result = await safeCallTool(connection, resolved.tool, args.args ?? {})
-      return mapCallToolResult(resolved.server, resolved.tool, result)
+      const toolArgs = args.args ?? {}
+      const pinned = await enforceAndPinToolFiles({
+        tool: 'mcp_call',
+        args: toolArgs,
+        agentDir: ctx.agentDir,
+        genericInputs: true,
+        signal: ctx.signal,
+      })
+      try {
+        const result = await safeCallTool(connection, resolved.tool, toolArgs)
+        return pinned.restoreResult(mapCallToolResult(resolved.server, resolved.tool, result))
+      } finally {
+        await pinned.cleanup()
+      }
     },
   })
 }
