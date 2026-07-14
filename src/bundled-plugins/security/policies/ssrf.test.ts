@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { GUARD_SSRF, checkSsrfGuard, classifyUrl } from './ssrf'
+import { GUARD_SSRF, checkSsrfGuard, classifyIpAddress, classifyUrl } from './ssrf'
 
 describe('SSRF classifier', () => {
   test('blocks AWS IMDS metadata endpoint', () => {
@@ -50,6 +50,14 @@ describe('SSRF classifier', () => {
     expect(classifyUrl('http://100.128.0.1/').blocked).toBe(false)
   })
 
+  test('blocks the full 198.18.0.0/15 benchmarking range', () => {
+    expect(classifyUrl('http://198.18.0.1/').blocked).toBe(true)
+    expect(classifyUrl('http://198.19.42.7/internal').blocked).toBe(true)
+    expect(classifyUrl('http://198.19.255.255/').blocked).toBe(true)
+    expect(classifyUrl('http://198.17.255.255/').blocked).toBe(false)
+    expect(classifyUrl('http://198.20.0.0/').blocked).toBe(false)
+  })
+
   test('blocks decimal-encoded loopback (127.0.0.1 = 2130706433)', () => {
     expect(classifyUrl('http://2130706433/').blocked).toBe(true)
   })
@@ -73,6 +81,24 @@ describe('SSRF classifier', () => {
 
   test('blocks IPv4-mapped IPv6 loopback', () => {
     expect(classifyUrl('http://[::ffff:127.0.0.1]/').blocked).toBe(true)
+  })
+
+  test.each([
+    '0:0:0:0:0:ffff:7f00:1',
+    '0:0:0::ffff:7f00:1',
+    '0000:0000:0000:0000:0000:ffff:7f00:0001',
+    '::ffff:7f00:1',
+    '::ffff:127.0.0.1',
+  ])('blocks semantically equivalent IPv4-mapped IPv6 loopback %s', (address) => {
+    expect(classifyIpAddress(address)).toEqual({
+      blocked: true,
+      category: 'loopback',
+      reason: 'IPv4-mapped IPv6: IPv4 loopback (127.0.0.1)',
+    })
+  })
+
+  test('allows an IPv4-mapped public address', () => {
+    expect(classifyIpAddress('0:0:0:0:0:ffff:808:808')).toEqual({ blocked: false })
   })
 
   test('blocks .internal / .local / .corp / .home suffixes', () => {
