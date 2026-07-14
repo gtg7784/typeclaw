@@ -5,6 +5,10 @@ import {
   type DiscordMessage,
 } from 'agent-messenger/discord'
 
+import {
+  enrichHistoricalProvenance,
+  type HistoricalProvenanceResolver,
+} from '@/bundled-plugins/memory/provenance-index'
 import type { MembershipResolver, MembershipResolverResult } from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
@@ -48,6 +52,7 @@ export type DiscordCredentialStore = {
 }
 
 export type DiscordAdapterOptions = {
+  agentDir?: string
   router: ChannelRouter
   configRef: () => ChannelAdapterConfig
   logger?: DiscordAdapterLogger
@@ -56,6 +61,7 @@ export type DiscordAdapterOptions = {
   createClient?: () => DiscordClient
   createListener?: (client: DiscordClient) => DiscordListener
   fetchImpl?: typeof fetch
+  enrichHistoricalProvenance?: typeof enrichHistoricalProvenance
 }
 
 export type DiscordAdapter = {
@@ -221,14 +227,15 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
   const handleMessage = async (event: DiscordGatewayMessageCreateEvent): Promise<void> => {
     inflightInbounds++
     try {
-      const tag = await formatChannelTag(event.channel_id)
-      logger.info(
-        `[discord] inbound id=${event.id} author=${event.author.id || '(none)'} ${tag} text_len=${event.content.length}`,
-      )
       const verdict = classifyInbound(event, options.configRef(), {
         selfUserId,
         selfAliases: options.selfAliasesRef?.() ?? [],
       })
+      const tag =
+        event.guild_id === undefined ? `channel=${event.channel_id}` : await formatChannelTag(event.channel_id)
+      logger.info(
+        `[discord] inbound id=${event.id} author=${event.author.id || '(none)'} ${tag} text_len=${event.content.length}`,
+      )
       if (verdict.kind === 'drop') {
         logger.info(`[discord] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
@@ -240,9 +247,11 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
         filename: file.filename,
         mimetype: file.content_type,
       }))
+      const room = verdict.payload.isDm ? undefined : await channelResolver.resolveRoom(verdict.payload.chat)
       const payload = {
         ...verdict.payload,
         authorName: await authorResolver.resolve(verdict.payload.authorId),
+        ...(room !== undefined ? { room } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
       }
       logger.info(`[discord] routed id=${event.id} ${tag} mention=${payload.isBotMention}`)
@@ -334,6 +343,42 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): DiscordAda
         rollbackStart(
           'listener start failed silently',
           listenerStartupError ?? new Error('listener.start() returned without emitting connected'),
+        )
+      }
+
+      if (options.agentDir !== undefined) {
+        const runEnrichment = options.enrichHistoricalProvenance ?? enrichHistoricalProvenance
+        const resolveHistorical: HistoricalProvenanceResolver = async (where) => {
+          const key = {
+            adapter: 'discord' as const,
+            workspace: where.workspace,
+            chat: where.chat,
+            thread: where.thread ?? null,
+          }
+          const [names, roomStatus] = await Promise.all([
+            channelResolver(key),
+            channelResolver.resolveRoomStatus(where.chat),
+          ])
+          const room = roomStatus.room
+          return {
+            where: {
+              ...where,
+              ...names,
+              ...(room?.parentChat !== undefined ? { parentChat: room.parentChat } : {}),
+              ...(room?.parentChatName !== undefined ? { parentChatName: room.parentChatName } : {}),
+            },
+            parentChecked: roomStatus.parentChecked,
+          }
+        }
+        void runEnrichment(options.agentDir, resolveHistorical, { adapter: 'discord' }).then(
+          (result) => {
+            logger.info(
+              `[discord] historical provenance enrichment scanned=${result.scanned} attempted=${result.attempted} resolved=${result.resolved} failed=${result.failed} timed_out=${result.timedOut} changed=${String(result.changed)}`,
+            )
+          },
+          (error: unknown) => {
+            logger.warn(`[discord] historical provenance enrichment failed: ${describeError(error)}`)
+          },
         )
       }
     },
