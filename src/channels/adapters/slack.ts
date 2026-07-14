@@ -8,6 +8,7 @@ import {
   type SlackRTMReactionEvent,
 } from 'agent-messenger/slack'
 
+import { DEFAULT_ATTACHMENT_MAX_BYTES, enforceAttachmentMetadataSize } from '@/channels/fetch-attachment'
 import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
@@ -33,6 +34,7 @@ import { chunkMarkdown } from '@/markdown'
 import type { SlackAccountRecord } from '@/secrets/schema'
 
 import { describeError } from './describe-error'
+import { downloadSlackAttachment, type SlackAttachmentFetch } from './slack-attachment-download'
 import { createSlackAuthorResolver } from './slack-author-resolver'
 import { slackTsToMillis } from './slack-bot-time'
 import { createSlackChannelResolver } from './slack-channel-resolver'
@@ -166,17 +168,31 @@ export function createSlackMembershipResolver(deps: {
 }
 
 export function createSlackFetchAttachmentCallback(deps: {
-  client: Pick<SlackClient, 'downloadFile'>
+  client: Pick<SlackClient, 'getFileInfo'>
+  tokenRef: () => string | null
+  cookieRef?: () => string | null
+  fetchImpl?: SlackAttachmentFetch
   logger: SlackAdapterLogger
 }): FetchAttachmentCallback {
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     try {
-      const { buffer, file } = await deps.client.downloadFile(ref)
+      const metadata = await deps.client.getFileInfo(ref)
+      enforceAttachmentMetadataSize(metadata.size, maxBytes)
+      const token = deps.tokenRef()
+      if (token === null) throw new Error('Slack attachment credential is unavailable')
+      const cookie = deps.cookieRef?.() ?? undefined
+      const { buffer } = await downloadSlackAttachment({
+        metadata,
+        token,
+        ...(cookie === undefined ? {} : { cookie }),
+        maxBytes,
+        fetchImpl: deps.fetchImpl,
+      })
       return {
         ok: true,
         buffer,
-        filename: filename ?? file.name ?? 'attachment',
-        mimetype: file.mimetype,
+        filename: filename ?? metadata.name ?? 'attachment',
+        mimetype: metadata.mimetype,
         size: buffer.length,
       }
     } catch (err) {
@@ -197,6 +213,8 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
   let selfName: string | null = null
   let teamId = ''
   let teamName: string | null = null
+  let accountToken: string | null = null
+  let accountCookie: string | null = null
   let connected = false
   let started = false
   let inflightInbounds = 0
@@ -222,7 +240,12 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
     selfUserIdRef: () => selfUserId,
   })
   const outboundCallback = createSlackOutboundCallback({ client, logger, formatChannelTag })
-  const fetchAttachmentCallback = createSlackFetchAttachmentCallback({ client, logger })
+  const fetchAttachmentCallback = createSlackFetchAttachmentCallback({
+    client,
+    logger,
+    tokenRef: () => accountToken,
+    cookieRef: () => accountCookie,
+  })
   const reactionCallback = createSlackReactionCallback({ client })
   const removeReactionCallback = createSlackRemoveReactionCallback({ client })
   const editMessageCallback = createSlackUserEditMessageCallback({ client })
@@ -294,6 +317,8 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
           throw new Error('no Slack account in secrets.json#channels.slack (run typeclaw init to authenticate)')
         }
         await client.login({ token: account.token, cookie: account.cookie })
+        accountToken = account.token
+        accountCookie = account.cookie
         const auth = await client.testAuth()
         selfUserId = auth.user_id
         selfName = auth.user ?? auth.user_id
@@ -303,6 +328,8 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
       } catch (err) {
         started = false
         selfUserId = null
+        accountToken = null
+        accountCookie = null
         teamId = ''
         logger.error(`[slack] login failed: ${describeError(err)}`)
         throw err
@@ -381,6 +408,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
         listener?.stop()
         listener = null
         selfUserId = null
+        accountToken = null
         connected = false
         started = false
         logger.error(`[slack] ${reason}: ${describeError(cause)}`)
@@ -399,6 +427,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
     async stop(): Promise<void> {
       if (!started) return
       started = false
+      accountToken = null
       options.router.unregisterOutbound('slack', outboundCallback)
       options.router.setTypingCapability('slack', false)
       options.router.unregisterChannelNameResolver('slack', channelResolver)
