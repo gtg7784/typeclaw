@@ -29,6 +29,13 @@ export type KakaoTypingCallbackHandle = {
 // expiry — enough headroom for network jitter without burning a packet every 3s.
 export const KAKAO_TYPING_REFRESH_MS = 4000
 
+// OpenChat ACTION packets require the LOCO `linkId` field, which the channel
+// resolver does not surface today (the same limitation `markReadIfSupported`
+// documents for NOTIREAD). Rather than emit a doomed pulse, we skip typing for
+// `@kakao-open` and log once per chat. Wiring linkId through the resolver is a
+// follow-up shared with mark-read.
+const OPEN_CHAT_WORKSPACE = '@kakao-open'
+
 export function createKakaoTypingCallback(deps: {
   logger: KakaoTypingLogger
   sendTyping: KakaoTypingSender
@@ -52,12 +59,22 @@ export function createKakaoTypingCallback(deps: {
   // between router ticks. A new tick resets the timer; a stop clears it.
   const refreshTimers = new Map<string, unknown>()
   const targetByChat = new Map<string, TypingTarget>()
+  // Per-chat generation token. A pulse captures the current generation at
+  // enqueue time and re-checks it just before hitting the wire; `clearRefresh`
+  // (fired by 'stop', shutdown, or teardown) deletes it, so a pulse already
+  // queued behind a slow send is dropped instead of re-raising the indicator
+  // after a delivered message cleared it.
+  const activeGeneration = new Map<string, number>()
+  const openChatSkipLogged = new Set<string>()
+  let generationCounter = 0
 
   const enqueue = (target: TypingTarget): Promise<void> => {
+    const generation = activeGeneration.get(target.chat)
     const prev = queues.get(target.chat) ?? Promise.resolve()
     const next = prev
       .catch(() => {})
       .then(async () => {
+        if (generation === undefined || activeGeneration.get(target.chat) !== generation) return
         const result = await sendTyping(target.chat)
         if (!result.success) {
           throw new Error(`kakaotalk ACTION rejected: status_code=${result.status_code}`)
@@ -83,10 +100,15 @@ export function createKakaoTypingCallback(deps: {
       refreshTimers.delete(chat)
     }
     targetByChat.delete(chat)
+    activeGeneration.delete(chat)
   }
 
   const startRefresh = (target: TypingTarget): void => {
-    clearRefresh(target.chat)
+    if (!activeGeneration.has(target.chat)) {
+      activeGeneration.set(target.chat, ++generationCounter)
+    }
+    const existing = refreshTimers.get(target.chat)
+    if (existing !== undefined) clearIntervalImpl(existing)
     targetByChat.set(target.chat, target)
     const handle = setIntervalImpl(() => {
       const t = targetByChat.get(target.chat)
@@ -99,6 +121,13 @@ export function createKakaoTypingCallback(deps: {
   const callback: TypingCallback = async (target) => {
     if (target.adapter !== 'kakaotalk') return
     if (target.phase === 'tick') {
+      if (target.workspace === OPEN_CHAT_WORKSPACE) {
+        if (!openChatSkipLogged.has(target.chat)) {
+          openChatSkipLogged.add(target.chat)
+          logger.info(`[kakaotalk:typing] skipped chat=${target.chat} reason=open_chat_link_id_unsupported`)
+        }
+        return
+      }
       startRefresh(target)
       await enqueue(target)
       return

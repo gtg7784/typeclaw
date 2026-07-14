@@ -218,4 +218,80 @@ describe('createKakaoTypingCallback', () => {
 
     expect(cleared.sort()).toEqual(['handle-1', 'handle-2'])
   })
+
+  test('a refresh queued behind an in-flight send is dropped once stop lands (only the in-flight packet ships)', async () => {
+    const completed: string[] = []
+    let releaseFirst: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let n = 0
+    let refreshFn: (() => void) | undefined
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+    }
+    const { callback } = createKakaoTypingCallback({
+      logger: logger(),
+      sendTyping: async (chatId) => {
+        const id = `send${++n}`
+        if (id === 'send1') await gate
+        completed.push(id)
+        return ok(chatId)
+      },
+      setInterval: (fn) => {
+        refreshFn = fn
+        return 'handle'
+      },
+      clearInterval: () => {},
+    })
+
+    // given: send1 has already passed the generation gate and is stalled mid-flight on the wire
+    const tick = callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'tick' })
+    await flush()
+    // when: the refresh timer queues send2 behind the in-flight send1, then stop lands before send1 resolves
+    refreshFn?.()
+    await callback({ adapter: 'kakaotalk', workspace: 'b', chat: 'chat-1', thread: null, phase: 'stop' })
+    releaseFirst?.()
+    await tick
+    await flush()
+
+    // then: send1 (already on the wire) ships, but the queued send2 is dropped by the generation gate
+    expect(completed).toEqual(['send1'])
+  })
+
+  test('skips typing for @kakao-open (linkId unsupported) and logs once per chat', async () => {
+    const calls: string[] = []
+    const log = logger()
+    const { callback } = createKakaoTypingCallback({
+      logger: log,
+      sendTyping: async (chatId) => {
+        calls.push(chatId)
+        return ok(chatId)
+      },
+      ...noRefresh,
+    })
+
+    await callback({ adapter: 'kakaotalk', workspace: '@kakao-open', chat: 'open-1', thread: null, phase: 'tick' })
+    await callback({ adapter: 'kakaotalk', workspace: '@kakao-open', chat: 'open-1', thread: null, phase: 'tick' })
+
+    expect(calls).toEqual([])
+    expect(log.lines.filter((l) => l.includes('open_chat_link_id_unsupported'))).toHaveLength(1)
+  })
+
+  test('still emits for @kakao-group and @kakao-dm', async () => {
+    const calls: string[] = []
+    const { callback } = createKakaoTypingCallback({
+      logger: logger(),
+      sendTyping: async (chatId) => {
+        calls.push(chatId)
+        return ok(chatId)
+      },
+      ...noRefresh,
+    })
+
+    await callback({ adapter: 'kakaotalk', workspace: '@kakao-group', chat: 'grp-1', thread: null, phase: 'tick' })
+    await callback({ adapter: 'kakaotalk', workspace: '@kakao-dm', chat: 'dm-1', thread: null, phase: 'tick' })
+
+    expect(calls).toEqual(['grp-1', 'dm-1'])
+  })
 })
