@@ -304,6 +304,56 @@ describe('security plugin wiring', () => {
     expect(result).toBeUndefined()
   })
 
+  test('permissions: owner cannot bypass canonical agent secret files, even with an acknowledgement', async () => {
+    const hook = await toolBeforeHookWith(prodPermissionService())
+    const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+
+    for (const event of [
+      toolEvent('read', { path: '.env', acknowledgeGuards: { secretExfilRead: true } }),
+      toolEvent('grep', { pattern: 'token', path: '/agent/secrets.json' }),
+      toolEvent('find', { path: '.', pattern: 'secrets.json' }),
+      toolEvent('ls', { path: '/agent/.env' }),
+    ]) {
+      const result = await hook({ ...event, origin: tui }, hookContext('/agent'))
+      expect(result?.block).toBe(true)
+      expect(result?.reason).toContain('privateSurfaceRead')
+    }
+  })
+
+  test('permissions: owner keeps existing bypass semantics for unrelated credential-like files', async () => {
+    const hook = await toolBeforeHookWith(prodPermissionService())
+    const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+
+    expect(
+      await hook({ ...toolEvent('read', { path: 'config/.env.local' }), origin: tui }, hookContext('/agent')),
+    ).toBeUndefined()
+    expect(
+      await hook({ ...toolEvent('read', { path: 'fixtures/credentials.json' }), origin: tui }, hookContext('/agent')),
+    ).toBeUndefined()
+  })
+
+  test('permissions: trusted cannot bypass canonical files but still bypasses unrelated credential-like files', async () => {
+    const permissions = prodPermissionService({
+      trusted: { match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', author: 'U_TRUSTED' }] },
+    })
+    const hook = await toolBeforeHookWith(permissions)
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+      lastInboundAuthorId: 'U_TRUSTED',
+    }
+
+    const canonical = await hook({ ...toolEvent('read', { path: 'secrets.json' }), origin }, hookContext('/agent'))
+    expect(canonical?.block).toBe(true)
+    expect(canonical?.reason).toContain('privateSurfaceRead')
+    expect(
+      await hook({ ...toolEvent('read', { path: 'fixtures/credentials.json' }), origin }, hookContext('/agent')),
+    ).toBeUndefined()
+  })
+
   test('permissions: TUI owner BYPASSES `git push` (medium tier; owner carries bypass.medium by default under the role-tower model)', async () => {
     const svc = prodPermissionService()
     const hook = await toolBeforeHookWith(svc)
@@ -519,7 +569,9 @@ describe('security plugin wiring', () => {
     const tui: SessionOrigin = { kind: 'tui', sessionId: 's_owner_lm' }
 
     expect(await hook({ ...toolEvent('bash', { command: 'env' }), origin: tui }, hookContext('/agent'))).toBeUndefined()
-    expect(await hook({ ...toolEvent('read', { path: '.env' }), origin: tui }, hookContext('/agent'))).toBeUndefined()
+    expect(
+      await hook({ ...toolEvent('read', { path: 'config/.env.local' }), origin: tui }, hookContext('/agent')),
+    ).toBeUndefined()
     expect(
       await hook(
         { ...toolEvent('web_fetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: tui },
