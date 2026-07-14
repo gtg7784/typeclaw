@@ -25,8 +25,7 @@ export const webFetchTool = defineTool({
     'Fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy. ' +
     'Use this when the user references a specific URL or when web_search surfaced a result you need to read in full. ' +
     'If `spawn_subagent` is available to you, PREFER delegating to the `scout` subagent by default: spawn it whenever you expect more than one fetch, an "across multiple sources" task, or any search-then-fetch loop. Scout runs the noisy fetching in its own context window and returns a distilled, citation-backed answer, keeping bulky page bodies out of yours. Only call this tool directly for a single known URL whose content you will cite immediately — or whenever you cannot spawn subagents (e.g. you are yourself a subagent), in which case fetch here. ' +
-    'Outbound requests impersonate Chrome 136 at the TLS, HTTP/2, and header layers ' +
-    '(via curl-impersonate), which helps with TLS/header fingerprint gates on sites behind Cloudflare/Akamai. ' +
+    'Outbound requests use a DNS-rebinding-safe transport that validates and pins every redirect hop. ' +
     'For Akamai Bot Manager specifically, it auto-warms the session: a first-request 403 that sets bot-manager ' +
     'cookies (_abck/bm_sz/…) is absorbed and replayed once, which returns 200 on many Akamai-fronted sites ' +
     '(disable with `antibotWarmup: "off"`). It still does NOT solve JavaScript challenges, behavioural ' +
@@ -40,7 +39,7 @@ export const webFetchTool = defineTool({
     '- "snapshot": indented semantic tree of the page (forms, headings, links).\n' +
     '- "raw": no processing.\n' +
     'If `strategy` is omitted, it is inferred from content-type. JSON responses require explicit `strategy: "jq"` (or "raw"). ' +
-    'No SSRF protection is applied; do not use on untrusted user-supplied URLs without an outer guard.',
+    'Private, mixed-address, and non-HTTP(S) targets are rejected.',
   parameters: Type.Object({
     url: Type.String({
       description: 'URL to fetch (http:// or https://). Bare hostnames are rewritten to https://.',
