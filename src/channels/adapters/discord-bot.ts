@@ -15,6 +15,11 @@ import {
   type HistoricalProvenanceResolver,
 } from '@/bundled-plugins/memory/provenance-index'
 import {
+  DEFAULT_ATTACHMENT_MAX_BYTES,
+  readAttachmentErrorSnippet,
+  readAttachmentResponse,
+} from '@/channels/fetch-attachment'
+import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
   type MembershipResolverFailure,
@@ -901,7 +906,7 @@ export function createFetchAttachmentCallback(deps: {
 }): FetchAttachmentCallback {
   const { token, logger } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     let url: URL
     try {
       url = new URL(ref)
@@ -914,13 +919,12 @@ export function createFetchAttachmentCallback(deps: {
     try {
       const res = await fetchImpl(url.toString(), { headers: { Authorization: `Bot ${token}` } })
       if (!res.ok) {
-        const body = await res.text().catch(() => '')
+        const body = await readAttachmentErrorSnippet(res)
         const message = `discord cdn fetch ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`
         logger.error(`[discord-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
         return { ok: false, error: message }
       }
-      const arrayBuffer = await res.arrayBuffer()
-      const buffer = Buffer.from(arrayBuffer)
+      const buffer = await readAttachmentResponse(res, maxBytes)
       const inferredFilename = filename ?? url.pathname.split('/').pop() ?? 'attachment'
       const contentType = res.headers.get('content-type') ?? undefined
       logger.info(

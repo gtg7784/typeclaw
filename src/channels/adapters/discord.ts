@@ -9,6 +9,11 @@ import {
   enrichHistoricalProvenance,
   type HistoricalProvenanceResolver,
 } from '@/bundled-plugins/memory/provenance-index'
+import {
+  DEFAULT_ATTACHMENT_MAX_BYTES,
+  readAttachmentErrorSnippet,
+  readAttachmentResponse,
+} from '@/channels/fetch-attachment'
 import type { MembershipResolver, MembershipResolverResult } from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
@@ -149,7 +154,7 @@ export function createDiscordFetchAttachmentCallback(deps: {
   logger: DiscordAdapterLogger
 }): FetchAttachmentCallback {
   const fetchFn = deps.fetchImpl ?? fetch
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     let url: URL
     try {
       url = new URL(ref)
@@ -164,12 +169,12 @@ export function createDiscordFetchAttachmentCallback(deps: {
       const headers = token !== null ? { Authorization: token } : undefined
       const res = await fetchFn(url.toString(), headers !== undefined ? { headers } : undefined)
       if (!res.ok) {
-        const body = await res.text().catch(() => '')
+        const body = await readAttachmentErrorSnippet(res)
         const message = `discord cdn fetch ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`
         deps.logger.error(`[discord] fetchAttachment failed for ${url.toString()}: ${message}`)
         return { ok: false, error: message }
       }
-      const buffer = Buffer.from(await res.arrayBuffer())
+      const buffer = await readAttachmentResponse(res, maxBytes)
       const inferredFilename = filename ?? url.pathname.split('/').pop() ?? 'attachment'
       const contentType = res.headers.get('content-type') ?? undefined
       return {
