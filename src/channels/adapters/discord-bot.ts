@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 
-import { DiscordBotClient, DiscordBotListener } from 'agent-messenger/discordbot'
+import { DiscordBotClient, DiscordBotListener, type DiscordBotListenerOptions } from 'agent-messenger/discordbot'
 import {
   DiscordIntent,
   type DiscordFile,
@@ -121,6 +121,8 @@ export type DiscordBotAdapterOptions = {
   // exact REST calls without monkey-patching globalThis.fetch. Production
   // callers leave it undefined to use the global fetch.
   fetchImpl?: typeof fetch
+  createClient?: () => DiscordBotClient
+  createListener?: (client: DiscordBotClient, options: DiscordBotListenerOptions) => DiscordBotListener
 }
 
 export type DiscordBotAdapter = {
@@ -1018,10 +1020,14 @@ export const DISCORD_SLASH_COMMAND_NAMES = SLASH_COMMAND_NAMES
 
 export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): DiscordBotAdapter {
   const logger = options.logger ?? consoleLogger
-  const client = new DiscordBotClient()
+  const createClient = options.createClient ?? (() => new DiscordBotClient())
+  const createListener =
+    options.createListener ?? ((client, listenerOptions) => new DiscordBotListener(client, listenerOptions))
+  const client = createClient()
   const fetchImpl = options.fetchImpl ?? fetch
   let listener: DiscordBotListener | null = null
   let botUserId: string | null = null
+  let connected = false
   let started = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
@@ -1178,8 +1184,9 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         throw err
       }
 
-      listener = new DiscordBotListener(client, { intents: DISCORD_BOT_INTENTS })
+      listener = createListener(client, { intents: DISCORD_BOT_INTENTS })
       listener.on('connected', (info) => {
+        connected = true
         botUserId = info.user.id
         logger.info(`[discord-bot] connected as ${info.user.username} (${info.user.id})`)
         // For bots, the gateway's user.id IS the application id — the same
@@ -1211,9 +1218,15 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         })
       })
       listener.on('disconnected', () => {
+        connected = false
         logger.warn('[discord-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
+        // agent-messenger 2.30.0 emits only `error` (not `disconnected`)
+        // when a terminal Gateway close stops the listener. Match that
+        // distinct SDK error contract without treating transient transport
+        // errors as disconnects.
+        if (isTerminalGatewayClose(err)) connected = false
         logger.error(`[discord-bot] gateway error: ${describe(err)}`)
       })
       listener.on('message_create', (event) => {
@@ -1259,6 +1272,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         options.router.unregisterMembership('discord-bot', membershipResolver)
         listener = null
         botUserId = null
+        connected = false
         started = false
         logger.error(`[discord-bot] listener start failed: ${describe(err)}`)
         throw err
@@ -1288,12 +1302,19 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       }
       listener?.stop()
       listener = null
+      connected = false
     },
 
     isConnected(): boolean {
-      return botUserId !== null
+      return started && connected
     },
   }
+}
+
+const TERMINAL_GATEWAY_CLOSE_PATTERN = /^Discord gateway closed with non-recoverable code \d+$/
+
+function isTerminalGatewayClose(err: unknown): boolean {
+  return err instanceof Error && TERMINAL_GATEWAY_CLOSE_PATTERN.test(err.message)
 }
 
 function describe(err: unknown): string {
