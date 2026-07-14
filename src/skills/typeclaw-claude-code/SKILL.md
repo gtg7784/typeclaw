@@ -5,6 +5,8 @@ description: Use this skill whenever you decide to delegate substantial coding o
 
 # typeclaw-claude-code
 
+> **Current security boundary:** authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools. The bash sandbox never receives Anthropic keys, OAuth tokens, or Claude credential profiles, regardless of role. Do not start the tmux/worktree delegation flow for work that requires authentication. A direct operator may authenticate and run Claude Code themselves from the host side, outside the model tool boundary. The mechanics below are retained for unauthenticated diagnostics and for a future explicitly brokered runtime, not as a credential workaround.
+
 You can delegate work to Claude Code, Anthropic's official coding agent. The agent runs as an interactive TUI: it plans, uses sub-agents, edits files, runs tools — the full loop. You drive it through tmux because your own process has no TTY, you isolate it in a dedicated `git worktree` so its experiments never touch the live agent checkout, and you detect "turn done" through a `Stop` hook that writes a sentinel file (not by parsing the TUI buffer).
 
 This skill is for the case where Claude Code is the right tool: hard architecture work, multi-file refactors, deep code analysis, a second-opinion read on something you wrote. It is **not** for trivial edits — the round-trip cost (worktree setup + process spawn + auth check + TUI init + at least one full Claude turn) is 15–45 seconds and several thousand tokens of someone else's context window. Do trivial edits yourself.
@@ -13,7 +15,7 @@ This skill is for the case where Claude Code is the right tool: hard architectur
 
 Once you've decided Claude Code is the right tool, spawn the bundled `operator` subagent to do the actual driving — don't run the worktree setup, the tmux session, the polling loop, the multi-turn decision loop, and the cleanup inline in your own context. The whole loop typically takes several minutes and produces large amounts of intermediate output (TUI buffer captures, Stop sentinels per turn, JSONL transcript references); running it inline blocks the user from talking to you and burns through your context window before you ever get to the synthesis step. `operator` is write-capable and runs the same loop, then returns a clean final report (what claude produced, what `git diff main..cc-<id>` shows, what you should review). You ship the worktree, the prompt, and the safety constraints to operator; operator ships you back the diff and the summary.
 
-Exception: a quick sanity ping (`claude --version` to check the binary exists, `env | grep ANTHROPIC` to check auth). Those are single fast bash calls — do them inline. The "spawn through operator" rule applies to anything that runs `claude` itself as an interactive TUI.
+Exception: a quick unauthenticated sanity ping (`claude --version` to check the binary exists). Do it inline. Do not probe authentication state. The "spawn through operator" rule applies to anything that runs `claude` itself as an interactive TUI.
 
 ## When to delegate to Claude Code
 
@@ -30,50 +32,15 @@ Do **not** use Claude Code for:
 - Anything where the user is watching your tool calls and wants to see each step — Claude's intermediate output is captured but not streamed back to the user.
 - Tasks that depend on context you haven't extracted yet. Claude won't have repo-wide context either; you have to brief it explicitly.
 
-## First-time auth (interactive)
+## Authentication boundary
 
-If `claude` is installed but no credential is set up, you have to broker the auth flow yourself. The user is talking to you through the TUI (or a channel); you walk them through one of two paths.
+Authentication is an **operator-owned host action**. Model-driven tools cannot read or write `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or the persistent credential directories, and must never ask a user to paste an API key or OAuth token into chat.
 
-**Decision rule, top to bottom:**
+Even when TypeClaw's trusted runtime has provider credentials, model-driven bash does not inherit them and cannot open the exported profile. There is no readiness check that turns authenticated delegation on.
 
-1. **`~/.claude/.credentials.json` already populated?** When typeclaw is configured with an `anthropic` OAuth credential (via `typeclaw provider add anthropic` or the init wizard) AND `docker.file.claudeCode: true`, the agent boot auto-emits the credential to `~/.claude/.credentials.json`. Check with `test -s ~/.claude/.credentials.json && jq -e '.claudeAiOauth.accessToken' ~/.claude/.credentials.json` — if it returns a string, Claude Code reads it on its own with no env var needed. Skip auth entirely.
-2. **Already authenticated via env?** Run `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='` — if either is present, skip auth entirely.
-3. **User has an Anthropic Console workspace** (API billing, no subscription) → API key path.
-4. **User has a Claude Pro/Max/Team/Enterprise subscription** → OAuth token path.
-5. **User is unsure** → ask which kind of Claude account they have. Both paths are now equally low-friction (one user action each — paste an API key, or run one command on their machine and paste the result), so the old "prefer API key when unsure" bias is gone. Pick by account shape, not by flow complexity.
+Stop and tell the operator that they must authenticate and invoke Claude Code directly from the **host side**. Do not promise that `typeclaw restart`, a role grant, a guard acknowledgement, or an existing provider login will make authenticated model-driven delegation available. Any direct Claude Code login or token setup must be completed entirely by the operator; do not request its output.
 
-Both paths converge on the same final steps: read `.env`, merge one new `KEY=value` line, write back with the `nonWorkspaceWrite` guard ack, verify, and prompt the user to restart the container. Only the credential differs.
-
-### API key path
-
-1. Ask the user: "Paste your Anthropic API key (starts with `sk-ant-`) — or say 'cancel' to use OAuth instead."
-2. **Validate** the pasted value before writing: `/^sk-ant-[A-Za-z0-9_-]{20,}$/`. If it doesn't match, refuse and ask again — neither the guard nor the restart tool catches a malformed token.
-3. **Read** the existing `.env` first (if any). Parse it into a key→value map so you don't clobber unrelated entries.
-4. **Reconstruct** the full `.env` content with `ANTHROPIC_API_KEY=<value>` added or replaced.
-5. **Write** with `acknowledgeGuards: { nonWorkspaceWrite: true }`. `.env` is in the `nonWorkspaceWrite` guard's deny set; the call fails without the ack flag.
-6. **Verify** by re-reading the file.
-7. **Ask the user**: "Auth is on disk. The container needs to restart to load it (TUI will briefly disconnect). May I restart now, or do you have other changes to make first?"
-8. On yes → call the `restart` tool. On no → tell them to run `typeclaw restart` themselves when ready.
-
-### OAuth path
-
-The OAuth flow runs **on the user's own machine**, not inside the container. The user generates a long-lived `CLAUDE_CODE_OAUTH_TOKEN` with `claude setup-token` on whatever local machine they're already authenticated on, copies the printed token, and pastes it back to you. You write it to `.env` exactly like the API key path.
-
-Why this works: `claude setup-token` is Anthropic's documented path for "CI pipelines, scripts, or other environments where interactive browser login isn't available" ([code.claude.com/docs/en/authentication](https://code.claude.com/docs/en/authentication)). A typeclaw container is exactly that environment. The token is one-year-lived, authenticates against the user's Claude subscription, and is scoped to inference only — it can't establish Remote Control sessions or otherwise act outside of `claude` CLI calls.
-
-Do **not** run `claude setup-token` inside the container. The container has no browser, no display, and (for remote-host typeclaw deployments) is on a different machine from the user's browser anyway. The user's local machine already has `claude` installed for them to be a subscriber in the first place — they're the right place to run the one-off `setup-token` command.
-
-1. Confirm with the user: "Do you have the `claude` CLI installed on your local machine and are you signed in to it with your Claude Pro/Max/Team/Enterprise account? If not, install it from claude.com/code and `claude login` first."
-2. Once they confirm, instruct them: "Run `claude setup-token` on your machine. It opens a browser, you authorize, and the terminal prints a long token (looks like `sk-ant-oat01-...` or similar). Copy that token and paste it back to me. The token is long-lived (one year) and authenticates against your Claude subscription — keep it private."
-3. When they paste, **validate** before writing: `/^[A-Za-z0-9_-]{30,}$/`. Strip surrounding whitespace first. If it doesn't match (too short, contains slashes, looks like a URL or a sentence), refuse and ask again — the user may have pasted a partial copy or the wrong line.
-4. **Read** the existing `.env` first. Parse it into a key→value map.
-5. **Reconstruct** the full `.env` content with `CLAUDE_CODE_OAUTH_TOKEN=<value>` added or replaced.
-6. **Write** with `acknowledgeGuards: { nonWorkspaceWrite: true }`.
-7. **Verify** by re-reading the file.
-8. **Ask before restart** (same prompt as the API key path).
-9. On yes → call the `restart` tool. On no → `typeclaw restart` themselves when ready.
-
-The full validation rules, the failure modes on the user's side (their `claude` CLI is signed out, their `setup-token` command 401s, their subscription is expired), and the rationale for not doing the OAuth dance in-container are in `references/auth-flow.md`.
+If Claude Code presents an auth prompt or API-key confirmation that would require entering or inspecting a credential, abort and report that host-side authentication is required. Never transmit a credential through tmux, a prompt, a tool argument, or a file writable by the model. See `references/auth-flow.md`.
 
 ### Cost-cap warning
 
@@ -85,8 +52,8 @@ Before you spawn `claude` for any real work:
 
 - **`docker.file.claudeCode: true`** in `typeclaw.json`. Verify with `which claude`; if missing, the toggle isn't on. Tell the user to enable it and `typeclaw start --build`.
 - **`docker.file.tmux: true`** (default `true`, but check). Verify with `which tmux`.
-- **Auth set up** — see above. Verify with `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='`.
-- **Onboarding pre-seeded.** The Dockerfile layer writes `~/.claude.json` with `hasCompletedOnboarding: true` and `theme: "dark"` so the first `claude` invocation skips the TTY-only theme picker / welcome wizard. **This is necessary but not sufficient** — even with the seed, Claude Code can still land on two other pre-prompt modals: the "Detected a custom API key from environment. Do you want to use this API key?" confirmation (when `ANTHROPIC_API_KEY` is set in env — default focus is **No**, so `Down Enter` is needed to accept) and the workspace trust dialog ("Do you trust the files in this folder?", default focus already on **Yes**, so a bare `Enter` accepts). The "Driving the session" section below clears them as a loop. If `~/.claude.json` is empty or missing entirely (custom mount, manual `rm`, a `CLAUDE_CONFIG_DIR` pointing at a fresh directory), the theme picker also reappears. Self-heal: `printf '%s\n' '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}' > "$HOME/.claude.json"` before spawning, then retry.
+- **No authenticated model-driven path.** If the task requires a Claude account, stop and hand execution to the direct host-side operator. Do not probe env vars or credential files.
+- **Onboarding pre-seeded.** The Dockerfile layer writes non-secret onboarding preferences. A workspace-trust dialog may still appear. Any API-key or sign-in dialog means the command requires authentication that model-driven tools cannot receive: abort rather than navigating it.
 - **Agent folder is a git repo.** Verify with `git -C /agent rev-parse --is-inside-work-tree`. The worktree model below requires it. If the user's agent folder somehow isn't a repo (rare — `typeclaw init` scaffolds one), tell them to `git init && git add -A && git commit -m "initial"` first.
 - **No uncommitted changes that you care about.** `git -C /agent status --porcelain` should be clean, or you should be willing to set the working tree aside before delegating. The worktree is a separate checkout, so claude can't see your uncommitted changes — meaning claude operates on the last committed state. If the user wants claude to work with in-progress edits, commit them first (even on a WIP branch).
 
@@ -194,26 +161,24 @@ The minimum protocol — translate to your actual tool calls:
 4. **Clear startup dialogs (BEFORE sending the task prompt).** Even with `~/.claude.json` pre-seeded, claude can land on one or both pre-prompt modals. Run this as a **loop**, not a one-shot: clearing one dialog can immediately reveal the next, and you must keep polling until claude's actual input prompt is visible (it renders a bottom-of-pane input box with a `╭` / `╰` border). **Do NOT poll `.session-id` before this step** — per anthropics/claude-code#11519, SessionStart is suppressed while workspace trust is pending, so `.session-id` will not appear until you've accepted trust here.
 
    The two known modals, with the exact keystrokes for each (Claude Code's select widget does NOT wrap — pressing `Up` from the first option is a no-op, so the direction must match the dialog's option order):
-   - **Custom API key confirmation** — "Detected a custom API key from environment. Do you want to use this API key?" Fires when `ANTHROPIC_API_KEY` is set (exactly typeclaw's auth path). Options are `[No (recommended), Yes]` with focus initialized on **No**. Resolution: `tmux send-keys -t cc-<id> Down Enter` to advance to **Yes** and submit. Sending `Up Enter` would submit the **No** answer, which can persist as a rejection in `customApiKeyResponses.rejected` and break subsequent launches — never do that here.
+   - **Custom API key or sign-in prompt** — abort the session and tell the direct operator to authenticate and run Claude Code host-side. Never accept the prompt or enter a credential.
 
    - **Workspace trust** — "Do you trust the files in this folder?" Fires on first launch in any new cwd, so every fresh `/tmp/cc-<id>/` worktree triggers it. Options are `[Yes, proceed, No, exit]` with focus on the first option (**Yes**) by default. Resolution: bare `tmux send-keys -t cc-<id> Enter` — no arrow key needed. Always verify the pane text matches the trust dialog before pressing Enter; a misidentified modal would submit a different default.
 
    Loop shape (translate to your tool calls):
    1. Capture the last ~15 lines: `tmux capture-pane -t cc-<id> -p -S -15`.
-   2. If the capture contains the API key dialog text → `send-keys Down Enter`, sleep 500ms, goto 1.
-   3. If the capture contains the trust dialog text → `send-keys Enter`, sleep 500ms, goto 1.
-   4. If the capture shows the input box (`╭` border on a bottom line, no dialog text above it) → ready; exit the loop.
-   5. Otherwise sleep 500ms, goto 1. Apply a wall-clock budget of ~10 seconds; if the loop hasn't reached step 4 by then, abort with `/exit` and surface to the user — claude is in a state this skill doesn't model.
+
+5. If the capture contains an API-key or sign-in dialog → send `/exit` (or terminate the unauthenticated session if no input box is available), then report that the direct host-side operator must authenticate and run Claude Code. Never select a credential option or enter a key. 3. If the capture contains the trust dialog text → `send-keys Enter`, sleep 500ms, goto 1. 4. If the capture shows the input box (`╭` border on a bottom line, no dialog text above it) → ready; exit the loop. 5. Otherwise sleep 500ms, goto 1. Apply a wall-clock budget of ~10 seconds; if the loop hasn't reached step 4 by then, abort with `/exit` and surface to the user — claude is in a state this skill doesn't model.
 
    Do not use a fixed 2-second wait then send the prompt — cold-start and slow-disk cases can deliver a dialog at 2.5s+, and sending the task prompt into a modal corrupts the session.
 
    **Safety note**: accepting workspace trust on a fresh `/tmp/cc-<id>/` worktree is the right call **only when its `HEAD` is the intended clean state** — typically the agent folder's last good commit on a branch the user controls. If the user just merged a third-party PR, pulled a remote branch, or checked out an untrusted ref, the worktree carries that content too and "trusting" it gives claude tool access on potentially hostile code. Before auto-accepting trust, sanity-check: if the user hasn't said something equivalent to "delegate this to Claude Code", or if you're not confident the current `HEAD` is one the user authored or reviewed, surface the trust dialog to them instead. Do NOT extend even a legitimate trust acceptance to in-session permission prompts (Bash, Edit, etc.) — those still need per-turn judgment per the multi-turn decision loop below.
 
-5. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
-6. **Discover the session UUID from the newest unprocessed Stop sentinel.** Poll `/tmp/cc-<id>/.done-*` in a loop: each iteration, enumerate the files sorted by mtime (`ls -t`), filter out any UUIDs you've already processed (initially empty), and pick the first one whose UUID is a real hex UUID (not `malformed`). That UUID becomes `cc_session_id`. On every poll, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed. (Fast-path optimization: if `/tmp/cc-<id>/.session-id` happened to appear before the first prompt, you can use it instead and skip the glob — see `references/tmux-driving.md` for the fast-path snippet.) If the only marker that appears is `.done-malformed`, the Stop hook fired but couldn't extract a UUID-shape `session_id` from the payload — bail and surface to the user.
-7. Read `/tmp/cc-<id>/sentinel-${cc_session_id}.json`, examine `last_assistant_message`, then `rm /tmp/cc-<id>/.done-${cc_session_id}` (the SPECIFIC file you just processed, NOT a glob — globbing wipes any in-flight new sentinel from a concurrent compact rotation).
-8. Decide using the multi-turn loop below. **Track which UUIDs you've already processed.** On the next poll, again pick the newest unprocessed `.done-<uuid>`. If the UUID differs from the previous `cc_session_id`, claude has compacted (anthropics/claude-code#29094) — update `cc_session_id` to the new value and continue. Polling is edge-triggered: don't wait on `.done-${cc_session_id}` specifically, because if compact rotated the UUID, that file will never appear.
-9. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
+6. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
+7. **Discover the session UUID from the newest unprocessed Stop sentinel.** Poll `/tmp/cc-<id>/.done-*` in a loop: each iteration, enumerate the files sorted by mtime (`ls -t`), filter out any UUIDs you've already processed (initially empty), and pick the first one whose UUID is a real hex UUID (not `malformed`). That UUID becomes `cc_session_id`. On every poll, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed. (Fast-path optimization: if `/tmp/cc-<id>/.session-id` happened to appear before the first prompt, you can use it instead and skip the glob — see `references/tmux-driving.md` for the fast-path snippet.) If the only marker that appears is `.done-malformed`, the Stop hook fired but couldn't extract a UUID-shape `session_id` from the payload — bail and surface to the user.
+8. Read `/tmp/cc-<id>/sentinel-${cc_session_id}.json`, examine `last_assistant_message`, then `rm /tmp/cc-<id>/.done-${cc_session_id}` (the SPECIFIC file you just processed, NOT a glob — globbing wipes any in-flight new sentinel from a concurrent compact rotation).
+9. Decide using the multi-turn loop below. **Track which UUIDs you've already processed.** On the next poll, again pick the newest unprocessed `.done-<uuid>`. If the UUID differs from the previous `cc_session_id`, claude has compacted (anthropics/claude-code#29094) — update `cc_session_id` to the new value and continue. Polling is edge-triggered: don't wait on `.done-${cc_session_id}` specifically, because if compact rotated the UUID, that file will never appear.
+10. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
 
 The full polling implementation, the ANSI-handling rules for `capture-pane` fallbacks, and the "tmux session died unexpectedly" recovery path are in `references/tmux-driving.md`.
 
@@ -284,7 +249,7 @@ A re-statement, because this is where the skill is most often misused:
 - **Trivial edits**: the round-trip cost dominates. Do it yourself.
 - **Tasks needing live user visibility**: claude's tool calls don't stream back through TypeClaw. The user sees a long pause, not progress. Use your own tools.
 - **Tasks where you don't have the context to brief claude**: spend tokens narrowing the problem first. A vague delegation produces a vague result.
-- **Anything secret beyond `ANTHROPIC_API_KEY`**: claude only sees the prompt you send it and the files in its worktree (which is everything at `HEAD`). Don't try to pass secrets through the prompt — they'll land in claude's transcript and in your sentinel.
+- **Any secret, including Anthropic credentials**: never pass it through the prompt or worktree. It would land in Claude's transcript and sentinels.
 
 ## Things you must not do
 
@@ -297,19 +262,18 @@ A re-statement, because this is where the skill is most often misused:
 - **Do not merge claude's branch into main without reviewing the diff.** The `git diff main..cc-<id>` is your review surface. Skipping the diff and merging blindly means you don't actually know what shipped.
 - **Do not commit `/tmp/cc-<id>/` artifacts back to the agent folder.** The sentinel, the hook script, the captured pane content are scratch — they live in `/tmp/`, they die with `worktree remove`.
 - **Do not paste Claude's output verbatim into a commit message or a user reply.** Summarize and attribute. You're accountable for the work you ship.
-- **Do not put `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in `typeclaw.json`, in a prompt, or in any committed file.** They live in `.env`, which is gitignored. Period.
+- **Do not put `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in `typeclaw.json`, a prompt, a worktree, or any model-accessible file.** Credential provisioning is direct-operator host work; the model does not edit `.env`.
 - **Do not poll the JSONL transcript directly as the done-signal.** The JSONL has documented race conditions (the file can be stale when `Stop` fires, or occasionally missing entirely). The sentinel is the reliable signal; the JSONL is for content, not lifecycle.
-- **Do not write to `.env` without `acknowledgeGuards: { nonWorkspaceWrite: true }`.** The guard will refuse, the agent loop will retry the same broken write, and you'll waste tokens fighting the guard. The ack is required every write, not just the first one.
-- **Do not edit `.env` with the `edit` tool's patch semantics.** Use read-modify-write: read the whole file, reconstruct the new content, write the whole file. `.env` is a flat KV store; a fragile `oldText` match could corrupt unrelated lines.
-- **Do not run `claude setup-token` inside the container.** It's a TUI OAuth flow that wants a browser. The container has no display, no browser, and is often on a different machine from the user anyway. Always have the user run `setup-token` on their own machine and paste the resulting token back; never spawn it in tmux on this side.
-- **Do not echo, log, or transcribe the pasted `CLAUDE_CODE_OAUTH_TOKEN` value back to the user, into a sentinel, into a commit message, or into any message you send.** It's a one-year credential. Confirm receipt with "got it, validating" — never with the token itself.
+- **Do not read, write, edit, parse, or verify `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or any credential value.** These are outside the model-driven tool boundary; guard acknowledgements do not make credential handling acceptable.
+- **Do not run `claude setup-token` inside the container, and do not ask the user to paste its output.** Authentication remains entirely on the operator's host side.
+- **Do not ask for, receive, echo, log, or transcribe credentials.** If a user offers one, tell them not to send it and direct them to host-side setup.
 - **Do not invent answers to Claude's clarifying questions.** If you can't derive the answer from the original task brief, surface the question to the user. Wrong answers compound across multi-turn delegations.
 - **Do not exceed 8 turns per delegation.** Abort, capture what you have, surface. Long delegations almost always mean the task wasn't shaped right.
 - **Do not assume `claude` exists.** If `which claude` returns empty, the `docker.file.claudeCode` toggle isn't on. Tell the user, don't try to install it yourself.
 
 ## Cross-references
 
-- **`references/auth-flow.md`** — both auth paths in detail: the API-key recap, the OAuth user-machine flow (what to tell the user, what their `claude setup-token` output looks like, validation rules), and the failure-mode catalogue (expired subscription, wrong account, malformed paste).
+- **`references/auth-flow.md`** — the authentication boundary: authenticated delegation is unavailable to model-driven tools, and direct host-side setup and execution belong to the operator.
 - **`references/tmux-driving.md`** — full polling implementation, ANSI handling, session-died recovery, the `capture-pane` fallback details, the worktree-is-not-scratch distinction.
 - **`references/stop-hook.md`** — complete `Stop` event JSON schema, `SubagentStop` differences, transcript JSONL schema (unofficial but reverse-engineered), documented race conditions to handle.
 - **`typeclaw-config`** — the `docker.file.claudeCode` toggle that gates the install.
