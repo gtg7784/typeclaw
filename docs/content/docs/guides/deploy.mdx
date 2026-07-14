@@ -43,7 +43,7 @@ export SLACK_BOT_TOKEN=...
 typeclaw start
 ```
 
-No file edit needed — environment wins over `secrets.json`. The full resolution order is in [Secrets policy](/docs/concepts/secrets-policy). (If you run several agents that each need a _different_ key for the same provider, you can bind a custom env-var name per agent — the agent can set that up for you; see the [secrets reference](/docs/reference/secrets-json).)
+No file edit needed — environment wins over `secrets.json`. The full resolution order is in [Secrets policy](/docs/concepts/secrets-policy). If several agents need different keys for the same provider, the **operator must configure the custom environment-variable binding host-side** for each agent; model-driven tools cannot bind or edit secrets. See the [secrets reference](/docs/reference/secrets-json).
 
 </Accordion>
 
