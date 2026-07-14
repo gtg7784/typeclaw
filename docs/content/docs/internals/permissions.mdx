@@ -27,7 +27,7 @@ The fail-safe floor is **not** the `guest` role; it is the `undefined` origin. `
 
 User-declared `match[]` **appends**; user-declared `permissions[]` **replaces** (no merge — `[]` means none). Custom role names must declare both.
 
-The role tower is monotonic on the `fs.see.*` axis: `fsSeePrivate` gates `workspace/` + `memory/` + `sessions/`, `fsSeeSecrets` gates `.env` + `secrets.json`. `resolveHiddenPaths` masks whatever the resolved role lacks, so `member` sees private state but not secrets, and `guest` sees neither.
+The role tower is monotonic on the `fs.see.*` axis: `fsSeePrivate` gates the ordinary `workspace/` + `memory/` + `sessions/` surface, while `fsSeeSecrets` authorizes only runtime-owned credential use that has a dedicated safe mediation path. It never exposes raw canonical credential stores to LLM tools: `.env`, `secrets.json`, historical root `auth.json`, GWS/agent-messenger state, and persisted CLI-auth state remain masked for every role. It also does not authorize mounting reusable Codex, Claude, GWS, or agent-messenger auth into model-controlled children. `resolveHiddenPaths` adds the role-dependent private directories on top of those unconditional masks, so `member` sees ordinary private state and `guest` does not.
 
 ### Core permission strings
 
