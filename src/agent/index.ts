@@ -761,6 +761,7 @@ export function buildChannelTools(
       createChannelFetchAttachmentTool({
         router: channelRouter,
         origin: channelOrigin,
+        ...(agentDir !== undefined ? { agentDir } : {}),
         ...(permissions !== undefined && agentDir !== undefined
           ? { resolveBaseDir: () => resolveInboxBaseDir(permissions, getOrigin?.() ?? origin, agentDir) }
           : {}),
