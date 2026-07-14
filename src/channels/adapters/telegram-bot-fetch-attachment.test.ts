@@ -177,4 +177,34 @@ describe('telegram-bot createFetchAttachmentCallback', () => {
     if (!result.ok) throw new Error('expected ok')
     expect(result.filename).toBe('renamed.jpg')
   })
+
+  test('resolves over-limit reads as structured errors and cancels the body', async () => {
+    let cancelled = false
+    const cb = createFetchAttachmentCallback({
+      token: 'T',
+      logger: silentLogger(),
+      fetchImpl: fakeFetch((url) => {
+        if (url.includes('/getFile')) {
+          return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/large.bin' } }))
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(8))
+            },
+            cancel() {
+              cancelled = true
+            },
+          }),
+        )
+      }),
+    })
+
+    const result = await cb({ ref: 'AgAD', maxBytes: 4 })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected error')
+    expect(result.error).toContain('attachment is too large')
+    expect(cancelled).toBe(true)
+  })
 })

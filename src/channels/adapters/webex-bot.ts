@@ -8,6 +8,11 @@ import type {
 } from 'agent-messenger/webexbot'
 
 import {
+  DEFAULT_ATTACHMENT_MAX_BYTES,
+  readAttachmentErrorSnippet,
+  readAttachmentResponse,
+} from '@/channels/fetch-attachment'
+import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
   type MembershipResolverFailure,
@@ -236,7 +241,7 @@ export function createFetchAttachmentCallback(deps: {
   fetchImpl?: typeof fetch
 }): FetchAttachmentCallback {
   const fetchImpl = deps.fetchImpl ?? fetch
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     let url: URL
     try {
       url = new URL(ref)
@@ -255,12 +260,12 @@ export function createFetchAttachmentCallback(deps: {
     try {
       const res = await fetchImpl(url.toString(), { headers: { Authorization: `Bearer ${deps.token}` } })
       if (!res.ok) {
-        const body = await res.text().catch(() => '')
+        const body = await readAttachmentErrorSnippet(res)
         const message = `webex file fetch ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`
         deps.logger.error(`[webex-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
         return { ok: false, error: message }
       }
-      const buffer = Buffer.from(await res.arrayBuffer())
+      const buffer = await readAttachmentResponse(res, maxBytes)
       const inferredFilename = filename ?? url.pathname.split('/').pop() ?? 'attachment'
       const contentType = res.headers.get('content-type') ?? undefined
       return {

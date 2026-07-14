@@ -1,6 +1,12 @@
 import { TelegramBotClient, TelegramBotListener } from 'agent-messenger/telegrambot'
 import type { TelegramBotUser, TelegramMessage } from 'agent-messenger/telegrambot'
 
+import { readResponseBodyBounded } from '@/agent/network/response-body'
+import {
+  DEFAULT_ATTACHMENT_MAX_BYTES,
+  readAttachmentErrorSnippet,
+  readAttachmentResponse,
+} from '@/channels/fetch-attachment'
 import type { MembershipResolver, MembershipResolverFailure, MembershipResolverResult } from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
@@ -313,7 +319,7 @@ export function createFetchAttachmentCallback(deps: {
 }): FetchAttachmentCallback {
   const { token, logger } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     if (ref === '' || ref.includes('://')) {
       return { ok: false, error: `invalid Telegram file_id: ${ref}` }
     }
@@ -333,7 +339,8 @@ export function createFetchAttachmentCallback(deps: {
     }
     let meta: TelegramFileResponse
     try {
-      meta = (await metaResponse.json()) as TelegramFileResponse
+      const bytes = await readResponseBodyBounded(metaResponse, 64 * 1024)
+      meta = JSON.parse(bytes.toString('utf8')) as TelegramFileResponse
     } catch (err) {
       return { ok: false, error: `getFile parse failed: ${describeError(err)}` }
     }
@@ -352,13 +359,19 @@ export function createFetchAttachmentCallback(deps: {
       return { ok: false, error: message }
     }
     if (!response.ok) {
-      const body = await response.text().catch(() => '')
+      const body = await readAttachmentErrorSnippet(response)
       const message = `download ${response.status} ${response.statusText}${body !== '' ? `: ${body.slice(0, 200)}` : ''}`
       logger.error(`[telegram-bot] download failed for ${ref}: ${message}`)
       return { ok: false, error: message }
     }
-    const arrayBuffer = await response.arrayBuffer()
-    const buffer = Buffer.from(arrayBuffer)
+    let buffer: Buffer
+    try {
+      buffer = await readAttachmentResponse(response, maxBytes)
+    } catch (err) {
+      const message = describeError(err)
+      logger.error(`[telegram-bot] download failed for ${ref}: ${message}`)
+      return { ok: false, error: message }
+    }
     const inferredFilename = filename ?? filePath.split('/').pop() ?? 'attachment'
     const contentType = response.headers.get('content-type') ?? undefined
     logger.info(
