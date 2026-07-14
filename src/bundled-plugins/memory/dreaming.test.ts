@@ -1430,6 +1430,20 @@ async function skipWorktreeFiles(cwd: string): Promise<string[]> {
 }
 
 describe('commitMemorySnapshot', () => {
+  test('commits a snapshot without executing a planted hook', async () => {
+    await initRepo(agentDir)
+    await writeFile(streamFile('2026-04-27'), 'fragment\n')
+    const marker = join(agentDir, 'hook-ran')
+    const hook = join(agentDir, '.git', 'hooks', 'pre-commit')
+    await writeFile(hook, `#!/bin/sh\nprintf hook > "${marker}"\n`)
+    await chmod(hook, 0o755)
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await Bun.file(marker).exists()).toBe(false)
+    expect((await runGit(agentDir, ['log', '-1', '--format=%s'])).stdout).toStartWith('dream:')
+  })
+
   test('is a no-op when the directory is not a git repo', async () => {
     await writeFile(streamFile('2026-04-27'), 'fragment\n')
     await commitMemorySnapshot(agentDir)
