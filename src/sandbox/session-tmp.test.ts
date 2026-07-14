@@ -27,6 +27,11 @@ describe('session-tmp path mapping', () => {
     expect(mapVirtualTmpPath('/agent', 'sid', 'workspace/x.json')).toBeUndefined()
   })
 
+  test('does not redirect project paths when the agent fixture itself is under /tmp', () => {
+    expect(isUnderTmp('/tmp/typeclaw-agent', 'workspace/x.json')).toBe(false)
+    expect(mapVirtualTmpPath('/tmp/typeclaw-agent', 'sid', '.')).toBeUndefined()
+  })
+
   test('does not treat a /tmpfoo sibling as under /tmp', () => {
     expect(mapVirtualTmpPath('/agent', 'sid', '/tmpfoo/x')).toBeUndefined()
     expect(isUnderTmp('/agent', '/tmpfoo/x')).toBe(false)

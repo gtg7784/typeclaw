@@ -1,27 +1,46 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  truncate,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { defineTool as definePiTool } from '@mariozechner/pi-coding-agent'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import { Type } from 'typebox'
 import { z } from 'zod'
 
+import { createDreamingSubagent } from '@/bundled-plugins/memory/dreaming'
+import { createWriteReportTool } from '@/bundled-plugins/researcher/write-report'
 import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
 import { hooklessGitArgs } from '@/git/hookless'
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
 import {
+  buildSandboxedCommand,
+  canWriteAgentRootInSandbox,
   _resetBwrapAvailabilityCacheForTests,
   _resetRealProcProbeCacheForTests,
-  buildSandboxedCommand,
+  resolveProtectedZones,
   SESSION_TMP_ROOT,
   resolvePrivilegedSandboxRuntime,
 } from '@/sandbox'
 
+import { URL_FETCH_MAX_BYTES } from './multimodal/looker'
 import {
   __resetSharedLoopGuardForTests,
+  buildBashFilesystemPolicy,
   buildBuiltinPiToolOverrides,
   defaultBuiltinPiToolDefinitions,
   forgetSharedLoopGuardTool,
@@ -32,12 +51,21 @@ import {
   zodToToolParameters,
 } from './plugin-tools'
 import type { SessionOrigin } from './session-origin'
+import {
+  enforceAndPinToolFiles,
+  PINNED_SNAPSHOT_GLOBAL_MAX_COUNT,
+  PINNED_SNAPSHOT_MAX_WAITERS,
+  TOOL_INPUT_MAX_BYTES,
+  TOOL_INPUT_MAX_COUNT,
+  writeToolOutputNoFollow,
+} from './tool-file-safety'
 
 beforeEach(() => {
   __resetSharedLoopGuardForTests()
 })
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
+const lacksInodeAnchoring = process.platform !== 'linux'
 
 function textOfFirstContent(result: { content: { type: string; text?: string }[] }): string | undefined {
   const first = result.content[0]
@@ -319,9 +347,364 @@ describe('wrapPluginTool', () => {
     await wrapped.execute('c', {}, controller.signal, undefined, {} as never)
     expect(captured.signal).toBe(controller.signal)
   })
+
+  test('hookless plugin tools cannot open canonical credentials', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-hookless-plugin-'))
+    await writeFile(path.join(agentDir, 'secrets.json'), '{"secret":true}')
+    let called = false
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ path: z.string() }),
+      async execute() {
+        called = true
+        return { content: [] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'arbitrary_reader',
+      agentDir,
+      sessionId: 's',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      await expect(wrapped.execute('c', { path: 'secrets.json' }, undefined, undefined, {} as never)).rejects.toThrow(
+        /ambiguous.*fileOperands\.input.*file:/i,
+      )
+      expect(called).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin semantic API routes and repository slugs pass only under their narrow key grammars', async () => {
+    const seen: Array<{ path: string; repository: string; id: string }> = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ path: z.string(), repository: z.string(), id: z.string() }),
+      async execute(args) {
+        seen.push(args)
+        return { content: [{ type: 'text', text: args.path }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'repository',
+      toolName: 'repository_status',
+      agentDir: '/agent',
+      sessionId: 'semantic-path',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    const result = await wrapped.execute(
+      'c',
+      { path: '/v1/repos', repository: 'acme/widgets', id: 'opaque-123' },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(textOfFirstContent(result)).toBe('/v1/repos')
+    expect(seen).toEqual([{ path: '/v1/repos', repository: 'acme/widgets', id: 'opaque-123' }])
+  })
+
+  test.each(['/v1/../../tmp/result.txt', '/v1/%2e%2e/tmp/result.txt', '/v1\\..\\tmp', '/v1//repos'])(
+    'rejects traversal-shaped API route %s before plugin dispatch',
+    async (route) => {
+      let called = false
+      const tool = defineTool({
+        description: '',
+        parameters: z.object({ path: z.string() }),
+        async execute() {
+          called = true
+          return { content: [] }
+        },
+      })
+      const wrapped = wrapPluginTool(tool, {
+        pluginName: 'repository',
+        toolName: 'repository_status',
+        agentDir: '/agent',
+        sessionId: `route-${route}`,
+        logger: noopLogger,
+        hooks: createHookBus(),
+      })
+
+      await expect(wrapped.execute('c', { path: route }, undefined, undefined, {} as never)).rejects.toThrow(
+        /ambiguous.*fileOperands\.input.*file:/i,
+      )
+      expect(called).toBeFalse()
+    },
+  )
+
+  test('rejects undeclared scalar array paths and non-file-key multi-component paths before plugin dispatch', async () => {
+    let called = false
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ files: z.array(z.string()), value: z.string() }),
+      async execute() {
+        called = true
+        return { content: [] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'array_reader',
+      agentDir: '/agent',
+      sessionId: 'undeclared-array',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+
+    for (const args of [
+      { files: ['workspace/missing.txt'], value: 'opaque' },
+      { files: ['opaque'], value: 'workspace/missing.txt' },
+    ]) {
+      await expect(wrapped.execute('c', args, undefined, undefined, {} as never)).rejects.toThrow(
+        /ambiguous.*fileOperands\.input.*file:/i,
+      )
+    }
+    expect(called).toBeFalse()
+  })
+
+  test('plugin-declared whole-array scalar inputs execute against immutable snapshots', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-declared-array-input-'))
+    const safe = path.join(agentDir, 'safe.txt')
+    const replacement = path.join(agentDir, 'replacement.txt')
+    await writeFile(safe, 'safe')
+    await writeFile(replacement, 'replacement')
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ files: z.array(z.string()) }),
+      fileOperands: { input: ['files'] },
+      async execute(args) {
+        await rm(safe)
+        await symlink(replacement, safe)
+        return { content: [{ type: 'text', text: await readFile(args.files[0] as string, 'utf8') }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'declared_array_reader',
+      agentDir,
+      sessionId: 'declared-array-input',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      const result = await wrapped.execute('c', { files: ['safe.txt'] }, undefined, undefined, {} as never)
+      expect(textOfFirstContent(result)).toBe('safe')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.each([
+    ['outputPath', 'result.txt'],
+    ['filename', 'result.txt'],
+    ['value', 'result.txt'],
+    ['value', 'C:\\temp\\result.txt'],
+    ['value', '\\\\server\\share\\result.txt'],
+  ])('rejects undeclared nonexistent local operand %s=%s before dispatch', async (key, value) => {
+    let called = false
+    const tool = defineTool({
+      description: '',
+      parameters: z.record(z.string(), z.string()),
+      async execute() {
+        called = true
+        return { content: [] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'undeclared_reader',
+      agentDir: '/agent',
+      sessionId: `undeclared-${key}-${value}`,
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    await expect(wrapped.execute('c', { [key]: value }, undefined, undefined, {} as never)).rejects.toThrow(
+      /ambiguous.*fileOperands\.input.*file:/i,
+    )
+    expect(called).toBeFalse()
+  })
+
+  test('rejects a nonexistent output path before a tool can race it to a symlink', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-undeclared-output-race-'))
+    const destination = path.join(agentDir, 'result.txt')
+    let called = false
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ outputPath: z.string() }),
+      async execute() {
+        called = true
+        await symlink(path.join(agentDir, 'secrets.json'), destination)
+        return { content: [] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'writer',
+      toolName: 'undeclared_writer',
+      agentDir,
+      sessionId: 'undeclared-output-race',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      await expect(
+        wrapped.execute('c', { outputPath: 'result.txt' }, undefined, undefined, {} as never),
+      ).rejects.toThrow(/ambiguous/i)
+      expect(called).toBeFalse()
+      expect(await Bun.file(destination).exists()).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.each(['absolute', 'relative', 'bare'])(
+    'undeclared existing %s path-like plugin operands are rejected instead of dispatched with a TOCTOU window',
+    async (kind) => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-undeclared-plugin-input-'))
+      const safe = path.join(agentDir, 'safe.txt')
+      await writeFile(safe, 'safe')
+      let called = false
+      const tool = defineTool({
+        description: '',
+        parameters: z.object({ inputPath: z.string() }),
+        async execute() {
+          called = true
+          return { content: [] }
+        },
+      })
+      const wrapped = wrapPluginTool(tool, {
+        pluginName: 'reader',
+        toolName: 'undeclared_reader',
+        agentDir,
+        sessionId: `undeclared-${kind}`,
+        logger: noopLogger,
+        hooks: createHookBus(),
+      })
+      try {
+        const inputPath = kind === 'absolute' ? safe : kind === 'relative' ? './safe.txt' : 'safe.txt'
+        await expect(wrapped.execute('c', { inputPath }, undefined, undefined, {} as never)).rejects.toThrow(
+          /ambiguous.*fileOperands\.input.*file:/i,
+        )
+        expect(called).toBeFalse()
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('plugin-declared local input operands execute against an immutable snapshot', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-declared-plugin-input-'))
+    const safe = path.join(agentDir, 'safe.txt')
+    const replacement = path.join(agentDir, 'replacement.txt')
+    await writeFile(safe, 'safe')
+    await writeFile(replacement, 'replacement')
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ path: z.string() }),
+      fileOperands: { input: ['path'] },
+      async execute(args) {
+        await rm(safe)
+        await symlink(replacement, safe)
+        return { content: [{ type: 'text', text: await readFile(args.path, 'utf8') }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'declared_reader',
+      agentDir,
+      sessionId: 'declared-input',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      const result = await wrapped.execute('c', { path: 'safe.txt' }, undefined, undefined, {} as never)
+      expect(textOfFirstContent(result)).toBe('safe')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('researcher write_report preserves its absent O_EXCL output through the production plugin wrapper', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-wrapped-write-report-'))
+    await mkdir(path.join(agentDir, 'workspace'))
+    const destination = path.join(agentDir, 'workspace', 'research-wrapper.md')
+    const wrapped = wrapPluginTool(createWriteReportTool(), {
+      pluginName: 'researcher',
+      toolName: 'researcher_1',
+      agentDir,
+      sessionId: `write-report-${Date.now()}`,
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      const execution = wrapped.execute(
+        'c',
+        { path: destination, content: '# Wrapped report' },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      if (lacksInodeAnchoring) {
+        await expect(execution).rejects.toThrow(/requires Linux inode anchoring/i)
+        return
+      }
+      const result = await execution
+      expect(textOfFirstContent(result)).toContain('Wrote research report')
+      expect(await readFile(destination, 'utf8')).toBe('# Wrapped report')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory delete_topic_shard keeps its destructive semantic path unchanged through the production wrapper', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-wrapped-delete-topic-'))
+    const topics = path.join(agentDir, 'memory', 'topics')
+    await mkdir(topics, { recursive: true })
+    await writeFile(path.join(topics, 'obsolete.md'), 'old')
+    const subagent = createDreamingSubagent()
+    const deleteTool = subagent.customTools?.[0]
+    if (deleteTool === undefined) throw new Error('dreaming delete tool was not registered')
+    const wrapped = wrapPluginTool(deleteTool, {
+      pluginName: 'memory',
+      toolName: 'dreaming_0',
+      agentDir,
+      sessionId: 'delete-topic',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+    try {
+      const rejected = await wrapped.execute(
+        'absolute',
+        { path: path.join(topics, 'obsolete.md') },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(textOfFirstContent(rejected)).toContain('invalid_path')
+      expect(await Bun.file(path.join(topics, 'obsolete.md')).exists()).toBeTrue()
+
+      const deleted = await wrapped.execute(
+        'relative',
+        { path: 'memory/topics/obsolete.md' },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(textOfFirstContent(deleted)).toContain('"ok":true')
+      expect(await Bun.file(path.join(topics, 'obsolete.md')).exists()).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('wrapSystemTool', () => {
+  test('local look_at snapshots share the remote-image byte ceiling', () => {
+    expect(TOOL_INPUT_MAX_BYTES.look_at).toBe(URL_FETCH_MAX_BYTES)
+  })
+
   test('tool.before mutations propagate to TypeClaw system tool execution and tool.after can rewrite the result', async () => {
     const seen: unknown[] = []
     const observed: unknown[] = []
@@ -379,45 +762,56 @@ describe('wrapSystemTool', () => {
     expect(calls).toEqual([])
   })
 
-  test('write system tool exposes and strips guard acknowledgements before execution', async () => {
-    const seen: unknown[] = []
-    const tool = definePiTool({
-      name: 'write',
-      label: 'write',
-      description: '',
-      parameters: Type.Object(
-        {
-          path: Type.String(),
-          content: Type.String(),
+  test.skipIf(lacksInodeAnchoring)(
+    'write system tool exposes and strips guard acknowledgements before execution',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-system-write-ack-'))
+      const seen: unknown[] = []
+      const tool = definePiTool({
+        name: 'write',
+        label: 'write',
+        description: '',
+        parameters: Type.Object(
+          {
+            path: Type.String(),
+            content: Type.String(),
+          },
+          { additionalProperties: false },
+        ),
+        async execute(_callId, params) {
+          seen.push({ ...params, path: 'notes.md' })
+          await writeFile(params.path, params.content)
+          return { content: [{ type: 'text', text: 'wrote' }], details: params }
         },
-        { additionalProperties: false },
-      ),
-      async execute(_callId, params) {
-        seen.push(params)
-        return { content: [{ type: 'text', text: 'wrote' }], details: params }
-      },
-    })
-    const hooks = createHookBus()
-    hooks.registerAll('p1', '/agent', noopLogger, {
-      'tool.before': (event) => {
-        expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
-      },
-    })
+      })
+      const hooks = createHookBus()
+      hooks.registerAll('p1', agentDir, noopLogger, {
+        'tool.before': (event) => {
+          expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
+        },
+      })
 
-    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+      const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 's', hooks })
 
-    const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
-    expect(parameters.properties).toHaveProperty('acknowledgeGuards')
-    await wrapped.execute(
-      'c',
-      { path: 'typeclaw.json', content: '{}', acknowledgeGuards: { nonWorkspaceWrite: true } },
-      undefined,
-      undefined,
-      {} as never,
-    )
+      const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
+      expect(parameters.properties).toHaveProperty('acknowledgeGuards')
+      try {
+        const result = await wrapped.execute(
+          'c',
+          { path: 'notes.md', content: '{}', acknowledgeGuards: { nonWorkspaceWrite: true } },
+          undefined,
+          undefined,
+          {} as never,
+        )
 
-    expect(seen[0]).toEqual({ path: 'typeclaw.json', content: '{}' })
-  })
+        expect(seen[0]).toEqual({ path: 'notes.md', content: '{}' })
+        expect(result.details).toEqual({ path: 'notes.md', content: '{}' })
+        expect(await readFile(path.join(agentDir, 'notes.md'), 'utf8')).toBe('{}')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
 
   test('write system tool runs a final guard after hook mutations', async () => {
     const calls: number[] = []
@@ -503,15 +897,1030 @@ describe('wrapSystemTool', () => {
     ).rejects.toThrow('Guard `managedConfig` blocked write')
     expect(calls).toEqual([])
   })
+
+  test('hookless system tools deny canonical secrets for read, look_at, and channel uploads', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-hookless-secret-'))
+    await writeFile(path.join(agentDir, '.env'), 'SECRET=never')
+    const cases: Array<{ name: string; args: Record<string, unknown> }> = [
+      { name: 'read', args: { path: '.env' } },
+      { name: 'look_at', args: { images: [{ path: '.env' }] } },
+      { name: 'channel_send', args: { attachments: [{ path: '.env' }] } },
+    ]
+    try {
+      for (const testCase of cases) {
+        let called = false
+        const tool = definePiTool({
+          name: testCase.name,
+          label: testCase.name,
+          description: '',
+          parameters: Type.Any(),
+          async execute() {
+            called = true
+            return { content: [], details: undefined }
+          },
+        })
+        const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 's', hooks: createHookBus() })
+        await expect(wrapped.execute('c', testCase.args, undefined, undefined, {} as never)).rejects.toThrow(
+          /not available to LLM tools/,
+        )
+        expect(called).toBeFalse()
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('hookless system MCP calls reject nested file URLs before dispatch', async () => {
+    let called = false
+    const tool = definePiTool({
+      name: 'mcp_call',
+      label: 'mcp_call',
+      description: '',
+      parameters: Type.Any(),
+      async execute() {
+        called = true
+        return { content: [], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'mcp', hooks: createHookBus() })
+    await expect(
+      wrapped.execute(
+        'c',
+        { server: 'files', tool: 'read', args: { nested: { url: 'file:///agent/secrets.json' } } },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/not available to LLM tools/)
+    expect(called).toBeFalse()
+  })
+
+  test('ambiguous system tools execute explicit file URLs against an immutable pinned copy', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-mcp-pinned-url-'))
+    const safe = path.join(agentDir, 'safe.txt')
+    const replacement = path.join(agentDir, 'replacement.txt')
+    await writeFile(safe, 'safe')
+    await writeFile(replacement, 'replacement')
+    let startedResolve: () => void = () => {}
+    const started = new Promise<void>((resolve) => (startedResolve = resolve))
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const tool = definePiTool({
+      name: 'custom_system_reader',
+      label: 'custom_system_reader',
+      description: '',
+      parameters: Type.Any(),
+      async execute(_id, params) {
+        startedResolve()
+        await gate
+        const url = (params.args as { url: string }).url
+        return { content: [{ type: 'text' as const, text: await Bun.file(new URL(url)).text() }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 'mcp-pinned', hooks: createHookBus() })
+    try {
+      const resultPromise = wrapped.execute(
+        'c',
+        { server: 'files', tool: 'read', args: { url: pathToFileURL(safe).href } },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      await started
+      await rm(safe)
+      await symlink(replacement, safe)
+      release()
+      expect(textOfFirstContent(await resultPromise)).toBe('safe')
+    } finally {
+      release()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('channel attachments reject process-backed files before opening them', async () => {
+    await expect(
+      enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: [{ path: '/proc/self/environ' }] },
+        agentDir: '/agent',
+      }),
+    ).rejects.toThrow(/virtual|process-backed|not available/i)
+  })
+
+  test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-pinned-read-'))
+    const safe = path.join(agentDir, 'safe.txt')
+    const secret = path.join(agentDir, '.env')
+    const aliases = Array.from({ length: 8 }, (_, i) => path.join(agentDir, `alias-${i}.txt`))
+    await writeFile(safe, 'safe bytes')
+    await writeFile(secret, 'secret bytes')
+    await Promise.all(aliases.map((alias) => symlink(safe, alias)))
+
+    const releases: Array<() => void> = []
+    const started: Promise<void>[] = []
+    const names = [
+      'read',
+      'look_at',
+      'channel_send',
+      'channel_reply',
+      'read',
+      'look_at',
+      'channel_send',
+      'channel_reply',
+    ]
+
+    try {
+      const calls = aliases.map((alias, i) => {
+        const name = names[i] as string
+        const tool = definePiTool({
+          name,
+          label: name,
+          description: '',
+          parameters: Type.Any(),
+          async execute(_callId, params) {
+            let markStarted: () => void = () => {}
+            started.push(new Promise<void>((resolve) => (markStarted = resolve)))
+            let release: () => void = () => {}
+            const gate = new Promise<void>((resolve) => (release = resolve))
+            releases.push(release)
+            markStarted()
+            await gate
+            const inputPath =
+              typeof params.path === 'string'
+                ? params.path
+                : name === 'look_at'
+                  ? (params.images as Array<{ path: string }>)[0]?.path
+                  : (params.attachments as Array<{ path: string }>)[0]?.path
+            if (inputPath === undefined) throw new Error('missing pinned input')
+            return { content: [{ type: 'text' as const, text: await readFile(inputPath, 'utf8') }], details: undefined }
+          },
+        })
+        const wrapped = wrapSystemTool(tool, { agentDir, sessionId: `s-${i}`, hooks: createHookBus() })
+        const args =
+          name === 'read'
+            ? { path: alias }
+            : name === 'look_at'
+              ? { images: [{ path: alias }] }
+              : { attachments: [{ path: alias }] }
+        return wrapped.execute(String(i), args, undefined, undefined, {} as never)
+      })
+      while (started.length < calls.length) await Bun.sleep(1)
+      await Promise.all(started)
+      await Promise.all(aliases.map((alias) => rm(alias)))
+      await Promise.all(aliases.map((alias) => symlink(secret, alias)))
+      for (const release of releases) release()
+      const results = await Promise.all(calls)
+      expect(results.map((result) => textOfFirstContent(result))).toEqual(
+        Array.from({ length: calls.length }, () => 'safe bytes'),
+      )
+    } finally {
+      for (const release of releases) release()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('absent input operands cannot appear as secret symlinks before execution', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-absent-input-'))
+    const secret = path.join(agentDir, '.env')
+    await writeFile(secret, 'secret bytes')
+    const aliases = Array.from({ length: 24 }, (_, i) => path.join(agentDir, `late-${i}.txt`))
+    let called = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute() {
+        called++
+        return { content: [], details: undefined }
+      },
+    })
+
+    try {
+      const calls = aliases.map((alias, i) => {
+        const wrapped = wrapSystemTool(tool, { agentDir, sessionId: `late-${i}`, hooks: createHookBus() })
+        return wrapped.execute(String(i), { path: alias }, undefined, undefined, {} as never).then(
+          () => false,
+          () => true,
+        )
+      })
+      await Promise.all(aliases.map((alias) => symlink(secret, alias).catch(() => {})))
+      expect(await Promise.all(calls)).toEqual(Array.from({ length: aliases.length }, () => true))
+      expect(called).toBe(0)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(lacksInodeAnchoring)(
+    'a nonexistent write destination remains valid because it is output, not input',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-output-destination-'))
+      await mkdir(path.join(agentDir, 'workspace'))
+      const destination = path.join(agentDir, 'workspace', 'new-output.txt')
+      const tool = definePiTool({
+        name: 'write',
+        label: 'write',
+        description: '',
+        parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+        async execute(_callId, params) {
+          expect(await Bun.file(destination).exists()).toBeFalse()
+          await writeFile(params.path, params.content)
+          return { content: [{ type: 'text' as const, text: 'wrote' }], details: undefined }
+        },
+      })
+      const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 'output', hooks: createHookBus() })
+      try {
+        await wrapped.execute('c', { path: destination, content: 'ok' }, undefined, undefined, {} as never)
+        expect(await readFile(destination, 'utf8')).toBe('ok')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('missing-parent writes fail closed before creating or authorizing an unanchored path', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-missing-parent-output-'))
+    const destination = path.join(agentDir, 'workspace', 'missing', 'output.txt')
+    try {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'write', args: { path: destination, content: 'x' }, agentDir }),
+      ).rejects.toThrow(/parent|anchor|Linux/i)
+      expect(await Bun.file(destination).exists()).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('an already-aborted write stops before path authorization or filesystem mutation', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-aborted-output-auth-'))
+    const destination = path.join(agentDir, '.env')
+    const controller = new AbortController()
+    controller.abort('cancel before authorization')
+    try {
+      await expect(
+        enforceAndPinToolFiles({
+          tool: 'write',
+          args: { path: destination, content: 'never' },
+          agentDir,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort|cancel/i)
+      expect(await Bun.file(destination).exists()).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects oversized read, look_at, and channel-upload inputs before tool execution', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-oversized-input-'))
+    const cases = [
+      { name: 'read', limit: TOOL_INPUT_MAX_BYTES.read, args: (file: string) => ({ path: file }) },
+      { name: 'look_at', limit: TOOL_INPUT_MAX_BYTES.look_at, args: (file: string) => ({ images: [{ path: file }] }) },
+      {
+        name: 'channel_send',
+        limit: TOOL_INPUT_MAX_BYTES.channel_upload,
+        args: (file: string) => ({ attachments: [{ path: file }] }),
+      },
+    ]
+    let called = 0
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        const file = path.join(agentDir, `oversized-${index}.bin`)
+        await writeFile(file, '')
+        await truncate(file, testCase.limit + 1)
+        const tool = definePiTool({
+          name: testCase.name,
+          label: testCase.name,
+          description: '',
+          parameters: Type.Any(),
+          async execute() {
+            called++
+            return { content: [], details: undefined }
+          },
+        })
+        const wrapped = wrapSystemTool(tool, {
+          agentDir,
+          sessionId: `oversized-${index}`,
+          hooks: createHookBus(),
+        })
+        await expect(
+          wrapped.execute(String(index), testCase.args(file), undefined, undefined, {} as never),
+        ).rejects.toThrow(new RegExp(`> ${testCase.limit} byte limit`))
+      }
+      expect(called).toBe(0)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects repeated near-limit look_at and channel attachments over the aggregate byte ceiling', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-aggregate-input-'))
+    const snapshotRoot = path.join(agentDir, 'snapshots')
+    await mkdir(snapshotRoot)
+    const cases = [
+      {
+        tool: 'look_at',
+        limit: TOOL_INPUT_MAX_BYTES.look_at,
+        args: (files: string[]) => ({ images: files.map((file) => ({ path: file })) }),
+      },
+      {
+        tool: 'channel_send',
+        limit: TOOL_INPUT_MAX_BYTES.channel_upload,
+        args: (files: string[]) => ({ attachments: files.map((file) => ({ path: file })) }),
+      },
+    ]
+    try {
+      for (const [index, testCase] of cases.entries()) {
+        const files = [
+          path.join(agentDir, `near-limit-${index}-a.bin`),
+          path.join(agentDir, `near-limit-${index}-b.bin`),
+        ]
+        await Promise.all(
+          files.map(async (file) => {
+            await writeFile(file, '')
+            await truncate(file, Math.floor(testCase.limit * 0.75))
+          }),
+        )
+
+        await expect(
+          enforceAndPinToolFiles({
+            tool: testCase.tool,
+            args: testCase.args(files),
+            agentDir,
+            tempRoot: snapshotRoot,
+          }),
+        ).rejects.toThrow(/aggregate.*byte limit/i)
+        expect(await readdir(snapshotRoot)).toEqual([])
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects unbounded local-input arrays at the per-invocation count ceiling before snapshotting', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-input-count-'))
+    const snapshotRoot = path.join(agentDir, 'snapshots')
+    await mkdir(snapshotRoot)
+    const file = path.join(agentDir, 'small.bin')
+    await writeFile(file, 'x')
+    try {
+      await expect(
+        enforceAndPinToolFiles({
+          tool: 'look_at',
+          args: { images: Array.from({ length: TOOL_INPUT_MAX_COUNT.look_at + 1 }, () => ({ path: file })) },
+          agentDir,
+          tempRoot: snapshotRoot,
+        }),
+      ).rejects.toThrow(new RegExp(`count.*> ${TOOL_INPUT_MAX_COUNT.look_at}`, 'i'))
+      expect(await readdir(snapshotRoot)).toEqual([])
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('cleans a partial snapshot when a later attachment exceeds its byte limit', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-snapshot-cleanup-'))
+    const snapshotRoot = path.join(agentDir, 'snapshots')
+    await mkdir(snapshotRoot)
+    const small = path.join(agentDir, 'small.txt')
+    const oversized = path.join(agentDir, 'oversized.bin')
+    await writeFile(small, 'small')
+    await writeFile(oversized, '')
+    await truncate(oversized, TOOL_INPUT_MAX_BYTES.channel_upload + 1)
+    try {
+      await expect(
+        enforceAndPinToolFiles({
+          tool: 'channel_reply',
+          args: { attachments: [{ path: small }, { path: oversized }] },
+          agentDir,
+          tempRoot: snapshotRoot,
+        }),
+      ).rejects.toThrow(/tool input is too large/)
+      expect(await readdir(snapshotRoot)).toEqual([])
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('removes a successful immutable snapshot when tool execution cleanup runs', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-snapshot-success-'))
+    const snapshotRoot = path.join(agentDir, 'snapshots')
+    await mkdir(snapshotRoot)
+    const input = path.join(agentDir, 'input.txt')
+    await writeFile(input, 'bounded input')
+    const args: Record<string, unknown> = { path: input }
+    try {
+      const pinned = await enforceAndPinToolFiles({ tool: 'read', args, agentDir, tempRoot: snapshotRoot })
+      expect(await readdir(snapshotRoot)).toHaveLength(1)
+      expect(await readFile(args.path as string, 'utf8')).toBe('bounded input')
+      await pinned.cleanup()
+      expect(await readdir(snapshotRoot)).toEqual([])
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('direct snapshots reject a file hardlinked to .env after initial authorization but before open', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-direct-hardlink-race-'))
+    const holderFiles = Array.from({ length: PINNED_SNAPSHOT_GLOBAL_MAX_COUNT }, (_, i) =>
+      path.join(agentDir, `holder-${i}.txt`),
+    )
+    const input = path.join(agentDir, 'input.txt')
+    const env = path.join(agentDir, '.env')
+    await Promise.all(holderFiles.map(async (file) => await writeFile(file, 'x')))
+    await writeFile(input, 'safe before hardlink')
+    let holder: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    try {
+      holder = await enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: holderFiles.map((file) => ({ path: file })) },
+        agentDir,
+      })
+      let dispatched = false
+      const waiting = enforceAndPinToolFiles({ tool: 'read', args: { path: input }, agentDir }).then(
+        async (pinned) => {
+          dispatched = true
+          await pinned.cleanup()
+          return undefined
+        },
+        (error: unknown) => error,
+      )
+      await Bun.sleep(10)
+      await link(input, env)
+      await holder.cleanup()
+      holder = undefined
+
+      const failure = await waiting
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toMatch(
+        /(?:not available to LLM tools|hard links.*copy.*unique regular file)/i,
+      )
+      expect(dispatched).toBeFalse()
+    } finally {
+      await holder?.cleanup()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform !== 'linux')(
+    'recursive directory snapshots reject a nested file hardlinked to .env',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-tree-hardlink-'))
+      const tree = path.join(agentDir, 'safe-tree', 'nested')
+      const env = path.join(agentDir, '.env')
+      await mkdir(tree, { recursive: true })
+      await writeFile(env, 'secret')
+      await link(env, path.join(tree, 'alias.txt'))
+      try {
+        await expect(
+          enforceAndPinToolFiles({ tool: 'grep', args: { path: path.join(agentDir, 'safe-tree') }, agentDir }),
+        ).rejects.toThrow(/hardlink|hard links|aliases cannot be bounded/i)
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('holds the process-wide pinned-count reservation through cleanup', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-global-snapshot-budget-'))
+    const files = Array.from({ length: PINNED_SNAPSHOT_GLOBAL_MAX_COUNT + 1 }, (_, i) =>
+      path.join(agentDir, `${i}.png`),
+    )
+    await Promise.all(files.map(async (file) => await writeFile(file, 'x')))
+    const make = (slice: string[]) =>
+      enforceAndPinToolFiles({
+        tool: 'look_at',
+        args: { images: slice.map((file) => ({ path: file })) },
+        agentDir,
+      })
+    let first: Awaited<ReturnType<typeof make>> | undefined
+    let second: Awaited<ReturnType<typeof make>> | undefined
+    let third: Awaited<ReturnType<typeof make>> | undefined
+    try {
+      first = await make(files.slice(0, TOOL_INPUT_MAX_COUNT.look_at))
+      second = await make(files.slice(TOOL_INPUT_MAX_COUNT.look_at, PINNED_SNAPSHOT_GLOBAL_MAX_COUNT))
+      let settled = false
+      const waiting = make([files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string]).then((value) => {
+        settled = true
+        return value
+      })
+      await Bun.sleep(10)
+      expect(settled).toBeFalse()
+      await first.cleanup()
+      first = undefined
+      third = await waiting
+      expect(settled).toBeTrue()
+    } finally {
+      await first?.cleanup()
+      await second?.cleanup()
+      await third?.cleanup()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('aborting a queued snapshot waiter removes it without consuming capacity', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-aborted-snapshot-waiter-'))
+    const files = Array.from({ length: PINNED_SNAPSHOT_GLOBAL_MAX_COUNT + 1 }, (_, i) =>
+      path.join(agentDir, `${i}.bin`),
+    )
+    await Promise.all(files.map(async (file) => await writeFile(file, 'x')))
+    let holder: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    try {
+      holder = await enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: files.slice(0, PINNED_SNAPSHOT_GLOBAL_MAX_COUNT).map((file) => ({ path: file })) },
+        agentDir,
+      })
+      const controller = new AbortController()
+      const waiting = enforceAndPinToolFiles({
+        tool: 'read',
+        args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
+        agentDir,
+        signal: controller.signal,
+      })
+      controller.abort('cancelled test waiter')
+      await expect(waiting).rejects.toThrow(/abort|cancel/i)
+      await holder.cleanup()
+      holder = undefined
+      const next = await enforceAndPinToolFiles({
+        tool: 'read',
+        args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
+        agentDir,
+      })
+      await next.cleanup()
+    } finally {
+      await holder?.cleanup()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects excess queued snapshot waiters with a deterministic bound', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-bounded-snapshot-waiters-'))
+    const files = Array.from({ length: PINNED_SNAPSHOT_GLOBAL_MAX_COUNT + 1 }, (_, i) =>
+      path.join(agentDir, `${i}.bin`),
+    )
+    await Promise.all(files.map(async (file) => await writeFile(file, 'x')))
+    const controllers: AbortController[] = []
+    let holder: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    try {
+      holder = await enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: files.slice(0, PINNED_SNAPSHOT_GLOBAL_MAX_COUNT).map((file) => ({ path: file })) },
+        agentDir,
+      })
+      const waiters = Array.from({ length: PINNED_SNAPSHOT_MAX_WAITERS }, () => {
+        const controller = new AbortController()
+        controllers.push(controller)
+        return enforceAndPinToolFiles({
+          tool: 'read',
+          args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
+          agentDir,
+          signal: controller.signal,
+        })
+      })
+      await expect(
+        enforceAndPinToolFiles({
+          tool: 'read',
+          args: { path: files[PINNED_SNAPSHOT_GLOBAL_MAX_COUNT] as string },
+          agentDir,
+        }),
+      ).rejects.toThrow(/waiter|queue/i)
+      for (const controller of controllers) controller.abort()
+      await Promise.allSettled(waiters)
+    } finally {
+      await holder?.cleanup()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('charges streamed file growth against the process-wide byte budget', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-growing-snapshot-budget-'))
+    const firstFile = path.join(agentDir, 'first.bin')
+    const growingFile = path.join(agentDir, 'growing.bin')
+    const secondFile = path.join(agentDir, 'second.bin')
+    await Promise.all([writeFile(firstFile, ''), writeFile(growingFile, ''), writeFile(secondFile, '')])
+    await Promise.all([
+      truncate(firstFile, 41 * 1024 * 1024),
+      truncate(growingFile, 60 * 1024 * 1024),
+      truncate(secondFile, 38 * 1024 * 1024),
+    ])
+    let first: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    let second: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    let unexpected: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+    try {
+      first = await enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: [{ path: firstFile }] },
+        agentDir,
+      })
+      const growing = enforceAndPinToolFiles({ tool: 'read', args: { path: growingFile }, agentDir }).then((value) => {
+        unexpected = value
+        return value
+      })
+      const queuedSecond = enforceAndPinToolFiles({
+        tool: 'channel_send',
+        args: { attachments: [{ path: secondFile }] },
+        agentDir,
+      })
+      await Bun.sleep(10)
+      await truncate(growingFile, 64 * 1024 * 1024)
+      await first.cleanup()
+      first = undefined
+      second = await queuedSecond
+      await expect(growing).rejects.toThrow(/process-wide pinned byte budget|snapshot growth/i)
+    } finally {
+      await first?.cleanup()
+      await second?.cleanup()
+      await unexpected?.cleanup()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform !== 'linux')(
+    'grep executes against an immutable directory snapshot across a symlink swap',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-grep-snapshot-'))
+      const safeDir = path.join(agentDir, 'safe')
+      const secretDir = path.join(agentDir, 'secret')
+      const alias = path.join(agentDir, 'search')
+      await mkdir(safeDir)
+      await mkdir(secretDir)
+      await writeFile(path.join(safeDir, 'result.txt'), 'safe')
+      await writeFile(path.join(secretDir, 'result.txt'), 'secret')
+      await symlink(safeDir, alias)
+      let startedResolve: () => void = () => {}
+      const started = new Promise<void>((resolve) => (startedResolve = resolve))
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      const tool = definePiTool({
+        name: 'grep',
+        label: 'grep',
+        description: '',
+        parameters: Type.Any(),
+        async execute(_id, params) {
+          expect((await stat(params.path as string)).mode & 0o777).toBe(0o500)
+          expect((await stat(path.join(params.path as string, 'result.txt'))).mode & 0o777).toBe(0o400)
+          startedResolve()
+          await gate
+          return {
+            content: [
+              { type: 'text' as const, text: await readFile(path.join(params.path as string, 'result.txt'), 'utf8') },
+            ],
+            details: undefined,
+          }
+        },
+      })
+      const wrapped = wrapBuiltinToolDefinition(tool, {
+        agentDir,
+        sessionId: 'grep-snapshot',
+        hooks: createHookBus(),
+      })
+      try {
+        const resultPromise = wrapped.execute('c', { path: alias }, undefined, undefined, {} as never)
+        await started
+        await rm(alias)
+        await symlink(secretDir, alias)
+        release()
+        expect(textOfFirstContent(await resultPromise)).toBe('safe')
+      } finally {
+        release()
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'grep, find, and ls omitted and explicit roots preserve visible discovery while excluding role-hidden descendants',
+    async () => {
+      const guestTree: SessionOrigin = {
+        kind: 'subagent',
+        subagent: 'tree-test',
+        parentSessionId: 'parent',
+        spawnedByRole: 'guest',
+      }
+      for (const rootMode of ['omitted', 'explicit'] as const) {
+        for (const name of ['grep', 'find', 'ls']) {
+          const agentDir = await mkdtemp(path.join(tmpdir(), `typeclaw-${name}-${rootMode}-hidden-`))
+          await writeFile(path.join(agentDir, 'visible.txt'), 'needle')
+          await writeFile(path.join(agentDir, '.env'), 'SECRET=never')
+          await writeFile(path.join(agentDir, 'secrets.json'), '{"secret":true}')
+          for (const hiddenDir of ['sessions', 'memory', 'workspace']) {
+            await mkdir(path.join(agentDir, hiddenDir))
+            await writeFile(path.join(agentDir, hiddenDir, 'hidden.txt'), 'needle')
+          }
+          const tool = definePiTool({
+            name,
+            label: name,
+            description: '',
+            parameters: Type.Any(),
+            async execute(_id, params) {
+              const entries = await readdir(params.path as string)
+              return {
+                content: [{ type: 'text' as const, text: entries.sort().join('\n') }],
+                details: { path: params.path },
+              }
+            },
+          })
+          const wrapped = wrapBuiltinToolDefinition(tool, {
+            agentDir,
+            sessionId: `${name}-${rootMode}-hidden`,
+            hooks: createHookBus(),
+            getOrigin: () => guestTree,
+            permissions: createPermissionService(),
+          })
+          try {
+            const result = await wrapped.execute(
+              'c',
+              rootMode === 'omitted' ? {} : { path: '.' },
+              undefined,
+              undefined,
+              {} as never,
+            )
+            expect(textOfFirstContent(result)).toBe('visible.txt')
+            expect(result.details).toEqual({ path: '.' })
+          } finally {
+            await rm(agentDir, { recursive: true, force: true })
+          }
+        }
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'grep, find, and ls agent-root snapshots skip repository and dependency internals before traversal',
+    async () => {
+      for (const rootMode of ['omitted', 'explicit'] as const) {
+        for (const name of ['grep', 'find', 'ls']) {
+          const agentDir = await mkdtemp(path.join(tmpdir(), `typeclaw-${name}-${rootMode}-root-internals-`))
+          const outside = path.join(tmpdir(), `typeclaw-${name}-${rootMode}-outside-${Date.now()}.txt`)
+          await mkdir(path.join(agentDir, 'visible', 'nested'), { recursive: true })
+          await writeFile(path.join(agentDir, 'visible', 'nested', 'result.txt'), 'visible')
+          await writeFile(outside, 'outside')
+          for (const internal of ['.git', '.gitstore', 'node_modules']) {
+            const internalDir = path.join(agentDir, internal, 'deep')
+            await mkdir(internalDir, { recursive: true })
+            await symlink(outside, path.join(internalDir, 'must-not-open'))
+            const oversized = path.join(internalDir, 'must-not-copy.bin')
+            await writeFile(oversized, '')
+            await truncate(oversized, 65 * 1024 * 1024)
+          }
+          const tool = definePiTool({
+            name,
+            label: name,
+            description: '',
+            parameters: Type.Any(),
+            async execute(_id, params) {
+              const entries = await readdir(params.path as string)
+              const nested = await readFile(path.join(params.path as string, 'visible', 'nested', 'result.txt'), 'utf8')
+              return {
+                content: [{ type: 'text' as const, text: `${entries.sort().join('\n')}\n${nested}` }],
+                details: { path: params.path },
+              }
+            },
+          })
+          const wrapped = wrapBuiltinToolDefinition(tool, {
+            agentDir,
+            sessionId: `${name}-${rootMode}-root-internals`,
+            hooks: createHookBus(),
+          })
+          try {
+            const result = await wrapped.execute(
+              'c',
+              rootMode === 'omitted' ? {} : { path: '.' },
+              undefined,
+              undefined,
+              {} as never,
+            )
+            expect(textOfFirstContent(result)).toBe('visible\nvisible')
+            expect(result.details).toEqual({ path: '.' })
+          } finally {
+            await rm(agentDir, { recursive: true, force: true })
+            await rm(outside, { force: true })
+          }
+        }
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'an explicitly targeted package subdirectory remains readable through a normal tree snapshot',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-explicit-package-tree-'))
+      const packageDir = path.join(agentDir, 'node_modules', 'safe-package', 'nested')
+      await mkdir(packageDir, { recursive: true })
+      await writeFile(path.join(packageDir, 'index.js'), 'safe-package')
+      const tool = definePiTool({
+        name: 'ls',
+        label: 'ls',
+        description: '',
+        parameters: Type.Any(),
+        async execute(_id, params) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: await readFile(path.join(params.path as string, 'nested', 'index.js'), 'utf8'),
+              },
+            ],
+            details: undefined,
+          }
+        },
+      })
+      const wrapped = wrapBuiltinToolDefinition(tool, {
+        agentDir,
+        sessionId: 'explicit-package-tree',
+        hooks: createHookBus(),
+      })
+      try {
+        const result = await wrapped.execute(
+          'c',
+          { path: 'node_modules/safe-package' },
+          undefined,
+          undefined,
+          {} as never,
+        )
+        expect(textOfFirstContent(result)).toBe('safe-package')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('grep, find, and ls normalize omitted roots before production security hooks run', async () => {
+    for (const name of ['grep', 'find', 'ls']) {
+      const seenPaths: unknown[] = []
+      const hooks = createHookBus()
+      hooks.registerAll('security', '/agent', noopLogger, {
+        'tool.before': (event) => {
+          seenPaths.push(event.args.path)
+          return { block: true, reason: 'default root inspected' }
+        },
+      })
+      const tool = definePiTool({
+        name,
+        label: name,
+        description: '',
+        parameters: Type.Any(),
+        async execute() {
+          return { content: [], details: undefined }
+        },
+      })
+      const wrapped = wrapBuiltinToolDefinition(tool, {
+        agentDir: '/agent',
+        sessionId: `${name}-default-hook`,
+        hooks,
+      })
+      await expect(wrapped.execute('c', {}, undefined, undefined, {} as never)).rejects.toThrow(
+        'blocked: default root inspected',
+      )
+      expect(seenPaths).toEqual(['.'])
+    }
+  })
+
+  test.skipIf(process.platform !== 'linux')(
+    'grep, find, and ls omitted roots execute against immutable snapshots across symlink swaps',
+    async () => {
+      for (const name of ['grep', 'find', 'ls']) {
+        const agentDir = await mkdtemp(path.join(tmpdir(), `typeclaw-${name}-omitted-swap-`))
+        const visible = path.join(agentDir, 'result.txt')
+        const secret = path.join(tmpdir(), `typeclaw-${name}-secret-${Date.now()}.txt`)
+        await writeFile(visible, 'safe')
+        await writeFile(secret, 'secret')
+        let startedResolve: () => void = () => {}
+        const started = new Promise<void>((resolve) => (startedResolve = resolve))
+        let release: () => void = () => {}
+        const gate = new Promise<void>((resolve) => (release = resolve))
+        const tool = definePiTool({
+          name,
+          label: name,
+          description: '',
+          parameters: Type.Any(),
+          async execute(_id, params) {
+            startedResolve()
+            await gate
+            return {
+              content: [
+                { type: 'text' as const, text: await readFile(path.join(params.path as string, 'result.txt'), 'utf8') },
+              ],
+              details: { path: params.path },
+            }
+          },
+        })
+        const wrapped = wrapBuiltinToolDefinition(tool, {
+          agentDir,
+          sessionId: `${name}-omitted-swap`,
+          hooks: createHookBus(),
+        })
+        try {
+          const resultPromise = wrapped.execute('c', {}, undefined, undefined, {} as never)
+          await started
+          await rm(visible)
+          await symlink(secret, visible)
+          release()
+          const result = await resultPromise
+          expect(textOfFirstContent(result)).toBe('safe')
+          expect(result.details).toEqual({ path: '.' })
+        } finally {
+          release()
+          await rm(agentDir, { recursive: true, force: true })
+          await rm(secret, { force: true })
+        }
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'anchors a write to its opened inode across a secret symlink swap',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-output-swap-'))
+      const destination = path.join(agentDir, 'workspace', 'output.txt')
+      const secret = path.join(agentDir, '.env')
+      await mkdir(path.dirname(destination))
+      await writeFile(destination, 'old')
+      await writeFile(secret, 'SECRET=untouched')
+      const args: Record<string, unknown> = { path: destination, content: 'safe output' }
+      const pinned = await enforceAndPinToolFiles({ tool: 'write', args, agentDir })
+      try {
+        await rm(destination)
+        await symlink(secret, destination)
+        await writeFile(args.path as string, 'safe output')
+        expect(await readFile(secret, 'utf8')).toBe('SECRET=untouched')
+        expect(await readFile(args.path as string, 'utf8')).toBe('safe output')
+        await expect(pinned.cleanup()).rejects.toThrow(/changed|symbolic|ELOOP/i)
+      } finally {
+        await pinned.cleanup()
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== 'linux')(
+    'a missing output basename cannot be raced into a hardlink before the real write opens it',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-new-output-race-'))
+      const workspace = path.join(agentDir, 'workspace')
+      const destination = path.join(workspace, 'output.txt')
+      const secret = path.join(agentDir, 'protected.txt')
+      await mkdir(workspace)
+      await writeFile(secret, 'untouched')
+      const args: Record<string, unknown> = { path: destination, content: 'unsafe' }
+      const pinned = await enforceAndPinToolFiles({ tool: 'write', args, agentDir })
+      try {
+        expect(await Bun.file(destination).exists()).toBeFalse()
+        await link(secret, destination)
+        await expect(writeToolOutputNoFollow(args.path as string, 'unsafe')).rejects.toThrow()
+        expect(await readFile(secret, 'utf8')).toBe('untouched')
+        await expect(pinned.cleanup()).rejects.toThrow(/single-link|changed/i)
+      } finally {
+        await pinned.cleanup()
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
 })
 
 describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
+  test('hookless builtin read cannot open a canonical credential', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-hookless-builtin-'))
+    await writeFile(path.join(agentDir, '.env'), 'SECRET=never')
+    let called = false
+    const tool = {
+      name: 'grep',
+      label: 'grep',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute() {
+        called = true
+        return { content: [], details: undefined }
+      },
+    }
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir,
+      sessionId: 's',
+      hooks: createHookBus(),
+    })
+    try {
+      await expect(wrapped.execute('c', { path: '.env' }, undefined, undefined, {} as never)).rejects.toThrow(
+        /not available to LLM tools/,
+      )
+      expect(called).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('tool.before and tool.after fire for built-in pi tool definitions and can rewrite the result', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-hooked-grep-'))
+    const original = path.join(agentDir, 'original')
+    const mutated = path.join(agentDir, 'mutated')
+    await writeFile(original, 'original')
+    await writeFile(mutated, 'mutated')
     const seen: unknown[] = []
     const observed: unknown[] = []
     const tool = {
-      name: 'read',
-      label: 'read',
+      name: 'grep',
+      label: 'grep',
       description: '',
       parameters: Type.Object({ path: Type.String() }),
       async execute(_callId: string, params: { path: string }) {
@@ -520,9 +1929,9 @@ describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
       },
     }
     const hooks = createHookBus()
-    hooks.registerAll('p1', '/agent', noopLogger, {
+    hooks.registerAll('p1', agentDir, noopLogger, {
       'tool.before': (event) => {
-        event.args.path = '/mutated'
+        event.args.path = mutated
       },
       'tool.after': (event) => {
         observed.push(event.result.details)
@@ -531,13 +1940,17 @@ describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
       },
     })
 
-    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
 
-    const result = await wrapped.execute('c', { path: '/original' }, undefined, undefined, {} as never)
-    expect(textOfFirstContent(result)).toBe('rewritten read')
-    expect(result.details as Record<string, unknown>).toEqual({ rewritten: true })
-    expect(seen[0]).toEqual({ path: '/mutated' })
-    expect(observed[0]).toEqual({ path: '/mutated' })
+    try {
+      const result = await wrapped.execute('c', { path: original }, undefined, undefined, {} as never)
+      expect(textOfFirstContent(result)).toBe('rewritten read')
+      expect(result.details as Record<string, unknown>).toEqual({ rewritten: true })
+      expect((seen[0] as { path: string }).path).not.toBe(mutated)
+      expect(observed[0]).toEqual({ path: mutated })
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 
   test('tool.before { block: true } rejects built-in pi-style agent tool execution through the engine error path', async () => {
@@ -568,82 +1981,103 @@ describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
   // pi's bash tool REJECTS on non-zero exit. Without a finally-style after-run,
   // a tool.after hook that releases a reservation (the github approve guard)
   // never fires, stranding the PR as "already approved" on retry (PR #672).
-  test('tool.after fires with an error result when a built-in agent tool throws, then rethrows', async () => {
+  test('tool.after fires with an error result when a built-in file tool throws, then rethrows', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-throwing-grep-'))
+    const input = path.join(agentDir, 'input.txt')
+    await writeFile(input, 'input')
     const afterResults: unknown[] = []
     const tool = {
-      name: 'bash',
-      label: 'bash',
+      name: 'grep',
+      label: 'grep',
       description: '',
-      parameters: Type.Object({ command: Type.String() }),
-      async execute(_callId: string, _params: { command: string }) {
+      parameters: Type.Object({ path: Type.String() }),
+      async execute(_callId: string, _params: { path: string }) {
         throw new Error('no such file or directory')
       },
     }
     const hooks = createHookBus()
-    hooks.registerAll('p1', '/agent', noopLogger, {
+    hooks.registerAll('p1', agentDir, noopLogger, {
       'tool.after': (event) => {
         afterResults.push(event.result)
       },
     })
 
-    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
 
-    await expect(
-      wrapped.execute('c', { command: 'gh api --input /tmp/x' } as never, undefined, undefined, {} as never),
-    ).rejects.toThrow('no such file or directory')
-    expect(afterResults).toHaveLength(1)
-    const errorText = ((afterResults[0] as ToolResult).content as Array<{ type: string; text?: string }>)
-      .filter((p) => p.type === 'text')
-      .map((p) => p.text)
-      .join('\n')
-    expect(errorText).toContain('no such file or directory')
-  })
-
-  test('edit built-in agent tool exposes and strips guard acknowledgements before execution', async () => {
-    const seen: unknown[] = []
-    const tool = {
-      name: 'edit',
-      label: 'edit',
-      description: '',
-      parameters: Type.Object(
-        {
-          path: Type.String(),
-          edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
-        },
-        { additionalProperties: false },
-      ),
-      async execute(
-        _callId: string,
-        params: {
-          path: string
-          edits: { oldText: string; newText: string }[]
-          acknowledgeGuards?: { nonWorkspaceWrite?: boolean }
-        },
-      ) {
-        seen.push(params)
-        return { content: [{ type: 'text' as const, text: 'edited' }], details: params }
-      },
+    try {
+      await expect(wrapped.execute('c', { path: input } as never, undefined, undefined, {} as never)).rejects.toThrow(
+        'no such file or directory',
+      )
+      expect(afterResults).toHaveLength(1)
+      const errorText = ((afterResults[0] as ToolResult).content as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      expect(errorText).toContain('no such file or directory')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
     }
-    const hooks = createHookBus()
-    hooks.registerAll('p1', '/agent', noopLogger, {
-      'tool.before': (event) => {
-        expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
-      },
-    })
-
-    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
-
-    const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
-    expect(parameters.properties).toHaveProperty('acknowledgeGuards')
-    const params = {
-      path: 'notes.md',
-      edits: [{ oldText: 'x', newText: 'y' }],
-      acknowledgeGuards: { nonWorkspaceWrite: true },
-    } as unknown as Parameters<typeof wrapped.execute>[1]
-    await wrapped.execute('c', params, undefined, undefined, {} as never)
-
-    expect(seen[0]).toEqual({ path: 'notes.md', edits: [{ oldText: 'x', newText: 'y' }] })
   })
+
+  test.skipIf(lacksInodeAnchoring)(
+    'edit built-in agent tool exposes and strips guard acknowledgements before execution',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-builtin-edit-ack-'))
+      const notes = path.join(agentDir, 'notes.md')
+      await writeFile(notes, 'x')
+      const seen: unknown[] = []
+      const tool = {
+        name: 'edit',
+        label: 'edit',
+        description: '',
+        parameters: Type.Object(
+          {
+            path: Type.String(),
+            edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+          },
+          { additionalProperties: false },
+        ),
+        async execute(
+          _callId: string,
+          params: {
+            path: string
+            edits: { oldText: string; newText: string }[]
+            acknowledgeGuards?: { nonWorkspaceWrite?: boolean }
+          },
+        ) {
+          seen.push({ ...params, path: 'notes.md' })
+          const content = await readFile(params.path, 'utf8')
+          await writeFile(params.path, content.replace('x', 'y'))
+          return { content: [{ type: 'text' as const, text: 'edited' }], details: params }
+        },
+      }
+      const hooks = createHookBus()
+      hooks.registerAll('p1', agentDir, noopLogger, {
+        'tool.before': (event) => {
+          expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
+        },
+      })
+
+      const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
+
+      const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
+      expect(parameters.properties).toHaveProperty('acknowledgeGuards')
+      const params = {
+        path: 'notes.md',
+        edits: [{ oldText: 'x', newText: 'y' }],
+        acknowledgeGuards: { nonWorkspaceWrite: true },
+      } as unknown as Parameters<typeof wrapped.execute>[1]
+      try {
+        const result = await wrapped.execute('c', params, undefined, undefined, {} as never)
+
+        expect(seen[0]).toEqual({ path: 'notes.md', edits: [{ oldText: 'x', newText: 'y' }] })
+        expect(result.details).toEqual({ path: 'notes.md', edits: [{ oldText: 'x', newText: 'y' }] })
+        expect(await readFile(notes, 'utf8')).toBe('y')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
 })
 
 describe('getOrigin (live origin holder)', () => {
@@ -810,43 +2244,56 @@ describe('resolveBuiltinToolRefs', () => {
 })
 
 describe('wrapBuiltinToolDefinition (pi customTools override path)', () => {
-  test('the returned ToolDefinition runs tool.before/runFinalWriteGuards before delegating to the underlying pi AgentTool', async () => {
-    let executedUnderlying = 0
-    const beforeArgs: unknown[] = []
-    const tool = {
-      name: 'edit',
-      label: 'edit',
-      description: '',
-      parameters: Type.Object({
-        path: Type.String(),
-        edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
-      }),
-      async execute(_id: string, _params: unknown) {
-        executedUnderlying++
-        return { content: [{ type: 'text' as const, text: 'underlying ran' }], details: undefined }
-      },
-    }
-    const hooks = createHookBus()
-    hooks.registerAll('p1', '/agent', noopLogger, {
-      'tool.before': (event) => {
-        beforeArgs.push({ ...event.args })
-      },
-    })
+  test.skipIf(lacksInodeAnchoring)(
+    'the returned ToolDefinition runs tool.before/runFinalWriteGuards before delegating to the underlying pi AgentTool',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-custom-edit-pipeline-'))
+      const workspace = path.join(agentDir, 'workspace')
+      const notes = path.join(workspace, 'notes.md')
+      await mkdir(workspace)
+      await writeFile(notes, 'a')
+      let executedUnderlying = 0
+      const beforeArgs: unknown[] = []
+      const tool = {
+        name: 'edit',
+        label: 'edit',
+        description: '',
+        parameters: Type.Object({
+          path: Type.String(),
+          edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+        }),
+        async execute(_id: string, params: { path: string }) {
+          executedUnderlying++
+          expect(await readFile(params.path, 'utf8')).toBe('a')
+          return { content: [{ type: 'text' as const, text: 'underlying ran' }], details: undefined }
+        },
+      }
+      const hooks = createHookBus()
+      hooks.registerAll('p1', agentDir, noopLogger, {
+        'tool.before': (event) => {
+          beforeArgs.push({ ...event.args })
+        },
+      })
 
-    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+      const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
 
-    expect(wrapped.name).toBe('edit')
-    const result = await wrapped.execute(
-      'c',
-      { path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] },
-      undefined,
-      undefined,
-      {} as never,
-    )
-    expect(textOfFirstContent(result)).toBe('underlying ran')
-    expect(executedUnderlying).toBe(1)
-    expect(beforeArgs).toEqual([{ path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] }])
-  })
+      try {
+        expect(wrapped.name).toBe('edit')
+        const result = await wrapped.execute(
+          'c',
+          { path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] },
+          undefined,
+          undefined,
+          {} as never,
+        )
+        expect(textOfFirstContent(result)).toBe('underlying ran')
+        expect(executedUnderlying).toBe(1)
+        expect(beforeArgs).toEqual([{ path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] }])
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
 
   test('regression: managedConfig guard blocks an edit that would produce invalid typeclaw.json, on the customTool override path', async () => {
     // PR #283's failure mode: pi 0.67.3 ignores `tools:` for implementation
@@ -1013,7 +2460,143 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
   const member: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'member' }
   const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
 
-  test('trusted+ (tui→owner) still requires bwrap for canonical masks', async () => {
+  test('owner bash keeps the agent root writable while canonical secrets stay read-only masked and env stays cleared', () => {
+    const permissions = createPermissionService()
+    const policy = buildBashFilesystemPolicy({
+      agentDir: '/agent',
+      canWriteAgentRoot: canWriteAgentRootInSandbox(permissions, tui),
+      masks: { dirs: [], files: ['/agent/.env', '/agent/secrets.json'] },
+      writable: { dirs: ['/agent/workspace'], files: [] },
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
+    })
+    const { argv } = buildSandboxedCommand('printf ok > /agent/ordinary.txt', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      ...policy,
+    })
+    const rendered = argv.join(' ')
+
+    expect(rendered).toContain('--ro-bind /agent /agent')
+    expect(rendered).toContain('--bind /agent /agent')
+    expect(rendered.indexOf('--bind /agent /agent')).toBeLessThan(rendered.indexOf('--ro-bind-data 3 /agent/.env'))
+    expect(rendered).toContain('--ro-bind-data 3 /agent/.env')
+    expect(rendered).toContain('--ro-bind-data 3 /agent/secrets.json')
+    expect(rendered).toContain('--ro-bind /agent/.git/hooks /agent/.git/hooks')
+    expect(rendered).toContain('--ro-bind /agent/.git/config /agent/.git/config')
+    expect(rendered.indexOf('--bind /agent /agent')).toBeLessThan(rendered.indexOf('--ro-bind /agent/.git/hooks'))
+    expect(argv).toContain('--clearenv')
+  })
+
+  test('role filesystem policies preserve ordinary trusted root writes without widening confined roles', () => {
+    const confinedPolicy = buildBashFilesystemPolicy({
+      agentDir: '/agent',
+      canWriteAgentRoot: false,
+      masks: { dirs: [], files: ['/agent/.env'] },
+      writable: { dirs: ['/agent/workspace'], files: ['/agent/package.json'] },
+      protected: {
+        dirs: ['/agent/.git/hooks', '/agent/workspace/hooks'],
+        files: ['/agent/.git/config', '/agent/workspace/git.inc'],
+      },
+    })
+    const confined = buildSandboxedCommand('printf safe > workspace/output.txt', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      ...confinedPolicy,
+    }).argv.join(' ')
+
+    expect(confined).not.toContain('--bind /agent /agent')
+    expect(confined).not.toContain('--bind /agent/node_modules /agent/node_modules')
+    expect(confined).toContain('--bind /agent/workspace /agent/workspace')
+
+    const ownerPolicy = buildBashFilesystemPolicy({
+      agentDir: '/agent',
+      canWriteAgentRoot: true,
+      masks: { dirs: [], files: ['/agent/.env'] },
+      writable: { dirs: [], files: [] },
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
+    })
+    const owner = buildSandboxedCommand('printf safe > ordinary.txt', {
+      mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
+      ...ownerPolicy,
+    }).argv.join(' ')
+
+    expect(owner).toContain('--bind /agent /agent')
+    expect(owner.indexOf('--bind /agent /agent')).toBeLessThan(owner.indexOf('--ro-bind-data 3 /agent/.env'))
+  })
+
+  test('the entire root dependency tree renders read-only for trusted and confined role policies', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-protected-dependencies-'))
+    await mkdir(path.join(agentDir, 'node_modules'))
+    try {
+      const protectedZones = await resolveProtectedZones(agentDir)
+      const trustedPolicy = buildBashFilesystemPolicy({
+        agentDir,
+        canWriteAgentRoot: true,
+        masks: { dirs: [], files: [] },
+        writable: { dirs: [], files: [] },
+        protected: protectedZones,
+      })
+      const confinedPolicy = buildBashFilesystemPolicy({
+        agentDir,
+        canWriteAgentRoot: false,
+        masks: { dirs: [], files: [] },
+        writable: { dirs: [path.join(agentDir, 'workspace')], files: [] },
+        protected: protectedZones,
+      })
+      const trusted = buildSandboxedCommand('printf safe > ordinary.txt', trustedPolicy).argv.join(' ')
+      const confined = buildSandboxedCommand('printf safe > workspace/output.txt', confinedPolicy).argv.join(' ')
+      const protectedNodeModules = `--ro-bind ${path.join(agentDir, 'node_modules')} ${path.join(agentDir, 'node_modules')}`
+
+      expect(trusted).toContain(`--bind ${agentDir} ${agentDir}`)
+      expect(trusted).toContain(protectedNodeModules)
+      expect(trusted.indexOf(`--bind ${agentDir} ${agentDir}`)).toBeLessThan(trusted.indexOf(protectedNodeModules))
+      expect(confined).not.toContain(`--bind ${agentDir} ${agentDir}`)
+      expect(confined).toContain(protectedNodeModules)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test.each(['write', 'edit'] as const)(
+    '%s cannot modify Git hook configuration even with guard acknowledgements',
+    async (toolName) => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'tc-git-control-'))
+      const calls: unknown[] = []
+      const tool = definePiTool({
+        name: toolName,
+        label: toolName,
+        description: '',
+        parameters: Type.Object({ path: Type.String() }),
+        async execute(_id, params) {
+          calls.push(params)
+          return { content: [{ type: 'text' as const, text: 'mutated' }], details: undefined }
+        },
+      })
+      const wrapped = wrapBuiltinToolDefinition(tool, {
+        agentDir,
+        sessionId: `git-control-${toolName}`,
+        hooks: createHookBus(),
+      })
+
+      try {
+        await expect(
+          wrapped.execute(
+            'c',
+            {
+              path: path.join(agentDir, '.git', 'config'),
+              acknowledgeGuards: { nonWorkspaceWrite: true, rolePromotion: true, cronPromotion: true },
+            },
+            undefined,
+            undefined,
+            {} as never,
+          ),
+        ).rejects.toThrow(/Git control path/)
+        expect(calls).toEqual([])
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('owner bash requires canonical secret masks and fails closed without bwrap', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
@@ -1023,7 +2606,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       permissions: createPermissionService(),
     })
     await expect(
-      wrapped.execute('c', { command: 'cat /agent/.env' }, undefined, undefined, {} as never),
+      wrapped.execute('c', { command: 'cat /agent/secrets.json' }, undefined, undefined, {} as never),
     ).rejects.toThrow()
     expect(record.command).toBeUndefined()
   })
@@ -1043,7 +2626,30 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
         getOrigin: () => tui,
         permissions: createPermissionService(),
       })
+      await expect(
+        wrapped.execute('c', { command: 'echo should-not-run' }, undefined, undefined, {} as never),
+      ).rejects.toThrow(/mask target/i)
+      expect(record.command).toBeUndefined()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
 
+  test('owner bash aborts before execution when a canonical target has a hardlink alias', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'tc-unsafe-mask-hardlink-'))
+    const record: { command?: string } = {}
+    try {
+      const env = path.join(agentDir, '.env')
+      await writeFile(env, 'secret')
+      await link(env, path.join(agentDir, 'env-alias'))
+      await writeFile(path.join(agentDir, 'secrets.json'), '{}')
+      const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
+        agentDir,
+        sessionId: 's',
+        hooks: createHookBus(),
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+      })
       await expect(
         wrapped.execute('c', { command: 'echo should-not-run' }, undefined, undefined, {} as never),
       ).rejects.toThrow(/mask target/i)
@@ -1209,6 +2815,101 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     await rm(agentDir, { recursive: true, force: true })
   })
 
+  test.skipIf(lacksInodeAnchoring)(
+    'pinned output verification failure reaches tool.after exactly once before propagation',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-output-after-'))
+      const destination = path.join(agentDir, 'workspace', 'output.txt')
+      const protectedFile = path.join(agentDir, 'protected.txt')
+      const afterResults: ToolResult[] = []
+      await mkdir(path.dirname(destination))
+      await writeFile(destination, 'before')
+      await writeFile(protectedFile, 'protected')
+      const hooks = createHookBus()
+      hooks.registerAll('observer', agentDir, noopLogger, {
+        'tool.after': (event) => {
+          afterResults.push(event.result)
+        },
+      })
+      const tool = definePiTool({
+        name: 'write',
+        label: 'write',
+        description: '',
+        parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+        async execute(_callId, params) {
+          await writeFile(params.path, params.content)
+          await rm(destination)
+          await symlink(protectedFile, destination)
+          return { content: [{ type: 'text' as const, text: 'wrote' }], details: undefined }
+        },
+      })
+      const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 'output-after', hooks })
+
+      try {
+        await expect(
+          wrapped.execute('call', { path: destination, content: 'safe' }, undefined, undefined, {} as never),
+        ).rejects.toThrow(/changed|symbolic|ELOOP/i)
+        expect(afterResults).toHaveLength(1)
+        expect(afterResults[0]?.details).toEqual({ error: expect.any(String) })
+        expect(await readFile(protectedFile, 'utf8')).toBe('protected')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.skipIf(lacksInodeAnchoring)(
+    'plugin output verification failure reaches tool.after exactly once before propagation',
+    async () => {
+      const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-plugin-output-after-'))
+      const destination = path.join(agentDir, 'workspace', 'output.txt')
+      const protectedFile = path.join(agentDir, 'protected.txt')
+      const afterResults: ToolResult[] = []
+      await mkdir(path.dirname(destination))
+      await writeFile(destination, 'before')
+      await writeFile(protectedFile, 'protected')
+      const hooks = createHookBus()
+      hooks.registerAll('observer', agentDir, noopLogger, {
+        'tool.after': (event) => {
+          afterResults.push(event.result)
+        },
+      })
+      const tool = defineTool({
+        description: '',
+        parameters: z.object({ destination: z.string() }),
+        fileOperands: { output: ['destination'] },
+        async execute(args) {
+          await writeFile(args.destination, 'safe')
+          await rm(destination)
+          await symlink(protectedFile, destination)
+          return { content: [{ type: 'text' as const, text: 'wrote' }] }
+        },
+      })
+      const wrapped = wrapPluginTool(tool, {
+        pluginName: 'writer',
+        toolName: 'plugin_writer',
+        agentDir,
+        sessionId: 'plugin-output-after',
+        logger: noopLogger,
+        hooks,
+      })
+
+      try {
+        await expect(wrapped.execute('call', { destination }, undefined, undefined, {} as never)).rejects.toThrow(
+          /changed|symbolic|ELOOP/i,
+        )
+        expect(afterResults).toHaveLength(1)
+        expect(afterResults[0]?.details).toEqual({
+          error: true,
+          message: expect.stringMatching(/changed|symbolic|ELOOP/i),
+        })
+        expect(await readFile(protectedFile, 'utf8')).toBe('protected')
+      } finally {
+        await rm(agentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
   test('execution error wins over cleanup error and reaches tool.after exactly once after cleanup', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-error-precedence-'))
     const order: string[] = []
@@ -1251,7 +2952,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     await rm(agentDir, { recursive: true, force: true })
   })
 
-  test('without a permission service bash is never rewritten (escape hatch for unwired sessions)', async () => {
+  test('without a permission service bash fails closed and never reaches the underlying tool', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
@@ -1259,11 +2960,13 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       hooks: createHookBus(),
       getOrigin: () => guest,
     })
-    await wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)
-    expect(record.command).toBe('echo hi')
+    await expect(wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)).rejects.toThrow(
+      /permission service/i,
+    )
+    expect(record.command).toBeUndefined()
   })
 
-  test('a hook-set env overlay is stripped from args before sandbox preparation', async () => {
+  test('a hook-set env overlay is stripped from args and never reaches an unwired command', async () => {
     const record: { command?: string } = {}
     const hooks = createHookBus()
     hooks.registerAll('env-setter', '/agent', noopLogger, {
@@ -1277,9 +2980,10 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       sessionId: 's',
       hooks,
       getOrigin: () => tui,
-      permissions: createPermissionService(),
     })
-    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow()
+    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow(
+      /permission service/i,
+    )
     expect(record.command).toBeUndefined()
     expect(args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
@@ -1361,9 +3065,10 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       sessionId: 's',
       hooks,
       getOrigin: () => tui,
-      permissions: createPermissionService(),
     })
-    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow()
+    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow(
+      /permission service/i,
+    )
     expect(seenInHook).toBeUndefined()
   })
 })
@@ -1400,38 +3105,38 @@ describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role
     expect(record.command).toBeUndefined()
   })
 
-  test('readonly-reviewer policy lets a read-only command reach mandatory sandbox preparation', async () => {
+  test('readonly-reviewer policy cannot bypass missing sandbox permission wiring', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
       getOrigin: () => ownerTui,
-      permissions: createPermissionService(),
       bashPolicy: { kind: 'readonly-reviewer' },
     })
-    await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow()
+    await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow(
+      /permission service/i,
+    )
     expect(record.command).toBeUndefined()
   })
 
-  test('no bashPolicy still applies the mandatory owner sandbox', async () => {
+  test('no bashPolicy still cannot bypass missing sandbox permission wiring', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
       sessionId: 's',
       hooks: createHookBus(),
       getOrigin: () => ownerTui,
-      permissions: createPermissionService(),
     })
     await expect(
       wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/permission service/i)
     expect(record.command).toBeUndefined()
   })
 })
 
 describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', () => {
-  function fakeWrite(record: { path?: string }) {
+  function fakeWrite(record: { path?: string; resolvedParent?: string }) {
     return {
       name: 'write',
       label: 'write',
@@ -1439,7 +3144,9 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
       parameters: Type.Object({ path: Type.String(), content: Type.String() }),
       async execute(_id: string, params: { path: string; content: string }) {
         record.path = params.path
-        return { content: [{ type: 'text' as const, text: 'wrote' }], details: undefined }
+        record.resolvedParent = await realpath(path.dirname(params.path))
+        await writeFile(params.path, params.content)
+        return { content: [{ type: 'text' as const, text: 'wrote' }], details: { path: params.path } }
       },
     }
   }
@@ -1452,7 +3159,7 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
       parameters: Type.Object({ path: Type.String() }),
       async execute(_id: string, params: { path: string }) {
         record.path = params.path
-        return { content: [{ type: 'text' as const, text: 'read' }], details: undefined }
+        return { content: [{ type: 'text' as const, text: 'read' }], details: { path: params.path } }
       },
     }
   }
@@ -1460,75 +3167,147 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
   const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
   const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
 
-  test('a sandboxed role (guest) has its /tmp write redirected to the session backing dir', async () => {
-    const record: { path?: string } = {}
-    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
-      agentDir: '/agent',
-      sessionId: 'sid42',
-      hooks: createHookBus(),
-      getOrigin: () => guest,
-      permissions: createPermissionService(),
-    })
-    await wrapped.execute('c', { path: '/tmp/review.json', content: '{}' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
-  })
+  test.skipIf(lacksInodeAnchoring)(
+    'a sandboxed role (guest) has its /tmp write redirected to the session backing dir',
+    async () => {
+      const sessionId = 'sid42-guest-write'
+      const record: { path?: string; resolvedParent?: string } = {}
+      const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
+        agentDir: '/agent',
+        sessionId,
+        hooks: createHookBus(),
+        getOrigin: () => guest,
+        permissions: createPermissionService(),
+      })
+      try {
+        const result = await wrapped.execute(
+          'c',
+          { path: '/tmp/review.json', content: '{}' } as never,
+          undefined,
+          undefined,
+          {} as never,
+        )
+        expect(record.path).toMatch(/^\/proc\/self\/fd\/\d+\/review\.json$/)
+        expect(record.resolvedParent).toBe(`${SESSION_TMP_ROOT}/${sessionId}`)
+        expect(result.details).toEqual({ path: '/tmp/review.json' })
+        expect(await readFile(`${SESSION_TMP_ROOT}/${sessionId}/review.json`, 'utf8')).toBe('{}')
+      } finally {
+        await rm(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true, force: true })
+      }
+    },
+  )
 
   test('a sandboxed role (guest) reading /tmp resolves to the same session backing dir bash wrote', async () => {
-    const record: { path?: string } = {}
+    const sessionId = 'sid42-guest-read'
+    await mkdir(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true })
+    await writeFile(`${SESSION_TMP_ROOT}/${sessionId}/review.json`, '{}')
+    const record: { path?: string; resolvedParent?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
       agentDir: '/agent',
+      sessionId,
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    try {
+      const result = await wrapped.execute(
+        'c',
+        { path: '/tmp/review.json' } as never,
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(result.details).toEqual({ path: '/tmp/review.json' })
+      expect(record.path).not.toBe('/tmp/review.json')
+    } finally {
+      await rm(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(lacksInodeAnchoring)(
+    'an owner write uses the session /tmp backing because owner bash is also sandboxed',
+    async () => {
+      const sessionId = 'sid42-owner-write'
+      const record: { path?: string; resolvedParent?: string } = {}
+      const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
+        agentDir: '/agent',
+        sessionId,
+        hooks: createHookBus(),
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+      })
+      try {
+        const result = await wrapped.execute(
+          'c',
+          { path: '/tmp/review.json', content: '{}' } as never,
+          undefined,
+          undefined,
+          {} as never,
+        )
+        expect(record.path).toMatch(/^\/proc\/self\/fd\/\d+\/review\.json$/)
+        expect(record.resolvedParent).toBe(`${SESSION_TMP_ROOT}/${sessionId}`)
+        expect(result.details).toEqual({ path: '/tmp/review.json' })
+        expect(await readFile(`${SESSION_TMP_ROOT}/${sessionId}/review.json`, 'utf8')).toBe('{}')
+      } finally {
+        await rm(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('an owner read uses the session /tmp backing because owner bash is also sandboxed', async () => {
+    const sessionId = 'sid42-owner-read'
+    await mkdir(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true })
+    await writeFile(`${SESSION_TMP_ROOT}/${sessionId}/review.json`, '{}')
+    const record: { path?: string; resolvedParent?: string } = {}
+    const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
+      agentDir: '/agent',
+      sessionId,
+      hooks: createHookBus(),
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    try {
+      const result = await wrapped.execute(
+        'c',
+        { path: '/tmp/review.json' } as never,
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(result.details).toEqual({ path: '/tmp/review.json' })
+      expect(record.path).not.toBe('/tmp/review.json')
+    } finally {
+      await rm(`${SESSION_TMP_ROOT}/${sessionId}`, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(lacksInodeAnchoring)('a non-/tmp write is left untouched even for a sandboxed role', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-non-tmp-write-'))
+    const workspace = path.join(agentDir, 'workspace')
+    await mkdir(workspace)
+    const record: { path?: string; resolvedParent?: string } = {}
+    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
+      agentDir,
       sessionId: 'sid42',
       hooks: createHookBus(),
       getOrigin: () => guest,
       permissions: createPermissionService(),
     })
-    await wrapped.execute('c', { path: '/tmp/review.json' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
-  })
-
-  test('an owner write uses the session scratch backing path', async () => {
-    const record: { path?: string } = {}
-    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
-      agentDir: '/agent',
-      sessionId: 'sid42',
-      hooks: createHookBus(),
-      getOrigin: () => tui,
-      permissions: createPermissionService(),
-    })
-    await wrapped.execute('c', { path: '/tmp/review.json', content: '{}' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
-  })
-
-  test('an owner read uses the session scratch backing path', async () => {
-    const record: { path?: string } = {}
-    const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
-      agentDir: '/agent',
-      sessionId: 'sid42',
-      hooks: createHookBus(),
-      getOrigin: () => tui,
-      permissions: createPermissionService(),
-    })
-    await wrapped.execute('c', { path: '/tmp/review.json' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
-  })
-
-  test('a non-/tmp write is left untouched even for a sandboxed role', async () => {
-    const record: { path?: string } = {}
-    const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
-      agentDir: '/agent',
-      sessionId: 'sid42',
-      hooks: createHookBus(),
-      getOrigin: () => guest,
-      permissions: createPermissionService(),
-    })
-    await wrapped.execute(
-      'c',
-      { path: 'workspace/out.json', content: '{}' } as never,
-      undefined,
-      undefined,
-      {} as never,
-    )
-    expect(record.path).toBe('workspace/out.json')
+    try {
+      const result = await wrapped.execute(
+        'c',
+        { path: 'workspace/out.json', content: '{}' } as never,
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(record.path).toMatch(/^\/proc\/self\/fd\/\d+\/out\.json$/)
+      expect(record.resolvedParent).toBe(workspace)
+      expect(result.details).toEqual({ path: 'workspace/out.json' })
+      expect(await readFile(path.join(workspace, 'out.json'), 'utf8')).toBe('{}')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 
   // Mirrors pi's real write tool, which echoes the path back ("Successfully
@@ -1550,30 +3329,33 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
     }
   }
 
-  test('a sandboxed role sees its original /tmp path in the receipt, not the backing dir', async () => {
-    const wrapped = wrapBuiltinToolDefinition(fakeWriteEchoingPath(), {
-      agentDir: '/agent',
-      sessionId: 'sid42',
-      hooks: createHookBus(),
-      getOrigin: () => guest,
-      permissions: createPermissionService(),
-    })
-    const result = await wrapped.execute(
-      'c',
-      { path: '/tmp/review.json', content: '{}' } as never,
-      undefined,
-      undefined,
-      {} as never,
-    )
-    const text = (result.content as Array<{ type: string; text?: string }>)
-      .filter((p) => p.type === 'text')
-      .map((p) => p.text)
-      .join('\n')
-    expect(text).toContain('/tmp/review.json')
-    expect(text).not.toContain(`${SESSION_TMP_ROOT}/sid42`)
-  })
+  test.skipIf(lacksInodeAnchoring)(
+    'a sandboxed role sees its original /tmp path in the receipt, not the backing dir',
+    async () => {
+      const wrapped = wrapBuiltinToolDefinition(fakeWriteEchoingPath(), {
+        agentDir: '/agent',
+        sessionId: 'sid42',
+        hooks: createHookBus(),
+        getOrigin: () => guest,
+        permissions: createPermissionService(),
+      })
+      const result = await wrapped.execute(
+        'c',
+        { path: '/tmp/review.json', content: '{}' } as never,
+        undefined,
+        undefined,
+        {} as never,
+      )
+      const text = (result.content as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      expect(text).toContain('/tmp/review.json')
+      expect(text).not.toContain(`${SESSION_TMP_ROOT}/sid42`)
+    },
+  )
 
-  test('an unsandboxed role keeps the real /tmp path in the receipt (no rewrite)', async () => {
+  test.skipIf(lacksInodeAnchoring)('an owner still sees the virtual /tmp path in the receipt', async () => {
     const wrapped = wrapBuiltinToolDefinition(fakeWriteEchoingPath(), {
       agentDir: '/agent',
       sessionId: 'sid42',
@@ -2091,7 +3873,7 @@ describe('loop guard integration', () => {
       [1, 2, 3, 4, 5, 6].map((offset, index) =>
         wrapped.execute(
           `c${index}`,
-          { path: '/agent/router.ts', offset, limit: 100 },
+          { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset, limit: 100 },
           undefined,
           undefined,
           {} as never,
@@ -2130,7 +3912,13 @@ describe('loop guard integration', () => {
 
     for (let offset = 1; offset <= 701; offset += 100) {
       turnId += 1
-      await wrapped.execute(`c${turnId}`, { path: '/agent/router.ts', offset }, undefined, undefined, {} as never)
+      await wrapped.execute(
+        `c${turnId}`,
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset },
+        undefined,
+        undefined,
+        {} as never,
+      )
     }
     expect(aborts).toBe(0)
   })
@@ -2170,7 +3958,7 @@ describe('loop guard integration', () => {
       turnId += 1
       return wrapped.execute(
         `c${turnId}`,
-        { path: '/agent/router.ts', offset, limit: 100 },
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset, limit: 100 },
         undefined,
         undefined,
         {} as never,
@@ -2213,7 +4001,7 @@ describe('loop guard integration', () => {
       turnId += 1
       await wrapped.execute(
         `c${turnId}`,
-        { path: '/agent/router.ts', offset, limit: 1 },
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset, limit: 1 },
         undefined,
         undefined,
         {} as never,
@@ -2221,7 +4009,13 @@ describe('loop guard integration', () => {
     }
     turnId += 1
     await expect(
-      wrapped.execute('c6', { path: '/agent/router.ts', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+      wrapped.execute(
+        'c6',
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset: 6, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      ),
     ).rejects.toThrow(/loop-guard/)
     expect(aborts).toBe(1)
   })
@@ -2258,7 +4052,7 @@ describe('loop guard integration', () => {
       turnId += 1
       await wrapped.execute(
         `c${turnId}`,
-        { path: '/agent/blob.dat', offset, limit: 1 },
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset, limit: 1 },
         undefined,
         undefined,
         {} as never,
@@ -2266,7 +4060,13 @@ describe('loop guard integration', () => {
     }
     turnId += 1
     await expect(
-      wrapped.execute('c6', { path: '/agent/blob.dat', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+      wrapped.execute(
+        'c6',
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset: 6, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      ),
     ).rejects.toThrow(/loop-guard/)
     expect(aborts).toBe(1)
   })
@@ -2305,7 +4105,7 @@ describe('loop guard integration', () => {
       turnId += 1
       await wrapped.execute(
         `c${turnId}`,
-        { path: '/agent/blob.dat', offset, limit: 1 },
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset, limit: 1 },
         undefined,
         undefined,
         {} as never,
@@ -2313,7 +4113,13 @@ describe('loop guard integration', () => {
     }
     turnId += 1
     await expect(
-      wrapped.execute('c6', { path: '/agent/blob.dat', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+      wrapped.execute(
+        'c6',
+        { path: path.join(process.cwd(), 'src/agent/plugin-tools.ts'), offset: 6, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      ),
     ).rejects.toThrow(/loop-guard/)
     expect(aborts).toBe(1)
   })

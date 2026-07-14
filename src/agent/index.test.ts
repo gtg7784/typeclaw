@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { SessionManager } from '@mariozechner/pi-coding-agent'
+import { defineTool as definePiTool, SessionManager } from '@mariozechner/pi-coding-agent'
+import { Type } from 'typebox'
 
 import { PLANNER_SYSTEM_PROMPT } from '@/bundled-plugins/planner/planner'
 import { SCOUT_SYSTEM_PROMPT } from '@/bundled-plugins/scout/scout'
@@ -14,6 +15,7 @@ import { configSchema, type Models, resolveProfile, type ResolvedProfile, type T
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { ModelRef } from '@/config/providers'
 import { createHookBus, type PluginRegistry } from '@/plugin'
+import { emptyRegistry } from '@/plugin/registry'
 import { createStream } from '@/stream'
 
 import {
@@ -29,6 +31,7 @@ import {
   getBundledSkillsDir,
   resolveSessionThinkingLevel,
   subscribeRestartNotice,
+  wrapSystemTools,
 } from './index'
 import { LiveSubagentRegistry } from './live-subagents'
 import { PROACTIVE_NEXT_STEP_NUDGE } from './proactive-next-step-nudge'
@@ -101,6 +104,35 @@ describe('attachLoopGuardTurnTracking', () => {
 
     unsubscribe()
     expect(unsubscribed).toBe(true)
+  })
+})
+
+describe('wrapSystemTools', () => {
+  test('hookless composition denies canonical secret operands before a custom system tool executes', async () => {
+    await writeFile(join(agentDir, '.env'), 'EXAMPLE_TOKEN=placeholder')
+    let executed = false
+    const lookAt = definePiTool({
+      name: 'look_at',
+      label: 'look_at',
+      description: '',
+      parameters: Type.Any(),
+      async execute() {
+        executed = true
+        return { content: [], details: undefined }
+      },
+    })
+    const tools = wrapSystemTools(
+      [lookAt],
+      { registry: emptyRegistry(), hooks: createHookBus(), sessionId: 'hookless', agentDir },
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    )
+
+    await expect(
+      tools[0]!.execute('call', { images: [{ path: '.env' }] }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/not available to LLM tools/)
+    expect(executed).toBeFalse()
   })
 })
 
