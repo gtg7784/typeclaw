@@ -372,6 +372,237 @@ function retryableFakeSession(behaviors: RetryBehavior[]) {
 }
 
 describe('promptPersistentTurnWithFallback same-ref retry', () => {
+  test('an authorized retry resumes from a completed tool result despite tool activity', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages: Array<{ role: string; stopReason?: string }> = []
+    let promptCalls = 0
+    let continueCalls = 0
+    const session = {
+      prompt: async () => {
+        promptCalls++
+        messages.push(
+          { role: 'user' },
+          { role: 'assistant', stopReason: 'toolUse' },
+          { role: 'toolResult' },
+          { role: 'assistant', stopReason: 'error' },
+        )
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) cb({ type: 'tool_execution_end' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+          messages.push({ role: 'assistant', stopReason: 'stop' })
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      authorizeRetryAfterCompletedToolResult: () => true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(promptCalls).toBe(1)
+    expect(continueCalls).toBe(1)
+    expect(messages.filter((message) => message.role === 'user')).toHaveLength(1)
+  })
+
+  test('authorization alone cannot retry an unsafe transcript tail', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages = [{ role: 'user' }, { role: 'assistant', stopReason: 'error' }]
+    const originalMessages = messages.map((message) => ({ ...message }))
+    let continueCalls = 0
+    const session = {
+      prompt: async () => {
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      authorizeRetryAfterCompletedToolResult: () => true,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.lastError?.message).toBe('WebSocket closed 1000')
+    expect(continueCalls).toBe(0)
+    expect(messages).toEqual(originalMessages)
+  })
+
+  test('passes authorization through for late revalidation before transcript mutation', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    const originalMessages = messages.map((message) => ({ ...message }))
+    let authorizationChecks = 0
+    let continueCalls = 0
+    const session = {
+      prompt: async () => {
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      authorizeRetryAfterCompletedToolResult: () => {
+        authorizationChecks++
+        return authorizationChecks === 1
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(authorizationChecks).toBe(2)
+    expect(continueCalls).toBe(0)
+    expect(messages).toEqual(originalMessages)
+  })
+
+  test('authorization and a safe transcript cannot retry a non-retryable provider error', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    const originalMessages = messages.map((message) => ({ ...message }))
+    let continueCalls = 0
+    const session = {
+      prompt: async () => {
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: '401 Unauthorized' },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      authorizeRetryAfterCompletedToolResult: () => true,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.lastError?.message).toBe('401 Unauthorized')
+    expect(continueCalls).toBe(0)
+    expect(messages).toEqual(originalMessages)
+  })
+
+  test('does not relax tool-activity retry gating without caller authorization', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+    let continueCalls = 0
+    const session = {
+      prompt: async () => {
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(continueCalls).toBe(0)
+    expect(messages).toHaveLength(2)
+  })
+
   test('a transient soft error recovers via agent.continue without duplicating the user message', async () => {
     const fake = retryableFakeSession(['soft-transient', 'success'])
     const result = await promptPersistentTurnWithFallback({

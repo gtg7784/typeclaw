@@ -79,6 +79,72 @@ export async function retryTurnOnPersistentSession(
   return true
 }
 
+// Resume only the post-tool provider-failure shape. Unlike the generic helper,
+// this deliberately refuses a trailing user leaf or an assistant error whose
+// predecessor is anything other than the completed tool result. Callers use it
+// after externally visible tool activity, where replaying the original turn
+// could duplicate side effects.
+export async function retryTurnAfterCompletedToolResult(
+  session: AgentSession,
+  opts: {
+    attempt: number
+    signal?: AbortSignal
+    random?: () => number
+    authorize: () => boolean
+    onBackoffStart?: () => void
+  },
+): Promise<boolean> {
+  const agent = (session as { agent?: ContinuableAgent }).agent
+  if (!agent || typeof agent.continue !== 'function') return false
+  if (!hasCompletedToolResultErrorTail(agent.state?.messages)) return false
+
+  opts.onBackoffStart?.()
+  await sleep(retryBackoffMs(opts.attempt, opts.random), opts.signal)
+  if (opts.signal?.aborted) return false
+
+  // Re-read after the backoff: another actor may have advanced the transcript
+  // while we slept. Mutation is safe only while the exact tail still holds.
+  const messages = agent.state?.messages
+  if (!hasCompletedToolResultErrorTail(messages)) return false
+  if (opts.authorize() !== true) return false
+
+  const originalMessages = messages
+  const prefix = messages.slice(0, -1)
+  ;(agent.state as { messages: unknown }).messages = prefix
+  try {
+    await agent.continue()
+  } catch (err) {
+    if (hasSameEntries(agent.state?.messages, prefix)) {
+      ;(agent.state as { messages: unknown }).messages = originalMessages
+    }
+    throw err
+  }
+  return true
+}
+
+function hasCompletedToolResultErrorTail(messages: unknown): messages is unknown[] {
+  if (!Array.isArray(messages) || messages.length < 2) return false
+  const predecessor = messages[messages.length - 2]
+  const leaf = messages[messages.length - 1]
+  return (
+    typeof predecessor === 'object' &&
+    predecessor !== null &&
+    (predecessor as { role?: unknown }).role === 'toolResult' &&
+    typeof leaf === 'object' &&
+    leaf !== null &&
+    (leaf as { role?: unknown }).role === 'assistant' &&
+    (leaf as { stopReason?: unknown }).stopReason === 'error'
+  )
+}
+
+function hasSameEntries(messages: unknown, expected: unknown[]): boolean {
+  return (
+    Array.isArray(messages) &&
+    messages.length === expected.length &&
+    messages.every((entry, i) => entry === expected[i])
+  )
+}
+
 // Same-ref retry for DIRECT `session.prompt()` call sites that bypass the model
 // fallback helpers (non-stream TUI, slash commands, subagent drain/required-block
 // nudges, multimodal look-at). These lost the SDK's built-in retry when it was

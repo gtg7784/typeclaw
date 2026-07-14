@@ -88,6 +88,8 @@ class FakeSession {
   // find the assistant message that called the tool.
   public entriesById = new Map<string, SessionEntry>()
   public onPrompt: ((text: string) => void | Promise<void>) | undefined
+  public onContinue: (() => void | Promise<void>) | undefined
+  public continued = 0
 
   // Mirrors the real `AgentSession.agent` surface the router touches:
   // `agent.abort()` flips `agent.signal.aborted`. The router uses this as the
@@ -98,6 +100,8 @@ class FakeSession {
   public agent: {
     controller: AbortController
     readonly signal: AbortSignal
+    state: { messages: Array<{ role: string; stopReason?: string }> }
+    continue(): Promise<void>
     abort(): void
     afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>
     streamFn: StreamFn
@@ -111,6 +115,11 @@ class FakeSession {
       controller: new AbortController(),
       get signal(): AbortSignal {
         return this.controller.signal
+      },
+      state: { messages: [] },
+      continue: async (): Promise<void> => {
+        this.continued++
+        await this.onContinue?.()
       },
       abort(): void {
         this.controller.abort()
@@ -339,6 +348,8 @@ function makeRouter(
     config?: ChannelAdapterConfig
     sessions?: FakeSession[]
     nowRef?: { value: number }
+    retryRandom?: () => number
+    onRetryBackoffStart?: () => void
     logs?: string[]
     origins?: SessionOrigin[]
     factoryCalls?: SessionFactoryArgs[]
@@ -363,6 +374,8 @@ function makeRouter(
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
+    ...(options.retryRandom !== undefined ? { retryRandom: options.retryRandom } : {}),
+    ...(options.onRetryBackoffStart !== undefined ? { onRetryBackoffStart: options.onRetryBackoffStart } : {}),
     ...(options.measureTranscriptBytes !== undefined ? { measureTranscriptBytes: options.measureTranscriptBytes } : {}),
     ...(options.claimHandler !== undefined ? { claimHandler: options.claimHandler } : {}),
     ...(options.onReload !== undefined ? { onReload: options.onReload } : {}),
@@ -13321,6 +13334,217 @@ describe('ChannelRouter continue:true empty-stop recovery (phrase-independent)',
     expect(
       logs.some((m) => m.includes('empty_turn_fallback cause=empty_stop_after_continue_reply_nudges_exhausted')),
     ).toBe(true)
+  })
+
+  test('retries once after a continue:true progress reply and suppresses the warning when the final reply succeeds', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    sessions[0]!.onContinue = async () => {
+      sessions[0]!.agent.state.messages.push({ role: 'assistant', stopReason: 'stop' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지난 기록은 이 내용이야.' })
+      sessions[0]!.setAssistantText('')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.continued).toBe(1)
+    expect(sent).toEqual(['찾아볼게.', '지난 기록은 이 내용이야.'])
+    expect(sent.some((text) => /upstream LLM provider/i.test(text))).toBe(false)
+    expect(logs.some((m) => m.includes('send_willingness_nudge'))).toBe(false)
+  })
+
+  test('/stop during post-tool retry backoff invalidates the continue:true authorization', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    let signalBackoffStart: () => void = () => {}
+    const backoffStarted = new Promise<void>((resolve) => {
+      signalBackoffStart = resolve
+    })
+    const { router, sessions } = makeRouter(dir, {
+      retryRandom: () => 0.999,
+      onRetryBackoffStart: signalBackoffStart,
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      const text = msg.text ?? ''
+      if (text === 'Stopped the current turn.') return { ok: false, error: 'stop acknowledgment unavailable' }
+      sent.push(text)
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    sessions[0]!.onContinue = async () => {
+      sessions[0]!.agent.state.messages.push({ role: 'assistant', stopReason: 'stop' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지난 기록은 이 내용이야.' })
+      sessions[0]!.setAssistantText('')
+    }
+
+    const draining = router.__testing!.flushDebounce(KEY)
+    await backoffStarted
+
+    await router.route(inbound({ text: '/stop', externalMessageId: 'm-stop-retry-backoff' }))
+    await draining
+
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.continued).toBe(0)
+    expect(sent.filter((text) => text === '찾아볼게.')).toHaveLength(1)
+    expect(sent).not.toContain('지난 기록은 이 내용이야.')
+  })
+
+  test('surfaces one redacted warning after the authorized retry fails again', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [
+        { role: 'user' },
+        { role: 'assistant', stopReason: 'toolUse' },
+        { role: 'toolResult' },
+        { role: 'assistant', stopReason: 'error' },
+      ]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000 raw-detail' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    sessions[0]!.onContinue = () => {
+      sessions[0]!.agent.state.messages.push({ role: 'assistant', stopReason: 'error' })
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000 second-raw-detail' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.continued).toBe(1)
+    expect(sent[0]).toBe('찾아볼게.')
+    expect(sent.filter((text) => text.startsWith('⚠️'))).toHaveLength(1)
+    expect(sent[1]).toMatch(/connection to the upstream LLM provider dropped/i)
+    expect(sent[1]).not.toContain('raw-detail')
+    expect(sent[1]).not.toContain('second-raw-detail')
+  })
+
+  test('keeps the deferred warning latched when recovery queues an empty-continuation nudge', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    let promptAttempt = 0
+    sessions[0]!.onPrompt = async (text) => {
+      promptAttempt++
+      if (promptAttempt === 1) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+        await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+        sessions[0]!.emit({ type: 'tool_execution_start' })
+        sessions[0]!.agent.state.messages = [
+          { role: 'user' },
+          { role: 'assistant', stopReason: 'toolUse' },
+          { role: 'toolResult' },
+          { role: 'assistant', stopReason: 'error' },
+        ]
+        sessions[0]!.emit({
+          type: 'message_end',
+          message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+        })
+        sessions[0]!.setAssistantMidTurn('', 'error')
+        return
+      }
+
+      expect(text).toContain(SEND_WILLINGNESS_NUDGE)
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지난 기록은 이 내용이야.' })
+      sessions[0]!.setAssistantText('')
+    }
+    sessions[0]!.onContinue = () => {
+      sessions[0]!.agent.state.messages.push({ role: 'assistant', stopReason: 'stop' })
+      emptyStopAfterToolWork(sessions[0]!, 'provider-recovery-empty')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.continued).toBe(1)
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(sent).toEqual(['찾아볼게.', '지난 기록은 이 내용이야.'])
+    expect(sent.some((text) => text.startsWith('⚠️'))).toBe(false)
+  })
+
+  test('suppresses a provider error after a final reply follows the continue:true progress reply', async () => {
+    const dir = await tempDir()
+    const sent: string[] = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '지난 기록 찾아줘' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '찾아볼게.' })
+      await sessions[0]!.agent.afterToolCall!(continueReplyContext('찾아볼게.'))
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: '지난 기록은 이 내용이야.' })
+      sessions[0]!.emit({ type: 'tool_execution_start' })
+      sessions[0]!.agent.state.messages = [{ role: 'toolResult' }, { role: 'assistant', stopReason: 'error' }]
+      sessions[0]!.emit({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'WebSocket closed 1000' },
+      })
+      sessions[0]!.setAssistantMidTurn('', 'error')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toEqual(['찾아볼게.', '지난 기록은 이 내용이야.'])
   })
 
   test('does NOT recover when the continue:true ack leaf is unchanged since the send (ack-then-await-user)', async () => {

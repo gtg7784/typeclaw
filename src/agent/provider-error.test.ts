@@ -297,6 +297,11 @@ describe('isFailoverWorthy', () => {
     expect(isFailoverWorthy('network unreachable')).toBe(false)
   })
 
+  test('does NOT fail over context overflow even when transport text is also present', () => {
+    expect(isFailoverWorthy('context length exceeded')).toBe(false)
+    expect(isFailoverWorthy('WebSocket closed 1000: context length exceeded')).toBe(false)
+  })
+
   test('a provider transport / expired-session failure IS failover-worthy (the cron-report incident)', () => {
     expect(isFailoverWorthy('provider_transport_failure')).toBe(true)
     expect(
@@ -337,6 +342,8 @@ describe('isRetryableSameRef', () => {
     expect(isRetryableSameRef('ECONNRESET')).toBe(true)
     expect(isRetryableSameRef('fetch failed')).toBe(true)
     expect(isRetryableSameRef('500 Internal Server Error')).toBe(true)
+    expect(isRetryableSameRef('WebSocket closed 1000')).toBe(true)
+    expect(isRetryableSameRef('websocket connection was closed normally')).toBe(true)
   })
 
   test('does NOT same-ref retry throttle/overload — those fail OVER to another ref', () => {
@@ -349,10 +356,18 @@ describe('isRetryableSameRef', () => {
     expect(isRetryableSameRef('401 Unauthorized')).toBe(false)
     expect(isRetryableSameRef('insufficient quota')).toBe(false)
     expect(isRetryableSameRef('session expired: api key expired')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: 401 Unauthorized')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: 403 Forbidden')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: access denied')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: access token expired')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: session token has expired')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: authentication_error')).toBe(false)
+    expect(isRetryableSameRef('websocket connection closed: billing quota exhausted')).toBe(false)
   })
 
   test('does NOT same-ref retry context-overflow or generic errors (compaction / surface own it)', () => {
     expect(isRetryableSameRef('context length exceeded')).toBe(false)
+    expect(isRetryableSameRef('WebSocket closed 1000: context length exceeded')).toBe(false)
     expect(isRetryableSameRef('malformed response')).toBe(false)
   })
 })

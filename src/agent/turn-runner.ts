@@ -2,7 +2,7 @@ import type { ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
 import { detectProviderError, isRetryableSameRef, subscribeProviderErrors } from './provider-error'
-import { RETRIES_PER_REF, retryTurnOnPersistentSession } from './retry-same-ref'
+import { RETRIES_PER_REF, retryTurnAfterCompletedToolResult, retryTurnOnPersistentSession } from './retry-same-ref'
 import { modelThrottleCircuit, type ThrottleCircuit } from './throttle-circuit'
 
 export type PersistentTurnAttempt = {
@@ -34,6 +34,9 @@ export async function promptPersistentTurnWithFallback(opts: {
   circuit?: ThrottleCircuit
   skipProviderErrorSubscription?: boolean
   detectSoftErrorFromLeaf?: boolean
+  authorizeRetryAfterCompletedToolResult?: () => boolean
+  retryRandom?: () => number
+  onRetryBackoffStart?: () => void
   beforeAttempt?: (ref: ModelRef) => void
   onAttemptFailed?: (attempt: PersistentTurnAttempt) => void
 }): Promise<PersistentTurnResult> {
@@ -78,6 +81,7 @@ export async function promptPersistentTurnWithFallback(opts: {
       // advancing the chain. `retry === 0` is the first, prompt()-driven attempt;
       // later iterations resume via agent.continue() (no user-message re-append).
       let outcome: AttemptOutcome | undefined
+      let retryAfterCompletedToolResult = false
       for (let retry = 0; ; retry++) {
         softError = undefined
         let outcomeThisAttempt: AttemptOutcome | undefined
@@ -85,7 +89,14 @@ export async function promptPersistentTurnWithFallback(opts: {
           if (retry === 0) {
             await opts.session.prompt(opts.text)
           } else {
-            const retried = await retryTurnOnPersistentSession(opts.session, { attempt: retry - 1 })
+            const retried = retryAfterCompletedToolResult
+              ? await retryTurnAfterCompletedToolResult(opts.session, {
+                  attempt: retry - 1,
+                  authorize: () => opts.authorizeRetryAfterCompletedToolResult?.() === true,
+                  ...(opts.retryRandom !== undefined ? { random: opts.retryRandom } : {}),
+                  ...(opts.onRetryBackoffStart !== undefined ? { onBackoffStart: opts.onRetryBackoffStart } : {}),
+                })
+              : await retryTurnOnPersistentSession(opts.session, { attempt: retry - 1 })
             // The safe continue-recipe couldn't apply: keep the PREVIOUS failure
             // outcome (never cleared) and let it drive the advance/return below.
             if (!retried) break
@@ -96,13 +107,16 @@ export async function promptPersistentTurnWithFallback(opts: {
         }
         outcome = outcomeThisAttempt
         if (outcome === undefined) break
-        // Only keep retrying while the failure is same-ref retryable, the turn
-        // stayed idempotent (no output/tool-exec yet), and budget remains.
-        const mayRetry =
-          retry < RETRIES_PER_REF &&
-          isRetryableSameRef(outcome.error.message) &&
-          !activity.producedAssistantOutput &&
-          !activity.startedToolExecution
+        // Retry within budget only when the failure is same-ref retryable and
+        // either no visible/tool activity occurred, or the caller explicitly
+        // authorizes the strict post-tool-result resume recipe.
+        const retryableWithinBudget = retry < RETRIES_PER_REF && isRetryableSameRef(outcome.error.message)
+        const mayRetryWithoutActivity = !activity.producedAssistantOutput && !activity.startedToolExecution
+        retryAfterCompletedToolResult =
+          retryableWithinBudget &&
+          activity.startedToolExecution &&
+          opts.authorizeRetryAfterCompletedToolResult?.() === true
+        const mayRetry = retryableWithinBudget && (mayRetryWithoutActivity || retryAfterCompletedToolResult)
         if (!mayRetry) break
       }
 

@@ -42,17 +42,17 @@ const OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
 // `wss://…/codex/responses` non-101 upgrade). Provider protocol tokens — English
 // by design (the system-token exception to the multi-language rule).
 const TRANSPORT_FAILURE =
-  /provider[_ -]?transport[_ -]?failure|(?:websocket|ws) connection.*failed|expected 101|session expired/i
+  /provider[_ -]?transport[_ -]?failure|(?:websocket|ws)(?: connection)?(?:(?: was| is)? closed|.*failed)|expected 101|session expired/i
 
 // Auth failure: the provider rejected our credentials (bad/expired/missing API
-// key, 401, failed authentication). Account-wide — a different ref shares the
+// key or token, 401/403, failed authentication). Account-wide — a different ref shares the
 // same credential problem — so this is BOTH a redacted safe-message class (a
 // 401 body can carry a Bearer token) AND a NON_FAILOVER_FAULT reason. Shared as
 // one constant so the two uses can never drift: previously the safe-message copy
 // matched `api key ... expired` but the failover copy didn't, letting
 // `session expired: api key expired` wrongly fail over past the auth guard.
 const AUTH_FAULT =
-  /\b(401|unauthori[sz]ed|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|authentication failed|invalid bearer)\b/i
+  /\b(401|403|unauthori[sz]ed|forbidden|access denied|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|(?:access|session)[_ -]?token(?:(?:[_ -]+)(?:has|is))?[_ -]+expired|authentication(?: failed|[_ -]?error)|invalid bearer)\b/i
 
 // Each entry pairs a narrow matcher against the raw provider text with the
 // canonical, leak-free sentence shown in channels. Matchers are intentionally
@@ -120,6 +120,11 @@ const NON_FAILOVER_FAULT = new RegExp(
   'i',
 )
 
+// Context-window exhaustion belongs to the SDK compaction/error path, never
+// transport recovery. Keep this to provider protocol forms rather than matching
+// natural-language user text.
+const CONTEXT_OVERFLOW = /\bcontext[_ -]?length[_ -]?exceeded\b/i
+
 export function isThrottleOrOverload(raw: string): boolean {
   if (NON_FAILOVER_FAULT.test(raw)) return false
   return THROTTLE_OR_OVERLOAD.test(raw)
@@ -133,6 +138,7 @@ export function isThrottleOrOverload(raw: string): boolean {
 // Account-wide faults (billing/quota/auth) are excluded up front — a different
 // ref shares the same account problem, so switching can't help.
 export function isFailoverWorthy(raw: string): boolean {
+  if (CONTEXT_OVERFLOW.test(raw)) return false
   if (NON_FAILOVER_FAULT.test(raw)) return false
   return isThrottleOrOverload(raw) || OBSERVER_TIMEOUT.test(raw) || TRANSPORT_FAILURE.test(raw)
 }
@@ -157,6 +163,7 @@ const NETWORK_OR_5XX =
 // does NOT match context-overflow: that stays on the SDK compaction path and must
 // never be treated as a retryable provider failure.
 export function isRetryableSameRef(raw: string): boolean {
+  if (CONTEXT_OVERFLOW.test(raw)) return false
   if (NON_FAILOVER_FAULT.test(raw)) return false
   if (isThrottleOrOverload(raw)) return false
   return TRANSPORT_FAILURE.test(raw) || OBSERVER_TIMEOUT.test(raw) || NETWORK_OR_5XX.test(raw)
