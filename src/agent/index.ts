@@ -252,6 +252,15 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
   return session
 }
 
+export function attachLoopGuardTurnTracking(
+  agent: { subscribe: (listener: (event: unknown) => void) => () => void },
+  onTurnStart: () => void,
+): () => void {
+  return agent.subscribe((event: unknown) => {
+    if ((event as { type?: string }).type === 'turn_start') onTurnStart()
+  })
+}
+
 export async function createSessionWithDispose(options: CreateSessionOptions = {}): Promise<CreateSessionResult> {
   const resolved = resolveProfile(getConfig().models, options.profile)
   // Unknown profiles silently fall back to `default`. The fallback is by design
@@ -301,6 +310,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // plugin-tools.ts for why aborting (not throwing) is what stops the loop.
   const abortHolder: { abort?: (reason?: string) => void; reason?: string } = {}
   const getAbort: () => ((reason?: string) => void) | undefined = () => abortHolder.abort
+  let loopGuardTurnId = 0
+  const getLoopGuardTurn = () => loopGuardTurnId
 
   // Subagent built-in tool refs resolve to `ToolDefinition`s (see
   // plugin-tools.ts). Their NAMES narrow the session via `tools:`; their wrapped
@@ -312,8 +323,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const subagentBuiltinNames = resolvedSubagentBuiltins.map((t) => t.name)
   const subagentTypeclawToolDefinitions = resolvedSubagentBuiltins.filter((t) => !isPiCodingBuiltinName(t.name))
   const pluginCustomTools = options.pluginSubagent
-    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin, getAbort)
-    : wrapRegistryTools(options.plugins, getOrigin, getAbort)
+    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin, getAbort, getLoopGuardTurn)
+    : wrapRegistryTools(options.plugins, getOrigin, getAbort, getLoopGuardTurn)
 
   // Per-run budget state for the tool-result byte ceiling. Allocated once per
   // session creation and threaded into every wrapped tool so they share the
@@ -442,10 +453,17 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     hooks: options.plugins?.hooks ?? createHookBus(),
     getOrigin,
     getAbort,
+    getLoopGuardTurn,
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(options.bashPolicy !== undefined ? { bashPolicy: options.bashPolicy } : {}),
   })
-  const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin, getAbort)
+  const wrappedCustomSystemTools = wrapSystemTools(
+    customSystemTools,
+    options.plugins,
+    getOrigin,
+    getAbort,
+    getLoopGuardTurn,
+  )
   const customToolsPreBudget = [...wrappedCustomSystemTools, ...pluginCustomTools, ...builtinPiToolOverrides]
   const customTools =
     sessionBudget && sessionBudgetState
@@ -491,6 +509,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   ;(session as { setAutoRetryEnabled?: (enabled: boolean) => void }).setAutoRetryEnabled?.(false)
   const getAbortReason = () => abortHolder.reason
   const sessionWithAbortReason = Object.assign(session, { getAbortReason })
+  const unsubLoopGuardTurn = attachLoopGuardTurnTracking(session.agent, () => {
+    loopGuardTurnId += 1
+  })
 
   // Layer the replay sanitizer over pi's convertToLlm so a transcript with an
   // orphaned toolResult (e.g. a torn-down restart turn) can't wedge the session
@@ -524,6 +545,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const unsubToolNudge = attachToolNotFoundNudge(session, intendedActiveToolNames)
 
   const dispose = async () => {
+    unsubLoopGuardTurn()
     unsubRestart?.()
     unsubToolNudge()
     if (materializedSkills) await materializedSkills.dispose()
@@ -863,6 +885,7 @@ function wrapRegistryTools(
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
+  getLoopGuardTurn: () => number | undefined,
 ): ToolDefinition[] {
   if (!plugins) return []
   return plugins.registry.tools.map((t: PluginRegisteredTool) =>
@@ -875,6 +898,7 @@ function wrapRegistryTools(
       hooks: plugins.hooks,
       getOrigin,
       getAbort,
+      getLoopGuardTurn,
     }),
   )
 }
@@ -884,6 +908,7 @@ function wrapSystemTools(
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
+  getLoopGuardTurn: () => number | undefined,
 ): ToolDefinition[] {
   if (!hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -893,6 +918,7 @@ function wrapSystemTools(
       hooks: plugins.hooks,
       getOrigin,
       getAbort,
+      getLoopGuardTurn,
     }),
   )
 }
@@ -907,6 +933,7 @@ function wrapSubagentCustomTools(
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
+  getLoopGuardTurn: () => number | undefined,
 ): ToolDefinition[] {
   if (!selection.customTools || !plugins) return []
   const logger = makePluginLogger(selection.pluginName)
@@ -920,6 +947,7 @@ function wrapSubagentCustomTools(
       hooks: plugins.hooks,
       getOrigin,
       getAbort,
+      getLoopGuardTurn,
     }),
   )
 }
