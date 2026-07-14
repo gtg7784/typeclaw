@@ -105,6 +105,7 @@ import type {
   ReactionRequest,
   ReactionResult,
   ResolvedChannelNames,
+  ReviewSubmitter,
   ReviewStateRequest,
   ReviewStateResolver,
   ReviewStateResult,
@@ -113,6 +114,8 @@ import type {
   ReviewThreadResolver,
   SendErrorCode,
   SendResult,
+  SubmitReviewRequest,
+  SubmitReviewResult,
   TypingCallback,
 } from './types'
 import { channelKeyId } from './types'
@@ -1269,6 +1272,9 @@ export type ChannelRouter = {
   registerReviewStateResolver: (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver) => void
   unregisterReviewStateResolver: (adapter: ChannelKey['adapter'], resolver: ReviewStateResolver) => void
   getReviewState: (req: ReviewStateRequest) => Promise<ReviewStateResult>
+  registerReviewSubmitter: (adapter: ChannelKey['adapter'], submitter: ReviewSubmitter) => void
+  unregisterReviewSubmitter: (adapter: ChannelKey['adapter'], submitter: ReviewSubmitter) => void
+  submitReview: (req: SubmitReviewRequest) => Promise<SubmitReviewResult>
   lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
   listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
   // Stash refs from a channel_history fetch so prior-turn attachments stay
@@ -1609,6 +1615,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const reviewThreadResolvers = new Map<ChannelKey['adapter'], ReviewThreadResolver>()
   const reviewStateResolvers = new Map<ChannelKey['adapter'], ReviewStateResolver>()
+  const reviewSubmitters = new Map<ChannelKey['adapter'], ReviewSubmitter>()
   const stickyLedger = new StickyLedger()
   // The /help handler reads the live registry to enumerate commands, so it
   // forward-references `commands`. Safe at runtime — the handler only runs on
@@ -1728,6 +1735,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         sessionManager,
         origin,
         originRef,
+        permissions,
       })
       const sessionId = sessionManager.getSessionId()
       void key
@@ -4099,6 +4107,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
+  const registerReviewSubmitter = (adapter: ChannelKey['adapter'], submitter: ReviewSubmitter): void => {
+    reviewSubmitters.set(adapter, submitter)
+  }
+
+  const unregisterReviewSubmitter = (adapter: ChannelKey['adapter'], submitter: ReviewSubmitter): void => {
+    if (reviewSubmitters.get(adapter) === submitter) reviewSubmitters.delete(adapter)
+  }
+
+  const submitReview = async (req: SubmitReviewRequest): Promise<SubmitReviewResult> => {
+    const submitter = reviewSubmitters.get(req.adapter)
+    if (submitter === undefined) {
+      return { ok: false, error: `adapter "${req.adapter}" does not support review submission`, code: 'unsupported' }
+    }
+    return await submitter(req).catch(
+      (err): SubmitReviewResult => ({ ok: false, error: describe(err), code: 'transient' }),
+    )
+  }
+
   const lookupInboundAttachment = (args: ChannelKey & { id: number }): InboundAttachment | null => {
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return null
@@ -5697,6 +5723,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerReviewStateResolver,
     unregisterReviewStateResolver,
     getReviewState,
+    registerReviewSubmitter,
+    unregisterReviewSubmitter,
+    submitReview,
     lookupInboundAttachment,
     listInboundAttachmentIds,
     registerHistoryAttachments,

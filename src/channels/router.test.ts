@@ -13888,6 +13888,38 @@ describe('review-thread resolver registry', () => {
   })
 })
 
+describe('review submitter registry', () => {
+  const req = {
+    adapter: 'github' as const,
+    workspace: 'acme/p',
+    chat: 'pr:1',
+    event: 'COMMENT' as const,
+    body: 'summary',
+    comments: [],
+  }
+
+  test('answers unsupported when no submitter is registered', async () => {
+    const { router } = await makeRouter(await tempDir())
+    const result = await router.submitReview(req)
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' })
+  })
+
+  test('dispatches, preserves last-write-wins, and converts throws to transient failures', async () => {
+    const { router } = await makeRouter(await tempDir())
+    const stale = async () => ({ ok: false as const, error: 'stale', code: 'transient' as const })
+    const active = async () => ({ ok: true as const, reviewId: 2, state: 'COMMENTED' })
+    router.registerReviewSubmitter('github', stale)
+    router.registerReviewSubmitter('github', active)
+    router.unregisterReviewSubmitter('github', stale)
+    expect(await router.submitReview(req)).toEqual({ ok: true, reviewId: 2, state: 'COMMENTED' })
+
+    router.registerReviewSubmitter('github', async () => {
+      throw new Error('boom')
+    })
+    expect(await router.submitReview(req)).toMatchObject({ ok: false, code: 'transient' })
+  })
+})
+
 describe('resumeRestartHandoff', () => {
   async function seedMapping(dir: string, sessionId: string, sessionFile: string): Promise<void> {
     await mkdir(join(dir, 'channels'), { recursive: true })
