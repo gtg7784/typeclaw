@@ -200,6 +200,7 @@ export type WrapToolOptions = {
   // time) because tools are wrapped BEFORE `createAgentSession` returns the
   // session whose `agent.abort` this points at. See `fireLoopAbort`.
   getAbort?: () => ((reason?: string) => void) | undefined
+  getLoopGuardTurn?: () => number | undefined
 }
 
 export type WrapSystemToolOptions = {
@@ -208,6 +209,7 @@ export type WrapSystemToolOptions = {
   hooks: HookBus
   getOrigin?: () => SessionOrigin | undefined
   getAbort?: () => ((reason?: string) => void) | undefined
+  getLoopGuardTurn?: () => number | undefined
   // When present, the bash builtin is rewritten through the per-tool bwrap
   // sandbox with role-derived path masks. Absent (or no masks for the role)
   // runs bash unchanged — preserving today's behavior for trusted+ and for
@@ -269,7 +271,13 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         return errorResult(`blocked: ${blockResult.reason}`)
       }
 
-      const loopGate = gateLoopGuard(opts.sessionId, opts.toolName, before.args)
+      const loopGate = gateLoopGuard(
+        opts.sessionId,
+        opts.toolName,
+        before.args,
+        opts.getLoopGuardTurn?.(),
+        opts.agentDir,
+      )
       if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort, 'loop_guard:block')
         return errorResult(loopGate.message)
@@ -332,7 +340,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
-      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
+      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs, opts.getLoopGuardTurn?.(), opts.agentDir)
       if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort, 'loop_guard:block')
         throw new Error(loopGate.message)
@@ -406,7 +414,7 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
       // loop-detection state, or pi's execute.
       const bashEnvOverlay = readBashEnvOverlay(mutableArgs)
       delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
-      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs)
+      const loopGate = gateLoopGuard(opts.sessionId, tool.name, mutableArgs, opts.getLoopGuardTurn?.(), opts.agentDir)
       if (loopGate.blockNow) {
         fireLoopAbort(opts.getAbort, 'loop_guard:block')
         throw new Error(loopGate.message)
@@ -818,6 +826,44 @@ function subagentPollStatus(toolName: string, result: ToolResult): 'running' | '
   return details.status === 'running' ? 'running' : 'terminal'
 }
 
+function observedReadResult(
+  toolName: string,
+  result: ToolResult,
+): { nonEmpty: boolean; outputLines?: number; textual: boolean } | undefined {
+  if (toolName !== 'read') return undefined
+  const details = result.details as { truncation?: { outputLines?: unknown } } | undefined
+  const outputLines = details?.truncation?.outputLines
+  const hasImage = result.content.some((part) => part.type === 'image')
+  const hasText = result.content.some(
+    (part) => part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0,
+  )
+  const imageFallback =
+    !hasImage &&
+    result.content.some(
+      (part) => part.type === 'text' && typeof part.text === 'string' && /^Read image file \[[^\]]+\]/.test(part.text),
+    )
+  const observedOutputLines =
+    typeof outputLines === 'number' && Number.isFinite(outputLines)
+      ? outputLines
+      : !hasImage && !imageFallback
+        ? countReadOutputLines(result.content)
+        : undefined
+  return {
+    nonEmpty: hasImage || hasText,
+    textual: !hasImage && !imageFallback,
+    ...(observedOutputLines !== undefined ? { outputLines: observedOutputLines } : {}),
+  }
+}
+
+function countReadOutputLines(content: ContentPart[]): number | undefined {
+  const textParts = content.filter(
+    (part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text' && typeof part.text === 'string',
+  )
+  if (textParts.length !== 1) return undefined
+  const fileText = textParts[0]!.text.replace(/\n\n\[\d+ more lines in file\. Use offset=\d+ to continue\.\]$/, '')
+  return fileText.length === 0 ? 0 : fileText.split('\n').length
+}
+
 type LoopGuardGate = {
   // True when the guard wants to block AND the block is enforced now (every tool
   // except a deferable `subagent_output` poll). The caller aborts + errors.
@@ -835,13 +881,21 @@ type LoopGuardGate = {
 // semantics. `check` runs here (recording the observation); the returned
 // `resolve` is called after execute with the tool's result, feeding the poll's
 // running/terminal status back to the guard so future blocks stop deferring.
-function gateLoopGuard(sessionId: string, toolName: string, args: unknown): LoopGuardGate {
-  const decision = sharedLoopGuard.check(sessionId, toolName, args)
+function gateLoopGuard(
+  sessionId: string,
+  toolName: string,
+  args: unknown,
+  turnId?: number,
+  cwd?: string,
+): LoopGuardGate {
+  const decision = sharedLoopGuard.check(sessionId, toolName, args, { turnId, cwd })
   const defer = shouldDeferLoopBlock(toolName, decision)
   return {
     blockNow: decision.kind === 'block' && !defer,
     message: decision.kind === 'ok' ? '' : decision.message,
     resolve(result) {
+      const readResult = observedReadResult(toolName, result)
+      if (readResult !== undefined) sharedLoopGuard.noteReadResult(decision.receipt, readResult)
       const pollStatus = subagentPollStatus(toolName, result)
       if (pollStatus !== undefined) {
         sharedLoopGuard.noteResult(decision.receipt, pollStatus)

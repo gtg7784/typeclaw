@@ -313,6 +313,44 @@ describe('createSpawnSubagentTool — background mode', () => {
     expect(completion?.ok).toBe(true)
   })
 
+  test('loop-aborted background completion publishes failure with recoverable output', async () => {
+    const stream = createStream()
+    const events: unknown[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+      events.push(msg.payload)
+    })
+    const liveRegistry = new LiveSubagentRegistry()
+    const session = emittingSession(() => ({
+      type: 'message_end',
+      message: { role: 'assistant', content: 'Partial review evidence.' },
+    }))
+    Object.assign(session, { getAbortReason: () => 'loop_guard:block' })
+    const tool = createSpawnSubagentTool({
+      registry: makeRegistry(),
+      liveRegistry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin: () => ({ kind: 'tui', sessionId: 'ses_parent' }),
+      stream,
+      generateTaskId: () => 'bg_loop',
+      now: () => 1_000,
+    })
+
+    await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(liveRegistry.get('bg_loop')?.status).toBe('failed')
+    const completion = events.find((event) => (event as { kind?: string }).kind === 'subagent.completed') as
+      | Record<string, unknown>
+      | undefined
+    expect(completion?.ok).toBe(false)
+    expect(completion?.error).toContain('loop_guard:block')
+    expect(completion?.hasRecoverableOutput).toBe(true)
+  })
+
   test('channel-origin background completion carries the channel key for rollover-safe routing', async () => {
     const stream = createStream()
     const events: unknown[] = []

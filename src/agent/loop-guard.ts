@@ -1,3 +1,5 @@
+import { posix } from 'node:path'
+
 // Detects when the model is stuck looping on tool calls. Two independent
 // detectors run per call; the more severe decision wins.
 //
@@ -10,8 +12,9 @@
 //    re-reading one file with drifting offsets. Over a sliding window of the
 //    last WINDOW_SIZE calls, if one signature recurs WINDOW_SOFT_WARN times it
 //    warns and WINDOW_HARD_BLOCK times it blocks. Path-bearing tools coarsen
-//    their signature to the path alone (offsets/limits/line ranges dropped) so
-//    that paging the same file in a cycle collapses to one signature.
+//    their signature to the path alone. Read calls additionally recognize one
+//    assistant tool batch and successfully-observed forward pagination so
+//    productive inspection does not look like a reactive cycle.
 //
 // Both warn/block decisions carry the byte-identical or coarsened nudge text.
 // The wrapping in plugin-tools.ts maps a block to `errorResult` for plugin tools
@@ -71,12 +74,20 @@ export type LoopGuardReceipt = {
   tool: string
   signature: string
   windowSignature: string
+  recorded: boolean
+  readPage?: ReadPage
+}
+
+export type LoopGuardCheckContext = {
+  turnId?: number
+  cwd?: string
 }
 
 // Post-execution classification of a `subagent_output` poll, fed back via
 // `noteResult`. 'running' is a still-pending wait; 'terminal' is completed/failed
 // — a repeated terminal poll is a real loop.
 export type LoopObservedResult = 'running' | 'terminal'
+export type ReadObservedResult = { nonEmpty: boolean; outputLines?: number; textual?: boolean }
 
 export type LoopGuardDecision =
   | { kind: 'ok'; receipt: LoopGuardReceipt }
@@ -91,7 +102,7 @@ type Verdict =
   | { kind: 'block'; count: number; reason: LoopReason; message: string }
 
 export type LoopGuard = {
-  check: (sessionId: string, tool: string, args: unknown) => LoopGuardDecision
+  check: (sessionId: string, tool: string, args: unknown, context?: LoopGuardCheckContext) => LoopGuardDecision
   reset: (sessionId: string) => void
   forget: (sessionId: string) => void
   // Clears only the residue a single tool left behind in a session: its entries
@@ -104,9 +115,10 @@ export type LoopGuard = {
   forgetTool: (sessionId: string, tool: string) => void
   // Undoes the one observation a prior `check` recorded, identified by its
   // receipt. Pops that signature from the windowed history and, when the
-  // current consecutive streak is the call this receipt named (it is the most
-  // recent `check` on the session, since tool execution within a turn is
-  // sequential), rewinds the streak by one. Used post-execution for a
+  // current consecutive streak is the call this receipt named, rewinds the
+  // streak by one. Suppressed same-batch read receipts are explicit no-ops so
+  // parallel sibling completion cannot retract the recorded observation. Used
+  // post-execution for a
   // `subagent_output` poll that returned `status: 'running'` — a still-pending
   // wait, not a loop — so it never accumulates toward either detector.
   retract: (receipt: LoopGuardReceipt) => void
@@ -117,6 +129,7 @@ export type LoopGuard = {
   // mark for that signature (a task can only move running→terminal, but a
   // signature can be reused across episodes).
   noteResult: (receipt: LoopGuardReceipt, result: LoopObservedResult) => void
+  noteReadResult: (receipt: LoopGuardReceipt, result: ReadObservedResult) => void
 }
 
 type SessionState = {
@@ -134,7 +147,18 @@ type SessionState = {
   // A block on such a signature is enforced pre-execute (not deferred), so a
   // completed task is not re-polled forever just to re-learn it is done.
   termKnown: Set<string>
+  // A model turn may emit several tool calls in one assistant message. Those
+  // calls cannot react to one another's results, so same-path reads in that
+  // batch count as one loop observation rather than a reactive cycle.
+  readTurnId: number | undefined
+  readPathsThisTurn: Set<string>
+  // Observed contiguous line progress per recently-read canonical path.
+  // Suppressed siblings may wait here for earlier siblings to complete, but
+  // only exact adjacency advances the frontier.
+  readFrontiers: Map<string, ReadProgress>
 }
+
+type ReadProgress = { frontier?: number; pending: Map<number, number> }
 
 export type CreateLoopGuardOptions = {
   softWarn?: number
@@ -228,10 +252,8 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
   }
 
   return {
-    check(sessionId, tool, args) {
+    check(sessionId, tool, args, context) {
       const signature = makeCallSignature(tool, args)
-      const windowSig = makeWindowSignature(tool, args)
-      const receipt: LoopGuardReceipt = { sessionId, tool, signature, windowSignature: windowSig }
       const existing = sessions.get(sessionId)
 
       const state: SessionState = existing ?? {
@@ -241,6 +263,36 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
         window: [],
         windowWarned: new Set(),
         termKnown: new Set(),
+        readTurnId: undefined,
+        readPathsThisTurn: new Set(),
+        readFrontiers: new Map(),
+      }
+
+      const readTarget = parseReadTarget(tool, args, context?.cwd)
+      const readPage = parseReadPage(tool, args, context?.cwd)
+      if (readTarget !== undefined && context?.turnId !== undefined) {
+        if (readPathSeenThisTurn(state, readTarget.path, context.turnId, windowSize)) {
+          const receipt: LoopGuardReceipt = {
+            sessionId,
+            tool,
+            signature,
+            windowSignature: readPathSignature(readTarget.path),
+            recorded: false,
+            ...(readPage !== undefined ? { readPage } : {}),
+          }
+          touch(sessionId, state)
+          return { kind: 'ok', receipt }
+        }
+      }
+
+      const windowSig = makeWindowSignature(tool, args, state, context?.cwd)
+      const receipt: LoopGuardReceipt = {
+        sessionId,
+        tool,
+        signature,
+        windowSignature: windowSig,
+        recorded: true,
+        ...(readPage !== undefined ? { readPage } : {}),
       }
 
       if (state.signature !== signature) {
@@ -296,8 +348,14 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
       for (const sig of state.termKnown) {
         if (signatureBelongsToTool(sig, tool)) state.termKnown.delete(sig)
       }
+      if (tool === 'read') {
+        state.readTurnId = undefined
+        state.readPathsThisTurn.clear()
+        state.readFrontiers.clear()
+      }
     },
     retract(receipt) {
+      if (!receipt.recorded) return
       const state = sessions.get(receipt.sessionId)
       if (state === undefined) return
 
@@ -322,10 +380,20 @@ export function createLoopGuard(options: CreateLoopGuardOptions = {}): LoopGuard
       }
     },
     noteResult(receipt, result) {
+      if (!receipt.recorded) return
       const state = sessions.get(receipt.sessionId)
       if (state === undefined) return
       if (result === 'terminal') state.termKnown.add(receipt.signature)
       else state.termKnown.delete(receipt.signature)
+    },
+    noteReadResult(receipt, result) {
+      const page = receipt.readPage
+      if (page === undefined || !result.nonEmpty || result.textual === false) return
+      const state = sessions.get(receipt.sessionId)
+      if (state === undefined) return
+      const span = result.outputLines
+      if (span === undefined || !Number.isFinite(span) || span <= 0) return
+      updateReadFrontier(state, page.path, page.offset, page.offset + span, receipt.recorded, windowSize)
     },
   }
 }
@@ -385,7 +453,16 @@ function makeCallSignature(tool: string, args: unknown): string {
 // target path alone so re-reading one target with drifting non-path args
 // collapses to a single signature. All other tools fall back to the exact
 // signature.
-function makeWindowSignature(tool: string, args: unknown): string {
+function makeWindowSignature(tool: string, args: unknown, state: SessionState, cwd: string | undefined): string {
+  const readPage = parseReadPage(tool, args, cwd)
+  if (readPage !== undefined) {
+    const coarse = readPathSignature(readPage.path)
+    const previousFrontier = state.readFrontiers.get(readPage.path)?.frontier
+    return previousFrontier !== undefined && readPage.offset === previousFrontier
+      ? `${coarse}#frontier:${readPage.offset}`
+      : coarse
+  }
+
   const isRequiredPath = REQUIRED_PATH_TOOLS.has(tool)
   const isDefaultPath = DEFAULT_PATH_TOOLS.has(tool)
   if ((isRequiredPath || isDefaultPath) && args !== null && typeof args === 'object') {
@@ -399,6 +476,127 @@ function makeWindowSignature(tool: string, args: unknown): string {
     if (isDefaultPath) return `${tool}#path:${DEFAULT_PATH_TARGET}`
   }
   return makeCallSignature(tool, args)
+}
+
+type ReadTarget = { path: string }
+type ReadPage = ReadTarget & { offset: number; limit?: number }
+
+function parseReadTarget(tool: string, args: unknown, cwd?: string): ReadTarget | undefined {
+  if (tool !== 'read' || args === null || typeof args !== 'object') return undefined
+  const record = args as Record<string, unknown>
+  const path = PATH_ARG_KEYS.map((key) => record[key]).find(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  )
+  return path === undefined ? undefined : { path: canonicalizeReadPath(path, cwd) }
+}
+
+function parseReadPage(tool: string, args: unknown, cwd?: string): ReadPage | undefined {
+  const target = parseReadTarget(tool, args, cwd)
+  if (target === undefined || args === null || typeof args !== 'object') return undefined
+  const record = args as Record<string, unknown>
+  const { offset, limit } = record
+  if (
+    (offset !== undefined && (typeof offset !== 'number' || !Number.isFinite(offset) || offset < 1)) ||
+    (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0))
+  ) {
+    return undefined
+  }
+  return {
+    path: target.path,
+    offset: typeof offset === 'number' ? offset : 1,
+    ...(typeof limit === 'number' ? { limit } : {}),
+  }
+}
+
+function readPathSignature(path: string): string {
+  return `read#path:${path}`
+}
+
+function readPathSeenThisTurn(state: SessionState, path: string, turnId: number, maxReadPaths: number): boolean {
+  if (state.readTurnId !== turnId) {
+    state.readTurnId = turnId
+    state.readPathsThisTurn.clear()
+  }
+  const seen = state.readPathsThisTurn.has(path)
+  if (seen) state.readPathsThisTurn.delete(path)
+  state.readPathsThisTurn.add(path)
+  while (state.readPathsThisTurn.size > maxReadPaths) {
+    const oldest = state.readPathsThisTurn.values().next().value
+    if (oldest === undefined) break
+    state.readPathsThisTurn.delete(oldest)
+  }
+  return seen
+}
+
+function updateReadFrontier(
+  state: SessionState,
+  path: string,
+  observedStart: number,
+  observedEnd: number,
+  recorded: boolean,
+  maxReadFrontiers: number,
+): void {
+  let progress = state.readFrontiers.get(path)
+  if (progress === undefined) {
+    progress = { pending: new Map() }
+  }
+  state.readFrontiers.delete(path)
+  state.readFrontiers.set(path, progress)
+
+  if (progress.frontier === undefined) {
+    if (recorded) {
+      progress.frontier = observedEnd
+      drainContiguousReadIntervals(progress)
+    } else {
+      rememberReadInterval(progress, observedStart, observedEnd, maxReadFrontiers)
+    }
+  } else if (observedStart === progress.frontier) {
+    progress.frontier = observedEnd
+    drainContiguousReadIntervals(progress)
+  } else if (!recorded && observedStart > progress.frontier) {
+    rememberReadInterval(progress, observedStart, observedEnd, maxReadFrontiers)
+  }
+
+  while (state.readFrontiers.size > maxReadFrontiers) {
+    const oldest = state.readFrontiers.keys().next().value
+    if (oldest === undefined) break
+    state.readFrontiers.delete(oldest)
+  }
+}
+
+function rememberReadInterval(progress: ReadProgress, start: number, end: number, maxIntervals: number): void {
+  const previousEnd = progress.pending.get(start)
+  progress.pending.delete(start)
+  progress.pending.set(start, previousEnd === undefined ? end : Math.max(previousEnd, end))
+  while (progress.pending.size > maxIntervals) {
+    const oldest = progress.pending.keys().next().value
+    if (oldest === undefined) break
+    progress.pending.delete(oldest)
+  }
+}
+
+function drainContiguousReadIntervals(progress: ReadProgress): void {
+  let frontier = progress.frontier
+  if (frontier === undefined) return
+  for (const start of progress.pending.keys()) {
+    if (start < frontier) progress.pending.delete(start)
+  }
+  let nextEnd = progress.pending.get(frontier)
+  while (nextEnd !== undefined) {
+    progress.pending.delete(frontier)
+    frontier = nextEnd
+    progress.frontier = frontier
+    nextEnd = progress.pending.get(frontier)
+  }
+}
+
+function canonicalizeReadPath(path: string, cwd?: string): string {
+  const normalizedPath = path.replaceAll('\\', '/')
+  if (normalizedPath.startsWith('/') || /^[A-Za-z]:\//.test(normalizedPath)) {
+    return posix.normalize(normalizedPath)
+  }
+  if (cwd === undefined) return posix.normalize(normalizedPath)
+  return posix.normalize(`${cwd.replaceAll('\\', '/')}/${normalizedPath}`)
 }
 
 // Order-independent JSON serialization so semantically-identical objects

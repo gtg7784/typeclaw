@@ -1735,6 +1735,264 @@ describe('loop guard integration', () => {
     expect(aborts).toBe(0)
   })
 
+  test('does not abort a same-turn fan-out of paged reads against one file', async () => {
+    let calls = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({
+        path: Type.String(),
+        offset: Type.Optional(Type.Number()),
+        limit: Type.Optional(Type.Number()),
+      }),
+      async execute() {
+        calls += 1
+        return { content: [{ type: 'text' as const, text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-fan-out',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => 1,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    await Promise.all(
+      [1, 2, 3, 4, 5, 6].map((offset, index) =>
+        wrapped.execute(
+          `c${index}`,
+          { path: '/agent/router.ts', offset, limit: 100 },
+          undefined,
+          undefined,
+          {} as never,
+        ),
+      ),
+    )
+
+    expect(calls).toBe(6)
+    expect(aborts).toBe(0)
+  })
+
+  test('advances offset-only reads from observed truncation output', async () => {
+    let turnId = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()) }),
+      async execute() {
+        return {
+          content: [{ type: 'text' as const, text: 'page' }],
+          details: { truncation: { outputLines: 100 } },
+        }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-offset-only',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => turnId,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let offset = 1; offset <= 701; offset += 100) {
+      turnId += 1
+      await wrapped.execute(`c${turnId}`, { path: '/agent/router.ts', offset }, undefined, undefined, {} as never)
+    }
+    expect(aborts).toBe(0)
+  })
+
+  test('advances a short final read page only by the lines actually returned', async () => {
+    let turnId = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Number(), limit: Type.Number() }),
+      async execute(_callId, params) {
+        const lineCount = params.offset === 101 ? 50 : params.limit
+        const lines = Array.from({ length: lineCount }, (_, i) => `line ${i}`).join('\n')
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: params.offset === 1 ? `${lines}\n\n[50 more lines in file. Use offset=101 to continue.]` : lines,
+            },
+          ],
+          details: undefined,
+        }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-short-page',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => turnId,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+    const read = async (offset: number) => {
+      turnId += 1
+      return wrapped.execute(
+        `c${turnId}`,
+        { path: '/agent/router.ts', offset, limit: 100 },
+        undefined,
+        undefined,
+        {} as never,
+      )
+    }
+
+    await read(1)
+    await read(101)
+    for (const offset of [201, 202, 203, 204]) await read(offset)
+    await expect(read(205)).rejects.toThrow(/loop-guard/)
+    expect(aborts).toBe(1)
+  })
+
+  test('does not advance reads whose truncation observed zero file lines', async () => {
+    let turnId = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Number(), limit: Type.Number() }),
+      async execute() {
+        return {
+          content: [{ type: 'text' as const, text: 'line exceeds byte limit; use bash' }],
+          details: { truncation: { outputLines: 0 } },
+        }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-zero-lines',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => turnId,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let offset = 1; offset <= 5; offset++) {
+      turnId += 1
+      await wrapped.execute(
+        `c${turnId}`,
+        { path: '/agent/router.ts', offset, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      )
+    }
+    turnId += 1
+    await expect(
+      wrapped.execute('c6', { path: '/agent/router.ts', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/loop-guard/)
+    expect(aborts).toBe(1)
+  })
+
+  test('does not infer paginated progress from image read results', async () => {
+    let turnId = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Number(), limit: Type.Number() }),
+      async execute() {
+        return {
+          content: [
+            { type: 'text' as const, text: 'Read image file [image/png]' },
+            { type: 'image' as const, data: 'AA==', mimeType: 'image/png' },
+          ],
+          details: undefined,
+        }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-image',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => turnId,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let offset = 1; offset <= 5; offset++) {
+      turnId += 1
+      await wrapped.execute(
+        `c${turnId}`,
+        { path: '/agent/blob.dat', offset, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      )
+    }
+    turnId += 1
+    await expect(
+      wrapped.execute('c6', { path: '/agent/blob.dat', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/loop-guard/)
+    expect(aborts).toBe(1)
+  })
+
+  test('does not infer textual progress from an omitted image fallback', async () => {
+    let turnId = 0
+    let aborts = 0
+    const tool = definePiTool({
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Number(), limit: Type.Number() }),
+      async execute() {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Read image file [image/png]\n[Image omitted: could not be resized below the inline image size limit.]',
+            },
+          ],
+          details: undefined,
+        }
+      },
+    })
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir: '/agent',
+      sessionId: 'read-image-fallback',
+      hooks: createHookBus(),
+      getLoopGuardTurn: () => turnId,
+      getAbort: () => () => {
+        aborts += 1
+      },
+    })
+
+    for (let offset = 1; offset <= 5; offset++) {
+      turnId += 1
+      await wrapped.execute(
+        `c${turnId}`,
+        { path: '/agent/blob.dat', offset, limit: 1 },
+        undefined,
+        undefined,
+        {} as never,
+      )
+    }
+    turnId += 1
+    await expect(
+      wrapped.execute('c6', { path: '/agent/blob.dat', offset: 6, limit: 1 }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/loop-guard/)
+    expect(aborts).toBe(1)
+  })
+
   // A subagent_output poll that returns status:'running' is a still-pending
   // wait, not a loop. The wrapper retracts it from the guard so round-robin
   // fan-out polling never false-blocks (the production incident).

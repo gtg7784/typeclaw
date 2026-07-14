@@ -84,7 +84,7 @@ The `contextBuffer` only flushes inside `drain()`, which only runs on an `engage
 
 ## Peer-bot loop guard
 
-Distinct from the per-session [tool loop guard](/docs/internals/message-stream) (`src/agent/loop-guard.ts`, byte-identical tool calls). The channel-level guard (`updateLoopGuard`, `router.ts`) counts **engaged peer-bot turns since the last human**:
+Distinct from the per-session [tool loop guard](/docs/internals/message-stream) (`src/agent/loop-guard.ts`, exact-call and sliding-window cycle detection). The channel-level guard (`updateLoopGuard`, `router.ts`) counts **engaged peer-bot turns since the last human**:
 
 - Any human inbound resets the counters and clears `loopGuardActive`.
 - A peer-bot engage increments `consecutiveEngagedPeerBotTurns` and pushes onto a sliding `PEER_BOT_TURNS_WINDOW_MS` (60s) window.

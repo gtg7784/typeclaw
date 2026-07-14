@@ -19,12 +19,19 @@ Adding a fifth kind is a deliberate design choice. No generic `handler` extensio
 
 ## Subagents
 
-`src/agent/subagents.ts` defines the `Subagent` type and the `SubagentConsumer`. Two paths converge on `invokeSubagent`:
+`src/agent/subagents.ts` defines the `Subagent` type and the `SubagentConsumer`. Three paths converge on `invokeSubagent`:
 
 1. `ctx.spawnSubagent(name, payload, options)` — direct, no Stream. Plugin hooks, main-agent `spawn-subagent` tool, plugin commands.
 2. Cron with a `subagent` field → `target: { kind: 'new-session' }` → `SubagentConsumer` → `invokeSubagent`. The Stream path exists so the scheduler doesn't need to import the registry.
+3. `startSubagent` wraps `invokeSubagent` with a live handle and completion result for sync/background tool spawns. Background completions publish `subagent.completed`; failed runs can carry a captured final message as recoverable output without changing the failed lifecycle status.
 
 Production registry is built from plugin contributions. The bundled memory plugin is auto-loaded and contributes `memory-logger` + `dreaming`. Each plugin `Subagent` may declare `inFlightKey(payload)`; consumer uses `${name}:${key}` as the dedup key (both memory-logger and dreaming key by `agentDir`). `payloadSchema` is validated by the cron loader at parse time and on every `reloadAll()`.
+
+### Tool-loop termination
+
+`src/agent/loop-guard.ts` combines exact repeated-call detection with a sliding target window. Reads are classified at the awaited SDK `turn_start` boundary: calls for one canonical path emitted in the same assistant tool batch count once. Successful non-empty textual results contribute bounded observed intervals; recorded pages establish the frontier, and exact-adjacent sibling intervals extend it even when parallel calls finish out of order. Suppressed siblings do not count as independent loop observations. Recorded images, overlap, backtracking, gaps, empty results, and malformed ranges retain the coarse path signature and accumulate toward a block.
+
+A confirmed block aborts the active SDK run because returning a tool error alone lets a looping model retry indefinitely. `loop_guard:block` and `loop_guard:deferred_block` are lifecycle failures for subagents; `startSubagent` reports `ok: false` and preserves any assistant result captured before the abort only as recoverable output. Required-result repair retries never convert that forced termination back into success.
 
 ## Bundled plugins
 

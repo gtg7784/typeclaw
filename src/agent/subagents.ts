@@ -367,6 +367,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           },
         })
         if (result.success) activeModelRef = result.refUsed
+        throwIfLoopGuardAborted(session)
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)
@@ -377,10 +378,12 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           drain: backgroundDrain,
           prompt: async (text) => {
             await promptWithSameRefRetryOnly(session, `${renderTurnTimeAnchor()}\n\n${text}`)
+            throwIfLoopGuardAborted(session)
           },
           cancelled: () => aborted,
         })
       }
+      throwIfLoopGuardAborted(session)
       // Required-block guard (mirrors the channel empty-response guard): a subagent
       // that owes a result block but ended without one gets a bounded re-prompt to
       // emit it as text, then an honest fallback — never a silent stale-preamble
@@ -400,6 +403,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
             session,
             `${renderTurnTimeAnchor()}\n\n${renderRequiredBlockRetryNudge(requiredBlockTag)}`,
           )
+          throwIfLoopGuardAborted(session)
         }
         if (!aborted && !capture.hasRequiredBlock()) {
           console.warn(`[subagent] ${name} required_block_fallback tag=${requiredBlockTag}`)
@@ -446,6 +450,19 @@ export class SubagentTimeoutError extends Error {
   ) {
     super(`subagent ${subagentName} (key=${coalesceKey}) spawn timed out after ${timeoutMs}ms`)
   }
+}
+
+class SubagentLoopGuardAbortError extends Error {
+  override readonly name = 'SubagentLoopGuardAbortError'
+
+  constructor(readonly reason: string) {
+    super(`subagent aborted by loop guard (${reason})`)
+  }
+}
+
+function throwIfLoopGuardAborted(session: AgentSession): void {
+  const reason = (session as AgentSession & { getAbortReason?: () => string | undefined }).getAbortReason?.()
+  if (reason?.startsWith('loop_guard:') === true) throw new SubagentLoopGuardAbortError(reason)
 }
 
 export function isSubagentTimeoutError(err: unknown): err is SubagentTimeoutError {
@@ -544,7 +561,7 @@ export function startSubagent(name: string, options: StartSubagentOptions): Star
       if (!handleSettled) {
         rejectHandle(err instanceof Error ? err : new Error(error))
       }
-      return { ok: false as const, error }
+      return { ok: false as const, error, ...(finalMessage !== undefined ? { finalMessage } : {}) }
     })
 
   const timeoutMs = options.registry[name]?.timeoutMs
@@ -688,7 +705,7 @@ function attachFinalMessageCapture(
   let lastReview: string | null = null
   let lastRequired: string | null = null
   try {
-    session.subscribe((event: unknown) => {
+    subscribeToAwaitedAgentEvents(session, (event: unknown) => {
       const ev = event as { type?: string; message?: { role?: string; content?: unknown } }
       if (ev?.type !== 'message_end') return
       // Real assistant messages carry role 'assistant'; older test doubles omit
@@ -729,6 +746,15 @@ function attachFinalMessageCapture(
       onFinalMessage(msg)
     },
   }
+}
+
+function subscribeToAwaitedAgentEvents(session: AgentSession, listener: (event: unknown) => void): () => void {
+  const agent = (
+    session as AgentSession & {
+      agent?: { subscribe?: (listener: (event: unknown) => void) => () => void }
+    }
+  ).agent
+  return agent?.subscribe?.(listener) ?? session.subscribe(listener)
 }
 
 function extractFinalMessageText(content: unknown): string | null {

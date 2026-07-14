@@ -19,6 +19,7 @@ import { createStream } from '@/stream'
 import {
   buildChannelTools,
   buildSubagentOrchestrationTools,
+  attachLoopGuardTurnTracking,
   composeSystemPrompt,
   createOverrideResourceLoader,
   createResourceLoader,
@@ -72,6 +73,35 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(agentDir, { recursive: true, force: true })
+})
+
+describe('attachLoopGuardTurnTracking', () => {
+  test('advances only on awaited agent turn_start events and unsubscribes cleanly', () => {
+    let listener: ((event: unknown) => void) | undefined
+    let unsubscribed = false
+    let turns = 0
+    const unsubscribe = attachLoopGuardTurnTracking(
+      {
+        subscribe: (next) => {
+          listener = next
+          return () => {
+            unsubscribed = true
+          }
+        },
+      },
+      () => {
+        turns += 1
+      },
+    )
+
+    listener?.({ type: 'message_start' })
+    listener?.({ type: 'turn_start' })
+    listener?.({ type: 'turn_start' })
+    expect(turns).toBe(2)
+
+    unsubscribe()
+    expect(unsubscribed).toBe(true)
+  })
 })
 
 describe('createResourceLoader', () => {

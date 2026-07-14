@@ -205,6 +205,199 @@ describe('createLoopGuard — windowed multi-signature detection', () => {
     if (last.kind === 'block') expect(last.reason).toBe('windowed')
   })
 
+  test('records one same-path read observation per model turn', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+
+    const decisions = [1, 2, 3, 4, 5, 6].map((offset) =>
+      guard.check('s1', 'read', { path: '/agent/router.ts', offset, limit: 100 }, { turnId: 1 }),
+    )
+
+    expect(decisions.every((decision) => decision.kind === 'ok')).toBe(true)
+    expect(decisions.map((decision) => decision.receipt.recorded)).toEqual([true, false, false, false, false, false])
+  })
+
+  test('records one same-path read observation per model turn when pagination args are omitted', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const decisions = Array.from({ length: 6 }, () =>
+      guard.check('s1', 'read', { path: '/agent/router.ts' }, { turnId: 1 }),
+    )
+    expect(decisions.every((decision) => decision.kind === 'ok')).toBe(true)
+    expect(decisions.map((decision) => decision.receipt.recorded)).toEqual([true, false, false, false, false, false])
+  })
+
+  test('does not count non-overlapping read pages across model turns as a cycle', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+
+    for (let turnId = 1; turnId <= 8; turnId++) {
+      const offset = 1 + (turnId - 1) * 100
+      const decision = guard.check('s1', 'read', { path: '/agent/router.ts', offset, limit: 100 }, { turnId })
+      expect(decision.kind).toBe('ok')
+      guard.noteReadResult(decision.receipt, { nonEmpty: true, outputLines: 100 })
+    }
+  })
+
+  test('merges out-of-order contiguous sibling pages across repeated fan-out turns', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+
+    for (let turnId = 1; turnId <= 6; turnId++) {
+      const firstOffset = 1 + (turnId - 1) * 600
+      const decisions = Array.from({ length: 6 }, (_, index) =>
+        guard.check(
+          's1',
+          'read',
+          { path: '/agent/router.ts', offset: firstOffset + index * 100, limit: 100 },
+          { turnId },
+        ),
+      )
+      expect(decisions.every((decision) => decision.kind === 'ok')).toBe(true)
+      for (const index of [5, 3, 1, 4, 2, 0]) {
+        guard.noteReadResult(decisions[index]!.receipt, { nonEmpty: true, outputLines: 100 })
+      }
+    }
+  })
+
+  test('uses observed output lines to advance offset-only reads', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    for (let turnId = 1; turnId <= 8; turnId++) {
+      const offset = 1 + (turnId - 1) * 100
+      const decision = guard.check('s1', 'read', { path: '/agent/router.ts', offset }, { turnId })
+      expect(decision.kind).toBe('ok')
+      guard.noteReadResult(decision.receipt, { nonEmpty: true, outputLines: 100 })
+    }
+  })
+
+  test('still blocks overlapping read pages across model turns', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+    let last = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 100 }, { turnId: 1 })
+    guard.noteReadResult(last.receipt, { nonEmpty: true, outputLines: 100 })
+    for (let turnId = 2; turnId <= 6; turnId++) {
+      last = guard.check('s1', 'read', { path: '/agent/router.ts', offset: turnId, limit: 100 }, { turnId })
+      guard.noteReadResult(last.receipt, { nonEmpty: true, outputLines: 100 })
+    }
+
+    expect(last.kind).toBe('block')
+    if (last.kind === 'block') expect(last.reason).toBe('windowed')
+  })
+
+  test('still blocks backtracking read pages across model turns', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+    const offsets = [1, 101, 1, 101, 1, 101, 1, 101]
+    let last = guard.check('s1', 'read', { path: '/agent/router.ts', offset: offsets[0]!, limit: 100 }, { turnId: 1 })
+    guard.noteReadResult(last.receipt, { nonEmpty: true, outputLines: 100 })
+    for (const [index, offset] of offsets.slice(1).entries()) {
+      last = guard.check('s1', 'read', { path: '/agent/router.ts', offset, limit: 100 }, { turnId: index + 2 })
+      guard.noteReadResult(last.receipt, { nonEmpty: true, outputLines: 100 })
+    }
+
+    expect(last.kind).toBe('block')
+    if (last.kind === 'block') expect(last.reason).toBe('windowed')
+  })
+
+  test('overlapping suppressed same-turn reads cannot move the observed frontier', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const first = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 100 }, { turnId: 1 })
+    const extending = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 51, limit: 100 }, { turnId: 1 })
+    guard.noteReadResult(first.receipt, { nonEmpty: true, outputLines: 100 })
+    guard.noteReadResult(extending.receipt, { nonEmpty: true, outputLines: 100 })
+
+    const skipped = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 151, limit: 100 }, { turnId: 2 })
+    expect(skipped.receipt.windowSignature).toBe('read#path:/agent/router.ts')
+    const next = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 101, limit: 100 }, { turnId: 3 })
+    expect(next.receipt.windowSignature).toContain('#frontier:101')
+  })
+
+  test('recorded overlapping reads cannot extend the contiguous frontier', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const first = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 100 }, { turnId: 1 })
+    guard.noteReadResult(first.receipt, { nonEmpty: true, outputLines: 100 })
+    const overlap = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 51, limit: 100 }, { turnId: 2 })
+    guard.noteReadResult(overlap.receipt, { nonEmpty: true, outputLines: 100 })
+
+    const next = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 101, limit: 100 }, { turnId: 3 })
+    expect(next.receipt.windowSignature).toContain('#frontier:101')
+  })
+
+  test('does not treat skipped offsets or empty results as forward progress', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const first = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 100 }, { turnId: 1 })
+    guard.noteReadResult(first.receipt, { nonEmpty: true, outputLines: 100 })
+    const skipped = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 10_000, limit: 100 }, { turnId: 2 })
+    expect(skipped.receipt.windowSignature).toBe('read#path:/agent/router.ts')
+    guard.noteReadResult(skipped.receipt, { nonEmpty: true, outputLines: 100 })
+    const expectedFrontier = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 101 }, { turnId: 3 })
+    expect(expectedFrontier.receipt.windowSignature).toContain('#frontier:101')
+  })
+
+  test('treats an observed zero-line read result as no progress', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const first = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 1 }, { turnId: 1 })
+    guard.noteReadResult(first.receipt, { nonEmpty: true, outputLines: 0 })
+    const next = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 2, limit: 1 }, { turnId: 2 })
+    expect(next.receipt.windowSignature).toBe('read#path:/agent/router.ts')
+  })
+
+  test('bounds same-turn read-path deduplication state', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 4, windowSoftWarn: 3, windowHardBlock: 4 })
+    for (const path of ['a', 'b', 'c', 'd', 'e']) guard.check('s1', 'read', { path }, { turnId: 1 })
+    const revisitedEvictedPath = guard.check('s1', 'read', { path: 'a' }, { turnId: 1 })
+    expect(revisitedEvictedPath.receipt.recorded).toBe(true)
+  })
+
+  test('canonicalizes lexical read-path aliases before window accounting', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const aliases = ['x', './x', 'a/../x', './a/../x', 'b/../x', '././x']
+    let last = guard.check('s1', 'read', { path: aliases[0] }, { turnId: 1, cwd: '/agent' })
+    for (const [index, path] of aliases.slice(1).entries()) {
+      last = guard.check('s1', 'read', { path }, { turnId: index + 2, cwd: '/agent' })
+    }
+    expect(last.kind).toBe('block')
+    if (last.kind === 'block') expect(last.reason).toBe('windowed')
+  })
+
+  test('uses platform-neutral canonical keys for Windows-style read paths', () => {
+    const guard = createLoopGuard({ ...noConsecutive, windowSize: 16, windowSoftWarn: 4, windowHardBlock: 6 })
+    const first = guard.check(
+      's1',
+      'read',
+      { path: '.\\router.ts', offset: 1, limit: 100 },
+      { turnId: 1, cwd: 'C:\\agent' },
+    )
+    const alias = guard.check(
+      's1',
+      'read',
+      { path: 'C:/agent/router.ts', offset: 101, limit: 100 },
+      { turnId: 1, cwd: 'C:\\agent' },
+    )
+
+    expect(first.receipt.windowSignature).toBe('read#path:C:/agent/router.ts')
+    expect(alias.receipt.recorded).toBe(false)
+  })
+
   test('does not flag legitimate fan-out reads across distinct paths', () => {
     const guard = createLoopGuard({
       ...noConsecutive,
@@ -525,8 +718,29 @@ describe('createLoopGuard — retract', () => {
 
   test('is a no-op for an unknown session', () => {
     const guard = windowGuard()
-    const receipt = { sessionId: 'missing', tool: 'subagent_output', signature: 'x', windowSignature: 'y' }
+    const receipt = {
+      sessionId: 'missing',
+      tool: 'subagent_output',
+      signature: 'x',
+      windowSignature: 'y',
+      recorded: true,
+    }
     expect(() => guard.retract(receipt)).not.toThrow()
+  })
+
+  test('retracting a suppressed same-turn read does not remove its recorded sibling', () => {
+    const guard = windowGuard()
+    const recorded = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 1, limit: 100 }, { turnId: 1 })
+    const suppressed = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 101, limit: 100 }, { turnId: 1 })
+    expect(recorded.receipt.recorded).toBe(true)
+    expect(suppressed.receipt.recorded).toBe(false)
+
+    guard.retract(suppressed.receipt)
+    for (let turnId = 2; turnId <= 5; turnId++) {
+      guard.check('s1', 'read', { path: '/agent/router.ts', offset: turnId, limit: 100 }, { turnId })
+    }
+    const blocked = guard.check('s1', 'read', { path: '/agent/router.ts', offset: 6, limit: 100 }, { turnId: 6 })
+    expect(blocked.kind).toBe('block')
   })
 })
 
@@ -589,7 +803,13 @@ describe('createLoopGuard — noteResult / deferable', () => {
 
   test('noteResult is a no-op for an unknown session', () => {
     const guard = createLoopGuard({ softWarn: 3, hardBlock: 5 })
-    const receipt = { sessionId: 'missing', tool: 'subagent_output', signature: 'x', windowSignature: 'y' }
+    const receipt = {
+      sessionId: 'missing',
+      tool: 'subagent_output',
+      signature: 'x',
+      windowSignature: 'y',
+      recorded: true,
+    }
     expect(() => guard.noteResult(receipt, 'terminal')).not.toThrow()
   })
 })
