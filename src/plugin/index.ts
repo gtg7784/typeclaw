@@ -60,6 +60,7 @@ export type {
   ToolBeforeEvent,
   ToolBeforeResult,
   ToolContext,
+  ToolFileOperands,
   ToolLogger,
   ToolResult,
 } from './types'
