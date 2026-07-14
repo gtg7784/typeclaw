@@ -3,14 +3,16 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { DiscordBotClient, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
+import type { DiscordBotClient, DiscordBotListener, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
 import { DiscordIntent } from 'agent-messenger/discordbot'
 
+import type { ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 import type { ChannelKey } from '@/channels/types'
 
 import {
+  createDiscordBotAdapter,
   createDiscordHistoryCallback,
   createDiscordListCallback,
   createDiscordMembershipResolver,
@@ -35,6 +37,67 @@ describe('discord-bot gateway intents', () => {
 
   test('includes GuildMessages so guild channel messages are delivered', () => {
     expect(DISCORD_BOT_INTENTS & DiscordIntent.GuildMessages).toBe(DiscordIntent.GuildMessages)
+  })
+})
+
+describe('discord-bot lifecycle', () => {
+  test('reports live gateway state while retaining bot identity across reconnects', async () => {
+    const listener = new FakeDiscordBotListener()
+    const router = new FakeDiscordBotRouter()
+    const adapter = createDiscordBotAdapter({
+      router: router.value,
+      configRef: () => lifecycleConfig(),
+      token: 'token-1',
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      fetchImpl: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
+      createClient: () => fakeDiscordBotClient(),
+      createListener: () => listener.value,
+    })
+
+    expect(adapter.isConnected()).toBe(false)
+    await adapter.start()
+    expect(adapter.isConnected()).toBe(true)
+    expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1' })
+
+    listener.emit('disconnected', 'transport closed')
+    expect(adapter.isConnected()).toBe(false)
+    expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1' })
+
+    listener.emit('connected', connectedInfo())
+    expect(adapter.isConnected()).toBe(true)
+
+    listener.emit('error', new Error('temporary gateway transport error'))
+    expect(adapter.isConnected()).toBe(true)
+
+    listener.emit('error', new Error('Discord gateway closed with non-recoverable code 4004'))
+    expect(adapter.isConnected()).toBe(false)
+    expect(router.selfIdentity?.('@dm')).toEqual({ id: 'bot-1' })
+
+    listener.emit('connected', connectedInfo())
+    expect(adapter.isConnected()).toBe(true)
+
+    await adapter.stop()
+    expect(adapter.isConnected()).toBe(false)
+    expect(listener.stopped).toBe(true)
+    expect(router.unregistered).toEqual(router.registered)
+  })
+
+  test('remains disconnected when listener startup fails', async () => {
+    const listener = new FakeDiscordBotListener({ failStart: true })
+    const router = new FakeDiscordBotRouter()
+    const adapter = createDiscordBotAdapter({
+      router: router.value,
+      configRef: () => lifecycleConfig(),
+      token: 'token-1',
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      fetchImpl: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
+      createClient: () => fakeDiscordBotClient(),
+      createListener: () => listener.value,
+    })
+
+    await expect(adapter.start()).rejects.toThrow('start failed')
+    expect(adapter.isConnected()).toBe(false)
+    expect(router.unregistered).toEqual(router.registered)
   })
 })
 
@@ -1868,3 +1931,85 @@ describe('createInteractionHandler', () => {
     expect(events.map((e) => e.kind)).toEqual(['router-call', 'ack-sent', 'channel-tag-resolved'])
   })
 })
+
+class FakeDiscordBotListener {
+  private handlers = new Map<string, Array<(arg: unknown) => void>>()
+  readonly value = this as unknown as DiscordBotListener
+  stopped = false
+
+  constructor(private readonly options: { failStart?: boolean } = {}) {}
+
+  on(event: string, listener: (arg: unknown) => void): this {
+    this.handlers.set(event, [...(this.handlers.get(event) ?? []), listener])
+    return this
+  }
+
+  async start(): Promise<void> {
+    if (this.options.failStart) throw new Error('start failed')
+    this.emit('connected', connectedInfo())
+  }
+
+  stop(): void {
+    this.stopped = true
+  }
+
+  emit(event: string, payload: unknown): void {
+    for (const handler of this.handlers.get(event) ?? []) handler(payload)
+  }
+}
+
+class FakeDiscordBotRouter {
+  readonly registered: string[] = []
+  readonly unregistered: string[] = []
+  selfIdentity: ((workspace: string) => { id: string; username?: string } | null) | null = null
+  readonly value = {
+    route: async () => {},
+    registerOutbound: () => this.registered.push('outbound'),
+    unregisterOutbound: () => this.unregistered.push('outbound'),
+    registerReaction: () => this.registered.push('reaction'),
+    unregisterReaction: () => this.unregistered.push('reaction'),
+    registerRemoveReaction: () => this.registered.push('removeReaction'),
+    unregisterRemoveReaction: () => this.unregistered.push('removeReaction'),
+    registerTyping: () => this.registered.push('typing'),
+    unregisterTyping: () => this.unregistered.push('typing'),
+    setTypingCapability: (_adapter: string, supported: boolean) =>
+      (supported ? this.registered : this.unregistered).push('typingCapability'),
+    registerChannelNameResolver: () => this.registered.push('channelNameResolver'),
+    unregisterChannelNameResolver: () => this.unregistered.push('channelNameResolver'),
+    registerSelfIdentity: (_adapter: string, cb: (workspace: string) => { id: string; username?: string } | null) => {
+      this.selfIdentity = cb
+      this.registered.push('selfIdentity')
+    },
+    unregisterSelfIdentity: () => this.unregistered.push('selfIdentity'),
+    registerHistory: () => this.registered.push('history'),
+    unregisterHistory: () => this.unregistered.push('history'),
+    registerMessageGet: () => this.registered.push('messageGet'),
+    unregisterMessageGet: () => this.unregistered.push('messageGet'),
+    registerList: () => this.registered.push('list'),
+    unregisterList: () => this.unregistered.push('list'),
+    registerEditMessage: () => this.registered.push('editMessage'),
+    unregisterEditMessage: () => this.unregistered.push('editMessage'),
+    registerFetchAttachment: () => this.registered.push('fetchAttachment'),
+    unregisterFetchAttachment: () => this.unregistered.push('fetchAttachment'),
+    registerMembership: () => this.registered.push('membership'),
+    unregisterMembership: () => this.unregistered.push('membership'),
+  } as unknown as ChannelRouter
+}
+
+function connectedInfo() {
+  return { user: { id: 'bot-1', username: 'Typeey' }, sessionId: 'session-1' }
+}
+
+function lifecycleConfig(): ChannelAdapterConfig {
+  return {
+    engagement: { trigger: ['mention'], stickiness: 'off' },
+    enabled: true,
+    history: defaultHistoryConfig(),
+  }
+}
+
+function fakeDiscordBotClient() {
+  return {
+    login: async () => fakeDiscordBotClient(),
+  } as unknown as ReturnType<NonNullable<Parameters<typeof createDiscordBotAdapter>[0]['createClient']>>
+}
