@@ -9,7 +9,7 @@ export type SandboxNetwork = 'none' | 'inherit'
 // 'proc-bind' (the runtime default): --ro-bind /proc /proc binds the container's
 // ALREADY-REAL procfs straight into the sandbox — no `unshare --mount-proc`, no
 // CAP_SYS_ADMIN. A JS package runner's child gets a real /proc/self/{fd,maps,exe}
-// so `bunx`/`bun add`/`bun run <pkg-bin>` stop aborting with Bun's ENOTDIR. The
+// so allowed `bunx`/`bun run <pkg-bin>` calls stop aborting with Bun's ENOTDIR. The
 // agent runtime's /proc/<agent>/environ (OPENAI_API_KEY, GH_TOKEN) is NOT
 // leaked: build.ts always emits --unshare-user, so the sandboxed bash runs as
 // mapped-root in a CHILD user namespace that is not an ancestor of the agent
@@ -37,6 +37,11 @@ export type SandboxProcStrategy = 'tmpfs' | 'none' | 'real-proc' | 'proc-bind'
 export type SandboxEnvPolicy = {
   set?: Record<string, string>
   passthrough?: string[]
+  // Preserve these names from bwrap's parent environment without rendering
+  // their values in argv. The builder switches from --clearenv to explicit
+  // --unsetenv for every other inherited name. Reserved for command-scoped
+  // secrets whose parent process is protected by the child-userns boundary.
+  inherit?: string[]
 }
 
 export type SandboxCommandFilter = {
@@ -94,34 +99,16 @@ export type SandboxSymlinkOp = {
   dest: string
 }
 
-// A single RW bind of the project root, used ONLY by the package-install path
-// (recognized standalone `bun add`/`bun install` commands). `bun add` writes
-// node_modules/ AND a temp lockfile (`bun.lock.NNN.tmp`, atomically renamed)
-// directly under the root, so a file-level RW bind of `bun.lock` alone is
-// insufficient — Bun needs DIRECTORY write to create its temp file. The default
-// ro-root + narrow carve-out model can't express that, so this widens the root
-// to RW for that command class only.
+// A single RW bind of the project root used for trusted/owner compatibility.
+// Model-driven package installs are denied before sandbox construction; this
+// preserves ordinary root writes without granting lifecycle-script persistence.
 //
 // CRITICAL ordering: unlike `writable` (rendered AFTER masks), `writableRoot`
 // renders BEFORE masks so the broad RW root does not re-expose secrets. With
 // last-op-wins the chain is: ro-bind root → writableRoot (RW root) → masks
-// (re-hide .env/secrets.json/private dirs) → protected (re-RO node_modules/typeclaw,
-// packages, .agents/skills, .git/hooks, .git/config). Everything stays hidden or
-// EROFS except the dirs a dependency install legitimately needs to write.
+// (re-hide .env/secrets.json/private dirs) → protected (.git/hooks/.git/config).
 export type SandboxWritableRootPolicy = {
   dir: string
-}
-
-// Paths whose CREATION must be blocked under a writable root, rendered as
-// `--ro-bind /dev/null <path>`. Used by the package-install path for the
-// semantically-guarded managed files (cron.json / typeclaw.json) when they are
-// ABSENT: the RW root would otherwise let a postinstall lifecycle script create
-// them, bypassing the write/edit-tool guards. Binding /dev/null occupies the
-// path with an empty read-only object (blocking creation) WITHOUT manufacturing
-// a real invalid file on the host FS. Renders after writableRoot, with the
-// protected binds, so last-op-wins keeps the path occupied.
-export type SandboxBlockedCreationPolicy = {
-  files?: string[]
 }
 
 export type SandboxPolicy = {
@@ -140,7 +127,6 @@ export type SandboxPolicy = {
   masks?: SandboxMaskPolicy
   writable?: SandboxWritablePolicy
   protected?: SandboxProtectedPolicy
-  blockedCreation?: SandboxBlockedCreationPolicy
   symlinks?: SandboxSymlinkOp[]
   network?: SandboxNetwork
   env?: SandboxEnvPolicy
@@ -158,7 +144,7 @@ export type SandboxPolicy = {
 //
 // BUN_TMPDIR / BUN_INSTALL both point under /tmp because `--clearenv` strips
 // the host's TMPDIR, and bun refuses to run without a writable scratch dir it
-// can discover: `bunx`, `bun add`, and `bun run <pkg-bin>` abort with
+// can discover: `bunx` and `bun run <pkg-bin>` abort with
 // "Unexpected accessing temporary directory. Please set $BUN_TMPDIR or
 // $BUN_INSTALL". /tmp is always writable inside the sandbox (fresh tmpfs, or
 // the per-session bind that overrides it), so both are safe targets. Without

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { readFile } from 'node:fs/promises'
 
 import { buildSandboxedCommand } from './build'
 import { SandboxPolicyError } from './errors'
@@ -143,6 +144,47 @@ describe('buildSandboxedCommand env policy', () => {
       delete process.env.TYPECLAW_SANDBOX_SECRET
     }
   })
+
+  test('preserves an approved env name without placing its value in bwrap argv', () => {
+    const name = 'TYPECLAW_SANDBOX_INHERITED_SECRET'
+    const value = 'secret-value-that-must-not-enter-cmdline'
+    process.env[name] = value
+    try {
+      const argv = argvOf('true', { env: { inherit: [name] } })
+      expect(argv).not.toContain('--clearenv')
+      expect(argv).not.toContain(value)
+      expect(argv).not.toEqual(expect.arrayContaining(['--setenv', name, value]))
+      expect(argv).not.toEqual(expect.arrayContaining(['--unsetenv', name]))
+    } finally {
+      delete process.env[name]
+    }
+  })
+
+  test('keeps an inherited secret out of /proc cmdline while the child receives it', async () => {
+    if (process.platform !== 'linux') return
+    const name = 'TYPECLAW_SANDBOX_PROC_SECRET'
+    const value = 'proc-secret-value'
+    process.env[name] = value
+    try {
+      const argv = argvOf('true', { env: { inherit: [name] } })
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          '-e',
+          `process.stdout.write(process.env.${name} ?? ''); setTimeout(() => {}, 250)`,
+          '--',
+          ...argv,
+        ],
+        { env: process.env, stdout: 'pipe', stderr: 'pipe' },
+      )
+      const cmdline = await readFile(`/proc/${child.pid}/cmdline`, 'utf8')
+      expect(cmdline).not.toContain(value)
+      expect(await new Response(child.stdout).text()).toBe(value)
+      expect(await child.exited).toBe(0)
+    } finally {
+      delete process.env[name]
+    }
+  })
 })
 
 describe('buildSandboxedCommand mounts', () => {
@@ -243,14 +285,14 @@ describe('buildSandboxedCommand writable overlays', () => {
   })
 })
 
-describe('buildSandboxedCommand writableRoot (package-install mode)', () => {
+describe('buildSandboxedCommand writableRoot (trusted-role compatibility)', () => {
   test('RW-binds the project root with --bind <root> <root>', () => {
-    const joined = argvOf('bun add foo', { writableRoot: { dir: '/agent' } }).join(' ')
+    const joined = argvOf('printf safe > ordinary.txt', { writableRoot: { dir: '/agent' } }).join(' ')
     expect(joined).toContain('--bind /agent /agent')
   })
 
   test('renders the RW root BEFORE masks so secret masks override it (no re-expose)', () => {
-    const argv = argvOf('bun add foo', {
+    const argv = argvOf('printf safe > ordinary.txt', {
       mounts: [{ type: 'ro-bind', source: '/agent', dest: '/agent' }],
       writableRoot: { dir: '/agent' },
       masks: { dirs: ['/agent/memory'], files: ['/agent/.env'] },
@@ -264,15 +306,15 @@ describe('buildSandboxedCommand writableRoot (package-install mode)', () => {
   })
 
   test('renders the RW root BEFORE protected re-binds so executable surfaces stay RO', () => {
-    const argv = argvOf('bun add foo', {
+    const argv = argvOf('printf safe > ordinary.txt', {
       writableRoot: { dir: '/agent' },
-      protected: { dirs: ['/agent/packages', '/agent/node_modules/typeclaw'], files: ['/agent/.git/config'] },
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
     })
     const rwRoot = argv.indexOf('--bind')
-    const packages = argv.indexOf('/agent/packages')
-    const runtime = argv.indexOf('/agent/node_modules/typeclaw')
-    expect(rwRoot).toBeLessThan(packages)
-    expect(rwRoot).toBeLessThan(runtime)
+    const hooks = argv.indexOf('/agent/.git/hooks')
+    const config = argv.indexOf('/agent/.git/config')
+    expect(rwRoot).toBeLessThan(hooks)
+    expect(rwRoot).toBeLessThan(config)
   })
 
   test('emits no RW root bind when the policy omits writableRoot', () => {
@@ -303,6 +345,23 @@ describe('buildSandboxedCommand protected re-binds', () => {
     expect(configProtect).toBeGreaterThan(writableGit)
   })
 
+  test('renders node_modules read-only after a trusted root bind while confined policy remains valid', () => {
+    const trusted = argvOf('printf safe > ordinary.txt', {
+      writableRoot: { dir: '/agent' },
+      protected: { dirs: ['/agent/node_modules'], files: [] },
+    })
+    const confined = argvOf('printf safe > workspace/output.txt', {
+      writable: { dirs: ['/agent/workspace'], files: [] },
+      protected: { dirs: ['/agent/node_modules'], files: [] },
+    })
+
+    expect(trusted.indexOf('/agent')).toBeLessThan(trusted.indexOf('/agent/node_modules'))
+    expect(trusted.join(' ')).toContain('--ro-bind /agent/node_modules /agent/node_modules')
+    expect(confined.join(' ')).toContain('--bind /agent/workspace /agent/workspace')
+    expect(confined.join(' ')).toContain('--ro-bind /agent/node_modules /agent/node_modules')
+    expect(confined.join(' ')).not.toContain('--bind /agent /agent')
+  })
+
   test('emits no protected re-binds when the policy omits them', () => {
     const joined = argvOf('true', { writable: { dirs: ['/agent/.git'] } }).join(' ')
     expect(joined).not.toContain('/agent/.git/hooks')
@@ -310,28 +369,25 @@ describe('buildSandboxedCommand protected re-binds', () => {
   })
 })
 
-describe('buildSandboxedCommand blockedCreation', () => {
-  test('binds /dev/null over each blocked path to prevent creation', () => {
-    const joined = argvOf('bun add foo', {
-      blockedCreation: { files: ['/agent/cron.json', '/agent/typeclaw.json'] },
-    }).join(' ')
-    expect(joined).toContain('--ro-bind /dev/null /agent/cron.json')
-    expect(joined).toContain('--ro-bind /dev/null /agent/typeclaw.json')
+describe('buildSandboxedCommand has no package-install path-occupancy mode', () => {
+  test('does not emit /dev/null path occupancy for a trusted ordinary write', () => {
+    const joined = argvOf('printf safe > ordinary.txt', { writableRoot: { dir: '/agent' } }).join(' ')
+    expect(joined).not.toContain('--ro-bind /dev/null')
   })
 
-  test('renders blocked binds AFTER the RW root so last-op-wins occupies the path', () => {
-    const argv = argvOf('bun add foo', {
+  test('still renders protected Git controls after the trusted RW root', () => {
+    const argv = argvOf('printf safe > ordinary.txt', {
       writableRoot: { dir: '/agent' },
-      blockedCreation: { files: ['/agent/cron.json'] },
+      protected: { dirs: ['/agent/.git/hooks'], files: ['/agent/.git/config'] },
     })
     const rwRoot = argv.indexOf('--bind')
-    const blocked = argv.indexOf('/agent/cron.json')
+    const protectedPath = argv.indexOf('/agent/.git/hooks')
     expect(rwRoot).toBeGreaterThanOrEqual(0)
-    expect(blocked).toBeGreaterThan(rwRoot)
+    expect(protectedPath).toBeGreaterThan(rwRoot)
   })
 
-  test('emits no blocked binds when the policy omits them', () => {
-    const argv = argvOf('true', { writableRoot: { dir: '/agent' } })
+  test('emits no hidden path-occupancy bind when the root is read-only', () => {
+    const argv = argvOf('true', {})
     expect(argv.join(' ')).not.toContain('/dev/null /agent')
   })
 })
