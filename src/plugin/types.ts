@@ -291,6 +291,7 @@ export type PluginContext<TConfig = never> = {
 export type PluginGithubServices = {
   resolveTokenForRepo: ResolveGithubTokenForRepo
   hasAppTokenResolver: () => boolean
+  getAppSelfLogin?: () => string | null
 }
 
 export type PluginExports = {

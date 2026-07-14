@@ -35,6 +35,7 @@ export type LoadPluginsOptions = {
   roles?: RolesConfig
   resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
   hasGithubAppTokenResolver?: () => boolean
+  getGithubAppSelfLogin?: () => string | null
   // Bundled plugins resolved by the runtime (not from typeclaw.json). Loaded
   // before user-declared `entries` so a config block named after a bundled
   // plugin (e.g. "memory") is consumed by the bundled plugin, and so plugin-
@@ -126,6 +127,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
         ctxDeps: {
           resolveGithubTokenForRepo: opts.resolveGithubTokenForRepo,
           hasGithubAppTokenResolver: opts.hasGithubAppTokenResolver,
+          getGithubAppSelfLogin: opts.getGithubAppSelfLogin,
           spawnSubagent: (name, payload, options) => spawnSubagentImpl(name, payload, options),
           isBooted: () => booted,
         },
@@ -224,6 +226,7 @@ type RegisterOnePluginArgs = {
   ctxDeps: {
     resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
     hasGithubAppTokenResolver?: () => boolean
+    getGithubAppSelfLogin?: () => string | null
     spawnSubagent: SpawnSubagentFn
     isBooted: () => boolean
   }
@@ -255,6 +258,7 @@ async function registerOnePlugin(args: RegisterOnePluginArgs): Promise<void> {
     permissions: args.permissions,
     resolveGithubTokenForRepo: args.ctxDeps.resolveGithubTokenForRepo,
     hasGithubAppTokenResolver: args.ctxDeps.hasGithubAppTokenResolver,
+    getGithubAppSelfLogin: args.ctxDeps.getGithubAppSelfLogin,
     spawnSubagent: args.ctxDeps.spawnSubagent,
     isBooted: args.ctxDeps.isBooted,
   })

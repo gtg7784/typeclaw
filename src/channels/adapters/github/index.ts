@@ -292,17 +292,20 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         // would mint an installation-wide token for any repo the App is installed
         // on — a cross-tenant leak under a multi-owner App. Enforced here, not in
         // the parser, because this adapter is the authority that owns repos[].
-        unregisterTokenBridge = options.githubTokenBridge.registerResolver((repoSlug) => {
-          const allowed = new Set((options.configRef().repos ?? []).map(canonicalRepoSlug))
-          if (!allowed.has(canonicalRepoSlug(repoSlug))) {
-            throw new Error(
-              `repo \`${repoSlug}\` is not in this agent's configured \`channels.github.repos[]\`; ` +
-                'refusing to mint a GitHub App token for it. Target a configured repo, ' +
-                'or add it to `repos[]` if the agent is meant to operate there.',
-            )
-          }
-          return auth.token({ repoSlug })
-        })
+        unregisterTokenBridge = options.githubTokenBridge.registerResolver(
+          (repoSlug) => {
+            const allowed = new Set((options.configRef().repos ?? []).map(canonicalRepoSlug))
+            if (!allowed.has(canonicalRepoSlug(repoSlug))) {
+              throw new Error(
+                `repo \`${repoSlug}\` is not in this agent's configured \`channels.github.repos[]\`; ` +
+                  'refusing to mint a GitHub App token for it. Target a configured repo, ' +
+                  'or add it to `repos[]` if the agent is meant to operate there.',
+              )
+            }
+            return auth.token({ repoSlug })
+          },
+          () => selfLogin,
+        )
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted

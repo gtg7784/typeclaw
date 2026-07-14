@@ -10,9 +10,12 @@ import {
   type ReviewOutputState,
   setReviewOutputObserver,
 } from '@/channels/github-review-turn-ledger'
+import {
+  __resetReviewVerdictGuardForTest,
+  createApproveIdempotencyGuard,
+} from '@/channels/github-review-verdict-coordinator'
 import type { ToolResult } from '@/plugin'
 
-import { __resetReviewVerdictGuardForTest, createApproveIdempotencyGuard } from './approve-idempotency'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
 
 const SESSION = 'ses_recorder'

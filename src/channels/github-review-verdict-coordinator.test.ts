@@ -5,7 +5,7 @@ import {
   createApproveIdempotencyGuard,
   type EffectiveApprovalResolver,
   type EffectiveVerdict,
-} from './approve-idempotency'
+} from './github-review-verdict-coordinator'
 
 const WS = 'acme/widgets'
 

@@ -287,6 +287,7 @@ async function startAgentRuntime(
     bundled: BUNDLED_PLUGINS,
     resolveGithubTokenForRepo: githubTokenBridge.resolveTokenForRepo,
     hasGithubAppTokenResolver: githubTokenBridge.hasAppTokenResolver,
+    getGithubAppSelfLogin: githubTokenBridge.getAppSelfLogin,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   const vectorStartupPromise = runVectorStartup(cwd)

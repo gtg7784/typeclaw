@@ -168,7 +168,7 @@ const GIT_MUTATING_ALWAYS_DENIED = new Set([
 ])
 
 // git subcommands permitted only when the effective working dir is /tmp.
-const GIT_TMP_SCOPED = new Set(['clone', 'fetch', 'checkout', 'init', 'sparse-checkout', 'worktree'])
+const GIT_TMP_SCOPED = new Set(['init', 'sparse-checkout', 'worktree'])
 
 // `gh` subcommands/objects that mutate remote state. The reviewer reads PRs and
 // repos; it never merges, reviews, comments, edits, or creates. We allow the

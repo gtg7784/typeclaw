@@ -2,7 +2,15 @@
 // string-matching the reason: only `missing-repo` is eligible for a trusted
 // repo-fallback (origin/cwd) that turns the block into a mint; `composition`,
 // `multi-owner`, `api-repo-conflict`, and `non-literal-repo` must stay blocks.
-export type GhBlockCode = 'missing-repo' | 'non-literal-repo' | 'composition' | 'multi-owner' | 'api-repo-conflict'
+export type GhBlockCode =
+  | 'missing-repo'
+  | 'non-literal-repo'
+  | 'composition'
+  | 'multi-owner'
+  | 'api-repo-conflict'
+  | 'repo-selector-conflict'
+  | 'credential-display'
+  | 'credential-exposure'
 
 export type GhCommandDecision =
   | { kind: 'pass-through' }
@@ -37,6 +45,19 @@ const API_REPO_CONFLICT_REASON =
   'used to mint a token for one repo while hitting another. Drop the mismatched ' +
   '`-R`, or target the repo named in the path.'
 
+const REPO_SELECTOR_CONFLICT_REASON =
+  'This gh command names a repository in a positional selector or GitHub PR/issue URL that differs from its ' +
+  'authorized `-R/--repo` or runtime repo hint. The positional selector is where gh actually sends the request, ' +
+  'so TypeClaw will not mint a token for a different repository. Use matching repository selectors.'
+
+const CREDENTIAL_DISPLAY_REASON =
+  'GitHub authentication management and token-display commands are unavailable to model-driven bash. ' +
+  'In particular, `gh auth token` and `gh auth status --show-token` would print the command-scoped credential. ' +
+  'Use host-side authentication setup or a redacted diagnostic instead.'
+
+const CREDENTIAL_EXPOSURE_REASON =
+  'This gh command is not in TypeClaw’s credential-safe allowlist. Model-driven gh receives a command-scoped credential only for operations whose argv cannot read arbitrary files, render process environment values, upload arbitrary files, select another host, or start extensions. Use a supported direct gh operation, a first-class TypeClaw tool, or run this command host-side.'
+
 // A gh segment can legitimately touch more than one repo (a `gh api` compare
 // endpoint references both the base repo and a cross-fork head). The classifier
 // returns EVERY effective target so analyzeGhCommand can allowlist-check and
@@ -60,8 +81,8 @@ const COMPOSITION_REASON =
   'exfiltrate it). One exception is allowed: a trailing reader pipeline `gh … | <reader>` ' +
   'where every downstream stage is a stdin-only reader (`jq`, `cat`, `wc`, `sort`, `uniq`) ' +
   'with no file operand — e.g. `gh api repos/o/r | jq .`. jq/JSON metacharacters are also ' +
-  "fine INSIDE single quotes, e.g. `gh api repos/o/r --jq '.[] | {id}'`. To feed JSON to " +
-  '`gh api`, write it to a temp file and use `gh api --input <file>`.'
+  "fine INSIDE single quotes, e.g. `gh api repos/o/r --jq '.[] | {id}'`. File-backed " +
+  '`--input`, `--body-file`, templates, aliases, extensions, and auth/config commands remain unavailable.'
 
 // Shell-active metacharacters that, OUTSIDE single quotes, either spawn another
 // process sharing the shell env (where the minted GH_TOKEN lives) or expand
@@ -146,9 +167,20 @@ const REPO_LESS_SUBCOMMANDS = new Set([
 // `-R`/path repo, and is NOT applied to `non-literal-repo` (a `$var` the user
 // wrote) or `gh api` (path is authoritative).
 export function analyzeGhCommand(command: string, fallbackRepo?: string): GhCommandDecision {
+  if (containsReviewGraphqlMutation(command)) {
+    return { kind: 'block', code: 'credential-exposure', reason: CREDENTIAL_EXPOSURE_REASON }
+  }
   const tokens = tokenize(command)
   const ghStarts = findGhInvocations(tokens)
   if (ghStarts.length === 0) return { kind: 'pass-through' }
+
+  for (let i = 0; i < ghStarts.length; i++) {
+    const start = ghStarts[i] as number
+    const end = ghStarts[i + 1] ?? tokens.length
+    if (isCredentialDisplayOrManagement(tokens.slice(start + 1, end))) {
+      return { kind: 'block', code: 'credential-display', reason: CREDENTIAL_DISPLAY_REASON }
+    }
+  }
 
   const repoSlugs: string[] = []
   let stripRepoFlag = false
@@ -175,14 +207,285 @@ export function analyzeGhCommand(command: string, fallbackRepo?: string): GhComm
   // bare-`gh` shape is the safe baseline; a trailing reader pipeline (`gh | jq`)
   // is the one exception we allow, under strict conditions (see analyzeReaderPipeline).
   if (isSingleBareGhCommand(command)) {
+    if (!isCredentialSafeGhCommand(command)) {
+      return { kind: 'block', code: 'credential-exposure', reason: CREDENTIAL_EXPOSURE_REASON }
+    }
     if (stripRepoFlag) return { kind: 'inject', repoSlug, rewrittenCommand: stripRepoFlagFromCommand(command) }
     return { kind: 'inject', repoSlug }
   }
 
   const piped = analyzeReaderPipeline(command, stripRepoFlag)
-  if (piped !== null) return { kind: 'inject', repoSlug, rewrittenCommand: piped }
+  if (piped !== null) {
+    if (!isCredentialSafeGhCommand(command)) {
+      return { kind: 'block', code: 'credential-exposure', reason: CREDENTIAL_EXPOSURE_REASON }
+    }
+    return { kind: 'inject', repoSlug, rewrittenCommand: piped }
+  }
 
   return { kind: 'block', code: 'composition', reason: COMPOSITION_REASON }
+}
+
+function isCredentialDisplayOrManagement(args: readonly string[]): boolean {
+  if (args[0] !== 'auth') return false
+  const subcommand = args[1]
+  if (subcommand === 'token') return true
+  if (subcommand === 'status') {
+    return args.some(isAuthStatusTokenDisplayFlag)
+  }
+  return subcommand !== undefined && new Set(['login', 'logout', 'refresh', 'switch', 'setup-git']).has(subcommand)
+}
+
+function isAuthStatusTokenDisplayFlag(arg: string): boolean {
+  if (arg === '--show-token' || arg.startsWith('--show-token=')) return true
+  if (!arg.startsWith('-') || arg.startsWith('--')) return false
+  return arg.slice(1).split('=', 1)[0]?.includes('t') === true
+}
+
+export function canInjectPatIntoPassThroughGh(command: string): boolean {
+  if (containsReviewGraphqlMutation(command)) return false
+  if (command.includes('\\')) return false
+  if (!isSingleBareGhCommand(command)) return false
+  const tokens = tokenize(command)
+  const starts = findGhInvocations(tokens)
+  if (starts.length !== 1 || starts[0] !== 0) return false
+  const args = tokens.slice(1)
+  if (isCredentialDisplayOrManagement(args)) return false
+  const subcommand = args[0]
+  if (subcommand === 'alias' || subcommand === 'extension' || subcommand === 'config') return false
+  if (subcommand === 'auth') return args[1] === 'status'
+  return isCredentialSafeGhArgs(args)
+}
+
+function containsReviewGraphqlMutation(command: string): boolean {
+  const tokens = tokenize(command)
+  const ghStarts = findGhInvocations(tokens)
+  for (let i = 0; i < ghStarts.length; i++) {
+    const start = ghStarts[i] as number
+    const end = ghStarts[i + 1] ?? tokens.length
+    const args = tokens.slice(start + 1, end)
+    if (findApiEndpoint(args) !== 'graphql') continue
+    if (extractGraphqlQueries(args).some((query) => REVIEW_GRAPHQL_MUTATION.test(query))) return true
+  }
+  return false
+}
+
+const REVIEW_GRAPHQL_MUTATION =
+  /\b(?:addPullRequestReview|submitPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread|addPullRequestReviewThreadReply)\b/
+
+const GRAPHQL_FIELD_FLAGS = new Set(['-f', '--raw-field', '-F', '--field'])
+
+function extractGraphqlQueries(args: readonly string[]): string[] {
+  const queries: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (GRAPHQL_FIELD_FLAGS.has(arg)) {
+      const field = args[i + 1]
+      if (field !== undefined) {
+        addGraphqlQuery(queries, field)
+        i += 1
+      }
+      continue
+    }
+    for (const prefix of ['--raw-field=', '--field=', '-f', '-F']) {
+      if (arg.startsWith(prefix)) {
+        addGraphqlQuery(queries, arg.slice(prefix.length))
+        break
+      }
+    }
+  }
+  return queries
+}
+
+function addGraphqlQuery(queries: string[], field: string): void {
+  if (field.startsWith('query=')) queries.push(field.slice('query='.length))
+}
+
+const SAFE_GH_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  api: new Set(['']),
+  pr: new Set([
+    'view',
+    'list',
+    'status',
+    'checks',
+    'diff',
+    'review',
+    'comment',
+    'close',
+    'reopen',
+    'ready',
+    'merge',
+    'create',
+  ]),
+  issue: new Set(['view', 'list', 'status', 'comment', 'close', 'reopen', 'create']),
+  label: new Set(['list', 'create', 'edit', 'delete', 'clone']),
+  release: new Set(['view', 'list']),
+  gist: new Set(['list']),
+  repo: new Set(['view', 'list']),
+  run: new Set(['view', 'list', 'watch', 'cancel', 'rerun', 'delete']),
+  workflow: new Set(['view', 'list', 'run', 'enable', 'disable']),
+  ruleset: new Set(['view', 'list', 'check']),
+  cache: new Set(['list', 'delete']),
+  variable: new Set(['list', 'get', 'set', 'delete']),
+  secret: new Set(['list', 'delete']),
+}
+
+const CREDENTIAL_UNSAFE_FLAGS = new Set(['--input', '--template', '-t', '--hostname', '--body-file', '--web'])
+
+const CREDENTIAL_SAFE_FLAGS = new Set([
+  '-R',
+  '--repo',
+  '-X',
+  '--method',
+  '-f',
+  '--raw-field',
+  '-F',
+  '--field',
+  '-H',
+  '--header',
+  '-i',
+  '--include',
+  '--paginate',
+  '--slurp',
+  '--cache',
+  '--silent',
+  '--verbose',
+  '--version',
+  '--help',
+  '--json',
+  '--jq',
+  '-q',
+  '--comments',
+  '--checks',
+  '--files',
+  '--commits',
+  '--body',
+  '-b',
+  '--title',
+  '--approve',
+  '--request-changes',
+  '--comment',
+  '--delete-branch',
+  '--merge',
+  '--squash',
+  '--rebase',
+  '--admin',
+  '--auto',
+  '--match-head-commit',
+  '--subject',
+  '--limit',
+  '-L',
+  '--state',
+  '--author',
+  '--assignee',
+  '--label',
+  '--milestone',
+  '--search',
+  '--base',
+  '--head',
+  '--draft',
+  '--name',
+  '--color',
+  '--description',
+  '--force',
+  '--confirm',
+  '--branch',
+  '--event',
+])
+
+function isCredentialSafeGhCommand(command: string): boolean {
+  const stages = splitTopLevelPipeStages(command)
+  if (stages === null || stages.length === 0) return false
+  const ghStage = (stages[0] as string).trim()
+  if (!isSingleBareGhCommand(ghStage) || ghStage.includes('\\')) return false
+  const tokens = tokenize(ghStage)
+  return tokens[0] === 'gh' && isCredentialSafeGhArgs(tokens.slice(1))
+}
+
+function isCredentialSafeGhArgs(args: readonly string[]): boolean {
+  const parsed = parseGhArgs(args)
+  if (parsed === null) return false
+  const { command, operation } = parsed
+  if (command === 'api') {
+    const endpoint = findApiEndpoint(args)
+    if (endpoint === null || endpoint.includes('://')) return false
+  }
+  if (!SAFE_GH_OPERATIONS[command]?.has(operation)) return false
+  if ((command === 'issue' || command === 'pr') && operation === 'create' && !isSafeCreateArgs(command, args)) {
+    return false
+  }
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    const flag = arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg
+    if (CREDENTIAL_UNSAFE_FLAGS.has(flag)) return false
+    if (flag.endsWith('-file') || flag.endsWith('-file-name')) return false
+    if (arg.startsWith('-') && !CREDENTIAL_SAFE_FLAGS.has(flag)) return false
+    if (
+      (command === 'api' || command === 'workflow') &&
+      (flag === '--raw-field' || flag === '-f' || flag === '--field' || flag === '-F')
+    ) {
+      const value = flagValue(args, i)
+      if (value === null || fieldDereferencesFile(value)) return false
+    }
+    if (flag === '--jq' || flag === '-q') {
+      const filter = flagValue(args, i)
+      if (filter === null || !isSafeGhJqFilter(filter)) return false
+    }
+  }
+  return true
+}
+
+function isSafeCreateArgs(command: 'issue' | 'pr', args: readonly string[]): boolean {
+  if (extractRepoFlag(args) === null) return false
+  const title = findFlagValue(args, ['--title'])
+  const body = findFlagValue(args, ['--body', '-b'])
+  if (title === null || title.trim() === '' || body === null || body.trim() === '') return false
+  if (title.startsWith('@') || body.startsWith('@')) return false
+
+  const forbidden = new Set([
+    '--body-file',
+    '--template',
+    '--editor',
+    '--web',
+    '--recover',
+    '--fill',
+    '--fill-first',
+    '--fill-verbose',
+  ])
+  if (args.some((arg) => forbidden.has(arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg))) return false
+  if (command === 'pr') {
+    const head = findFlagValue(args, ['--head'])
+    const base = findFlagValue(args, ['--base'])
+    if (head !== null && head.startsWith('@')) return false
+    if (base !== null && base.startsWith('@')) return false
+  }
+  return true
+}
+
+function findFlagValue(args: readonly string[], names: readonly string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    for (const name of names) {
+      if (arg === name) return args[i + 1] ?? null
+      if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1)
+    }
+  }
+  return null
+}
+
+function flagValue(args: readonly string[], index: number): string | null {
+  const arg = args[index] as string
+  const separator = arg.indexOf('=')
+  return separator >= 0 ? arg.slice(separator + 1) : (args[index + 1] ?? null)
+}
+
+function fieldDereferencesFile(value: string): boolean {
+  const separator = value.indexOf('=')
+  return separator < 1 || value.slice(separator + 1).startsWith('@')
+}
+
+function isSafeGhJqFilter(filter: string): boolean {
+  return !/(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)|\$ENV\b|input_filename|modulemeta/.test(filter)
 }
 
 // stdin-only readers whose only sink is stdout (back to the agent, who already
@@ -330,7 +633,7 @@ function analyzeReaderPipeline(command: string, stripRepoFlag: boolean): string 
   }
 
   const rewrittenGh = stripRepoFlag ? stripRepoFlagFromCommand(ghStage) : ghStage
-  const rewrittenReaders = stages.slice(1).map((s) => `/usr/bin/env -u GH_TOKEN ${s.trim()}`)
+  const rewrittenReaders = stages.slice(1).map((s) => `/usr/bin/env -u GH_TOKEN -u GITHUB_TOKEN ${s.trim()}`)
   return [rewrittenGh, ...rewrittenReaders].join(' | ')
 }
 
@@ -514,8 +817,9 @@ function matchRepoFlagAt(command: string, start: number): number | null {
 }
 
 function classifyGhSegment(args: readonly string[], fallbackRepo?: string): GhSegmentDecision {
-  const subcommand = args.find((t) => !t.startsWith('-'))
-  if (subcommand === undefined) return { kind: 'pass-through' }
+  const parsed = parseGhArgs(args)
+  if (parsed === null) return { kind: 'pass-through' }
+  const { command: subcommand } = parsed
 
   // `gh api` is resolved BEFORE the generic -R extraction: for a literal
   // `/repos/{owner}/{repo}` endpoint the request goes to the PATH repo and `gh`
@@ -523,24 +827,232 @@ function classifyGhSegment(args: readonly string[], fallbackRepo?: string): GhSe
   // call hits another (the allowlist-bypass this guards against).
   if (subcommand === 'api') return classifyGhApiSegment(args)
 
-  const explicit = extractRepoFlag(args)
-  if (explicit !== null) return { kind: 'inject', repoSlugs: [explicit] }
+  if (repoFlagHasNonLiteralValue(args))
+    return { kind: 'block', code: 'non-literal-repo', reason: NON_LITERAL_REPO_REASON }
+
+  const explicitRepos = extractAllRepoFlags(args)
+  const explicit = explicitRepos[0] ?? null
+  if (explicit !== null && explicitRepos.some((repo) => !sameRepo(repo, explicit))) {
+    return { kind: 'block', code: 'repo-selector-conflict', reason: REPO_SELECTOR_CONFLICT_REASON }
+  }
+  const positionalTargets = extractReposFromPositionalSelectors(parsed)
+  if (positionalTargets.invalid) {
+    return { kind: 'block', code: 'repo-selector-conflict', reason: REPO_SELECTOR_CONFLICT_REASON }
+  }
+  const positionalRepos = positionalTargets.repos
+  if (explicit !== null) {
+    if (positionalRepos.some((repo) => !sameRepo(repo, explicit))) {
+      return { kind: 'block', code: 'repo-selector-conflict', reason: REPO_SELECTOR_CONFLICT_REASON }
+    }
+    return { kind: 'inject', repoSlugs: [explicit] }
+  }
 
   // A `-R`/`--repo` IS present but its value isn't a literal slug (e.g. `-R "$repo"`):
   // tell the user that, not the misleading "add -R" message — they already did.
   // A trusted fallback never papers over a value the user explicitly mistyped.
-  if (repoFlagHasNonLiteralValue(args))
-    return { kind: 'block', code: 'non-literal-repo', reason: NON_LITERAL_REPO_REASON }
-
   if (REPO_LESS_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
 
   // Repo-less repo-scoped subcommand. A caller-supplied trusted fallback repo
   // (origin/cwd, already allowlisted) fills it so the command can mint; absent
   // one, block missing-repo. The fallback still passes through the composition
   // gate in analyzeGhCommand, so a compound command blocks regardless.
+  const isLabelClone = subcommand === 'label' && parsed.operation === 'clone'
+  if (positionalRepos.length > 0) {
+    if (fallbackRepo !== undefined && isRepoSlug(fallbackRepo)) {
+      if (positionalRepos.some((repo) => !sameRepo(repo, fallbackRepo))) {
+        return { kind: 'block', code: 'repo-selector-conflict', reason: REPO_SELECTOR_CONFLICT_REASON }
+      }
+      return { kind: 'inject', repoSlugs: [fallbackRepo] }
+    }
+    if (isLabelClone) return { kind: 'block', code: 'missing-repo', reason: MISSING_REPO_REASON }
+    return { kind: 'inject', repoSlugs: positionalRepos }
+  }
+
   if (fallbackRepo !== undefined && isRepoSlug(fallbackRepo)) return { kind: 'inject', repoSlugs: [fallbackRepo] }
 
   return { kind: 'block', code: 'missing-repo', reason: MISSING_REPO_REASON }
+}
+
+const GH_FLAGS_WITH_VALUES = new Set([
+  '-R',
+  '--repo',
+  '-X',
+  '--method',
+  '-f',
+  '--raw-field',
+  '-F',
+  '--field',
+  '-H',
+  '--header',
+  '-q',
+  '--jq',
+  '-t',
+  '--template',
+  '--input',
+  '--hostname',
+  '--body-file',
+  '--cache',
+  '--json',
+  '--body',
+  '-b',
+  '--title',
+  '--match-head-commit',
+  '--subject',
+  '--limit',
+  '-L',
+  '--state',
+  '--author',
+  '--assignee',
+  '--label',
+  '--milestone',
+  '--search',
+  '--base',
+  '--head',
+  '--name',
+  '--color',
+  '--description',
+  '--branch',
+  '--event',
+])
+
+const PR_REPO_SELECTOR_OPERATIONS = new Set([
+  'view',
+  'list',
+  'status',
+  'checks',
+  'diff',
+  'review',
+  'comment',
+  'close',
+  'reopen',
+  'ready',
+  'merge',
+  'checkout',
+])
+const ISSUE_REPO_SELECTOR_OPERATIONS = new Set(['view', 'list', 'status', 'comment', 'close', 'reopen'])
+
+type ParsedGhArgs = {
+  command: string
+  operation: string
+  operands: string[]
+}
+
+function parseGhArgs(args: readonly string[]): ParsedGhArgs | null {
+  const positionals = positionalArgs(args)
+  const command = positionals[0]
+  if (command === undefined) return null
+  if (command === 'api') return { command, operation: '', operands: positionals.slice(1) }
+  const operation = positionals[1]
+  if (operation === undefined) return { command, operation: '', operands: [] }
+  return { command, operation, operands: positionals.slice(2) }
+}
+
+// Audit of SAFE_GH_OPERATIONS positional repository authority:
+// - repo view: first operand is a repository slug/URL.
+// - the PR/issue sets below: a URL operand overrides -R's effective repo.
+// - label clone: first operand is a second (source) repository and must agree
+//   with the authorized destination repo; cross-repo clone is intentionally
+//   unavailable under a command-scoped credential.
+// Every other allowlisted operation accepts only repo-local names/IDs/refs or
+// no positional operand; none names a secondary repository.
+function extractReposFromPositionalSelectors(parsed: ParsedGhArgs): { repos: string[]; invalid: boolean } {
+  const { command, operation, operands } = parsed
+  if (command === 'repo' && operation === 'view') {
+    const selector = operands[0]
+    if (selector === undefined) return { repos: [], invalid: false }
+    const repo = repoFromSelector(selector)
+    return repo === null ? { repos: [], invalid: true } : { repos: [repo], invalid: false }
+  }
+
+  if (command === 'pr' && PR_REPO_SELECTOR_OPERATIONS.has(operation)) {
+    return reposFromIssueLikeSelectors(operands, 'pr')
+  }
+  if (command === 'issue' && ISSUE_REPO_SELECTOR_OPERATIONS.has(operation)) {
+    return reposFromIssueLikeSelectors(operands, 'issue')
+  }
+  if (command === 'label' && operation === 'clone') {
+    const source = operands[0]
+    if (source === undefined) return { repos: [], invalid: false }
+    const repo = repoFromSelector(source)
+    return repo === null ? { repos: [], invalid: true } : { repos: [repo], invalid: false }
+  }
+  return { repos: [], invalid: false }
+}
+
+function reposFromIssueLikeSelectors(
+  selectors: readonly string[],
+  kind: 'pr' | 'issue',
+): { repos: string[]; invalid: boolean } {
+  const repos: string[] = []
+  for (const selector of selectors) {
+    const repo = repoFromGithubUrl(selector, kind)
+    if (repo !== null) repos.push(repo)
+    else if (looksLikeUrl(selector)) return { repos: [], invalid: true }
+  }
+  return { repos, invalid: false }
+}
+
+function repoFromSelector(value: string): string | null {
+  if (isRepoSlug(value)) return value
+  const hostQualified = value.split('/')
+  if (hostQualified.length === 3 && hostQualified[0]?.toLocaleLowerCase() === 'github.com') {
+    const slug = `${hostQualified[1]}/${hostQualified[2]}`
+    return isRepoSlug(slug) ? slug : null
+  }
+  return repoFromGithubUrl(value)
+}
+
+function looksLikeUrl(value: string): boolean {
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(value)
+}
+
+function positionalArgs(args: readonly string[]): string[] {
+  const result: string[] = []
+  let command: string | undefined
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (!arg.startsWith('-')) {
+      result.push(arg)
+      if (command === undefined) command = arg
+      continue
+    }
+    const equals = arg.indexOf('=')
+    const flag = equals === -1 ? arg : arg.slice(0, equals)
+    if (equals === -1 && ghFlagTakesValue(flag, command)) i += 1
+  }
+  return result
+}
+
+// Short flags are scoped by Cobra command, not globally. In the credential-safe
+// surface, `-f` is value-taking for `gh api` and `gh workflow run`, but boolean
+// `--force` for `gh label create/clone`. Treating it globally as value-taking
+// hides label clone's following source repository from authorization. The other
+// short value flags in GH_FLAGS_WITH_VALUES have no boolean overload in the
+// allowlisted operations audited above.
+function ghFlagTakesValue(flag: string, command: string | undefined): boolean {
+  if (flag === '-f' && command === 'label') return false
+  return GH_FLAGS_WITH_VALUES.has(flag)
+}
+
+function repoFromGithubUrl(value: string, kind?: 'pr' | 'issue'): string | null {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:' || url.hostname.toLocaleLowerCase() !== 'github.com') return null
+  const segments = url.pathname.split('/').filter(Boolean)
+  const owner = segments[0]
+  const repo = segments[1]?.replace(/\.git$/i, '')
+  if (owner === undefined || repo === undefined || !isRepoSlug(`${owner}/${repo}`)) return null
+  if (kind === 'pr' && (segments[2] !== 'pull' || !/^\d+$/.test(segments[3] ?? ''))) return null
+  if (kind === 'issue' && (segments[2] !== 'issues' || !/^\d+$/.test(segments[3] ?? ''))) return null
+  return `${owner}/${repo}`
+}
+
+function sameRepo(left: string, right: string): boolean {
+  return left.toLocaleLowerCase() === right.toLocaleLowerCase()
 }
 
 // Repo authority for `gh api`: the literal endpoint path wins. A `-R/--repo`
@@ -571,7 +1083,7 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
     // must block even when an earlier flag matches the path and would otherwise
     // mask it.
     const flagRepos = extractAllRepoFlags(args)
-    if (flagRepos.some((slug) => !pathRepos.includes(slug))) {
+    if (flagRepos.some((slug) => !pathRepos.some((pathRepo) => sameRepo(slug, pathRepo)))) {
       return { kind: 'block', code: 'api-repo-conflict', reason: API_REPO_CONFLICT_REASON }
     }
     // Every `-R` here is redundant: it matches the repo already named in the
@@ -590,7 +1102,8 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   // graphql encodes its repo in the query body / opaque node IDs, never an
   // inspectable path, so `-R` is taken as the mint hint. Safe because there is
   // no literal path to conflict with (cf. the API_REPO_CONFLICT_REASON guard
-  // above): the minted token's installation scope, not the flag, bounds reach.
+  // above): the minted token's server-side repository restriction, not the
+  // flag, bounds reach.
   // `gh api` rejects `-R`, so the flag must be stripped from the command.
   if (flagRepo !== null && isGraphqlEndpoint(args)) {
     return { kind: 'inject', repoSlugs: [flagRepo], stripRepoFlag: true }
@@ -644,6 +1157,17 @@ export function effectiveGhTokensForAuthenticatedUserEndpoint(
 
 export function usesGhApiAuthenticatedUserEndpoint(command: string): boolean {
   return effectiveGhTokensForAuthenticatedUserEndpoint(command, {}).length > 0
+}
+
+export function usesGhApiGraphqlEndpoint(command: string): boolean {
+  const tokens = tokenize(command)
+  const ghStarts = findGhInvocations(tokens)
+  for (let i = 0; i < ghStarts.length; i++) {
+    const start = ghStarts[i] as number
+    const end = ghStarts[i + 1] ?? tokens.length
+    if (isGraphqlEndpoint(tokens.slice(start + 1, end))) return true
+  }
+  return false
 }
 
 function isAuthenticatedUserEndpointArgs(args: readonly string[]): boolean {

@@ -1,6 +1,11 @@
 import { GITHUB_API_BASE, githubJsonHeaders } from '@/channels/adapters/github/auth-pat'
+import type {
+  EffectiveApprovalResolver,
+  EffectiveVerdict,
+  HeadShaResolver,
+} from '@/channels/github-review-verdict-coordinator'
 
-import type { EffectiveApprovalResolver, EffectiveVerdict, HeadShaResolver } from './approve-idempotency'
+type GithubFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 // Resolves THIS bot's standing decisive review on a PR, used by the review
 // verdict guard to stop a second formal verdict after a restart (the in-process
@@ -9,7 +14,9 @@ import type { EffectiveApprovalResolver, EffectiveVerdict, HeadShaResolver } fro
 // error must never permanently block a genuine first verdict.
 export function createGithubEffectiveApprovalResolver(deps: {
   resolveToken: (workspace: string) => Promise<string | null>
-  fetchImpl?: typeof fetch
+  selfLogin?: () => string | null
+  isAppAuth?: () => boolean
+  fetchImpl?: GithubFetch
 }): EffectiveApprovalResolver {
   const fetchImpl = deps.fetchImpl ?? fetch
   return async ({ workspace, prNumber }) => {
@@ -19,7 +26,10 @@ export function createGithubEffectiveApprovalResolver(deps: {
     const token = await deps.resolveToken(workspace).catch(() => null)
     if (token === null || token === '') return { ok: false }
 
-    const self = await fetchSelfLogin(fetchImpl, token)
+    const configuredSelf = deps.selfLogin?.() ?? null
+    if ((configuredSelf === '' || configuredSelf === null) && deps.isAppAuth?.() === true) return { ok: false }
+    const self =
+      configuredSelf !== '' && configuredSelf !== null ? configuredSelf : await fetchSelfLogin(fetchImpl, token)
     if (self === null) return { ok: false }
 
     const reviews = await fetchReviews(fetchImpl, token, owner, repo, prNumber)
@@ -36,7 +46,7 @@ export function createGithubEffectiveApprovalResolver(deps: {
 // landed-verdict cache degrades to verdict-only matching rather than stranding.
 export function createGithubHeadShaResolver(deps: {
   resolveToken: (workspace: string) => Promise<string | null>
-  fetchImpl?: typeof fetch
+  fetchImpl?: GithubFetch
 }): HeadShaResolver {
   const fetchImpl = deps.fetchImpl ?? fetch
   return async ({ workspace, prNumber }) => {
@@ -80,7 +90,7 @@ function isDecisive(state: string): boolean {
 
 type ReviewRow = { state: string; login: string; isBot: boolean }
 
-async function fetchSelfLogin(fetchImpl: typeof fetch, token: string): Promise<string | null> {
+async function fetchSelfLogin(fetchImpl: GithubFetch, token: string): Promise<string | null> {
   try {
     const response = await fetchImpl(`${GITHUB_API_BASE}/user`, { headers: githubJsonHeaders(token) })
     if (!response.ok) return null
@@ -92,7 +102,7 @@ async function fetchSelfLogin(fetchImpl: typeof fetch, token: string): Promise<s
 }
 
 async function fetchReviews(
-  fetchImpl: typeof fetch,
+  fetchImpl: GithubFetch,
   token: string,
   owner: string,
   repo: string,
