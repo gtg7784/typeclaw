@@ -456,6 +456,7 @@ export type ListCallback = (args: ListChannelsArgs) => Promise<ListChannelsResul
 export type FetchAttachmentArgs = {
   ref: string
   filename?: string
+  maxBytes?: number
 }
 
 export type FetchAttachmentResult =
