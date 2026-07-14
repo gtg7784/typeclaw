@@ -31,7 +31,13 @@ Two modes. Both require `channels.github.webhookSecret` in [`secrets.json`](/doc
 }
 ```
 
-Fine-grained PAT. The bot acts as a real GitHub user. `GH_TOKEN` is seeded for ad-hoc `gh` commands.
+Fine-grained PAT. The bot acts as a real GitHub user. Model-driven commands do **not** receive the process environment wholesale: TypeClaw brokers the PAT into one standalone, statically inspected `gh` invocation only when the session role has `fs.see.secrets` or `security.bypass.medium`. Lower-trust roles do not receive a long-lived PAT; configure App mode for their repository operations.
+
+PAT brokerage deliberately excludes shapes where the destination cannot be enforced:
+
+- `gh api graphql` is blocked for PATs because the query can name repositories that are not visible in argv. Use a repository-confined REST endpoint, App mode with an explicit `-R owner/repo` mint hint, or run the PAT-backed query host-side.
+- Authenticated network `git` (`push`, `fetch`, `pull`, `clone`, and `ls-remote`) and `gh pr checkout` are blocked in model-driven bash because Git hooks and credential helpers can inherit reusable credentials. Local Git commands remain available. Broad private-repository reviews use the reviewer-only `github_prepare_review_checkout` action: the runtime verifies one allowlisted `owner/repo` and a full commit SHA, exposes the token only to a host-locked fetch process, then performs checkout in a separate token-free process beneath session scratch.
+- Chained commands, substitutions, aliases, extensions, auth/config management, token-display forms (`gh auth token`, `gh auth status -t`, and `--show-token`), and other shapes that could expose the command-scoped token are rejected rather than run with broad ambient credentials.
 
 ### GitHub App mode
 
@@ -46,7 +52,11 @@ Fine-grained PAT. The bot acts as a real GitHub user. `GH_TOKEN` is seeded for a
 }
 ```
 
-Installations are auto-resolved per repo. A GitHub App can't be a `requested_reviewer` — use its [decoy user account](/docs/internals/github-decoy-reviewer) instead. `GH_TOKEN` is seeded only when all repos share one owner.
+Installations are resolved per repository, and model-driven repository commands receive a short-lived installation token minted for that exact `owner/repo`. A global `GH_TOKEN` may be kept warm only when the configured repositories unambiguously share one installation owner; it is not an authorization shortcut—command analysis still resolves the repository and injects a per-repo token. Multi-owner and empty `repos[]` configurations intentionally leave the global token unset.
+
+App-backed GraphQL requires an explicit repository mint hint (`gh api graphql -R owner/repo ...`); TypeClaw consumes `-R`, mints that repository's installation token, and removes the unsupported flag before invoking `gh api`. Review-producing mutations are rejected from the shell-normalized query before minting so they cannot bypass the formal-review coordinator. Authenticated network Git remains blocked in model-driven bash for the hook/helper inheritance reason above.
+
+A GitHub App can't be a `requested_reviewer` — use its [decoy user account](/docs/internals/github-decoy-reviewer) instead.
 
 CLI: `typeclaw channel add github` (interactive; offers to create a Cloudflare tunnel), `typeclaw channel set github` (rotate credentials).
 
@@ -81,18 +91,18 @@ pull_request_review.submitted
 
 ## Capabilities
 
-| Feature                  | Supported | Notes                                     |
-| ------------------------ | --------- | ----------------------------------------- |
-| Outbound messages        | yes       |                                           |
-| Reactions (add + remove) | yes       |                                           |
-| Typing indicator         | no        | GitHub has no typing API                  |
-| Channel-name resolution  | yes       |                                           |
-| Self identity            | yes       |                                           |
-| History                  | yes       |                                           |
-| Attachments              | yes       |                                           |
-| Membership               | yes       |                                           |
-| Review threads           | yes       |                                           |
-| Review state             | yes       | APPROVE or COMMENT (see `review.approve`) |
+| Feature                  | Supported | Notes                                                  |
+| ------------------------ | --------- | ------------------------------------------------------ |
+| Outbound messages        | yes       |                                                        |
+| Reactions (add + remove) | yes       |                                                        |
+| Typing indicator         | no        | GitHub has no typing API                               |
+| Channel-name resolution  | yes       |                                                        |
+| Self identity            | yes       |                                                        |
+| History                  | yes       |                                                        |
+| Attachments              | no        | Outbound upload and inbound byte fetch are unavailable |
+| Membership               | yes       |                                                        |
+| Review threads           | yes       |                                                        |
+| Review state             | yes       | APPROVE or COMMENT (see `review.approve`)              |
 
 ## Review behavior
 

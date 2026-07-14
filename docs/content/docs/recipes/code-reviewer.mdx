@@ -38,7 +38,7 @@ The sections below set up each hop.
 
 ## Wire the GitHub channel
 
-You don't hand-edit `typeclaw.json` for this. Run the wizard from inside your agent folder:
+You don't hand-edit `typeclaw.json` for this. The operator must run the wizard at the host stage from inside the agent folder:
 
 ```sh
 typeclaw channel add github
@@ -53,11 +53,8 @@ It walks the whole setup interactively:
 
 When it finishes, it **installs the repository webhooks for you** and enables the adapter. If the container is running, it offers to restart so the change takes effect; otherwise `typeclaw start` picks it up. See [Add a channel](/docs/guides/add-a-channel) for the shared flow and the [`github` adapter reference](/docs/reference/github) for the config the wizard writes.
 
-<Callout type="info" title="Or just ask the agent">
-  If the agent is already running with an `owner` paired, you can skip the CLI and ask it in the TUI or a 1:1 DM — _"add
-  the GitHub channel for `owner/repo` using App auth"_ — and let it run the same steps. The CLI is the deterministic
-  path; the agent is the conversational one.
-</Callout>
+Credential collection is host-only. An agent may explain the non-secret configuration, but it cannot collect a PAT or
+private key conversationally or read the resulting secret store.
 
 ## Scope events to pull-request activity
 
@@ -65,17 +62,18 @@ The default GitHub event allowlist already covers reviews. If you want to narrow
 
 <Callout type="info" title="App auth and the Contents permission">
   On a **public** repo an App only needs **Pull requests: read/write** to read the diff and post reviews. On a
-  **private** repo the agent also needs **Contents: read** — `git clone` (and any raw file-tree access) of a private
-  repo fails with 403/404 without it; **Metadata: read** alone lets the App _see_ the repo but not read its files. Grant
-  **Contents: write** _only_ if the agent will also push fix branches — GitHub bundles branch creation into that scope,
-  so there's no narrower one. Keep a ruleset on `main` that requires pull requests, and the bot opens branches and PRs
-  without ever touching `main` directly. The wizard's permission note lists exactly what to enable.
+  **private** repo the agent also needs **Contents: read** — the runtime-owned exact-SHA review fetch (and any raw
+  file-tree access) of a private repo fails with 403/404 without it; **Metadata: read** alone lets the App _see_ the
+  repo but not read its files. Model-driven review, commenting, and triage do not require **Contents: write**, so keep
+  that permission disabled for this recipe. If a finding needs a fix, a host-stage operator checks out the repository,
+  makes the authenticated push, publishes the branch, and creates the pull request using host credentials. The wizard's
+  permission note lists exactly what to enable.
 </Callout>
 
 <Callout type="warn" title="The preflight won't catch a missing Contents grant">
   TypeClaw's App permission preflight only checks permissions tied to your configured `eventAllowlist` (issues, pull
   requests, discussions), so a private-repo reviewer missing **Contents: read** passes preflight cleanly and then fails
-  at runtime when the agent tries to clone or read files. If reviews on a private repo error with "Resource not
+  at runtime when the reviewer action fetches or reads files. If reviews on a private repo error with "Resource not
   accessible by integration," add **Contents: read** to the App.
 </Callout>
 
@@ -116,23 +114,17 @@ You don't script any of this. The review request lands, the agent reads the diff
 
 ## How the review gets posted
 
-Conversational comments go back through the channel automatically. A **formal review** — approve, request-changes, or inline line comments — is posted through the `gh` CLI, which the adapter pre-authenticates with a `GH_TOKEN` minted for your configured repos. The agent handles this; the notes below are for when you're debugging its output.
+Conversational comments go back through the channel automatically. A **formal review** — approve, request-changes, or inline line comments — is submitted through the first-class `post_github_review` tool. The adapter resolves the live PR head, validates each line anchor, moves out-of-diff findings into the review body, submits one review, and verifies the resulting review id and state. Formal verdicts share one process-wide coordinator with authenticated `gh` review commands, so concurrent per-PR submissions are serialized and an already-effective or just-landed identical verdict is deduplicated. TypeClaw credits the current-turn verdict/output ledger only from the verified effective state; a policy-downgraded approval is credited as comment output, never as an approval.
 
-<Callout type="warn" title="Single-quote the review body">
-  When the agent posts with `gh api -f body='...'`, single quotes matter. Double quotes let bash run backticks in the
-  markdown (command substitution) and collapse `\n` escapes — which silently corrupts a review body containing `` `code`
-  `` spans. If a posted review reads as mangled, this is the first thing to check.
-</Callout>
-
-<Callout type="info" title="gh may be unauthenticated in-container">
-  If `gh` prompts for `gh auth login` inside a review session, the agent derives App installation auth from
-  `secrets.json`: the App id is `channels.github.auth.appId` and the RSA signing key is
-  `channels.github.auth.privateKey.value` — the `.value`, not the surrounding `privateKey` object.
-</Callout>
+The model should not inspect credential files or construct a direct REST or GraphQL `gh api` formal-review request.
+Review-producing GraphQL mutations are denied before token minting. The guard inspects the shell-normalized `query`
+field, including adjacent quoted fragments, so they cannot bypass the coordinator and verified ledger. If submission
+fails, inspect the `post_github_review` result and adapter logs: they distinguish invalid anchors, permission denial,
+stale/transient GitHub responses, and operator policy that downgraded an approval to a comment.
 
 ## Lock down who can trigger it
 
-Inbound GitHub authors resolve to a role like any other channel. Keep public participants on `guest` with just `channel.respond`, and reserve privileged actions (pushing branches, scheduling cron) for `owner`. To pair yourself as `owner`, run `typeclaw role claim --as owner` and follow the prompt — or, if you're already paired, ask the agent to grant a role via its `grant_role` tool from the TUI or a DM. The review path itself only needs read access plus the ability to post, so a stranger requesting the decoy gets a review — but can't make the agent push to your repo. See [/concepts/permissions-model](/docs/concepts/permissions-model) for why provenance is enforced at the tool boundary.
+Inbound GitHub authors resolve to a role like any other channel. Keep public participants on `guest` with just `channel.respond`, and reserve privileged model-driven actions such as scheduling cron for `owner`. Repository checkout, authenticated push, branch publication, and pull-request creation remain host-stage operator actions regardless of role. To pair yourself as `owner`, run `typeclaw role claim --as owner` and follow the prompt — or, if you're already paired, ask the agent to grant a role via its `grant_role` tool from the TUI or a DM. The review path itself only needs read access plus the ability to post, so a stranger requesting the decoy gets a review but cannot trigger privileged model actions or host-stage repository publication. See [/concepts/permissions-model](/docs/concepts/permissions-model) for why provenance is enforced at the tool boundary.
 
 ---
 
