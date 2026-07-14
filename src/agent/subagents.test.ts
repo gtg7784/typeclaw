@@ -1026,6 +1026,115 @@ describe('startSubagent', () => {
     }
   })
 
+  test('completion resolves ok=false when the session was aborted by the loop guard', async () => {
+    const session = {
+      prompt: async () => {},
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+      getAbortReason: () => 'loop_guard:block',
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_loop_abort',
+    })
+    const result = await completion
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain('loop_guard:block')
+  })
+
+  test('loop-guard failure preserves an already-captured assistant message', async () => {
+    const listeners = new Set<(event: unknown) => void>()
+    const session = {
+      prompt: async () => {
+        for (const listener of listeners) {
+          listener({ type: 'message_end', message: { role: 'assistant', content: 'Partial but useful analysis.' } })
+        }
+      },
+      dispose: () => {},
+      subscribe: (listener: (event: unknown) => void) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      abort: async () => {},
+      getAbortReason: () => 'loop_guard:deferred_block',
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_loop_recover',
+    })
+    const result = await completion
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.finalMessage).toBe('Partial but useful analysis.')
+  })
+
+  test('loop-guard failure captures output through the awaited agent event stream', async () => {
+    const agentListeners = new Set<(event: unknown) => void>()
+    const session = {
+      agent: {
+        subscribe: (listener: (event: unknown) => void) => {
+          agentListeners.add(listener)
+          return () => agentListeners.delete(listener)
+        },
+      },
+      prompt: async () => {
+        for (const listener of agentListeners) {
+          listener({ type: 'message_end', message: { role: 'assistant', content: 'Captured before settlement.' } })
+        }
+      },
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+      getAbortReason: () => 'loop_guard:block',
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_loop_awaited_capture',
+    })
+    const result = await completion
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.finalMessage).toBe('Captured before settlement.')
+  })
+
+  test('a non-loop abort reason keeps the existing successful completion semantics', async () => {
+    const session = {
+      prompt: async () => {},
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+      getAbortReason: () => 'user_cancelled',
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_other_abort',
+    })
+
+    expect((await completion).ok).toBe(true)
+  })
+
   test('timeoutMs settles completion with ok=false when prompt wedges (parent gets woken, not stranded)', async () => {
     // given: a session whose prompt never resolves, and a subagent with a tiny timeout
     let abortCount = 0
@@ -1148,6 +1257,26 @@ describe('startSubagent', () => {
     } as unknown as AgentSession
     return { session, prompts }
   }
+
+  test('a loop-aborted researcher fails before required-block retries can mask the lifecycle error', async () => {
+    const { session, prompts } = scriptedResearcherSession([
+      [{ role: 'assistant', content: '<analysis>unfinished</analysis>' }],
+    ])
+    Object.assign(session, { getAbortReason: () => 'loop_guard:block' })
+    const registry = { researcher: { systemPrompt: 'X' } satisfies Subagent }
+
+    const { completion } = startSubagent('researcher', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'research',
+      taskId: 'bg_research_loop_abort',
+    })
+    const result = await completion
+
+    expect(result.ok).toBe(false)
+    expect(prompts).toHaveLength(1)
+  })
 
   async function runResearcher(turns: { role?: string; content: unknown }[][]) {
     const { session, prompts } = scriptedResearcherSession(turns)
