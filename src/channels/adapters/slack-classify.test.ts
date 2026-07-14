@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { SlackRTMMessageEvent } from 'agent-messenger/slack'
 
 import { channelsSchema } from '@/channels/schema'
+import { isDmChannelOrigin } from '@/permissions'
 
 import { classifyInbound } from './slack-classify'
 
@@ -43,6 +44,29 @@ describe('classifyInbound (slack user)', () => {
     expect(verdict.payload.workspace).toBe('@dm')
     expect(verdict.payload.isDm).toBe(true)
     expect(verdict.payload.thread).toBeNull()
+  })
+
+  test('fails closed to the team workspace for a G-prefixed conversation without metadata', () => {
+    const verdict = classifyInbound(event({ channel: 'G0123456789' }), config, context)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.workspace).toBe('T0123456789')
+    expect(verdict.payload.chat).toBe('G0123456789')
+    expect(verdict.payload.isDm).toBe(false)
+  })
+
+  test('keeps MPIMs and private channels in the real team workspace without granting DM semantics', () => {
+    const mpim = classifyInbound(event({ channel: 'G0MPIM' }), config, { ...context, conversationType: 'mpim' })
+    const privateChannel = classifyInbound(event({ channel: 'G0PRIVATE' }), config, {
+      ...context,
+      conversationType: 'channel',
+    })
+
+    expect(mpim.kind === 'route' && mpim.payload.workspace).toBe('T0123456789')
+    expect(mpim.kind === 'route' && mpim.payload.isDm).toBe(false)
+    expect(mpim.kind === 'route' && isDmChannelOrigin(mpim.payload)).toBe(false)
+    expect(privateChannel.kind === 'route' && privateChannel.payload.workspace).toBe('T0123456789')
   })
 
   test('detects self mentions, group mentions, and other mentions', () => {
