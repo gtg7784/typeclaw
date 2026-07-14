@@ -4,12 +4,8 @@ import { lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import {
-  resolvePackageInstallZones,
-  resolveProtectedZones,
-  resolveWritableZones,
-  subtractMasked,
-} from './writable-zones'
+import { CANONICAL_AGENT_SECRET_DIRS, CANONICAL_AGENT_SECRET_FILES } from './canonical-secrets'
+import { resolveProtectedZones, resolveWritableZones, subtractMasked } from './writable-zones'
 
 let agentDir: string
 
@@ -201,19 +197,26 @@ describe('resolveWritableZones', () => {
       expect(dirs).not.toContain(join(agentDir, '../escape'))
     })
 
-    test.each(['.git', '.env', 'secrets.json', 'sessions', 'memory', '.typeclaw', 'node_modules'])(
-      'drops the security-sensitive root %p even when it exists',
-      async (root) => {
-        await mkdir(join(agentDir, root), { recursive: true })
+    test.each([
+      ...new Set([
+        '.git',
+        ...CANONICAL_AGENT_SECRET_FILES,
+        ...CANONICAL_AGENT_SECRET_DIRS,
+        'sessions',
+        'memory',
+        '.typeclaw',
+        'node_modules',
+      ]),
+    ])('drops the security-sensitive root %p even when it exists', async (root) => {
+      await mkdir(join(agentDir, root), { recursive: true })
 
-        const { dirs } = await resolveWritableZones(agentDir, [root])
+      const { dirs } = await resolveWritableZones(agentDir, [root])
 
-        // .git is a built-in writable zone, so it is present via WRITABLE_DIRS —
-        // but the configured path must not be what re-adds it. The other roots
-        // must be absent entirely.
-        if (root !== '.git') expect(dirs).not.toContain(join(agentDir, root))
-      },
-    )
+      // .git is a built-in writable zone, so it is present via WRITABLE_DIRS —
+      // but the configured path must not be what re-adds it. The other roots
+      // must be absent entirely.
+      if (root !== '.git') expect(dirs).not.toContain(join(agentDir, root))
+    })
 
     test('drops a configured path nested under a forbidden root', async () => {
       await mkdir(join(agentDir, 'sessions', 'sub'), { recursive: true })
@@ -250,6 +253,32 @@ describe('resolveWritableZones', () => {
 })
 
 describe('resolveProtectedZones', () => {
+  test('protects an existing node_modules directory without requiring a Git repository', async () => {
+    await mkdir(join(agentDir, 'node_modules'))
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).toEqual([join(agentDir, 'node_modules')])
+    expect(files).toEqual([])
+  })
+
+  test('does not create node_modules when it is absent', async () => {
+    await resolveProtectedZones(agentDir)
+
+    expect(existsSync(join(agentDir, 'node_modules'))).toBe(false)
+  })
+
+  test('rejects a symlinked node_modules instead of leaving executable dependencies writable', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-node-modules-outside-'))
+    try {
+      await symlink(outside, join(agentDir, 'node_modules'))
+
+      await expect(resolveProtectedZones(agentDir)).rejects.toThrow(/symlink/i)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
   test('re-protects .git/hooks and .git/config when present', async () => {
     await mkdir(join(agentDir, '.git', 'hooks'), { recursive: true })
     await writeFile(join(agentDir, '.git', 'config'), '[core]\n')
@@ -294,6 +323,73 @@ describe('resolveProtectedZones', () => {
     expect((await lstat(join(agentDir, 'workspace/hooks'))).isDirectory()).toBe(true)
   })
 
+  test('uses Git parsing for quoted, escaped, and commented hooksPath values', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await writeFile(
+      join(agentDir, '.git', 'config'),
+      '[core]\n\t# hooksPath = workspace/ignored\n\thooksPath = "workspace/hook\\\\dir"\n',
+    )
+
+    const { dirs } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).toContain(join(agentDir, 'workspace/hook\\dir'))
+  })
+
+  test('protects agent-local config includes that could later redirect core.hooksPath', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await mkdir(join(agentDir, 'workspace'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[include]\n\tpath = ../workspace/git.inc\n')
+    await writeFile(join(agentDir, 'workspace', 'git.inc'), '[core]\n\thooksPath = workspace/hooks\n')
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
+
+    expect(files).toContain(join(agentDir, 'workspace/git.inc'))
+    expect(dirs).toContain(join(agentDir, 'workspace/hooks'))
+  })
+
+  test('honors matching includeIf config through Git semantics', async () => {
+    await mkdir(join(agentDir, '.git', 'objects'), { recursive: true })
+    await mkdir(join(agentDir, '.git', 'refs', 'heads'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await mkdir(join(agentDir, 'workspace'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[includeIf "gitdir:**"]\n\tpath = ../workspace/git.inc\n')
+    await writeFile(join(agentDir, 'workspace', 'git.inc'), '[core]\n\thooksPath = workspace/conditional-hooks\n')
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
+
+    expect(files).toContain(join(agentDir, 'workspace/git.inc'))
+    expect(dirs).toContain(join(agentDir, 'workspace/conditional-hooks'))
+  })
+
+  test('protects tilde-expanded and nested agent-local includes', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await mkdir(join(agentDir, 'workspace'), { recursive: true })
+    await writeFile(join(agentDir, '.git', 'config'), '[include]\n\tpath = ~/workspace/first.inc\n')
+    await writeFile(join(agentDir, 'workspace', 'first.inc'), '[include]\n\tpath = nested.inc\n')
+    await writeFile(join(agentDir, 'workspace', 'nested.inc'), '[core]\n\thooksPath = workspace/nested-hooks\n')
+
+    const { dirs, files } = await resolveProtectedZones(agentDir)
+
+    expect(files).toContain(join(agentDir, 'workspace/first.inc'))
+    expect(files).toContain(join(agentDir, 'workspace/nested.inc'))
+    expect(dirs).toContain(join(agentDir, 'workspace/nested-hooks'))
+  })
+
+  test('protects Git effective hooksPath when the root overrides an included value', async () => {
+    await mkdir(join(agentDir, '.git'), { recursive: true })
+    await mkdir(join(agentDir, 'workspace'), { recursive: true })
+    await writeFile(
+      join(agentDir, '.git', 'config'),
+      '[include]\n\tpath = ../workspace/git.inc\n[core]\n\thooksPath = workspace/final-hooks\n',
+    )
+    await writeFile(join(agentDir, 'workspace', 'git.inc'), '[core]\n\thooksPath = workspace/stale-hooks\n')
+
+    const { dirs } = await resolveProtectedZones(agentDir)
+
+    expect(dirs).toContain(join(agentDir, 'workspace/final-hooks'))
+    expect(dirs).not.toContain(join(agentDir, 'workspace/stale-hooks'))
+  })
+
   test('ignores a core.hooksPath that resolves outside the agent dir', async () => {
     await mkdir(join(agentDir, '.git'), { recursive: true })
     await writeFile(join(agentDir, '.git', 'config'), '[core]\n\thooksPath = /etc\n')
@@ -317,164 +413,58 @@ describe('resolveProtectedZones', () => {
     expect(filtered.dirs).not.toContain(join(agentDir, 'workspace/hooks'))
     expect(filtered.dirs).toContain(join(agentDir, '.git/hooks'))
   })
+
+  test('resolves a worktree .git file and protects the real gitdir controls', async () => {
+    const commonDir = await mkdtemp(join(tmpdir(), 'typeclaw-common-git-'))
+    try {
+      const gitDir = join(commonDir, 'worktrees', 'agent')
+      await mkdir(gitDir, { recursive: true })
+      await writeFile(join(gitDir, 'commondir'), '../..\n')
+      await writeFile(join(agentDir, '.git'), `gitdir: ${gitDir}\n`)
+      await writeFile(join(commonDir, 'config'), '[core]\n\thooksPath = workspace/hooks\n')
+
+      const { dirs, files } = await resolveProtectedZones(agentDir)
+
+      expect(dirs).toContain(join(commonDir, 'hooks'))
+      expect(dirs).toContain(join(agentDir, 'workspace/hooks'))
+      expect(files).toContain(join(agentDir, '.git'))
+      expect(files).toContain(join(commonDir, 'config'))
+    } finally {
+      await rm(commonDir, { recursive: true, force: true })
+    }
+  })
 })
 
-describe('resolvePackageInstallZones', () => {
-  test('returns the agent root as the RW root and pre-creates node_modules', async () => {
-    const zones = await resolvePackageInstallZones(agentDir)
-
-    expect(zones.root).toBe(agentDir)
-    expect((await stat(join(agentDir, 'node_modules'))).isDirectory()).toBe(true)
+describe('resolveWritableZones package lifecycle boundary', () => {
+  test('does not create node_modules while resolving ordinary writable zones', async () => {
+    await resolveWritableZones(agentDir)
+    expect(existsSync(join(agentDir, 'node_modules'))).toBe(false)
   })
 
-  // SECURITY: the allowlist-inversion must fail closed — every root entry the
-  // unsandboxed runtime may read/execute is RO, not just a known executable set.
-  test('RO-protects runtime source trees (src/, scripts/) so lifecycle scripts cannot overwrite them', async () => {
-    await mkdir(join(agentDir, 'src'))
-    await mkdir(join(agentDir, 'scripts'))
+  test.each(['node_modules', 'node_modules/typeclaw', 'src', 'scripts', 'packages'])(
+    'does not expose executable dependency path %s as a normal writable zone',
+    async (relative) => {
+      await mkdir(join(agentDir, relative), { recursive: true })
+      const zones = await resolveWritableZones(agentDir)
+      expect(zones.dirs).not.toContain(join(agentDir, relative))
+    },
+  )
 
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
+  test.each(['bun.lock', 'cron.json', 'typeclaw.json'])(
+    'does not expose lifecycle/managed root file %s as a normal writable file',
+    async (relative) => {
+      await writeFile(join(agentDir, relative), 'x')
+      const zones = await resolveWritableZones(agentDir)
+      expect(zones.files).not.toContain(join(agentDir, relative))
+    },
+  )
 
-    expect(prot.dirs).toContain(join(agentDir, 'src'))
-    expect(prot.dirs).toContain(join(agentDir, 'scripts'))
-  })
-
-  test('RO-protects prompt-source and config root files (no bun-add write need, prompt-poison vector)', async () => {
-    for (const f of ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
-      await writeFile(join(agentDir, f), 'x')
-    }
-
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    for (const f of ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
-      expect(prot.files).toContain(join(agentDir, f))
-    }
-  })
-
-  test('RO-protects an arbitrary unanticipated root entry (covered by readdir, no hardcoded list)', async () => {
-    await mkdir(join(agentDir, 'some-new-dir'))
-    await writeFile(join(agentDir, 'evil.sh'), '#!/bin/sh')
-
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    expect(prot.dirs).toContain(join(agentDir, 'some-new-dir'))
-    expect(prot.files).toContain(join(agentDir, 'evil.sh'))
-  })
-
-  test('RO-protects the whole .git (bun add never needs git; closes hook/config escalation)', async () => {
-    await mkdir(join(agentDir, '.git'))
-
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    expect(prot.dirs).toContain(join(agentDir, '.git'))
-  })
-
-  test('RO-protects node_modules/typeclaw (the live runtime) while node_modules stays writable', async () => {
-    await mkdir(join(agentDir, 'node_modules', 'typeclaw'), { recursive: true })
-
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    expect(prot.dirs).toContain(join(agentDir, 'node_modules/typeclaw'))
-    expect(prot.dirs).not.toContain(join(agentDir, 'node_modules'))
-  })
-
-  test('keeps the writable allowlist OUT of the protected set (node_modules, package.json, bun.lock, workspace, public, mounts)', async () => {
-    for (const d of ['workspace', 'public', 'mounts']) await mkdir(join(agentDir, d))
-    for (const f of ['package.json', 'bun.lock']) await writeFile(join(agentDir, f), '{}')
-
-    const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    for (const d of ['node_modules', 'workspace', 'public', 'mounts']) {
-      expect(prot.dirs).not.toContain(join(agentDir, d))
-    }
-    for (const f of ['package.json', 'bun.lock']) {
-      expect(prot.files).not.toContain(join(agentDir, f))
-    }
-  })
-
-  test('rejects a symlinked agent root (RW root would follow it outside the jail)', async () => {
-    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
-    const linked = join(outside, 'link')
-    try {
-      await symlink(outside, linked)
-
-      await expect(resolvePackageInstallZones(linked)).rejects.toThrow(/symlink/i)
-    } finally {
-      await rm(outside, { recursive: true, force: true })
-    }
-  })
-
-  test('rejects a symlinked node_modules / package.json / bun.lock', async () => {
-    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
-    try {
-      await mkdir(join(outside, 'real-nm'))
-      await symlink(join(outside, 'real-nm'), join(agentDir, 'node_modules'))
-
-      await expect(resolvePackageInstallZones(agentDir)).rejects.toThrow(/symlink/i)
-    } finally {
-      await rm(outside, { recursive: true, force: true })
-    }
-  })
-
-  test('skips a symlinked root entry rather than RO-binding it (an RO bind would follow it outside)', async () => {
-    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
-    try {
-      await symlink(outside, join(agentDir, 'evil-link'))
-
-      const { protected: prot } = await resolvePackageInstallZones(agentDir)
-
-      expect(prot.dirs).not.toContain(join(agentDir, 'evil-link'))
-      expect(prot.files).not.toContain(join(agentDir, 'evil-link'))
-    } finally {
-      await rm(outside, { recursive: true, force: true })
-    }
-  })
-
-  // SECURITY: the RW package-install root would let a postinstall lifecycle
-  // script CREATE an absent managed file (cron.json/typeclaw.json), bypassing the
-  // write/edit-tool guards. Absent managed files must land in blockedCreation
-  // (rendered as --ro-bind /dev/null) so their path is occupied.
-  test('blocks creation of ABSENT managed files (cron.json, typeclaw.json)', async () => {
-    const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    expect(blockedCreation).toContain(join(agentDir, 'cron.json'))
-    expect(blockedCreation).toContain(join(agentDir, 'typeclaw.json'))
-    // Absent files are not (and cannot be) RO-bound — /dev/null occupies them.
-    expect(prot.files).not.toContain(join(agentDir, 'cron.json'))
-    expect(prot.files).not.toContain(join(agentDir, 'typeclaw.json'))
-  })
-
-  test('does NOT block-create a PRESENT managed file (it is RO-bound with real content instead)', async () => {
-    await writeFile(join(agentDir, 'cron.json'), '{"jobs":[]}')
-
-    const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
-
-    expect(blockedCreation).not.toContain(join(agentDir, 'cron.json'))
-    expect(prot.files).toContain(join(agentDir, 'cron.json'))
-    // typeclaw.json is still absent, so it stays blocked.
-    expect(blockedCreation).toContain(join(agentDir, 'typeclaw.json'))
-  })
-
-  test('blocks a managed file that exists only as a symlink (an RO bind would follow it out)', async () => {
-    const outside = await mkdtemp(join(tmpdir(), 'typeclaw-outside-'))
-    try {
-      await writeFile(join(outside, 'real.json'), '{}')
-      await symlink(join(outside, 'real.json'), join(agentDir, 'cron.json'))
-
-      const { blockedCreation, protected: prot } = await resolvePackageInstallZones(agentDir)
-
-      expect(blockedCreation).toContain(join(agentDir, 'cron.json'))
-      expect(prot.files).not.toContain(join(agentDir, 'cron.json'))
-    } finally {
-      await rm(outside, { recursive: true, force: true })
-    }
-  })
-
-  test('does not leave an empty placeholder on the real FS for an absent managed file', async () => {
-    await resolvePackageInstallZones(agentDir)
-
-    expect(existsSync(join(agentDir, 'cron.json'))).toBe(false)
-    expect(existsSync(join(agentDir, 'typeclaw.json'))).toBe(false)
+  test('retains ordinary non-install scratch and manifest writes', async () => {
+    for (const dir of ['workspace', 'public', 'mounts']) await mkdir(join(agentDir, dir))
+    await writeFile(join(agentDir, 'package.json'), '{}')
+    const zones = await resolveWritableZones(agentDir)
+    expect(zones.dirs).toEqual(expect.arrayContaining(['workspace', 'public', 'mounts'].map((d) => join(agentDir, d))))
+    expect(zones.files).toContain(join(agentDir, 'package.json'))
   })
 })
 

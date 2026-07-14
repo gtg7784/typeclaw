@@ -1,5 +1,11 @@
-import { lstat, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path, { isAbsolute, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
+
+import { CANONICAL_AGENT_SECRET_DIRS, CANONICAL_AGENT_SECRET_FILES } from './canonical-secrets'
+
+const execFileAsync = promisify(execFile)
 
 export type WritableZones = {
   dirs: string[]
@@ -37,7 +43,7 @@ const WRITABLE_DIRS = ['workspace', 'public', 'mounts', '.git'] as const
 
 // SECURITY: configured writable paths (`sandbox.writablePaths`) may NOT resolve
 // onto these. `.git` carries the hook/config escalation surface; `.env` and
-// `secrets.json` are the credential files; `sessions`/`memory` are the agent's
+// `secrets.json`/`auth.json` are credential files; `sessions`/`memory` are the agent's
 // private surface (masked from low-trust roles by hidden-paths); `.typeclaw`
 // holds system-managed home persistence; `node_modules` is executable
 // dependency code. Granting blanket RW to any of these via config would defeat
@@ -46,16 +52,13 @@ const WRITABLE_DIRS = ['workspace', 'public', 'mounts', '.git'] as const
 // whole tree erases the read-only confinement wholesale.
 const FORBIDDEN_WRITABLE_ROOTS = [
   '.git',
-  '.env',
-  'secrets.json',
+  ...CANONICAL_AGENT_SECRET_FILES,
   'sessions',
   'memory',
   '.typeclaw',
+  ...CANONICAL_AGENT_SECRET_DIRS,
   'node_modules',
 ] as const
-
-const PROTECTED_GIT_DIRS = ['.git/hooks'] as const
-const PROTECTED_GIT_FILES = ['.git/config'] as const
 
 // Bash may EDIT these when present; creating a MISSING root file goes through
 // write/edit (bwrap cannot RW-bind a non-existent source without pre-creating it).
@@ -69,8 +72,8 @@ const PROTECTED_GIT_FILES = ['.git/config'] as const
 // this list forces every mutation of a guarded file through the one guarded path
 // (the write/edit tool), so a managed file has exactly one mutation boundary.
 // `package.json` stays writable: it is NOT a semantically-guarded managed file
-// (only cron.json/typeclaw.json are), and `bun add`/manual dep edits legitimately
-// touch it from bash.
+// (only cron.json/typeclaw.json are), and ordinary trusted/manual edits remain
+// supported.
 const WRITABLE_ROOT_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'package.json'] as const
 
 // SECURITY: the symlink rejection is load-bearing. An RW bind follows symlinks,
@@ -153,115 +156,6 @@ function dedupe(values: string[]): string[] {
   return [...new Set(values)]
 }
 
-export type PackageInstallZones = {
-  root: string
-  protected: ProtectedZones
-  // Guarded managed files that are ABSENT at jail-build time. The RW package-
-  // install root would otherwise let a `bun install` postinstall lifecycle
-  // script CREATE them (a guard bypass — see the SECURITY note on
-  // MANAGED_ROOT_FILES). Rendered as `--ro-bind /dev/null <path>` so the path is
-  // occupied by an empty read-only object that blocks creation, without
-  // manufacturing a real (invalid) file on the host FS the way the secret-mask
-  // placeholder pattern would. Present managed files go in `protected.files`.
-  blockedCreation: string[]
-}
-
-// SECURITY: the semantically-guarded managed files. They are gated by the
-// managedConfig / cronPromotion guards (write/edit tools only), so bash must
-// never be able to write OR create them. The normal jail already excludes them
-// from WRITABLE_ROOT_FILES; the package-install RW root needs the extra step of
-// blocking their CREATION when absent (see PackageInstallZones.blockedCreation).
-const MANAGED_ROOT_FILES = ['cron.json', 'typeclaw.json'] as const
-
-// SECURITY: the package-install RW root is governed by an ALLOWLIST, not a
-// denylist. `bun add` writes exactly these and nothing else: `node_modules/`
-// (deps), `package.json` + `bun.lock` (manifest + lockfile, plus the temp
-// lockfile created in the root DIR). The scratch zones (`workspace`, `public`,
-// `mounts`) stay writable to match the normal jail. EVERY other existing root
-// entry is RO-bound, so a denylist of "executable/runtime-sensitive" paths is
-// not needed — it would be unbounded (any file the unsandboxed runtime reads or
-// execs, including `src/`/`scripts/` in dev-mode agents where typeclaw is a
-// file:/link: dep, the agent's own lifecycle scripts, and prompt-source files)
-// and fails OPEN for any root entry not yet listed. An allowlist fails CLOSED.
-const PACKAGE_INSTALL_WRITABLE_DIRS = ['node_modules', 'workspace', 'public', 'mounts'] as const
-const PACKAGE_INSTALL_WRITABLE_FILES = ['package.json', 'bun.lock'] as const
-
-// Resolves the jail layout for a recognized standalone dependency install
-// (`bun add` / `bun install`). The RW root lets bun create node_modules/ and its
-// temp lockfile (`bun.lock.NNN.tmp`, renamed) — a file-level bind of `bun.lock`
-// alone cannot, since the temp file needs DIRECTORY write. Pre-creates an empty
-// node_modules/ so the dir exists before the RW root bind. Then RO-binds every
-// EXISTING root entry not in the writable allowlist (readdir enumeration, so a
-// new file like `src/` or a planted `cron.json` is covered without a hardcoded
-// list), plus `node_modules/typeclaw` (the live/symlinked runtime, nested under
-// the writable node_modules) and the whole `.git` (a `bun add` never needs git,
-// so RO-binding it wholesale is simpler and safer than the hooks/config carve-out
-// — it closes the hook / core.hooksPath escalation by construction).
-//
-// SECURITY: rejects a symlink at agentDir, at any install-touched path
-// (node_modules, package.json, bun.lock), and at every RO-bind source — an RW
-// root or an RO bind that follows a symlink would write/read outside the jail.
-// The secret/private masks render AFTER this protected set (subtractMasked in
-// applyBashSandbox drops any protected entry a mask already hides), so .env /
-// secrets.json / memory / sessions stay hidden, not merely RO.
-export async function resolvePackageInstallZones(agentDir: string): Promise<PackageInstallZones> {
-  await assertNotSymlink(agentDir)
-  await mkdir(join(agentDir, 'node_modules'), { recursive: true })
-  for (const rel of ['node_modules', ...PACKAGE_INSTALL_WRITABLE_FILES] as const) {
-    const target = join(agentDir, rel)
-    if (await exists(target)) await assertNotSymlink(target)
-  }
-
-  const writable = new Set<string>([...PACKAGE_INSTALL_WRITABLE_DIRS, ...PACKAGE_INSTALL_WRITABLE_FILES])
-  const dirs: string[] = []
-  const files: string[] = []
-  for (const entry of await readdir(agentDir, { withFileTypes: true })) {
-    if (writable.has(entry.name)) continue
-    // A symlinked root entry is skipped, not RO-bound: an RO bind follows it to
-    // an outside target. Skipping leaves it under the RW root — but it is the
-    // agent's OWN symlink under its OWN root, contained by the agent-folder bind
-    // and the always-on kernel invariants, the same residual the default jail
-    // accepts for symlinks pointing outside /agent.
-    if (entry.isSymbolicLink()) continue
-    const target = join(agentDir, entry.name)
-    if (entry.isDirectory()) dirs.push(target)
-    else if (entry.isFile()) files.push(target)
-  }
-
-  // node_modules itself is writable (deps land there), but the runtime under it
-  // must not be — RO-bind it nested, last-op-wins over the writable node_modules.
-  const runtime = join(agentDir, 'node_modules', 'typeclaw')
-  if (await isRealEntry(runtime, 'dir')) dirs.push(runtime)
-
-  // Guarded managed files: a PRESENT real one is already RO-bound by the readdir
-  // loop above (it is not in the writable set). The gap is a managed file ABSENT
-  // at jail-build time — readdir never sees it, so nothing occupies its path and
-  // a postinstall script could CREATE it under the RW root. Block that path with
-  // `--ro-bind /dev/null`. A managed file that exists as a SYMLINK is also blocked
-  // here rather than RO-bound (the readdir loop skipped it, and an RO bind would
-  // follow it out of the jail) — occupying the path with /dev/null is safe.
-  const blockedCreation: string[] = []
-  for (const name of MANAGED_ROOT_FILES) {
-    const target = join(agentDir, name)
-    if (!(await isRealEntry(target, 'file'))) blockedCreation.push(target)
-  }
-
-  return {
-    root: agentDir,
-    protected: { dirs: dedupe(dirs), files: dedupe(files) },
-    blockedCreation: dedupe(blockedCreation),
-  }
-}
-
-async function exists(target: string): Promise<boolean> {
-  try {
-    await lstat(target)
-    return true
-  } catch {
-    return false
-  }
-}
-
 // Read-only re-protections rendered on top of the writable .git bind. Unlike
 // the writable resolvers, this MUST NOT drop absent entries: .git is writable,
 // so a path absent at jail-build time would otherwise be CREATED by sandboxed
@@ -276,20 +170,148 @@ async function exists(target: string): Promise<boolean> {
 // the .git/hooks RO-bind alone would not cover it, so that dir is protected too.
 export async function resolveProtectedZones(agentDir: string): Promise<ProtectedZones> {
   const dirs: string[] = []
-  for (const rel of PROTECTED_GIT_DIRS) {
-    dirs.push(await ensureProtectedDir(join(agentDir, rel)))
-  }
-  const files: string[] = []
-  for (const rel of PROTECTED_GIT_FILES) {
-    files.push(await ensureProtectedFile(join(agentDir, rel)))
-  }
+  const nodeModules = await resolveExistingProtectedDir(join(agentDir, 'node_modules'))
+  if (nodeModules !== undefined) dirs.push(nodeModules)
+  const layout = await resolveGitControlLayout(agentDir)
+  if (layout === undefined) return { dirs, files: [] }
 
-  const hooksPathDir = await resolveEffectiveHooksPath(agentDir)
+  dirs.push(await ensureProtectedDir(layout.defaultHooksDir))
+  const files: string[] = []
+  for (const configFile of layout.configFiles) files.push(await ensureProtectedFile(configFile))
+  if (layout.gitEntryFile !== undefined) files.push(layout.gitEntryFile)
+
+  const hooksPathDir = await resolveEffectiveHooksPath(agentDir, layout)
   if (hooksPathDir !== undefined && !dirs.includes(hooksPathDir)) {
     dirs.push(await ensureProtectedDir(hooksPathDir))
   }
 
-  return { dirs, files }
+  return { dirs: dedupe(dirs), files: dedupe(files) }
+}
+
+async function resolveExistingProtectedDir(target: string): Promise<string | undefined> {
+  const stats = await lstatOrUndefined(target)
+  if (stats === undefined) return undefined
+  if (stats.isSymbolicLink()) throw new Error(`sandbox: refusing to protect symlinked path ${target}`)
+  if (!stats.isDirectory()) throw new Error(`sandbox: protected directory is not a directory ${target}`)
+  return target
+}
+
+export async function isGitControlPath(agentDir: string, candidate: string): Promise<boolean> {
+  const absolute = resolve(agentDir, candidate)
+  const real = await realpathOrUndefined(absolute)
+  const candidates = real === undefined ? [absolute] : [absolute, real]
+  const lexicalGit = join(agentDir, '.git')
+  const lexicalGitstore = join(agentDir, '.gitstore')
+  if (candidates.some((path) => isLexicalGitControlPath(path, lexicalGit, lexicalGitstore))) {
+    return true
+  }
+
+  const layout = await resolveGitControlLayout(agentDir)
+  if (layout === undefined) return false
+  if (candidates.some((path) => layout.configFiles.includes(path))) return true
+  if (candidates.some((path) => path === layout.defaultHooksDir || isInside(layout.defaultHooksDir, path))) return true
+  const effectiveHooks = await resolveEffectiveHooksPath(agentDir, layout)
+  return (
+    effectiveHooks !== undefined && candidates.some((path) => path === effectiveHooks || isInside(effectiveHooks, path))
+  )
+}
+
+function isLexicalGitControlPath(candidate: string, dotGit: string, gitstore: string): boolean {
+  return (
+    candidate === dotGit ||
+    candidate === join(dotGit, 'config') ||
+    candidate === join(dotGit, 'hooks') ||
+    isInside(join(dotGit, 'hooks'), candidate) ||
+    candidate === join(gitstore, 'config') ||
+    candidate === join(gitstore, 'hooks') ||
+    isInside(join(gitstore, 'hooks'), candidate)
+  )
+}
+
+type GitControlLayout = {
+  gitEntryFile?: string
+  gitDir: string
+  defaultHooksDir: string
+  configFiles: string[]
+}
+
+async function resolveGitControlLayout(agentDir: string): Promise<GitControlLayout | undefined> {
+  const dotGit = join(agentDir, '.git')
+  const gitstore = join(agentDir, '.gitstore')
+  let gitDir: string
+  let gitEntryFile: string | undefined
+
+  const dotGitStats = await lstatOrUndefined(dotGit)
+  if (dotGitStats?.isDirectory()) {
+    gitDir = dotGit
+  } else if (dotGitStats?.isFile()) {
+    const pointer = await readFile(dotGit, 'utf8')
+    const match = /^gitdir:\s*(.+?)\s*$/im.exec(pointer)
+    if (match?.[1] === undefined) throw new Error(`sandbox: invalid worktree gitdir pointer ${dotGit}`)
+    gitDir = resolve(agentDir, match[1])
+    await assertRealDirectory(gitDir)
+    gitEntryFile = dotGit
+  } else {
+    const gitstoreStats = await lstatOrUndefined(gitstore)
+    if (!gitstoreStats?.isDirectory()) return undefined
+    gitDir = gitstore
+  }
+
+  const commonDir = await resolveCommonGitDir(gitDir)
+  const rootConfigFiles = [join(commonDir, 'config')]
+  const worktreeConfig = join(gitDir, 'config.worktree')
+  if (await isRealEntry(worktreeConfig, 'file')) rootConfigFiles.push(worktreeConfig)
+  const configFiles = await resolveLocalConfigFiles(agentDir, gitDir, rootConfigFiles)
+  return { gitEntryFile, gitDir, defaultHooksDir: join(commonDir, 'hooks'), configFiles }
+}
+
+async function resolveLocalConfigFiles(agentDir: string, gitDir: string, roots: readonly string[]): Promise<string[]> {
+  if (!(await isRealEntry(roots[0] as string, 'file'))) return roots.map((root) => resolve(root))
+  const result = await execLocalGitConfig(
+    agentDir,
+    gitDir,
+    roots[0] as string,
+    ['--includes', '--show-origin', '--null', '--name-only', '--list'],
+    256 * 1024,
+  )
+  const fields = result.stdout.split('\0').filter((field) => field !== '')
+  const origins: string[] = []
+  for (let index = 0; index < fields.length; index += 2) {
+    const origin = fields[index]
+    if (origin === undefined || !origin.startsWith('file:')) continue
+    const configFile = resolve(origin.slice('file:'.length))
+    if (configFile === agentDir || isInside(agentDir, configFile)) origins.push(configFile)
+  }
+  return dedupe([...roots.map((root) => resolve(root)), ...origins])
+}
+
+async function resolveCommonGitDir(gitDir: string): Promise<string> {
+  try {
+    const relative = (await readFile(join(gitDir, 'commondir'), 'utf8')).trim()
+    if (relative.length === 0) return gitDir
+    const commonDir = resolve(gitDir, relative)
+    await assertRealDirectory(commonDir)
+    return commonDir
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return gitDir
+    throw error
+  }
+}
+
+async function assertRealDirectory(target: string): Promise<void> {
+  const stats = await lstat(target)
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`sandbox: refusing non-directory git control root ${target}`)
+  }
+}
+
+async function lstatOrUndefined(target: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  try {
+    return await lstat(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
 }
 
 // Fail closed: a symlink at a protected path would make the RO bind follow it
@@ -319,24 +341,66 @@ async function assertNotSymlink(target: string): Promise<void> {
   }
 }
 
-// Reads core.hooksPath straight from .git/config text (the file is about to be
-// RO-bound, so its content is the trusted baseline). Returns the resolved
-// absolute dir only when it lands inside agentDir — an outside path is not
-// writable by the jail and a relative path resolves against the repo root, per
-// gitconfig semantics.
-async function resolveEffectiveHooksPath(agentDir: string): Promise<string | undefined> {
-  let text: string
+// Ask Git to parse the effective value so quoting, escapes, comments, include,
+// and includeIf semantics exactly match the process that may later run hooks.
+// Global/system config and prompt-driven helpers are disabled so only the
+// repository-owned config graph can influence the result.
+async function resolveEffectiveHooksPath(agentDir: string, layout: GitControlLayout): Promise<string | undefined> {
+  let raw: string
   try {
-    text = await readFile(join(agentDir, '.git', 'config'), 'utf8')
-  } catch {
-    return undefined
+    const result = await execLocalGitConfig(
+      agentDir,
+      layout.gitDir,
+      layout.configFiles[0] as string,
+      ['--includes', '--path', '--get', 'core.hooksPath'],
+      64 * 1024,
+    )
+    raw = result.stdout.trim()
+  } catch (error) {
+    const code = (error as { code?: number | string }).code
+    if (code === 1) return undefined
+    throw error
   }
-  const match = text.match(/^\s*hooksPath\s*=\s*(.+?)\s*$/m)
-  if (match === null) return undefined
-  const raw = match[1]?.trim()
-  if (raw === undefined || raw.length === 0) return undefined
+  if (raw.length === 0) return undefined
   const resolved = isAbsolute(raw) ? resolve(raw) : resolve(agentDir, raw)
   return isInside(agentDir, resolved) ? resolved : undefined
+}
+
+function gitConfigEnv(agentDir: string, gitDir: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: agentDir,
+    GIT_DIR: gitDir,
+    GIT_WORK_TREE: agentDir,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  }
+}
+
+async function execLocalGitConfig(
+  agentDir: string,
+  gitDir: string,
+  rootConfig: string,
+  args: string[],
+  maxBuffer: number,
+): Promise<{ stdout: string; stderr: string }> {
+  const options = { env: gitConfigEnv(agentDir, gitDir), maxBuffer }
+  try {
+    return await execFileAsync(
+      'git',
+      [`--git-dir=${gitDir}`, `--work-tree=${agentDir}`, 'config', '--local', ...args],
+      options,
+    )
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr ?? ''
+    if (!stderr.includes('--local can only be used inside a git repository')) throw error
+    return execFileAsync(
+      'git',
+      [`--git-dir=${gitDir}`, `--work-tree=${agentDir}`, 'config', '--file', rootConfig, ...args],
+      options,
+    )
+  }
 }
 
 // SECURITY: a writable RW bind renders AFTER the masks and last-op-wins, so an
