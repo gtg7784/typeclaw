@@ -46,7 +46,7 @@ import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
 import { toKakaoPlainText } from './kakaotalk-format'
 import { createKakaoMembershipResolver } from './kakaotalk-membership'
-import { createKakaoTypingCallback, KAKAO_TYPING_HEARTBEAT_MS } from './kakaotalk-typing'
+import { createKakaoTypingCallback, kakaoTypingClassFromLookup, KAKAO_TYPING_HEARTBEAT_MS } from './kakaotalk-typing'
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
@@ -409,6 +409,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   const typing = createKakaoTypingCallback({
     logger,
     sendTyping: (chatId, opts) => client.sendTyping(chatId, opts),
+    classifyChat: (chatId) => kakaoTypingClassFromLookup(channelResolver.lookupChat(chatId)),
     formatChannelTag,
   })
 

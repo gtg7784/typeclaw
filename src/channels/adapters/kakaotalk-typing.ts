@@ -30,19 +30,37 @@ export type KakaoTypingCallbackHandle = {
 // expiry even with scheduler/network jitter (a 5000ms interval has no margin).
 export const KAKAO_TYPING_HEARTBEAT_MS = 4000
 
-// OpenChat ACTION packets require the LOCO `linkId` field, which the channel
-// resolver does not surface today (the same limitation `markReadIfSupported`
-// documents for NOTIREAD). Rather than emit a doomed pulse, we skip typing for
-// `@kakao-open` and log once per chat. Wiring linkId through the resolver is a
-// follow-up shared with mark-read.
-const OPEN_CHAT_WORKSPACE = '@kakao-open'
+// Per-chat send decision, resolved live at each tick rather than from the
+// (stale) session-key workspace:
+//   send             — an authoritative DM/group chat; emit the ACTION packet.
+//   skip-open        — a confirmed OpenChat; the LOCO ACTION needs a `linkId`
+//                      the resolver does not surface today, so skip (logged once,
+//                      mirroring markReadIfSupported).
+//   skip-unresolved  — unknown or provisional entry: the resolver has not yet
+//                      confirmed the kind (a chat seen on an inbound push but not
+//                      surfaced by getChats is cached as a strict @kakao-group
+//                      GUESS). Skip silently — sending could hit an OpenChat
+//                      without its linkId, and a later refresh upgrades the entry.
+export type KakaoTypingChatClass = 'send' | 'skip-open' | 'skip-unresolved'
+
+export function kakaoTypingClassFromLookup(
+  lookup: { workspace: string; provisional: boolean } | null,
+): KakaoTypingChatClass {
+  if (lookup === null || lookup.provisional) return 'skip-unresolved'
+  if (lookup.workspace === '@kakao-open') return 'skip-open'
+  return 'send'
+}
 
 export function createKakaoTypingCallback(deps: {
   logger: KakaoTypingLogger
   sendTyping: KakaoTypingSender
+  // Live per-chat classifier — consults the channel resolver at send time so a
+  // provisional/unknown room (or one that refreshed into OpenChat after the
+  // session key was minted) is suppressed, not judged by the stale target.
+  classifyChat: (chatId: string) => KakaoTypingChatClass
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): KakaoTypingCallbackHandle {
-  const { logger, sendTyping, formatChannelTag } = deps
+  const { logger, sendTyping, classifyChat, formatChannelTag } = deps
   // Per-chat FIFO mirrors the webex/slack pattern: chaining each request through
   // the per-chat tail keeps on-the-wire order matching enqueue order even under
   // network jitter, so a slow send can't reorder behind a later tick.
@@ -65,8 +83,9 @@ export function createKakaoTypingCallback(deps: {
       activeGeneration.delete(target.chat)
       return
     }
-    if (target.workspace === OPEN_CHAT_WORKSPACE) {
-      if (!openChatSkipLogged.has(target.chat)) {
+    const chatClass = classifyChat(target.chat)
+    if (chatClass !== 'send') {
+      if (chatClass === 'skip-open' && !openChatSkipLogged.has(target.chat)) {
         openChatSkipLogged.add(target.chat)
         logger.info(`[kakaotalk:typing] skipped chat=${target.chat} reason=open_chat_link_id_unsupported`)
       }
