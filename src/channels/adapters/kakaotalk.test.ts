@@ -326,19 +326,22 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await router.stop()
   })
 
-  test('registers typing on start, routes a tick to client.sendTyping, and unregisters + disables + shuts down on stop', async () => {
+  test('registers a stateless typing callback + 5s heartbeat on start, routes a tick to client.sendTyping, and unregisters + disables on stop', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
 
-    // Spy on the real router's typing wiring: capture the registered callback
-    // and the capability toggles so we can drive a tick through the exact
-    // callback the adapter handed the router, then assert teardown ordering.
+    // Spy on the real router's typing wiring: capture the registered callback,
+    // the capability toggles, and the heartbeat-interval override so we can
+    // drive a tick through the exact callback the adapter handed the router and
+    // assert teardown ordering.
     const events: string[] = []
     let registeredTyping: TypingCallback | null = null
+    let heartbeatInterval = -1
     const realRegisterTyping = router.registerTyping.bind(router)
     const realUnregisterTyping = router.unregisterTyping.bind(router)
     const realSetTypingCapability = router.setTypingCapability.bind(router)
+    const realSetTypingHeartbeatInterval = router.setTypingHeartbeatInterval.bind(router)
     router.registerTyping = (adapter, cb) => {
       if (adapter === 'kakaotalk') registeredTyping = cb
       events.push(`register:${adapter}`)
@@ -351,6 +354,10 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     router.setTypingCapability = (adapter, supported) => {
       events.push(`cap:${adapter}=${String(supported)}`)
       return realSetTypingCapability(adapter, supported)
+    }
+    router.setTypingHeartbeatInterval = (adapter, intervalMs) => {
+      if (adapter === 'kakaotalk') heartbeatInterval = intervalMs
+      return realSetTypingHeartbeatInterval(adapter, intervalMs)
     }
 
     const adapter = createKakaotalkAdapter({
@@ -365,8 +372,11 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     expect(registeredTyping).not.toBeNull()
     expect(events).toContain('register:kakaotalk')
     expect(events).toContain('cap:kakaotalk=true')
+    // The adapter must register a heartbeat faster than the default 8s so the
+    // router itself paces the refresh (KakaoTalk expires the indicator ~5s).
+    expect(heartbeatInterval).toBe(5000)
 
-    // Drive a tick through the captured callback — it must reach client.sendTyping.
+    // A tick reaches client.sendTyping; the callback holds no timer of its own.
     await registeredTyping!({
       adapter: 'kakaotalk',
       workspace: '@kakao-group',
@@ -375,23 +385,14 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
       phase: 'tick',
     })
     expect(client.sendTypingCalls).toEqual([{ chatId: '111' }])
-    // Clear the self-refresh timer the tick armed so it can't fire post-stop.
-    await registeredTyping!({
-      adapter: 'kakaotalk',
-      workspace: '@kakao-group',
-      chat: '111',
-      thread: null,
-      phase: 'stop',
-    })
 
     await adapter.stop()
 
     expect(events).toContain('unregister:kakaotalk')
     expect(events).toContain('cap:kakaotalk=false')
 
-    // After stop, a stray heartbeat must not reach the client (callback is
-    // unregistered from the router; a direct call would also no-op via the
-    // capability gate, but the router is the real dispatch path here).
+    // After stop the callback is unregistered from the router, so a heartbeat
+    // dispatched through the real router path no longer reaches the client.
     const before = client.sendTypingCalls.length
     await router.__testing?.fireTypingHeartbeat(
       { adapter: 'kakaotalk', workspace: '@kakao-group', chat: '111', thread: null },

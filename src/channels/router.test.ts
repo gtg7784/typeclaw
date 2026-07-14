@@ -35,6 +35,7 @@ import {
   MAX_EMPTY_TURN_RETRIES,
   MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
+  TYPING_HEARTBEAT_MS,
   MAX_WILLINGNESS_NUDGES,
   OUTBOUND_FLOOD_ERROR,
   SEND_RATE_WARN_THRESHOLD,
@@ -7511,6 +7512,26 @@ describe('ChannelRouter stop', () => {
     expect(router.__testing!.isTypingActive(KEY)).toBe(true)
     await router.stop()
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+})
+
+describe('ChannelRouter typing heartbeat interval', () => {
+  test('adapters default to TYPING_HEARTBEAT_MS when no override is registered', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    expect(router.__testing!.typingHeartbeatIntervalFor('discord-bot')).toBe(TYPING_HEARTBEAT_MS)
+    expect(router.__testing!.typingHeartbeatIntervalFor('kakaotalk')).toBe(TYPING_HEARTBEAT_MS)
+    await router.stop()
+  })
+
+  test('setTypingHeartbeatInterval overrides one adapter without affecting others', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.setTypingHeartbeatInterval('kakaotalk', 5000)
+    expect(router.__testing!.typingHeartbeatIntervalFor('kakaotalk')).toBe(5000)
+    // Other adapters keep the default — the override is per-adapter, not global.
+    expect(router.__testing!.typingHeartbeatIntervalFor('discord-bot')).toBe(TYPING_HEARTBEAT_MS)
+    await router.stop()
   })
 })
 
