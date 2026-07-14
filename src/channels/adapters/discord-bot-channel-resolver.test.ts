@@ -118,4 +118,16 @@ describe('discord-bot channel resolver', () => {
 
     expect(result).toEqual({})
   })
+
+  test('rejects malformed IDs before building Discord API paths', async () => {
+    installFetch(() => {
+      throw new Error('must not fetch')
+    })
+    const resolver = createDiscordChannelResolver({ token: 'tok' })
+
+    await expect(
+      resolver({ adapter: 'discord-bot', workspace: '../guild', chat: 'room/1', thread: null }),
+    ).resolves.toEqual({})
+    expect(calls).toHaveLength(0)
+  })
 })
