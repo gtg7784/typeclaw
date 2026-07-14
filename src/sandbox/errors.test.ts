@@ -14,9 +14,9 @@ describe('SandboxDegradedProcError', () => {
     expect(err.name).toBe('SandboxDegradedProcError')
   })
 
-  test('names the bun package commands and frames it as an environment limit, not a command fault', () => {
+  test('names the allowed bun package runners and frames it as an environment limit, not a command fault', () => {
     const { message } = new SandboxDegradedProcError()
-    expect(message).toContain('bun install')
+    expect(message).toContain('bun run')
     expect(message).toContain('bunx')
     expect(message).toContain('NotDir')
     expect(message.toLowerCase()).toContain('retry')
@@ -40,9 +40,9 @@ describe('SandboxProcProbeUnverifiedError', () => {
     expect(err.name).toBe('SandboxProcProbeUnverifiedError')
   })
 
-  test('names the bun package commands and frames it as transient, not a command fault', () => {
+  test('names the allowed bun package runners and frames it as transient, not a command fault', () => {
     const { message } = new SandboxProcProbeUnverifiedError()
-    expect(message).toContain('bun install')
+    expect(message).toContain('bun run')
     expect(message).toContain('bunx')
     expect(message.toLowerCase()).toContain('inconclusive')
     expect(message.toLowerCase()).toContain('temporary')
