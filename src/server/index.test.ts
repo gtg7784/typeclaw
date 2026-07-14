@@ -12,7 +12,7 @@ import { renderShard } from '@/bundled-plugins/memory/frontmatter'
 import { topicShardPath, topicsDir } from '@/bundled-plugins/memory/paths'
 import { createMemorySearchTool } from '@/bundled-plugins/memory/search-tool'
 import type { CronJob } from '@/cron'
-import { createPermissionService } from '@/permissions'
+import { createPermissionService, type PermissionService } from '@/permissions'
 import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -730,6 +730,28 @@ describe('createServer session persistence wiring', () => {
     expect(observed).toHaveLength(1)
     expect(observed[0]?.sessionManager).toBe(created[0])
 
+    ws.close()
+  })
+
+  test('forwards the live permission service into every TUI session', async () => {
+    const session = createFakeSession()
+    const permissions = {} as PermissionService
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      permissions,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((message) => message.type === 'connected')
+
+    expect(observed).toHaveLength(1)
+    expect(observed[0]?.permissions).toBe(permissions)
     ws.close()
   })
 
