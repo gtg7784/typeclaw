@@ -9,12 +9,24 @@ import { promptPersistentTurnWithFallback } from './turn-runner'
 
 const REF_A = 'openai/gpt-5.4-nano' as ModelRef
 const REF_B = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' as ModelRef
+const CODEX_TERRA_REF = 'openai-codex/gpt-5.5' as ModelRef
+const CODEX_SOL_REF = 'openai-codex/gpt-5.4' as ModelRef
+const CODEX_LUNA_REF = 'openai-codex/gpt-5.4-mini' as ModelRef
+const ANTHROPIC_REF = 'anthropic/claude-sonnet-5' as ModelRef
 
 type FakeEvent = { type: string; message?: unknown; assistantMessageEvent?: { type: string; delta?: string } }
 
 function fakeSession(
   behaviors: Array<
-    'soft-throttle' | 'soft-billing' | 'text-then-throttle' | 'tool-then-throttle' | 'hard-observer-timeout' | 'success'
+    | 'soft-throttle'
+    | 'soft-503'
+    | 'soft-billing'
+    | 'text-then-throttle'
+    | 'tool-then-throttle'
+    | 'hard-observer-timeout'
+    | 'hard-observer-ttfb-timeout'
+    | 'soft-observer-ttfb-timeout'
+    | 'success'
   >,
 ) {
   const events: Array<(event: FakeEvent) => void> = []
@@ -27,6 +39,9 @@ function fakeSession(
       if (behavior === 'hard-observer-timeout') {
         throw new Error('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')
       }
+      if (behavior === 'hard-observer-ttfb-timeout') {
+        throw new Error('openai-codex timed out before response headers after 30000ms (typeclaw observer timeout)')
+      }
       if (behavior === 'text-then-throttle') {
         for (const cb of events)
           cb({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
@@ -35,7 +50,14 @@ function fakeSession(
         for (const cb of events) cb({ type: 'tool_execution_start' })
       }
       if (behavior !== 'success') {
-        const message = behavior === 'soft-billing' ? 'billing required' : 'server_is_overloaded'
+        const message =
+          behavior === 'soft-billing'
+            ? 'billing required'
+            : behavior === 'soft-503'
+              ? '503 Service Unavailable'
+              : behavior === 'soft-observer-ttfb-timeout'
+                ? 'openai-codex timed out before response headers after 30000ms (typeclaw observer timeout)'
+                : 'server_is_overloaded'
         for (const cb of events) {
           cb({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: message } })
         }
@@ -215,6 +237,186 @@ describe('promptPersistentTurnWithFallback', () => {
 
     expect(probed.refUsed).toBe(REF_A)
     expect(probe.setModels).toEqual([])
+  })
+
+  test('records codex observer TTFB timeouts against one provider circuit across refs', async () => {
+    const circuit = new ThrottleCircuit()
+
+    for (const ref of [CODEX_TERRA_REF, CODEX_SOL_REF]) {
+      const fake = fakeSession(['hard-observer-ttfb-timeout', 'success'])
+      const result = await promptPersistentTurnWithFallback({
+        refs: [ref, ANTHROPIC_REF],
+        currentModelRef: ref,
+        profile: 'default',
+        session: fake.session,
+        text: 'hello',
+        circuit,
+        shouldFailover: (err) => isFailoverWorthy(err.message),
+        setModelForRef: async (nextRef) => {
+          fake.setModels.push(nextRef)
+        },
+      })
+      expect(result.success).toBe(true)
+    }
+
+    expect(circuit.isProviderOpen({ profile: 'default', ref: CODEX_LUNA_REF })).toBe(true)
+    expect(circuit.isOpen({ profile: 'default', ref: CODEX_TERRA_REF })).toBe(false)
+    expect(circuit.isOpen({ profile: 'default', ref: CODEX_SOL_REF })).toBe(false)
+  })
+
+  test('attempts terra, sol, then routes to anthropic in one turn as the codex provider breaker opens mid-chain', async () => {
+    const circuit = new ThrottleCircuit({ now: () => 1_000 })
+    const fake = fakeSession(['soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout', 'success'])
+    const attemptedRefs: ModelRef[] = []
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [CODEX_TERRA_REF, CODEX_SOL_REF, ANTHROPIC_REF],
+      currentModelRef: CODEX_TERRA_REF,
+      profile: 'default',
+      session: fake.session,
+      text: 'hello',
+      circuit,
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+      beforeAttempt: (ref) => {
+        attemptedRefs.push(ref)
+      },
+    })
+
+    expect(attemptedRefs).toEqual([CODEX_TERRA_REF, CODEX_SOL_REF, ANTHROPIC_REF])
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(ANTHROPIC_REF)
+  })
+
+  test('attempts only terra and sol (not luna) for a codex-only chain when the breaker opens mid-chain', async () => {
+    const circuit = new ThrottleCircuit({ now: () => 1_000 })
+    const fake = fakeSession(['soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout'])
+    const attemptedRefs: ModelRef[] = []
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [CODEX_TERRA_REF, CODEX_SOL_REF, CODEX_LUNA_REF],
+      currentModelRef: CODEX_TERRA_REF,
+      profile: 'default',
+      session: fake.session,
+      text: 'hello',
+      circuit,
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+      beforeAttempt: (ref) => {
+        attemptedRefs.push(ref)
+      },
+    })
+
+    expect(attemptedRefs).toEqual([CODEX_TERRA_REF, CODEX_SOL_REF])
+    expect(result.success).toBe(false)
+  })
+
+  test('surfaces on the last attempted ref when a mid-chain trip strands trailing codex refs', async () => {
+    // [anthropic, terra, sol, luna]: anthropic fails over, terra+sol TTFB-timeout
+    // and open the breaker at sol. luna would now be skipped, so the turn must
+    // surface on sol (the last ATTEMPTED ref) — not fall through and report luna,
+    // which was never attempted.
+    const circuit = new ThrottleCircuit({ now: () => 1_000 })
+    const fake = fakeSession(['soft-throttle', 'soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout'])
+    const attemptedRefs: ModelRef[] = []
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [ANTHROPIC_REF, CODEX_TERRA_REF, CODEX_SOL_REF, CODEX_LUNA_REF],
+      currentModelRef: ANTHROPIC_REF,
+      profile: 'default',
+      session: fake.session,
+      text: 'hello',
+      circuit,
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+      beforeAttempt: (ref) => {
+        attemptedRefs.push(ref)
+      },
+    })
+
+    expect(attemptedRefs).toEqual([ANTHROPIC_REF, CODEX_TERRA_REF, CODEX_SOL_REF])
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(CODEX_SOL_REF)
+  })
+
+  test('skips every codex ref while its provider circuit is open and uses the first non-codex fallback', async () => {
+    const circuit = new ThrottleCircuit()
+    circuit.recordProviderTrip({ profile: 'default', ref: CODEX_TERRA_REF })
+    circuit.recordProviderTrip({ profile: 'default', ref: CODEX_SOL_REF })
+    const fake = fakeSession(['success'])
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [CODEX_TERRA_REF, CODEX_SOL_REF, ANTHROPIC_REF, CODEX_LUNA_REF],
+      currentModelRef: CODEX_TERRA_REF,
+      profile: 'default',
+      session: fake.session,
+      text: 'hello',
+      circuit,
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        fake.setModels.push(ref)
+      },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(ANTHROPIC_REF)
+    expect(result.attempts).toEqual([{ ref: ANTHROPIC_REF, outcome: 'success' }])
+    expect(fake.prompted).toEqual(['hello'])
+    expect(fake.setModels).toEqual([ANTHROPIC_REF])
+  })
+
+  test('an open codex provider circuit surfaces a codex-only chain after one attempt', async () => {
+    const circuit = new ThrottleCircuit()
+    circuit.recordProviderTrip({ profile: 'default', ref: CODEX_TERRA_REF })
+    circuit.recordProviderTrip({ profile: 'default', ref: CODEX_SOL_REF })
+    const fake = fakeSession(['hard-observer-ttfb-timeout'])
+
+    await expect(
+      promptPersistentTurnWithFallback({
+        refs: [CODEX_TERRA_REF, CODEX_SOL_REF, CODEX_LUNA_REF],
+        currentModelRef: CODEX_TERRA_REF,
+        profile: 'default',
+        session: fake.session,
+        text: 'hello',
+        circuit,
+        shouldFailover: (err) => isFailoverWorthy(err.message),
+        setModelForRef: async (ref) => {
+          fake.setModels.push(ref)
+        },
+      }),
+    ).rejects.toThrow('timed out before response headers')
+
+    expect(fake.prompted).toEqual(['hello'])
+    expect(fake.setModels).toEqual([])
+  })
+
+  test('a codex 503 opens only the existing per-ref circuit', async () => {
+    const circuit = new ThrottleCircuit()
+
+    for (let turn = 0; turn < 2; turn++) {
+      const fake = fakeSession(['soft-503', 'success'])
+      await promptPersistentTurnWithFallback({
+        refs: [CODEX_TERRA_REF, ANTHROPIC_REF],
+        currentModelRef: CODEX_TERRA_REF,
+        profile: 'default',
+        session: fake.session,
+        text: 'hello',
+        circuit,
+        shouldFailover: (err) => isFailoverWorthy(err.message),
+        setModelForRef: async (ref) => {
+          fake.setModels.push(ref)
+        },
+      })
+    }
+
+    expect(circuit.isOpen({ profile: 'default', ref: CODEX_TERRA_REF })).toBe(true)
+    expect(circuit.isProviderOpen({ profile: 'default', ref: CODEX_TERRA_REF })).toBe(false)
   })
 
   test('detects a soft error from the leaf entry when event subscriptions are skipped', async () => {

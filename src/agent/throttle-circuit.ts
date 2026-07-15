@@ -23,13 +23,33 @@ export class ThrottleCircuit {
   }
 
   isOpen(key: ThrottleCircuitKey): boolean {
-    const entry = this.entries.get(this.keyId(key))
+    return this.isEntryOpen(this.keyId(key))
+  }
+
+  isProviderOpen(key: ThrottleCircuitKey): boolean {
+    return this.isEntryOpen(this.providerKeyId(key))
+  }
+
+  recordThrottle(key: ThrottleCircuitKey): void {
+    this.recordFailure(this.keyId(key))
+  }
+
+  recordProviderTrip(key: ThrottleCircuitKey): void {
+    this.recordFailure(this.providerKeyId(key))
+  }
+
+  recordSuccess(key: ThrottleCircuitKey): void {
+    this.entries.delete(this.keyId(key))
+    this.entries.delete(this.providerKeyId(key))
+  }
+
+  private isEntryOpen(id: string): boolean {
+    const entry = this.entries.get(id)
     if (entry === undefined) return false
     return this.now() < entry.openUntil
   }
 
-  recordThrottle(key: ThrottleCircuitKey): void {
-    const id = this.keyId(key)
+  private recordFailure(id: string): void {
     const now = this.now()
     const entry = this.entries.get(id) ?? { failures: [], openUntil: 0 }
     entry.failures = entry.failures.filter((ts) => now - ts <= THROTTLE_WINDOW_MS)
@@ -38,8 +58,8 @@ export class ThrottleCircuit {
     this.entries.set(id, entry)
   }
 
-  recordSuccess(key: ThrottleCircuitKey): void {
-    this.entries.delete(this.keyId(key))
+  private providerKeyId(key: ThrottleCircuitKey): string {
+    return `${key.profile ?? 'default'}:${providerForModelRef(key.ref)}`
   }
 
   private keyId(key: ThrottleCircuitKey): string {
