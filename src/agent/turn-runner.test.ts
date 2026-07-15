@@ -26,8 +26,10 @@ function fakeSession(
     | 'hard-observer-timeout'
     | 'hard-observer-ttfb-timeout'
     | 'soft-observer-ttfb-timeout'
+    | 'text-then-success'
     | 'success'
   >,
+  onPrompt?: () => void,
 ) {
   const events: Array<(event: FakeEvent) => void> = []
   const prompted: string[] = []
@@ -36,6 +38,7 @@ function fakeSession(
     prompt: async (text: string) => {
       prompted.push(text)
       const behavior = behaviors.shift() ?? 'success'
+      onPrompt?.()
       if (behavior === 'hard-observer-timeout') {
         throw new Error('anthropic SSE body idle for 120000ms (typeclaw observer timeout)')
       }
@@ -46,10 +49,14 @@ function fakeSession(
         for (const cb of events)
           cb({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hi' } })
       }
+      if (behavior === 'text-then-success') {
+        for (const cb of events)
+          cb({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'still working' } })
+      }
       if (behavior === 'tool-then-throttle') {
         for (const cb of events) cb({ type: 'tool_execution_start' })
       }
-      if (behavior !== 'success') {
+      if (behavior !== 'success' && behavior !== 'text-then-success') {
         const message =
           behavior === 'soft-billing'
             ? 'billing required'
@@ -521,15 +528,22 @@ describe('promptPersistentTurnWithFallback', () => {
 // `prompt` runs the first behavior; `continue` runs subsequent ones WITHOUT
 // re-appending a user message — mirroring the real SDK recipe we depend on.
 // `userMessages` lets tests assert the user message is never duplicated.
-type RetryBehavior = 'throw-transient' | 'throw-before-assistant' | 'soft-transient' | 'success'
+type RetryBehavior =
+  | 'throw-transient'
+  | 'throw-before-assistant'
+  | 'soft-transient'
+  | 'soft-throttle'
+  | 'soft-observer-ttfb-timeout'
+  | 'success'
 
-function retryableFakeSession(behaviors: RetryBehavior[]) {
+function retryableFakeSession(behaviors: RetryBehavior[], onAttempt?: () => void) {
   const listeners: Array<(event: FakeEvent) => void> = []
   const messages: Array<{ role: string; stopReason?: string }> = []
   let idx = 0
   const run = (viaContinue: boolean) => {
     const behavior = behaviors[Math.min(idx, behaviors.length - 1)]!
     idx++
+    onAttempt?.()
     if (!viaContinue) messages.push({ role: 'user' })
     if (behavior === 'throw-before-assistant') {
       // provider dies before writing any assistant message: trailing leaf stays 'user'
@@ -539,10 +553,16 @@ function retryableFakeSession(behaviors: RetryBehavior[]) {
       messages.push({ role: 'assistant', stopReason: 'error' })
       throw new Error('socket hang up')
     }
-    if (behavior === 'soft-transient') {
+    if (behavior === 'soft-transient' || behavior === 'soft-throttle' || behavior === 'soft-observer-ttfb-timeout') {
       messages.push({ role: 'assistant', stopReason: 'error' })
+      const errorMessage =
+        behavior === 'soft-throttle'
+          ? '429 Too Many Requests'
+          : behavior === 'soft-observer-ttfb-timeout'
+            ? 'openai-codex timed out before response headers after 30000ms (typeclaw observer timeout)'
+            : 'ECONNRESET'
       for (const cb of listeners)
-        cb({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'ECONNRESET' } })
+        cb({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage } })
       return
     }
     messages.push({ role: 'assistant', stopReason: 'stop' })
@@ -572,6 +592,189 @@ function retryableFakeSession(behaviors: RetryBehavior[]) {
   } as unknown as AgentSession
   return { session, userMessages: () => messages.filter((m) => m.role === 'user').length, attempts: () => idx }
 }
+
+describe('promptPersistentTurnWithFallback no-progress envelope', () => {
+  test('surfaces after three logical no-header attempts without starting another attempt', async () => {
+    const fake = retryableFakeSession([
+      'soft-observer-ttfb-timeout',
+      'soft-observer-ttfb-timeout',
+      'soft-observer-ttfb-timeout',
+      'success',
+    ])
+    const attemptedRefs: ModelRef[] = []
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B, ANTHROPIC_REF],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      beforeAttempt: (ref) => {
+        attemptedRefs.push(ref)
+      },
+      now: () => 0,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_B)
+    expect(fake.attempts()).toBe(3)
+    expect(attemptedRefs).toEqual([REF_A, REF_B])
+  })
+
+  test('surfaces at 60 seconds of cumulative no-progress before three attempts', async () => {
+    let nowMs = 0
+    const fake = retryableFakeSession(['soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout', 'success'], () => {
+      nowMs += 30_000
+    })
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      now: () => nowMs,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(fake.attempts()).toBe(2)
+  })
+
+  test('accrues only per-attempt elapsed, so a backward clock jump cannot prematurely exhaust the cap', async () => {
+    // A large backward jump between attempts (simulating an NTP/system-clock
+    // correction) must not inflate cumulativeNoProgressMs: each attempt only
+    // contributes its own positive elapsed, clamped at 0 by max(0, ...).
+    const elapsedPerAttempt = [10_000, 10_000, 10_000]
+    let nowMs = 1_000_000_000
+    let idx = 0
+    const fake = retryableFakeSession(
+      ['soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout', 'soft-observer-ttfb-timeout'],
+      () => {
+        nowMs += elapsedPerAttempt[idx]!
+        idx++
+        nowMs -= 500_000_000
+      },
+    )
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      now: () => nowMs,
+    })
+
+    // Surfaces on the 3-attempt cap, not the time cap (each attempt's real
+    // elapsed is 10s; the backward jumps must not have accrued negative or
+    // inflated time that would trip the 60s cap early or hide the count cap).
+    expect(result.success).toBe(false)
+    expect(fake.attempts()).toBe(3)
+  })
+
+  test('does not abort a progressing stream that runs past 60 seconds', async () => {
+    let nowMs = 0
+    const fake = fakeSession(['text-then-success'], () => {
+      nowMs = 60_001
+    })
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      now: () => nowMs,
+    })
+
+    expect(nowMs).toBeGreaterThan(60_000)
+    expect(result.success).toBe(true)
+    expect(fake.prompted).toEqual(['hello'])
+  })
+
+  test('keeps post-tool observer-timeout replay blocked', async () => {
+    const listeners = new Set<(event: FakeEvent) => void>()
+    const messages: Array<{ role: string; stopReason?: string }> = []
+    let continueCalls = 0
+    const setModels: ModelRef[] = []
+    const session = {
+      prompt: async () => {
+        messages.push({ role: 'user' }, { role: 'assistant', stopReason: 'error' })
+        for (const cb of listeners) cb({ type: 'tool_execution_start' })
+        for (const cb of listeners) {
+          cb({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'openai-codex timed out before response headers after 30000ms (typeclaw observer timeout)',
+            },
+          })
+        }
+      },
+      subscribe: (cb: (event: FakeEvent) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+      agent: {
+        state: { messages },
+        continue: async () => {
+          continueCalls++
+        },
+      },
+    } as unknown as AgentSession
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B],
+      currentModelRef: REF_A,
+      session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async (ref) => {
+        setModels.push(ref)
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.refUsed).toBe(REF_A)
+    expect(continueCalls).toBe(0)
+    expect(setModels).toEqual([])
+  })
+
+  test('does not count a 429 toward the no-progress attempt limit', async () => {
+    const fake = retryableFakeSession([
+      'soft-throttle',
+      'soft-observer-ttfb-timeout',
+      'soft-observer-ttfb-timeout',
+      'success',
+    ])
+
+    const result = await promptPersistentTurnWithFallback({
+      refs: [REF_A, REF_B, ANTHROPIC_REF],
+      currentModelRef: REF_A,
+      session: fake.session,
+      text: 'hello',
+      circuit: new ThrottleCircuit(),
+      shouldFailover: (err) => isFailoverWorthy(err.message),
+      setModelForRef: async () => {},
+      now: () => 0,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.refUsed).toBe(ANTHROPIC_REF)
+    expect(fake.attempts()).toBe(4)
+  })
+})
 
 describe('promptPersistentTurnWithFallback same-ref retry', () => {
   test('an authorized retry resumes from a completed tool result despite tool activity', async () => {
