@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { readFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -180,6 +180,29 @@ describe('setProfile', () => {
     const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', { env, force: true })
     expect(result.ok).toBe(true)
   })
+
+  test.skipIf(process.platform === 'win32')(
+    'reports actionable ownership guidance when typeclaw.json is not writable',
+    async () => {
+      // given
+      const configPath = join(root, 'typeclaw.json')
+      await chmod(configPath, 0o444)
+
+      // when
+      const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', {
+        env: { OPENAI_API_KEY: 'sk-from-env' },
+      })
+
+      // then
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('not writable by the current user')
+      expect(result.reason).toContain('ls -ln')
+      expect(result.reason).toContain('sudo chown')
+
+      await chmod(configPath, 0o600)
+    },
+  )
 })
 
 describe('addProfile', () => {

@@ -307,7 +307,19 @@ function writeModels(
   try {
     writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`)
   } catch (error) {
-    return { ok: false, reason: `Failed to write ${CONFIG_FILE}: ${(error as Error).message}` }
+    const code = error instanceof Error && 'code' in error ? error.code : undefined
+    if (code === 'EACCES' || code === 'EPERM') {
+      return {
+        ok: false,
+        reason:
+          `${CONFIG_FILE} is not writable by the current user. ` +
+          `Inspect ownership with \`ls -ln "${path}"\`. If it is owned by another user and this agent folder belongs to you, repair it with \`sudo chown "$(id -u):$(id -g)" "${path}"\`.`,
+      }
+    }
+    return {
+      ok: false,
+      reason: `Failed to write ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
   // Final schema-pass for parity with every other host-side mutation that runs
   // through validateConfig. Mount checks etc. should never fail here because
