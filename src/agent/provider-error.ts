@@ -32,6 +32,7 @@ const GENERIC_SAFE_NOTICE = 'The upstream LLM provider failed. Operators can che
 // reaches `detectProviderError`; the marker lets the hard-throw path recognize
 // and surface it. The literal is the system's own token — English by design.
 const OBSERVER_TIMEOUT = /\(typeclaw observer timeout\)/i
+const OBSERVER_TTFB_TIMEOUT = /timed out before response headers/i
 
 // Transport-layer failure: the request died at the connection/session before a
 // usable response — an expired live session, a WebSocket upgrade that never
@@ -128,6 +129,10 @@ const CONTEXT_OVERFLOW = /\bcontext[_ -]?length[_ -]?exceeded\b/i
 export function isThrottleOrOverload(raw: string): boolean {
   if (NON_FAILOVER_FAULT.test(raw)) return false
   return THROTTLE_OR_OVERLOAD.test(raw)
+}
+
+export function isObserverTtfbTimeout(raw: string): boolean {
+  return OBSERVER_TIMEOUT.test(raw) && OBSERVER_TTFB_TIMEOUT.test(raw)
 }
 
 // Failover predicate for turn-drivers' `shouldFailover`: rotate to the next model

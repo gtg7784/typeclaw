@@ -1,7 +1,12 @@
-import type { ModelRef } from '@/config/providers'
+import { providerForModelRef, type ModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
-import { detectProviderError, isRetryableSameRef, subscribeProviderErrors } from './provider-error'
+import {
+  detectProviderError,
+  isObserverTtfbTimeout,
+  isRetryableSameRef,
+  subscribeProviderErrors,
+} from './provider-error'
 import { RETRIES_PER_REF, retryTurnAfterCompletedToolResult, retryTurnOnPersistentSession } from './retry-same-ref'
 import { modelThrottleCircuit, type ThrottleCircuit } from './throttle-circuit'
 
@@ -44,6 +49,7 @@ export async function promptPersistentTurnWithFallback(opts: {
   const attempts: PersistentTurnAttempt[] = []
   let lastError: Error | undefined
   const circuit = opts.circuit ?? modelThrottleCircuit
+  const hasNonCodexFallback = opts.refs.some((ref) => !isCodexRef(ref))
   // The model the session currently has loaded; only call setModel when the
   // chosen ref differs from it. Tracked locally so successive setModel calls
   // within a single turn stay coherent.
@@ -55,9 +61,13 @@ export async function promptPersistentTurnWithFallback(opts: {
   // re-test the primary.
   for (let i = 0; i < opts.refs.length; i++) {
     const ref = opts.refs[i]!
-    const isLast = i === opts.refs.length - 1
-    // Skip a ref whose circuit is open, but never skip the last one — there is
-    // nowhere left to fall, so we try it regardless and let the result speak.
+    const codexProviderOpen = isCodexRef(ref) && circuit.isProviderOpen({ profile: opts.profile, ref })
+    if (codexProviderOpen && hasNonCodexFallback) continue
+    const isLast = !opts.refs
+      .slice(i + 1)
+      .some((candidate) => isRefUsable(candidate, opts.profile, circuit, hasNonCodexFallback))
+    // The last usable ref remains a safety probe. Codex refs stop being usable
+    // together only when the chain has transport-diverse credentials to use.
     if (!isLast && circuit.isOpen({ profile: opts.profile, ref })) continue
     if (ref !== loadedRef) {
       await opts.setModelForRef(ref)
@@ -133,7 +143,31 @@ export async function promptPersistentTurnWithFallback(opts: {
       attempts.push(attempt)
       lastError = outcome.error
       if (opts.shouldFailover(outcome.error)) circuit.recordThrottle({ profile: opts.profile, ref })
-      if (isLast || !canAdvance(outcome.error, activity, opts.shouldFailover)) {
+      if (isCodexRef(ref) && isObserverTtfbTimeout(outcome.error.message)) {
+        circuit.recordProviderTrip({ profile: opts.profile, ref })
+      }
+      // A codex-only chain surfaces after one attempt once its breaker is open
+      // (no transport-diverse ref to fall to). isRefUsable can't express this —
+      // with no non-codex fallback every codex ref reads as "usable" — so it stays
+      // an explicit condition.
+      const codexOnlyProviderOpen =
+        !hasNonCodexFallback && isCodexRef(ref) && circuit.isProviderOpen({ profile: opts.profile, ref })
+      // `isLast` was computed BEFORE this attempt, but recordProviderTrip above
+      // may have just opened the codex breaker and made every trailing candidate
+      // unusable (all remaining refs are codex the loop would now skip). Re-derive
+      // "is there a ref left worth advancing to" from the post-trip circuit state,
+      // so we finish on the CURRENT outcome (throw hard / return soft) instead of
+      // falling through the loop and returning success:false for a ref that was
+      // skipped and never attempted.
+      const noUsableCandidateRemains = !opts.refs
+        .slice(i + 1)
+        .some((next) => isRefUsable(next, opts.profile, circuit, hasNonCodexFallback))
+      if (
+        isLast ||
+        codexOnlyProviderOpen ||
+        noUsableCandidateRemains ||
+        !canAdvance(outcome.error, activity, opts.shouldFailover)
+      ) {
         if (outcome.kind === 'hard') throw outcome.error
         return { success: false, refUsed: ref, attempts, lastError }
       }
@@ -164,6 +198,26 @@ function classifySoftOutcome(
 
 function canAdvance(error: Error, activity: AttemptActivity, shouldFailover: (err: Error) => boolean): boolean {
   return shouldFailover(error) && !activity.producedAssistantOutput && !activity.startedToolExecution
+}
+
+function isCodexRef(ref: ModelRef): boolean {
+  return providerForModelRef(ref) === 'openai-codex'
+}
+
+// A ref is still worth advancing to iff the loop wouldn't skip it at the top: a
+// codex ref is dropped only once the codex provider breaker is open AND the chain
+// has a transport-diverse (non-codex) fallback to use instead. Shared by the
+// `isLast` safety-probe check and the post-trip terminal decision so both read
+// the SAME circuit state and can't diverge.
+function isRefUsable(
+  ref: ModelRef,
+  profile: string | undefined,
+  circuit: ThrottleCircuit,
+  hasNonCodexFallback: boolean,
+): boolean {
+  if (!isCodexRef(ref)) return true
+  if (!hasNonCodexFallback) return true
+  return !circuit.isProviderOpen({ profile, ref })
 }
 
 function subscribeAttemptActivity(session: AgentSession, activity: AttemptActivity): () => void {
