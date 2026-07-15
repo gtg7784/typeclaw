@@ -77,6 +77,9 @@ export type LlmFetchObserverOptions = {
   // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
   // the wrapper can pass to `clear`. Default: `setTimeout`/`clearTimeout`.
   scheduler?: TimeoutScheduler
+  // Test-only: inject a pre-seeded adaptive tracker to assert widening/probe/
+  // cooldown behaviour deterministically. Production always constructs its own.
+  adaptiveTracker?: AdaptiveTtfbTracker
 }
 
 export type TimeoutScheduler = {
@@ -102,6 +105,124 @@ const DEFAULT_TTFB_MS = 15_000
 const DEFAULT_IDLE_MS = 120_000
 const DEFAULT_OVERALL_MS = 300_000
 const LOG_PREFIX = '[llm-fetch]'
+
+// Adaptive TTFB: give a provider that is OBSERVED to be slow-but-healthy more
+// pre-headers room, without blunting silent-hang detection for fast providers.
+// A fixed 15s guillotine kills legitimately-slow providers (e.g. GLM cold-start
+// TTFB ~16.5s while its p50 is ~1s); a uniform higher default would let a truly
+// hung FAST provider stall for the same widened window. So widening is scoped to
+// the specific origin whose recent successful header latency is actually high.
+//
+// Signal: rolling p95 of successful header latency (not EWMA — the distributions
+// are bimodal, mostly-1s with occasional 10–16s, so a mean-tracker sits low and
+// never widens for the spike). Nearest-rank p95 over the last ADAPTIVE_WINDOW_MS
+// of samples reacts to the current upper tail and forgets stale slowness.
+const ADAPTIVE_TTFB_FLOOR_MS = 15_000
+const ADAPTIVE_TTFB_CEIL_MS = 30_000
+const ADAPTIVE_TTFB_MULTIPLIER = 2
+const ADAPTIVE_MIN_SAMPLES = 8
+const ADAPTIVE_MAX_SAMPLES = 32
+const ADAPTIVE_WINDOW_MS = 5 * 60_000
+// After a timeout at the CEIL budget, the origin is treated as slow-then-hung:
+// suppress all widening (learned + probe) and fail closed to the floor for this
+// long, so five rapid retries can't each inherit the 30s budget. A sub-floor
+// success clears the suppression early.
+const ADAPTIVE_COOLDOWN_MS = 5 * 60_000
+
+function clampMs(value: number, floor: number, ceil: number): number {
+  return Math.min(ceil, Math.max(floor, value))
+}
+
+function p95(samples: readonly number[]): number {
+  const sorted = [...samples].sort((a, b) => a - b)
+  const rank = Math.ceil(0.95 * sorted.length)
+  return sorted[Math.min(rank, sorted.length) - 1]!
+}
+
+type AdaptiveSample = { at: number; headersMs: number }
+
+// Per-origin adaptive-TTFB state. One instance lives in the first-installed
+// observer's closure and is shared across every in-flight fetch in the process
+// (single-threaded event loop → plain mutable maps are safe, no locking). Keyed
+// by `${label}|${origin}` so unrelated OpenAI-compatible providers/proxies never
+// inherit each other's latency budget.
+export class AdaptiveTtfbTracker {
+  private readonly samples = new Map<string, AdaptiveSample[]>()
+  // Whether the origin's next request may spend one CEIL-budget recovery probe.
+  // Granted after a below-CEIL timeout (the killed request yielded only a
+  // right-censored "≥floor" bound, never a usable sample — a bounded probe is
+  // the only way to observe a genuinely-slow header latency past the floor).
+  private readonly probeGrant = new Set<string>()
+  // Origin → wall-clock time until which widening is suppressed (fail-closed).
+  private readonly cooldownUntil = new Map<string, number>()
+
+  constructor(private readonly now: () => number) {}
+
+  // Consumes the probe grant atomically so exactly one request gets the ceil.
+  resolve(key: string): number {
+    if (this.isInCooldown(key)) return ADAPTIVE_TTFB_FLOOR_MS
+    const learned = this.learnedTtfb(key)
+    if (this.probeGrant.has(key)) {
+      this.probeGrant.delete(key)
+      return Math.max(learned, ADAPTIVE_TTFB_CEIL_MS)
+    }
+    return learned
+  }
+
+  recordHeaders(key: string, headersMs: number): void {
+    // Any arrived-headers response (200/429/500) proves the origin is
+    // responsive, so it's a valid latency sample and clears fail-closed state.
+    if (headersMs < ADAPTIVE_TTFB_FLOOR_MS) this.cooldownUntil.delete(key)
+    const list = this.samples.get(key) ?? []
+    list.push({ at: this.now(), headersMs })
+    this.prune(list)
+    if (list.length > ADAPTIVE_MAX_SAMPLES) list.splice(0, list.length - ADAPTIVE_MAX_SAMPLES)
+    this.samples.set(key, list)
+  }
+
+  // A TTFB timeout at `usedMs`. Below the ceil → grant one recovery probe.
+  // At/above the ceil → the widened budget already failed; fail closed.
+  recordTimeout(key: string, usedMs: number): void {
+    if (usedMs >= ADAPTIVE_TTFB_CEIL_MS) {
+      this.probeGrant.delete(key)
+      this.cooldownUntil.set(key, this.now() + ADAPTIVE_COOLDOWN_MS)
+      return
+    }
+    this.probeGrant.add(key)
+  }
+
+  reset(): void {
+    this.samples.clear()
+    this.probeGrant.clear()
+    this.cooldownUntil.clear()
+  }
+
+  private learnedTtfb(key: string): number {
+    const list = this.samples.get(key)
+    if (list === undefined) return ADAPTIVE_TTFB_FLOOR_MS
+    this.prune(list)
+    if (list.length < ADAPTIVE_MIN_SAMPLES) return ADAPTIVE_TTFB_FLOOR_MS
+    const target = Math.ceil(ADAPTIVE_TTFB_MULTIPLIER * p95(list.map((s) => s.headersMs)))
+    return clampMs(target, ADAPTIVE_TTFB_FLOOR_MS, ADAPTIVE_TTFB_CEIL_MS)
+  }
+
+  private isInCooldown(key: string): boolean {
+    const until = this.cooldownUntil.get(key)
+    if (until === undefined) return false
+    if (this.now() >= until) {
+      this.cooldownUntil.delete(key)
+      return false
+    }
+    return true
+  }
+
+  private prune(list: AdaptiveSample[]): void {
+    const cutoff = this.now() - ADAPTIVE_WINDOW_MS
+    let drop = 0
+    while (drop < list.length && list[drop]!.at < cutoff) drop++
+    if (drop > 0) list.splice(0, drop)
+  }
+}
 
 const defaultScheduler: TimeoutScheduler = {
   set: (delayMs, cb) => setTimeout(cb, delayMs),
@@ -153,6 +274,7 @@ type InstallState = {
   originalFetch: typeof fetch
   wrapped: typeof fetch
   claimants: number
+  adaptive: AdaptiveTtfbTracker
 }
 
 // Ref-counted so multiple agents in one process (compose, tests) share one
@@ -169,7 +291,7 @@ function matchEndpoint(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   endpoints: readonly LlmFetchEndpoint[],
-): LlmFetchEndpoint | null {
+): { endpoint: LlmFetchEndpoint; origin: string } | null {
   const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
   let urlString: string
   if (typeof input === 'string') urlString = input
@@ -182,7 +304,7 @@ function matchEndpoint(
     return null
   }
   for (const endpoint of endpoints) {
-    if (endpoint.match(parsed, method)) return endpoint
+    if (endpoint.match(parsed, method)) return { endpoint, origin: parsed.origin }
   }
   return null
 }
@@ -454,6 +576,15 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     overallMs: readEnvMs(process.env, ENV_OVERALL_MS, DEFAULT_OVERALL_MS),
   }
   const originalFetch = globalThis.fetch
+  const adaptive = opts.adaptiveTracker ?? new AdaptiveTtfbTracker(now)
+  // Adaptation is a property of the built-in floor default only. Any explicit
+  // static TTFB (observer opt, per-endpoint value, or a set TYPECLAW_*_TTFB_MS)
+  // means the operator pinned a deadline — honour it verbatim, no widening.
+  const adaptiveEligible =
+    timeoutsEnabled &&
+    opts.ttfbMs === undefined &&
+    readEnvMsOptional(process.env, ENV_TTFB_MS) === undefined &&
+    envDefaults.ttfbMs === DEFAULT_TTFB_MS
 
   // Precedence per timer: explicit observer-level option wins over the endpoint's
   // own value, which wins over the generic env/default. An explicit `opts.*` means
@@ -476,25 +607,29 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ): Promise<Response> => {
-    const endpoint = matchEndpoint(input, init, endpoints)
-    if (endpoint === null) {
+    const matched = matchEndpoint(input, init, endpoints)
+    if (matched === null) {
       return originalFetch(input, init)
     }
+    const { endpoint, origin } = matched
     const perRequest = (init as LlmFetchObservedRequestInit | undefined)?.[LLM_FETCH_OBSERVER_TIMEOUTS]
     const timeouts = resolveTimeouts(endpoint, perRequest)
     const provider = endpoint.label
+    const adaptiveKey = `${provider}|${origin}`
+    const usesAdaptiveTtfb = adaptiveEligible && perRequest?.ttfbMs === undefined && endpoint.ttfbMs === undefined
+    const effectiveTtfbMs = usesAdaptiveTtfb ? adaptive.resolve(adaptiveKey) : timeouts.ttfbMs
     const start = now()
 
     let ttfbCause: 'ttfb_timeout' | null = null
     let ttfbHandle: unknown = null
     let initWithSignal: RequestInit | undefined = init
-    if (timeouts.ttfbMs > 0) {
+    if (effectiveTtfbMs > 0) {
       const ttfbController = new AbortController()
-      ttfbHandle = scheduler.set(timeouts.ttfbMs, () => {
+      ttfbHandle = scheduler.set(effectiveTtfbMs, () => {
         ttfbCause = 'ttfb_timeout'
         ttfbController.abort(
           new Error(
-            `${provider} fetch timed out before response headers after ${timeouts.ttfbMs}ms (typeclaw observer timeout)`,
+            `${provider} fetch timed out before response headers after ${effectiveTtfbMs}ms (typeclaw observer timeout)`,
           ),
         )
       })
@@ -508,9 +643,10 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     } catch (err) {
       if (ttfbHandle !== null) scheduler.clear(ttfbHandle)
       const isTtfbAbort = ttfbCause === 'ttfb_timeout'
+      if (isTtfbAbort && usesAdaptiveTtfb) adaptive.recordTimeout(adaptiveKey, effectiveTtfbMs)
       const surfacedError = isTtfbAbort
         ? new Error(
-            `${provider} fetch timed out before response headers after ${timeouts.ttfbMs}ms (typeclaw observer timeout)`,
+            `${provider} fetch timed out before response headers after ${effectiveTtfbMs}ms (typeclaw observer timeout)`,
           )
         : err
       const message = surfacedError instanceof Error ? surfacedError.message : String(surfacedError)
@@ -532,6 +668,7 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     }
     if (ttfbHandle !== null) scheduler.clear(ttfbHandle)
     const headersMs = now() - start
+    if (usesAdaptiveTtfb) adaptive.recordHeaders(adaptiveKey, headersMs)
     const retryAfter = response.headers.get('retry-after')
     const requestId = response.headers.get('x-request-id')
     return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger, {
@@ -550,7 +687,7 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
 
   globalThis.fetch = wrapped
 
-  installed = { originalFetch, wrapped, claimants: 1 }
+  installed = { originalFetch, wrapped, claimants: 1, adaptive }
   return makeRelease(wrapped)
 }
 
@@ -564,6 +701,7 @@ function makeRelease(wrapped: typeof fetch): () => void {
     released = true
     installed.claimants--
     if (installed.claimants > 0) return
+    installed.adaptive.reset()
     if (globalThis.fetch === installed.wrapped) {
       globalThis.fetch = installed.originalFetch
     }
