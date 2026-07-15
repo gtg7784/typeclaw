@@ -11,9 +11,9 @@ export class AppAuthStrategy implements GithubAuthStrategy {
   private readonly appId: number
   private readonly privateKeyPem: string
   private readonly fetchImpl: typeof fetch
-  // Keyed by installation id: a single App may span multiple owners, each a
-  // separate installation with its own short-lived token.
-  private readonly tokenCache = new Map<number, TokenCacheEntry>()
+  // Installation-level and repository-restricted tokens are distinct
+  // authorities even when GitHub serves them from the same installation.
+  private readonly tokenCache = new Map<string, TokenCacheEntry>()
   private readonly repoInstallationCache = new Map<string, number>()
   private soleInstallationId: number | null = null
   private _selfUser: GithubSelfUser | null = null
@@ -29,25 +29,29 @@ export class AppAuthStrategy implements GithubAuthStrategy {
   async token(context?: GithubAuthContext): Promise<string> {
     const jwt = await this.mintJwt()
     const installId = await this.resolveInstallationId(jwt, context)
-    return this.installationToken(jwt, installId)
+    return this.installationToken(jwt, installId, context?.repoSlug)
   }
 
   async authHeaders(context?: GithubAuthContext): Promise<HeadersInit> {
     return githubJsonHeaders(await this.token(context))
   }
 
-  private async installationToken(jwt: string, installId: number): Promise<string> {
-    const cached = this.tokenCache.get(installId)
+  private async installationToken(jwt: string, installId: number, repoSlug?: string): Promise<string> {
+    const repository = repoSlug === undefined || repoSlug === '' ? undefined : canonicalRepoSlug(repoSlug)
+    const cacheKey =
+      repository === undefined ? `${installId}:installation` : `${installId}:repository:${repository.slug}`
+    const cached = this.tokenCache.get(cacheKey)
     if (cached && Date.now() < cached.expiresAt - 5 * 60 * 1000) return cached.value
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations/${installId}/access_tokens`, {
       method: 'POST',
       headers: githubJsonHeaders(jwt),
+      body: JSON.stringify(repository === undefined ? {} : { repositories: [repository.name] }),
     })
     if (!response.ok) throw new Error(`GitHub App token mint failed: ${response.status}`)
     const raw = (await response.json()) as { token?: unknown; expires_at?: unknown }
     if (typeof raw.token !== 'string') throw new Error('GitHub App token response missing token')
     const expiresAt = typeof raw.expires_at === 'string' ? Date.parse(raw.expires_at) : Date.now() + 60 * 60 * 1000
-    this.tokenCache.set(installId, { value: raw.token, expiresAt })
+    this.tokenCache.set(cacheKey, { value: raw.token, expiresAt })
     return raw.token
   }
 
@@ -116,10 +120,21 @@ export class AppAuthStrategy implements GithubAuthStrategy {
 
   private async resolveInstallationId(jwt: string, context?: GithubAuthContext): Promise<number> {
     if (context?.repoSlug !== undefined && context.repoSlug !== '') {
-      return this.resolveInstallationByEndpoint(jwt, `repos/${context.repoSlug}/installation`, context.repoSlug)
+      const repository = canonicalRepoSlug(context.repoSlug)
+      return this.resolveInstallationByEndpoint(
+        jwt,
+        `repos/${context.repoSlug}/installation`,
+        `repository:${repository.slug}`,
+        context.repoSlug,
+      )
     }
     if (context?.owner !== undefined && context.owner !== '') {
-      return this.resolveInstallationByEndpoint(jwt, `orgs/${context.owner}/installation`, context.owner)
+      return this.resolveInstallationByEndpoint(
+        jwt,
+        `orgs/${context.owner}/installation`,
+        `owner:${context.owner.toLocaleLowerCase()}`,
+        context.owner,
+      )
     }
     if (this.soleInstallationId !== null) return this.soleInstallationId
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations`, { headers: githubJsonHeaders(jwt) })
@@ -136,8 +151,13 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     return id
   }
 
-  private async resolveInstallationByEndpoint(jwt: string, path: string, target: string): Promise<number> {
-    const cached = this.repoInstallationCache.get(target)
+  private async resolveInstallationByEndpoint(
+    jwt: string,
+    path: string,
+    cacheKey: string,
+    target: string,
+  ): Promise<number> {
+    const cached = this.repoInstallationCache.get(cacheKey)
     if (cached !== undefined) return cached
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/${path}`, { headers: githubJsonHeaders(jwt) })
     if (response.status === 404) {
@@ -146,9 +166,18 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     if (!response.ok) throw new Error(`GitHub App installation lookup for ${target} failed: ${response.status}`)
     const raw = (await response.json()) as { id?: unknown }
     if (typeof raw.id !== 'number') throw new Error(`GitHub App installation for ${target} missing id`)
-    this.repoInstallationCache.set(target, raw.id)
+    this.repoInstallationCache.set(cacheKey, raw.id)
     return raw.id
   }
+}
+
+function canonicalRepoSlug(repoSlug: string): { slug: string; name: string } {
+  const slug = repoSlug.toLocaleLowerCase()
+  const [owner, name, ...rest] = slug.split('/')
+  if (owner === undefined || owner === '' || name === undefined || name === '' || rest.length > 0) {
+    throw new Error(`Invalid GitHub repository slug: ${repoSlug}`)
+  }
+  return { slug, name }
 }
 
 function base64url(input: string | Buffer): string {

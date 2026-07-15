@@ -543,6 +543,32 @@ export type GithubReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_RE
 // answer `unsupported`.
 export type ReviewStateResolver = (req: ReviewStateRequest) => Promise<ReviewStateResult>
 
+export type ReviewFinding = {
+  path: string
+  line: number
+  side?: 'LEFT' | 'RIGHT'
+  startLine?: number
+  startSide?: 'LEFT' | 'RIGHT'
+  body: string
+}
+
+export type SubmitReviewRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
+  body: string
+  comments: ReviewFinding[]
+}
+
+export type SubmitReviewResult =
+  | { ok: true; reviewId: number; state: string; downgraded?: boolean; reanchored?: ReviewFinding[] }
+  | { ok: false; error: string; code: SubmitReviewErrorCode; submitted?: boolean }
+
+export type SubmitReviewErrorCode = 'unsupported' | 'permission-denied' | 'bad-anchor' | 'not-found' | 'transient'
+
+export type ReviewSubmitter = (req: SubmitReviewRequest) => Promise<SubmitReviewResult>
+
 export function channelKeyId(key: { adapter: string; workspace: string; chat: string; thread: string | null }): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }
