@@ -1,38 +1,13 @@
-// WebFetch's HTTP transport.
-//
-// Production path (container, curl-impersonate available): we shell out to
-// `curl_chrome136` so outbound requests carry Chrome 136's TLS handshake
-// (JA3/JA4), HTTP/2 SETTINGS frame, and full header set. This is what gets
-// us past the modern bot-detection stacks on Cloudflare/Akamai-protected
-// sites (Reuters, MarketWatch, etc.) when the agent is running from the
-// user's home network — the IP is already residential, so impersonating
-// the browser is the only remaining missing piece. See AGENTS.md §"Web
-// search" and src/agent/tools/curl-impersonate.ts for the full story.
-//
-// Test/dev fallback (curl_chrome136 not on PATH): we transparently fall
-// back to Bun's native `fetch()` with a static User-Agent. This keeps unit
-// tests on developer macOS machines working without forcing every contributor
-// to install curl-impersonate locally. Production runs always have the binary
-// because the typeclaw Dockerfile pins it.
-//
-// Best-effort doctrine: this transport does NOT guarantee the fetch succeeds.
-// Bot-detected sites can still serve 403/CAPTCHA pages. We surface what we
-// got (status, body, final URL) and let the caller decide. The web_fetch tool
-// translates non-2xx into a tool-level error message that's useful to the
-// model.
-
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { CookieJar } from 'tough-cookie'
 
 import {
-  CurlImpersonateError,
-  curlImpersonate,
-  type CurlImpersonateResponse,
-  isCurlExitFilesizeExceeded,
-  isCurlExitTimeout,
-  isCurlImpersonateAvailable,
-} from '../curl-impersonate'
+  defaultPublicHttpDependencies,
+  headerValue,
+  requestPublicHttpUrl,
+  type PublicHttpDependencies,
+  type PublicHttpResponse,
+} from '@/agent/network/safe-http'
+
 import { MAX_RESPONSE_BYTES } from './types'
 
 export type AntibotWarmup = 'auto' | 'off'
@@ -54,17 +29,9 @@ export type FetchResult = {
   antibotWarmup?: AntibotWarmupInfo
 }
 
-// Cookie names Akamai Bot Manager sets in the Set-Cookie of its 403 challenge.
-// A 403 carrying one of these is a state-bootstrap handshake (absorb cookies,
-// replay once), NOT an authorization failure — that distinction is what makes
-// the auto-retry safe. Scoped to Akamai on purpose: Cloudflare/DataDome use
-// different challenge semantics (JS/redirects/CAPTCHA) that a blind replay
-// would not satisfy.
-const AKAMAI_BOTMANAGER_COOKIE = /^(_abck|bm_sz|bm_s|bm_ss|bm_so|ak_bmsc)$/i
+export type WebFetchNetworkDependencies = PublicHttpDependencies
 
-function isAntibotWarmup403(response: CurlImpersonateResponse): boolean {
-  return response.httpStatus === 403 && response.setCookieNames.some((name) => AKAMAI_BOTMANAGER_COOKIE.test(name))
-}
+const AKAMAI_BOTMANAGER_COOKIE = /^(_abck|bm_sz|bm_s|bm_ss|bm_so|ak_bmsc)$/i
 
 export class WebFetchError extends Error {
   constructor(message: string) {
@@ -73,7 +40,7 @@ export class WebFetchError extends Error {
   }
 }
 
-const FALLBACK_HEADERS: Record<string, string> = {
+const REQUEST_HEADERS: Record<string, string> = {
   'User-Agent': 'typeclaw/0 (+https://github.com/code-yeongyu/typeclaw)',
   Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.1',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -90,10 +57,6 @@ export function normalizeUrl(input: string): string {
   return `https://${trimmed}`
 }
 
-// Test-only seam: forces fetchWithLimits to use the native-fetch fallback
-// even when curl-impersonate is detected. Used by fetch.test.ts to keep its
-// existing mocked-fetch contract working without the test having to install
-// a fake curl binary. Production code never calls this.
 let forceFallbackForTest = false
 
 export function _setForceFallbackForTest(value: boolean): void {
@@ -105,175 +68,172 @@ export async function fetchWithLimits(
   timeoutSeconds: number,
   parentSignal?: AbortSignal,
   antibotWarmup: AntibotWarmup = 'auto',
-): Promise<FetchResult> {
-  const useImpersonate = !forceFallbackForTest && (await isCurlImpersonateAvailable())
-  if (useImpersonate) {
-    return fetchWithCurlImpersonate(url, timeoutSeconds, antibotWarmup, parentSignal)
-  }
-  return fetchWithBunFetch(url, timeoutSeconds, parentSignal)
-}
-
-async function fetchWithCurlImpersonate(
-  url: string,
-  timeoutSeconds: number,
-  antibotWarmup: AntibotWarmup,
-  parentSignal?: AbortSignal,
-): Promise<FetchResult> {
-  if (antibotWarmup === 'off') {
-    const response = await runCurl(url, timeoutSeconds, undefined, parentSignal)
-    return toFetchResult(url, response)
-  }
-
-  // Warmup needs a jar shared across both requests: request 1 (`-c`) captures
-  // the bot-manager cookies the 403 sets; request 2 (`-b`) replays them.
-  const jarDir = await mkdtemp(join(tmpdir(), 'typeclaw-webfetch-jar-'))
-  const jarPath = join(jarDir, 'cookies.txt')
-  const startedAt = Date.now()
-  try {
-    const first = await runCurl(url, timeoutSeconds, jarPath, parentSignal)
-    if (!isAntibotWarmup403(first)) {
-      return toFetchResult(url, first, { attempted: true, triggered: false })
-    }
-
-    // `timeoutSeconds` is the budget for the WHOLE web_fetch call, not per
-    // attempt: charge the replay only the time the first request left, so a
-    // warmed fetch can't run for ~2x the requested timeout. If the first
-    // request already spent the budget, surface its 403 instead of forcing a
-    // zero-time replay that would just time out.
-    const remaining = timeoutSeconds - (Date.now() - startedAt) / 1000
-    if (remaining < 1) {
-      return toFetchResult(url, first, {
-        attempted: true,
-        triggered: false,
-        initialStatus: first.httpStatus,
-        initialSetCookieNames: first.setCookieNames,
-      })
-    }
-
-    const replay = await runCurl(url, Math.floor(remaining), jarPath, parentSignal)
-    return toFetchResult(url, replay, {
-      attempted: true,
-      triggered: true,
-      initialStatus: first.httpStatus,
-      initialSetCookieNames: first.setCookieNames,
-      replayStatus: replay.httpStatus,
-    })
-  } finally {
-    await rm(jarDir, { recursive: true, force: true })
-  }
-}
-
-async function runCurl(
-  url: string,
-  timeoutSeconds: number,
-  cookieJarPath: string | undefined,
-  parentSignal?: AbortSignal,
-): Promise<CurlImpersonateResponse> {
-  try {
-    return await curlImpersonate({
-      url,
-      method: 'GET',
-      timeoutSeconds,
-      maxBytes: MAX_RESPONSE_BYTES,
-      cookieJarPath,
-      signal: parentSignal,
-    })
-  } catch (error) {
-    if (parentSignal?.aborted) {
-      throw new WebFetchError('Request aborted')
-    }
-    if (error instanceof CurlImpersonateError) {
-      if (isCurlExitTimeout(error)) {
-        throw new WebFetchError(`Request timed out after ${timeoutSeconds}s`)
-      }
-      if (isCurlExitFilesizeExceeded(error)) {
-        throw new WebFetchError(`Response too large (exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`)
-      }
-      throw new WebFetchError(`Fetch failed: ${error.message}`)
-    }
-    const message = error instanceof Error ? error.message : String(error)
-    throw new WebFetchError(`Fetch failed: ${message}`)
-  }
-}
-
-function toFetchResult(url: string, response: CurlImpersonateResponse, antibotWarmup?: AntibotWarmupInfo): FetchResult {
-  if (response.httpStatus < 200 || response.httpStatus >= 300) {
-    throw new WebFetchError(`Fetch failed: HTTP ${response.httpStatus}`)
-  }
-
-  const bodyByteLength = new TextEncoder().encode(response.body).byteLength
-  if (bodyByteLength > MAX_RESPONSE_BYTES) {
-    throw new WebFetchError(
-      `Response too large (${formatBytes(bodyByteLength)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
-    )
-  }
-
-  return {
-    body: response.body,
-    contentType: response.contentType,
-    finalUrl: response.finalUrl || url,
-    httpStatus: response.httpStatus,
-    bytesIn: bodyByteLength,
-    ...(antibotWarmup ? { antibotWarmup } : {}),
-  }
-}
-
-async function fetchWithBunFetch(
-  url: string,
-  timeoutSeconds: number,
-  parentSignal?: AbortSignal,
+  network: WebFetchNetworkDependencies = forceFallbackForTest ? testFetchDependencies : defaultPublicHttpDependencies,
 ): Promise<FetchResult> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(new Error('timeout')), timeoutSeconds * 1000)
   const onAbort = () => controller.abort(parentSignal?.reason)
   parentSignal?.addEventListener('abort', onAbort, { once: true })
-
+  const startedAt = Date.now()
   try {
-    const response = await fetch(url, { headers: FALLBACK_HEADERS, signal: controller.signal, redirect: 'follow' })
-    if (!response.ok) {
-      throw new WebFetchError(`Fetch failed: HTTP ${response.status} ${response.statusText}`)
+    const cookieJar = new WarmupCookieJar()
+    const visitedUrls = new Set<string>()
+    const first = await fetchOnce(url, controller.signal, network, REQUEST_HEADERS, cookieJar, visitedUrls)
+    const cookieNames = cookieJar.names()
+    const warmup =
+      antibotWarmup === 'auto' &&
+      first.statusCode === 403 &&
+      [...visitedUrls].some((visitedUrl) => cookieJar.hasMatching(visitedUrl, AKAMAI_BOTMANAGER_COOKIE))
+    if (!warmup) {
+      return toFetchResult(first, { attempted: antibotWarmup === 'auto', triggered: false })
     }
 
-    const contentLengthHeader = response.headers.get('content-length')
-    if (contentLengthHeader) {
-      const declared = Number(contentLengthHeader)
-      if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-        throw new WebFetchError(
-          `Response too large (${formatBytes(declared)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
-        )
-      }
+    const remainingMs = timeoutSeconds * 1000 - (Date.now() - startedAt)
+    if (remainingMs < 1_000) {
+      return toFetchResult(first, {
+        attempted: true,
+        triggered: false,
+        initialStatus: first.statusCode,
+        initialSetCookieNames: cookieNames,
+      })
     }
-
-    const buffer = await response.arrayBuffer()
-    if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-      throw new WebFetchError(
-        `Response too large (${formatBytes(buffer.byteLength)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
-      )
-    }
-
-    const body = new TextDecoder('utf-8', { fatal: false }).decode(buffer)
-    return {
-      body,
-      contentType: response.headers.get('content-type') ?? '',
-      finalUrl: response.url || url,
-      httpStatus: response.status,
-      bytesIn: buffer.byteLength,
-    }
+    const replay = await fetchOnce(url, controller.signal, network, REQUEST_HEADERS, cookieJar)
+    return toFetchResult(replay, {
+      attempted: true,
+      triggered: true,
+      initialStatus: first.statusCode,
+      initialSetCookieNames: cookieNames,
+      replayStatus: replay.statusCode,
+    })
   } catch (error) {
-    if (
-      controller.signal.aborted &&
-      controller.signal.reason instanceof Error &&
-      controller.signal.reason.message === 'timeout'
-    ) {
-      throw new WebFetchError(`Request timed out after ${timeoutSeconds}s`)
+    if (controller.signal.aborted) {
+      if (controller.signal.reason instanceof Error && controller.signal.reason.message === 'timeout') {
+        throw new WebFetchError(`Request timed out after ${timeoutSeconds}s`)
+      }
+      throw new WebFetchError('Request aborted')
     }
     if (error instanceof WebFetchError) throw error
-    const message = error instanceof Error ? error.message : String(error)
-    throw new WebFetchError(`Fetch failed: ${message}`)
+    throw new WebFetchError(`Fetch failed: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     clearTimeout(timeout)
     parentSignal?.removeEventListener('abort', onAbort)
   }
+}
+
+const testFetchDependencies: WebFetchNetworkDependencies = {
+  resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+  async request(options) {
+    const url = `${options.protocol}//${options.headers.Host}${options.path}`
+    const response = await fetch(url, { headers: options.headers, signal: options.signal, redirect: 'manual' })
+    return {
+      statusCode: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      body: response.body ?? emptyBody(),
+      cancel: () => {
+        void response.body?.cancel()
+      },
+    }
+  },
+}
+
+async function* emptyBody(): AsyncIterable<Uint8Array> {}
+
+type BufferedResponse = {
+  body: Uint8Array
+  headers: PublicHttpResponse['headers']
+  statusCode: number
+  finalUrl: string
+}
+
+async function fetchOnce(
+  url: string,
+  signal: AbortSignal,
+  network: WebFetchNetworkDependencies,
+  headers: Record<string, string>,
+  cookieJar?: WarmupCookieJar,
+  visitedUrls?: Set<string>,
+): Promise<BufferedResponse> {
+  const { response, finalUrl } = await requestPublicHttpUrl(url, {
+    signal,
+    headers,
+    dependencies: network,
+    headersForUrl(currentUrl): Record<string, string> {
+      visitedUrls?.add(currentUrl)
+      const cookie = cookieJar?.header(currentUrl)
+      if (cookie === undefined) return {}
+      return { Cookie: cookie }
+    },
+    onResponse(response, responseUrl) {
+      cookieJar?.store(response.headers, responseUrl)
+    },
+  })
+  try {
+    const declared = Number(headerValue(response.headers, 'content-length') ?? '')
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      throw tooLarge(declared)
+    }
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for await (const chunk of response.body) {
+      total += chunk.byteLength
+      if (total > MAX_RESPONSE_BYTES) throw tooLarge(total)
+      chunks.push(chunk)
+    }
+    return { body: Buffer.concat(chunks), headers: response.headers, statusCode: response.statusCode, finalUrl }
+  } finally {
+    response.cancel()
+  }
+}
+
+function toFetchResult(response: BufferedResponse, antibotWarmup?: AntibotWarmupInfo): FetchResult {
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new WebFetchError(`Fetch failed: HTTP ${response.statusCode}`)
+  }
+  return {
+    body: new TextDecoder('utf-8', { fatal: false }).decode(response.body),
+    contentType: headerValue(response.headers, 'content-type') ?? '',
+    finalUrl: response.finalUrl,
+    httpStatus: response.statusCode,
+    bytesIn: response.body.byteLength,
+    ...(antibotWarmup !== undefined ? { antibotWarmup } : {}),
+  }
+}
+
+function setCookieValues(headers: PublicHttpResponse['headers']): string[] {
+  const value = headers['set-cookie']
+  if (Array.isArray(value)) return value
+  return value === undefined ? [] : [value]
+}
+
+class WarmupCookieJar {
+  readonly #jar = new CookieJar()
+  readonly #names = new Set<string>()
+
+  store(headers: PublicHttpResponse['headers'], responseUrl: string): void {
+    for (const value of setCookieValues(headers)) {
+      const cookie = this.#jar.setCookieSync(value, responseUrl, { ignoreError: true })
+      if (cookie !== undefined) this.#names.add(cookie.key)
+    }
+  }
+
+  names(): string[] {
+    return [...this.#names]
+  }
+
+  hasMatching(rawUrl: string, namePattern: RegExp): boolean {
+    return this.#jar.getCookiesSync(rawUrl).some((cookie) => namePattern.test(cookie.key))
+  }
+
+  header(rawUrl: string): string | undefined {
+    const header = this.#jar.getCookieStringSync(rawUrl)
+    return header === '' ? undefined : header
+  }
+}
+
+function tooLarge(bytes: number): WebFetchError {
+  return new WebFetchError(
+    `Response too large (${formatBytes(bytes)} exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`,
+  )
 }
 
 export function parseMimeType(contentType: string): string {

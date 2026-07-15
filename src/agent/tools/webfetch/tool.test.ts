@@ -57,7 +57,7 @@ describe('webfetch: URL handling', () => {
 
     await webFetchTool.execute('id', { url: 'example.com' }, undefined, undefined, ctx)
 
-    expect(fetchCalls[0]?.url).toBe('https://example.com')
+    expect(fetchCalls[0]?.url).toBe('https://example.com/')
   })
 
   test('rejects non-http(s) schemes without a network call', async () => {

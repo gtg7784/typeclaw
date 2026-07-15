@@ -1,4 +1,4 @@
-export { createChannelLookAtTool, lookAtTool } from './look-at'
+export { createChannelLookAtTool, createLookAtTool, lookAtTool } from './look-at'
 export {
   buildMultimodalLookerSystemPrompt,
   imageInputSchema,

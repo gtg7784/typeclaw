@@ -5,15 +5,23 @@ import type { ImageContent } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { createSessionWithDispose, type SessionOrigin } from '@/agent'
+import { readResponseBodyBounded } from '@/agent/network/response-body'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
 import { providerForModelRef } from '@/config/providers'
+import type { PermissionService } from '@/permissions'
 import { LLM_FETCH_OBSERVER_TIMEOUTS, type LlmFetchObservedRequestInit } from '@/run/llm-fetch-observer'
 import { SecretsBackend } from '@/secrets'
 
 import { promptWithSameRefRetryOnly } from '../retry-same-ref'
-import { buildMultimodalLookerSystemPrompt, resolveImage, type ImageInput } from './looker'
+import {
+  buildMultimodalLookerSystemPrompt,
+  LOOK_AT_MAX_BYTES,
+  LOOK_AT_MAX_IMAGES,
+  resolveImagesBounded,
+  type ImageInput,
+} from './looker'
 
 type ImageParam = { url: string } | { path: string } | { data: string; mimeType: string }
 
@@ -46,52 +54,62 @@ export type ChannelLookAtOrigin = {
 // Output is the subagent's text response. The subagent itself decides whether
 // to answer the user's question (when `prompt` is supplied) or describe the
 // image (when `prompt` is omitted) via its dynamic system prompt.
-export const lookAtTool = defineTool({
-  name: 'look_at',
-  label: 'Look at images',
-  description:
-    'Route image(s) through a vision-capable subagent and get a text result. ' +
-    'Use this when you need to see an image: a screenshot the user shared, a diagram in a doc, a photo, a chart, etc. ' +
-    'Each image is specified by ONE of `url` (https://...), `path` (absolute filesystem path), or `data`+`mimeType` (base64). ' +
-    'The optional `prompt` is a question to ask about the image(s); without it, the subagent returns a faithful description. ' +
-    'The image bytes never enter your context — only the resulting text comes back.',
-  parameters: Type.Object({
-    images: Type.Array(
-      Type.Object({
-        url: Type.Optional(Type.String({ description: 'https:// URL to fetch the image from.' })),
-        path: Type.Optional(Type.String({ description: 'Absolute filesystem path (inside /agent or a mounted dir).' })),
-        data: Type.Optional(Type.String({ description: 'Base64-encoded image bytes (pair with mimeType).' })),
-        mimeType: Type.Optional(Type.String({ description: 'MIME type when using `data` (e.g. "image/png").' })),
-      }),
-      { minItems: 1, description: 'One or more images to look at.' },
-    ),
-    prompt: Type.Optional(
-      Type.String({
-        description:
-          'Optional question to ask about the image(s). When omitted, the subagent returns a faithful description.',
-      }),
-    ),
-  }),
+export function createLookAtTool(permissions?: PermissionService) {
+  return defineTool({
+    name: 'look_at',
+    label: 'Look at images',
+    description:
+      'Route image(s) through a vision-capable subagent and get a text result. ' +
+      'Use this when you need to see an image: a screenshot the user shared, a diagram in a doc, a photo, a chart, etc. ' +
+      'Each image is specified by ONE of `url` (https://...), `path` (absolute filesystem path), or `data`+`mimeType` (base64). ' +
+      'The optional `prompt` is a question to ask about the image(s); without it, the subagent returns a faithful description. ' +
+      'The image bytes never enter your context — only the resulting text comes back.',
+    parameters: Type.Object({
+      images: Type.Array(
+        Type.Object({
+          url: Type.Optional(Type.String({ description: 'https:// URL to fetch the image from.' })),
+          path: Type.Optional(
+            Type.String({ description: 'Absolute filesystem path (inside /agent or a mounted dir).' }),
+          ),
+          data: Type.Optional(Type.String({ description: 'Base64-encoded image bytes (pair with mimeType).' })),
+          mimeType: Type.Optional(Type.String({ description: 'MIME type when using `data` (e.g. "image/png").' })),
+        }),
+        { minItems: 1, maxItems: LOOK_AT_MAX_IMAGES, description: 'One or more images to look at.' },
+      ),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            'Optional question to ask about the image(s). When omitted, the subagent returns a faithful description.',
+        }),
+      ),
+    }),
 
-  async execute(_toolCallId, params, signal) {
-    const args = params as LookAtArgs
-    try {
-      const imageInputs = args.images.map(toImageInput)
-      const resolved = await Promise.all(imageInputs.map((i) => resolveImage(i, signal)))
-      const imageContents: ImageContent[] = resolved.map((r) => toImageContent(r.data, r.mimeType))
-      return await runLookAtImages(imageContents, args.prompt)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return errorResult(message, { count: args.images.length, prompt: args.prompt })
-    }
-  },
-})
+    async execute(_toolCallId, params, signal) {
+      const args = params as LookAtArgs
+      try {
+        const imageInputs = args.images.map(toImageInput)
+        const resolved = await resolveImagesBounded(imageInputs, signal)
+        const imageContents: ImageContent[] = resolved.map((r) => toImageContent(r.data, r.mimeType))
+        return await runLookAtImages(imageContents, args.prompt, permissions)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return errorResult(message, { count: args.images.length, prompt: args.prompt })
+      }
+    },
+  })
+}
+
+export const lookAtTool = createLookAtTool()
 
 // Channel attachments intentionally use a separate tool instead of adding
 // channel-only dependencies to the global look_at implementation. This keeps
 // non-channel sessions' image source validation unchanged while channel
 // sessions get router-validated attachment_id lookup.
-export function createChannelLookAtTool(router: ChannelRouter, origin: ChannelLookAtOrigin) {
+export function createChannelLookAtTool(
+  router: ChannelRouter,
+  origin: ChannelLookAtOrigin,
+  permissions?: PermissionService,
+) {
   return defineTool({
     name: 'look_at_channel_attachment',
     label: 'Look at channel attachment',
@@ -130,12 +148,14 @@ export function createChannelLookAtTool(router: ChannelRouter, origin: ChannelLo
       }
       const result = await router.fetchAttachment(origin.adapter, {
         ref: found.ref,
+        maxBytes: LOOK_AT_MAX_BYTES,
         ...(found.filename !== undefined ? { filename: found.filename } : {}),
       })
       if (!result.ok) return errorResult(result.error, { count: 0, prompt: params.prompt })
       return await runLookAtImages(
         [toImageContent(result.buffer.toString('base64'), result.mimetype ?? 'image/jpeg')],
         params.prompt,
+        permissions,
       )
     },
   })
@@ -145,7 +165,11 @@ function toImageContent(data: string, mimeType: string): ImageContent {
   return { type: 'image', data, mimeType }
 }
 
-async function runLookAtImages(imageContents: ImageContent[], prompt: string | undefined) {
+async function runLookAtImages(
+  imageContents: ImageContent[],
+  prompt: string | undefined,
+  permissions?: PermissionService,
+) {
   // Exception for text-only GLM Coding Plan models: the subagent below would
   // resolve to the same image-blind model and silently fail. GLM-4.6V vision is
   // reachable on the coding-plan endpoint with the same key (POST
@@ -176,6 +200,7 @@ async function runLookAtImages(imageContents: ImageContent[], prompt: string | u
   const { session, dispose } = await createSessionWithDispose({
     systemPromptOverride: systemPrompt,
     origin,
+    ...(permissions !== undefined ? { permissions } : {}),
     profile: 'vision',
     // Both knobs are required to fully disarm the subagent's tool surface:
     // `customTools: []` blocks typeclaw's system tools (web_search/web_fetch/
@@ -208,6 +233,7 @@ const GLM_VISION_PROVIDER = 'zai-coding'
 const GLM_VISION_MODEL = 'glm-4.6v'
 const GLM_VISION_ENDPOINT = 'https://api.z.ai/api/coding/paas/v4/chat/completions'
 const GLM_VISION_MAX_TOKENS = 32768
+export const GLM_VISION_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 // Vision requests carry a base64 image body the server must decode before it can
 // send response headers, so the observer's 15s default TTFB (tuned for ~1s text
@@ -254,10 +280,18 @@ async function analyzeWithGlmCodingPlanVision(imageContents: ImageContent[], pro
   }
 
   if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined)
     return errorResult(`GLM vision request failed: HTTP ${response.status}`, details)
   }
 
-  const text = extractGlmVisionText(await response.json().catch(() => null))
+  let body: unknown
+  try {
+    const bytes = await readResponseBodyBounded(response, GLM_VISION_MAX_RESPONSE_BYTES)
+    body = JSON.parse(bytes.toString('utf8'))
+  } catch (error) {
+    return errorResult(`GLM vision response failed: ${error instanceof Error ? error.message : String(error)}`, details)
+  }
+  const text = extractGlmVisionText(body)
   if (text === null) {
     return errorResult('GLM vision returned no text response', details)
   }

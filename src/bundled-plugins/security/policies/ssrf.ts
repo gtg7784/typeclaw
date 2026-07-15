@@ -1,3 +1,5 @@
+import { isIP } from 'node:net'
+
 import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
@@ -84,18 +86,35 @@ export function classifyUrl(rawUrl: string): SsrfClassification {
     }
   }
 
+  const addressClassification = classifyIpAddress(decoded)
+  if (addressClassification.blocked) return addressClassification
+
+  return { blocked: false }
+}
+
+export function classifyIpAddress(address: string): SsrfClassification {
+  const decoded = decodeBracketedIpv6(address.toLowerCase().split('%')[0] ?? '')
   const ipv4 = parseIpv4Loose(decoded)
   if (ipv4) {
     const cls = classifyIpv4(ipv4)
     if (cls) return { blocked: true, category: cls.category, reason: cls.reason }
+    return { blocked: false }
   }
-
-  if (looksLikeIpv6(decoded)) {
-    const cls = classifyIpv6(decoded)
+  const normalizedIpv6 = normalizeIpv6(decoded)
+  if (normalizedIpv6 !== undefined) {
+    const cls = classifyIpv6(normalizedIpv6)
     if (cls) return { blocked: true, category: cls.category, reason: cls.reason }
   }
-
   return { blocked: false }
+}
+
+function normalizeIpv6(address: string): string | undefined {
+  if (isIP(address) !== 6) return undefined
+  try {
+    return decodeBracketedIpv6(new URL(`http://[${address}]/`).hostname).toLowerCase()
+  } catch {
+    return undefined
+  }
 }
 
 export function checkSsrfGuard(options: { tool: string; args: Record<string, unknown> }): SecurityBlock | undefined {
@@ -162,21 +181,22 @@ function classifyIpv4(
     return { category: 'cloud_metadata', reason: `link-local / cloud metadata 169.254.0.0/16 (${ip.join('.')})` }
   if (a === 100 && b >= 64 && b <= 127)
     return { category: 'shared_cgnat', reason: `CGNAT 100.64.0.0/10 (${ip.join('.')})` }
+  if (a === 198 && (b === 18 || b === 19))
+    return { category: 'private_ipv4', reason: `benchmarking-only 198.18.0.0/15 (${ip.join('.')})` }
   if (a === 0) return { category: 'unspecified', reason: `unspecified 0.0.0.0/8 (${ip.join('.')})` }
   if (a >= 224) return { category: 'private_ipv4', reason: `multicast/reserved (${ip.join('.')})` }
   return undefined
-}
-
-function looksLikeIpv6(host: string): boolean {
-  return host.includes(':') && /^[0-9a-f:]+$/i.test(host)
 }
 
 function classifyIpv6(host: string): { category: SsrfClassification['category']; reason: string } | undefined {
   const lower = host.toLowerCase()
   if (lower === '::1' || lower === '0:0:0:0:0:0:0:1') return { category: 'loopback', reason: 'IPv6 loopback ::1' }
   if (lower === '::' || lower === '0:0:0:0:0:0:0:0') return { category: 'unspecified', reason: 'IPv6 unspecified ::' }
-  if (lower.startsWith('fe80:') || lower.startsWith('fe80::'))
+  const firstHextet = Number.parseInt(lower.split(':')[0] ?? '', 16)
+  if (Number.isFinite(firstHextet) && firstHextet >= 0xfe80 && firstHextet <= 0xfebf)
     return { category: 'link_local', reason: 'IPv6 link-local fe80::/10' }
+  if (Number.isFinite(firstHextet) && firstHextet >= 0xfec0 && firstHextet <= 0xfeff)
+    return { category: 'ipv6_internal', reason: 'IPv6 site-local fec0::/10' }
   if (lower.startsWith('fc') || lower.startsWith('fd'))
     return { category: 'ipv6_internal', reason: 'IPv6 unique-local fc00::/7' }
   if (lower.startsWith('ff')) return { category: 'ipv6_internal', reason: 'IPv6 multicast ff00::/8' }
