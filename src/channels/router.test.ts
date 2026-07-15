@@ -7,7 +7,7 @@ import type { AfterToolCallContext, AfterToolCallResult, StreamFn } from '@mario
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
-import type { AgentSession } from '@/agent'
+import type { AgentSession, SessionOriginRef } from '@/agent'
 import type { RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { readContinuationState } from '@/agent/todo/continuation-state'
@@ -353,6 +353,7 @@ function makeRouter(
     onRetryBackoffStart?: () => void
     logs?: string[]
     origins?: SessionOrigin[]
+    originRefs?: SessionOriginRef[]
     factoryCalls?: SessionFactoryArgs[]
     transcriptPathFor?: (sessionId: string) => string | undefined
     measureTranscriptBytes?: (path: string) => number
@@ -392,12 +393,13 @@ function makeRouter(
       warn: (m) => options.logs?.push(`warn:${m}`),
       error: (m) => options.logs?.push(`error:${m}`),
     },
-    createSessionForChannel: async ({ origin, existingSessionId, existingSessionFile }) => {
+    createSessionForChannel: async ({ origin, originRef, existingSessionId, existingSessionFile }) => {
       options.factoryCalls?.push({
         ...(existingSessionId !== undefined ? { existingSessionId } : {}),
         ...(existingSessionFile !== undefined ? { existingSessionFile } : {}),
       })
       origins.push(origin)
+      options.originRefs?.push(originRef)
       const fake = new FakeSession()
       sessions.push(fake)
       const sessionId = existingSessionId ?? `ses_fake_${sessions.length}`
@@ -10583,6 +10585,35 @@ describe('ChannelRouter cold-start prefetch', () => {
     // then: membership was resolved against the PARENT channel, not the thread
     expect(resolvedChats.length).toBeGreaterThan(0)
     expect(resolvedChats.every((c) => c === 'parent-c1')).toBe(true)
+  })
+
+  test('rebuilt live channel origin retains Discord parent chat metadata and parent-scoped membership', async () => {
+    const dir = await tempDir()
+    const originRefs: SessionOriginRef[] = []
+    const { router } = makeRouter(dir, { originRefs })
+    router.registerMembership('discord-bot', async () => ({
+      humans: 4,
+      bots: 1,
+      fetchedAt: Date.now(),
+      truncated: false,
+    }))
+
+    await router.route(
+      inbound({
+        chat: 'thread-t1',
+        thread: null,
+        room: { kind: 'thread', parentChat: 'parent-c1', parentChatName: '개발실' },
+        externalMessageId: 'origin-parent',
+        text: 'hey bot',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'thread-t1', thread: null })
+
+    expect(originRefs[0]?.current).toMatchObject({
+      parentChat: 'parent-c1',
+      parentChatName: '개발실',
+      membership: { humans: 4, bots: 1, truncated: false },
+    })
   })
 
   test('a fresh Discord thread room observes an un-addressed message when membership is unknown', async () => {

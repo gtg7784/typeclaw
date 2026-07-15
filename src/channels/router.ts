@@ -2031,6 +2031,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         chat: key.chat,
         ...(resolvedNames.chatName !== undefined ? { chatName: resolvedNames.chatName } : {}),
         thread: key.thread,
+        ...(room?.parentChat !== undefined ? { parentChat: room.parentChat } : {}),
+        ...(room?.parentChatName !== undefined ? { parentChatName: room.parentChatName } : {}),
         ...(triggeringAuthorId !== undefined ? { lastInboundAuthorId: triggeringAuthorId } : {}),
         participants,
         ...(membership !== null ? { membership } : {}),
@@ -2724,7 +2726,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const buildLiveOrigin = (live: LiveSession): SessionOrigin => {
-    const membership = readMembership(live.key)
+    const membership = readMembership(live.key, live.room)
     const self = resolveSelfIdentity(live.key)
     return {
       kind: 'channel',
@@ -2734,6 +2736,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: live.key.chat,
       ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
       thread: live.key.thread,
+      ...(live.room?.parentChat !== undefined ? { parentChat: live.room.parentChat } : {}),
+      ...(live.room?.parentChatName !== undefined ? { parentChatName: live.room.parentChatName } : {}),
       ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
       ...(live.currentTurnReactionRef !== null ? { reactionRef: live.currentTurnReactionRef } : {}),
       participants: live.participants,

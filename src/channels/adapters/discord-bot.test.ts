@@ -3,12 +3,18 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { DiscordBotClient, DiscordBotListener, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
+import type {
+  DiscordBotClient,
+  DiscordBotListener,
+  DiscordFile,
+  DiscordGatewayMessageCreateEvent,
+  DiscordMessage,
+} from 'agent-messenger/discordbot'
 import { DiscordIntent } from 'agent-messenger/discordbot'
 
 import type { ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
-import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
+import type { FetchHistoryResult, HistoryCallback, InboundMessage, OutboundMessage } from '@/channels/types'
 import type { ChannelKey } from '@/channels/types'
 
 import {
@@ -25,6 +31,12 @@ import {
   DISCORD_SLASH_COMMAND_NAMES,
 } from './discord-bot'
 import { DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT } from './discord-bot-slash-commands'
+
+const provenanceConfig: ChannelAdapterConfig = {
+  enabled: true,
+  engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: 'off' },
+  history: defaultHistoryConfig(),
+}
 
 describe('discord-bot gateway intents', () => {
   test('includes MessageContent (privileged) so inbound messages carry text', () => {
@@ -101,6 +113,149 @@ describe('discord-bot lifecycle', () => {
   })
 })
 
+describe('discord-bot provenance enrichment', () => {
+  test('startup resolves workspace and thread parent names for historical fragments', async () => {
+    const listener = fakeBotListener()
+    const logs: string[] = []
+    const resolved: unknown[] = []
+    const adapter = createDiscordBotAdapter({
+      agentDir: '/agent',
+      router: noopRouter(),
+      configRef: () => provenanceConfig,
+      token: 'test-token',
+      logger: {
+        info: (message) => logs.push(`info:${message}`),
+        warn: (message) => logs.push(`warn:${message}`),
+        error: (message) => logs.push(`error:${message}`),
+      },
+      createClient: () => ({ login: async () => {} }) as unknown as DiscordBotClient,
+      createListener: () => listener as unknown as DiscordBotListener,
+      fetchImpl: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith('/channels/301')) {
+          return Response.json({ id: '301', name: 'release-thread', type: 11, parent_id: '302' })
+        }
+        if (url.endsWith('/channels/302')) return Response.json({ id: '302', name: 'development', type: 0 })
+        if (url.endsWith('/guilds/201')) return Response.json({ id: '201', name: 'Example Guild' })
+        return new Response(null, { status: 404 })
+      }) as typeof fetch,
+      enrichHistoricalProvenance: async (agentDir, resolve, options) => {
+        expect(agentDir).toBe('/agent')
+        expect(options.adapter).toBe('discord-bot')
+        resolved.push(await resolve({ adapter: 'discord-bot', workspace: '201', chat: '301', thread: null }))
+        return { scanned: 1, attempted: 1, resolved: 1, failed: 0, timedOut: 0, changed: true }
+      },
+    })
+
+    await adapter.start()
+    await Bun.sleep(0)
+
+    expect(resolved).toEqual([
+      {
+        where: {
+          adapter: 'discord-bot',
+          workspace: '201',
+          workspaceName: 'Example Guild',
+          chat: '301',
+          chatName: 'release-thread',
+          thread: null,
+          parentChat: '302',
+          parentChatName: 'development',
+        },
+        parentChecked: true,
+      },
+    ])
+    expect(logs).toContain(
+      'info:[discord-bot] historical provenance enrichment scanned=1 attempted=1 resolved=1 failed=0 timed_out=0 changed=true',
+    )
+  })
+
+  test('historical enrichment failure never fails adapter startup', async () => {
+    const listener = fakeBotListener()
+    const warns: string[] = []
+    const adapter = createDiscordBotAdapter({
+      agentDir: '/agent',
+      router: noopRouter(),
+      configRef: () => provenanceConfig,
+      token: 'test-token',
+      logger: { info: () => {}, warn: (message) => warns.push(message), error: () => {} },
+      createClient: () => ({ login: async () => {} }) as unknown as DiscordBotClient,
+      createListener: () => listener as unknown as DiscordBotListener,
+      enrichHistoricalProvenance: async () => {
+        throw new Error('maintenance unavailable')
+      },
+    })
+
+    await expect(adapter.start()).resolves.toBeUndefined()
+    await Bun.sleep(0)
+    expect(warns).toContain('[discord-bot] historical provenance enrichment failed: maintenance unavailable')
+  })
+
+  test('live thread capture includes parent id and parent name before routing', async () => {
+    const listener = fakeBotListener()
+    const routed: InboundMessage[] = []
+    const adapter = createDiscordBotAdapter({
+      router: noopRouter((message) => routed.push(message)),
+      configRef: () => provenanceConfig,
+      token: 'test-token',
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createClient: () => ({ login: async () => {} }) as unknown as DiscordBotClient,
+      createListener: () => listener as unknown as DiscordBotListener,
+      fetchImpl: (async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith('/channels/301')) {
+          return Response.json({ id: '301', name: 'release-thread', type: 11, parent_id: '302' })
+        }
+        if (url.endsWith('/channels/302')) return Response.json({ id: '302', name: 'development', type: 0 })
+        if (url.endsWith('/guilds/201')) return Response.json({ id: '201', name: 'Example Guild' })
+        return new Response(null, { status: 204 })
+      }) as typeof fetch,
+    })
+    await adapter.start()
+    listener.emit('connected', { user: { id: '999', username: 'typeclaw' } })
+    listener.emit('message_create', {
+      type: 'MESSAGE_CREATE',
+      id: '401',
+      channel_id: '301',
+      guild_id: '201',
+      author: { id: '501', username: 'alice', bot: false },
+      content: 'thread message',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    } satisfies DiscordGatewayMessageCreateEvent)
+    await adapter.stop()
+
+    expect(routed[0]?.room).toEqual({ kind: 'thread', parentChat: '302', parentChatName: 'development' })
+  })
+})
+
+function noopRouter(route?: (message: InboundMessage) => void): ChannelRouter {
+  return new Proxy(
+    {},
+    {
+      get: (_target, property) =>
+        property === 'route'
+          ? async (message: InboundMessage) => {
+              route?.(message)
+            }
+          : () => {},
+    },
+  ) as ChannelRouter
+}
+
+function fakeBotListener(): {
+  on(event: string, handler: (...args: unknown[]) => void): void
+  emit(event: string, ...args: unknown[]): void
+  start(): Promise<void>
+  stop(): void
+} {
+  const handlers = new Map<string, Array<(...args: unknown[]) => void>>()
+  return {
+    on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+    emit: (event, ...args) => handlers.get(event)?.forEach((handler) => handler(...args)),
+    start: async () => {},
+    stop: () => {},
+  }
+}
 describe('createTypingCallback', () => {
   let originalFetch: typeof fetch
   let calls: Array<{ url: string; init: RequestInit }>

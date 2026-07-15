@@ -260,6 +260,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const token = env.DISCORD_BOT_TOKEN
       if (token === undefined || token.trim() === '') return null
       return createDiscordBot({
+        agentDir: options.agentDir,
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         token,
@@ -331,6 +332,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const credentialsStore = createContainerDiscordCredentialStore(options.agentDir, options.secretsProvider ?? null)
       if (credentialsStore === null) return null
       return createDiscordUser({
+        agentDir: options.agentDir,
         router,
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,

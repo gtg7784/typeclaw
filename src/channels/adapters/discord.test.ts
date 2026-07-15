@@ -169,6 +169,121 @@ describe('createDiscordAdapter', () => {
     expect(r.unregistered).toContain('remove-reaction:discord')
   })
 
+  test('captures Discord thread parent id and name before routing', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const adapter = createDiscordAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () =>
+        fakeClient({
+          getChannel: async (id: string) =>
+            id === '300000000000000003'
+              ? {
+                  id,
+                  guild_id: '200000000000000002',
+                  name: 'topic-thread',
+                  type: 11,
+                  parent_id: '300000000000000099',
+                }
+              : { id, guild_id: '200000000000000002', name: 'development', type: 0 },
+        }),
+      createListener: () => listener as unknown as DiscordListener,
+    })
+
+    await adapter.start()
+    listener.emit('message_create', {
+      type: 'MESSAGE_CREATE',
+      id: '400000000000000004',
+      channel_id: '300000000000000003',
+      guild_id: '200000000000000002',
+      author: { id: '500000000000000005', username: 'alice' },
+      content: 'thread message',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    } satisfies DiscordGatewayMessageCreateEvent)
+    await adapter.stop()
+
+    expect(r.routed[0]?.room).toEqual({
+      kind: 'thread',
+      parentChat: '300000000000000099',
+      parentChatName: 'development',
+    })
+  })
+
+  test('a known DM routes successfully without channel metadata resolution', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    let channelMetadataCalls = 0
+    const adapter = createDiscordAdapter({
+      router: r,
+      configRef: () => config,
+      logger: logger(),
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () =>
+        fakeClient({
+          getChannel: async () => {
+            channelMetadataCalls++
+            return { id: '300000000000000003', name: 'should-not-resolve', type: 0 }
+          },
+        }),
+      createListener: () => listener as unknown as DiscordListener,
+    })
+
+    await adapter.start()
+    listener.emit('message_create', {
+      type: 'MESSAGE_CREATE',
+      id: '400000000000000004',
+      channel_id: '300000000000000003',
+      author: { id: '500000000000000005', username: 'alice' },
+      content: 'private message',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    } satisfies DiscordGatewayMessageCreateEvent)
+    await adapter.stop()
+
+    expect(r.routed[0]?.workspace).toBe('@dm')
+    expect(r.routed[0]?.room).toBeUndefined()
+    expect(channelMetadataCalls).toBe(0)
+  })
+
+  test('adapter start triggers observable resolver-backed historical provenance maintenance', async () => {
+    const r = router()
+    const listener = new FakeListener()
+    const log = logger()
+    const calls: string[] = []
+    const adapter = createDiscordAdapter({
+      agentDir: '/agent',
+      router: r,
+      configRef: () => config,
+      logger: log,
+      credentialsStore: { getAccount: async () => account() },
+      createClient: () => fakeClient(),
+      createListener: () => listener as unknown as DiscordListener,
+      enrichHistoricalProvenance: async (agentDir, resolve, options) => {
+        calls.push(agentDir)
+        expect(options.adapter).toBe('discord')
+        const resolved = await resolve({
+          adapter: 'discord',
+          workspace: '200000000000000002',
+          chat: '300000000000000003',
+          thread: null,
+        })
+        expect(resolved.where.workspaceName).toBe('Example Guild')
+        expect(resolved.parentChecked).toBe(true)
+        return { scanned: 1, attempted: 1, resolved: 1, failed: 0, timedOut: 0, changed: true }
+      },
+    })
+
+    await adapter.start()
+    await Bun.sleep(0)
+
+    expect(calls).toEqual(['/agent'])
+    expect(log.lines).toContain(
+      'info:[discord] historical provenance enrichment scanned=1 attempted=1 resolved=1 failed=0 timed_out=0 changed=true',
+    )
+  })
+
   test('outbound sends messages through DiscordClient.sendMessage', async () => {
     const sent: unknown[] = []
     const r = router()
@@ -342,6 +457,7 @@ function fakeClient(
     login: async () => {},
     testAuth: async () => ({ id: '100000000000000001', username: 'self', global_name: 'Self' }),
     getChannel: async () => ({ id: '300000000000000003', guild_id: '200000000000000002', name: 'general', type: 0 }),
+    getServer: async () => ({ id: '200000000000000002', name: 'Example Guild' }),
     getUser: async () => ({ id: '500000000000000005', username: 'alice', global_name: 'Alice' }),
     getMessages: async () => [],
     sendMessage: async () => ({

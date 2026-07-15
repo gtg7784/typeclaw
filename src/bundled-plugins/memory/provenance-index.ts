@@ -66,6 +66,7 @@ export type HistoricalProvenanceEnrichmentResult = {
 }
 
 export type HistoricalProvenanceEnrichmentOptions = {
+  adapter: Extract<AdapterId, 'discord' | 'discord-bot'>
   maxOrigins?: number
   timeoutMs?: number
   perOriginTimeoutMs?: number
@@ -206,7 +207,7 @@ export async function buildProvenanceIndexFrom(
 export async function enrichHistoricalProvenance(
   agentDir: string,
   resolve: HistoricalProvenanceResolver,
-  options: HistoricalProvenanceEnrichmentOptions = {},
+  options: HistoricalProvenanceEnrichmentOptions,
 ): Promise<HistoricalProvenanceEnrichmentResult> {
   const maxOrigins = options.maxOrigins ?? 100
   const deadline = Date.now() + (options.timeoutMs ?? 10_000)
@@ -219,8 +220,7 @@ export async function enrichHistoricalProvenance(
     const events = days[dayIndex]!.events
     for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex--) {
       const event = events[eventIndex]!
-      if (event.type !== 'fragment' || (event.where?.adapter !== 'discord' && event.where?.adapter !== 'discord-bot'))
-        continue
+      if (event.type !== 'fragment' || event.where?.adapter !== options.adapter) continue
       const where = event.where
       if (where.workspace === '@dm') continue
       if (!needsResolverEnrichment(where, registry)) continue

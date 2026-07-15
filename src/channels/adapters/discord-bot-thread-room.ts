@@ -1,5 +1,8 @@
 import type { InboundMessage } from '@/channels/types'
 
+import { isDiscordSnowflake } from './discord-id'
+import { DiscordResolverCache } from './discord-resolver-cache'
+
 const DISCORD_API_BASE = 'https://discord.com/api/v10'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -11,7 +14,7 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 // carries no thread/parent signal.
 const DISCORD_THREAD_CHANNEL_TYPES: ReadonlySet<number> = new Set([10, 11, 12])
 
-export type DiscordChannelMeta = { type?: number; parent_id?: string }
+export type DiscordChannelMeta = { type?: number; parent_id?: string | null }
 
 // The lookup has THREE outcomes, and the failure case must not be conflated
 // with a confirmed non-thread channel:
@@ -25,6 +28,12 @@ export type DiscordThreadRoomResolverOptions = {
   fetchImpl?: typeof fetch
   now?: () => number
   ttlMs?: number
+  maxCacheEntries?: number
+}
+
+export type DiscordThreadRoomStatus = { room: InboundMessage['room']; parentChecked: boolean }
+export type DiscordThreadRoomResolver = ((channelId: string) => Promise<InboundMessage['room']>) & {
+  resolveStatus(channelId: string): Promise<DiscordThreadRoomStatus>
 }
 
 // Maps a lookup outcome to the room signal. A confirmed thread carries its
@@ -37,27 +46,39 @@ export type DiscordThreadRoomResolverOptions = {
 export function discordThreadRoom(meta: ChannelMetaLookup): InboundMessage['room'] {
   if (meta === 'unknown') return { kind: 'thread' }
   if (meta.type === undefined || !DISCORD_THREAD_CHANNEL_TYPES.has(meta.type)) return undefined
-  return meta.parent_id !== undefined ? { kind: 'thread', parentChat: meta.parent_id } : { kind: 'thread' }
+  return meta.parent_id != null ? { kind: 'thread', parentChat: meta.parent_id } : { kind: 'thread' }
 }
 
-export function createDiscordThreadRoomResolver(
-  options: DiscordThreadRoomResolverOptions,
-): (channelId: string) => Promise<InboundMessage['room']> {
+export function createDiscordThreadRoomResolver(options: DiscordThreadRoomResolverOptions): DiscordThreadRoomResolver {
   const fetchImpl = options.fetchImpl ?? fetch
   const now = options.now ?? Date.now
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS
-  const cache = new Map<string, { value: DiscordChannelMeta; expiresAt: number }>()
+  const cache = new DiscordResolverCache<DiscordChannelMeta>(options.maxCacheEntries)
 
-  return async (channelId: string): Promise<InboundMessage['room']> => {
-    const cached = cache.get(channelId)
-    if (cached !== undefined && cached.expiresAt > now()) return discordThreadRoom(cached.value)
+  const resolve = (async (channelId: string): Promise<InboundMessage['room']> =>
+    (await resolve.resolveStatus(channelId)).room) as DiscordThreadRoomResolver
+
+  resolve.resolveStatus = async (channelId: string): Promise<DiscordThreadRoomStatus> => {
+    if (!isDiscordSnowflake(channelId)) return { room: { kind: 'thread' }, parentChecked: false }
+    const currentTime = now()
+    const cached = cache.get(channelId, currentTime)
+    if (cached !== undefined) {
+      return { room: discordThreadRoom(cached), parentChecked: true }
+    }
     // Only CONFIRMED metadata is cached. A failed lookup ('unknown') is not
     // cached, so the next message on this channel retries rather than pinning
     // the fail-closed state for the whole TTL.
     const meta = await fetchChannelMeta(channelId)
-    if (meta !== 'unknown') cache.set(channelId, { value: meta, expiresAt: now() + ttlMs })
-    return discordThreadRoom(meta)
+    const room = discordThreadRoom(meta)
+    const parentChecked = meta !== 'unknown' && (room?.kind !== 'thread' || room.parentChat != null)
+    if (meta !== 'unknown' && parentChecked) {
+      const fetchedAt = now()
+      cache.set(channelId, meta, fetchedAt + ttlMs, fetchedAt)
+    }
+    return { room, parentChecked }
   }
+
+  return resolve
 
   async function fetchChannelMeta(channelId: string): Promise<ChannelMetaLookup> {
     try {
@@ -65,9 +86,20 @@ export function createDiscordThreadRoomResolver(
         headers: { Authorization: `Bot ${options.token}` },
       })
       if (!response.ok) return 'unknown'
-      return (await response.json()) as DiscordChannelMeta
+      const body: unknown = await response.json()
+      if (!validChannelMetadata(body)) return 'unknown'
+      return body
     } catch {
       return 'unknown'
     }
   }
+}
+
+function validChannelMetadata(value: unknown): value is DiscordChannelMeta & { type: number } {
+  if (typeof value !== 'object' || value === null || !('type' in value)) return false
+  if (typeof value.type !== 'number' || !Number.isInteger(value.type) || value.type < 0) return false
+  if ('parent_id' in value && value.parent_id != null) {
+    if (typeof value.parent_id !== 'string' || !isDiscordSnowflake(value.parent_id)) return false
+  }
+  return true
 }
