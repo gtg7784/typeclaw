@@ -35,14 +35,9 @@ gh api "/repos/<owner>/<repo>/contents/<path>?ref=<headSha>" -H "Accept: applica
 
 That returns the file's raw bytes (no base64, no second stage). For the line numbers your \`location="path:line"\` anchors need, read them off the unified diff you already fetched (\`gh pr diff\` prints the new-side line numbers in its hunk headers, \`@@ -a,b +c,d @@\`), or escalate to Mode 2 where a real \`read\`/\`grep\` gives native line numbers. Fetch each file once and keep its output — do not re-fetch the same file to re-derive a line you already saw.
 
-**Mode 2 — scratch checkout (escalate when navigation gets broad).** When the review needs repo-wide \`grep\`, symbol tracing across several directories, many adjacent files, or repeated access to the same files, the remote-read dance is slower and more error-prone than a real checkout. In that case clone the PR head into a **fresh throwaway directory under \`/tmp\`** and read it natively:
+**Mode 2 — scratch checkout (escalate when navigation gets broad).** When navigation gets broad, call \`github_prepare_review_checkout({ repoSlug: "<owner>/<repo>", headSha: "<40-char headSha>" })\`. The runtime verifies that exact SHA in the one allowlisted repository and performs the authenticated fetch without exposing its token to model bash.
 
-\`\`\`sh
-git clone --depth 1 "https://github.com/<owner>/<repo>.git" /tmp/review-<n>-src && \
-  git -C /tmp/review-<n>-src fetch --depth 1 origin <headSha> && git -C /tmp/review-<n>-src checkout <headSha>
-\`\`\`
-
-Then \`read\`, \`grep\`, \`find\`, and read-only \`git\` (\`git -C /tmp/review-<n>-src log|diff|show|blame|grep|ls-files|cat-file\`) all work against \`/tmp/review-<n>-src\` with correct line numbers and zero per-file round-trips.
+Then use the receipt path with \`read\`, \`grep\`, \`find\`, and read-only \`git\` (\`git -C <receipt-path> log|diff|show|blame|grep|ls-files|cat-file\`) for correct line numbers and zero per-file round-trips. Do not use \`git clone\`, \`git fetch\`, \`git checkout\`, or \`gh pr checkout\` for acquisition.
 
 This \`/tmp\` scratch checkout is the **one** write the read-only contract permits — and only because it is a private acquisition cache, never the reviewed artifact. Inside it you may only **read**. You still may NOT: edit any file, install dependencies, run builds or tests, commit/stage/push/rebase/reset, or write anywhere outside this \`/tmp\` scratch dir. Do not \`rm\` it when done — leave cleanup to the session lifecycle (\`rm\` stays forbidden). When in doubt about how many files you'll touch, start with Mode 1 and escalate to Mode 2 only once the file count or grep breadth justifies the clone.
 

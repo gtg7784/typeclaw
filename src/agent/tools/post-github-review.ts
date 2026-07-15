@@ -1,0 +1,199 @@
+import { Type } from '@mariozechner/pi-ai'
+import { defineTool } from '@mariozechner/pi-coding-agent'
+
+import { recordReview, recordReviewOutput, type ReviewVerdict } from '@/channels/github-review-turn-ledger'
+import { createSharedReviewVerdictGuard, type ReviewVerdictGuard } from '@/channels/github-review-verdict-coordinator'
+import type { ChannelRouter } from '@/channels/router'
+import type { ReviewFinding, SubmitReviewRequest } from '@/channels/types'
+
+import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+import { type ChannelReplyOrigin, TOOL_RESULT_PREFIX } from './channel-reply'
+import { fenceToolResult } from './runtime-notice'
+
+type PostGithubReviewDetails = {
+  ok: boolean
+  error?: string
+  code?: string
+  reviewId?: number
+  state?: string
+  downgraded?: boolean
+  reanchored?: ReviewFinding[]
+}
+
+export function createPostGithubReviewTool(options: {
+  router: ChannelRouter
+  origin: ChannelReplyOrigin
+  sessionId: string
+  logger?: ChannelToolLogger
+  verdictGuard?: ReviewVerdictGuard
+}) {
+  const { router, origin, sessionId, logger = consoleChannelLogger } = options
+  const verdictGuard = options.verdictGuard ?? createSharedReviewVerdictGuard()
+  return defineTool({
+    name: 'post_github_review',
+    label: 'Post GitHub PR Review',
+    description:
+      'GitHub channel sessions only. Submit a formal PR review. The adapter resolves the head SHA, validates diff anchors, moves out-of-diff findings into the body, enforces approval policy, and verifies the posted review.',
+    parameters: Type.Object({
+      event: Type.Union([Type.Literal('APPROVE'), Type.Literal('REQUEST_CHANGES'), Type.Literal('COMMENT')]),
+      body: Type.String({ minLength: 1 }),
+      comments: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({ minLength: 1 }),
+            line: Type.Integer({ minimum: 1 }),
+            side: Type.Optional(Type.Union([Type.Literal('LEFT'), Type.Literal('RIGHT')])),
+            start_line: Type.Optional(Type.Integer({ minimum: 1 })),
+            start_side: Type.Optional(Type.Union([Type.Literal('LEFT'), Type.Literal('RIGHT')])),
+            body: Type.String({ minLength: 1 }),
+          }),
+          { minItems: 1 },
+        ),
+      ),
+    }),
+    async execute(toolCallId, params) {
+      if (origin.adapter !== 'github') return denied(logger, 'post_github_review is only supported on github sessions.')
+      const prNumber = parsePrNumber(origin.chat)
+      if (prNumber === null) return denied(logger, `invalid GitHub review target: ${origin.chat}`)
+      const verdict = decisiveVerdict(params.event)
+      const coordinationCallId = `${sessionId}:${toolCallId}`
+      if (verdict !== null) {
+        const blocked = await verdictGuard.guard({
+          callId: coordinationCallId,
+          workspace: origin.workspace,
+          prNumber,
+          verdict,
+        })
+        if (blocked !== null) return denied(logger, blocked.reason)
+      }
+      const request: SubmitReviewRequest = {
+        adapter: 'github',
+        workspace: origin.workspace,
+        chat: origin.chat,
+        event: params.event,
+        body: params.body,
+        comments: (params.comments ?? []).map(toReviewFinding),
+      }
+      let releaseAsLanded = false
+      try {
+        const result = await router.submitReview(request)
+        if (!result.ok) {
+          // A POST whose verification failed may already have landed. Keep the
+          // short conservative shield, but never credit an unverified ledger.
+          releaseAsLanded = verdict !== null && result.submitted === true
+          return denied(logger, result.error, result.code)
+        }
+
+        const effective = effectiveReviewState(result.state)
+        if (effective === null)
+          return denied(logger, `GitHub returned an unknown verified review state: ${result.state}`)
+        releaseAsLanded = verdict !== null && effective === verdict
+        creditVerifiedReview({ sessionId, workspace: origin.workspace, prNumber, effective })
+
+        const receipt = renderReceipt(
+          result.reviewId,
+          result.state,
+          result.downgraded === true,
+          result.reanchored ?? [],
+        )
+        const details: PostGithubReviewDetails = {
+          ok: true,
+          reviewId: result.reviewId,
+          state: result.state,
+          ...(result.downgraded === true ? { downgraded: true } : {}),
+          ...(result.reanchored !== undefined ? { reanchored: result.reanchored } : {}),
+        }
+        return { content: [{ type: 'text' as const, text: fenceToolResult(receipt) }], details }
+      } finally {
+        if (verdict !== null) {
+          await verdictGuard.release({ callId: coordinationCallId, succeeded: releaseAsLanded })
+        }
+      }
+    },
+  })
+}
+
+function parsePrNumber(chat: string): number | null {
+  const match = /^pr:(\d+)$/.exec(chat)
+  if (match?.[1] === undefined) return null
+  const value = Number(match[1])
+  return Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+function decisiveVerdict(event: SubmitReviewRequest['event']): ReviewVerdict | null {
+  return event === 'APPROVE' || event === 'REQUEST_CHANGES' ? event : null
+}
+
+function effectiveReviewState(state: string): ReviewVerdict | 'COMMENT' | null {
+  if (state === 'APPROVED') return 'APPROVE'
+  if (state === 'CHANGES_REQUESTED') return 'REQUEST_CHANGES'
+  if (state === 'COMMENTED') return 'COMMENT'
+  return null
+}
+
+function creditVerifiedReview(args: {
+  sessionId: string
+  workspace: string
+  prNumber: number
+  effective: ReviewVerdict | 'COMMENT'
+}): void {
+  if (args.effective === 'COMMENT') {
+    recordReviewOutput({
+      sessionId: args.sessionId,
+      workspace: args.workspace,
+      prNumber: args.prNumber,
+      state: 'COMMENT',
+    })
+    return
+  }
+  // recordReview also emits the review-output observer signal for decisive
+  // states, keeping verdict and output credit atomic.
+  recordReview({
+    sessionId: args.sessionId,
+    workspace: args.workspace,
+    prNumber: args.prNumber,
+    verdict: args.effective,
+  })
+}
+
+function denied(logger: ChannelToolLogger, error: string, code?: string) {
+  logger.warn(formatChannelToolFailure('post_github_review', error))
+  const details: PostGithubReviewDetails = { ok: false, error, ...(code !== undefined ? { code } : {}) }
+  return {
+    content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}post_github_review denied: ${error}` }],
+    details,
+  }
+}
+
+function toReviewFinding(comment: {
+  path: string
+  line: number
+  side?: 'LEFT' | 'RIGHT'
+  start_line?: number
+  start_side?: 'LEFT' | 'RIGHT'
+  body: string
+}): ReviewFinding {
+  return {
+    path: comment.path,
+    line: comment.line,
+    ...(comment.side !== undefined ? { side: comment.side } : {}),
+    ...(comment.start_line !== undefined ? { startLine: comment.start_line } : {}),
+    ...(comment.start_side !== undefined ? { startSide: comment.start_side } : {}),
+    body: comment.body,
+  }
+}
+
+function renderReceipt(
+  reviewId: number,
+  state: string,
+  downgraded: boolean,
+  reanchored: readonly ReviewFinding[],
+): string {
+  const notes = [
+    downgraded ? 'APPROVE was downgraded to COMMENT by operator policy.' : null,
+    reanchored.length > 0
+      ? `${reanchored.length} out-of-diff finding(s) moved into the review body: ${reanchored.map((finding) => `${finding.path}:${finding.line}`).join(', ')}.`
+      : null,
+  ].filter((note): note is string => note !== null)
+  return [`GitHub review posted: id=${reviewId}, state=${state}.`, ...notes].join('\n')
+}

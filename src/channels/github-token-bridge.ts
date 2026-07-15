@@ -15,7 +15,8 @@ export type GithubTokenBridge = {
   // configs where the process-wide GH_TOKEN is intentionally NOT seeded, so the
   // git/gh mint paths can no longer rely on GH_TOKEN's prefix to detect App auth.
   hasAppTokenResolver: () => boolean
-  registerResolver: (resolver: (repoSlug: string) => Promise<string>) => () => void
+  getAppSelfLogin: () => string | null
+  registerResolver: (resolver: (repoSlug: string) => Promise<string>, selfLogin?: () => string | null) => () => void
 }
 
 const NO_RESOLVER_REASON =
@@ -24,6 +25,7 @@ const NO_RESOLVER_REASON =
 
 export function createGithubTokenBridge(): GithubTokenBridge {
   let current: ((repoSlug: string) => Promise<string>) | null = null
+  let currentSelfLogin: (() => string | null) | null = null
 
   return {
     resolveTokenForRepo: async (repoSlug) => {
@@ -37,12 +39,17 @@ export function createGithubTokenBridge(): GithubTokenBridge {
       }
     },
     hasAppTokenResolver: () => current !== null,
-    registerResolver: (resolver) => {
+    getAppSelfLogin: () => currentSelfLogin?.() ?? null,
+    registerResolver: (resolver, selfLogin) => {
       current = resolver
+      currentSelfLogin = selfLogin ?? null
       return () => {
         // Only clear if still the active resolver: a stop() racing a newer
         // start() must not wipe the newer registration.
-        if (current === resolver) current = null
+        if (current === resolver) {
+          current = null
+          currentSelfLogin = null
+        }
       }
     },
   }

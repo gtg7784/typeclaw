@@ -398,14 +398,13 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('do not pipe')
   })
 
-  test('code-review skill allows a scoped /tmp scratch checkout for broad navigation but keeps it read-only', () => {
-    // Hybrid acquisition: remote-read by default, escalate to a throwaway
-    // checkout only when navigation gets broad. The exception must stay
-    // narrow — /tmp scratch only, never the reviewed artifact, no rm.
+  test('code-review skill uses the runtime-owned exact-SHA checkout for broad navigation', () => {
     const content = CODE_REVIEW_SKILL.content
     const lower = content.toLowerCase()
     expect(lower).toContain('scratch checkout')
-    expect(content).toContain('/tmp/review-')
+    expect(content).toContain('github_prepare_review_checkout')
+    expect(content).toContain('<40-char headSha>')
+    expect(lower).toContain('do not use `git clone`')
     expect(lower).toContain('never the reviewed artifact')
     expect(lower).toContain('leave cleanup to the session lifecycle')
   })

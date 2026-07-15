@@ -3,9 +3,9 @@ import { definePlugin } from '@/plugin'
 import { createReviewerSubagent } from './reviewer'
 
 export default definePlugin({
-  plugin: async () => ({
+  plugin: async (ctx) => ({
     subagents: {
-      reviewer: createReviewerSubagent(),
+      reviewer: createReviewerSubagent({ resolveTokenForRepo: ctx.github.resolveTokenForRepo }),
     },
   }),
 })

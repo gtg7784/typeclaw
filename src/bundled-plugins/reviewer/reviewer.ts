@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { createReviewerCheckoutTool } from '@/bundled-plugins/github-cli-auth/review-checkout'
+import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
 import {
   bashTool,
   createLoadSkillTool,
@@ -188,7 +190,9 @@ export const reviewerPayloadSchema = z
 
 export type ReviewerPayload = z.infer<typeof reviewerPayloadSchema>
 
-export function createReviewerSubagent(): Subagent<ReviewerPayload> {
+export function createReviewerSubagent(options?: {
+  resolveTokenForRepo: ResolveGithubTokenForRepo
+}): Subagent<ReviewerPayload> {
   const loadSkillTool = createLoadSkillTool({
     skills: REVIEWER_SKILLS,
     description: `Load a curated review skill by name. Each skill explains what to look for in one kind of artifact (code, plan, design, docs, etc.) and refines the universal severity scale for that domain. Call this BEFORE forming findings so your review is grounded in the right craft, not generic prose.
@@ -210,7 +214,10 @@ If none of the listed skills fit the target, load \`general\`. Keep the skill-se
     // two layers; this is the one that survives a trusted/owner caller.
     bashPolicy: { kind: 'readonly-reviewer' },
     tools: [readTool, grepTool, findTool, lsTool, bashTool, webSearchTool, webFetchTool],
-    customTools: [loadSkillTool],
+    customTools: [
+      loadSkillTool,
+      ...(options === undefined ? [] : [createReviewerCheckoutTool(options.resolveTokenForRepo)]),
+    ],
     payloadSchema: reviewerPayloadSchema,
     visibility: 'public',
     rosterDescription:

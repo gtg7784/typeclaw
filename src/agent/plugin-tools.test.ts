@@ -705,6 +705,39 @@ describe('wrapSystemTool', () => {
     expect(TOOL_INPUT_MAX_BYTES.look_at).toBe(URL_FETCH_MAX_BYTES)
   })
 
+  test('session-level system-tool wrapping stays active with an empty hook bus', async () => {
+    const { wrapSystemTools } = await import('./index')
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-empty-hooks-system-'))
+    await writeFile(path.join(agentDir, '.env'), 'SECRET=never')
+    let called = false
+    const tool = definePiTool({
+      name: 'look_at',
+      label: 'look_at',
+      description: '',
+      parameters: Type.Any(),
+      async execute() {
+        called = true
+        return { content: [], details: undefined }
+      },
+    })
+    const [wrapped] = wrapSystemTools([tool], {
+      agentDir,
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => undefined,
+      getAbort: () => undefined,
+    })
+    try {
+      if (wrapped === undefined) throw new Error('missing wrapped tool')
+      await expect(
+        wrapped.execute('c', { images: [{ path: '.env' }] } as never, undefined, undefined, {} as never),
+      ).rejects.toThrow(/not available to LLM tools/)
+      expect(called).toBeFalse()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('tool.before mutations propagate to TypeClaw system tool execution and tool.after can rewrite the result', async () => {
     const seen: unknown[] = []
     const observed: unknown[] = []

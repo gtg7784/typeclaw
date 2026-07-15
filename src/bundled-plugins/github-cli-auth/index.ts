@@ -1,12 +1,19 @@
 import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import type { SessionOrigin } from '@/agent/session-origin'
+import {
+  configureReviewVerdictCoordinator,
+  createSharedReviewVerdictGuard,
+} from '@/channels/github-review-verdict-coordinator'
 import { CORE_PERMISSIONS } from '@/permissions/builtins'
 import { definePlugin } from '@/plugin'
 
-import { createApproveIdempotencyGuard } from './approve-idempotency'
 import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
-import { analyzeGhCommand, effectiveGhTokensForAuthenticatedUserEndpoint } from './gh-command'
-import { ensureGitAskPassHelper } from './git-askpass'
+import {
+  analyzeGhCommand,
+  canInjectPatIntoPassThroughGh,
+  effectiveGhTokensForAuthenticatedUserEndpoint,
+  usesGhApiGraphqlEndpoint,
+} from './gh-command'
 import { analyzeGitCommand, defaultGitResolvers, resolveGhDefaultRepoFromCwd } from './git-command'
 import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { commitReviewIfSucceeded, noteReviewCommand } from './review-recorder'
@@ -17,13 +24,33 @@ export default definePlugin({
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
     const hasAppTokenResolver = ctx.github.hasAppTokenResolver
 
-    // Canonical credentials remain masked for every role, including owner and
-    // trusted. Privileged roles may still use a PAT through this runtime-owned
-    // command overlay, gated by the existing credential capability rather than
-    // by whether the sandbox happens to render path masks.
+    // Every model-driven bash masks the canonical credential files. A role may
+    // still USE a PAT through this runtime-owned overlay, which injects one
+    // value without exposing .env/secrets.json to the model. Gate that on the
+    // existing credential capability rather than sandbox presence: privileged
+    // roles are sandboxed for file masking too.
     const canUsePat = (origin: SessionOrigin | undefined): boolean =>
       ctx.permissions.has(origin, CORE_PERMISSIONS.fsSeeSecrets) ||
       ctx.permissions.has(origin, 'security.bypass.medium')
+
+    const effectiveProcessToken = (): { envName: 'GH_TOKEN' | 'GITHUB_TOKEN'; value: string } | undefined => {
+      if (process.env.GH_TOKEN !== undefined && process.env.GH_TOKEN !== '') {
+        return { envName: 'GH_TOKEN', value: process.env.GH_TOKEN }
+      }
+      if (process.env.GITHUB_TOKEN !== undefined && process.env.GITHUB_TOKEN !== '') {
+        return { envName: 'GITHUB_TOKEN', value: process.env.GITHUB_TOKEN }
+      }
+      return undefined
+    }
+
+    const processPatOverlay = (): Record<string, string> | undefined => {
+      const token = effectiveProcessToken()
+      if (token === undefined) return undefined
+      const tokenClass = classifyGhToken(token.value)
+      return tokenClass === 'cross-owner' || tokenClass === 'fine-grained-pat'
+        ? { [token.envName]: token.value }
+        : undefined
+    }
 
     // The PAT is in the container env but stripped by --clearenv for this role,
     // and a PAT is not re-mintable per repo, so there is no token to inject. Tell
@@ -58,14 +85,24 @@ export default definePlugin({
       'scoped calls still work). It is not a valid auth/login check. For repo data use ' +
       '`gh <cmd> -R owner/repo` or `gh api /repos/owner/repo/...`; for the actor, read the ' +
       'PR/issue/comment context you were given instead of `gh api /user`.'
+    const patGraphqlReason =
+      'Model-driven `gh api graphql` cannot receive a classic or fine-grained GitHub PAT because the query can ' +
+      'target repositories that are not visible in argv; `-R owner/repo` is only a CLI hint, not an authorization ' +
+      'boundary. Configure GitHub App auth so TypeClaw can mint a server-enforced single-repository installation ' +
+      'token, use a statically repo-confined REST endpoint, or run the PAT-backed GraphQL command host-side.'
     const resolveToken = async (workspace: string) => {
       const result = await resolveTokenForRepo(workspace)
       return result.kind === 'token' ? result.token : null
     }
-    const verdictGuard = createApproveIdempotencyGuard({
-      resolveEffectiveApproval: createGithubEffectiveApprovalResolver({ resolveToken }),
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: createGithubEffectiveApprovalResolver({
+        resolveToken,
+        selfLogin: ctx.github.getAppSelfLogin ?? (() => null),
+        isAppAuth: hasAppTokenResolver,
+      }),
       resolveHeadSha: createGithubHeadShaResolver({ resolveToken }),
     })
+    const verdictGuard = createSharedReviewVerdictGuard()
 
     type HookResult = void | { block: true; reason: string }
 
@@ -105,31 +142,6 @@ export default definePlugin({
       command: string
     }): Promise<HookResult | 'fall-through'> => {
       const { event, command } = params
-      const review = await noteReviewCommand({ callId: event.callId, command })
-      // guard() holds the lease expecting tool.after to release it, but a
-      // tool.before block (from ANY guard below) means the command never runs, so
-      // tool.after never fires and the lease strands for its full TTL — telling
-      // every other session "the in-flight one will post" when it never will (the
-      // lost-verdict strand: a review trips the shape guard, the lease strands, the
-      // PR ends unreviewed). blockAfterLease() releases on such a block. guard()'s
-      // OWN terminal block self-releases and returns directly, bypassing this path.
-      let leaseClaimed = false
-      const blockAfterLease = async (block: HookResult & { block: true }): Promise<HookResult> => {
-        if (leaseClaimed) await verdictGuard.release({ callId: event.callId, succeeded: false })
-        return block
-      }
-      if (review.detected !== null) {
-        const block = await verdictGuard.guard({
-          callId: event.callId,
-          workspace: review.detected.workspace,
-          prNumber: review.detected.prNumber,
-          verdict: review.detected.verdict,
-        })
-        if (block !== null) return block
-        leaseClaimed = true
-      }
-      if (review.dump !== null) return blockAfterLease(review.dump)
-
       // Analyze first WITHOUT the fallback: an explicit `-R`/path repo must win,
       // and we only pay for fallback resolution (a git subprocess) when the
       // command is otherwise repo-less. A trusted fallback is then applied ONLY to
@@ -151,6 +163,42 @@ export default definePlugin({
         }
       }
 
+      // Reject every statically unsafe/conflicting shape before review detection.
+      // noteReviewCommand may open an --input file, and verdictGuard.guard performs
+      // authenticated GitHub reads through the token resolver; neither may run for
+      // a command the argv/repository authorization layer already rejects.
+      if (decision.kind === 'block') {
+        return {
+          block: true,
+          reason:
+            decision.code === 'credential-display'
+              ? decision.reason
+              : decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo),
+        }
+      }
+
+      const review = await noteReviewCommand({ callId: event.callId, command })
+      // guard() holds the lease expecting tool.after to release it. A later
+      // tool.before block means tool.after never fires, so blockAfterLease()
+      // releases the lease with succeeded:false. The static command analyzer runs
+      // above and never claims a lease for a command it will reject.
+      let leaseClaimed = false
+      const blockAfterLease = async (block: HookResult & { block: true }): Promise<HookResult> => {
+        if (leaseClaimed) await verdictGuard.release({ callId: event.callId, succeeded: false })
+        return block
+      }
+      if (review.detected !== null) {
+        const block = await verdictGuard.guard({
+          callId: event.callId,
+          workspace: review.detected.workspace,
+          prNumber: review.detected.prNumber,
+          verdict: review.detected.verdict,
+        })
+        if (block !== null) return block
+        leaseClaimed = true
+      }
+      if (review.dump !== null) return blockAfterLease(review.dump)
+
       // `/user` classifies as pass-through (no repo to mint for), so this block
       // must run BEFORE the pass-through return. Resolve the EFFECTIVE token per
       // `/user` invocation (a command-local `GH_TOKEN=…`/`GITHUB_TOKEN=…` overrides
@@ -165,7 +213,33 @@ export default definePlugin({
         return blockAfterLease({ block: true, reason: appUserEndpointReason })
       }
 
-      if (decision.kind === 'pass-through') return 'fall-through'
+      const processToken = effectiveProcessToken()
+      const tokenClass = classifyGhToken(processToken?.value)
+      if (
+        (tokenClass === 'cross-owner' || tokenClass === 'fine-grained-pat') &&
+        canUsePat(event.origin) &&
+        usesGhApiGraphqlEndpoint(command)
+      ) {
+        return blockAfterLease({ block: true, reason: patGraphqlReason })
+      }
+
+      if (decision.kind === 'pass-through') {
+        const patOverlay = canUsePat(event.origin) ? processPatOverlay() : undefined
+        if (patOverlay !== undefined) {
+          if (!canInjectPatIntoPassThroughGh(command)) {
+            return blockAfterLease({
+              block: true,
+              reason:
+                'A GitHub PAT can only be brokered to a single standalone known-safe `gh` command. ' +
+                'Chaining, substitution, aliases, extensions, and config/auth management are blocked because a sibling or plugin could read the command-scoped token.',
+            })
+          }
+          const existing = event.args[TYPECLAW_INTERNAL_BASH_ENV]
+          const overlay = existing !== null && typeof existing === 'object' ? (existing as Record<string, string>) : {}
+          event.args[TYPECLAW_INTERNAL_BASH_ENV] = { ...overlay, ...patOverlay }
+        }
+        return 'fall-through'
+      }
 
       // The `-R` strip is a pure syntax fix (`gh api` rejects `-R`), independent
       // of token minting, so apply it for EVERY token class — including the PAT
@@ -176,30 +250,25 @@ export default definePlugin({
         event.args.command = decision.rewrittenCommand
       }
 
-      const tokenClass = classifyGhToken(process.env.GH_TOKEN)
-
       // PAT classes (classic = cross-owner, fine-grained) are not re-minted per
       // repo; the seeded GH_TOKEN is the only token we have. App minting, when
-      // available, is still preferred for SANDBOXED roles (the PAT can't reach
-      // them), so a PAT must NOT suppress minting there — only for unsandboxed
-      // execution does the PAT win. Unsandboxed: the PAT already rides inherited
-      // process.env, but re-asserting it in the overlay keeps the command-local
-      // GH_TOKEN explicit and consistent with the git path. Sandboxed PAT-only:
+      // available, is preferred for roles without credential-use permission,
+      // so a PAT must not suppress minting there. An entitled role receives the
+      // PAT through the narrow overlay; raw process.env and credential files
+      // remain unavailable inside bash. Sandboxed PAT-only:
       // block with guidance instead of failing silently.
       // Set when a sandboxed PAT falls through to App minting: the tail's
       // shouldMintAppToken(process.env.GH_TOKEN) re-check would see the PAT and
       // bail, so this flag forces the mint that the PAT must not suppress.
       let mintForSandboxedPat = false
       if (tokenClass === 'cross-owner' || tokenClass === 'fine-grained-pat') {
-        // Unsandboxed: the PAT authenticates directly (it already rides inherited
-        // process.env). For a repo-targeting command we re-assert it in the
-        // overlay so behavior is explicit and matches the git path; otherwise we
-        // pass through. The App-oriented missing-repo / multi-owner BLOCK does
-        // NOT apply — a PAT needs no per-repo mint — so we never surface it here.
+        // Credential-entitled role: for a repo-targeting command, inject the PAT
+        // through the runtime-owned overlay. The same literal-repo and
+        // credential-safe argv gates apply to PATs and App tokens.
         if (canUsePat(event.origin)) {
           if (decision.kind === 'inject') {
             event.args[TYPECLAW_INTERNAL_BASH_ENV] = {
-              GH_TOKEN: process.env.GH_TOKEN as string,
+              [processToken?.envName ?? 'GH_TOKEN']: processToken?.value ?? '',
               ...(fallbackRepoUsed && fallbackRepo !== undefined ? { GH_REPO: fallbackRepo } : {}),
             }
           }
@@ -209,29 +278,16 @@ export default definePlugin({
         // available (a PAT must NOT suppress it, or the original silent-failure
         // bug returns); otherwise block with guidance rather than failing mute.
         if (!shouldMintAppToken(undefined, hasAppTokenResolver())) {
-          if (decision.kind === 'block') {
-            return blockAfterLease({
-              block: true,
-              reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo),
-            })
-          }
           warnSandboxedPatWithheldOnce()
           return blockAfterLease({ block: true, reason: sandboxedPatWithheldReason })
         }
         mintForSandboxedPat = true
       }
 
-      if (decision.kind === 'block') {
-        return blockAfterLease({
-          block: true,
-          reason: decision.reason + buildGhBlockGuidance(decision.code, fallbackRepo),
-        })
-      }
-
       // No App auth (no App-class GH_TOKEN and no live minter): leave whatever
       // is seeded so `gh` fails honestly rather than us guessing a token. The
       // sandboxed-PAT mint path bypasses this PAT-class re-check via the flag.
-      if (!mintForSandboxedPat && !shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver())) return
+      if (!mintForSandboxedPat && !shouldMintAppToken(processToken?.value, hasAppTokenResolver())) return
 
       const result = await resolveTokenForRepo(decision.repoSlug)
       if (result.kind === 'unavailable') return blockAfterLease({ block: true, reason: result.reason })
@@ -248,75 +304,18 @@ export default definePlugin({
       return
     }
 
-    const handleGitCommand = async (params: {
-      event: { args: Record<string, unknown>; origin?: SessionOrigin }
-      command: string
-      agentDir: string
-    }): Promise<HookResult> => {
-      const { event, command, agentDir } = params
-      const tokenClass = classifyGhToken(process.env.GH_TOKEN)
-      const isPat = tokenClass === 'cross-owner' || tokenClass === 'fine-grained-pat'
-
-      // A PAT is not re-mintable per repo. For unsandboxed roles it rides the
-      // git-askpass path so SSH/scp remotes get rewritten to https and clone
-      // works uniformly (matching the gh path). For sandboxed roles the PAT is
-      // withheld (env cleared): mint an App token instead if available, else
-      // block with guidance rather than letting git fail silently. App auth must
-      // still mint for sandboxed roles even when a PAT is present.
-      const useEnvPat = isPat && canUsePat(event.origin)
-      // Sandboxed PAT: the env is cleared, so the PAT can't reach git. Mint an
-      // App token instead when a minter is live (a PAT must NOT suppress it);
-      // otherwise block with guidance below rather than fail silently.
-      const mintForSandboxedPat = isPat && !useEnvPat && shouldMintAppToken(undefined, hasAppTokenResolver())
-      if (isPat && !useEnvPat && !mintForSandboxedPat) {
-        const decision = await analyzeGitCommand(command, { cwd: agentDir, resolvers: defaultGitResolvers })
-        if (decision.kind === 'pass-through') return
-        if (decision.kind === 'block') return { block: true, reason: decision.reason }
-        warnSandboxedPatWithheldOnce()
-        return { block: true, reason: sandboxedPatWithheldReason }
-      }
-
-      // Neither a usable PAT nor App auth: leave the command untouched so git
-      // fails honestly rather than us guessing a token. App auth is detected by
-      // the live minter too, not just an App-class GH_TOKEN: multi-owner /
-      // no-repos App configs never seed GH_TOKEN yet can mint. The mintForSandboxedPat
-      // flag forces minting past this PAT-class re-check.
-      if (!useEnvPat && !mintForSandboxedPat && !shouldMintAppToken(process.env.GH_TOKEN, hasAppTokenResolver())) return
-
+    const handleGitCommand = async (params: { command: string; agentDir: string }): Promise<HookResult> => {
+      const { command, agentDir } = params
       const decision = await analyzeGitCommand(command, { cwd: agentDir, resolvers: defaultGitResolvers })
       if (decision.kind === 'pass-through') return
       if (decision.kind === 'block') return { block: true, reason: decision.reason }
-
-      // The unsandboxed-PAT path uses the PAT directly; otherwise mint a per-repo
-      // App token. Both ride TYPECLAW_GIT_TOKEN (read by the askpass helper),
-      // never argv/config.
-      let gitToken: string
-      if (useEnvPat) {
-        gitToken = process.env.GH_TOKEN as string
-      } else {
-        const result = await resolveTokenForRepo(decision.repoSlug)
-        if (result.kind === 'unavailable') return { block: true, reason: result.reason }
-        gitToken = result.token
+      const token = effectiveProcessToken()
+      if (token === undefined && !hasAppTokenResolver()) return
+      return {
+        block: true,
+        reason:
+          'Authenticated git is unavailable to model-driven bash because git can invoke repository hooks and credential helpers that inherit reusable credentials. Local git commands still work; use a first-class GitHub action or run network git host-side.',
       }
-
-      const askpass = await ensureGitAskPassHelper()
-      const existing = event.args[TYPECLAW_INTERNAL_BASH_ENV]
-      const overlay = existing !== null && typeof existing === 'object' ? (existing as Record<string, string>) : {}
-      // insteadOf rewrites SSH/scp remotes to https so the helper's credential
-      // applies; GIT_TERMINAL_PROMPT=0 fails fast instead of hanging.
-      event.args[TYPECLAW_INTERNAL_BASH_ENV] = {
-        ...overlay,
-        GIT_ASKPASS: askpass,
-        TYPECLAW_GIT_TOKEN: gitToken,
-        GIT_TERMINAL_PROMPT: '0',
-        GIT_CONFIG_COUNT: '2',
-        GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
-        GIT_CONFIG_VALUE_0: 'git@github.com:',
-        GIT_CONFIG_KEY_1: 'url.https://github.com/.insteadOf',
-        GIT_CONFIG_VALUE_1: 'ssh://git@github.com/',
-      }
-      if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
-      return
     }
 
     return {
@@ -332,7 +331,7 @@ export default definePlugin({
           }
 
           if (command.includes('git')) {
-            return await handleGitCommand({ event, command, agentDir: ctx.agentDir })
+            return await handleGitCommand({ command, agentDir: ctx.agentDir })
           }
           return
         },

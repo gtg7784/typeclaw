@@ -108,6 +108,39 @@ describe('github effective-approval resolver', () => {
     expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: true, effective: 'APPROVED' })
   })
 
+  test('uses adapter-resolved App identity without calling the unsupported /user endpoint', async () => {
+    const seen: string[] = []
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'ghs_installation',
+      selfLogin: () => 'review-bot[bot]',
+      isAppAuth: () => true,
+      fetchImpl: async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        seen.push(url)
+        return jsonResponse([{ state: 'CHANGES_REQUESTED', user: { login: 'review-bot[bot]', type: 'Bot' } }])
+      },
+    })
+
+    expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: true, effective: 'CHANGES_REQUESTED' })
+    expect(seen.some((url) => url.endsWith('/user'))).toBe(false)
+  })
+
+  test('fails open under App auth when adapter identity is unavailable without claiming remote dedupe', async () => {
+    let fetched = false
+    const resolve = createGithubEffectiveApprovalResolver({
+      resolveToken: async () => 'ghs_installation',
+      selfLogin: () => null,
+      isAppAuth: () => true,
+      fetchImpl: async () => {
+        fetched = true
+        return jsonResponse({ login: 'unexpected' })
+      },
+    })
+
+    expect(await resolve({ workspace: WS, prNumber: 8 })).toEqual({ ok: false })
+    expect(fetched).toBe(false)
+  })
+
   test('fails (ok:false) when the reviews fetch errors so the guard can fail open', async () => {
     const resolve = createGithubEffectiveApprovalResolver({
       resolveToken: async () => 'tok',

@@ -1,4 +1,4 @@
-import type { ReviewVerdict } from '@/channels/github-review-turn-ledger'
+import type { ReviewVerdict } from './github-review-turn-ledger'
 
 // Raw latest-decisive state. DISMISSED is kept DISTINCT from NONE on purpose: a
 // genuine dismissal means a fresh same-verdict re-review is legitimate and must
@@ -44,6 +44,28 @@ export type ReviewVerdictGuard = {
 
 // Back-compat alias: the guard now covers REQUEST_CHANGES too, not just APPROVE.
 export type ApproveIdempotencyGuard = ReviewVerdictGuard
+
+let processEffectiveResolver: EffectiveApprovalResolver = async () => ({ ok: false })
+let processHeadShaResolver: HeadShaResolver = async () => null
+
+// Installs the auth-bearing resolvers used by every auth-neutral review surface
+// in this process. The bash interceptor and post_github_review each create a
+// lightweight guard facade, but all facades use these resolvers and the single
+// module-level lease/landed state below.
+export function configureReviewVerdictCoordinator(deps: {
+  resolveEffectiveApproval: EffectiveApprovalResolver
+  resolveHeadSha: HeadShaResolver
+}): void {
+  processEffectiveResolver = deps.resolveEffectiveApproval
+  processHeadShaResolver = deps.resolveHeadSha
+}
+
+export function createSharedReviewVerdictGuard(): ReviewVerdictGuard {
+  return createApproveIdempotencyGuard({
+    resolveEffectiveApproval: (target) => processEffectiveResolver(target),
+    resolveHeadSha: (target) => processHeadShaResolver(target),
+  })
+}
 
 function duplicateReason(verdict: ReviewVerdict): string {
   if (verdict === 'APPROVE') {
@@ -317,4 +339,6 @@ export function __resetReviewVerdictGuardForTest(): void {
   reservationByCall.clear()
   recentLandedByPr.clear()
   tokenSeq = 0
+  processEffectiveResolver = async () => ({ ok: false })
+  processHeadShaResolver = async () => null
 }

@@ -73,4 +73,16 @@ describe('createGithubTokenBridge', () => {
     unregister()
     expect(bridge.hasAppTokenResolver()).toBe(false)
   })
+
+  it('carries adapter-resolved self login with the active App resolver', () => {
+    const bridge = createGithubTokenBridge()
+    const unregister = bridge.registerResolver(
+      async () => 'ghs_x',
+      () => 'typeclaw[bot]',
+    )
+
+    expect(bridge.getAppSelfLogin()).toBe('typeclaw[bot]')
+    unregister()
+    expect(bridge.getAppSelfLogin()).toBeNull()
+  })
 })

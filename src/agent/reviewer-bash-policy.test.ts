@@ -89,10 +89,10 @@ describe('reviewer read-only bash policy — allowed read-only workflows', () =>
     expect(allows('gh api /repos/o/r/contents/src/x.ts?ref=abc --jq .content | base64 -d | nl -ba')).toBe(true)
   })
 
-  test('allows the documented /tmp scratch-checkout chain (&& + git clone/fetch/checkout into /tmp)', () => {
+  test('denies model-driven scratch checkout in favor of the runtime-owned checkout tool', () => {
     const cmd =
       'git clone --depth 1 https://github.com/o/r.git /tmp/review-1 && git -C /tmp/review-1 fetch --depth 1 origin abc && git -C /tmp/review-1 checkout abc'
-    expect(allows(cmd)).toBe(true)
+    expect(allows(cmd)).toBe(false)
   })
 
   test('allows a read-only pipeline of git + jq + sort + uniq', () => {
