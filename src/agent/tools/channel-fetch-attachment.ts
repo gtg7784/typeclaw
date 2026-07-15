@@ -1,10 +1,10 @@
-import { mkdir, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import { TOOL_INPUT_MAX_BYTES, writeFileAnchored } from '@/agent/tool-file-safety'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import type { PermissionService } from '@/permissions'
@@ -32,6 +32,7 @@ export type CreateChannelFetchAttachmentToolOptions = {
   // its follow-up look_at/read). See buildChannelTools for the decision.
   resolveBaseDir?: () => string
   logger?: ChannelToolLogger
+  agentDir?: string
 }
 
 // workspace/ is private-surface: readable only by roles with fs.see.private.
@@ -46,6 +47,7 @@ export function createChannelFetchAttachmentTool({
   inboxDir,
   resolveBaseDir,
   logger = consoleChannelLogger,
+  agentDir = process.cwd(),
 }: CreateChannelFetchAttachmentToolOptions) {
   const fallbackBaseDir = inboxDir ?? DEFAULT_INBOX_DIR
   const adapter = origin.adapter
@@ -108,6 +110,7 @@ export function createChannelFetchAttachmentTool({
       const filename = params.filename ?? found.filename
       const result = await router.fetchAttachment(adapter, {
         ref,
+        maxBytes: TOOL_INPUT_MAX_BYTES.channel_upload,
         ...(filename !== undefined ? { filename } : {}),
       })
       if (!result.ok) {
@@ -123,8 +126,12 @@ export function createChannelFetchAttachmentTool({
       const targetDir = join(baseDir, adapter, refSlug)
       const targetPath = join(targetDir, safeFilename)
       try {
-        await mkdir(targetDir, { recursive: true })
-        await writeFile(targetPath, result.buffer)
+        await writeFileAnchored({
+          targetPath,
+          data: result.buffer,
+          agentDir,
+          tool: 'channel_fetch_attachment',
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: write failed: ${message}`))

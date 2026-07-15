@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import { TOOL_INPUT_MAX_BYTES } from '@/agent/tool-file-safety'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import type { FetchAttachmentArgs, FetchAttachmentResult, InboundAttachment } from '@/channels/types'
@@ -18,6 +19,7 @@ import {
 
 const origin = { adapter: 'slack-bot' as const, workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null }
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelFetchAttachmentTool>['execute']>[4]
+const lacksInodeAnchoring = process.platform !== 'linux'
 
 type FakeRouterOptions = {
   attachments?: readonly InboundAttachment[]
@@ -109,34 +111,42 @@ describe('channel_fetch_attachment', () => {
     rmSync(inboxDir, { recursive: true, force: true })
   })
 
-  test('downloads a looked-up attachment via the adapter callback and writes it to the inbox dir', async () => {
-    const calls: Array<{ adapter: AdapterId; args: FetchAttachmentArgs }> = []
-    const router = makeRouter({
-      attachments: [{ id: 1, kind: 'file', ref: 'F12345', filename: 'diagram.png', mimetype: 'image/png' }],
-      fetch: async (adapter, args) => {
-        calls.push({ adapter, args })
-        return {
-          ok: true,
-          buffer: Buffer.from('hello-bytes'),
-          filename: 'diagram.png',
-          mimetype: 'image/png',
-          size: 11,
-        }
-      },
-    })
+  test.skipIf(lacksInodeAnchoring)(
+    'downloads a looked-up attachment via the adapter callback and writes it to the inbox dir',
+    async () => {
+      const calls: Array<{ adapter: AdapterId; args: FetchAttachmentArgs }> = []
+      const router = makeRouter({
+        attachments: [{ id: 1, kind: 'file', ref: 'F12345', filename: 'diagram.png', mimetype: 'image/png' }],
+        fetch: async (adapter, args) => {
+          calls.push({ adapter, args })
+          return {
+            ok: true,
+            buffer: Buffer.from('hello-bytes'),
+            filename: 'diagram.png',
+            mimetype: 'image/png',
+            size: 11,
+          }
+        },
+      })
 
-    const tool = createChannelFetchAttachmentTool({ router, origin, inboxDir })
+      const tool = createChannelFetchAttachmentTool({ router, origin, inboxDir })
 
-    const result = await runTool(tool, { attachment_id: 1 })
+      const result = await runTool(tool, { attachment_id: 1 })
 
-    expect(calls).toEqual([{ adapter: 'slack-bot', args: { ref: 'F12345', filename: 'diagram.png' } }])
-    expect(result.details).toMatchObject({ ok: true, mimetype: 'image/png', size: 11 })
-    const expectedPath = join(inboxDir, 'slack-bot', 'F12345', 'diagram.png')
-    expect(result.details?.path).toBe(expectedPath)
-    expect(readFileSync(expectedPath, 'utf8')).toBe('hello-bytes')
-  })
+      expect(calls).toEqual([
+        {
+          adapter: 'slack-bot',
+          args: { ref: 'F12345', filename: 'diagram.png', maxBytes: TOOL_INPUT_MAX_BYTES.channel_upload },
+        },
+      ])
+      expect(result.details).toMatchObject({ ok: true, mimetype: 'image/png', size: 11 })
+      const expectedPath = join(inboxDir, 'slack-bot', 'F12345', 'diagram.png')
+      expect(result.details?.path).toBe(expectedPath)
+      expect(readFileSync(expectedPath, 'utf8')).toBe('hello-bytes')
+    },
+  )
 
-  test('uses an explicit filename override instead of attachment metadata', async () => {
+  test.skipIf(lacksInodeAnchoring)('uses an explicit filename override instead of attachment metadata', async () => {
     const calls: FetchAttachmentArgs[] = []
     const router = makeRouter({
       attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: 'original.bin' }],
@@ -149,7 +159,7 @@ describe('channel_fetch_attachment', () => {
     const tool = createChannelFetchAttachmentTool({ router, origin, inboxDir })
     const result = await runTool(tool, { attachment_id: 1, filename: 'renamed.bin' })
 
-    expect(calls).toEqual([{ ref: 'F1', filename: 'renamed.bin' }])
+    expect(calls).toEqual([{ ref: 'F1', filename: 'renamed.bin', maxBytes: TOOL_INPUT_MAX_BYTES.channel_upload }])
     expect(result.details?.path).toMatch(/[/\\]renamed\.bin$/)
   })
 
@@ -191,7 +201,7 @@ describe('channel_fetch_attachment', () => {
     expect(result.details).toEqual({ ok: false, error: 'invalid Slack file id: F-bogus' })
   })
 
-  test('resolveBaseDir wins over inboxDir and steers the write per role', async () => {
+  test.skipIf(lacksInodeAnchoring)('resolveBaseDir wins over inboxDir and steers the write per role', async () => {
     const router = makeRouter({
       attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: 'shot.png' }],
       fetch: async () => ({ ok: true, buffer: Buffer.from('x'), filename: 'shot.png', size: 1 }),
@@ -201,6 +211,7 @@ describe('channel_fetch_attachment', () => {
       origin,
       inboxDir,
       resolveBaseDir: () => join(inboxDir, 'redirected'),
+      agentDir: inboxDir,
     })
 
     const result = await runTool(tool, { attachment_id: 1 })
@@ -208,6 +219,58 @@ describe('channel_fetch_attachment', () => {
     const expectedPath = join(inboxDir, 'redirected', 'slack-bot', 'F1', 'shot.png')
     expect(result.details?.path).toBe(expectedPath)
     expect(readFileSync(expectedPath, 'utf8')).toBe('x')
+  })
+
+  test.skipIf(lacksInodeAnchoring)(
+    'authorizes anchored writes against the configured agent root, not process.cwd()',
+    async () => {
+      const agentDir = join(inboxDir, 'configured-agent')
+      const baseDir = join(agentDir, 'public', 'inbox')
+      const router = makeRouter({
+        attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: 'shot.png' }],
+        fetch: async () => ({ ok: true, buffer: Buffer.from('x'), filename: 'shot.png', size: 1 }),
+      })
+      const tool = createChannelFetchAttachmentTool({ router, origin, resolveBaseDir: () => baseDir, agentDir })
+
+      const result = await runTool(tool, { attachment_id: 1 })
+
+      expect(result.details?.path).toBe(join(baseDir, 'slack-bot', 'F1', 'shot.png'))
+    },
+  )
+
+  test('refuses a planted final symlink instead of overwriting its target', async () => {
+    const secret = join(inboxDir, 'secret.env')
+    writeFileSync(secret, 'SECRET=untouched')
+    const targetDir = join(inboxDir, 'slack-bot', 'F1')
+    mkdirSync(targetDir, { recursive: true })
+    symlinkSync(secret, join(targetDir, 'payload.bin'))
+    const router = makeRouter({
+      attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: 'payload.bin' }],
+      fetch: async () => ({ ok: true, buffer: Buffer.from('attacker'), filename: 'payload.bin', size: 8 }),
+    })
+
+    const result = await runTool(createChannelFetchAttachmentTool({ router, origin, inboxDir }), { attachment_id: 1 })
+
+    expect(result.details?.ok).toBe(false)
+    expect(readFileSync(secret, 'utf8')).toBe('SECRET=untouched')
+  })
+
+  test('refuses a planted destination-directory symlink instead of writing through it', async () => {
+    const secretDir = join(inboxDir, 'canonical')
+    mkdirSync(secretDir)
+    const secret = join(secretDir, '.env')
+    writeFileSync(secret, 'SECRET=untouched')
+    mkdirSync(join(inboxDir, 'slack-bot'))
+    symlinkSync(secretDir, join(inboxDir, 'slack-bot', 'F1'))
+    const router = makeRouter({
+      attachments: [{ id: 1, kind: 'file', ref: 'F1', filename: '.env' }],
+      fetch: async () => ({ ok: true, buffer: Buffer.from('attacker'), filename: '.env', size: 8 }),
+    })
+
+    const result = await runTool(createChannelFetchAttachmentTool({ router, origin, inboxDir }), { attachment_id: 1 })
+
+    expect(result.details?.ok).toBe(false)
+    expect(readFileSync(secret, 'utf8')).toBe('SECRET=untouched')
   })
 })
 
