@@ -9,8 +9,8 @@ You can produce professional PDFs from Markdown. The bundled `doc-render` plugin
 ships two things: a **themed report library** (`lib.typ`) that does all the
 styling, and a **render script** that does the compile. The only thing installed
 on demand is the [Typst](https://typst.app) compiler — a single npm package the
-agent `bun add`s into its own `node_modules` the **first time** you need a PDF,
-then reuses. No Pandoc, no LaTeX, no headless browser, no PDF toolchain baked
+agent `bun add`s into writable session scratch the **first time** you need a PDF,
+then reuses for that session. No Pandoc, no LaTeX, no headless browser, no PDF toolchain baked
 into the image.
 
 The flow is: **(1)** install the compiler once (`bun add`), **(2)** have your
@@ -44,16 +44,15 @@ which theme fits the document.**
 When plain markdown in chat is fine, **don't** make a PDF. This is for when a
 _file_ is the deliverable.
 
-## Step 0 — install the Typst compiler (once per container)
+## Step 0 — install the Typst compiler (once per session)
 
 The PDF compiler is not baked into the image — install it on first use. It is a
 single version-pinned npm package (npm pulls only this platform's prebuilt
-binary — Linux x64/arm64, glibc or musl). It writes to the agent's
-`node_modules` + `package.json` + `bun.lock`, all of which survive restarts, so
-this only runs once per container life:
+binary — Linux x64/arm64, glibc or musl). Install it in the session's writable
+`/tmp` runtime; the agent-root dependency tree is protected read-only:
 
 ```sh
-# Idempotent: bun add is a no-op if it's already the installed version.
+mkdir -p /tmp/typeclaw-doc-render-runtime && cd /tmp/typeclaw-doc-render-runtime
 bun add @myriaddreamin/typst-ts-node-compiler@0.7.0
 ```
 
@@ -61,10 +60,11 @@ The `@0.7.0` pin embeds Typst 0.14.2 and keeps the toolchain reproducible. If yo
 forget this step, the render script in Step 3 stops with the exact `bun add` line
 to run, so you can also just try the render and follow its guidance.
 
-> **Where it goes:** the agent's own `node_modules` — the canonical home for
-> executable dependencies, gitignored, not user-facing. Do **not** create a
-> `package.json` or `node_modules` under `workspace/` for this; let `bun add`
-> manage it at the agent root like any other dependency.
+> **Where it goes:** `/tmp/typeclaw-doc-render-runtime`, backed by TypeClaw's
+> per-session scratch directory. It is writable to model-driven bash and reused
+> across calls in the same session, but not promised across container restarts.
+> Do **not** modify `/agent/node_modules` or create a dependency tree under
+> `workspace/`.
 
 ## Step 1 — have the markdown ready
 
@@ -313,8 +313,8 @@ might expect:
   first (Typst's workspace sandbox won't resolve an import from outside the
   render's working directory).
 - **Don't** build a `package.json` / `node_modules` / a render script under
-  `workspace/`. The compiler installs at the agent root via `bun add`; the render
-  script and theme library are bundled with the plugin (under
+  `workspace/` or modify the protected agent-root dependencies. The compiler
+  installs in `/tmp/typeclaw-doc-render-runtime`; the render script and theme library are bundled with the plugin (under
   `/agent/node_modules/typeclaw/src/bundled-plugins/doc-render/`).
 - **Don't** attach a PDF to a GitHub channel — that adapter rejects attachments.
   Link or inline instead.
