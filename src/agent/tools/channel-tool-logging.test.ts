@@ -55,6 +55,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setTypingHeartbeatInterval: () => {},
     setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},

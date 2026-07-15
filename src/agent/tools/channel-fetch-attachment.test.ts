@@ -43,6 +43,7 @@ function makeRouter(options: FakeRouterOptions = {}): ChannelRouter {
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setTypingHeartbeatInterval: () => {},
     setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},

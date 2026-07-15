@@ -130,6 +130,10 @@ export const CONTEXT_BUFFER_SIZE = 20
 export const OBSERVED_MESSAGE_MAX_CHARS = 800
 // Discord's typing indicator expires after ~10s; an 8s heartbeat keeps it
 // continuously visible while we debounce + generate without spamming the API.
+// This is the default; an adapter whose platform expires the indicator sooner
+// registers a shorter interval via `setTypingHeartbeatInterval` (e.g. KakaoTalk
+// auto-expires after ~5s) so the router itself paces the refresh — the adapter
+// callback stays stateless instead of running its own timer.
 export const TYPING_HEARTBEAT_MS = 8000
 // A stuck model call or an agent that never yields should not keep re-arming
 // platform-side typing forever. Slack Assistant status in particular has a
@@ -1198,6 +1202,11 @@ export type ChannelRouter = {
   // the wrong signal. autoReactOnEngage reads this to post :eyes: only as a
   // fallback when no visible typing exists. Unset defaults to false.
   setTypingCapability: (adapter: ChannelKey['adapter'], supported: boolean) => void
+  // Override the typing heartbeat interval for one adapter. Adapters whose
+  // platform expires the indicator faster than the default TYPING_HEARTBEAT_MS
+  // register a shorter interval here so the router paces their refresh; the
+  // adapter callback stays stateless. Unset adapters use TYPING_HEARTBEAT_MS.
+  setTypingHeartbeatInterval: (adapter: ChannelKey['adapter'], intervalMs: number) => void
   // Set by the manager for every adapter present in typeclaw.json#channels,
   // independent of whether the adapter's start() succeeded (a failed login never
   // registers callbacks). Combined with the adapter's static read-capability set
@@ -1382,6 +1391,7 @@ export type ChannelRouter = {
     typingEpoch: (key: ChannelKey) => number | undefined
     isTypingActive: (key: ChannelKey) => boolean
     stopTyping: (key: ChannelKey) => Promise<void>
+    typingHeartbeatIntervalFor: (adapter: ChannelKey['adapter']) => number
     runIdleGc: () => Promise<void>
     // Returns the seeded author state on the live session matching
     // `key`, or undefined when no live session exists. Tests use this
@@ -1586,6 +1596,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const removeReactionCallbacks = new Map<ChannelKey['adapter'], Set<RemoveReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const typingCapableAdapters = new Set<ChannelKey['adapter']>()
+  const typingHeartbeatIntervals = new Map<ChannelKey['adapter'], number>()
   const configuredAdapters = new Set<ChannelKey['adapter']>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
@@ -2598,7 +2609,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return
       }
       void fireTyping(live, 'tick', epoch)
-    }, TYPING_HEARTBEAT_MS)
+    }, typingHeartbeatIntervalFor(live.key.adapter))
   }
 
   const stopTypingHeartbeat = async (live: LiveSession): Promise<void> => {
@@ -3793,6 +3804,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (supported) typingCapableAdapters.add(adapter)
     else typingCapableAdapters.delete(adapter)
   }
+
+  const setTypingHeartbeatInterval = (adapter: ChannelKey['adapter'], intervalMs: number): void => {
+    typingHeartbeatIntervals.set(adapter, intervalMs)
+  }
+
+  const typingHeartbeatIntervalFor = (adapter: ChannelKey['adapter']): number =>
+    typingHeartbeatIntervals.get(adapter) ?? TYPING_HEARTBEAT_MS
 
   const setAdapterConfigured = (adapter: ChannelKey['adapter'], configured: boolean): void => {
     if (configured) configuredAdapters.add(adapter)
@@ -5646,6 +5664,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerTyping,
     unregisterTyping,
     setTypingCapability,
+    setTypingHeartbeatInterval,
     setAdapterConfigured,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
@@ -5743,6 +5762,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (!live) return
         await stopTypingHeartbeat(live)
       },
+      typingHeartbeatIntervalFor,
       runIdleGc,
       getLiveOriginSnapshot: (key: ChannelKey) => {
         const live = liveSessions.get(channelKeyId(key))

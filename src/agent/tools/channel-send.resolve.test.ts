@@ -38,6 +38,7 @@ function fakeRouter(handlers: {
     registerTyping: () => {},
     unregisterTyping: () => {},
     setTypingCapability: () => {},
+    setTypingHeartbeatInterval: () => {},
     setAdapterConfigured: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},

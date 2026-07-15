@@ -14,10 +14,12 @@ import type {
   KakaoSendResult,
   KakaoTalkListenerEventMap,
   KakaoTalkPushMessageEvent,
+  KakaoTypingResult,
 } from 'agent-messenger/kakaotalk'
 
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
+import type { TypingCallback } from '@/channels/types'
 
 import {
   createKakaotalkAdapter,
@@ -157,6 +159,17 @@ class FakeClient implements KakaoTalkClient {
     this.markReadCalls.push({ chatId, logId, ...(opts !== undefined ? { opts } : {}) })
     if (this.markReadError !== null) throw this.markReadError
     return this.markReadResult
+  }
+
+  sendTypingCalls: Array<{ chatId: string; opts?: { linkId?: string } }> = []
+  sendTypingResult: KakaoTypingResult = { success: true, status_code: 0, chat_id: '111' }
+  sendTypingError: Error | null = null
+  sendTypingGate: Promise<void> | null = null
+  async sendTyping(chatId: string, opts?: { linkId?: string }): Promise<KakaoTypingResult> {
+    if (this.sendTypingGate !== null) await this.sendTypingGate
+    this.sendTypingCalls.push({ chatId, ...(opts !== undefined ? { opts } : {}) })
+    if (this.sendTypingError !== null) throw this.sendTypingError
+    return this.sendTypingResult
   }
 
   profileError: Error | null = null
@@ -312,6 +325,180 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await expect(adapter.start()).rejects.toThrow(/Profile request failed: 503/)
     await expect(adapter.start()).rejects.not.toThrow(/sub-device session is stale/)
 
+    await router.stop()
+  })
+
+  test('registers a stateless typing callback + 4s heartbeat on start, routes a tick to client.sendTyping, and unregisters + disables on stop', async () => {
+    const client = new FakeClient()
+    // Seed the two chats as authoritative group chats so the resolver classifies
+    // them as `send` (typing consults it live via classifyChat). A chat absent
+    // from getChats would be unresolved/provisional and suppressed — see the
+    // dedicated OpenChat-provisional regression test below.
+    const groupChat = (id: string): KakaoChat => ({
+      chat_id: id,
+      type: 10,
+      display_name: 'Team',
+      title: null,
+      active_members: 4,
+      unread_count: 0,
+      last_message: null,
+    })
+    client.chats = [groupChat('111'), groupChat('222')]
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+
+    // Spy on the real router's typing wiring: capture the registered callback,
+    // the capability toggles, and the heartbeat-interval override so we can
+    // drive a tick through the exact callback the adapter handed the router and
+    // assert teardown ordering.
+    const events: string[] = []
+    let registeredTyping: TypingCallback | null = null
+    let heartbeatInterval = -1
+    const realRegisterTyping = router.registerTyping.bind(router)
+    const realUnregisterTyping = router.unregisterTyping.bind(router)
+    const realSetTypingCapability = router.setTypingCapability.bind(router)
+    const realSetTypingHeartbeatInterval = router.setTypingHeartbeatInterval.bind(router)
+    router.registerTyping = (adapter, cb) => {
+      if (adapter === 'kakaotalk') registeredTyping = cb
+      events.push(`register:${adapter}`)
+      return realRegisterTyping(adapter, cb)
+    }
+    router.unregisterTyping = (adapter, cb) => {
+      events.push(`unregister:${adapter}`)
+      return realUnregisterTyping(adapter, cb)
+    }
+    router.setTypingCapability = (adapter, supported) => {
+      events.push(`cap:${adapter}=${String(supported)}`)
+      return realSetTypingCapability(adapter, supported)
+    }
+    router.setTypingHeartbeatInterval = (adapter, intervalMs) => {
+      if (adapter === 'kakaotalk') heartbeatInterval = intervalMs
+      return realSetTypingHeartbeatInterval(adapter, intervalMs)
+    }
+
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    expect(registeredTyping).not.toBeNull()
+    expect(events).toContain('register:kakaotalk')
+    expect(events).toContain('cap:kakaotalk=true')
+    // The adapter must register a heartbeat below the ~5s expiry so the router
+    // paces the refresh with margin against scheduler/network jitter.
+    expect(heartbeatInterval).toBe(4000)
+
+    // A tick reaches client.sendTyping; the callback holds no timer of its own.
+    await registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: '111',
+      thread: null,
+      phase: 'tick',
+    })
+    expect(client.sendTypingCalls).toEqual([{ chatId: '111' }])
+
+    // Prove adapter.stop() invalidates queued typing work (via typing.reset()),
+    // driving the exact callback the router holds: block tick 1 mid-send, queue
+    // tick 2 behind it, stop the adapter, then release tick 1. Only the
+    // in-flight tick 1 may reach the client; the queued tick 2 must be dropped.
+    let releaseBlocked: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseBlocked = resolve
+    })
+    client.sendTypingGate = gate
+    const blockedChat = '222'
+    const firstTick = registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: blockedChat,
+      thread: null,
+      phase: 'tick',
+    })
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    const beforeQueued = client.sendTypingCalls.length
+    const secondTick = registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: blockedChat,
+      thread: null,
+      phase: 'tick',
+    })
+
+    await adapter.stop()
+
+    expect(events).toContain('unregister:kakaotalk')
+    expect(events).toContain('cap:kakaotalk=false')
+
+    releaseBlocked?.()
+    await Promise.all([firstTick, secondTick])
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    // Exactly one more packet (the in-flight tick 1); tick 2 was dropped by the
+    // generation reset adapter.stop() performed.
+    expect(client.sendTypingCalls.length).toBe(beforeQueued + 1)
+
+    await router.stop()
+  })
+
+  test('suppresses typing for an OpenChat room that getChats omits (provisional @kakao-group)', async () => {
+    // Reproduces the reviewer's gap: getChats does NOT surface this OpenChat, so
+    // an inbound push registers it provisionally as @kakao-group. The session
+    // key therefore carries workspace '@kakao-group', but typing must still be
+    // suppressed — sending sendTyping(chatId) without the OpenChat linkId is a
+    // doomed packet. The live classifier catches this via the provisional flag.
+    const client = new FakeClient()
+    client.chats = [] // getChats omits the open room entirely
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+
+    let registeredTyping: TypingCallback | null = null
+    const realRegisterTyping = router.registerTyping.bind(router)
+    router.registerTyping = (adapter, cb) => {
+      if (adapter === 'kakaotalk') registeredTyping = cb
+      return realRegisterTyping(adapter, cb)
+    }
+
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    // An inbound push from the open room the adapter can't resolve via getChats
+    // registers it provisionally as @kakao-group (the real production path).
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '888',
+      log_id: 'L1',
+      author_id: 222,
+      author_name: 'Someone',
+      message: 'hi',
+      message_type: 1,
+      attachment: null,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    // A heartbeat tick for the provisional room must NOT reach the client: its
+    // '@kakao-group' bucket is a strict guess, not an authoritative kind, so
+    // sending sendTyping(chatId) risks an OpenChat without its linkId.
+    await registeredTyping!({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: '888',
+      thread: null,
+      phase: 'tick',
+    })
+    expect(client.sendTypingCalls).toEqual([])
+
+    await adapter.stop()
     await router.stop()
   })
 })

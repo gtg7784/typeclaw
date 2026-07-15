@@ -15,6 +15,12 @@ export function kakaoWorkspaceForType(kind: KakaoChatKind): KakaoWorkspace {
 export type KakaoChatLookupValue = {
   workspace: KakaoWorkspace
   isDm: boolean
+  // True while the entry is a placeholder from `ingestProvisional` (a chat seen
+  // on an inbound push but not yet surfaced by getChats). Its `workspace` is a
+  // strict-bucket guess (@kakao-group), NOT the authoritative kind — callers
+  // that must know the real type (e.g. typing, which skips OpenChat) treat a
+  // provisional entry as unclassified until a real refresh upgrades it.
+  provisional: boolean
 }
 
 export type KakaoChannelResolver = {
@@ -43,6 +49,7 @@ type Entry = {
   isDm: boolean
   chatName: string | null
   expiresAt: number
+  provisional: boolean
 }
 
 export function createKakaoChannelResolver(options: KakaoChannelResolverOptions): KakaoChannelResolver {
@@ -81,6 +88,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
       isDm: kind === 'dm',
       chatName: chat.title ?? chat.display_name,
       expiresAt,
+      provisional: false,
     })
   }
 
@@ -102,7 +110,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
   const lookupChat = (chatId: string): KakaoChatLookupValue | null => {
     const entry = cache.get(chatId)
     if (entry === undefined || entry.expiresAt <= now()) return null
-    return { workspace: entry.workspace, isDm: entry.isDm }
+    return { workspace: entry.workspace, isDm: entry.isDm, provisional: entry.provisional }
   }
 
   const ingestProvisional = (chatId: string): void => {
@@ -113,6 +121,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
       isDm: false,
       chatName: null,
       expiresAt: now() + ttlMs,
+      provisional: true,
     })
   }
 
