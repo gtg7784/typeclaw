@@ -1406,13 +1406,69 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
 })
 
 describe('network egress entrypoint shim', () => {
-  test('off-switch path (network.blockInternal=false) installs no iptables rules and execs the agent directly (after link_persistent_home_files seeds the credential symlink and start_xvfb sets DISPLAY)', () => {
+  test('re-execs the runtime under the host UID/GID after root-only bootstrap on both network paths', () => {
+    // given
     const shim = buildEntrypointShim()
-    expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
-    expect(shim).toMatch(
-      /!= "1" \];? then\s+link_persistent_home_files\s+link_configured_symlinks\s+start_xvfb\s+exec bun run \/agent\/node_modules\/typeclaw\/src\/cli\/index\.ts "\$@"/,
-    )
-    expect(shim).toContain(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
+
+    // when
+    const runtimeExecs = shim.match(/exec setpriv[\s\S]*?TYPECLAW_ENTRYPOINT_RUNTIME=1 "\$0" "\$@"/g) ?? []
+
+    // then
+    expect(shim).toContain('TYPECLAW_HOST_UID')
+    expect(shim).toContain('TYPECLAW_HOST_GID')
+    expect(shim).toContain('--reuid="$TYPECLAW_HOST_UID"')
+    expect(shim).toContain('--regid="$TYPECLAW_HOST_GID"')
+    expect(shim).toContain('--clear-groups')
+    expect(runtimeExecs).toHaveLength(2)
+  })
+
+  test('uses a managed persistent runtime HOME and only chowns the TypeClaw-owned home subtree', () => {
+    // given
+    const shim = buildEntrypointShim()
+
+    // when
+    const executable = shim
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n')
+
+    // then
+    expect(shim).toContain('runtime_home="$persist_root/runtime"')
+    expect(shim.match(/--reset-env/g)?.length).toBe(2)
+    expect(shim).toContain('chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$persist_root"')
+    expect(executable).not.toMatch(/chown -R [^\n]*\/agent(?:\s|$)/)
+  })
+
+  test('runs persistent-home links, configured symlinks, Xvfb, and bun only in the non-root runtime phase', () => {
+    // given
+    const shim = buildEntrypointShim()
+
+    // when
+    const runtimeBranchStart = shim.indexOf('if [ "${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then')
+    const bootstrapStart = shim.indexOf('if [ "${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then')
+    const runtimeBranch = shim.slice(runtimeBranchStart, bootstrapStart)
+
+    // then
+    expect(runtimeBranchStart).toBeGreaterThan(-1)
+    expect(runtimeBranch).toContain('link_persistent_home_files')
+    expect(runtimeBranch).toContain('link_configured_symlinks')
+    expect(runtimeBranch).toContain('start_xvfb')
+    expect(runtimeBranch).toContain(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
+  })
+
+  test('off-switch path (network.blockInternal=false) installs no iptables rules and reaches the runtime phase before bun starts', () => {
+    // given
+    const shim = buildEntrypointShim()
+
+    // when
+    const offBranchStart = shim.indexOf('if [ "${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then')
+    const offBranchEnd = shim.indexOf('\nfi\n', offBranchStart)
+    const offBranch = shim.slice(offBranchStart, offBranchEnd)
+
+    // then
+    expect(offBranch).not.toContain('iptables -A OUTPUT')
+    expect(offBranch).toContain('TYPECLAW_ENTRYPOINT_RUNTIME=1')
+    expect(offBranch).toContain(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
   })
 
   test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
@@ -1506,25 +1562,21 @@ describe('network egress entrypoint shim', () => {
     )
   })
 
-  test('start_xvfb is called before each exec (off-path immediately before exec bun; on-path after iptables, before exec setpriv) so DISPLAY is exported before the agent inherits the env', () => {
+  test('start_xvfb is called before bun on both network-policy runtime paths so DISPLAY is inherited', () => {
+    // given
     const shim = buildEntrypointShim()
-    expect(shim).toContain('export DISPLAY=:99')
 
-    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
-    expect(offBranchEnd).toBeGreaterThan(-1)
-    const offBranch = shim.slice(0, offBranchEnd)
-    const offStartXvfbIdx = offBranch.lastIndexOf('start_xvfb\n')
-    const offExecIdx = offBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
-    expect(offStartXvfbIdx).toBeGreaterThan(-1)
-    expect(offExecIdx).toBeGreaterThan(offStartXvfbIdx)
+    // when
+    const runtimeBranchStart = shim.indexOf('if [ "${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then')
+    const runtimeBranchEnd = shim.indexOf('\nfi\n', runtimeBranchStart)
+    const runtimeBranch = shim.slice(runtimeBranchStart, runtimeBranchEnd)
+    const networkOnTail = shim.slice(shim.lastIndexOf('if [ -n "${TYPECLAW_HOST_UID:-}" ]'))
 
-    const onBranch = shim.slice(offBranchEnd)
-    const lastIptablesIdx = onBranch.lastIndexOf('iptables -A OUTPUT')
-    const onStartXvfbIdx = onBranch.lastIndexOf('start_xvfb\n')
-    const onExecIdx = onBranch.indexOf('exec setpriv')
-    expect(lastIptablesIdx).toBeGreaterThan(-1)
-    expect(onStartXvfbIdx).toBeGreaterThan(lastIptablesIdx)
-    expect(onExecIdx).toBeGreaterThan(onStartXvfbIdx)
+    // then
+    expect(runtimeBranch.indexOf('start_xvfb\n')).toBeLessThan(
+      runtimeBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY}`),
+    )
+    expect(networkOnTail.indexOf('start_xvfb\n')).toBeLessThan(networkOnTail.indexOf(`exec setpriv --bounding-set`))
   })
 
   test('Xvfb runs under the same setpriv capability-drop as the agent so it never holds NET_ADMIN on the network-block path', () => {
@@ -1656,14 +1708,19 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"')
   })
 
-  test('defines link_configured_symlinks gated on TYPECLAW_SANDBOX_SYMLINKS and called on both network paths', () => {
+  test('defines link_configured_symlinks gated on TYPECLAW_SANDBOX_SYMLINKS and calls it from every runtime path', () => {
+    // given
     const shim = buildEntrypointShim()
+
+    // when
+    const calls = shim.match(/^[ \t]*link_configured_symlinks$/gm)
+
+    // then
     expect(shim).toContain('link_configured_symlinks() {')
     expect(shim).toContain('[ -n "${TYPECLAW_SANDBOX_SYMLINKS:-}" ] || return 0')
-    // invoked once on the off-path (indented inside the `if`) and once on the
-    // on-path (column 0); a call is the bare name on its own line, while the
-    // definition line ends with `() {`
-    expect(shim.match(/^[ \t]*link_configured_symlinks$/gm)?.length).toBe(2)
+    // One shared non-root runtime branch plus root-compatible fallbacks for
+    // the network-off and network-on paths when host identity is unavailable.
+    expect(calls?.length).toBe(3)
   })
 
   test('sets GWS_CONFIG_HOME without changing global XDG_CONFIG_HOME so git config lookup is untouched', () => {
@@ -1709,24 +1766,23 @@ describe('network egress entrypoint shim', () => {
     expect(claudeSymlinkIdx).toBeGreaterThan(claudeConfigCheckIdx)
   })
 
-  test('link_persistent_home_files is called before each exec on both network-policy paths (off-path before exec bun; on-path after iptables, before exec setpriv) so the symlink is in place before the agent first reads ~/.codex', () => {
+  test('link_persistent_home_files runs after firewall setup and before bun on the runtime paths', () => {
+    // given
     const shim = buildEntrypointShim()
 
-    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
-    expect(offBranchEnd).toBeGreaterThan(-1)
-    const offBranch = shim.slice(0, offBranchEnd)
-    const offLinkIdx = offBranch.lastIndexOf('link_persistent_home_files\n')
-    const offExecIdx = offBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY} "$@"`)
-    expect(offLinkIdx).toBeGreaterThan(-1)
-    expect(offExecIdx).toBeGreaterThan(offLinkIdx)
+    // when
+    const runtimeBranchStart = shim.indexOf('if [ "${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then')
+    const runtimeBranchEnd = shim.indexOf('\nfi\n', runtimeBranchStart)
+    const runtimeBranch = shim.slice(runtimeBranchStart, runtimeBranchEnd)
+    const networkOnTail = shim.slice(shim.lastIndexOf('if [ -n "${TYPECLAW_HOST_UID:-}" ]'))
 
-    const onBranch = shim.slice(offBranchEnd)
-    const lastIptablesIdx = onBranch.lastIndexOf('iptables -A OUTPUT')
-    const onLinkIdx = onBranch.lastIndexOf('link_persistent_home_files\n')
-    const onExecIdx = onBranch.indexOf('exec setpriv')
-    expect(lastIptablesIdx).toBeGreaterThan(-1)
-    expect(onLinkIdx).toBeGreaterThan(lastIptablesIdx)
-    expect(onExecIdx).toBeGreaterThan(onLinkIdx)
+    // then
+    expect(runtimeBranch.indexOf('link_persistent_home_files\n')).toBeLessThan(
+      runtimeBranch.indexOf(`exec bun run ${TYPECLAW_CLI_ENTRY}`),
+    )
+    expect(networkOnTail.indexOf('link_persistent_home_files\n')).toBeLessThan(
+      networkOnTail.indexOf(`exec setpriv --bounding-set`),
+    )
   })
 
   test('on-path: link_persistent_home_files runs AFTER iptables OUTPUT rules so a failure in the helper cannot prevent the egress lockdown from taking effect (security invariant pinned by AGENTS.md)', () => {

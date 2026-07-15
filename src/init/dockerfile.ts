@@ -524,7 +524,27 @@ start_xvfb() {
   exit 1
 }
 
+if [ "\${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then
+  link_persistent_home_files
+  link_configured_symlinks
+  start_xvfb
+  exec bun run ${TYPECLAW_CLI_ENTRY} "$@"
+fi
+
+persist_root="\${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"
+runtime_home="$persist_root/runtime"
+if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
+  mkdir -p "$runtime_home"
+  chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$persist_root"
+fi
+
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
+  if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
+    exec setpriv --reuid="$TYPECLAW_HOST_UID" --regid="$TYPECLAW_HOST_GID" --clear-groups \\
+      --reset-env \\
+      --bounding-set=-all --inh-caps=-all --ambient-caps=-all \\
+      -- env HOME="$runtime_home" TYPECLAW_ENTRYPOINT_RUNTIME=1 "$0" "$@"
+  fi
   link_persistent_home_files
   link_configured_symlinks
   start_xvfb
@@ -572,6 +592,12 @@ ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
+if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
+  exec setpriv --reuid="$TYPECLAW_HOST_UID" --regid="$TYPECLAW_HOST_GID" --clear-groups \\
+    --reset-env \\
+    --bounding-set=-all --inh-caps=-all --ambient-caps=-all \\
+    -- env HOME="$runtime_home" TYPECLAW_ENTRYPOINT_RUNTIME=1 "$0" "$@"
+fi
 link_persistent_home_files
 link_configured_symlinks
 start_xvfb
