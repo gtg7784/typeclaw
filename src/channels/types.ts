@@ -60,7 +60,7 @@ export type InboundMessage = {
   // set this explicitly. `parentChat` carries the parent channel id when the
   // adapter knows it, so membership can be scoped to the room (channel), not
   // the thread. Absent ⇒ not a thread room (or the adapter cannot tell).
-  room?: { kind: 'thread'; parentChat?: string }
+  room?: { kind: 'thread'; parentChat?: string; parentChatName?: string }
   text: string
   // Prompt-only context for replied-to / quoted / linked messages. Kept out
   // of `text` so the engagement gate sees only the human-authored body.

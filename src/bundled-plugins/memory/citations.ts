@@ -87,9 +87,11 @@ const SECTION_HEADING = /^[\s-]*(fragments|superseded)\s*:\s*$/i
 
 export type SectionedCitations = { active: Set<string>; superseded: Set<string> }
 
-export function splitCitationsBySection(body: string): SectionedCitations {
-  const active = new Set<string>()
-  const superseded = new Set<string>()
+export type SectionedCitationRefs = { active: Citation[]; superseded: Citation[] }
+
+export function splitCitationRefsBySection(body: string): SectionedCitationRefs {
+  const active = new Map<string, Citation>()
+  const superseded = new Map<string, Citation>()
   let current: 'active' | 'superseded' = 'active'
 
   for (const line of body.split('\n')) {
@@ -98,13 +100,24 @@ export function splitCitationsBySection(body: string): SectionedCitations {
       current = heading[1]!.toLowerCase() === 'superseded' ? 'superseded' : 'active'
       continue
     }
-    const citation = CITATION_LINE.exec(line)
-    if (citation === null) continue
-    ;(current === 'superseded' ? superseded : active).add(citation[3]!)
+    const match = CITATION_LINE.exec(line)
+    if (match === null) continue
+    const citation = { date: match[2]!, fragmentId: match[3]! }
+    const canonical = formatCitation(citation.date, citation.fragmentId)
+    ;(current === 'superseded' ? superseded : active).set(canonical, citation)
   }
 
-  // Re-affirmed fact (appears in both sections across edits): active wins.
-  for (const id of active) superseded.delete(id)
+  const activeIds = new Set([...active.values()].map((citation) => citation.fragmentId))
+  for (const [canonical, citation] of superseded) {
+    if (activeIds.has(citation.fragmentId)) superseded.delete(canonical)
+  }
+  return { active: [...active.values()], superseded: [...superseded.values()] }
+}
 
-  return { active, superseded }
+export function splitCitationsBySection(body: string): SectionedCitations {
+  const refs = splitCitationRefsBySection(body)
+  return {
+    active: new Set(refs.active.map((citation) => citation.fragmentId)),
+    superseded: new Set(refs.superseded.map((citation) => citation.fragmentId)),
+  }
 }
