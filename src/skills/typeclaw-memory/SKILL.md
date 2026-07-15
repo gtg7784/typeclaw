@@ -25,14 +25,20 @@ Citations in shard bodies use the canonical form `streams/yyyy-MM-dd#<fragment-i
 
 ## `memory_search` tool
 
-When index-mode injection hides bodies, or when you need recent fragments the dreaming subagent hasn't consolidated yet, use `memory_search({query, asRegex?, full?, maxResults?})`. It searches BOTH topic shards under `memory/topics/` and undreamed stream events under `memory/streams/`. Substring (case-insensitive) by default; `asRegex: true` for regex.
+When index-mode injection hides bodies, or when you need recent fragments the dreaming subagent hasn't consolidated yet, use `memory_search({query, asRegex?, full?, maxResults?, workspace?, chat?, thread?})`. It searches topic shards, active cited-child provenance, and undreamed stream events. Substring (case-insensitive) by default; `asRegex: true` for regex. The legacy `where` argument is an alias for `chat`.
+
+Use `memory_search({topic: "<slug>", workspace?, chat?, thread?})` for an exact shard lookup. Scope applies here too: the shard is returned only when an active cited child matches every supplied coordinate. Scoped lookup does not return references because references have no origin children.
+
+Workspace/chat/thread IDs and captured names are searchable lexical metadata and appear in result provenance, but they are never embedded. Recall is globally visible by default across roles and origins. Optional `workspace`, `chat`, and `thread` arguments narrow query and exact-topic results to matching coordinates; names and aliases participate in lexical matching only. A mixed-scope shard remains eligible when any active child matches an explicit scope, and returned provenance contains only matching children. Automatic hybrid retrieval and channel heading injection remain global.
+
+Historical Discord names and parent-room metadata live only in a bounded runtime registry rebuilt by adapter-start maintenance. There is no provenance sidecar to edit. Do not rewrite stream JSONL. Resolver failure intentionally falls back to raw IDs, and `memory_search` never performs network calls.
 
 Plain queries are **phrase-first with a word fallback**: the whole query is tried as one substring, and only if that finds nothing is the query split on whitespace and the distinct words OR-matched (ranked by how many words each hit contains). So a descriptive multi-word query like `quarterly regional revenue summary` still returns results even when no entry contains that exact phrase. You don't need to pre-split queries into single keywords — but a focused phrase still wins when an entry contains it verbatim. Regex queries never fall back (whitespace stays part of the pattern).
 
 Results are discriminated by `source`:
 
-- `source: "topic"` — fields `shardPath`, `slug`, `heading`, `excerpt`, `fullBody?`
-- `source: "stream"` — fields `streamPath`, `date`, `eventId?` (citation-format `streams/yyyy-MM-dd#<id>` for fragments; absent for legacy prose), `topic`, `excerpt`, `fullBody?`
+- `source: "topic"` — fields `shardPath`, `slug`, `heading`, `excerpt`, `fullBody?`, `provenance`
+- `source: "stream"` — fields `streamPath`, `date`, `eventId?` (citation-format `streams/yyyy-MM-dd#<id>` for fragments; absent for legacy prose), `topic`, `excerpt`, `fullBody?`, and optional `who`/`when`/`where`
 
 Ordering depends on mode. Exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then stream matches (newest day first), and `maxResults` truncates streams before topics. Word-fallback results are instead ranked by matched-word count — that same topic-first/stream-newest order is only the tiebreak within a score band, so a higher-scoring stream can precede a lower-scoring topic, and `maxResults` drops the lowest-scored tail regardless of source. `full: true` returns the entire shard or fragment body.
 

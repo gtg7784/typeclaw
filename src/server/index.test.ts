@@ -1149,34 +1149,44 @@ describe('createServer TUI permission wiring', () => {
     )
     const permissions = createPermissionService()
     const session = createFakeSession()
-    let queryResult: unknown
-    let topicResult: unknown
+    const searchCompleted = Promise.withResolvers<{ queryResult: unknown; topicResult: unknown }>()
     const built = createServer({
       port: 0,
       agentDir,
       permissions,
       createSession: async (options = {}) => {
-        const origin = options.origin
-        const sessionPermissions = options.permissions
-        if (origin?.kind !== 'tui' || sessionPermissions === undefined) {
-          throw new Error('missing TUI permission wiring')
+        try {
+          const origin = options.origin
+          const sessionPermissions = options.permissions
+          if (origin?.kind !== 'tui' || sessionPermissions === undefined) {
+            throw new Error('missing TUI permission wiring')
+          }
+          const tool = createMemorySearchTool()
+          const context = {
+            signal: undefined,
+            sessionId: origin.sessionId,
+            agentDir,
+            logger: { info: () => {}, warn: () => {}, error: () => {} },
+          }
+          const queryResult = (await tool.execute(tool.parameters.parse({ query: 'aurora compass' }), context)).details
+          const topicResult = (await tool.execute(tool.parameters.parse({ topic: 'tui-memory-access' }), context))
+            .details
+          searchCompleted.resolve({ queryResult, topicResult })
+          return session
+        } catch (error) {
+          searchCompleted.reject(error)
+          throw error
         }
-        const tool = createMemorySearchTool()
-        const context = {
-          signal: undefined,
-          sessionId: origin.sessionId,
-          agentDir,
-          logger: { info: () => {}, warn: () => {}, error: () => {} },
-        }
-        queryResult = (await tool.execute(tool.parameters.parse({ query: 'aurora compass' }), context)).details
-        topicResult = (await tool.execute(tool.parameters.parse({ topic: 'tui-memory-access' }), context)).details
-        return session
       },
     }).start()
     server = built
 
     try {
       const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+      // `connected` is intentionally sent only after async session creation.
+      // Await the operation under test directly so filesystem contention cannot
+      // race the websocket helper's short transport-message deadline.
+      const { queryResult, topicResult } = await searchCompleted.promise
       await waitFor((message) => message.type === 'connected')
 
       expect(queryResult).toMatchObject({ matches: [{ source: 'topic', slug: 'tui-memory-access' }] })

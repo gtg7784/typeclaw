@@ -677,10 +677,12 @@ function observeAlias(
   }
 
   if (batch === undefined) {
-    const existingIndex = values.indexOf(value)
-    if (existingIndex >= 0) values.splice(existingIndex, 1)
-    values.unshift(value)
-    if (values.length > MAX_ALIASES) values.pop()
+    const resolverAliases = sidecar.resolverAliases.get(aliasKey) ?? []
+    const resolverAliasSet = new Set(resolverAliases)
+    const observedHistorical = source === 'historical' && !resolverAliasSet.has(value) ? [value] : []
+    const retainedHistorical = values.filter((candidate) => !resolverAliasSet.has(candidate) && candidate !== value)
+    values.splice(0, values.length, ...resolverAliases, ...observedHistorical, ...retainedHistorical)
+    if (values.length > MAX_ALIASES) values.length = MAX_ALIASES
     retainResolverAliases(sidecar, aliasKey, values)
     return
   }
