@@ -252,6 +252,44 @@ describe('planStart', () => {
     expect(plan.runArgs).toContain('--shm-size=2g')
   })
 
+  test('passes the host UID and GID to the container on POSIX so runtime writes keep host ownership', async () => {
+    // given
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    // when
+    const plan = await planStart({
+      cwd: root,
+      hostPort: 8973,
+      imageExists: true,
+      platform: 'linux',
+      hostIdentity: { uid: 1001, gid: 1002 },
+    })
+
+    // then
+    expect(plan.runArgs).toContain('TYPECLAW_HOST_UID=1001')
+    expect(plan.runArgs).toContain('TYPECLAW_HOST_GID=1002')
+  })
+
+  test('omits host UID and GID on native Windows where POSIX ownership does not apply', async () => {
+    // given
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    // when
+    const plan = await planStart({
+      cwd: root,
+      hostPort: 8973,
+      imageExists: true,
+      platform: 'win32',
+      hostIdentity: { uid: 1001, gid: 1002 },
+    })
+
+    // then
+    expect(plan.runArgs.some((arg) => arg.startsWith('TYPECLAW_HOST_UID='))).toBe(false)
+    expect(plan.runArgs.some((arg) => arg.startsWith('TYPECLAW_HOST_GID='))).toBe(false)
+  })
+
   test('sets --security-opt seccomp=unconfined unconditionally so bwrap can create user namespaces for per-tool sandboxing', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
@@ -1555,6 +1593,37 @@ function fakeDockerExec(scenario: {
 }
 
 describe('start (composition)', () => {
+  test('fails before refreshing managed files when typeclaw.json is not writable by the host user', async () => {
+    // given
+    await writeFile(join(root, 'typeclaw.json'), '{}\n')
+    await writeFile(join(root, '.gitignore'), '# stale\n')
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: noAutoUpgrade,
+      assertConfigWritable: () => {
+        throw new Error('typeclaw.json is not writable by the current host user')
+      },
+      ...bypassVerify,
+    })
+
+    // then
+    expect(result).toEqual({
+      ok: false,
+      reason: expect.stringContaining('typeclaw.json is not writable by the current host user'),
+    })
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('# stale\n')
+    expect(calls.some((call) => call.args[0] === 'run')).toBe(false)
+  })
+
   test('provisions embedding models on every fresh start', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })

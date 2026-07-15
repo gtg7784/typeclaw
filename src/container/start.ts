@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync } from 'node:fs'
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -85,6 +85,9 @@ export type PlanStartOptions = {
   // Defaults to `process.platform`; tests inject it to exercise the native-
   // Windows dev-source mount branch without running on a Windows host.
   platform?: NodeJS.Platform
+  // POSIX identity whose ownership bind-mounted runtime writes must retain.
+  // Omitted when unavailable (native Windows and unusual JS hosts).
+  hostIdentity?: { uid: number; gid: number } | null
 }
 
 export type HostDaemonControl = {
@@ -168,6 +171,9 @@ export type StartOptions = {
   // Defaults to `process.platform`; tests inject it to exercise the
   // native-Windows dev-link reconcile path off a non-Windows runner.
   platform?: NodeJS.Platform
+  hostIdentity?: { uid: number; gid: number } | null
+  // Test seam for the host-stage writable-config preflight.
+  assertConfigWritable?: (cwd: string) => void
 }
 
 export type HostDaemonStatus =
@@ -219,6 +225,8 @@ export async function start({
   verifyRunning = createVerifyRunning({ exec }),
   runBunLink,
   platform = process.platform,
+  hostIdentity = currentHostIdentity(),
+  assertConfigWritable = assertAgentConfigWritable,
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -233,6 +241,8 @@ export async function start({
     if (state.exists && state.running) {
       return await reportAlreadyRunning(exec, cwd, containerName)
     }
+
+    assertConfigWritable(cwd)
 
     // TypeClaw owns Dockerfile, .gitignore, and the bun-workspaces shape of
     // package.json. Refresh them from the current CLI templates on every fresh
@@ -463,6 +473,7 @@ export async function start({
       publishHost,
       tuiToken,
       platform,
+      hostIdentity,
     })
 
     let built = false
@@ -598,6 +609,25 @@ function installedReachesTarget(installed: string, target: string): boolean {
   return true
 }
 
+function currentHostIdentity(): { uid: number; gid: number } | null {
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') return null
+  return { uid: process.getuid(), gid: process.getgid() }
+}
+
+function assertAgentConfigWritable(cwd: string): void {
+  const configPath = join(cwd, 'typeclaw.json')
+  if (!existsSync(configPath)) return
+  try {
+    accessSync(configPath, fsConstants.R_OK | fsConstants.W_OK)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `typeclaw.json is not writable by the current host user: ${configPath}. ` +
+        `Inspect ownership with \`ls -ln "${configPath}"\` and run \`typeclaw doctor\` for repair guidance. ${detail}`,
+    )
+  }
+}
+
 export async function planStart({
   cwd,
   hostPort,
@@ -607,6 +637,7 @@ export async function planStart({
   publishHost = '127.0.0.1',
   tuiToken = null,
   platform = process.platform,
+  hostIdentity = currentHostIdentity(),
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -727,6 +758,14 @@ export async function planStart({
   const hostTz = resolveHostTimezone()
   if (hostTz) {
     runArgs.push('-e', `TZ=${hostTz}`)
+  }
+
+  // Run the container entrypoint as root for iptables/bootstrap work, then
+  // re-exec the TypeClaw runtime under the invoking POSIX host identity. Docker
+  // Desktop/OrbStack propagate numeric ownership through the /agent bind mount,
+  // so this prevents container-created files from becoming root-owned on host.
+  if (platform !== 'win32' && hostIdentity !== null) {
+    runArgs.push('-e', `TYPECLAW_HOST_UID=${hostIdentity.uid}`, '-e', `TYPECLAW_HOST_GID=${hostIdentity.gid}`)
   }
 
   // The agent's `restart` tool needs to identify itself to hostd. Inside the
