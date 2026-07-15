@@ -332,8 +332,8 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     const client = new FakeClient()
     // Seed the two chats as authoritative group chats so the resolver classifies
     // them as `send` (typing consults it live via classifyChat). A chat absent
-    // from getChats would be unresolved/provisional and suppressed — see the
-    // dedicated OpenChat-provisional regression test below.
+    // from getChats is registered provisionally and still sends — see the
+    // dedicated getChats-omitted regression test below.
     const groupChat = (id: string): KakaoChat => ({
       chat_id: id,
       type: 10,
@@ -444,14 +444,16 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await router.stop()
   })
 
-  test('suppresses typing for an OpenChat room that getChats omits (provisional @kakao-group)', async () => {
-    // Reproduces the reviewer's gap: getChats does NOT surface this OpenChat, so
-    // an inbound push registers it provisionally as @kakao-group. The session
-    // key therefore carries workspace '@kakao-group', but typing must still be
-    // suppressed — sending sendTyping(chatId) without the OpenChat linkId is a
-    // doomed packet. The live classifier catches this via the provisional flag.
+  test('sends typing for a chat getChats omits (provisional @kakao-group) — the inbound push proves it is real', async () => {
+    // Regression: a stale sub-device session returns a partial getChats list that
+    // omits an active chat, so an inbound push registers it provisionally as
+    // @kakao-group. Suppressing typing for provisional entries disabled the
+    // indicator for the entire lifetime of exactly the chats a user is actively
+    // messaging (observed in 0.45.1). The provisional bucket is @kakao-group
+    // (never @kakao-open), and a provisional-that-is-actually-OpenChat fails soft,
+    // so typing must send.
     const client = new FakeClient()
-    client.chats = [] // getChats omits the open room entirely
+    client.chats = [] // getChats omits the chat entirely
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
 
@@ -471,8 +473,8 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await adapter.start()
     listener.emit('connected', { userId: '999' })
 
-    // An inbound push from the open room the adapter can't resolve via getChats
-    // registers it provisionally as @kakao-group (the real production path).
+    // An inbound push from a chat the adapter can't resolve via getChats registers
+    // it provisionally as @kakao-group (the real production path).
     listener.emit('message', {
       type: 'MSG',
       chat_id: '888',
@@ -486,9 +488,6 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     })
     await new Promise((r) => setTimeout(r, 10))
 
-    // A heartbeat tick for the provisional room must NOT reach the client: its
-    // '@kakao-group' bucket is a strict guess, not an authoritative kind, so
-    // sending sendTyping(chatId) risks an OpenChat without its linkId.
     await registeredTyping!({
       adapter: 'kakaotalk',
       workspace: '@kakao-group',
@@ -496,7 +495,7 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
       thread: null,
       phase: 'tick',
     })
-    expect(client.sendTypingCalls).toEqual([])
+    expect(client.sendTypingCalls).toEqual([{ chatId: '888' }])
 
     await adapter.stop()
     await router.stop()

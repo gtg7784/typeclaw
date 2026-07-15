@@ -25,16 +25,16 @@ const logger = (): KakaoTypingLogger & { lines: string[] } => {
 
 const ok = (chatId: string): KakaoTypingResult => ({ success: true, status_code: 0, chat_id: chatId })
 
-// Default classifier: every chat is an authoritative DM/group. Tests that
-// exercise OpenChat / provisional suppression pass their own.
+// Default classifier: every chat sends. Tests that exercise OpenChat skip or
+// unknown-chat suppression pass their own.
 const sendAll = (): KakaoTypingChatClass => 'send'
 
 describe('kakaoTypingClassFromLookup', () => {
   test('null (unknown) → skip-unresolved', () => {
     expect(kakaoTypingClassFromLookup(null)).toBe('skip-unresolved')
   })
-  test('provisional entry → skip-unresolved even when bucketed as group', () => {
-    expect(kakaoTypingClassFromLookup({ workspace: '@kakao-group', provisional: true })).toBe('skip-unresolved')
+  test('provisional entry → send (inbound push proves the chat is real; @kakao-group bucket, never open)', () => {
+    expect(kakaoTypingClassFromLookup({ workspace: '@kakao-group', provisional: true })).toBe('send')
   })
   test('authoritative @kakao-open → skip-open', () => {
     expect(kakaoTypingClassFromLookup({ workspace: '@kakao-open', provisional: false })).toBe('skip-open')
@@ -208,7 +208,7 @@ describe('createKakaoTypingCallback', () => {
     expect(log.lines.filter((l) => l.includes('open_chat_link_id_unsupported'))).toHaveLength(1)
   })
 
-  test('skips typing for a provisional/unknown chat (skip-unresolved) silently — no packet, no log', async () => {
+  test('skips typing for an unknown chat (skip-unresolved) silently — no packet, no log', async () => {
     const calls: string[] = []
     const log = logger()
     const { callback } = createKakaoTypingCallback({
@@ -217,19 +217,16 @@ describe('createKakaoTypingCallback', () => {
         calls.push(chatId)
         return ok(chatId)
       },
-      // A room seen on an inbound push but not yet in getChats is bucketed as a
-      // provisional @kakao-group; the stale target.workspace says @kakao-group,
-      // but the live classifier reports it is not authoritative.
       classifyChat: () => 'skip-unresolved',
     })
 
-    await callback({ adapter: 'kakaotalk', workspace: '@kakao-group', chat: 'prov-1', thread: null, phase: 'tick' })
+    await callback({ adapter: 'kakaotalk', workspace: '@kakao-group', chat: 'unknown-1', thread: null, phase: 'tick' })
 
     expect(calls).toEqual([])
     expect(log.lines).toEqual([])
   })
 
-  test('classifies live at each tick: a chat suppressed while provisional sends once it resolves to group', async () => {
+  test('classifies live at each tick: a chat suppressed while unresolved sends once it resolves', async () => {
     const calls: string[] = []
     let cls: KakaoTypingChatClass = 'skip-unresolved'
     const { callback } = createKakaoTypingCallback({
