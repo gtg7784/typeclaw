@@ -42,8 +42,47 @@ describe('reviewer read-only bash policy — allowed read-only workflows', () =>
     'jq .content',
     'sed -n 1,40p src/x.ts',
     'awk {print} src/x.ts',
+    'which libreoffice',
+    'type rg',
+    'type -a python3',
+    'command -v soffice',
+    'command -V node',
   ])('allows: %s', (cmd) => {
     expect(allows(cmd)).toBe(true)
+  })
+
+  test('allows read-only tool-availability probes (which / type / command -v)', () => {
+    // These are the reviewer's "is this tool installed?" checks — pure lookups
+    // that never execute the queried command. The prior policy blocked all three
+    // (`which`/`type` unknown-verb deny; `command` forbidden-wrapper deny),
+    // forcing the reviewer to churn through refused calls mid-review.
+    expect(allows('which soffice')).toBe(true)
+    expect(allows('type -a libreoffice')).toBe(true)
+    expect(allows('command -v soffice')).toBe(true)
+    expect(allows('command -V soffice')).toBe(true)
+  })
+
+  test('command lookup is denied when it would still execute (regression: only -v/-V is a pure lookup)', () => {
+    // `command git push` runs `git push`; `command -p foo` forces a PATH exec.
+    // Neither is a lookup, so both must stay denied even though the leading verb
+    // is now specially handled.
+    expect(allows('command git push')).toBe(false)
+    expect(allows('command -p git push')).toBe(false)
+    expect(allows('command node -e code')).toBe(false)
+  })
+
+  test('command with a TRAILING -v/-V after the operand still executes and is denied (regression: -v belongs to the operand, not command)', () => {
+    // POSIX `command [-pVv] name [arg...]`: only options BEFORE the operand are
+    // command's own. In `command git push -v`, `git` is the operand and `-v` is
+    // an argument to `git push` (a real verbose push) — NOT a lookup flag. The
+    // prior `.some()` scan matched the trailing `-v` and authorized the mutation.
+    expect(allows('command git push -v')).toBe(false)
+    expect(allows('command git commit -v -m x')).toBe(false)
+    expect(allows('command rm -V /agent/x')).toBe(false)
+    // A lookup takes exactly one NAME; a second operand means execution.
+    expect(allows('command -v git push')).toBe(false)
+    // `--` ends option parsing, so the -v after it is not a command option.
+    expect(allows('command -- git push -v')).toBe(false)
   })
 
   test('allows the documented line-numbered remote-read pipeline (pipes are fine)', () => {
