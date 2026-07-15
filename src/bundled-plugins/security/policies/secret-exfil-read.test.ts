@@ -9,6 +9,11 @@ describe('secret-exfil-read guard', () => {
     expect(checkSecretExfilReadGuard({ tool: 'read', args: { path: '/agent/.env' } })?.block).toBe(true)
   })
 
+  test('treats secrets.json as a sensitive basename', () => {
+    expect(checkSecretExfilReadGuard({ tool: 'read', args: { path: 'secrets.json' } })?.block).toBe(true)
+    expect(checkSecretExfilReadGuard({ tool: 'find', args: { path: '.', pattern: 'secrets.json' } })?.block).toBe(true)
+  })
+
   test('blocks read of .env.production / .env.local', () => {
     expect(checkSecretExfilReadGuard({ tool: 'read', args: { path: '.env.production' } })?.block).toBe(true)
     expect(checkSecretExfilReadGuard({ tool: 'read', args: { path: 'config/.env.local' } })?.block).toBe(true)

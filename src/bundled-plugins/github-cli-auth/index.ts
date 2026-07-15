@@ -1,7 +1,7 @@
 import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import type { SessionOrigin } from '@/agent/session-origin'
+import { CORE_PERMISSIONS } from '@/permissions/builtins'
 import { definePlugin } from '@/plugin'
-import { resolveHiddenPaths } from '@/sandbox'
 
 import { createApproveIdempotencyGuard } from './approve-idempotency'
 import { createGithubEffectiveApprovalResolver, createGithubHeadShaResolver } from './effective-approval'
@@ -17,16 +17,13 @@ export default definePlugin({
     const resolveTokenForRepo = ctx.github.resolveTokenForRepo
     const hasAppTokenResolver = ctx.github.hasAppTokenResolver
 
-    // A .env PAT is broad and long-lived, so it may only reach bash that runs
-    // WITHOUT bwrap's --clearenv — otherwise a low-trust, stranger-drivable
-    // sandbox could exfiltrate it. We gate on the SAME signal applyBashSandbox
-    // uses (resolveHiddenPaths empty => unsandboxed) rather than a role name, so
-    // the credential policy can never diverge from the actual sandbox decision
-    // and custom roles follow their real fs.see.secrets / security.bypass grant.
-    const runsUnsandboxed = (origin: SessionOrigin | undefined): boolean => {
-      const { dirs, files } = resolveHiddenPaths(ctx.permissions, origin, ctx.agentDir)
-      return dirs.length === 0 && files.length === 0
-    }
+    // Canonical credentials remain masked for every role, including owner and
+    // trusted. Privileged roles may still use a PAT through this runtime-owned
+    // command overlay, gated by the existing credential capability rather than
+    // by whether the sandbox happens to render path masks.
+    const canUsePat = (origin: SessionOrigin | undefined): boolean =>
+      ctx.permissions.has(origin, CORE_PERMISSIONS.fsSeeSecrets) ||
+      ctx.permissions.has(origin, 'security.bypass.medium')
 
     // The PAT is in the container env but stripped by --clearenv for this role,
     // and a PAT is not re-mintable per repo, so there is no token to inject. Tell
@@ -199,7 +196,7 @@ export default definePlugin({
         // overlay so behavior is explicit and matches the git path; otherwise we
         // pass through. The App-oriented missing-repo / multi-owner BLOCK does
         // NOT apply — a PAT needs no per-repo mint — so we never surface it here.
-        if (runsUnsandboxed(event.origin)) {
+        if (canUsePat(event.origin)) {
           if (decision.kind === 'inject') {
             event.args[TYPECLAW_INTERNAL_BASH_ENV] = {
               GH_TOKEN: process.env.GH_TOKEN as string,
@@ -266,7 +263,7 @@ export default definePlugin({
       // withheld (env cleared): mint an App token instead if available, else
       // block with guidance rather than letting git fail silently. App auth must
       // still mint for sandboxed roles even when a PAT is present.
-      const useEnvPat = isPat && runsUnsandboxed(event.origin)
+      const useEnvPat = isPat && canUsePat(event.origin)
       // Sandboxed PAT: the env is cleared, so the PAT can't reach git. Mint an
       // App token instead when a minter is live (a PAT must NOT suppress it);
       // otherwise block with guidance below rather than fail silently.

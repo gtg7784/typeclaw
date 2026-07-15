@@ -25,9 +25,16 @@ export type ToolContext = {
   logger: ToolLogger
 }
 
+export type ToolFileOperands = {
+  input?: readonly string[]
+  output?: readonly string[]
+  destructive?: readonly string[]
+}
+
 export type Tool<P = unknown> = {
   description: string
   parameters: z.ZodType<P>
+  fileOperands?: ToolFileOperands
   execute: (args: P, ctx: ToolContext) => Promise<ToolResult>
 }
 

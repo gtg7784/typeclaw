@@ -51,6 +51,7 @@ Write to \`public/\` instead of \`workspace/\` when your resolved role lacks \`f
         .describe('Absolute path: <agent>/workspace/research-<slug>.md or <agent>/public/research-<slug>.md'),
       content: z.string().describe('The full markdown report body.'),
     }),
+    fileOperands: { output: ['path'] },
     async execute(args: WriteReportArgs, ctx: ToolContext) {
       if (writtenBySession.has(ctx.sessionId)) {
         throw new Error('A report has already been written for this session. You may write exactly one report.')

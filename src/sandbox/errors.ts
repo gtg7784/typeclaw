@@ -19,6 +19,13 @@ export class SandboxPolicyError extends Error {
   }
 }
 
+export class SandboxMaskTargetError extends Error {
+  override readonly name = 'SandboxMaskTargetError'
+  constructor(target: string, reason: string) {
+    super(`sandbox mask target is unsafe (${target}): ${reason}`)
+  }
+}
+
 // Raised when the /proc strategy degraded to the empty `tmpfs` fallback AND the
 // command needs a real /proc (a bun install / bunx / bun run that reads the
 // kernel-backed /proc/self/{fd,maps}). Without this pre-check Bun aborts deep in

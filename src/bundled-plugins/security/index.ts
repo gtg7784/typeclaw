@@ -201,10 +201,9 @@ export default definePlugin({
                 SECURITY_PERMISSIONS.bypassSecretExfilRead,
                 GUARD_SECRET_EXFIL_READ_SEVERITY,
               ),
-          // Role-derived, not severity-bypassed: resolveHiddenPaths already
-          // returns an empty deny-list for roles that may see the surface, so
-          // there is no canBypass wrapper. Mirrors the bash sandbox masks onto
-          // the non-bash read/grep/find/ls/edit/write builtins.
+          // Not severity-bypassed: private directories remain role-derived,
+          // while canonical credential-store denial is unconditional. Mirrors
+          // the bash masks onto every non-bash path-bearing tool.
           checkPrivateSurfaceReadGuard({
             tool: event.tool,
             args: event.args,

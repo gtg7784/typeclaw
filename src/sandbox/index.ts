@@ -1,5 +1,11 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
 export {
+  CANONICAL_AGENT_SECRET_DIRS,
+  CANONICAL_AGENT_SECRET_FILES,
+  CANONICAL_HOME_SECRET_DIRS,
+  CANONICAL_HOME_SECRET_FILES,
+} from './canonical-secrets'
+export {
   buildProcBindProbeScript,
   canBindProcSafely,
   canMountRealProc,
@@ -13,7 +19,12 @@ export {
   _resetProcBindProbeCacheForTests,
   _resetRealProcProbeCacheForTests,
 } from './availability'
-export { ensureHiddenMaskTargets, resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
+export {
+  canWriteAgentRootInSandbox,
+  ensureHiddenMaskTargets,
+  resolveHiddenPaths,
+  type HiddenPaths,
+} from './hidden-paths'
 export {
   resolvePackageInstallZones,
   resolveProtectedZones,

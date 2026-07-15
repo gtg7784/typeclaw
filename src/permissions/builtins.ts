@@ -32,7 +32,9 @@ export const CORE_PERMISSIONS = {
   // Phrased as capabilities to SEE, not to hide, so the role tower stays
   // monotonic (a higher tier sees a strict superset of a lower tier).
   // resolveHiddenPaths masks whatever the resolved role lacks: fsSeePrivate
-  // gates workspace/+memory/+sessions/, fsSeeSecrets gates .env+secrets.json.
+  // gates workspace/+memory/+sessions/. fsSeeSecrets authorizes runtime-owned
+  // credential use, never raw LLM tool access to canonical credential stores;
+  // canonical files are unconditionally masked for every role.
   // The fail-safe floor is the undefined origin (see has() in
   // permissions.ts), not the guest role, which is now grantable.
   fsSeePrivate: 'fs.see.private',

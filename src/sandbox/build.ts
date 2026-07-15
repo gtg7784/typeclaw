@@ -168,8 +168,8 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
   }
 
   appendWritableRoot(argv, policy)
-  appendMasks(argv, policy)
   appendWritable(argv, policy)
+  appendMasks(argv, policy)
   appendProtected(argv, policy)
   appendBlockedCreation(argv, policy)
   appendSymlinks(argv, policy)

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -8,6 +8,7 @@ import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import { Type } from 'typebox'
 import { z } from 'zod'
 
+import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
 import { _resetBwrapAvailabilityCacheForTests, _resetRealProcProbeCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
@@ -84,6 +85,42 @@ describe('zodToToolParameters', () => {
 })
 
 describe('wrapPluginTool', () => {
+  test('blocks a declared filename operand that targets a canonical secret', async () => {
+    const calls: string[] = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ filename: z.string() }),
+      fileOperands: { input: ['filename'] },
+      async execute(args) {
+        calls.push(args.filename)
+        return { content: [] }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('security', '/agent', noopLogger, {
+      'tool.before': (event) =>
+        checkPrivateSurfaceReadGuard({
+          tool: event.tool,
+          args: event.args,
+          agentDir: '/agent',
+          hidden: { dirs: [], files: [] },
+        }),
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'reader',
+      toolName: 'plugin_reader',
+      agentDir: '/agent',
+      sessionId: 's',
+      logger: noopLogger,
+      hooks,
+    })
+
+    const result = await wrapped.execute('c', { filename: '/agent/.env' }, undefined, undefined, {} as never)
+
+    expect(calls).toEqual([])
+    expect(result).toMatchObject({ isError: true })
+  })
+
   test('passes parsed args to plugin execute and exposes ToolContext', async () => {
     const seen: { args: unknown; ctx: { sessionId: string; agentDir: string } }[] = []
     const tool = defineTool({
@@ -959,7 +996,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
   const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
   const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
 
-  test('trusted+ (tui→owner) has no masks, so bash runs unchanged even without bwrap', async () => {
+  test('trusted+ (tui→owner) still requires bwrap for canonical masks', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
@@ -968,8 +1005,35 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       getOrigin: () => tui,
       permissions: createPermissionService(),
     })
-    await wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)
-    expect(record.command).toBe('echo hi')
+    await expect(
+      wrapped.execute('c', { command: 'cat /agent/.env' }, undefined, undefined, {} as never),
+    ).rejects.toThrow()
+    expect(record.command).toBeUndefined()
+  })
+
+  test('owner bash aborts before execution when a canonical target is symlinked', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'tc-unsafe-mask-symlink-'))
+    const record: { command?: string } = {}
+    try {
+      const outside = path.join(agentDir, 'outside')
+      await writeFile(outside, 'secret')
+      await symlink(outside, path.join(agentDir, '.env'))
+      await writeFile(path.join(agentDir, 'secrets.json'), '{}')
+      const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
+        agentDir,
+        sessionId: 's',
+        hooks: createHookBus(),
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+      })
+
+      await expect(
+        wrapped.execute('c', { command: 'echo should-not-run' }, undefined, undefined, {} as never),
+      ).rejects.toThrow(/mask target/i)
+      expect(record.command).toBeUndefined()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 
   test('guest needs masks; with bwrap unavailable the call fails closed and the underlying bash never runs', async () => {
@@ -999,7 +1063,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     expect(record.command).toBe('echo hi')
   })
 
-  test('a hook-set env overlay is stripped from args and never reaches the command (non-sandboxed)', async () => {
+  test('a hook-set env overlay is stripped from args before sandbox preparation', async () => {
     const record: { command?: string } = {}
     const hooks = createHookBus()
     hooks.registerAll('env-setter', '/agent', noopLogger, {
@@ -1015,8 +1079,8 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       getOrigin: () => tui,
       permissions: createPermissionService(),
     })
-    await wrapped.execute('c', args as never, undefined, undefined, {} as never)
-    expect(record.command).toBe('gh pr view -R acme/widgets')
+    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow()
+    expect(record.command).toBeUndefined()
     expect(args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
   })
 
@@ -1040,7 +1104,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       getOrigin: () => tui,
       permissions: createPermissionService(),
     })
-    await wrapped.execute('c', args as never, undefined, undefined, {} as never)
+    await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow()
     expect(seenInHook).toBeUndefined()
   })
 })
@@ -1077,7 +1141,7 @@ describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role
     expect(record.command).toBeUndefined()
   })
 
-  test('readonly-reviewer policy lets a read-only command through (and the role sandbox still leaves an owner command unchanged)', async () => {
+  test('readonly-reviewer policy lets a read-only command reach mandatory sandbox preparation', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
@@ -1087,11 +1151,11 @@ describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role
       permissions: createPermissionService(),
       bashPolicy: { kind: 'readonly-reviewer' },
     })
-    await wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)
-    expect(record.command).toBe('git status')
+    await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow()
+    expect(record.command).toBeUndefined()
   })
 
-  test('no bashPolicy leaves bash unrestricted (default subagents keep today behavior)', async () => {
+  test('no bashPolicy still applies the mandatory owner sandbox', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
       agentDir: '/agent',
@@ -1100,8 +1164,10 @@ describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role
       getOrigin: () => ownerTui,
       permissions: createPermissionService(),
     })
-    await wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never)
-    expect(record.command).toBe('git push origin HEAD')
+    await expect(
+      wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never),
+    ).rejects.toThrow()
+    expect(record.command).toBeUndefined()
   })
 })
 
@@ -1161,7 +1227,7 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
     expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
   })
 
-  test('an unsandboxed role (tui→owner) writes the real /tmp path untouched', async () => {
+  test('an owner write uses the session scratch backing path', async () => {
     const record: { path?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeWrite(record), {
       agentDir: '/agent',
@@ -1171,10 +1237,10 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
       permissions: createPermissionService(),
     })
     await wrapped.execute('c', { path: '/tmp/review.json', content: '{}' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe('/tmp/review.json')
+    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
   })
 
-  test('an unsandboxed role (tui→owner) reads the real /tmp path untouched', async () => {
+  test('an owner read uses the session scratch backing path', async () => {
     const record: { path?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeRead(record), {
       agentDir: '/agent',
@@ -1184,7 +1250,7 @@ describe('wrapBuiltinToolDefinition /tmp path redirect (per-session scratch)', (
       permissions: createPermissionService(),
     })
     await wrapped.execute('c', { path: '/tmp/review.json' } as never, undefined, undefined, {} as never)
-    expect(record.path).toBe('/tmp/review.json')
+    expect(record.path).toBe(`${SESSION_TMP_ROOT}/sid42/review.json`)
   })
 
   test('a non-/tmp write is left untouched even for a sandboxed role', async () => {

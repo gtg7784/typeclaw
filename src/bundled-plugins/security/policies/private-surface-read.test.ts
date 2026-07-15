@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import path from 'node:path'
 
 import type { HiddenPaths } from '@/sandbox'
@@ -11,9 +12,9 @@ import { checkPrivateSurfaceReadGuard } from './private-surface-read'
 const AGENT = '/agent'
 const guestHidden: HiddenPaths = {
   dirs: ['/agent/workspace', '/agent/memory', '/agent/sessions'],
-  files: ['/agent/.env', '/agent/secrets.json'],
+  files: ['/agent/.env', '/agent/secrets.json', '/agent/auth.json'],
 }
-const emptyHidden: HiddenPaths = { dirs: [], files: [] }
+const privilegedHidden: HiddenPaths = { dirs: [], files: [] }
 
 function check(tool: string, args: Record<string, unknown>, hidden: HiddenPaths = guestHidden) {
   return checkPrivateSurfaceReadGuard({ tool, args, agentDir: AGENT, hidden })
@@ -88,18 +89,71 @@ describe('private-surface-read guard — free-text field scoping (no false posit
     expect(check('some_new_plugin_tool', { nested: { target: 'workspace/y' } })?.block).toBe(true)
   })
 
-  test('does not block an attachment display filename that equals a hidden-dir name', () => {
-    expect(
-      check('channel_send', {
-        text: 'see attached',
-        attachments: [{ path: 'public/report.pdf', filename: 'memory' }],
-      }),
-    ).toBeUndefined()
-    expect(check('channel_reply', { attachments: [{ path: 'public/x.md', filename: 'sessions' }] })).toBeUndefined()
-    expect(check('channel_fetch_attachment', { attachment_id: 1, filename: 'workspace' })).toBeUndefined()
+  test('scans filename/filepath keys, file URIs, and nested shapes without scanning prose', () => {
+    expect(check('mcp_reader', { input: { filename: 'file:///agent/memory/x.md' } })?.block).toBe(true)
+    expect(check('plugin_reader', { payload: [{ filePath: '/agent/sessions/x.jsonl' }] })?.block).toBe(true)
+    expect(check('plugin_reader', { description: 'file:///agent/memory/x.md is an example' })?.block).toBe(true)
   })
 
-  test('STILL blocks a hidden attachments[].path even when filename is exempt', () => {
+  test('file URIs override free-text exemptions, including nested MCP url arguments', () => {
+    expect(
+      check('mcp_call', {
+        server: 'files',
+        tool: 'read',
+        args: { nested: { url: 'file:///agent/secrets.json' } },
+      })?.block,
+    ).toBe(true)
+    expect(check('plugin_tool', { prompt: 'file:///agent/.env' })?.block).toBe(true)
+  })
+
+  test('unconditionally blocks virtual and process-backed filesystems and effective aliases', () => {
+    for (const candidate of ['/proc/self/environ', '/sys/kernel/notes', '/dev/fd/0', '/run/secrets/token']) {
+      expect(check('channel_send', { attachments: [{ path: candidate }] }, privilegedHidden)?.block).toBe(true)
+    }
+  })
+
+  test('recognizes synthetic POSIX, file URI, Windows-drive, and UNC private paths without host path semantics', () => {
+    const windowsHidden: HiddenPaths = {
+      dirs: ['C:\\agent\\memory', '\\\\server\\agent\\sessions'],
+      files: ['C:\\agent\\secrets.json'],
+    }
+    expect(check('read', { path: '/agent/memory/x.md' })?.block).toBe(true)
+    expect(check('read', { path: 'file:///agent/secrets.json' })?.block).toBe(true)
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'read',
+        args: { path: 'C:\\agent\\secrets.json' },
+        agentDir: 'C:\\agent',
+        hidden: windowsHidden,
+      })?.block,
+    ).toBe(true)
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'read',
+        args: { path: '\\\\server\\agent\\sessions\\turn.jsonl' },
+        agentDir: '\\\\server\\agent',
+        hidden: windowsHidden,
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('reports synthetic /proc denial before host filesystem lookup', () => {
+    const result = check('channel_send', { attachments: [{ path: '/proc/self/environ' }] }, privilegedHidden)
+    expect(result?.reason).toMatch(/virtual|process-backed/i)
+  })
+
+  test('treats display filenames as metadata rather than file operands', () => {
+    expect(check('channel_send', { attachments: [{ path: 'public/x', filename: 'secrets.json' }] })).toBeUndefined()
+    expect(check('channel_reply', { attachments: [{ path: 'public/x', filename: '.env' }] })).toBeUndefined()
+    expect(check('channel_fetch_attachment', { attachment_id: 1, filename: 'auth.json' })).toBeUndefined()
+    expect(check('channel_reply', { attachments: [{ path: 'public/x.md', filename: 'report.pdf' }] })).toBeUndefined()
+  })
+
+  test('treats filename as a path for tools where it is not declared display metadata', () => {
+    expect(check('plugin_reader', { filename: '/agent/.env' })?.block).toBe(true)
+  })
+
+  test('still blocks a hidden attachments[].path when the filename itself is public', () => {
     expect(
       check('channel_send', {
         attachments: [{ path: 'memory/leak.md', filename: 'report.pdf' }],
@@ -173,16 +227,36 @@ describe('private-surface-read guard — traversal + scope', () => {
     expect(check('write', { path: 'secrets.json' })?.block).toBe(true)
     expect(check('look_at', { images: [{ path: '/agent/secrets.json' }] })?.block).toBe(true)
     expect(check('channel_send', { attachments: [{ path: '/agent/.env' }] })?.block).toBe(true)
+    expect(check('read', { path: '/agent/auth.json' })?.block).toBe(true)
   })
 
   test('a secret file matches exactly, not by prefix (.env does not block .envrc-style siblings)', () => {
     expect(check('read', { path: '/agent/.environment' })).toBeUndefined()
     expect(check('read', { path: '/agent/secrets.json.bak' })).toBeUndefined()
+    expect(check('read', { path: '/agent/auth.json.bak' })).toBeUndefined()
   })
 
-  test('empty deny-list (trusted+) is a no-op for every tool', () => {
-    expect(check('read', { path: 'workspace/notes.md' }, emptyHidden)).toBeUndefined()
-    expect(check('look_at', { images: [{ path: 'workspace/x' }] }, emptyHidden)).toBeUndefined()
+  test('privileged roles may read private directories but never canonical agent secret files', () => {
+    expect(check('read', { path: 'workspace/notes.md' }, privilegedHidden)).toBeUndefined()
+    expect(check('look_at', { images: [{ path: 'workspace/x' }] }, privilegedHidden)).toBeUndefined()
+    expect(check('read', { path: '.env' }, privilegedHidden)?.block).toBe(true)
+    expect(check('grep', { pattern: 'token', path: '/agent/secrets.json' }, privilegedHidden)?.block).toBe(true)
+    expect(check('find', { path: '.', pattern: 'secrets.json' }, privilegedHidden)?.block).toBe(true)
+    expect(check('ls', { path: '/agent/.env' }, privilegedHidden)?.block).toBe(true)
+    expect(check('read', { path: '/agent/auth.json' }, privilegedHidden)?.block).toBe(true)
+    expect(
+      check('read', { path: '/agent/workspace/.agent-messenger/slack-credentials.json' }, privilegedHidden)?.block,
+    ).toBe(true)
+    expect(check('read', { path: '/agent/workspace/.config/gws/credentials.json' }, privilegedHidden)?.block).toBe(true)
+    expect(check('read', { path: '/agent/.typeclaw/home/.codex/auth.json' }, privilegedHidden)?.block).toBe(true)
+  })
+
+  test('canonical HOME credential profiles are denied to privileged non-bash tools', () => {
+    expect(check('read', { path: path.join(homedir(), '.gitconfig') }, privilegedHidden)?.block).toBe(true)
+    expect(check('read', { path: path.join(homedir(), '.codex', 'auth.json') }, privilegedHidden)?.block).toBe(true)
+    expect(check('read', { path: path.join(homedir(), '.claude', '.credentials.json') }, privilegedHidden)?.block).toBe(
+      true,
+    )
   })
 
   test('bash is never blocked here (its access is contained by the bwrap sandbox)', () => {
@@ -208,7 +282,7 @@ describe('private-surface-read guard — symlink bypass defense', () => {
       agentDir,
       hidden: {
         dirs: ['workspace', 'memory', 'sessions'].map((d) => path.join(agentDir, d)),
-        files: ['.env', 'secrets.json'].map((f) => path.join(agentDir, f)),
+        files: ['.env', 'secrets.json', 'auth.json'].map((f) => path.join(agentDir, f)),
       },
     }
   }
@@ -217,6 +291,67 @@ describe('private-surface-read guard — symlink bypass defense', () => {
     const { agentDir, hidden } = makeAgentWithSymlinks()
     const result = checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: 'public/env-link' }, agentDir, hidden })
     expect(result?.block).toBe(true)
+  })
+
+  test('blocks a privileged non-bash read through a symlink to a canonical secret file', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    const result = checkPrivateSurfaceReadGuard({
+      tool: 'read',
+      args: { path: 'public/env-link' },
+      agentDir,
+      hidden: privilegedHidden,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('blocks a privileged non-bash read through a hardlink alias to a canonical secret file', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    const alias = path.join(agentDir, 'public', 'env-hardlink')
+    linkSync(path.join(agentDir, '.env'), alias)
+    const result = checkPrivateSurfaceReadGuard({
+      tool: 'read',
+      args: { path: alias },
+      agentDir,
+      hidden: privilegedHidden,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('blocks a privileged hardlink alias to historical root auth.json', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    writeFileSync(path.join(agentDir, 'auth.json'), 'legacy-secret')
+    const alias = path.join(agentDir, 'public', 'auth-hardlink')
+    linkSync(path.join(agentDir, 'auth.json'), alias)
+    const result = checkPrivateSurfaceReadGuard({
+      tool: 'read',
+      args: { path: alias },
+      agentDir,
+      hidden: privilegedHidden,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('blocks a hardlink alias of a file below a denied directory', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    const source = path.join(agentDir, 'workspace', '.agent-messenger', 'nested-token')
+    mkdirSync(path.dirname(source), { recursive: true })
+    writeFileSync(source, 'secret')
+    const alias = path.join(agentDir, 'public', 'nested-hardlink')
+    linkSync(source, alias)
+    expect(
+      checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: alias }, agentDir, hidden: privilegedHidden })?.block,
+    ).toBe(true)
+  })
+
+  test('allows unrelated public hardlinks', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    const source = path.join(agentDir, 'public', 'report-a.md')
+    const alias = path.join(agentDir, 'public', 'report-b.md')
+    writeFileSync(source, 'public')
+    linkSync(source, alias)
+    expect(
+      checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: alias }, agentDir, hidden: privilegedHidden }),
+    ).toBeUndefined()
   })
 
   test('blocks a non-bash read THROUGH a public/ symlink pointing at a hidden DIR', () => {
@@ -240,6 +375,19 @@ describe('private-surface-read guard — symlink bypass defense', () => {
       hidden,
     })
     expect(result?.block).toBe(true)
+  })
+
+  test.skipIf(process.platform !== 'linux')('blocks an effective public symlink alias into procfs', () => {
+    const { agentDir } = makeAgentWithSymlinks()
+    symlinkSync('/proc', path.join(agentDir, 'public', 'proc-link'))
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'read',
+        args: { path: 'public/proc-link/self/environ' },
+        agentDir,
+        hidden: privilegedHidden,
+      })?.block,
+    ).toBe(true)
   })
 
   test('still ALLOWS a genuine non-symlink file inside public/', () => {
