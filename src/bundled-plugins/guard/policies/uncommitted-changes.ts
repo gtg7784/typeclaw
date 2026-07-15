@@ -1,3 +1,4 @@
+import { hooklessGitArgs } from '@/git/hookless'
 import { resolveAgentGit } from '@/git/resolve-agent-git'
 import type { ContentPart, ToolResult } from '@/plugin'
 
@@ -63,7 +64,7 @@ const defaultDeps: UncommittedChangesDeps = {
     if (!bun) return null
     try {
       const proc = bun.spawn({
-        cmd: ['git', ...gitArgs, 'status', '--porcelain=v1'],
+        cmd: ['git', ...hooklessGitArgs([...gitArgs, 'status', '--porcelain=v1'])],
         cwd: agentDir,
         stdout: 'pipe',
         stderr: 'pipe',

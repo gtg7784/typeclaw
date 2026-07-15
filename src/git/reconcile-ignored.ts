@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { SYSTEM_MANAGED_ROOTS, TRULY_IGNORED_PATTERNS } from '@/init/gitignore'
 
+import { hooklessGitArgs } from './hookless'
 import { type AgentGit, resolveAgentGit } from './resolve-agent-git'
 
 export type UntrackResult = { untracked: string[] }
@@ -170,7 +171,7 @@ async function listTrackedIgnored(
   excludeFile: string,
 ): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', ...gitArgs, 'ls-files', '-z', '-c', '-i', '--exclude-from', excludeFile],
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, 'ls-files', '-z', '-c', '-i', '--exclude-from', excludeFile])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -182,7 +183,7 @@ async function listTrackedIgnored(
 
 async function gitRmCached(bun: BunLike, cwd: string, gitArgs: readonly string[], files: string[]): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', ...gitArgs, 'rm', '--cached', '-q', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, 'rm', '--cached', '-q', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -200,7 +201,13 @@ async function run(
   args: readonly string[],
   env?: GitEnv,
 ): Promise<boolean> {
-  const proc = bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+  const proc = bun.spawn({
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, ...args])],
+    cwd,
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   return (await proc.exited) === 0
 }
 
@@ -211,7 +218,13 @@ async function capture(
   args: readonly string[],
   env?: GitEnv,
 ): Promise<string> {
-  const proc = bun.spawn({ cmd: ['git', ...gitArgs, ...args], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+  const proc = bun.spawn({
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, ...args])],
+    cwd,
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   if ((await proc.exited) !== 0) return ''
   return await new Response(proc.stdout).text()
 }
@@ -226,7 +239,7 @@ async function forceRemove(
   env: GitEnv,
 ): Promise<boolean> {
   const proc = bun.spawn({
-    cmd: ['git', ...gitArgs, 'update-index', '-z', '--force-remove', '--stdin'],
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, 'update-index', '-z', '--force-remove', '--stdin'])],
     cwd,
     env,
     stdin: new TextEncoder().encode(files.join('\0')),

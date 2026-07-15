@@ -1,3 +1,4 @@
+import { hooklessGitArgs } from '@/git/hookless'
 import { resolveAgentGit } from '@/git/resolve-agent-git'
 
 export type GitResult = { exitCode: number; stdout: string; stderr: string }
@@ -87,7 +88,7 @@ const defaultSpawnGit: SpawnGit = async (args, cwd) => {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
   try {
-    const proc = bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({ cmd: ['git', ...hooklessGitArgs(args)], cwd, stdout: 'pipe', stderr: 'pipe' })
     const exitCode = await proc.exited
     const stdout = await new Response(proc.stdout).text()
     const stderr = await new Response(proc.stderr).text()

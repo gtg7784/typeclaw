@@ -9,6 +9,7 @@ import { Type } from 'typebox'
 import { z } from 'zod'
 
 import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
+import { hooklessGitArgs } from '@/git/hookless'
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
 import {
@@ -999,6 +1000,15 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     }
   }
 
+  async function runFixtureGit(agentDir: string, ...args: string[]): Promise<void> {
+    const proc = Bun.spawn(['git', ...hooklessGitArgs(['-C', agentDir, ...args])], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const stderr = await new Response(proc.stderr).text()
+    if ((await proc.exited) !== 0) throw new Error(`git fixture failed: ${stderr}`)
+  }
+
   const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
   const member: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'member' }
   const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
@@ -1063,7 +1073,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     const homeDir = path.join(agentDir, 'home')
     let generatedSource: string | undefined
     try {
-      await mkdir(path.join(agentDir, '.git'), { recursive: true })
+      await runFixtureGit(agentDir, 'init')
       await mkdir(homeDir)
       await writeFile(path.join(homeDir, '.gitconfig'), '[user]\nname = Alice\nemail = user@example.com\n')
       const record: { command?: string } = {}
@@ -1104,7 +1114,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-git-config-isolation-'))
     let sandboxEnv: Record<string, string> | undefined
     try {
-      await mkdir(path.join(agentDir, '.git'), { recursive: true })
+      await runFixtureGit(agentDir, 'init')
       const wrapped = wrapBuiltinToolDefinition(fakeBash({}), {
         agentDir,
         sessionId: 'git-config-isolation',
@@ -1124,6 +1134,34 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
       await wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never)
 
       expect(sandboxEnv).toMatchObject({ GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' })
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('blocks model-facing bash before execution when canonical secret history exists', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-contaminated-boundary-'))
+    const record: { command?: string } = {}
+    try {
+      await runFixtureGit(agentDir, 'init')
+      await runFixtureGit(agentDir, 'config', 'user.name', 'Test User')
+      await runFixtureGit(agentDir, 'config', 'user.email', 'test@example.com')
+      await writeFile(path.join(agentDir, '.env'), 'EXAMPLE_TOKEN=placeholder')
+      await runFixtureGit(agentDir, 'add', '.env')
+      await runFixtureGit(agentDir, 'commit', '-m', 'add fixture')
+      const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
+        agentDir,
+        sessionId: 'contaminated-boundary',
+        hooks: createHookBus(),
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+        bashSandboxBoundary: { ensureAvailable: async () => {}, buildCommand: buildSandboxedCommand },
+      })
+
+      await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow(
+        /contaminated|canonical|secret/i,
+      )
+      expect(record.command).toBeUndefined()
     } finally {
       await rm(agentDir, { recursive: true, force: true })
     }

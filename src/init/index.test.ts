@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, statSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1188,6 +1188,20 @@ describe('scaffold', () => {
 })
 
 describe('initGitRepo', () => {
+  test('initial commit does not execute a hook already present in an empty repo', async () => {
+    await scaffold(root)
+    await runGit(root, ['init', '-b', 'main'])
+    const marker = join(root, 'hook-ran')
+    const hook = join(root, '.git', 'hooks', 'pre-commit')
+    await writeFile(hook, `#!/bin/sh\nprintf hook > "${marker}"\n`)
+    await chmod(hook, 0o755)
+
+    const result = await initGitRepo(root)
+
+    expect(result).toEqual({ ok: true, skipped: false })
+    expect(existsSync(marker)).toBe(false)
+  })
+
   test('initializes a git repo with an initial commit on main', async () => {
     await scaffold(root)
 

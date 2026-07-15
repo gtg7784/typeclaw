@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,6 +8,7 @@ import {
   type GitSpawn,
   type GitSpawnResult,
   parsePorcelain,
+  makeDefaultGitSpawn,
   runBackup,
   withIndexLockRetry,
 } from './runner'
@@ -49,6 +50,53 @@ const baseDeps = (spawn: GitSpawn, message = 'chore: test'): BackupRunnerDeps =>
 })
 
 describe('runBackup', () => {
+  test('default runner commits without executing a planted hook', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'autobackup-hookless-'))
+    try {
+      const git = async (args: string[]): Promise<void> => {
+        const proc = Bun.spawn({
+          cmd: ['git', ...args],
+          cwd,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'Test',
+            GIT_AUTHOR_EMAIL: 'test@example.com',
+            GIT_COMMITTER_NAME: 'Test',
+            GIT_COMMITTER_EMAIL: 'test@example.com',
+          },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        expect(await proc.exited).toBe(0)
+      }
+      await git(['init', '-q', '-b', 'main'])
+      await writeFile(join(cwd, 'notes.md'), 'initial\n')
+      await git(['add', 'notes.md'])
+      await git(['commit', '-qm', 'initial'])
+      const marker = join(cwd, 'hook-ran')
+      const hook = join(cwd, '.git', 'hooks', 'pre-commit')
+      await writeFile(hook, `#!/bin/sh\nprintf '%s' "$TYPECLAW_HOOK_SECRET" > "${marker}"\n`)
+      await chmod(hook, 0o755)
+      await writeFile(join(cwd, 'notes.md'), 'changed\n')
+
+      const previous = process.env.TYPECLAW_HOOK_SECRET
+      process.env.TYPECLAW_HOOK_SECRET = 'must-not-leak'
+      try {
+        const result = await runBackup(
+          { cwd, pushToOrigin: false },
+          { gitSpawn: makeDefaultGitSpawn(), pickCommitMessage: async () => 'backup without hooks' },
+        )
+        expect(result).toEqual({ ok: true, kind: 'committed' })
+      } finally {
+        if (previous === undefined) delete process.env.TYPECLAW_HOOK_SECRET
+        else process.env.TYPECLAW_HOOK_SECRET = previous
+      }
+      expect(await Bun.file(marker).exists()).toBe(false)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('returns no-repo when .git is missing', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'autobackup-norepo-'))
     const { spawn, calls } = makeSpawn(() => okResult())

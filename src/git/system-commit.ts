@@ -1,3 +1,4 @@
+import { hooklessGitArgs } from './hookless'
 import { resolveAgentGit } from './resolve-agent-git'
 
 // Commits TypeClaw-owned tracked files (.gitignore, package.json,
@@ -27,7 +28,7 @@ export async function commitSystemFile(cwd: string, file: string | readonly stri
   if (!repo) return
 
   const status = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'status', '--porcelain', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'status', '--porcelain', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -36,11 +37,16 @@ export async function commitSystemFile(cwd: string, file: string | readonly stri
   const dirty = (await new Response(status.stdout).text()).trim().length > 0
   if (!dirty) return
 
-  const add = bun.spawn({ cmd: ['git', ...repo.gitArgs, 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const add = bun.spawn({
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'add', '--', ...files])],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   if ((await add.exited) !== 0) return
 
   const commit = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -73,7 +79,7 @@ export function commitSystemFileSync(cwd: string, file: string | readonly string
   if (!repo) return
 
   const status = bun.spawnSync({
-    cmd: ['git', ...repo.gitArgs, 'status', '--porcelain', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'status', '--porcelain', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -82,7 +88,7 @@ export function commitSystemFileSync(cwd: string, file: string | readonly string
   if (new TextDecoder().decode(status.stdout).trim().length === 0) return
 
   const add = bun.spawnSync({
-    cmd: ['git', ...repo.gitArgs, 'add', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'add', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -90,7 +96,7 @@ export function commitSystemFileSync(cwd: string, file: string | readonly string
   if (add.exitCode !== 0) return
 
   bun.spawnSync({
-    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',

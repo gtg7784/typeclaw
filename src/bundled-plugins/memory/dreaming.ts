@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 
 import { z } from 'zod'
 
+import { hooklessGitArgs } from '@/git/hookless'
 import { withGitLock } from '@/git/mutex'
 import { type AgentGit, resolveAgentGit } from '@/git/resolve-agent-git'
 import { defineTool, lsTool, readTool, type Subagent, writeTool } from '@/plugin'
@@ -773,7 +774,7 @@ async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   }
 
   const add = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'add', '-f', '--', ...presentPaths],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'add', '-f', '--', ...presentPaths])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -788,7 +789,10 @@ async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   // fails outright when `bar/` matches no tracked file, even if `foo` is
   // staged.
   const stagedNames = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS],
+    cmd: [
+      'git',
+      ...hooklessGitArgs([...repo.gitArgs, 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS]),
+    ],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -807,7 +811,7 @@ async function commitMemorySnapshotUnlocked(cwd: string): Promise<void> {
   const message = await buildCommitMessage(bun, cwd, staged, undefined, repo.gitArgs)
 
   const commit = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...staged],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'commit', '-m', message, '--only', '--', ...staged])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -864,7 +868,7 @@ async function buildDreamSummary(
   // numstat: `<added>\t<deleted>\t<path>` per line. Use NUL-terminated so paths
   // with whitespace round-trip; -z switches the record separator to NUL.
   const numstat = bun.spawn({
-    cmd: ['git', ...gitArgs, 'diff', '--cached', '--numstat', '-z', '--', ...staged],
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, 'diff', '--cached', '--numstat', '-z', '--', ...staged])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -921,7 +925,7 @@ async function listNewlyAddedSkills(
   gitArgs: readonly string[] = [],
 ): Promise<string[]> {
   const proc = bun.spawn({
-    cmd: ['git', ...gitArgs, 'diff', '--cached', '--name-status', '-z', '--', ...staged],
+    cmd: ['git', ...hooklessGitArgs([...gitArgs, 'diff', '--cached', '--name-status', '-z', '--', ...staged])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -949,7 +953,7 @@ async function listTrackedSnapshotFiles(
   repo: AgentGit,
 ): Promise<string[]> {
   const ls = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'ls-files', '-z', '--', ...SNAPSHOT_PATHS],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'ls-files', '-z', '--', ...SNAPSHOT_PATHS])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -963,7 +967,7 @@ async function clearSkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string, 
   const files = await listTrackedSnapshotFiles(bun, cwd, repo)
   if (files.length === 0) return
   const proc = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'update-index', '--no-skip-worktree', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'update-index', '--no-skip-worktree', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -975,7 +979,7 @@ async function applySkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string, 
   const files = await listTrackedSnapshotFiles(bun, cwd, repo)
   if (files.length === 0) return
   const proc = bun.spawn({
-    cmd: ['git', ...repo.gitArgs, 'update-index', '--skip-worktree', '--', ...files],
+    cmd: ['git', ...hooklessGitArgs([...repo.gitArgs, 'update-index', '--skip-worktree', '--', ...files])],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -1324,6 +1328,7 @@ function escapeTableCell(value: string): string {
 const dreamingDeleteTopicShardTool = defineTool({
   description: deleteTopicShardTool.description,
   parameters: deleteTopicShardTool.inputSchema,
+  fileOperands: { destructive: ['path'] },
   async execute(args, ctx) {
     const result = await deleteTopicShardTool.run(args, { agentDir: ctx.agentDir })
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
