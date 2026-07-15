@@ -219,12 +219,70 @@ describe('installLlmFetchObserver', () => {
     expect(observed.length).toBe(1)
     const line = observed[0]!.msg
     expect(line).toContain('status=200')
+    expect(line).toContain('seq=1')
     expect(line).toContain('headers_ms=50')
     expect(line).toContain('first_byte_ms=200')
     expect(line).toContain('total_ms=2000')
     expect(line).toContain('request_id=req_abc123')
     expect(line).toContain('retry_after=null')
     expect(line).toContain('error=null')
+  })
+
+  test('seq increments per provider|origin so retry multiplication is countable', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+
+    globalThis.fetch = (async () => {
+      const ctrl = makeControllableBody()
+      queueMicrotask(() => void ctrl.close())
+      return new Response(ctrl.body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
+    try {
+      for (let i = 0; i < 3; i++) {
+        const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+        await drainQuiet(response.body)
+      }
+    } finally {
+      uninstall()
+    }
+
+    const lines = entries.filter((e) => e.msg.startsWith('[llm-fetch]')).map((e) => e.msg)
+    expect(lines.map((m) => Number(m.match(/ seq=(\d+)/)![1]))).toEqual([1, 2, 3])
+    for (const line of lines) expect(line).toContain('origin=https://chatgpt.com')
+  })
+
+  test('seq is scoped per origin so a shared provider label does not collide', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+
+    globalThis.fetch = (async () => {
+      const ctrl = makeControllableBody()
+      queueMicrotask(() => void ctrl.close())
+      return new Response(ctrl.body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+
+    // Two distinct proxy origins that both match the `openai-compatible` label.
+    // Interleaved, each origin must keep its OWN seq (1,2), not a shared 1..4.
+    const urlA = 'https://proxy-a.example/v1/chat/completions'
+    const urlB = 'https://proxy-b.example/v1/chat/completions'
+    const uninstall = installLlmFetchObserver({ logger, now: clock.now })
+    try {
+      for (const url of [urlA, urlB, urlA, urlB]) {
+        const response = await fetch(url, { method: 'POST' })
+        await drainQuiet(response.body)
+      }
+    } finally {
+      uninstall()
+    }
+
+    const parse = (host: string) =>
+      entries
+        .filter((e) => e.msg.startsWith('[llm-fetch]') && e.msg.includes(`origin=https://${host}`))
+        .map((e) => Number(e.msg.match(/ seq=(\d+)/)![1]))
+    expect(parse('proxy-a.example')).toEqual([1, 2])
+    expect(parse('proxy-b.example')).toEqual([1, 2])
   })
 
   test('logs retry_after header when present (throttling signal)', async () => {
@@ -1169,10 +1227,12 @@ describe('installLlmFetchObserver', () => {
     expect(observed[0]!.msg).toContain('cause=overall_timeout')
   })
 
-  test('an unset TYPECLAW_CODEX_*_MS leaves the codex endpoint timeouts undefined (defers to generic/default)', () => {
+  test('an unset TYPECLAW_CODEX_*_MS pins codex ttfb to 13s and leaves idle/overall deferring', () => {
     const codex = defaultLlmFetchEndpoints({}).find((e) => e.label === 'codex')
     expect(codex).toBeDefined()
-    expect(codex!.ttfbMs).toBeUndefined()
+    // ttfb is pinned to the codex-specific 13s default (fast silent-hang detection,
+    // adaptation bypassed); idle/overall still defer to generic/built-in defaults.
+    expect(codex!.ttfbMs).toBe(13_000)
     expect(codex!.idleMs).toBeUndefined()
     expect(codex!.overallMs).toBeUndefined()
   })
@@ -1188,10 +1248,11 @@ describe('installLlmFetchObserver', () => {
     expect(codex!.overallMs).toBe(333)
   })
 
-  test('generic TYPECLAW_LLM_TTFB_MS applies to Codex when TYPECLAW_CODEX_TTFB_MS is unset', async () => {
-    // given: only the generic var is set; the Codex-specific var is unset, so it
-    // must NOT mask the generic one (the review bug).
-    process.env.TYPECLAW_LLM_TTFB_MS = '70'
+  test('codex ttfb 13s default wins over a generic TYPECLAW_LLM_TTFB_MS when codex var is unset', async () => {
+    // given: only the generic var is set (to a LONGER 20s). Codex must NOT defer to
+    // it — the codex-specific 13s pin is what protects against silent hangs, so it
+    // fires first regardless of a longer generic value.
+    process.env.TYPECLAW_LLM_TTFB_MS = '20000'
     const { logger, entries } = captureLogger()
     const clock = makeClock()
     const scheduler = makeScheduler()
@@ -1209,8 +1270,8 @@ describe('installLlmFetchObserver', () => {
     try {
       clock.set(0)
       const pending = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
-      clock.set(70)
-      await scheduler.fire(70)
+      clock.set(13_000)
+      await scheduler.fire(13_000)
       await pending.catch((e) => {
         caught = e
       })
@@ -1218,9 +1279,9 @@ describe('installLlmFetchObserver', () => {
       uninstall()
     }
 
-    // then: the 70ms generic TTFB fired for Codex
+    // then: the 13s codex TTFB fired, not the 20s generic one
     expect(caught).not.toBeNull()
-    expect(caught!.message).toContain('70ms')
+    expect(caught!.message).toContain('13000ms')
     expect(entries.find((e) => e.msg.startsWith('[llm-fetch]'))!.msg).toContain('cause=ttfb_timeout')
   })
 

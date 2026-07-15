@@ -104,6 +104,14 @@ const ENV_CODEX_OVERALL_MS = 'TYPECLAW_CODEX_OVERALL_MS'
 const DEFAULT_TTFB_MS = 15_000
 const DEFAULT_IDLE_MS = 120_000
 const DEFAULT_OVERALL_MS = 300_000
+// Codex is healthy-FAST but silently hangs: observed header latency p50~1s /
+// p99~8s / max~10.8s, yet hung requests wait out the generic 15s floor. Pinning
+// 13s detects hangs ~2s sooner with ~2.2s margin over the healthy max. Pinned,
+// not adaptive: codex's p95 (~5.6s) never crosses the floor so widening is a
+// no-op, and a longer deadline only makes each silent hang costlier to recover.
+// A concrete per-endpoint `ttfbMs` also disables adaptive eligibility for codex
+// (see `usesAdaptiveTtfb`). Operator-set TYPECLAW_CODEX_TTFB_MS still overrides.
+const DEFAULT_CODEX_TTFB_MS = 13_000
 const LOG_PREFIX = '[llm-fetch]'
 
 // Adaptive TTFB: give a provider that is OBSERVED to be slow-but-healthy more
@@ -248,10 +256,12 @@ export function defaultLlmFetchEndpoints(env: NodeJS.ProcessEnv = process.env): 
       // GETs to the same host (auth probes, etc.) are deliberately ignored.
       match: (url, method) =>
         method === 'POST' && url.hostname === 'chatgpt.com' && url.pathname.includes('/codex/responses'),
-      // Only pin a per-endpoint value when the operator explicitly set the
-      // Codex-specific var; unset falls through to the generic TYPECLAW_LLM_*
-      // (or built-in default) so it isn't masked. See readEnvMsOptional.
-      ttfbMs: readEnvMsOptional(env, ENV_CODEX_TTFB_MS),
+      // TTFB is pinned to the codex-specific default (not the generic 15s) so a
+      // silent hang is caught fast and adaptation is bypassed for this endpoint;
+      // an operator-set TYPECLAW_CODEX_TTFB_MS still wins. Idle/overall keep the
+      // fall-through shape (unset → generic TYPECLAW_LLM_* / built-in default) so
+      // they aren't masked. See readEnvMsOptional and DEFAULT_CODEX_TTFB_MS.
+      ttfbMs: readEnvMsOptional(env, ENV_CODEX_TTFB_MS) ?? DEFAULT_CODEX_TTFB_MS,
       idleMs: readEnvMsOptional(env, ENV_CODEX_IDLE_MS),
       overallMs: readEnvMsOptional(env, ENV_CODEX_OVERALL_MS),
     },
@@ -316,6 +326,18 @@ function quote(value: string | null): string {
 
 function formatLine(fields: {
   provider: string
+  // The request origin (scheme+host, no path/query — non-sensitive) that scopes
+  // `seq`. `provider` alone is ambiguous: `openai-compatible` accepts arbitrary
+  // proxy origins and the observer is shared across agents, so two origins can
+  // each emit `provider=openai-compatible seq=1`. The origin disambiguates them
+  // so seq is attributable per stream.
+  origin: string
+  // Per-(provider,origin) monotonic fetch sequence. A tight run of increasing seq
+  // on one provider|origin is the observable signature of retry MULTIPLICATION (the
+  // pi-ai codex provider's internal loop stacked under typeclaw's own retries):
+  // it makes the physical-fetch count per logical turn countable from logs alone.
+  // Observability only — nothing reads this back to drive behavior.
+  seq: number
   status: number | null
   headersMs: number | null
   firstByteMs: number | null
@@ -329,6 +351,8 @@ function formatLine(fields: {
   return [
     LOG_PREFIX,
     `provider=${fields.provider}`,
+    `origin=${fields.origin}`,
+    `seq=${fields.seq}`,
     `status=${fields.status === null ? 'null' : fields.status}`,
     `headers_ms=${fields.headersMs === null ? 'null' : fields.headersMs}`,
     `first_byte_ms=${fields.firstByteMs === null ? 'null' : fields.firstByteMs}`,
@@ -367,6 +391,8 @@ type ResolvedTimeouts = {
 
 type BodyTapConfig = {
   provider: string
+  origin: string
+  seq: number
   idleMs: number
   overallMs: number
   scheduler: TimeoutScheduler
@@ -387,6 +413,8 @@ function attachBodyTimingTap(
     logger.info(
       formatLine({
         provider: config.provider,
+        origin: config.origin,
+        seq: config.seq,
         status,
         headersMs,
         firstByteMs: null,
@@ -412,6 +440,8 @@ function attachBodyTimingTap(
     logger.info(
       formatLine({
         provider: config.provider,
+        origin: config.origin,
+        seq: config.seq,
         status,
         headersMs,
         firstByteMs,
@@ -577,6 +607,7 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
   }
   const originalFetch = globalThis.fetch
   const adaptive = opts.adaptiveTracker ?? new AdaptiveTtfbTracker(now)
+  const fetchSeqByKey = new Map<string, number>()
   // Adaptation is a property of the built-in floor default only. Any explicit
   // static TTFB (observer opt, per-endpoint value, or a set TYPECLAW_*_TTFB_MS)
   // means the operator pinned a deadline — honour it verbatim, no widening.
@@ -616,6 +647,8 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     const timeouts = resolveTimeouts(endpoint, perRequest)
     const provider = endpoint.label
     const adaptiveKey = `${provider}|${origin}`
+    const seq = (fetchSeqByKey.get(adaptiveKey) ?? 0) + 1
+    fetchSeqByKey.set(adaptiveKey, seq)
     const usesAdaptiveTtfb = adaptiveEligible && perRequest?.ttfbMs === undefined && endpoint.ttfbMs === undefined
     const effectiveTtfbMs = usesAdaptiveTtfb ? adaptive.resolve(adaptiveKey) : timeouts.ttfbMs
     const start = now()
@@ -653,6 +686,8 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
       logger.info(
         formatLine({
           provider,
+          origin,
+          seq,
           status: null,
           headersMs: null,
           firstByteMs: null,
@@ -673,6 +708,8 @@ export function installLlmFetchObserver(opts: LlmFetchObserverOptions = {}): () 
     const requestId = response.headers.get('x-request-id')
     return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger, {
       provider,
+      origin,
+      seq,
       idleMs: timeouts.idleMs,
       overallMs: timeouts.overallMs,
       scheduler,
