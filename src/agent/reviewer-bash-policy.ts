@@ -92,6 +92,8 @@ const READONLY_VERBS = new Set([
   'true',
   'false',
   'test',
+  'which', // read-only tool-availability probe; does not execute the queried command
+  'type', // shell builtin lookup; read-only. `type -a foo` reports, never runs
   'dirname',
   'basename',
   'realpath',
@@ -515,6 +517,44 @@ function assertGhApiReadOnly(rest: string[]): void {
   }
 }
 
+// `command` normally re-enters execution (`command git push` runs `git push`),
+// so it is a forbidden wrapper by default. The sole read-only exception is the
+// lookup form `command -v NAME` / `command -V NAME`, which only *reports* whether
+// NAME resolves and never executes it — the reviewer's legitimate "is this tool
+// available?" probe.
+//
+// The parse must respect POSIX `command [-pVv] name [arg...]` operand semantics:
+// only options BEFORE the first operand are `command`'s own; the first non-option
+// token is the command NAME, and everything after it is that command's arguments.
+// So `command git push -v` is NOT a lookup — `git` is the operand and the trailing
+// `-v` belongs to `git push` (a real verbose push). Scanning every position for a
+// `-v` (the earlier bug) would misread that as a lookup and authorize a mutation.
+// We therefore require a `-v`/`-V` among the LEADING options, reject `-p` (forces a
+// PATH exec) and `--` (ends option parsing → execution), and — since a lookup takes
+// exactly one NAME and never runs it — reject any operand beyond that single name.
+function classifyCommandBuiltin(tokens: string[]): void {
+  const args = tokens.slice(1)
+  const leadingOptions: string[] = []
+  let i = 0
+  while (i < args.length && args[i]!.startsWith('-') && args[i] !== '--') {
+    leadingOptions.push(args[i]!)
+    i++
+  }
+  const operands = args.slice(i).filter((t) => t !== '--')
+  const endsOptionParsing = i < args.length && args[i] === '--'
+
+  const isLookup = leadingOptions.some((f) => f === '-v' || f === '-V' || f === '-vV' || f === '-Vv')
+  const forcesExecution = leadingOptions.some((f) => f === '-p' || f.includes('p')) || endsOptionParsing
+  // A lookup resolves exactly one NAME and never executes it; a second operand
+  // means the extra tokens are arguments to an executed command, not a lookup.
+  const isSingleNameLookup = isLookup && !forcesExecution && operands.length <= 1
+
+  if (isSingleNameLookup) return
+  throw new SubagentBashPolicyError(
+    '`command` re-enters execution (only the read-only lookup form `command -v NAME` is allowed); it is not permitted.',
+  )
+}
+
 function classifyFsWriter(verb: string, tokens: string[], redirectTargets: string[]): void {
   const operands = tokens.slice(1).filter((t) => !t.startsWith('-'))
   const allUnderTmp = operands.length > 0 && operands.every(isTmpPath) && redirectTargets.every(isTmpPath)
@@ -538,6 +578,7 @@ function classifySegment(segment: Segment): void {
   if (tokens.length === 0) return
   const verb = stripQuotes(tokens[0]!)
 
+  if (verb === 'command') return classifyCommandBuiltin(tokens)
   if (FORBIDDEN_WRAPPER_VERBS.has(verb)) {
     throw new SubagentBashPolicyError(`\`${verb}\` can re-enter a shell or hand off execution; it is not permitted.`)
   }
