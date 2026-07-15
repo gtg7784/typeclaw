@@ -33,7 +33,7 @@
 ## Web & research — reads the web like a person
 
 - 🔍 **Live web search & fetch** — pull a page as a readable article, a JSON query, a selected slice, a grep, or raw
-- 🪪 **Browser-like fetching** — replays a Chrome-like TLS/HTTP fingerprint to get past many generic-client blocks; CAPTCHA and IP-reputation gates can still fail
+- 🛡️ **Rebinding-safe page fetching** — validates every A/AAAA answer on the socket lookup and every redirect hop; private and mixed-address targets fail closed
 - 🌐 **Interactive browser sessions** — drives a browser on live pages, with a dashboard you can step into for logins, 2FA, or CAPTCHA
 
 ## Security — defense-in-depth for risky actions

@@ -694,9 +694,9 @@ export async function planStart({
   }
 
   // sandbox.symlinks: the entrypoint shim creates `from -> /agent/<to>` at the
-  // real container HOME for the UNSANDBOXED (trusted/owner) bash path. The
-  // low-trust path is handled separately by the per-tool bwrap --symlink op
-  // (src/sandbox/build.ts). Passed as base64-encoded JSON because `from`/`to`
+  // real container HOME for runtime-owned processes. Model-driven bash creates
+  // its corresponding link at the bwrap HOME via src/sandbox/build.ts. Passed
+  // as base64-encoded JSON because `from`/`to`
   // are arbitrary operator strings — base64 sidesteps every shell-metachar and
   // env-quoting hazard; the shim decodes + JSON-parses it with bun. Omitted when
   // empty so the common case adds no env clutter and the shim's loop never runs.

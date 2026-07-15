@@ -24,29 +24,22 @@ A contribution composed from your defaults and one composed from the repo's conv
 The cheapest reliable check is to list each base directory once and scan the names, rather than guessing exact filenames:
 
 ```sh
-# PR template — scan all three base dirs for any case of the file OR a PULL_REQUEST_TEMPLATE/ dir.
-# (Listing the dir surfaces both the single-file and the multi-template-directory forms at once.)
-for base in "" "docs/" ".github/"; do
-  gh api "repos/OWNER/REPO/contents/${base}" --jq '.[].name' 2>/dev/null \
-    | grep -iE '^pull_request_template(\.md)?$'
-done
-# If a PULL_REQUEST_TEMPLATE/ directory exists in ANY base, list the choices inside it
-# (the directory form is supported at root, docs/, and .github/ alike):
-for base in "" "docs/" ".github/"; do
-  gh api "repos/OWNER/REPO/contents/${base}PULL_REQUEST_TEMPLATE" --jq '.[].name' 2>/dev/null
-done
-
-# Issue templates — the modern form is an ISSUE_TEMPLATE/ directory of forms;
-# the legacy form is a single ISSUE_TEMPLATE.md. Check both, in all three base dirs.
-for base in "" "docs/" ".github/"; do
-  gh api "repos/OWNER/REPO/contents/${base}ISSUE_TEMPLATE" --jq '.[].name' 2>/dev/null  # directory of forms
-  gh api "repos/OWNER/REPO/contents/${base}" --jq '.[].name' 2>/dev/null \
-    | grep -iE '^issue_template(\.md)?$'                                                 # single legacy file
-done
+# Run each as its own bare invocation. Inspect the returned names case-insensitively
+# for PULL_REQUEST_TEMPLATE(.md), PULL_REQUEST_TEMPLATE/, ISSUE_TEMPLATE(.md),
+# and ISSUE_TEMPLATE/. A missing directory may return 404; continue with the next.
+gh api repos/OWNER/REPO/contents/ --jq '.[].name'
+gh api repos/OWNER/REPO/contents/docs --jq '.[].name'
+gh api repos/OWNER/REPO/contents/.github --jq '.[].name'
+gh api repos/OWNER/REPO/contents/PULL_REQUEST_TEMPLATE --jq '.[].name'
+gh api repos/OWNER/REPO/contents/docs/PULL_REQUEST_TEMPLATE --jq '.[].name'
+gh api repos/OWNER/REPO/contents/.github/PULL_REQUEST_TEMPLATE --jq '.[].name'
+gh api repos/OWNER/REPO/contents/ISSUE_TEMPLATE --jq '.[].name'
+gh api repos/OWNER/REPO/contents/docs/ISSUE_TEMPLATE --jq '.[].name'
+gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE --jq '.[].name'
 
 # Contribution guide (root or .github/)
-gh api repos/OWNER/REPO/contents/CONTRIBUTING.md 2>/dev/null
-gh api repos/OWNER/REPO/contents/.github/CONTRIBUTING.md 2>/dev/null
+gh api repos/OWNER/REPO/contents/CONTRIBUTING.md
+gh api repos/OWNER/REPO/contents/.github/CONTRIBUTING.md
 
 # What do existing titles look like?
 gh pr list --repo OWNER/REPO --state all --limit 20 --json title --jq '.[].title'
@@ -100,12 +93,16 @@ The same applies to PRs: a quick `gh pr list --search` avoids opening a PR for s
 
 1. **Identify the target repo** (`OWNER/REPO`) and whether you're filing an issue or a PR.
 2. **Read the room** — run the checks in "Do this first": templates, CONTRIBUTING, existing titles, duplicate search.
-3. **Compose to the conventions** — fill the template, honor CONTRIBUTING, match the title style. Write the body to a file when it's long or contains backticks/markdown that shell-quoting would mangle, then pass it with `--body-file`.
-4. **Open it** with `gh`:
+3. **Compose to the conventions** — fill the template, honor CONTRIBUTING, match the title style. Keep the body inline and single-quoted. `--body-file`, `--template`, editor/fill/recovery modes, shell substitution, and command composition are intentionally unavailable to model-driven `gh`.
+4. **Open an issue** with the supported model-driven `gh` form:
    ```sh
-   gh issue create --repo OWNER/REPO --title "<conventional title>" --body-file /tmp/issue-body.md
-   gh pr create   --repo OWNER/REPO --title "<conventional title>" --body-file /tmp/pr-body.md --base <branch>
+   gh issue create --repo OWNER/REPO --title '<conventional title>' --body '<filled body>'
    ```
+   For a **pull request**, prepare the exact title, body, pushed head branch, and base branch, then ask the operator to run this at the host stage from the repository checkout:
+   ```sh
+   gh pr create --repo OWNER/REPO --title '<conventional title>' --body '<filled body>' --head <branch> --base <branch>
+   ```
+   Model-driven bash cannot create or push a PR: TypeClaw deliberately withholds reusable credentials from network Git and blocks `gh pr create` because it may invoke local Git hooks.
 5. **Verify it landed** as intended (`gh issue view` / `gh pr view`) — confirm the template rendered and nothing got truncated.
 
 ## Things you must not do
@@ -121,4 +118,4 @@ The same applies to PRs: a quick `gh pr list --search` avoids opening a PR for s
 
 - **Replying to inbound GitHub events, and running PR reviews** — `typeclaw-channel-github`. That skill owns triage of github-channel inbounds, formal reviews via the reviews API, and resolving review threads. This skill owns only the act of _opening_ a new issue/PR.
 - **Committing to your own agent folder** — `typeclaw-git`. Local commit hygiene and decision-context messages live there; this skill is about GitHub artifacts, not your local history.
-- **The `gh` CLI's full surface** — auth, sub-commands, flags. Defer to `gh <command> --help`. Under the github channel adapter, `GH_TOKEN` is pre-injected; see `typeclaw-channel-github` for the single-bare-invocation constraint that applies to repo-targeting `gh` calls (no pipes, `;`, `&&`, heredocs, or command substitution).
+- **The `gh` CLI's full surface** — auth, sub-commands, flags. TypeClaw brokers a command-scoped token only after statically validating the repo and command shape; it is not a broadly exposed `GH_TOKEN`. See `typeclaw-channel-github` for the single-bare-invocation constraint (no pipes, `;`, `&&`, heredocs, redirections, or substitution).

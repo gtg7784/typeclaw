@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-github
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues or PRs with `gh`, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as an inline review via `gh api`. ALWAYS settle PR authorship first (triage #0): on a PR **you** opened you are the CONTRIBUTOR/author, not its reviewer — "address the review" / "리뷰 반영" / "fix the feedback" / a `CHANGES_REQUESTED` on your own PR means change the code, push, and reply, NOT spawn the reviewer or post a formal verdict; you never review your own PR. The reviewer persona is for other people's PRs only. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. When a review comment **you authored** gets addressed — the author pushed a fix or replied that resolves it — verify the fix at the PR's head SHA and then resolve the thread by acknowledging with `channel_reply({ …, resolve_review_thread: true })`, which resolves the thread before posting the reply (see "Resolving review threads you authored" below); resolving is the close-out that tells the author the concern is settled. To open new issues or PRs use the `gh` CLI — `GH_TOKEN` is pre-set by the adapter. Read this skill before composing anything on GitHub.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues with model-driven `gh` or preparing a PR for host-stage operator creation, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as a formal review via `post_github_review`. ALWAYS settle PR authorship first (triage #0): on a PR **you** opened you are the CONTRIBUTOR/author, not its reviewer — "address the review" / "리뷰 반영" / "fix the feedback" / a `CHANGES_REQUESTED` on your own PR means ask the operator for host-stage checkout, change and commit the code, ask the operator to push, and reply, NOT spawn the reviewer or post a formal verdict; you never review your own PR. The reviewer persona is for other people's PRs only. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. When a review comment **you authored** gets addressed — the author pushed a fix or replied that resolves it — verify the fix at the PR's head SHA and then resolve the thread by acknowledging with `channel_reply({ …, resolve_review_thread: true })`, which resolves the thread before posting the reply (see "Resolving review threads you authored" below); resolving is the close-out that tells the author the concern is settled. Model-driven `gh issue create` may open new issues with a command-scoped credential brokered by the adapter. PR creation, checkout, and push are host-stage operator actions. Read this skill before composing anything on GitHub.
 ---
 
 GitHub renders normal Markdown in issues, PRs, discussions, and review comments. Use headings, lists, tables, fenced code blocks, links, and inline code when they improve clarity.
@@ -24,10 +24,10 @@ Before you pick an action, classify the inbound. Skipping this step is how a PR 
    gh pr view <N> --repo owner/repo --json author --jq '.author.login'
    ```
 
-   - **The PR author is you (`<your-login>`).** You are the **contributor/author** on this PR, not its reviewer. Feedback on it — a review, a "리뷰 반영 부탁드려요" / "address the review" / "please apply the feedback" / "fixed?" comment, a `CHANGES_REQUESTED` someone else left — is yours to **address as the author**: read it, change the code, push, and reply. Go to the **contributor flow** ("When the PR is yours"). **You never review your own PR**, and you never spawn the `reviewer` subagent on it — GitHub does not even let an author formally review their own PR, so an attempt produces a self-addressed "review" comment, which is the exact persona-confusion bug to avoid. Gates 1–2 below (review obligations / review requests) describe the _reviewer_ persona and **do not apply when the PR is yours** — skip straight to the contributor flow.
-   - **The PR author is someone else.** You may be its reviewer. Continue to gate 1.
+- **The PR author is you (`<your-login>`).** You are the **contributor/author** on this PR, not its reviewer. Feedback on it — a review, a "리뷰 반영 부탁드려요" / "address the review" / "please apply the feedback" / "fixed?" comment, a `CHANGES_REQUESTED` someone else left — is yours to **address as the author**: read it, ask the operator for the required host-stage checkout, change and commit the code, ask the operator to push, and reply. Go to the **contributor flow** ("When the PR is yours"). **You never review your own PR**, and you never spawn the `reviewer` subagent on it — GitHub does not even let an author formally review their own PR, so an attempt produces a self-addressed "review" comment, which is the exact persona-confusion bug to avoid. Gates 1–2 below (review obligations / review requests) describe the _reviewer_ persona and **do not apply when the PR is yours** — skip straight to the contributor flow.
+  - **The PR author is someone else.** You may be its reviewer. Continue to gate 1.
 
-   This gate is first because everything after it assumes the reviewer persona. "Address the review" sounds identical whether you wrote the PR or someone else did; only the author check disambiguates, and getting it wrong is what makes the agent review its own work.
+  This gate is first because everything after it assumes the reviewer persona. "Address the review" sounds identical whether you wrote the PR or someone else did; only the author check disambiguates, and getting it wrong is what makes the agent review its own work.
 
 1. **(Someone else's PR.) Do I have an unresolved blocking obligation on it?** On any `pr:N` inbound, before anything else, check whether you owe this PR a verdict you have not yet landed. Check **both** signals below — checking only formal review state misses the very failure this gate exists to catch, because a prior block may never have become formal state:
    - **Formal review state.** Run the step-1 re-review query in the PR review flow (`gh api --paginate --slurp /repos/owner/repo/pulls/<N>/reviews --jq '…'` filtered to `{CHANGES_REQUESTED, APPROVED}`). If your latest **blocking decision** is `CHANGES_REQUESTED`, you have a live sticky block.
@@ -47,16 +47,16 @@ Before you pick an action, classify the inbound. Skipping this step is how a PR 
 
 Every GitHub inbound lands on a `chat` keyed by its subject: `issue:N`, `pr:N`, or `discussion:N`. **Run the triage above first.** Only if no triage branch matched do you pick an action from this table. The default action for anything addressed to you is a normal `channel_reply` in that thread; the **PR review flow** is the exception that requires delegation.
 
-| Inbound                                                       | Looks like                                                                                           | What to do                                                                                                                                                      |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **New issue** (`issue:N`)                                     | A freshly opened issue body.                                                                         | Triage or answer it. `channel_reply` on `issue:N`. Open follow-up issues/PRs with `gh` if needed.                                                               |
-| **Issue comment** (`issue:N`)                                 | A comment on an issue.                                                                               | Reply in the issue thread with `channel_reply`.                                                                                                                 |
-| **PR conversation comment** (`pr:N`, no `thread`)             | A comment on a PR's main conversation (GitHub models PR comments as issue comments).                 | Reply on the PR with `channel_reply`. **If the text asks you to review → go to the PR review flow.**                                                            |
-| **PR review-thread reply** (`pr:N`, `thread` set)             | A reply on an existing inline review comment thread.                                                 | Stay in the thread: `channel_reply` with `thread` kept as-is. **If it addresses a comment you authored → verify and resolve the thread (below).**               |
-| **A submitted review** (`pr:N`)                               | Someone submitted a formal review (approve / changes / comment) on a PR.                             | **If the PR is yours (triage #0) → contributor flow:** address the feedback, then reply. Otherwise react if a response is warranted. `channel_reply` on `pr:N`. |
-| **Feedback on your own PR** (`pr:N`, author = `<your-login>`) | A review, a `CHANGES_REQUESTED`, or an "address the review / fixed?" comment on a PR **you** opened. | **Contributor flow** ("When the PR is yours"). Address the feedback as the author — never review or formally approve your own PR.                               |
-| **New discussion / discussion comment** (`discussion:N`)      | A discussion thread or a comment in one.                                                             | Reply with `channel_reply` on `discussion:N`.                                                                                                                   |
-| **Review requested** (`pr:N`)                                 | See "When you are being asked to review" below.                                                      | **PR review flow.**                                                                                                                                             |
+| Inbound                                                       | Looks like                                                                                           | What to do                                                                                                                                                               |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **New issue** (`issue:N`)                                     | A freshly opened issue body.                                                                         | Triage or answer it. `channel_reply` on `issue:N`. Model-driven `gh issue create` may open a follow-up issue; prepare any follow-up PR for host-stage operator creation. |
+| **Issue comment** (`issue:N`)                                 | A comment on an issue.                                                                               | Reply in the issue thread with `channel_reply`.                                                                                                                          |
+| **PR conversation comment** (`pr:N`, no `thread`)             | A comment on a PR's main conversation (GitHub models PR comments as issue comments).                 | Reply on the PR with `channel_reply`. **If the text asks you to review → go to the PR review flow.**                                                                     |
+| **PR review-thread reply** (`pr:N`, `thread` set)             | A reply on an existing inline review comment thread.                                                 | Stay in the thread: `channel_reply` with `thread` kept as-is. **If it addresses a comment you authored → verify and resolve the thread (below).**                        |
+| **A submitted review** (`pr:N`)                               | Someone submitted a formal review (approve / changes / comment) on a PR.                             | **If the PR is yours (triage #0) → contributor flow:** address the feedback, then reply. Otherwise react if a response is warranted. `channel_reply` on `pr:N`.          |
+| **Feedback on your own PR** (`pr:N`, author = `<your-login>`) | A review, a `CHANGES_REQUESTED`, or an "address the review / fixed?" comment on a PR **you** opened. | **Contributor flow** ("When the PR is yours"). Address the feedback as the author — never review or formally approve your own PR.                                        |
+| **New discussion / discussion comment** (`discussion:N`)      | A discussion thread or a comment in one.                                                             | Reply with `channel_reply` on `discussion:N`.                                                                                                                            |
+| **Review requested** (`pr:N`)                                 | See "When you are being asked to review" below.                                                      | **PR review flow.**                                                                                                                                                      |
 
 ### When the PR is yours — addressing review feedback (contributor)
 
@@ -70,17 +70,23 @@ The flow:
 1. **Read the feedback at the current head.** Pull the review comments and any `CHANGES_REQUESTED` summary so you know exactly what is being asked.
 
    ```sh
-   gh pr view <N> --repo owner/repo --json reviews,comments,headRefOid \
-     --jq '{reviews: [.reviews[] | {author: .author.login, state, body}], head: .headRefOid}'
+   gh pr view <N> --repo owner/repo --json reviews,comments,headRefOid --jq '{reviews: [.reviews[] | {author: .author.login, state, body}], head: .headRefOid}'
    gh api /repos/owner/repo/pulls/<N>/comments --jq '[.[] | {path, line, user: .user.login, body}]'
    ```
 
-2. **Make the changes on the PR's branch.** Check out the PR's head branch, make the minimal fixes the feedback calls for, and push. Committing and pushing to your own branch is `typeclaw-git` territory — follow it for commit hygiene. Do **not** open a _new_ PR to fix your existing one; push to the same branch so the open PR updates in place.
+2. **Update the PR's branch with host-stage help.** Model-driven bash cannot run `gh pr checkout` or authenticated `git push`: both may execute local hooks while carrying reusable credentials. Ask the operator to run the checkout from the host-stage repository directory:
 
    ```sh
    gh pr checkout <N> --repo owner/repo
-   # …edit files, then commit + push per typeclaw-git…
    ```
+
+   After the operator confirms the checkout, make the minimal fixes and commit them locally with `typeclaw-git` hygiene. Then ask the operator to push that same branch from the host stage:
+
+   ```sh
+   git push
+   ```
+
+   Do **not** open a _new_ PR to fix your existing one; the operator pushes to the same branch so the open PR updates in place.
 
    If a point is a genuine disagreement (the reviewer is mistaken, or the behavior is intentional), don't silently change it — reply in the thread with your reasoning instead.
 
@@ -88,9 +94,9 @@ The flow:
    - **Do not resolve the threads.** On your own PR the open inline threads were authored by your **reviewer**, not by you — and the base principle is _whoever opened the thread closes it_. Resolving is the reviewer's call once they're satisfied; the runtime enforces this (it only lets you resolve threads whose root comment **you** authored). Push the fix, reply, and leave the thread for the reviewer to close.
    - **Do not post a verdict.** "LGTM", "Approved", "Request changes" are reviewer words. As the author you reply in plain prose; you never emit a review verdict on your own PR.
 
-4. **If CI is failing on your PR**, that's also contributor work: read the failing check, fix the cause on the branch, and push. You can't always read another system's CI logs — if you can't, say so and ask for the error rather than guessing.
+4. **If CI is failing on your PR**, that's also contributor work: read the failing check, fix the cause on the checked-out branch, commit locally, then ask the operator to run `git push` from the host stage. You can't always read another system's CI logs — if you can't, say so and ask for the error rather than guessing.
 
-That's the whole contributor loop: read feedback → fix on the branch → push → reply. No subagent, no formal review, no thread resolution.
+That's the whole contributor loop: read feedback → operator checks out at the host stage → fix and commit locally → operator pushes at the host stage → reply. No subagent, no formal review, no thread resolution.
 
 ### When you are being asked to review
 
@@ -160,7 +166,7 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    </review>
    ```
 
-4. **Translate findings into a `gh api` review payload.** Each `<finding>` with `severity` of `blocker`, `concern`, or `nit` and a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` verbatim (modulo markdown). Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. **Skip `praise` findings when building `comments[]`** — if you want to surface them, weave them into the top-level `body`.
+4. **Translate findings into a `post_github_review` call.** Each `<finding>` with `severity` of `blocker`, `concern`, or `nit` and a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` verbatim (modulo markdown). Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. **Skip `praise` findings when building `comments[]`** — if you want to surface them, weave them into the top-level `body`.
 
    **The verdict and the inline comments are independent. The verdict sets only the `event` field; it never decides whether you post `comments[]`.** Whenever there is at least one actionable finding (`blocker`/`concern`/`nit`) with a `location="path:line"`, you MUST submit a formal review via `POST /pulls/<N>/reviews` carrying those findings in `comments[]` — including when the verdict is `approve`. An `approve` with three nits is still a formal `APPROVE` review with three inline comments, **not** a plain approval and **not** a flattened summary. Collapsing inline findings into a single `channel_reply` or issue comment loses the line anchors the reviewer worked to produce.
 
@@ -189,12 +195,10 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
 
      This transitions your review to `DISMISSED` and unblocks the PR without an approval. It needs the bot's installation to have **write** access (or to be on the branch's "who can dismiss reviews" list); if the dismissal returns 403, the block cannot be cleared under this policy — post the `<summary>` as a `COMMENT` review and say plainly in the body that the prior changes-request stands until a human dismisses it, rather than implying the PR is unblocked.
 
-   Then submit the review. **Write the JSON payload to a file with the `write` tool, then run a single bare `gh api --input <file>`** — two steps:
-
-   First write `/tmp/review-<N>.json` (via the `write` tool, not bash) — `/tmp` is per-session scratch, and the `<N>` keeps concurrent reviews in one session from colliding. **Every `gh api --input` payload — review JSON, dismissal JSON, top-level issue-comment JSON — is throwaway scratch and MUST be written under `/tmp/`, never the workspace/agent folder.** A path with no leading `/tmp/` (e.g. a bare `review.json`, `review_comment.json`, or `review-<N>-approve.json`) lands in the agent root and gets force-committed by the backup loop, littering the repo with review payloads. Always prefix the path with `/tmp/`; never write a `*.json` scratch file to the workspace:
+   Then submit the review with the first-class tool:
 
    ```json
-   {
+   post_github_review({
      "event": "COMMENT",
      "body": "<reviewer's <summary> goes here>",
      "comments": [
@@ -206,38 +210,22 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
        },
        { "path": "src/bar.ts", "line": 10, "side": "RIGHT", "body": "..." }
      ]
-   }
+   })
    ```
 
-   Then post it:
+   Anchor mechanics: `line` is a line number **in the file**, not a position in the diff. `side: RIGHT` is the new revision (default for additions); `side: LEFT` is the old revision (use for comments on removed lines). For multi-line comments, also set `start_line` and `start_side` (same semantics). The tool resolves the head SHA, validates anchors against the complete PR diff, moves out-of-diff findings into the top-level body, enforces approval policy, and verifies the exact returned review id/state. Its successful receipt is proof that the formal review landed. On failure, fix the payload or policy issue and retry; never post a flat comment claiming the review succeeded.
 
-   ```sh
-   gh api -X POST /repos/owner/repo/pulls/<N>/reviews --input /tmp/review-<N>.json
-   ```
+5. **The decoy reviewer is dropped for you — no action needed.** Under **GitHub App** auth, the adapter automatically removes the decoy reviewer from the PR's requested-reviewers list the moment your formal review lands (it reacts to your own `pull_request_review.submitted` webhook). Why this matters: GitHub auto-adds **you** (the App account) to the PR's reviewers when your review posts, but the **decoy** account would otherwise stay pinned as a perpetual "review requested", as if the review never happened. You do **not** need to issue a `DELETE /requested_reviewers` yourself — and you should not, since it would race the adapter's own cleanup. The removal is self-loop-safe: the adapter's `DELETE` is authenticated as the App, so the `review_request_removed` webhook carries your bot actor (`slug[bot]`) as `sender`, which the classifier drops (see "Self-loop safety" below). This is a no-op under **PAT** auth (no decoy) and for **plain-language**/**team** requests (no decoy user was placed). See [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer).
 
-   **A repo-targeting `gh` command must be a single bare `gh` invocation — no pipes, `;`, `&&`, heredocs, or command substitution.** The `github-cli-auth` plugin injects the GitHub App token into the command's environment, so any sibling/upstream stage in a pipeline would inherit a live token; the runtime blocks those shapes. That is why the old `cat <<'JSON' | gh api --input -` heredoc-pipe no longer works: write the JSON to a file and feed it with `--input <file>` instead. Do **not** use `-f body=...` or `-F 'comments[][body]=...'`: those go through shell argument parsing, so backticks trigger command substitution. The file passes the JSON through untouched — backticks, newlines, and `${...}` all survive verbatim. The same file-then-`--input` pattern applies to any `gh api` POST whose body contains backticks, embedded newlines, or shell metacharacters.
-
-   Anchor mechanics: `line` is a line number **in the file**, not a position in the diff. `side: RIGHT` is the new revision (default for additions); `side: LEFT` is the old revision (use for comments on removed lines). For multi-line comments, also set `start_line` and `start_side` (same semantics). If you need to read whole files at the PR's head SHA to validate an anchor before posting, use `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>`.
-
-5. **Verify the review actually landed before announcing it.** The `gh api` call can fail silently from the model's perspective — a permission denial, a bad `line` anchor, or a malformed payload returns an error you must not paper over. After submitting, confirm the review exists:
-
-   ```sh
-   gh api /repos/owner/repo/pulls/<N>/reviews --jq '.[-1] | {id, state, user: .user.login}'
-   ```
-
-   The returned `id`/`state` is your proof the formal review posted. If the call errored or the review is absent, do **not** fall back to a top-level `channel_reply` that _claims_ a review was posted — fix the payload (most often a `line` that isn't part of the diff; re-anchor it or move that finding to the top-level `body`) and resubmit. A trace reply that says "Posted review" when no review exists is worse than silence.
-
-6. **The decoy reviewer is dropped for you — no action needed.** Under **GitHub App** auth, the adapter automatically removes the decoy reviewer from the PR's requested-reviewers list the moment your formal review lands (it reacts to your own `pull_request_review.submitted` webhook). Why this matters: GitHub auto-adds **you** (the App account) to the PR's reviewers when your review posts, but the **decoy** account would otherwise stay pinned as a perpetual "review requested", as if the review never happened. You do **not** need to issue a `DELETE /requested_reviewers` yourself — and you should not, since it would race the adapter's own cleanup. The removal is self-loop-safe: the adapter's `DELETE` is authenticated as the App, so the `review_request_removed` webhook carries your bot actor (`slug[bot]`) as `sender`, which the classifier drops (see "Self-loop safety" below). This is a no-op under **PAT** auth (no decoy) and for **plain-language**/**team** requests (no decoy user was placed). See [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer).
-
-7. **End the turn with `skip_response`, not a trace reply.** The formal review from step 4 already landed _in this PR_ — it carries the summary, the verdict, and the inline comments. A `channel_reply` here does **not** go to a separate operator channel; on GitHub it posts another public comment on the same PR. A one-line "Posted review on PR #N: …" narrated into the PR thread is meta-commentary addressed to a phantom operator, and it reads absurdly next to the review it claims to point at. So once step 5 confirms the review exists, call `skip_response({ reason: "review posted via gh api" })` to close the turn silently. Only fall back to `channel_reply` when there was **no** formal review to post — the zero-actionable-findings branch below uses `channel_reply`/issue comments _as_ the substantive reply.
+6. **End the turn with `skip_response`, not a trace reply.** The formal review from step 4 already landed _in this PR_ — it carries the summary, the verdict, and the inline comments. A `channel_reply` here does **not** go to a separate operator channel; on GitHub it posts another public comment on the same PR. A one-line "Posted review on PR #N: …" narrated into the PR thread is meta-commentary addressed to a phantom operator, and it reads absurdly next to the review it claims to point at. So once `post_github_review` confirms success, call `skip_response({ reason: "review posted via post_github_review" })` to close the turn silently. Only fall back to `channel_reply` when there was **no** formal review to post — the zero-actionable-findings branch below uses `channel_reply` as the substantive reply.
 
 ### Zero actionable findings
 
 A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. The inline-review post in step 4 applies whenever the actionable count is **at least one**. When the reviewer returns **exactly zero** actionable findings (only `praise`, or none), there is nothing to anchor inline — handle by verdict:
 
-- `approve` → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array). **Post the `<summary>` verbatim — do not pad it back into a play-by-play.** The reviewer's contract already makes the summary a terse, author-facing verdict justification (no process narration, no "I loaded the X skill", no recap of what the PR does); your job is to forward it, not re-expand it. **This is still a formal review via `POST /pulls/<N>/reviews`, NOT a `channel_reply`.** A zero-findings approval is the single most common place this goes wrong: with nothing to anchor inline, the model is tempted to just `channel_reply({ text: "Approved …" })` and end the turn. That posts a plain PR comment and leaves the PR **"awaiting review"** with no approval — the verdict never reaches GitHub's review API. Never start a top-level `channel_reply` on a `pr:N` with "Approved" / "LGTM" / "Request changes": those are verdicts, and verdicts are always formal reviews. Submit the `APPROVE` via `gh api`, confirm it landed (step 5), then `skip_response`. **If the operator approval policy above disabled approval, submit a `COMMENT` review instead — same `<summary>` as the review body, `event: "COMMENT"`, no `comments[]` array. Keep it a formal review, not a top-level issue comment, so the review metadata and flow are preserved.** (Re-review caveat: a `COMMENT` review does **not** clear a sticky `CHANGES_REQUESTED` block. If this is a re-review under approval-disabled policy, follow the step-4 re-review branch — dismiss your prior review — instead of relying on this `COMMENT`.)
-- `comment` → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments`, feeding the body from a `/tmp/` scratch file: write `/tmp/review-comment-<N>.json` (e.g. `{ "body": "<summary>" }`) with the `write` tool, then `gh api -X POST /repos/owner/repo/issues/<N>/comments --input /tmp/review-comment-<N>.json`. As with the review payload, this scratch file goes under `/tmp/`, **never** a bare `review_comment.json` in the workspace — the file-then-`--input` shape also keeps backticks/newlines in the summary from being mangled by shell parsing. Submit an empty review instead of this comment only when a formal review is required. **Exception — re-reviews:** if this is a re-review (you have an unresolved blocking obligation — a formal `CHANGES_REQUESTED` **or** an unretracted flat-comment blocker), a top-level comment discharges neither. Do not use this branch; resolve it via the step-4 re-review branch (`APPROVE` if resolved and approval is enabled, the dismissal endpoint if a formal block is resolved but approval is disabled, `REQUEST_CHANGES` if not resolved).
-- `request-changes` → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern); if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
+- `approve` → call `post_github_review({ event: "APPROVE", body: "<summary>" })`. **Post the `<summary>` verbatim — do not pad it back into a play-by-play.** The tool enforces approval policy and verifies the formal review. Never replace it with an "Approved"/"LGTM" `channel_reply`, which leaves GitHub awaiting a formal review.
+- `comment` → post the summary as the substantive top-level PR reply with `channel_reply`. **Exception — re-reviews:** if an unresolved blocking obligation exists, a top-level comment discharges neither form of block. Use `post_github_review` to land a fresh formal verdict instead.
+- `request-changes` → call `post_github_review({ event: "REQUEST_CHANGES", body: "<summary>" })`. This combination is rare; faithfully encode the reviewer's verdict.
 
 The bundled `agent-browser` is **not** for PR reviews — `gh api` is faster and more reliable. Only use the browser when the API genuinely can't reach what you need.
 
@@ -285,7 +273,7 @@ Prefer the flag above. Reach for the raw mutation only when you need to resolve 
 1. **Find the node id of the thread you authored.** Query the PR's review threads and pick the one whose root comment is yours and matches the `thread` you're replying in:
 
    ```sh
-   gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}' -F owner=OWNER -F name=REPO -F number=N
+   gh api graphql -R OWNER/REPO -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}' -F owner=OWNER -F name=REPO -F number=N
    ```
 
    Match on the root comment: its `comments.nodes[0].databaseId` equals the root comment id (the `thread` value the inbound carried), and `author.login` is you. Skip threads already `isResolved: true`.
@@ -295,7 +283,7 @@ Prefer the flag above. Reach for the raw mutation only when you need to resolve 
 2. **Resolve it** with the node id from step 1:
 
    ```sh
-   gh api graphql -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}' -F threadId=PRRT_xxx
+   gh api graphql -R OWNER/REPO -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}' -F threadId=PRRT_xxx
    ```
 
    The returned `isResolved: true` is your proof it landed. As with every repo-targeting `gh` call, this is a **single bare `gh` invocation** — no pipes, `;`, `&&`, heredocs, or command substitution (the `github-cli-auth` plugin injects the App token into the command's environment; a pipeline would leak it). `-F` passes the id as a typed variable, so there is no shell-metacharacter hazard for the simple id/number values here.
@@ -306,17 +294,17 @@ Resolving your own thread is safe from the self-response loop. The `pull_request
 
 ## Opening new issues and PRs
 
-The `gh` CLI is pre-authenticated via `GH_TOKEN` (injected by the adapter at startup). Use it to open new issues or PRs:
+TypeClaw brokers a command-scoped credential only to a supported, statically repo-targeted `gh` invocation. Do not inspect or assume a process-wide `GH_TOKEN`. Model-driven bash can open an issue with the narrow form below:
 
 ```sh
 # Open a new issue
-gh issue create --repo owner/repo --title "Bug: ..." --body "..."
+gh issue create --repo owner/repo --title 'Bug: ...' --body '...'
 
-# Open a new PR
-gh pr create --repo owner/repo --title "Fix: ..." --head my-branch --base main --body "..."
 ```
 
-For App auth, `GH_TOKEN` is an installation access token that refreshes automatically — it stays current as long as the adapter is running.
+For a pull request, prepare the exact title, body, pushed head branch, and base branch, then ask the operator to run `gh pr create --repo owner/repo --title 'Fix: ...' --head my-branch --base main --body '...'` at the host stage from the repository checkout. Model-driven bash cannot push or create a PR because network Git and `gh pr create` may execute local Git hooks with reusable credentials.
+
+For the supported issue form under App auth, TypeClaw mints a short-lived token for the explicit `--repo owner/repo` target and withholds it from sibling commands and shell expansions.
 
 Before you compose the issue/PR body, read `typeclaw-github-contributing` — it covers the target repo's contribution etiquette (fill the issue/PR template if one exists, honor `CONTRIBUTING.md`, match the repo's title conventions, search for duplicates first). Opening an issue or PR that ignores the repo's template reads as careless; following it reads as someone who belongs. That skill applies whenever you open a new issue/PR, whether or not the work arrived through this channel.
 

@@ -5,17 +5,19 @@ description: Use this skill whenever you decide to delegate substantial coding o
 
 # typeclaw-codex-cli
 
+> **Current security boundary:** authenticated Codex CLI delegation is unavailable from model-driven TypeClaw tools. The bash sandbox never receives OpenAI keys, OAuth tokens, or Codex credential profiles, regardless of role. Do not start the tmux/worktree delegation flow for work that requires authentication. A direct operator may authenticate and run Codex themselves from the host side, outside the model tool boundary. The mechanics below are retained for unauthenticated diagnostics and for a future explicitly brokered runtime, not as a credential workaround.
+
 You can delegate work to Codex CLI, OpenAI's official coding agent. The agent runs as an interactive TUI: it plans, edits files, runs tools, asks for approval — the full loop. You drive it through tmux because your own process has no TTY, you isolate it in a dedicated `git worktree` so its experiments never touch the live agent checkout, and you detect "turn done" through a `Stop` hook that writes a sentinel file (not by parsing the TUI buffer).
 
 This skill is for the case where Codex CLI is the right tool: hard architecture work, multi-file refactors, deep code analysis, a second-opinion read on something you wrote (especially when you already used Claude Code and want OpenAI's view, or vice versa). It is **not** for trivial edits — the round-trip cost (worktree setup + process spawn + auth check + TUI init + at least one full Codex turn) is 15–45 seconds and several thousand tokens of someone else's context window. Do trivial edits yourself.
 
-The shape of this skill is intentionally a mirror of `typeclaw-claude-code`: the worktree model, the tmux driving, the `.session-id` discovery, the multi-turn loop, the cleanup discipline are all byte-for-byte equivalent because Codex CLI's hook system ships the same event names (`SessionStart`, `Stop`), the same JSON payload shape (`session_id`, `transcript_path`, `cwd`, `hook_event_name` on stdin), and the same per-session filenames work. What differs is the install path (`@openai/codex` npm package, not curl-bash), the config file location (`~/.codex/hooks.json`, not `~/.claude/settings.json`), the onboarding dialog set (Auth + TrustDirectory, no theme picker), the auth mechanism (`OPENAI_API_KEY` or `codex login`, not Anthropic-specific OAuth), and the project-instruction file (`AGENTS.md`, not `CLAUDE.md`). The runbook is the same; the credentials and the pre-prompt modals differ.
+The shape of this skill is intentionally a mirror of `typeclaw-claude-code`: the worktree model, tmux driving, session discovery, multi-turn loop, and cleanup discipline are equivalent. Codex's direct-operator host authentication differs from Claude's, but neither credential path is available to model-driven TypeClaw tools.
 
 ## Run the delegation inside `operator`, not inline
 
 Once you've decided Codex CLI is the right tool, spawn the bundled `operator` subagent to do the actual driving — don't run the worktree setup, the tmux session, the polling loop, the multi-turn decision loop, and the cleanup inline in your own context. The whole loop typically takes several minutes and produces large amounts of intermediate output (TUI buffer captures, Stop sentinels per turn, JSONL transcript references); running it inline blocks the user from talking to you and burns through your context window before you ever get to the synthesis step. `operator` is write-capable and runs the same loop, then returns a clean final report (what codex produced, what `git diff main..cx-<id>` shows, what you should review). You ship the worktree, the prompt, and the safety constraints to operator; operator ships you back the diff and the summary.
 
-Exception: a quick sanity ping (`codex --version` to check the binary exists, `env | grep OPENAI` to check auth). Those are single fast bash calls — do them inline. The "spawn through operator" rule applies to anything that runs `codex` itself as an interactive TUI.
+Exception: a quick unauthenticated sanity ping (`codex --version` to check the binary exists). Do it inline. Do not probe authentication state. The "spawn through operator" rule applies to anything that runs `codex` itself as an interactive TUI.
 
 ## When to delegate to Codex CLI
 
@@ -32,46 +34,15 @@ Do **not** use Codex CLI for:
 - Anything where the user is watching your tool calls and wants to see each step — Codex's intermediate output is captured but not streamed back to the user.
 - Tasks that depend on context you haven't extracted yet. Codex won't have repo-wide context either; you have to brief it explicitly (it will read `AGENTS.md` from the worktree root, but anything outside that file you must put in the prompt).
 
-## First-time auth (interactive)
+## Authentication boundary
 
-If `codex` is installed but no credential is set up, you have to broker the auth flow yourself. The user is talking to you through the TUI (or a channel); you walk them through one of two paths.
+Authentication is an **operator-owned host action**. Model-driven tools cannot read or write `.env`, `secrets.json`, `auth.json`, `~/.codex/auth.json`, or the persistent credential directories, and must never ask a user to paste a key, token, or credential-file contents into chat.
 
-**Decision rule, top to bottom:**
+Even when TypeClaw's trusted runtime has provider credentials, model-driven bash does not inherit them and cannot open the exported profile. There is no readiness check that turns authenticated delegation on.
 
-0. **typeclaw may have already done it for you.** If the agent was initialized with the `openai-codex` provider (the user pasted/ran OAuth into typeclaw itself), typeclaw writes `~/.codex/auth.json` automatically on every container start — provided `docker.file.codexCli: true` is set. Check `test -f ~/.codex/auth.json && jq -e '.tokens.access_token' ~/.codex/auth.json >/dev/null`; if both succeed, skip auth and go straight to delegation. The file is refreshed on every start via the newer-wins compare in `src/secrets/export-codex-auth-file.ts`, so a stale credential gets replaced without user intervention as long as the typeclaw-side credential is fresher.
-1. **Already authenticated some other way?** Check both env (`env | grep -E '^(OPENAI_API_KEY|CODEX_API_KEY)='`) and on-disk (`test -f ~/.codex/auth.json`). If either resolves, skip auth entirely.
-2. **User has an OpenAI API account** (api.openai.com billing, no ChatGPT Plus/Pro subscription) → API key path.
-3. **User has a ChatGPT Plus / Pro / Team / Enterprise subscription and wants to use their subscription credits** → OAuth path via `codex login`.
-4. **User is unsure** → ask which kind of OpenAI account they have. Both paths are equally low-friction. Pick by account shape, not by flow complexity.
+Stop and tell the operator that they must authenticate and invoke Codex CLI directly from the **host side**. Do not promise that `typeclaw restart`, a role grant, a guard acknowledgement, or an existing provider login will make authenticated model-driven delegation available. Any direct Codex login must be completed entirely by the operator; do not request the resulting artifact.
 
-Both paths converge on the same final steps: read `.env`, merge one new `KEY=value` line or a copied `~/.codex/auth.json`, write back with the `nonWorkspaceWrite` guard ack, verify, and prompt the user to restart the container. Only the credential medium differs.
-
-### API key path
-
-1. Ask the user: "Paste your OpenAI API key (starts with `sk-`) — or say 'cancel' to use the OAuth flow instead."
-2. **Validate** the pasted value before writing: `/^sk-[A-Za-z0-9_-]{20,}$/`. If it doesn't match, refuse and ask again — neither the guard nor the restart tool catches a malformed token.
-3. **Read** the existing `.env` first (if any). Parse it into a key→value map so you don't clobber unrelated entries.
-4. **Reconstruct** the full `.env` content with `OPENAI_API_KEY=<value>` added or replaced. (Codex also honors `CODEX_API_KEY` but that variant only takes effect for `codex exec`, not the interactive TUI we drive here — use `OPENAI_API_KEY`.)
-5. **Write** with `acknowledgeGuards: { nonWorkspaceWrite: true }`. `.env` is in the `nonWorkspaceWrite` guard's deny set; the call fails without the ack flag.
-6. **Verify** by re-reading the file.
-7. **Ask the user**: "Auth is on disk. The container needs to restart to load it (TUI will briefly disconnect). May I restart now, or do you have other changes to make first?"
-8. On yes → call the `restart` tool. On no → tell them to run `typeclaw restart` themselves when ready.
-
-### OAuth path
-
-Unlike Claude Code's `claude setup-token` flow, Codex CLI's OAuth (via `codex login`) writes a credential **file** (`~/.codex/auth.json`) on the user's machine rather than printing a long-lived token to stdout. The user logs in locally, copies that file, and you place it into the container's `~/.codex/auth.json` via a write call.
-
-Why this works: `~/.codex/auth.json` is the canonical credential location for the Codex CLI. From the official auth docs: "Credentials are persisted to `~/.codex/auth.json` by default." A typeclaw container, like any CI/headless environment, can simply receive that file from the user's already-authenticated machine. The container has no browser and cannot complete the `localhost:1455` OAuth callback on its own.
-
-1. Confirm with the user: "Do you have the `codex` CLI installed on your local machine and are you signed in to it with your ChatGPT subscription? If not, install with `npm install -g @openai/codex`, then `codex login` and complete the browser authorization."
-2. Once they confirm, instruct them: "On your machine, the file at `~/.codex/auth.json` now contains your credential. Paste its contents back to me — it's a small JSON object with an `OPENAI_API_KEY` field, OR a `tokens` object with `access_token` / `refresh_token` / `id_token`. Either shape is valid. Treat it like a password (the `access_token` if present is short-lived but the `refresh_token` is long-lived)."
-3. When they paste, **validate** before writing: it must `JSON.parse` cleanly into an object with at least one of `{ OPENAI_API_KEY, tokens }`. If neither field is present, refuse and ask again — the user may have pasted only a fragment.
-4. **Write to `~/.codex/auth.json` inside the container**, not `.env`. Create `~/.codex/` first if missing. Use `acknowledgeGuards: { nonWorkspaceWrite: true }` (the `~/.codex/` dir is outside `workspace/`). `~/.codex/auth.json` is symlinked by typeclaw's entrypoint shim to a host-side persistent path, so this write survives container restarts and codex's in-place token refreshes "just work" — see `references/auth-flow.md` "Persistence across container restarts" for the full mechanism.
-5. **Verify** by re-reading the file and re-parsing.
-6. **Ask before restart** (same prompt as the API key path).
-7. On yes → call the `restart` tool. On no → `typeclaw restart` themselves when ready.
-
-The full validation rules, the failure modes on the user's side (their `codex` CLI is signed out, their subscription is expired, their `auth.json` is missing or malformed), and the rationale for not doing the OAuth dance in-container are in `references/auth-flow.md`.
+The auth picker is also operator-owned. If it appears in the delegated TUI, abort the session and report that host-side authentication is required. Never navigate the picker or transmit a credential through tmux, a prompt, a tool argument, or a file writable by the model. See `references/auth-flow.md`.
 
 ### Cost-cap warning
 
@@ -83,8 +54,8 @@ Before you spawn `codex` for any real work:
 
 - **`docker.file.codexCli: true`** in `typeclaw.json`. Verify with `which codex`; if missing, the toggle isn't on. Tell the user to enable it and `typeclaw start --build`.
 - **`docker.file.tmux: true`** (default `true`, but check). Verify with `which tmux`.
-- **Auth set up** — see above. Verify with `env | grep -E '^(OPENAI_API_KEY|CODEX_API_KEY)='` OR `test -f ~/.codex/auth.json`.
-- **No onboarding seed needed.** Unlike Claude Code's `~/.claude.json` + `hasCompletedOnboarding: true` shim, Codex CLI has NO theme picker, NO telemetry consent dialog, NO terms-of-service prompt — verified directly against the upstream `codex-rs/tui/src/onboarding/onboarding_screen.rs` state machine. Codex's onboarding has exactly two interactive steps after the brief Welcome animation: an **Auth picker** (skipped automatically when `OPENAI_API_KEY` is in env or `~/.codex/auth.json` exists) and a **TrustDirectory** prompt (fires once per new cwd). The "Driving the session" section below clears both as a loop. If neither auth medium is present, the Auth picker fires and the delegation cannot proceed without runtime intervention — bail to the user.
+- **No authenticated model-driven path.** If the task requires an OpenAI/Codex account, stop and hand execution to the direct host-side operator. Do not probe env vars or credential files.
+- **Auth picker means stop.** Model-driven tools receive no Codex credential medium. If the picker appears, abort and hand execution to the direct host-side operator. The workspace-trust prompt is separate and may be handled only for an otherwise unauthenticated diagnostic.
 - **Agent folder is a git repo.** Verify with `git -C /agent rev-parse --is-inside-work-tree`. The worktree model below requires it. Codex CLI **additionally** requires a git repo by default (use `--skip-git-repo-check` to override, but we don't — the worktree is a git checkout by construction).
 - **No uncommitted changes that you care about.** `git -C /agent status --porcelain` should be clean, or you should be willing to set the working tree aside before delegating. The worktree is a separate checkout, so codex can't see your uncommitted changes — meaning codex operates on the last committed state. If the user wants codex to work with in-progress edits, commit them first (even on a WIP branch).
 
@@ -197,10 +168,10 @@ The minimum protocol — translate to your actual tool calls:
 1. Create the worktree.
 2. `tmux new-session -d -s cx-<id> -c /tmp/cx-<id> codex`. Do not pass any `--session-id` flag (the hook payload UUID is the source of truth).
 3. Wait ~3 seconds for the TUI to initialize.
-4. **Clear startup dialogs (BEFORE sending the task prompt).** Codex's onboarding has at most three runtime prompts: the Auth picker (suppressed when `OPENAI_API_KEY` is in env OR `~/.codex/auth.json` exists), the TrustDirectory prompt (fires once per new cwd, so EVERY fresh `/tmp/cx-<id>/` triggers it), and the hook trust prompt (fires once per `~/.codex/hooks.json` change). Run this as a **loop**, not a one-shot: clearing one dialog can immediately reveal the next, and you must keep polling until codex's actual input prompt is visible (it renders a bottom-of-pane composer with a `▌` or similar prompt indicator).
+4. **Clear startup dialogs (BEFORE sending the task prompt).** The Auth picker is a hard stop; do not navigate it. TrustDirectory and hook-trust prompts may appear for unauthenticated diagnostics. Run detection as a loop so an auth picker revealed after another dialog still aborts the session.
 
    The three known modals, with the exact keystrokes for each:
-   - **Auth picker** — "Sign in to Codex" with options to pick ChatGPT OAuth, Device code, or API key. If this fires despite `OPENAI_API_KEY` being set, the env var isn't being read — abort with `Ctrl-c` (or `/exit`) and surface to the user. Do NOT attempt to navigate the picker on the user's behalf.
+   - **Auth picker** — "Sign in to Codex" with OAuth, device-code, or API-key options. Abort with `Ctrl-c` (or `/exit`) and tell the direct operator to authenticate and run Codex host-side. Do not navigate it.
 
    - **TrustDirectory** — "Do you trust the files in this directory?" Options are `[Yes, trust] [No, exit]` with focus on **Yes** by default. Resolution: bare `tmux send-keys -t cx-<id> Enter`. Always verify the pane text matches the trust dialog before pressing Enter.
 
@@ -289,7 +260,7 @@ A re-statement, because this is where the skill is most often misused:
 - **Trivial edits**: the round-trip cost dominates. Do it yourself.
 - **Tasks needing live user visibility**: codex's tool calls don't stream back through TypeClaw. The user sees a long pause, not progress. Use your own tools.
 - **Tasks where you don't have the context to brief codex**: spend tokens narrowing the problem first. A vague delegation produces a vague result.
-- **Anything secret beyond `OPENAI_API_KEY` / `~/.codex/auth.json`**: codex only sees the prompt you send it and the files in its worktree. Don't try to pass secrets through the prompt — they'll land in codex's transcript and in your sentinel.
+- **Any secret, including OpenAI/Codex credentials**: never pass it through the prompt or worktree. It would land in Codex's transcript and sentinels.
 
 ## Things you must not do
 
@@ -302,12 +273,11 @@ A re-statement, because this is where the skill is most often misused:
 - **Do not merge codex's branch into main without reviewing the diff.** The `git diff main..cx-<id>` is your review surface. Skipping the diff and merging blindly means you don't actually know what shipped.
 - **Do not commit `/tmp/cx-<id>/` artifacts back to the agent folder.** The sentinel, the hook script, the captured pane content are scratch — they live in `/tmp/`, they die with `worktree remove`.
 - **Do not paste Codex's output verbatim into a commit message or a user reply.** Summarize and attribute. You're accountable for the work you ship.
-- **Do not put `OPENAI_API_KEY` or `~/.codex/auth.json` contents in `typeclaw.json`, in a prompt, or in any committed file.** API keys live in `.env`; OAuth credentials live in `~/.codex/auth.json` (a non-committed file under `$HOME`). Period.
+- **Do not put `OPENAI_API_KEY` or `~/.codex/auth.json` contents in `typeclaw.json`, a prompt, a worktree, or any model-accessible file.** Credential provisioning is direct-operator host work; the model does not edit `.env` or copy `auth.json`.
 - **Do not poll the JSONL transcript directly as the done-signal.** The JSONL has documented race conditions (the file can be stale when `Stop` fires). The sentinel is the reliable signal; the JSONL is for content, not lifecycle.
-- **Do not write to `.env` or `~/.codex/auth.json` without `acknowledgeGuards: { nonWorkspaceWrite: true }`.** Both are in the `nonWorkspaceWrite` guard's deny set; the ack is required on every write, not just the first one.
-- **Do not edit `.env` or `~/.codex/auth.json` with the `edit` tool's patch semantics.** Use read-modify-write: read the whole file, reconstruct the new content, write the whole file. A fragile `oldText` match could corrupt unrelated lines.
-- **Do not run `codex login` inside the container.** It's an OAuth flow that wants a browser. The container has no display, no browser, and is often on a different machine from the user anyway. Always have the user run `codex login` on their own machine and paste the resulting `~/.codex/auth.json` back to you; never spawn it in tmux on this side.
-- **Do not echo, log, or transcribe the pasted credential back to the user, into a sentinel, into a commit message, or into any message you send.** The `refresh_token` inside `~/.codex/auth.json` is a long-lived credential. Confirm receipt with "got it, validating" — never with the token itself.
+- **Do not read, write, edit, parse, or verify `.env`, `secrets.json`, `auth.json`, `~/.codex/auth.json`, or any credential value.** These are outside the model-driven tool boundary; guard acknowledgements do not make credential handling acceptable.
+- **Do not run `codex login` inside the container, and do not ask the user to paste its resulting credential file.** Authentication remains entirely on the operator's host side.
+- **Do not ask for, receive, echo, log, or transcribe credentials.** If a user offers one, tell them not to send it and direct them to host-side setup.
 - **Do not navigate Codex's Auth picker on the user's behalf.** If the picker fires (because no env var and no `auth.json` is present), the user owes you an auth step and the delegation cannot proceed. Bail and surface to the user; do not try to pick "API key" then paste anything into the in-TUI prompt.
 - **Do not invent answers to Codex's clarifying questions.** If you can't derive the answer from the original task brief, surface the question to the user. Wrong answers compound across multi-turn delegations.
 - **Do not exceed 8 turns per delegation.** Abort, capture what you have, surface. Long delegations almost always mean the task wasn't shaped right.
@@ -316,7 +286,7 @@ A re-statement, because this is where the skill is most often misused:
 
 ## Cross-references
 
-- **`references/auth-flow.md`** — both auth paths in detail: the API-key recap, the OAuth user-machine flow (what to tell the user, what their `~/.codex/auth.json` looks like, validation rules), and the failure-mode catalogue (expired subscription, wrong account, malformed paste).
+- **`references/auth-flow.md`** — the authentication boundary: authenticated delegation is unavailable to model-driven tools, and direct host-side setup and execution belong to the operator.
 - **`references/tmux-driving.md`** — full polling implementation, ANSI handling, session-died recovery, the `capture-pane` fallback details, the alternate-screen vs `--no-alt-screen` decision, the worktree-is-not-scratch distinction.
 - **`references/stop-hook.md`** — complete `Stop` event JSON schema for Codex CLI, transcript JSONL schema notes, documented race conditions to handle.
 - **`typeclaw-config`** — the `docker.file.codexCli` toggle that gates the install.

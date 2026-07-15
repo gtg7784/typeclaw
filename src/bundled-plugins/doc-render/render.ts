@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
+import { readFile, realpath } from 'node:fs/promises'
+import { isAbsolute, join, relative, sep } from 'node:path'
+
 // Bundled `bun run`-able render script for the doc-render plugin: the agent runs
 // `bun run <this> <main.typ> <out.pdf>`. Lives as a script (not a registered
 // tool) so it costs zero always-on system-prompt context, and the agent
-// dynamic-imports the Typst compiler from its own /agent/node_modules — installed
+// dynamic-imports the Typst compiler from writable per-session scratch — installed
 // on first use, never baked into the image. Its on-disk path is published to a
 // /tmp hint at boot (see index.ts) so the skill can resolve it.
 //
@@ -16,6 +19,7 @@
 // 0.7.0 embeds Typst 0.14.2; bumping is a deliberate, re-validated edit.
 export const COMPILER_PACKAGE = '@myriaddreamin/typst-ts-node-compiler'
 export const COMPILER_VERSION = '0.7.0'
+export const COMPILER_RUNTIME_DIR = '/tmp/typeclaw-doc-render-runtime'
 
 // NodeCompiler does not auto-discover system font dirs the way the Typst CLI
 // does; without these, CJK glyphs render as .notdef tofu. Filtered by existence
@@ -26,9 +30,10 @@ export function missingCompilerGuidance(): string {
   return [
     `doc-render: ${COMPILER_PACKAGE} is not installed.`,
     '',
-    'One-time PDF toolchain install. Run from the agent root (writes node_modules',
-    '+ package.json + bun.lock, which survive restarts), then re-run this render:',
+    'Install the PDF toolchain in this session’s writable scratch runtime, then',
+    're-run the render from the document directory:',
     '',
+    `  mkdir -p ${COMPILER_RUNTIME_DIR} && cd ${COMPILER_RUNTIME_DIR}`,
     `  bun add ${COMPILER_PACKAGE}@${COMPILER_VERSION}`,
     '',
     'Do NOT fall back to jsPDF, pdfkit, a canvas text dump, a headless-browser',
@@ -67,15 +72,91 @@ type NodeCompilerModule = {
   }
 }
 
-// Resolve from the CALLER's cwd, not this script's location: the agent installs
-// the compiler into its own /agent/node_modules and runs `bun run <this>` from
-// the agent root, but bare `import(pkg)` resolves relative to this file (under
-// node_modules/typeclaw/...), which need not see the agent's deps. Resolving
-// against cwd, then importing the absolute path, makes the lookup independent of
-// where the bundled script physically lives.
-export async function loadCompilerModule(cwd: string = process.cwd()): Promise<NodeCompilerModule> {
-  const resolved = Bun.resolveSync(COMPILER_PACKAGE, cwd)
-  return (await import(resolved)) as NodeCompilerModule
+async function isMuslLinux(): Promise<boolean> {
+  try {
+    if ((await readFile('/usr/bin/ldd', 'utf8')).includes('musl')) return true
+  } catch {
+    // Continue with the same process-report fallback used by the package loader.
+  }
+  const report = process.report?.getReport() as
+    | { header?: { glibcVersionRuntime?: string }; sharedObjects?: string[] }
+    | undefined
+  if (report?.header?.glibcVersionRuntime) return false
+  return report?.sharedObjects?.some((file) => file.includes('libc.musl-') || file.includes('ld-musl-')) ?? false
+}
+
+export async function requiredCompilerPlatformPackage(): Promise<string> {
+  const prefix = `${COMPILER_PACKAGE}-`
+  if (process.platform === 'darwin' && (process.arch === 'x64' || process.arch === 'arm64')) {
+    return `${prefix}darwin-${process.arch}`
+  }
+  if (process.platform === 'win32' && (process.arch === 'x64' || process.arch === 'arm64')) {
+    return `${prefix}win32-${process.arch}-msvc`
+  }
+  if (process.platform === 'android' && process.arch === 'arm64') return `${prefix}android-arm64`
+  if (process.platform === 'android' && process.arch === 'arm') return `${prefix}android-arm-eabi`
+  if (process.platform === 'linux') {
+    const libc = (await isMuslLinux()) ? 'musl' : 'gnu'
+    if (process.arch === 'x64' || process.arch === 'arm64') return `${prefix}linux-${process.arch}-${libc}`
+    if (process.arch === 'arm' && libc === 'gnu') return `${prefix}linux-arm-gnueabihf`
+  }
+  throw new Error(
+    `doc-render: ${COMPILER_PACKAGE}@${COMPILER_VERSION} has no published platform package for ${process.platform}/${process.arch}`,
+  )
+}
+
+type ValidatedRuntimePackage = {
+  entry: string
+}
+
+async function validateRuntimePackage(
+  runtimeDir: string,
+  packageName: string,
+  version: string,
+): Promise<ValidatedRuntimePackage> {
+  const packageDir = join(runtimeDir, 'node_modules', ...packageName.split('/'))
+  const manifestPath = join(packageDir, 'package.json')
+  let manifest: { name?: unknown; version?: unknown }
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { name?: unknown; version?: unknown }
+  } catch {
+    throw new Error(`doc-render: ${packageName}@${version} is not installed in ${runtimeDir}`)
+  }
+  if (manifest.name !== packageName || manifest.version !== version) {
+    throw new Error(
+      `doc-render: expected ${packageName}@${version} in ${runtimeDir}, found ${String(manifest.name)}@${String(manifest.version)}`,
+    )
+  }
+
+  const resolved = Bun.resolveSync(packageDir, packageDir)
+  const [realRuntimeDir, realPackageDir, realEntry] = await Promise.all([
+    realpath(runtimeDir),
+    realpath(packageDir),
+    realpath(resolved),
+  ])
+  for (const [candidate, label] of [
+    [realPackageDir, 'package'],
+    [realEntry, 'entry'],
+  ] as const) {
+    const fromRuntime = relative(realRuntimeDir, candidate)
+    if (fromRuntime === '..' || fromRuntime.startsWith(`..${sep}`) || isAbsolute(fromRuntime)) {
+      throw new Error(`doc-render: ${packageName} ${label} resolves outside the scratch runtime`)
+    }
+  }
+  const fromPackage = relative(realPackageDir, realEntry)
+  if (fromPackage === '..' || fromPackage.startsWith(`..${sep}`) || isAbsolute(fromPackage)) {
+    throw new Error(`doc-render: ${packageName} entry resolves outside its runtime-local package directory`)
+  }
+  return { entry: realEntry }
+}
+
+// Resolve only from the pinned scratch runtime. A document may contain an
+// attacker-controlled node_modules tree, so its cwd must never enter resolution.
+export async function loadCompilerModule(runtimeDir: string = COMPILER_RUNTIME_DIR): Promise<NodeCompilerModule> {
+  const platformPackage = await requiredCompilerPlatformPackage()
+  const compiler = await validateRuntimePackage(runtimeDir, COMPILER_PACKAGE, COMPILER_VERSION)
+  await validateRuntimePackage(runtimeDir, platformPackage, COMPILER_VERSION)
+  return (await import(compiler.entry)) as NodeCompilerModule
 }
 
 export async function renderPdf(mainFile: string, outFile: string): Promise<number> {

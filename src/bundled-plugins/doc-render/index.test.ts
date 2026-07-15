@@ -120,10 +120,12 @@ describe('typeclaw-render-pdf skill', () => {
     expect(raw).not.toContain('workspace/.tools/fonts')
   })
 
-  test('installs the compiler into the agent root, not a workspace .tools dir', async () => {
+  test('installs the compiler into writable session scratch, not protected agent dependencies', async () => {
     const raw = await readFile(skillPath, 'utf8')
 
     expect(raw).toContain('bun add @myriaddreamin/typst-ts-node-compiler@0.7.0')
+    expect(raw).toContain('/tmp/typeclaw-doc-render-runtime')
+    expect(raw).not.toContain("agent's own `node_modules`")
     expect(raw).not.toContain('workspace/.tools')
   })
 

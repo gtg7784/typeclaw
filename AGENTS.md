@@ -86,6 +86,8 @@ A new adapter is **not done when the adapter file compiles and the runtime route
 - `src/doctor/channel-checks.ts` — a `buildChannelChecks()` entry verifying credentials resolve host-side (and update the `channel-checks.test.ts` names assertion).
 - `src/channels/router.ts` `NATIVE_REPLY_EVERY_SHAPE_ADAPTERS` — only if the platform's reply model needs it.
 
+**Agent-messenger credential filenames are intentionally not enumerated in model-tool code.** The sandbox masks the entire canonical `workspace/.agent-messenger/` directory from every model-driven tool, and `resolvePrivilegedSandboxRuntime` never mounts an agent-messenger credential profile into a child CLI. When an upstream adapter changes its credential filename, do not add a per-platform broker entry; keep the whole-directory invariant instead. The canonical list shared by bash and non-bash guards lives in `src/sandbox/canonical-secrets.ts`.
+
 **Docs (ships in the same PR as the code that motivates it):**
 
 - `docs/content/docs/reference/<name>.mdx` — reference page (model it on the closest existing adapter: bot-token → `slack-bot.mdx`; user-account → `webex.mdx`).

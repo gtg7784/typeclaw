@@ -15,15 +15,21 @@ icon: Variable
 
 ## Container stage (set by `typeclaw start`)
 
-| Variable                          | Set on `docker run`                  | Effect                                                                                                                                                                                |
-| --------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TYPECLAW_CONTAINER_NAME`         | always                               | The container's name; container code uses it to identify itself to hostd                                                                                                              |
-| `TYPECLAW_HOSTD_URL`              | when hostd HTTP control is enabled   | `http://host.docker.internal:<port>` — used by the agent's `restart` tool                                                                                                             |
-| `TYPECLAW_HOSTD_TOKEN`            | per-container, generated at start    | Bearer token for the HTTP control surface; per-container restart RPC                                                                                                                  |
-| `TYPECLAW_HOSTD_BROKER_TOKEN`     | per-container, generated at start    | Auth token for the portbroker WebSocket connection                                                                                                                                    |
-| `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true`   | `1` — entrypoint shim installs the iptables egress filter                                                                                                                             |
-| `TYPECLAW_SANDBOX_SYMLINKS`       | when `sandbox.symlinks` is non-empty | base64-encoded JSON of the `sandbox.symlinks` array; the entrypoint shim decodes it and creates each `from -> /agent/<to>` symlink at the real container `$HOME` for unsandboxed bash |
-| `DISPLAY`                         | when `docker.file.xvfb` is enabled   | `:99` — points at the in-container Xvfb server                                                                                                                                        |
+| Variable                          | Set on `docker run`                  | Effect                                                                                                                                                                                                         |
+| --------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TYPECLAW_CONTAINER_NAME`         | always                               | The container's name; container code uses it to identify itself to hostd                                                                                                                                       |
+| `TYPECLAW_HOSTD_URL`              | when hostd HTTP control is enabled   | `http://host.docker.internal:<port>` — used by the agent's `restart` tool                                                                                                                                      |
+| `TYPECLAW_HOSTD_TOKEN`            | per-container, generated at start    | Bearer token for the HTTP control surface; per-container restart RPC                                                                                                                                           |
+| `TYPECLAW_HOSTD_BROKER_TOKEN`     | per-container, generated at start    | Auth token for the portbroker WebSocket connection                                                                                                                                                             |
+| `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true`   | `1` — entrypoint shim installs the iptables egress filter                                                                                                                                                      |
+| `TYPECLAW_SANDBOX_SYMLINKS`       | when `sandbox.symlinks` is non-empty | base64-encoded JSON of the `sandbox.symlinks` array; the entrypoint shim creates each `from -> /agent/<to>` link for runtime-owned processes, while model-driven bash receives an equivalent link inside bwrap |
+| `DISPLAY`                         | when `docker.file.xvfb` is enabled   | `:99` — points at the in-container Xvfb server                                                                                                                                                                 |
+
+### Model-driven bash environment
+
+Every production model-driven bash call runs in bwrap with the inherited process environment cleared, including for `trusted` and `owner`. TypeClaw adds back only the variables required for that command. Runtime-owned credential overlays, such as a GitHub PAT for a credential-entitled role, are injected directly into one narrowly parsed subprocess; they do not make `.env`, `secrets.json`, or historical root `auth.json` readable. GitHub token-display and auth-management commands, including `gh auth status -t` and `--show-token`, are blocked before injection.
+
+No model-driven role receives reusable Codex, Claude, GWS, or agent-messenger auth files. Those CLIs can upload arbitrary files, so even a standalone-command parser would make them confused deputies. They run with the cleared environment and no auth profile; version/help and unauthenticated diagnostics remain available. Standalone local Git commands may receive a generated config containing only `user.name` and `user.email`; the original config is never mounted.
 
 ## Provider credentials
 

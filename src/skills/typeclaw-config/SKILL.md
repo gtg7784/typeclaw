@@ -416,6 +416,8 @@ Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if th
 
 `typeclaw.json` does **not** hold API keys or OAuth tokens. Credentials live in two gitignored files, with `secrets.json` as the canonical store and `.env` retained for env-var overrides and parity with non-typeclaw tooling that reads from the environment:
 
+**Model boundary:** this section documents operator-owned state; it is not an editing runbook for the agent. Model-driven tools must never read, create, modify, validate, or delete `.env`, `secrets.json`, or `auth.json`, even when the user supplies a value or an acknowledgement flag. Tell the operator to use the TypeClaw host-stage init/provider/channel commands and restart the container. Do not ask them to paste credentials into chat.
+
 - **`./secrets.json`** (canonical structured store): a `v2` envelope managed by `SecretsBackend` (wraps `pi-coding-agent`'s `AuthStorage`). Written by `typeclaw init`, the OAuth refresh path, and explicit user-driven rotation. Two top-level slices:
   - `providers.*` — per-provider credentials. API-key providers store `{ type: 'api_key', key: <Secret> }`. OAuth providers store the `pi-coding-agent` token blob `{ type: 'oauth', access_token, refresh_token, expires_at, ... }`. The container auto-refreshes OAuth tokens with file locking; api-key writes only happen on explicit user-driven rotation.
   - `channels.*` — per-adapter credentials, with named fields per adapter:
@@ -430,7 +432,7 @@ Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if th
   - `FIREWORKS_API_KEY` — for any `fireworks/...` model.
   - `ANTHROPIC_API_KEY` — for any `anthropic/...` model when using API-key auth.
 
-  New typeclaw secrets should land in `secrets.json` (via `typeclaw init` or a structured edit) — `.env` is no longer the default home.
+  New TypeClaw secrets should be provisioned by the operator through host-stage TypeClaw setup. A model must not perform a "structured edit" of either secret store.
 
 ### The `Secret` shape and env-wins resolution
 
@@ -465,11 +467,9 @@ Every secret-bearing field in `secrets.json` is a **`Secret`**: either a plain s
 
 ### Switching credentials
 
-If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `secrets.json#providers` (and any matching env-var override in `.env`) and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
+Credential switching and rotation are direct-operator host actions. Tell the operator to use the host-stage TypeClaw provider/init flow appropriate to the provider, then run `typeclaw restart`. The model must not delete provider entries, rewrite `Secret` values, remove env overrides, or verify the result by reading either file.
 
-If the user wants to rotate an api-key, edit `secrets.json#providers.<provider>.key` — rewrite the `value` field (preserving any `env` binding), or remove the entry entirely if an env-var override is taking over. `.env` is a secondary path that still works (env-wins picks it up immediately), but `secrets.json` is the durable home. After either, `typeclaw restart` on the host stage.
-
-Never echo, log, or commit values from `secrets.json` or `.env`. Both are gitignored by default — keep them that way.
+Never request, echo, log, or commit values from `secrets.json` or `.env`. Gitignore is not an authorization boundary; both files remain inaccessible to model-driven tools.
 
 ## Editing `typeclaw.json` safely
 

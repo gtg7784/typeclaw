@@ -35,11 +35,17 @@ This closes a laundering attack: a `guest`-resolving channel session that asks t
 
 The bundled `security` plugin guards every privileged tool call. Each guard has a severity tier, and roles bypass tiers in a strict tower:
 
+<Callout type="warn" title="Canonical credentials sit outside the bypass tower">
+  `.env`, `secrets.json`, `auth.json`, canonical credential directories, reusable CLI profiles, and their aliases are
+  unavailable to every model-driven tool, including `owner`. `fs.see.secrets`, tier/per-guard permissions, wildcards,
+  and acknowledgements cannot bypass the core wrappers or bash masks. Credential use is runtime-owned and mediated only.
+</Callout>
+
 - **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, a `git push` after a mid-session `git remote set-url` to an attacker URL (`gitRemoteTainted`). **`owner` bypasses.** `trusted`, `member`, `guest` do not.
-- **`medium` — silent-attack.** Bypass produces attacker-favorable state in operator-reviewable surface without immediate audience-leak. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits, `git push` to an unfamiliar remote, and role/cron promotion (the privileged write is force-committed and visible in `git log` before it takes effect). **`owner` and `trusted` bypass.** `member`, `guest` do not.
+- **`medium` — silent-attack.** Bypass produces attacker-favorable state in operator-reviewable surface without immediate audience-leak. Examples: heuristic env/read checks outside canonical stores, IMDS SSRF, `session_search` returning secret-shaped hits, `git push` to an unfamiliar remote, and role/cron promotion. **`owner` and `trusted` bypass these plugin guards.** They still cannot access canonical credentials. `member`, `guest` do not.
 - **`low` — noisy, immediately recoverable.** Reserved tier with no current inhabitants today. **`owner`, `trusted`, and `member` bypass.**
 
-`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`). The tier route is the default ("owner bypasses everything high-and-below"); the per-guard route is for narrow opt-ins or opt-outs.
+`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`) for bypassable plugin policy. The tier route never bypasses core canonical-secret isolation.
 
 The motivating case is owner-in-public-channel. An operator with full owner privileges might run the agent from a Slack channel that also matches their owner role, and ask the agent to "post deploy status to #general" — the agent might then silently include a stack-trace `Bearer ghp_…` line. The defense is **operator scoping**: keep `roles.owner.match[]` narrow (the default is `{ kind: 'tui' }`, TUI-only, where a human is present). Configs that widen owner to a channel author re-open audience-leak for that author and should strip `security.bypass.high` from `roles.owner.permissions[]` for those origins.
 

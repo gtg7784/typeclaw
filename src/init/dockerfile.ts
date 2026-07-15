@@ -416,8 +416,8 @@ link_persistent_home_files() {
 }
 
 # link_configured_symlinks creates the operator's \`sandbox.symlinks\` at the real
-# container $HOME for the UNSANDBOXED (trusted/owner) bash path; low-trust bash
-# gets an equivalent in-jail symlink from the per-tool bwrap builder instead
+# container $HOME for runtime-owned processes. Model-driven bash runs in bwrap
+# for every role and gets an equivalent in-jail symlink from the per-tool builder
 # (src/sandbox/build.ts). TYPECLAW_SANDBOX_SYMLINKS is base64-encoded JSON of
 # [{from,to}] (set by start.ts only when non-empty). The whole job is done in
 # \`bun -e\` rather than POSIX shell because \`from\`/\`to\` are arbitrary operator

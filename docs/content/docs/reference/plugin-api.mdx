@@ -78,6 +78,11 @@ Commands are declared on `definePlugin` (by-value), not returned here.
 type Tool<P = unknown> = {
   description: string
   parameters: z.ZodType<P>
+  fileOperands?: {
+    input?: readonly string[]
+    output?: readonly string[]
+    destructive?: readonly string[]
+  }
   execute: (args: P, ctx: ToolContext) => Promise<ToolResult>
 }
 
@@ -93,6 +98,10 @@ type ToolResult = {
   details?: unknown
 }
 ```
+
+`fileOperands` declares which string fields carry local filesystem paths. Entries are dotted operand paths: for example, `source.path` addresses `args.source.path`, while `attachments.path` addresses the `path` field of each object in an `attachments` array (array indexes are not part of the path). `input` operands pass through normal authorization and execute against bounded immutable snapshots. `output` and `destructive` operands are explicitly not treated as reads or snapshotted; the tool's write/delete primitive remains responsible for authorizing and anchoring the operation.
+
+Declaration is required even when a target does not exist yet. Undeclared file-shaped keys (`path`, `filename`, `inputPath`, `outputPath`, and equivalents) and confidently local values (relative, POSIX absolute, Windows drive/UNC, canonical credential basenames, existing paths, or bare filenames with extensions) are rejected before dispatch. The only semantic exceptions are narrow key-plus-grammar pairs such as `path: "/v1/..."` for API routes and `repository: "owner/repo"`; opaque identifiers in non-file keys remain valid. A `file:` URI explicitly opts an undeclared value into input authorization and immutable snapshotting. Declare every local path a tool accepts so nonexistent outputs cannot become a check/open race.
 
 `defineTool(tool)` is an identity helper for type inference. Built-in tools are referenced by tagged ref (`readTool`, `bashTool`, `editTool`, `writeTool`, `grepTool`, `findTool`, `lsTool`, `webSearchTool`, `webFetchTool`) — useful when wiring a subagent's `tools` list.
 

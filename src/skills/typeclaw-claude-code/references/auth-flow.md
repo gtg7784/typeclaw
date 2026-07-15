@@ -1,170 +1,29 @@
-# Auth flow — interactive
+# Auth flow — operator-owned (Claude Code)
 
-Deep dive for the auth paths. Read it when `SKILL.md`'s "First-time auth (interactive)" section sends you here, or when an auth attempt fails and you need to understand what went wrong.
+Claude Code authentication is outside the model-driven tool boundary. **Authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools.** The agent must not read, print, parse, copy, write, verify, or probe any credential value or credential file.
 
-The two paths are intentionally symmetric: in both, the user produces one string on their side, pastes it to you, you validate it, you do read-modify-write on `.env`, you offer a restart. Only the credential differs.
+## No readiness bypass
 
-## Path 0 — auto-export from typeclaw's anthropic OAuth credential
+Do not check environment variables or profile-file existence as a way to enable delegation. TypeClaw masks canonical credential files and directories from model-driven bash, strips reusable credential environments, and unconditionally blocks non-bash tools from opening them. Provider authentication available to trusted runtime code is not delegated to a model-driven Claude child.
 
-If the user has already configured an `anthropic` OAuth credential in typeclaw (via `typeclaw provider add anthropic` or the init wizard) AND `docker.file.claudeCode: true`, the agent boot in `src/run/index.ts` auto-emits the credential to `~/.claude/.credentials.json` before `claude` ever runs. The destination matches Claude Code's documented Linux/Windows credential path; macOS uses the Keychain entry `"Claude Code-credentials"` with the same JSON shape, which typeclaw does not target (typeclaw runs Claude Code inside a Linux container).
+## When authentication is missing
 
-The on-disk shape:
+Stop the delegation and tell the operator:
 
-```json
-{
-  "claudeAiOauth": {
-    "accessToken": "sk-ant-oat01-...",
-    "refreshToken": "sk-ant-ort01-...",
-    "expiresAt": 1730000000000,
-    "scopes": ["user:inference", "user:profile", "user:sessions:claude_code", "user:mcp_servers"],
-    "subscriptionType": "max"
-  }
-}
-```
+> Authenticated Claude Code delegation is unavailable from model-driven TypeClaw tools. Authenticate and run Claude Code directly as the host-side operator. Do not send an API key or OAuth token in chat.
 
-Field names are camelCase and `expiresAt` is **milliseconds** since epoch (not seconds, not ISO).
+The operator may manage Claude Code authentication directly on the host. The model must not broker that path, request `claude setup-token` output, or transfer a credential into the container.
 
-### Newer-wins on every boot
+If Claude Code presents an auth prompt that requires entering or inspecting a credential, exit the delegated session. Do not run `claude setup-token` in the container or paste a key/token through tmux.
 
-The exporter compares typeclaw's stored `expires` against the JWT `exp` claim embedded in the on-disk `accessToken`. Strictly fresher wins; ties skip. Claude Code rotates tokens in place by rewriting `.credentials.json` on every successful refresh (anthropics/claude-code#53063), so on a restart the on-disk file may legitimately be ahead of `secrets.json` and must not be clobbered. The persistent-`$HOME` symlink the entrypoint shim installs (`~/.claude/.credentials.json` → `/agent/.typeclaw/home/.claude/.credentials.json`) is what makes the in-place refresh survive `stop`+`start`.
+## Runtime separation
 
-If `.credentials.json` already carries an `mcpOAuth` block (MCP server OAuth state), the exporter preserves it on overwrite. Only the `claudeAiOauth` block is rewritten.
+Trusted runtime provisioning does not authorize a model-driven child. Any exported persistent profile remains masked, and the sandbox intentionally does not mount it or preserve Anthropic credential variables. Restarting cannot change this policy boundary.
 
-### When Path 0 does NOT fire
+## Hard prohibitions
 
-- `docker.file.claudeCode: false` — the install layer is off, no point exporting.
-- `secrets.json#providers.anthropic` is absent — nothing to export.
-- The stored credential is api-key shape — Claude Code reads API keys from `ANTHROPIC_API_KEY` env, not from `.credentials.json`. Fall back to Path A.
-- The on-disk JWT `exp` is already fresher — Claude Code refreshed in-place, skip.
-
-In each of those cases the agent boots without touching the file and Path A or Path B applies. The exporter is failure-tolerant: any error (read, write, fs guard) is logged via `console.warn` and the boot continues — Claude Code will then surface the missing credential on first invocation, which is the existing fallback.
-
-## Path A — API key (recap)
-
-The API key path lives entirely in `SKILL.md` because there's nothing to elaborate. Summary:
-
-1. Prompt user for `sk-ant-…`.
-2. Validate `/^sk-ant-[A-Za-z0-9_-]{20,}$/`.
-3. Read `.env`, merge `ANTHROPIC_API_KEY=<value>` into the parsed map, reconstruct full content, write with `acknowledgeGuards: { nonWorkspaceWrite: true }`.
-4. Verify.
-5. Ask before restart.
-
-When to recommend it: the user has an **Anthropic Console** workspace (API billing, no Claude subscription). They get their key from `console.anthropic.com`. Cost is metered per-token against the Console workspace.
-
-## Path B — OAuth long-lived token, generated on the user's machine
-
-This is the path for users with a Claude **Pro / Max / Team / Enterprise** subscription. Inference cost is bounded by the subscription's monthly Agent SDK credit pool, not per-token.
-
-The token is generated by `claude setup-token`, which is Anthropic's own one-time setup command. From the [official docs](https://code.claude.com/docs/en/authentication):
-
-> For CI pipelines, scripts, or other environments where interactive browser login isn't available, generate a one-year OAuth token with `claude setup-token`. The command walks you through OAuth authorization and prints a token to the terminal. It does not save the token anywhere; copy it and set it as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable wherever you want to authenticate.
-
-A typeclaw container is precisely that environment ("CI pipelines, scripts, or other environments where interactive browser login isn't available"). The user runs `setup-token` on their own machine — where they already have `claude` installed and `/login`-ed — copies the printed token, and pastes it to you.
-
-### Why on the user's machine, not in the container
-
-This was originally implemented as an in-container tmux dance: agent spawns `claude setup-token` in a tmux pane, scrapes the URL with `capture-pane`, surfaces it to the user, brokers the auth code back, regex-extracts the token from the pane. It worked, barely. It cost ~150 lines of pane-capture mechanics, ANSI stripping, URL-or-code parsing, retry logic, and timing assumptions that broke on every Claude Code version bump.
-
-The user-machine flow is strictly better:
-
-1. **Zero in-container surface area.** No tmux session, no pane capture, no version-locked regex matching the prompt wording, no 30-second polling budget, no race between OAuth-code single-use and your retry loop.
-2. **The user already has `claude` installed locally.** They had to, to have a subscription worth using `setup-token` against. The marginal install cost is zero.
-3. **The browser is already on the user's machine.** No matter where the container lives — laptop, remote VM, shared workstation, cloud sandbox — the user's browser is where the user is. `setup-token` on the user's machine has a working `localhost:1455` callback by definition; no cross-device dance needed.
-4. **Failure modes are easier to debug.** When `setup-token` fails on the user's machine, the user sees the error directly. When it failed in the container, you had to surface a stripped-ANSI capture-pane snapshot and hope the user could decipher it.
-5. **The token has no network dependency from inside the container.** Once it's in `.env`, `claude` reads it from the environment on startup — no token-refresh round-trips, no `api.anthropic.com` reachability requirement at auth time (only at inference time, which the agent needs anyway).
-
-There is no remaining case where running `setup-token` inside the container is preferable. The only thing the container needs is the resulting token string.
-
-### Step-by-step
-
-1. **Confirm prerequisites with the user, in one message:**
-
-   > To set up OAuth auth, you'll generate a long-lived token on your own machine. Two prerequisites:
-   >
-   > 1. Do you have the `claude` CLI installed locally? If not: install from `claude.com/code`, then `claude login` with your Claude Pro / Max / Team / Enterprise account.
-   > 2. Do you have a paid Claude subscription? (`setup-token` requires Pro, Max, Team, or Enterprise — it doesn't work on free accounts.)
-   >
-   > Once both are true, reply "ready" and I'll send the next step.
-
-   This single confirmation up-front is the difference between a one-paste flow and a multi-turn debugging session when the user discovers mid-flow that their CLI isn't installed.
-
-2. **When the user confirms, send the generation instructions:**
-
-   > Great. On your machine, run:
-   >
-   > ```sh
-   > claude setup-token
-   > ```
-   >
-   > It opens a browser, you authorize with your Claude account, and then prints **one long token** on the terminal. It looks something like:
-   >
-   > ```
-   > sk-ant-oat01-<long random string>
-   > ```
-   >
-   > Copy the whole token (just the token, not any surrounding text) and paste it back to me. The token is valid for one year and authenticates against your Claude subscription — treat it like a password.
-
-3. **Wait for the user's reply.** Expected shapes:
-   - **A bare token string.** Typically starts with `sk-ant-oat01-` but Anthropic has changed the prefix before and may again — do not hardcode the prefix.
-   - **The full line including `CLAUDE_CODE_OAUTH_TOKEN=`** if they pasted the `export` line they wrote themselves. Strip the `CLAUDE_CODE_OAUTH_TOKEN=` prefix (and any leading `export `) before validating.
-   - **An error message** if `setup-token` failed on their side. See the failure-mode list below.
-   - **"cancel"** or equivalent. Drop the flow cleanly.
-
-4. **Parse and validate**, in order:
-   1. Trim leading/trailing whitespace.
-   2. If the string starts with `export ` (with the space), drop the `export ` prefix.
-   3. If the string starts with `CLAUDE_CODE_OAUTH_TOKEN=`, drop that prefix. Also strip surrounding single or double quotes that the user's shell prompt may have included.
-   4. Validate the remainder: `/^[A-Za-z0-9_-]{30,}$/`. Tokens are opaque alphanumeric blobs with `_` and `-` only (current observed prefix is `sk-ant-oat01-` but Anthropic has changed prefixes before — validate by shape, not prefix). If the token format ever grows to include `.`, `/`, or other characters, this regex will reject valid tokens; widen the character class then, not preemptively.
-   5. If validation fails, ask once more: "That doesn't look like a `claude setup-token` token — it should be one long string with no spaces or newlines. Paste just the token. Or say 'cancel' to switch to API-key auth instead."
-   6. If the second attempt also fails, drop OAuth and recommend the API-key path.
-
-5. **Confirm receipt without echoing the token.** Reply something like "Got it, validating and writing to `.env`." Never include the token in your reply, in a log line, in a sentinel, in a commit message, or anywhere else.
-
-6. **Read `.env`** (existing content, may not exist).
-
-7. **Parse into a key→value map.** Be tolerant of comments (`#`-prefixed lines), blank lines, and quoted values. Preserve order and comments when reconstructing.
-
-8. **Merge `CLAUDE_CODE_OAUTH_TOKEN=<value>`.** Add if absent, replace if present. Do not quote — Docker's `--env-file` parser is brittle around quotes, and the token has no whitespace by validation.
-
-9. **Write back with `acknowledgeGuards: { nonWorkspaceWrite: true }`.** `.env` is in the `nonWorkspaceWrite` guard's deny set; the ack flag is required on every write to it, not just the first.
-
-10. **Verify by re-reading `.env`** and confirming the new line is there exactly once and the value matches what you wrote.
-
-11. **Ask before restart**, same prompt as the API-key path:
-
-    > Auth is on disk. The container needs to restart to load it (TUI will briefly disconnect). May I restart now, or do you have other changes to make first?
-
-12. On yes → call the `restart` tool. On no → tell them to run `typeclaw restart` themselves when ready.
-
-13. **Done.** There is no auth scratch directory, no tmux session to tear down, no worktree. The OAuth path has the same on-disk footprint as the API-key path: one new line in `.env`.
-
-## Failure modes on the user's side
-
-These all surface as the user's reply being an error message instead of a token. Recognize them, do not validate them as tokens, and respond with the matching guidance.
-
-- **"command not found: claude"** — they don't have the CLI installed locally. Point them at `claude.com/code` and ask them to `claude login` after installing.
-- **"Not logged in"** / `setup-token` immediately asking them to log in — they have the CLI but no active subscription session. Have them run `claude login` first, then re-try `claude setup-token`.
-- **"This account doesn't have access to a paid Claude subscription"** — they're on a free account. `setup-token` requires Pro / Max / Team / Enterprise. They either upgrade or use the API-key path.
-- **"Token request failed"** / generic network error during `setup-token` — their local machine couldn't reach `claude.ai` or `api.anthropic.com`. Check VPN, firewall, corporate proxy. Re-try in a moment.
-- **Browser opened but no token appeared in terminal** — they authorized in the wrong account, or they closed the tab before the callback completed. Have them run `setup-token` again and wait for the terminal to finish.
-- **They report success but pasted a string that fails validation** — most likely they pasted the surrounding output (the `export` line, a banner, instructions) rather than just the token. Re-ask, emphasize "just the token, no surrounding text".
-
-## Failure modes after you've written the token
-
-- **`typeclaw restart` fails or the container won't come up** — the credential is on disk, the restart is the problem. Don't re-prompt for auth; surface the restart failure and tell the user to run `typeclaw restart` from their host shell to see the underlying error.
-- **`claude` invocations after restart still say "Invalid API key" / "Unauthorized"** — token validation passed locally but the credential is rejected upstream. Three likely causes:
-  1. **Token from a different account than expected.** The user has multiple Claude accounts on their local machine and `setup-token` used the wrong one. Have them check `claude login` and re-run `setup-token` from the right account.
-  2. **`ANTHROPIC_API_KEY` is also set in `.env` and takes precedence.** Per the [auth precedence rules](https://code.claude.com/docs/en/authentication#authentication-precedence), `ANTHROPIC_API_KEY` outranks `CLAUDE_CODE_OAUTH_TOKEN`. Check `.env`; remove the stale `ANTHROPIC_API_KEY` line if the user wants OAuth.
-  3. **Token expired or revoked.** Tokens are one-year-lived; revocation happens if the user `/logout`s from the subscription that issued the token. Have them re-run `setup-token`.
-
-## Things you must not do during auth
-
-- **Do not run `claude setup-token` inside the container.** Use the user-machine flow above. The in-container tmux dance that this skill used to recommend has been removed; it was strictly worse than asking the user to run one command on their machine.
-- **Do not log, echo, paste-back, or otherwise transcribe the user's token.** Not in a confirmation message, not in a sentinel, not in a commit. A one-year credential leak is significantly worse than a momentary "did you mean this?" reflection — there's no good reason for the token to leave the `.env` write path.
-- **Do not write the token to `.env` until you've validated its format.** A malformed token quietly turns into a broken auth that surfaces only on the next claude invocation, long after the user has moved on.
-- **Do not retry validation more than once.** If the first paste fails the regex, ask once with clearer guidance ("just the token, no surrounding text"). If the second also fails, the user is in a state that text instructions won't resolve — drop the OAuth path and recommend API-key auth.
-- **Do not advise the user to `typeclaw shell` and run `claude setup-token` inside the container as a "fallback"**. It does not work — the container has no browser. If `setup-token` is failing on the user's machine, the right fix is on their machine (check `claude login`, check network), not switching the dance to the container.
-- **Do not assume the token format prefix.** Anthropic has changed the prefix on long-lived tokens before (the docs use generic placeholders like `your-token`). Validate by shape (length + character class), not by prefix.
-- **Do not write to `.env` without `acknowledgeGuards: { nonWorkspaceWrite: true }`.** Same guard contract as every other `.env` write.
-- **Do not patch-edit `.env`.** Read-modify-write the whole file. A fragile `oldText` match could corrupt unrelated lines.
-- **Do not branch on local-vs-remote container topology.** The user-machine flow is the same whether the container is on the user's laptop or on a remote host — the user runs `setup-token` on whatever local machine they're at, the token works in either container.
+- Never ask for or accept an API key, OAuth token, access token, or credential-file contents in chat.
+- Never use `read`, `write`, `edit`, `look_at`, channel attachment tools, or shell commands to access `.env`, `secrets.json`, `auth.json`, `~/.claude/.credentials.json`, or their persistent backing directories.
+- Never put credentials in prompts, tmux keystrokes, command arguments, sentinels, transcripts, logs, commits, or scratch files.
+- Never treat a guard acknowledgement as authorization to handle credentials. Canonical credentials are blocked independently of plugin guard hooks.
+- If a credential is offered, tell the user not to send it and redirect them to host-side setup.

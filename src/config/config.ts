@@ -415,12 +415,12 @@ export const relativeAgentPathSchema = z
 //
 // `from` is the symlink LOCATION and is fully configurable: an absolute container
 // path (e.g. `/root/.metabase-cli`) or a `~/`-prefixed path expanded against the
-// stage's HOME. Two stages create it: the entrypoint shim creates it at the real
-// container HOME (/root) for trusted/owner roles whose bash runs UNSANDBOXED, and
-// the per-tool bwrap sandbox emits a `--symlink` at the sandbox HOME (/tmp) for
-// low-trust roles — because `$HOME` differs between the two stages, a `~/` from
-// resolves to a different absolute path in each, which is exactly what each
-// consumer needs. The entrypoint refuses to clobber an existing non-symlink.
+// stage's HOME. Two layers create it: the entrypoint shim creates it at the real
+// container HOME (/root) for runtime-owned processes, and the per-tool bwrap
+// sandbox emits a `--symlink` at the model-facing HOME (/tmp) for every role.
+// Because `$HOME` differs between the two layers, a `~/` from resolves to the
+// appropriate absolute path for each consumer. The entrypoint refuses to
+// clobber an existing non-symlink.
 //
 // `from` SECURITY: it must not contain a null byte, must not be the root `/`, and
 // must not point INTO /agent (a self-referential loop). Kernel/virtual paths

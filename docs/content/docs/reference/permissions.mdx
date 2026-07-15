@@ -8,7 +8,14 @@ The mental model is at [/concepts/permissions-model](/docs/concepts/permissions-
 
 ## Built-in roles
 
-Roles form a strict tower: each role bypasses every guard at its tier and below.
+Roles form a strict tower for bypassable plugin guards: each role bypasses guards at its tier and below. Canonical credential isolation is a core invariant outside the tower.
+
+<Callout type="warn" title="Canonical secrets are never bypassable">
+  No role—including `owner`—and no `fs.see.secrets`, `security.bypass.*`, wildcard, tier grant, or `acknowledgeGuards`
+  value allows an LLM tool to read or edit `.env`, `secrets.json`, `auth.json`, canonical credential directories,
+  reusable CLI profiles, or aliases to them. `fs.see.secrets` only authorizes runtime-owned credential use through
+  dedicated mediation. Core tool wrappers and bash masks enforce this independently of plugin hooks.
+</Callout>
 
 | Role      | Default `match[]`   | Tier bypass cap | Default `permissions[]`                                                                                                                                                                                                                                                                                                                                             |
 | --------- | ------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -39,7 +46,7 @@ You don't have to hand-edit `typeclaw.json#roles` to grant a role. From the TUI 
 | `subagent.output`         | `owner`/`trusted`/`member` | allow reading subagent output                                                                                                                                              |
 | `subagent.spawn.operator` | `owner`/`trusted`          | allow spawning write-capable (operator) subagents                                                                                                                          |
 | `fs.see.private`          | `owner`/`trusted`/`member` | see the private working surface (`workspace/`, `memory/`, `sessions/`); without it those dirs are hidden from bash and the file tools                                      |
-| `fs.see.secrets`          | `owner`/`trusted`          | see the credential files (`.env`, `secrets.json`); without it they are masked                                                                                              |
+| `fs.see.secrets`          | `owner`/`trusted`          | authorize runtime-owned credential use only through dedicated safe mediation; raw stores and reusable child-CLI auth remain unavailable to every LLM tool                  |
 | `security.bypass.low`     | `owner`/`trusted`/`member` | tier-wide bypass for low-severity guards                                                                                                                                   |
 | `security.bypass.medium`  | `owner`/`trusted`          | tier-wide bypass for medium-severity guards                                                                                                                                |
 | `security.bypass.high`    | `owner`                    | tier-wide bypass for high-severity guards                                                                                                                                  |
@@ -47,7 +54,7 @@ You don't have to hand-edit `typeclaw.json#roles` to grant a role. From the TUI 
 
 Plugin-contributed permissions live under the plugin's namespace (`<plugin>.<verb>.<noun>`). They're declared on `definePlugin({ permissions: [...] })` and surface in `roles.<name>.permissions[]` once the plugin is loaded.
 
-`fs.see.private` / `fs.see.secrets` are phrased as capabilities to _see_ so the tower stays monotonic: a role without them has the matching paths hidden from both bash (bwrap masks) and the file tools (the `privateSurfaceRead` guard). A custom role can carry them explicitly, e.g. `"contributor": { "match": ["slack:T0 author:U_C"], "permissions": ["channel.respond", "fs.see.private"] }` sees the working surface but not the secret files. The agent folder's top-level `public/` directory is never hidden by either grant — it is the one zone a `guest` can read and write. See [the sandbox internals](/docs/internals/sandbox) for the enforcement details.
+`fs.see.private` controls the role-private working surface (`workspace/`, `memory/`, `sessions/`). `fs.see.secrets` is intentionally different: despite its historical name, it permits runtime mediation only and never unmasks raw secret paths for LLM tools. A custom role carrying `fs.see.private` can see the working surface; no custom role can opt into canonical credential files. The agent folder's top-level `public/` directory remains the one zone a `guest` can read and write. See [the sandbox internals](/docs/internals/sandbox) for enforcement details.
 
 ## Security guards — `high` tier
 
@@ -61,12 +68,12 @@ Audience-leak severity. Bypass sends data to a third-party audience outside the 
 
 ## Security guards — `medium` tier
 
-Silent-attack severity. Bypass produces attacker-favorable state in operator-reviewable surface without immediate audience-leak. `owner` and `trusted` bypass by default; `member` does not.
+Silent-attack severity. `owner` and `trusted` bypass these plugin guards by default; `member` does not. Bypassing `secretExfilBash` or `secretExfilRead` only skips heuristic plugin checks—it does not remove canonical filesystem masks, canonical non-bash denial, or environment stripping.
 
 | Guard                  | Per-guard permission                   | Blocks                                                                                                                                                       |
 | ---------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `secretExfilBash`      | `security.bypass.secretExfilBash`      | `bash env`, `bash printenv`, etc.                                                                                                                            |
-| `secretExfilRead`      | `security.bypass.secretExfilRead`      | `read .env`, `read secrets.json`, etc.                                                                                                                       |
+| `secretExfilRead`      | `security.bypass.secretExfilRead`      | heuristic secret-like reads outside the non-bypassable canonical stores                                                                                      |
 | `ssrf`                 | `security.bypass.ssrf`                 | `curl http://169.254.169.254/...` and other IMDS / SSRF targets                                                                                              |
 | `sessionSearchSecrets` | `security.bypass.sessionSearchSecrets` | `session_search` query returning secret-shaped hits                                                                                                          |
 | `gitExfil`             | `security.bypass.gitExfil`             | `git push` to an unfamiliar remote (a clean operator-configured remote is not a leak; the retarget-and-push breach is gated by `gitRemoteTainted` at `high`) |
@@ -96,6 +103,6 @@ This is the conversational counterpart to the CLI `typeclaw role claim` flow ([/
 
 ## Acceptance logic
 
-`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission. The two axes work forever; adding a per-guard permission to a role doesn't remove the role's tier-wide grants.
+`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission for bypassable plugin guards. Neither axis applies to core canonical-secret enforcement.
 
 The bundled `security` plugin reads each guard's exported `GUARD_*_SEVERITY` constant at boot. Adding a new guard without an exported severity is a TypeScript error, not a silent permissive fallback.

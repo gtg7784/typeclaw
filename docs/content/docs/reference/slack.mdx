@@ -67,17 +67,17 @@ CLI: `typeclaw channel add slack` (interactive QR login). The `slack` adapter is
 
 ## Capabilities
 
-| Feature                  | Supported | Notes                                                       |
-| ------------------------ | --------- | ----------------------------------------------------------- |
-| Outbound messages        | yes       | Chunked at 11,500 chars; files upload after the text chunks |
-| Reactions (add + remove) | yes       |                                                             |
-| Message editing          | yes       | `channel_edit` maps to `chat.update`; own messages only     |
-| Typing indicator         | no        |                                                             |
-| Channel-name resolution  | yes       | Via the Conversations API, 24h cache                        |
-| Self identity            | yes       |                                                             |
-| History                  | yes       | Limit 100 messages                                          |
-| Attachments              | yes       | Inbound fetch + outbound upload                             |
-| Membership               | yes       |                                                             |
+| Feature                  | Supported | Notes                                                                                                                                   |
+| ------------------------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Outbound messages        | yes       | Chunked at 11,500 chars; files upload after the text chunks                                                                             |
+| Reactions (add + remove) | yes       |                                                                                                                                         |
+| Message editing          | yes       | `channel_edit` maps to `chat.update`; own messages only                                                                                 |
+| Typing indicator         | no        |                                                                                                                                         |
+| Channel-name resolution  | yes       | Via the Conversations API, 24h cache                                                                                                    |
+| Self identity            | yes       |                                                                                                                                         |
+| History                  | yes       | Limit 100 messages                                                                                                                      |
+| Attachments              | yes       | Inbound private URLs use Bearer auth, manual Slack-owned HTTPS redirects, and a hard streaming byte limit; outbound upload is supported |
+| Membership               | yes       |                                                                                                                                         |
 
 ## Workspaces
 
