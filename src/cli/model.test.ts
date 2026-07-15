@@ -54,6 +54,26 @@ describe('resolveExplicitRef carries catalog metadata for non-interactive set/ad
     expect(picked.ref).toBe('fireworks/unknown-model')
     expect(picked.meta).toBeUndefined()
   })
+
+  test('rejects an unsupported model for a closed-set provider (openai-codex), naming the valid ids', async () => {
+    // given: a Codex ref whose model id is not in the shipped lineup (the gpt-5.6 incident)
+    let error: Error | undefined
+    // when: resolving it for a non-interactive set/add
+    try {
+      await resolveExplicitRef('openai-codex/gpt-5.6', catalogWith(liveOption))
+    } catch (e) {
+      error = e as Error
+    }
+    // then: it throws (so the bad ref is never persisted) and names a valid alternative
+    expect(error?.message).toMatch(/isn't a supported model for openai-codex/)
+    expect(error?.message).toContain('openai-codex/gpt-5.5')
+  })
+
+  test('a valid closed-set provider ref resolves from KNOWN_PROVIDERS (no catalog, no metadata)', async () => {
+    const picked = await resolveExplicitRef('openai-codex/gpt-5.5', catalogWith(liveOption))
+    expect(picked.ref).toBe('openai-codex/gpt-5.5')
+    expect(picked.meta).toBeUndefined()
+  })
 })
 
 describe('parseThinkingArg', () => {

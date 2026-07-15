@@ -11,6 +11,7 @@ import {
   listKnownModelRefs,
   listKnownProviderVendorIds,
   providerForModelRef,
+  providerHasClosedModelSet,
   providerIdsForVendor,
   supportsApiKey,
   supportsOAuth,
@@ -374,6 +375,13 @@ describe('model ref predicates', () => {
     expect(isModelRef('openai/')).toBe(false)
     expect(isModelRef('OpenAI/gpt-6-live')).toBe(false)
     expect(isModelRef('openai/gpt 6')).toBe(false)
+  })
+
+  test('providerHasClosedModelSet is true only for the OAuth-backend Codex provider', () => {
+    expect(providerHasClosedModelSet('openai-codex')).toBe(true)
+    expect(providerHasClosedModelSet('openai')).toBe(false)
+    expect(providerHasClosedModelSet('fireworks')).toBe(false)
+    expect(providerHasClosedModelSet('anthropic')).toBe(false)
   })
 })
 

@@ -15,8 +15,11 @@ import {
 } from '@/config/models-mutation'
 import {
   isKnownModelRef,
+  isModelRef,
   KNOWN_PROVIDERS,
+  listKnownModelRefs,
   providerForModelRef,
+  providerHasClosedModelSet,
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
@@ -65,7 +68,7 @@ const setSub = defineCommand({
   async run({ args }) {
     const cwd = ensureAgentDir()
     const profile = args.profile ?? (await pickProfileName())
-    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
+    const picked = await resolvePickedRef(args.ref, cwd)
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
@@ -173,7 +176,7 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
+    const picked = await resolvePickedRef(args.ref, cwd)
 
     intro(`Adding model profile: ${args.profile} → ${picked.ref}`)
 
@@ -435,6 +438,16 @@ export async function resolveExplicitRef(
   loadCatalog: () => Promise<{ options: ModelOption[] }> = fetchModelOptions,
 ): Promise<PickedModelRef> {
   if (isKnownModelRef(ref)) return { ref }
+  // A closed-model-set provider (e.g. openai-codex) accepts only the ids we ship;
+  // anything else 400s at request time and would otherwise be persisted as a ref
+  // that silently breaks every turn. Reject it here — before the catalog lookup,
+  // which doesn't cover these providers anyway — and name the valid ids so the
+  // fix is obvious.
+  const closedProvider = isModelRef(ref) ? providerForModelRef(ref) : null
+  if (closedProvider !== null && providerHasClosedModelSet(closedProvider)) {
+    const valid = listKnownModelRefs().filter((known) => known.startsWith(`${closedProvider}/`))
+    throw new Error(`"${ref}" isn't a supported model for ${closedProvider}. Choose one of: ${valid.join(', ')}.`)
+  }
   const { options } = await loadCatalog()
   const option = options.find((candidate) => candidate.ref === ref)
   if (option === undefined) {
@@ -446,6 +459,21 @@ export async function resolveExplicitRef(
   }
   const meta = customModelMetaFromOption(option)
   return { ref, ...(meta !== undefined ? { meta } : {}) }
+}
+
+// Resolve the model ref for `set`/`add`: an explicit `<ref>` arg goes through
+// validation (`resolveExplicitRef`, which throws on a definitely-invalid ref such
+// as an unsupported openai-codex model), while a bare invocation opens the
+// interactive picker. A validation error surfaces via the standard CLI error line
+// + non-zero exit instead of an unhandled-rejection stack trace.
+async function resolvePickedRef(ref: string | undefined, cwd: string): Promise<PickedModelRef> {
+  if (ref === undefined) return pickModelRef(cwd)
+  try {
+    return await resolveExplicitRef(ref)
+  } catch (e) {
+    console.error(errorLine(e instanceof Error ? e.message : String(e)))
+    process.exit(1)
+  }
 }
 
 export type { PickedModelRef }

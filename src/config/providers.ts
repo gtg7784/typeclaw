@@ -1011,6 +1011,22 @@ export function isModelRef(value: string): value is ModelRef {
   return /^[a-z0-9][a-z0-9-]*\/[^\s/][^\s]*$/.test(value) && knownProviderForModelRef(value) !== null
 }
 
+// Providers whose model set is CLOSED: the ids shipped in KNOWN_PROVIDERS are the
+// complete, authoritative lineup the backend accepts, AND the live models.dev
+// catalog does not list them — so a ref that isn't a known ref here can't be
+// excused as "offline" or "a new model not synced yet". It's a definite config
+// error that 400s at request time. Today only `openai-codex`: it targets the
+// OAuth ChatGPT backend, which rejects any id outside its fixed lineup (e.g.
+// `openai-codex/gpt-5.6` → "model is not supported when using Codex with a
+// ChatGPT account"). API-key providers (openai, fireworks, openrouter, …) are
+// OPEN — they can serve models beyond our curated subset, so unknown ids there
+// stay permitted (persisted with a warning) rather than rejected.
+const CLOSED_MODEL_SET_PROVIDERS: ReadonlySet<KnownProviderId> = new Set<KnownProviderId>(['openai-codex'])
+
+export function providerHasClosedModelSet(providerId: KnownProviderId): boolean {
+  return CLOSED_MODEL_SET_PROVIDERS.has(providerId)
+}
+
 // The default we hand to scaffolded `typeclaw.json` and the schema's
 // `model.default`. Lives here (next to the provider table) so adding a model
 // can't drift from the field default — both come from the same module.
