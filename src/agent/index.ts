@@ -912,29 +912,23 @@ function wrapRegistryTools(
   )
 }
 
-function wrapSystemTools(
+export function wrapSystemTools(
   tools: ToolDefinition[],
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
   getLoopGuardTurn: () => number | undefined,
 ): ToolDefinition[] {
-  if (!hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
     wrapSystemTool(tool, {
-      agentDir: plugins.agentDir,
-      sessionId: plugins.sessionId,
-      hooks: plugins.hooks,
+      agentDir: plugins?.agentDir ?? process.cwd(),
+      sessionId: plugins?.sessionId ?? 'system-tools',
+      hooks: plugins?.hooks ?? createHookBus(),
       getOrigin,
       getAbort,
       getLoopGuardTurn,
     }),
   )
-}
-
-function hasToolHooks(plugins: PluginSessionWiring | undefined): plugins is PluginSessionWiring {
-  if (!plugins) return false
-  return plugins.hooks.count('tool.before') > 0 || plugins.hooks.count('tool.after') > 0
 }
 
 export function wrapSubagentCustomTools(

@@ -9,6 +9,7 @@ import { defineTool, type Tool, type ToolContext } from '@/plugin'
 export type WriteReportArgs = { path: string; content: string }
 
 const REPORT_BASENAME_RE = /^research-[a-z0-9][a-z0-9-]*\.md$/
+const PROC_FD_PARENT_RE = /^\/proc\/self\/fd\/\d+$/
 
 // One report per session. The researcher subagent object — and therefore this
 // tool instance — is built ONCE by `createResearcherSubagent()` at plugin
@@ -64,15 +65,16 @@ Write to \`public/\` instead of \`workspace/\` when your resolved role lacks \`f
 
       const parent = path.dirname(target)
       const base = path.basename(target)
+      const lexicalParent = PROC_FD_PARENT_RE.test(parent) ? await realpath(parent) : parent
 
       if (!REPORT_BASENAME_RE.test(base)) {
         throw new Error(
           `Report filename must match research-<slug>.md (lowercase slug), got: ${base}. Path: ${target}.`,
         )
       }
-      if (parent !== workspaceDir && parent !== publicDir) {
+      if (lexicalParent !== workspaceDir && lexicalParent !== publicDir) {
         throw new Error(
-          `Report must be written directly under ${workspaceDir} or ${publicDir} (no subdirectories), got parent: ${parent}.`,
+          `Report must be written directly under ${workspaceDir} or ${publicDir} (no subdirectories), got parent: ${lexicalParent}.`,
         )
       }
 
@@ -81,7 +83,7 @@ Write to \`public/\` instead of \`workspace/\` when your resolved role lacks \`f
       // `realpath('<agent>/public')` throws ENOENT on agents that never made it,
       // which would reject every valid write to `workspace/`. The symlink-escape
       // defense is unchanged — the parent actually written to is still canonicalized.
-      const canonicalDir = parent === workspaceDir ? workspaceDir : publicDir
+      const canonicalDir = lexicalParent === workspaceDir ? workspaceDir : publicDir
       const [realParent, realCanonical] = await Promise.all([realpath(parent), realpath(canonicalDir)])
       if (realParent !== realCanonical) {
         throw new Error(`Report parent directory resolves outside the allowed report directories: ${parent}.`)

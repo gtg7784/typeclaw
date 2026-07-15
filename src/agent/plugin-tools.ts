@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
@@ -38,16 +39,16 @@ import type {
 import {
   buildSandboxedCommand,
   canWriteAgentRootInSandbox,
-  cleanupPrivilegedSandboxRuntime,
   canMountRealProc,
+  cleanupPrivilegedSandboxRuntime,
   commandNeedsRealProc,
   DEFAULT_SANDBOX_ENV,
   ensureBwrapAvailable,
   ensureHiddenMaskTargets,
   ensureSessionTmpDir,
   getProcBindSafetyVerdict,
+  isGitControlPath,
   mapVirtualTmpPath,
-  type PrivilegedSandboxRuntime,
   resolveHiddenPaths,
   resolvePrivilegedSandboxRuntime,
   resolveProcBindSafetyWithRetry,
@@ -55,6 +56,7 @@ import {
   resolveProtectedZones,
   resolveSandboxSymlinks,
   resolveWritableZones,
+  SandboxPolicyError,
   SandboxDegradedProcError,
   SandboxProcProbeUnverifiedError,
   subtractMasked,
@@ -66,6 +68,7 @@ import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import { enforceSubagentBashPolicy, type SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
+import { enforceAndPinToolFiles, writeToolOutputNoFollow } from './tool-file-safety'
 import { SUBAGENT_OUTPUT_TOOL_NAME, type SubagentOutputToolDetails } from './tools/subagent-output'
 import { webFetchTool } from './tools/webfetch'
 import { webSearchTool } from './tools/websearch'
@@ -89,6 +92,7 @@ let sharedLoopGuard: LoopGuard = createLoopGuard()
 export const TYPECLAW_INTERNAL_BASH_ENV = '__typeclawBashEnv'
 
 type BashEnvOverlay = Record<string, string>
+const SECRET_BASH_ENV_NAMES = new Set(['GH_TOKEN', 'GITHUB_TOKEN'])
 
 const SECRET_ENV_NAME_PATTERN =
   /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|API_KEY|ACCESS_KEY(?:_ID)?|SECRET_KEY|PRIVATE_KEY|AUTH)$/
@@ -107,8 +111,17 @@ function readBashEnvOverlay(args: Record<string, unknown>): BashEnvOverlay | und
 
 function bashSpawnHookWithOverlay(context: BashSpawnContext): BashSpawnContext {
   const overlay = bashEnvStore.getStore()
-  if (overlay === undefined) return context
-  return { ...context, env: { ...context.env, ...overlay } }
+  return { ...context, env: sanitizeBashSpawnEnvironment(context.env, overlay) }
+}
+
+export function sanitizeBashSpawnEnvironment(
+  inherited: NodeJS.ProcessEnv | undefined,
+  overlay: BashEnvOverlay | undefined,
+): NodeJS.ProcessEnv {
+  const env = { ...inherited }
+  for (const name of SECRET_BASH_ENV_NAMES) delete env[name]
+  if (overlay !== undefined) Object.assign(env, overlay)
+  return env
 }
 
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
@@ -158,7 +171,14 @@ function createPiBuiltinToolDefinition(name: PiBuiltinToolName, cwd: string): To
     case 'edit':
       return piCreateEditToolDefinition(cwd)
     case 'write':
-      return piCreateWriteToolDefinition(cwd)
+      return piCreateWriteToolDefinition(cwd, {
+        operations: {
+          mkdir: async (dir) => {
+            await mkdir(dir, { recursive: true })
+          },
+          writeFile: writeToolOutputNoFollow,
+        },
+      })
     case 'grep':
       return piCreateGrepToolDefinition(cwd)
     case 'find':
@@ -234,13 +254,14 @@ export type WrapSystemToolOptions = {
   getAbort?: () => ((reason?: string) => void) | undefined
   getLoopGuardTurn?: () => number | undefined
   // When present, the bash builtin is rewritten through the per-tool bwrap
-  // sandbox with role-derived path masks. Absent (or no masks for the role)
-  // runs bash unchanged — preserving today's behavior for trusted+ and for
-  // sessions wired without a permission service (e.g. tests).
+  // sandbox. Private-directory masks remain role-derived; canonical agent
+  // secret-file masks apply to every role. Only sessions wired without a
+  // permission service fail closed before execution. Production session setup
+  // always supplies either the live service or the deny-all service.
   permissions?: PermissionService
   // Per-subagent bash capability policy, enforced as a hard pre-check BEFORE
-  // the role-derived sandbox (which returns early for trusted/owner). Lets a
-  // read-only subagent keep its bash read-only no matter who spawned it. See
+  // the role-derived sandbox. Lets a read-only subagent keep its bash read-only
+  // no matter who spawned it. See
   // `src/agent/reviewer-bash-policy.ts`.
   bashPolicy?: SubagentBashPolicy
   bashSandboxBoundary?: BashSandboxBoundary
@@ -314,13 +335,37 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         logger: opts.logger,
       }
 
-      let result: ToolResult
+      let result: ToolResult | undefined
+      let executionError: unknown
+      let cleanupError: unknown
+      const pinnedFiles = await enforceAndPinToolFiles({
+        tool: opts.toolName,
+        args: before.args,
+        agentDir: opts.agentDir,
+        genericInputs: true,
+        fileOperands: tool.fileOperands,
+        signal,
+      })
       try {
         result = await tool.execute(before.args, toolCtx)
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return errorResult(message)
+        executionError = err
+      } finally {
+        try {
+          await pinnedFiles.cleanup()
+        } catch (error) {
+          cleanupError = error
+        }
       }
+      const finalError = executionError ?? cleanupError
+      if (finalError !== undefined) {
+        const failure = errorResult(finalError instanceof Error ? finalError.message : String(finalError))
+        await runToolAfterSafely(opts, opts.toolName, toolCallId, failure)
+        if (cleanupError !== undefined) throw finalError
+        return failure
+      }
+      if (result === undefined) throw new Error('plugin tool execution returned no result')
+      result = pinnedFiles.restoreResult(result)
 
       const resolved = loopGate.resolve(result)
       if ('deferredBlock' in resolved) {
@@ -353,6 +398,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
     parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mutableArgs = params as Record<string, unknown>
+      normalizeDefaultTreeRoot(tool.name, mutableArgs)
       const liveOrigin = opts.getOrigin?.()
       const blockResult = await opts.hooks.runToolBefore({
         tool: tool.name,
@@ -383,8 +429,41 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       }
       stripGuardAcknowledgements(mutableArgs)
 
-      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
-      const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
+      const pinnedFiles = await enforceAndPinToolFiles({
+        tool: tool.name,
+        args: mutableArgs,
+        agentDir: opts.agentDir,
+        genericInputs: tool.name !== 'mcp_call',
+        ...(opts.permissions !== undefined
+          ? { hidden: resolveHiddenPaths(opts.permissions, liveOrigin, opts.agentDir) }
+          : {}),
+        signal,
+      })
+      let result: Awaited<ReturnType<typeof tool.execute>> | undefined
+      let executionError: unknown
+      let cleanupError: unknown
+      try {
+        result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
+      } catch (error) {
+        executionError = error
+      } finally {
+        try {
+          await pinnedFiles.cleanup()
+        } catch (error) {
+          cleanupError = error
+        }
+      }
+      const finalError = executionError ?? cleanupError
+      if (finalError !== undefined) {
+        await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(finalError))
+        throw finalError
+      }
+      if (result === undefined) throw new Error('system tool execution returned no result')
+      const restoredResult = pinnedFiles.restoreResult({
+        content: result.content as ContentPart[],
+        details: result.details,
+      })
+      const resolved = loopGate.resolve(restoredResult)
       if ('deferredBlock' in resolved) {
         fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
         throw new Error(resolved.deferredBlock)
@@ -419,6 +498,7 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
     parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mutableArgs = params as Record<string, unknown>
+      normalizeDefaultTreeRoot(tool.name, mutableArgs)
       const liveOrigin = opts.getOrigin?.()
       // Defense-in-depth: strip any pre-existing internal env-overlay key
       // before hooks run so only trusted tool.before hooks can set it.
@@ -459,63 +539,73 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
 
       // Per-subagent capability fence: runs BEFORE the role-derived sandbox so
       // a read-only subagent's bash stays read-only even for a trusted/owner
-      // caller (for whom applyBashSandbox returns early with no masks). Throws
-      // SubagentBashPolicyError on a disallowed command, surfaced to the model
-      // as a tool error.
+      // caller whose sandbox otherwise preserves full agent-root writes. Throws
+      // SubagentBashPolicyError on a disallowed command, surfaced to the model as
+      // a tool error.
       if (tool.name === 'bash' && opts.bashPolicy !== undefined) {
         const command = mutableArgs.command
         if (typeof command === 'string') enforceSubagentBashPolicy(opts.bashPolicy, command)
       }
 
-      const sandboxBoundary = opts.bashSandboxBoundary ?? DEFAULT_BASH_SANDBOX_BOUNDARY
-      const privilegedRuntime =
-        tool.name === 'bash' && opts.permissions !== undefined
-          ? await applyBashSandbox(
-              mutableArgs,
-              opts.permissions,
-              liveOrigin,
-              opts.agentDir,
-              opts.sessionId,
-              bashEnvOverlay,
-              sandboxBoundary,
-            )
-          : undefined
-
-      const tmpRedirect =
-        TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined
-          ? await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
-          : undefined
-
+      let preparedSandboxRuntime: PreparedBashSandbox | undefined
+      let pinnedFiles: Awaited<ReturnType<typeof enforceAndPinToolFiles>> | undefined
+      let tmpRedirect: TmpRedirect | undefined
       let rawResult: ToolResult | undefined
       let executionError: unknown
+      let cleanupError: unknown
+      const sandboxBoundary = opts.bashSandboxBoundary ?? DEFAULT_BASH_SANDBOX_BOUNDARY
       try {
-        if (privilegedRuntime !== undefined) {
-          await (sandboxBoundary.verifyRuntime ?? verifyPrivilegedSandboxRuntime)(privilegedRuntime)
+        if (tool.name === 'bash') {
+          if (opts.permissions === undefined) {
+            throw new SandboxPolicyError('model-driven bash has no permission service; refusing unsandboxed execution')
+          }
+          preparedSandboxRuntime = await applyBashSandbox(
+            mutableArgs,
+            opts.permissions,
+            liveOrigin,
+            opts.agentDir,
+            opts.sessionId,
+            bashEnvOverlay,
+            sandboxBoundary,
+          )
         }
+
+        tmpRedirect =
+          TMP_REDIRECT_TOOLS.has(tool.name) && opts.permissions !== undefined
+            ? await applyTmpPathRedirect(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, opts.sessionId)
+            : undefined
+        pinnedFiles = await enforceAndPinToolFiles({
+          tool: tool.name,
+          args: mutableArgs,
+          agentDir: opts.agentDir,
+          ...(opts.permissions !== undefined
+            ? { hidden: resolveHiddenPaths(opts.permissions, liveOrigin, opts.agentDir) }
+            : {}),
+          signal,
+        })
+        await preparedSandboxRuntime?.verify()
         rawResult = await bashEnvStore.run(bashEnvOverlay, () =>
           tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx),
         )
       } catch (error) {
         executionError = error
-      }
-      let cleanupError: unknown
-      if (privilegedRuntime !== undefined) {
-        try {
-          await (sandboxBoundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime)
-        } catch (error) {
-          cleanupError = error
-        }
+      } finally {
+        const cleanup = [pinnedFiles?.cleanup(), preparedSandboxRuntime?.cleanup()].filter(
+          (task): task is Promise<void> => task !== undefined,
+        )
+        const outcomes = await Promise.allSettled(cleanup)
+        const failed = outcomes.find((outcome) => outcome.status === 'rejected')
+        if (failed?.status === 'rejected') cleanupError = failed.reason
       }
       const finalError = executionError ?? cleanupError
       if (finalError !== undefined) {
-        // A throwing tool or cleanup must still run tool.after exactly once so
-        // lifecycle hooks release reservations. The execution error remains the
-        // primary failure when both phases reject.
         await runToolAfterSafely(opts, tool.name, toolCallId, toErrorResult(finalError))
         throw finalError
       }
+      if (pinnedFiles === undefined) throw new Error('tool file boundary was not initialized')
       if (rawResult === undefined) throw new Error('tool execution returned no result')
-      const result = tmpRedirect !== undefined ? restoreTmpPathInResult(rawResult, tmpRedirect) : rawResult
+      const pinnedResult = pinnedFiles.restoreResult(rawResult)
+      const result = tmpRedirect !== undefined ? restoreTmpPathInResult(pinnedResult, tmpRedirect) : pinnedResult
       const resolved = loopGate.resolve({ content: result.content as ContentPart[], details: result.details })
       if ('deferredBlock' in resolved) {
         fireLoopAbort(opts.getAbort, 'loop_guard:deferred_block')
@@ -564,9 +654,30 @@ export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDe
   return defaultBuiltinPiToolDefinitions(opts.agentDir).map((tool) => wrapBuiltinToolDefinition(tool, opts))
 }
 
+type BashFilesystemPolicyOptions = {
+  agentDir: string
+  canWriteAgentRoot: boolean
+  masks: { dirs: string[]; files: string[] }
+  writable: { dirs: string[]; files: string[] }
+  protected: { dirs: string[]; files: string[] }
+}
+
+type PreparedBashSandbox = {
+  verify: () => Promise<void>
+  cleanup: () => Promise<void>
+}
+
+export function buildBashFilesystemPolicy(options: BashFilesystemPolicyOptions) {
+  const { agentDir, canWriteAgentRoot, masks, writable, protected: protectedZones } = options
+  if (canWriteAgentRoot) {
+    return { writableRoot: { dir: agentDir }, masks, protected: protectedZones }
+  }
+  return { masks, writable, protected: protectedZones }
+}
+
 // Rewrites mutableArgs.command in place so the bash builtin runs inside bwrap
-// with role-derived path masks. A role that sees everything (trusted+) yields
-// no masks and runs unchanged. When masks ARE needed but bwrap is unavailable
+// with role-derived private-directory masks and unconditional canonical-secret
+// file masks. When masks are needed but bwrap is unavailable
 // we throw rather than run unsandboxed — fail closed, never leak the masked
 // surface. Runs after the tool.before guards have inspected the raw command.
 async function applyBashSandbox(
@@ -577,89 +688,32 @@ async function applyBashSandbox(
   sessionId: string,
   envOverlay: BashEnvOverlay | undefined,
   boundary: BashSandboxBoundary,
-): Promise<PrivilegedSandboxRuntime | undefined> {
+): Promise<PreparedBashSandbox> {
   const command = mutableArgs.command
-  if (typeof command !== 'string') return undefined
+  if (typeof command !== 'string') return { verify: async () => {}, cleanup: async () => {} }
 
   await assertNoCanonicalSecretsInGit(agentDir)
 
   const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
-
   const sandboxEnvOverlay = buildRoleScopedConfigEnv(agentDir, dirs, envOverlay)
-
-  // bwrap's --ro-bind-data/--tmpfs mask ops abort when the target does not exist
-  // on the (read-only, virtiofs/OrbStack) agent-folder bind. Materialize the mask
-  // targets on the real host FS first; the full {dirs, files} still feeds
-  // subtractMasked below so a masked path is never re-exposed by a later RW bind.
   const maskTargets = await ensureHiddenMaskTargets({ dirs, files })
   await boundary.ensureAvailable()
-  // Per-session /tmp: bind this session's scratch dir over the default
-  // --tmpfs /tmp so writes survive across the role's sandboxed bash calls AND
-  // match what the write/edit wrapper redirected a /tmp path to. The bind is
-  // emitted via policy.mounts (after the hardcoded --tmpfs /tmp), so last-op-
-  // wins makes it the live /tmp. Unsandboxed roles (empty masks, returned
-  // above) keep sharing the real container /tmp between write and bash.
   const sessionTmp = await ensureSessionTmpDir(sessionId)
-  // Write-confined jail for low-trust roles: bind the whole project read-only,
-  // hide private/secret paths, then re-expose only the free-write scratch zones
-  // (workspace + root allowlist + .git) RW. The WORKING TREE outside those zones
-  // (node_modules/, agentDir root, non-allowlisted tracked files) stays EROFS, so
-  // bash cannot sidestep the non-workspace-write guard — and `git checkout` of a
-  // protected worktree path fails at the kernel. .git is RW so members can
-  // commit; .git/hooks + .git/config (and any writable core.hooksPath target)
-  // are re-protected RO (protected, rendered after writable, ensured to exist so
-  // an absent path can't be created+executed) so a hook-plant / core.hooksPath
-  // never becomes code execution in the unsandboxed runtime git ops. Trusted/owner never reach here
-  // (their masks are empty) and keep full unsandboxed access. subtractMasked
-  // drops any writable zone masked for this role so an RW bind never re-exposes a
-  // hidden path (e.g. a guest's masked workspace/).
-  // config.sandbox.* is read from the BOOT-TIME snapshot, not getConfig():
-  // sandbox is restart-required, so the writable surface AND the in-jail symlinks
-  // must stay coherent with the boot-time bwrap/capability decisions and with the
-  // entrypoint shim's symlink creation (same contract as resolveProcStrategy's
-  // read of config.sandbox.realProc below). getSandboxWritablePathSpecs folds
-  // every sandbox.symlinks[].to into the writable set so the symlink target is
-  // writable without the operator also listing it under writablePaths.
   const writable = subtractMasked(await resolveWritableZones(agentDir, getSandboxWritablePathSpecs(config)), {
     dirs,
     files,
   })
-  // subtractMasked again on the protected set: a protected RO bind renders after
-  // the masks (last-op-wins), so an unfiltered protected path nested under a
-  // masked dir (e.g. a guest's workspace/ when core.hooksPath=workspace/hooks)
-  // would re-expose the hidden real dir. A masked path is already non-writable
-  // for this role, so it needs no protection anyway.
   const writableRoot = canWriteAgentRootInSandbox(permissions, origin)
   const protectedZones =
     writableRoot || writable.dirs.includes(join(agentDir, '.git'))
       ? subtractMasked(await resolveProtectedZones(agentDir), { dirs, files })
       : { dirs: [], files: [] }
-  // Only emit an in-jail symlink for a target that actually survived as a
-  // writable dir: a symlink to a target that was dropped (missing, masked for
-  // this role, or filtered by the writable-zone guardrails) would dangle onto an
-  // EROFS/hidden path. Resolve `from` against the SANDBOX HOME (/tmp), where the
-  // per-session tmp dir is bound — NOT the container's real /root, which the jail
-  // never sees. The entrypoint shim handles the real-/root symlink for the
-  // unsandboxed (trusted/owner) path.
   const writableDirSet = new Set(writable.dirs)
   const sandboxHome = DEFAULT_SANDBOX_ENV.HOME ?? '/tmp'
   const symlinks = resolveSandboxSymlinks(agentDir, config.sandbox.symlinks, sandboxHome).filter((op) =>
     writableDirSet.has(op.target),
   )
-  // The spawn hook gives bwrap the command-scoped overlay as its parent env.
-  // Secret names are inherited through bwrap without putting their values in
-  // --setenv argv; only non-secret overlay/runtime values are rendered.
   const { strategy: proc, degradeReason } = await resolveProcStrategy()
-  // Fail fast with an actionable error when /proc degraded to tmpfs AND the
-  // command needs a real /proc: under tmpfs Bun would otherwise abort deep in its
-  // pipeline with the opaque "NotDir", which the model retries forever. Which
-  // error depends on WHY it degraded: a 'definitive' degrade (a real leak / an
-  // incapable host) is permanent → SandboxDegradedProcError ("retrying won't
-  // help"); an 'unverified' degrade (the safety probe stayed inconclusive through
-  // its retry budget, e.g. a boot-time load spike) is transient and re-probes on
-  // the next call → SandboxProcProbeUnverifiedError ("retry the same command").
-  // Guarded on the command so non-bun bash still runs in the degraded mode (it
-  // does not touch /proc/self/{fd,maps}).
   if (proc === 'tmpfs' && commandNeedsRealProc(command)) {
     throw degradeReason === 'unverified' ? new SandboxProcProbeUnverifiedError() : new SandboxDegradedProcError()
   }
@@ -668,6 +722,8 @@ async function applyBashSandbox(
     command,
     env: sandboxEnvOverlay,
   })
+  const cleanup = async (): Promise<void> =>
+    (boundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime)
   try {
     await verifyHiddenMaskTargets(maskTargets)
     const { commandString } = boundary.buildCommand(command, {
@@ -689,9 +745,12 @@ async function applyBashSandbox(
         : {}),
     })
     mutableArgs.command = commandString
-    return privilegedRuntime
+    return {
+      verify: async () => (boundary.verifyRuntime ?? verifyPrivilegedSandboxRuntime)(privilegedRuntime),
+      cleanup,
+    }
   } catch (error) {
-    await (boundary.cleanupRuntime ?? cleanupPrivilegedSandboxRuntime)(privilegedRuntime).catch(() => undefined)
+    await cleanup()
     throw error
   }
 }
@@ -721,8 +780,8 @@ function buildRoleScopedConfigEnv(
   // Low-trust roles have workspace/ masked. Do not let container-global config
   // env vars point CLIs back at that private surface: apps that honor XDG should
   // still run, but their config must land in the sandbox's per-session /tmp.
-  // Trusted/owner never get here (no hidden dirs), so their Dockerfile-level
-  // persistent GWS_CONFIG_HOME remains /agent/workspace/.config/gws.
+  // Trusted/owner have only the unconditional credential-dir masks, not the
+  // workspace root mask, so their command broker decides whether to set GWS.
   const workspaceHidden = hiddenDirs.includes(join(agentDir, 'workspace'))
   if (!workspaceHidden) return envOverlay
 
@@ -778,7 +837,7 @@ async function resolveProcStrategy(): Promise<ProcStrategyResolution> {
   )
   if (verdict === 'safe') return { strategy: 'proc-bind' }
   // Degraded last resort: no working /proc strategy. External package runners
-  // (bunx/bun add/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
+  // (bunx/bun run <pkg-bin>) will fail with Bun's opaque "NotDir" because
   // /proc/self/{fd,maps} are absent. Only a proven 'unsafe' (a real cross-userns
   // leak) is DEFINITIVE — warn once (a real operator-facing limit). An
   // 'inconclusive' is reported as retryable upstream and NOT warned (it would cry
@@ -797,25 +856,26 @@ function warnTmpfsProcFallbackOnce(): void {
   tmpfsProcFallbackWarned = true
   console.warn(
     '[sandbox] degraded /proc mode: neither real-proc nor proc-bind is available on this host, ' +
-      'so sandboxed external package runners (bunx / bun add / bun run <pkg-bin>) will fail. ' +
+      'so sandboxed external package runners (bunx / bun run <pkg-bin>) will fail. ' +
       'This needs a runtime with working user namespaces.',
   )
 }
 
-// The builtin file tools that take a single filesystem `path` arg. For a
-// sandboxed role they all run UNSANDBOXED in the main process (only bash is
-// bwrap-wrapped), so each must apply the same /tmp -> session-dir mapping that
+// The builtin file tools that take a single filesystem `path` arg. They run in
+// the main process rather than bwrap, so each must apply the same
+// /tmp -> session-dir mapping that
 // applyBashSandbox binds for bash — otherwise a `read` of /tmp/foo hits the
 // real container /tmp while sandboxed bash wrote the session backing dir.
 const TMP_REDIRECT_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls'])
 
-// Sandboxed roles read /tmp through bwrap's per-session bind (applyBashSandbox),
-// but the path-based file tools run unsandboxed against the real container /tmp.
+// Model-driven bash reads /tmp through bwrap's per-session bind
+// (applyBashSandbox), but the path-based file tools run in the main process
+// against the real container /tmp.
 // Without this redirect a guest/member that touches /tmp/foo through bash (bound
 // to the session dir) and through a file tool (real /tmp) would see two
 // different files. Rewriting the file tool's on-disk path to the same session
-// backing dir makes every layer resolve /tmp/foo to one file. Unsandboxed roles
-// (empty masks) are left untouched: their bash already shares the real /tmp.
+// backing dir makes every layer resolve /tmp/foo to one file. Bare harnesses
+// without the production permission wiring are left untouched.
 type TmpRedirect = { original: string; backing: string }
 
 async function applyTmpPathRedirect(
@@ -857,6 +917,12 @@ function restoreTmpPathInResult(result: ToolResult, redirect: TmpRedirect): Tool
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function normalizeDefaultTreeRoot(toolName: string, args: Record<string, unknown>): void {
+  if ((toolName === 'grep' || toolName === 'find' || toolName === 'ls') && typeof args.path !== 'string') {
+    args.path = '.'
+  }
 }
 
 function appendLoopWarning(result: ToolResult, message: string): ToolResult {
@@ -1016,10 +1082,26 @@ function errorResult(message: string) {
 
 async function runFinalWriteGuards(options: { tool: string; args: Record<string, unknown>; agentDir: string }) {
   return (
+    (await checkGitControlWriteGuard(options)) ??
     (await checkManagedConfigGuard(options)) ??
     (await checkSkillAuthoringGuard(options)) ??
     checkNonWorkspaceWriteGuard(options)
   )
+}
+
+async function checkGitControlWriteGuard(options: {
+  tool: string
+  args: Record<string, unknown>
+  agentDir: string
+}): Promise<{ block: true; reason: string } | undefined> {
+  if (options.tool !== 'write' && options.tool !== 'edit') return undefined
+  const candidate = options.args.path
+  if (typeof candidate !== 'string') return undefined
+  if (!(await isGitControlPath(options.agentDir, candidate))) return undefined
+  return {
+    block: true,
+    reason: `Git control path is runtime-protected and cannot be modified with ${options.tool}: ${candidate}`,
+  }
 }
 
 function runFinalReadGuards(options: { tool: string; args: Record<string, unknown> }) {

@@ -29,6 +29,7 @@ export {
 export {
   resolveProtectedZones,
   resolveWritableZones,
+  isGitControlPath,
   subtractMasked,
   type ProtectedZones,
   type WritableZones,

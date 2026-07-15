@@ -27,7 +27,7 @@ export async function ensureSessionTmpDir(sessionId: string): Promise<string> {
 
 export function isUnderTmp(agentDir: string, rawPath: string): boolean {
   const resolved = resolve(agentDir, rawPath)
-  return resolved === '/tmp' || isInside('/tmp', resolved)
+  return isVirtualTmpPath(agentDir, resolved)
 }
 
 // Maps a model-facing /tmp path to its per-session backing path. Returns
@@ -37,9 +37,15 @@ export function isUnderTmp(agentDir: string, rawPath: string): boolean {
 // for the sandboxed bash that reads it back.
 export function mapVirtualTmpPath(agentDir: string, sessionId: string, rawPath: string): string | undefined {
   const resolved = resolve(agentDir, rawPath)
-  if (resolved !== '/tmp' && !isInside('/tmp', resolved)) return undefined
+  if (!isVirtualTmpPath(agentDir, resolved)) return undefined
   const rel = relative('/tmp', resolved)
   return rel === '' ? sessionTmpDir(sessionId) : join(sessionTmpDir(sessionId), rel)
+}
+
+function isVirtualTmpPath(agentDir: string, resolved: string): boolean {
+  const resolvedAgentDir = resolve(agentDir)
+  if (resolved === resolvedAgentDir || isInside(resolvedAgentDir, resolved)) return false
+  return resolved === '/tmp' || isInside('/tmp', resolved)
 }
 
 function isInside(parent: string, child: string): boolean {
