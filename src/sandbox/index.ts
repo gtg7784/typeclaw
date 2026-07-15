@@ -23,23 +23,29 @@ export {
   canWriteAgentRootInSandbox,
   ensureHiddenMaskTargets,
   resolveHiddenPaths,
+  verifyHiddenMaskTargets,
   type HiddenPaths,
 } from './hidden-paths'
 export {
-  resolvePackageInstallZones,
   resolveProtectedZones,
   resolveWritableZones,
   subtractMasked,
-  type PackageInstallZones,
   type ProtectedZones,
   type WritableZones,
 } from './writable-zones'
 export { resolveSandboxSymlinks, type SandboxSymlinkSpec } from './symlinks'
-export { commandNeedsRealProc, isPackageInstallCommand } from './package-install'
+export { commandNeedsRealProc } from './package-install'
+export {
+  cleanupPrivilegedSandboxRuntime,
+  resolvePrivilegedSandboxRuntime,
+  verifyPrivilegedSandboxRuntime,
+  type PrivilegedSandboxRuntime,
+} from './privileged-runtime'
 export { ensureSessionTmpDir, isUnderTmp, mapVirtualTmpPath, SESSION_TMP_ROOT, sessionTmpDir } from './session-tmp'
 export { formatCommand, shellQuote } from './quote'
 export {
   SandboxDegradedProcError,
+  SandboxMaskTargetError,
   SandboxPolicyError,
   SandboxProcProbeUnverifiedError,
   SandboxUnavailableError,

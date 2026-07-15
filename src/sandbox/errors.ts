@@ -7,6 +7,13 @@ export class SandboxUnavailableError extends Error {
   }
 }
 
+export class SandboxMaskTargetError extends Error {
+  override readonly name = 'SandboxMaskTargetError'
+  constructor(target: string, reason: string) {
+    super(`sandbox canonical mask target is unsafe: ${target} (${reason}). Refusing to run model-driven bash.`)
+  }
+}
+
 // Raised by the optional command-filter knobs (allowPrefixes,
 // rejectShellMetacharacters). These are consumer-opt-in restrictions layered
 // ABOVE the always-on kernel containment, so a rejection here is a policy
@@ -19,17 +26,10 @@ export class SandboxPolicyError extends Error {
   }
 }
 
-export class SandboxMaskTargetError extends Error {
-  override readonly name = 'SandboxMaskTargetError'
-  constructor(target: string, reason: string) {
-    super(`sandbox mask target is unsafe (${target}): ${reason}`)
-  }
-}
-
 // Raised when the /proc strategy degraded to the empty `tmpfs` fallback AND the
-// command needs a real /proc (a bun install / bunx / bun run that reads the
+// command needs a real /proc (bunx / bun run that reads the
 // kernel-backed /proc/self/{fd,maps}). Without this pre-check Bun aborts deep in
-// its install pipeline with the opaque "NotDir" (ENOTDIR) error, which the model
+// its runner pipeline with the opaque "NotDir" (ENOTDIR) error, which the model
 // misreads as a bad package or a transient hiccup and retries forever. Surfacing
 // it here, before the command runs, turns the failure into one the operator (or
 // the model) can act on: it is an environment/runtime limitation, not the
@@ -38,8 +38,8 @@ export class SandboxDegradedProcError extends Error {
   override readonly name = 'SandboxDegradedProcError'
   constructor() {
     super(
-      'sandbox /proc is in degraded tmpfs mode, so bun package commands ' +
-        '(bun install / bun add / bunx / bun run) cannot run: Bun needs a real ' +
+      'sandbox /proc is in degraded tmpfs mode, so bun package runners ' +
+        '(bunx / bun x / bun create / bun run) cannot run: Bun needs a real ' +
         '/proc/self/fd, which this strategy cannot provide, and would otherwise ' +
         'fail with an opaque "NotDir" error. This is a container/runtime limitation ' +
         '(no usable user namespaces for the cap-free proc-bind strategy), not a ' +
@@ -66,8 +66,8 @@ export class SandboxProcProbeUnverifiedError extends Error {
     super(
       'sandbox /proc strategy could not be verified right now: the cap-free ' +
         'proc-bind safety probe stayed inconclusive (usually transient load on the ' +
-        'host while the container was starting up), so this bun package command ' +
-        '(bun install / bun add / bunx / bun run) was held back rather than run ' +
+        'host while the container was starting up), so this bun package runner ' +
+        '(bunx / bun x / bun create / bun run) was held back rather than run ' +
         'under a broken /proc. This is almost certainly temporary and NOT a problem ' +
         'with the command or the package: retry the SAME command in a few seconds — ' +
         'the next attempt re-probes and normally succeeds.',

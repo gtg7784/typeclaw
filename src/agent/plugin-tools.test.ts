@@ -11,7 +11,13 @@ import { z } from 'zod'
 import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
 import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry, type ToolResult } from '@/plugin'
-import { _resetBwrapAvailabilityCacheForTests, _resetRealProcProbeCacheForTests, SESSION_TMP_ROOT } from '@/sandbox'
+import {
+  _resetBwrapAvailabilityCacheForTests,
+  _resetRealProcProbeCacheForTests,
+  buildSandboxedCommand,
+  SESSION_TMP_ROOT,
+  resolvePrivilegedSandboxRuntime,
+} from '@/sandbox'
 
 import {
   __resetSharedLoopGuardForTests,
@@ -994,6 +1000,7 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
   }
 
   const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+  const member: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'member' }
   const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
 
   test('trusted+ (tui→owner) still requires bwrap for canonical masks', async () => {
@@ -1051,6 +1058,161 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     expect(record.command).toBeUndefined()
   })
 
+  test('prepares, verifies, executes, and cleans the generated privileged runtime at the tool boundary', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-privileged-boundary-'))
+    const homeDir = path.join(agentDir, 'home')
+    let generatedSource: string | undefined
+    try {
+      await mkdir(path.join(agentDir, '.git'), { recursive: true })
+      await mkdir(homeDir)
+      await writeFile(path.join(homeDir, '.gitconfig'), '[user]\nname = Alice\nemail = user@example.com\n')
+      const record: { command?: string } = {}
+      const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
+        agentDir,
+        sessionId: 'privileged-boundary',
+        hooks: createHookBus(),
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+        bashSandboxBoundary: {
+          ensureAvailable: async () => {},
+          resolveRuntime: (options) => resolvePrivilegedSandboxRuntime({ ...options, homeDir }),
+          buildCommand(command, options) {
+            if (options === undefined) throw new Error('sandbox options were not provided')
+            for (const mount of options.mounts ?? []) {
+              if (mount.type === 'ro-bind' && mount.dest === '/tmp/.gitconfig') generatedSource = mount.source
+            }
+            expect(options.env?.set).toMatchObject({
+              GIT_CONFIG_GLOBAL: '/tmp/.gitconfig',
+              GIT_CONFIG_NOSYSTEM: '1',
+            })
+            return buildSandboxedCommand(command, options)
+          },
+        },
+      })
+
+      await wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)
+
+      expect(record.command).toContain('--bind')
+      if (generatedSource === undefined) throw new Error('generated profile did not reach sandbox command')
+      expect(await Bun.file(generatedSource).exists()).toBe(false)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('confined authenticated Git cannot load global or system config', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-git-config-isolation-'))
+    let sandboxEnv: Record<string, string> | undefined
+    try {
+      await mkdir(path.join(agentDir, '.git'), { recursive: true })
+      const wrapped = wrapBuiltinToolDefinition(fakeBash({}), {
+        agentDir,
+        sessionId: 'git-config-isolation',
+        hooks: createHookBus(),
+        getOrigin: () => member,
+        permissions: createPermissionService(),
+        bashSandboxBoundary: {
+          ensureAvailable: async () => {},
+          buildCommand(command, options) {
+            if (options === undefined) throw new Error('sandbox options were not provided')
+            sandboxEnv = options.env?.set
+            return buildSandboxedCommand(command, options)
+          },
+        },
+      })
+
+      await wrapped.execute('c', { command: 'git push origin HEAD' }, undefined, undefined, {} as never)
+
+      expect(sandboxEnv).toMatchObject({ GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' })
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('cleanup failure invokes tool.after once after cleanup and propagates the cleanup error', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-cleanup-boundary-'))
+    const order: string[] = []
+    const afterResults: ToolResult[] = []
+    const hooks = createHookBus()
+    hooks.registerAll('observer', agentDir, noopLogger, {
+      'tool.after': (event) => {
+        order.push('after')
+        afterResults.push(event.result)
+      },
+    })
+    const tool = fakeBash({})
+    tool.execute = async () => {
+      order.push('execute')
+      return { content: [{ type: 'text' as const, text: 'ran' }], details: undefined }
+    }
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir,
+      sessionId: 'cleanup-boundary',
+      hooks,
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+      bashSandboxBoundary: {
+        ensureAvailable: async () => {},
+        buildCommand: buildSandboxedCommand,
+        resolveRuntime: async () => ({ env: {}, mounts: [] }),
+        cleanupRuntime: async () => {
+          order.push('cleanup')
+          throw new Error('cleanup failed')
+        },
+      },
+    })
+
+    await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow(
+      'cleanup failed',
+    )
+    expect(order).toEqual(['execute', 'cleanup', 'after'])
+    expect(afterResults).toHaveLength(1)
+    expect(afterResults[0]?.details).toEqual({ error: 'cleanup failed' })
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('execution error wins over cleanup error and reaches tool.after exactly once after cleanup', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-error-precedence-'))
+    const order: string[] = []
+    const afterResults: ToolResult[] = []
+    const hooks = createHookBus()
+    hooks.registerAll('observer', agentDir, noopLogger, {
+      'tool.after': (event) => {
+        order.push('after')
+        afterResults.push(event.result)
+      },
+    })
+    const tool = fakeBash({})
+    tool.execute = async () => {
+      order.push('execute')
+      throw new Error('execution failed')
+    }
+    const wrapped = wrapBuiltinToolDefinition(tool, {
+      agentDir,
+      sessionId: 'error-precedence',
+      hooks,
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+      bashSandboxBoundary: {
+        ensureAvailable: async () => {},
+        buildCommand: buildSandboxedCommand,
+        resolveRuntime: async () => ({ env: {}, mounts: [] }),
+        cleanupRuntime: async () => {
+          order.push('cleanup')
+          throw new Error('cleanup failed')
+        },
+      },
+    })
+
+    await expect(wrapped.execute('c', { command: 'git status' }, undefined, undefined, {} as never)).rejects.toThrow(
+      'execution failed',
+    )
+    expect(order).toEqual(['execute', 'cleanup', 'after'])
+    expect(afterResults).toHaveLength(1)
+    expect(afterResults[0]?.details).toEqual({ error: 'execution failed' })
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
   test('without a permission service bash is never rewritten (escape hatch for unwired sessions)', async () => {
     const record: { command?: string } = {}
     const wrapped = wrapBuiltinToolDefinition(fakeBash(record), {
@@ -1082,6 +1244,65 @@ describe('wrapBuiltinToolDefinition bash sandbox (role-derived path hiding)', ()
     await expect(wrapped.execute('c', args as never, undefined, undefined, {} as never)).rejects.toThrow()
     expect(record.command).toBeUndefined()
     expect(args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
+  test('a secret env overlay reaches the sandbox child without entering generated bwrap text', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-secret-env-boundary-'))
+    const ghToken = 'boundary-gh-token-value'
+    const gitToken = 'boundary-git-token-value'
+    let generated: ReturnType<typeof buildSandboxedCommand> | undefined
+    try {
+      const hooks = createHookBus()
+      hooks.registerAll('env-setter', agentDir, noopLogger, {
+        'tool.before': (event) => {
+          ;(event.args as Record<string, unknown>)[TYPECLAW_INTERNAL_BASH_ENV] = {
+            GH_TOKEN: ghToken,
+            TYPECLAW_GIT_TOKEN: gitToken,
+            GH_REPO: 'acme/widgets',
+          }
+        },
+      })
+      const bash = defaultBuiltinPiToolDefinitions(agentDir).find((tool) => tool.name === 'bash')
+      if (bash === undefined) throw new Error('bash tool definition not found')
+      const wrapped = wrapBuiltinToolDefinition(bash, {
+        agentDir,
+        sessionId: 'secret-env-boundary',
+        hooks,
+        getOrigin: () => tui,
+        permissions: createPermissionService(),
+        bashSandboxBoundary: {
+          ensureAvailable: async () => {},
+          resolveRuntime: async () => ({ env: {}, mounts: [] }),
+          buildCommand(command, options) {
+            if (options === undefined) throw new Error('sandbox options were not provided')
+            expect(options.env?.inherit).toEqual(['GH_TOKEN', 'TYPECLAW_GIT_TOKEN'])
+            expect(options.env?.set).toMatchObject({ GH_REPO: 'acme/widgets' })
+            expect(options.env?.set?.GH_TOKEN).toBeUndefined()
+            expect(options.env?.set?.TYPECLAW_GIT_TOKEN).toBeUndefined()
+            generated = buildSandboxedCommand(command, options)
+            return { ...generated, commandString: command }
+          },
+        },
+      })
+
+      const result = await wrapped.execute(
+        'c',
+        { command: `printf '%s\n%s' "$GH_TOKEN" "$TYPECLAW_GIT_TOKEN"` },
+        undefined,
+        undefined,
+        {} as never,
+      )
+
+      expect(textOfFirstContent(result)).toContain(ghToken)
+      expect(textOfFirstContent(result)).toContain(gitToken)
+      expect(generated).toBeDefined()
+      expect(generated?.argv.join('\n')).not.toContain(ghToken)
+      expect(generated?.argv.join('\n')).not.toContain(gitToken)
+      expect(generated?.commandString).not.toContain(ghToken)
+      expect(generated?.commandString).not.toContain(gitToken)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 
   test('a client-supplied env overlay is stripped before hooks run (only trusted hooks may set it)', async () => {
