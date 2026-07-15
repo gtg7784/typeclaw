@@ -1,3 +1,8 @@
+import {
+  DEFAULT_ATTACHMENT_MAX_BYTES,
+  readAttachmentErrorSnippet,
+  readAttachmentResponse,
+} from '@/channels/fetch-attachment'
 import type { FetchAttachmentCallback } from '@/channels/types'
 
 import type { KakaotalkAdapterLogger } from './kakaotalk'
@@ -21,7 +26,7 @@ export function createFetchAttachmentCallback(deps: {
 }): FetchAttachmentCallback {
   const { logger } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     let url: URL
     try {
       url = new URL(ref)
@@ -37,7 +42,7 @@ export function createFetchAttachmentCallback(deps: {
     try {
       const res = await fetchImpl(url.toString())
       if (!res.ok) {
-        const body = await res.text().catch(() => '')
+        const body = await readAttachmentErrorSnippet(res)
         // 403 from kakaocdn almost always means the pre-signed URL expired
         // (the `expires=` query param has a fixed TTL — empirically ~3
         // days from the push event). Surfacing that distinction lets the
@@ -49,8 +54,7 @@ export function createFetchAttachmentCallback(deps: {
         logger.error(`[kakaotalk] fetchAttachment failed for ${url.toString()}: ${message}`)
         return { ok: false, error: message }
       }
-      const arrayBuffer = await res.arrayBuffer()
-      const buffer = Buffer.from(arrayBuffer)
+      const buffer = await readAttachmentResponse(res, maxBytes)
       const inferredFilename = filename ?? deriveFilename(url) ?? 'attachment'
       const contentType = res.headers.get('content-type') ?? undefined
       logger.info(

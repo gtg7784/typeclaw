@@ -5,6 +5,7 @@ import {
   type SlackSocketModeSlashCommandArgs,
 } from 'agent-messenger/slackbot'
 
+import { DEFAULT_ATTACHMENT_MAX_BYTES, enforceAttachmentMetadataSize } from '@/channels/fetch-attachment'
 import {
   MEMBERSHIP_CACHE_TRANSIENT_TTL_MS,
   MEMBERSHIP_CACHE_TTL_MS,
@@ -41,6 +42,7 @@ import { chunkMarkdown } from '@/markdown'
 
 import { describeError } from './describe-error'
 import { addSlackMentionHints } from './mention-hints'
+import { downloadSlackAttachment, type SlackAttachmentFetch } from './slack-attachment-download'
 import { createSlackAuthorResolver, type SlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import {
@@ -1049,24 +1051,33 @@ export function createOutboundCallback(deps: {
 // (legacy persisted state may still carry the old prompt-visible `id=` shape,
 // which channel_fetch_attachment strips before reaching this callback).
 export function createFetchAttachmentCallback(deps: {
-  client: Pick<SlackBotClient, 'downloadFile'>
+  client: Pick<SlackBotClient, 'getFileInfo'>
+  token: string
+  fetchImpl?: SlackAttachmentFetch
   logger: SlackBotAdapterLogger
 }): FetchAttachmentCallback {
   const { client, logger } = deps
-  return async ({ ref, filename }) => {
+  return async ({ ref, filename, maxBytes = DEFAULT_ATTACHMENT_MAX_BYTES }) => {
     const fileId = ref.trim()
     if (!/^F[A-Z0-9]+$/.test(fileId)) {
       return { ok: false, error: `invalid Slack file id: ${ref}` }
     }
     try {
-      const { buffer, file } = await client.downloadFile(fileId)
-      logger.info(`[slack-bot] downloaded id=${file.id} name=${file.name} size=${file.size}`)
+      const metadata = await client.getFileInfo(fileId)
+      enforceAttachmentMetadataSize(metadata.size, maxBytes)
+      const { buffer } = await downloadSlackAttachment({
+        metadata,
+        token: deps.token,
+        maxBytes,
+        fetchImpl: deps.fetchImpl,
+      })
+      logger.info(`[slack-bot] downloaded id=${fileId} name=${metadata.name} size=${buffer.length}`)
       return {
         ok: true,
         buffer,
-        filename: filename ?? file.name,
-        mimetype: file.mimetype,
-        size: file.size,
+        filename: filename ?? metadata.name,
+        mimetype: metadata.mimetype,
+        size: buffer.length,
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1184,7 +1195,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     typingTracker,
   })
 
-  const fetchAttachmentCallback = createFetchAttachmentCallback({ client, logger })
+  const fetchAttachmentCallback = createFetchAttachmentCallback({ client, logger, token: options.token })
 
   const reactionCallback = createSlackReactionCallback({ client })
   const removeReactionCallback = createSlackRemoveReactionCallback({ client })
