@@ -28,6 +28,12 @@ type AttemptActivity = {
   startedToolExecution: boolean
 }
 
+// SDK-level attempts already contain pi-ai's internal fetch recovery. Bounding
+// only repeated no-header outcomes limits dead air without timing out healthy
+// reasoning or tool execution.
+const MAX_NO_PROGRESS_ATTEMPTS = 3
+const MAX_CUMULATIVE_NO_PROGRESS_MS = 60_000
+
 export async function promptPersistentTurnWithFallback(opts: {
   refs: ModelRef[]
   currentModelRef: ModelRef
@@ -44,12 +50,21 @@ export async function promptPersistentTurnWithFallback(opts: {
   onRetryBackoffStart?: () => void
   beforeAttempt?: (ref: ModelRef) => void
   onAttemptFailed?: (attempt: PersistentTurnAttempt) => void
+  now?: () => number
 }): Promise<PersistentTurnResult> {
   if (opts.refs.length === 0) throw new Error('promptPersistentTurnWithFallback: refs[] must be non-empty')
   const attempts: PersistentTurnAttempt[] = []
   let lastError: Error | undefined
   const circuit = opts.circuit ?? modelThrottleCircuit
+  // Monotonic clock for the no-progress budget: it only ever measures elapsed
+  // (now() - attemptStartedAt), and performance.now() can't jump backward on an
+  // NTP/system-clock correction the way Date.now() can, which would otherwise
+  // prematurely trip or stall the 60s cap.
+  const now = opts.now ?? (() => performance.now())
   const hasNonCodexFallback = opts.refs.some((ref) => !isCodexRef(ref))
+  let noHeaderAttempts = 0
+  let cumulativeNoProgressMs = 0
+  let noProgressEnvelopeExhausted = false
   // The model the session currently has loaded; only call setModel when the
   // chosen ref differs from it. Tracked locally so successive setModel calls
   // within a single turn stay coherent.
@@ -94,6 +109,7 @@ export async function promptPersistentTurnWithFallback(opts: {
       let retryAfterCompletedToolResult = false
       for (let retry = 0; ; retry++) {
         softError = undefined
+        const attemptStartedAt = now()
         let outcomeThisAttempt: AttemptOutcome | undefined
         try {
           if (retry === 0) {
@@ -117,6 +133,15 @@ export async function promptPersistentTurnWithFallback(opts: {
         }
         outcome = outcomeThisAttempt
         if (outcome === undefined) break
+        if (isObserverTtfbTimeout(outcome.error.message)) {
+          noHeaderAttempts++
+          cumulativeNoProgressMs += Math.max(0, now() - attemptStartedAt)
+          noProgressEnvelopeExhausted =
+            noHeaderAttempts >= MAX_NO_PROGRESS_ATTEMPTS || cumulativeNoProgressMs >= MAX_CUMULATIVE_NO_PROGRESS_MS
+        }
+        // A fallback reached before the cap may still recover; once the cap is
+        // reached, no same-ref replay or later ref may start.
+        if (noProgressEnvelopeExhausted) break
         // Retry within budget only when the failure is same-ref retryable and
         // either no visible/tool activity occurred, or the caller explicitly
         // authorizes the strict post-tool-result resume recipe.
@@ -163,6 +188,7 @@ export async function promptPersistentTurnWithFallback(opts: {
         .slice(i + 1)
         .some((next) => isRefUsable(next, opts.profile, circuit, hasNonCodexFallback))
       if (
+        noProgressEnvelopeExhausted ||
         isLast ||
         codexOnlyProviderOpen ||
         noUsableCandidateRemains ||
