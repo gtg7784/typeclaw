@@ -15,6 +15,7 @@ import {
 } from '@/config/models-mutation'
 import {
   isKnownModelRef,
+  isModelRef,
   KNOWN_PROVIDERS,
   providerForModelRef,
   type KnownModelRef,
@@ -64,8 +65,15 @@ const setSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const profile = args.profile ?? (await pickProfileName())
-    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
+    const shorthandRef =
+      args.ref === undefined && args.profile !== undefined && isModelRef(args.profile) ? args.profile : undefined
+    const profile = shorthandRef !== undefined ? 'default' : (args.profile ?? (await pickProfileName()))
+    const picked =
+      shorthandRef !== undefined
+        ? await resolveExplicitRef(shorthandRef)
+        : args.ref !== undefined
+          ? await resolveExplicitRef(args.ref)
+          : await pickModelRef(cwd)
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
@@ -74,7 +82,7 @@ const setSub = defineCommand({
     // without having already mutated typeclaw.json. Non-interactive (`--thinking`)
     // resolves the level from the flag; an interactive run (no flag, no explicit
     // ref) offers the prompt; explicit-ref scripted calls leave the level alone.
-    const interactive = args.ref === undefined && args.thinking === undefined
+    const interactive = args.profile === undefined && args.ref === undefined && args.thinking === undefined
     let thinking: { level: ThinkingLevel | undefined } | undefined
     if (args.thinking !== undefined) {
       const parsed = parseThinkingArg(args.thinking)

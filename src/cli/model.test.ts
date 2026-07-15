@@ -233,6 +233,25 @@ describe('typeclaw model set validates the thinking level before mutating the pr
     expect(await readProfile('default')).toBe(ORIGINAL_REF)
   })
 
+  test('`model set <ref>` updates the default profile without repeating the profile name', async () => {
+    // given
+    expect(await readProfile('default')).toBe(ORIGINAL_REF)
+
+    // when
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', 'set', 'openai/gpt-5.4-nano', '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const exitCode = await proc.exited
+
+    // then
+    expect(exitCode).toBe(0)
+    expect(await readProfile('default')).toBe('openai/gpt-5.4-nano')
+  })
+
   test('a valid --thinking writes the profile as a rich object with its per-profile level', async () => {
     const proc = Bun.spawn({
       cmd: ['bun', CLI_ENTRY, 'model', 'set', 'fast', 'openai/gpt-5.4-nano', '--thinking', 'high', '--force'],
