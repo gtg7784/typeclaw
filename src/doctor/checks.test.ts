@@ -195,3 +195,46 @@ describe('managed-template checks tolerate CRLF line endings', () => {
     expect(result.status).toBe('ok')
   })
 })
+
+describe('agent file ownership checks', () => {
+  function findCheck(checks: ReturnType<typeof buildStaticChecks>, name: string) {
+    const check = checks.find((candidate) => candidate.name === name)
+    if (!check) throw new Error(`missing check ${name}`)
+    return check
+  }
+
+  test('reports agent-managed paths owned by another POSIX user', async () => {
+    // given
+    const cwd = mkdtempSync(join(tmpdir(), 'typeclaw-owner-test-'))
+    writeFileSync(join(cwd, 'typeclaw.json'), JSON.stringify({}), 'utf8')
+    const foreignUid = typeof process.getuid === 'function' ? process.getuid() + 1 : 1
+    const check = findCheck(
+      buildStaticChecks({ platform: 'linux', currentUid: () => foreignUid }),
+      'agent-folder.file-ownership',
+    )
+
+    // when
+    const result = await check.run({ cwd, hasAgentFolder: true })
+
+    // then
+    expect(result.status).toBe('error')
+    expect(result.message).toContain('typeclaw.json')
+    expect(result.details?.join('\n')).toContain('sudo chown -R "$(id -u):$(id -g)"')
+  })
+
+  test('skips POSIX ownership checks on native Windows', async () => {
+    // given
+    const cwd = mkdtempSync(join(tmpdir(), 'typeclaw-owner-test-'))
+    writeFileSync(join(cwd, 'typeclaw.json'), JSON.stringify({}), 'utf8')
+    const check = findCheck(
+      buildStaticChecks({ platform: 'win32', currentUid: () => 1 }),
+      'agent-folder.file-ownership',
+    )
+
+    // when
+    const result = await check.run({ cwd, hasAgentFolder: true })
+
+    // then
+    expect(result.status).toBe('ok')
+  })
+})

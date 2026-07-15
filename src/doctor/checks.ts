@@ -23,9 +23,10 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { detectWsl, isWindows, isWindowsDriveMount, type WslInfo } from '@/shared'
 
 import { buildChannelChecks } from './channel-checks'
+import { agentFileOwnership, type FileOwnershipDeps } from './file-ownership'
 import type { DoctorCheck } from './types'
 
-export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): DoctorCheck[] {
+export function buildStaticChecks(opts: { dockerExec?: DockerExec } & FileOwnershipDeps = {}): DoctorCheck[] {
   const dockerExec = opts.dockerExec ?? defaultDockerExec
 
   return [
@@ -36,6 +37,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     agentFolderGitignoreTemplate(),
     agentFolderNodeModules(),
     agentFolderGitRepo(),
+    agentFileOwnership(opts),
     configValid(),
     hostdHomeWritable(),
     wslDriveMount(),
