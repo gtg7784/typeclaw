@@ -394,6 +394,58 @@ describe('buildProvenanceIndex', () => {
     })
   })
 
+  test('unbatched historical observations cannot evict a resolver workspace alias', async () => {
+    const root = await makeRoot()
+    await writeStream(root, '2026-07-01', [
+      fragment('resolver-workspace-seed', {
+        adapter: 'discord',
+        workspace: 'guild-unbatched',
+        chat: 'seed-room',
+        thread: null,
+      }),
+    ])
+    await enrichHistoricalProvenance(
+      root,
+      async (where) => ({
+        where: { ...where, workspaceName: 'Current Resolver Workspace', chatName: 'Seed Room' },
+        parentChecked: true,
+      }),
+      { adapter: 'discord' },
+    )
+    await writeStream(
+      root,
+      '2026-07-01',
+      Array.from({ length: 12 }, (_, index) =>
+        fragment(`unbatched-history-${index}`, {
+          adapter: 'discord',
+          workspace: 'guild-unbatched',
+          workspaceName: `Historical Workspace ${index}`,
+          chat: `history-room-${index}`,
+          thread: null,
+        }),
+      ),
+    )
+    await enrichHistoricalProvenance(
+      root,
+      async (where) => ({ where: { ...where, chatName: `Resolved ${where.chat}` }, parentChecked: true }),
+      { adapter: 'discord' },
+    )
+    await writeStream(root, '2026-07-01', [
+      fragment('unbatched-workspace-probe', {
+        adapter: 'discord',
+        workspace: 'guild-unbatched',
+        chat: 'probe-room',
+        thread: null,
+      }),
+    ])
+
+    const index = await buildProvenanceIndex(root)
+
+    expect(index.undreamedChild('streams/2026-07-01#unbatched-workspace-probe')?.where?.workspaceName).toBe(
+      'Current Resolver Workspace',
+    )
+  })
+
   test('builds a high-cardinality registry without repeated whole-registry counting', async () => {
     const root = await makeRoot()
     const events = Array.from({ length: 10_000 }, (_, index) =>
