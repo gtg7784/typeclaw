@@ -55,6 +55,19 @@ const TRANSPORT_FAILURE =
 const AUTH_FAULT =
   /\b(401|403|unauthori[sz]ed|forbidden|access denied|invalid[_ -]?api[_ -]?key|api key.*(?:invalid|expired|missing)|(?:access|session)[_ -]?token(?:(?:[_ -]+)(?:has|is))?[_ -]+expired|authentication(?: failed|[_ -]?error)|invalid bearer)\b/i
 
+// Invalid-request / unsupported-or-misspelled model id. The provider rejected
+// the REQUEST itself — Codex returns `{"type":"invalid_request_error","message":
+// "The 'gpt-5.6' model is not supported when using Codex with a ChatGPT
+// account."}` for a model that isn't in the account's catalog. This is
+// account/config-wide: retrying or failing over to another ref can't fix a bad
+// `models` entry, so it is BOTH a redacted safe-message class (an actionable
+// "check your model config" notice, not the generic one) AND a
+// NON_FAILOVER_FAULT reason. Shared as one constant so the two uses can't drift
+// (mirrors AUTH_FAULT). Matched against the raw JSON body: pi-ai's Codex adapter
+// can't lift the nested `error.message` and stringifies the whole event, so the
+// text is the raw `{"type":"invalid_request_error",...}` payload.
+const INVALID_MODEL_OR_REQUEST = /\binvalid_request_error\b|\bmodel_not_found\b|\bmodel\b[^"]*\bnot supported\b/i
+
 // Each entry pairs a narrow matcher against the raw provider text with the
 // canonical, leak-free sentence shown in channels. Matchers are intentionally
 // specific: a miss falls through to GENERIC_SAFE_NOTICE rather than echoing raw
@@ -76,6 +89,15 @@ const SAFE_CLASSES: ReadonlyArray<{ match: RegExp; safe: string }> = [
     // the filter. The URL is OpenAI's own published enrollment page, safe to echo.
     match: /\bcyber_policy\b/i,
     safe: 'The upstream LLM provider (OpenAI Codex) refused the request under its cybersecurity content policy. Operators must enroll the account in OpenAI Trusted Access for Cyber at https://chatgpt.com/cyber, or switch the configured model.',
+  },
+  {
+    // Fallback for a provider-side invalid request — most often an unsupported
+    // or misspelled model id. Placed AFTER cyber_policy so a policy refusal keeps
+    // its more specific notice; the two don't collide in practice (policy body is
+    // `invalid_request`, this is `invalid_request_error`), but the order makes the
+    // precedence explicit.
+    match: INVALID_MODEL_OR_REQUEST,
+    safe: 'The upstream LLM provider rejected the request as invalid — the configured model is likely unsupported or misspelled. Operators should check the `models` setting in typeclaw.json and `typeclaw logs`.',
   },
   {
     match: /\b(usage limit|rate limit|rate.?limited|too many requests|429)\b/i,
@@ -117,7 +139,7 @@ const THROTTLE_OR_OVERLOAD =
 // status code alone must not force a pointless failover. The auth arm reuses the
 // shared `AUTH_FAULT` source so it stays in lockstep with the safe-message class.
 const NON_FAILOVER_FAULT = new RegExp(
-  `\\bcyber_policy\\b|insufficient.*(?:quota|credit|fund|balance)|\\bquota\\b|billing|payment|account is not active|${AUTH_FAULT.source}`,
+  `${INVALID_MODEL_OR_REQUEST.source}|\\bcyber_policy\\b|insufficient.*(?:quota|credit|fund|balance)|\\bquota\\b|billing|payment|account is not active|${AUTH_FAULT.source}`,
   'i',
 )
 

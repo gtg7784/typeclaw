@@ -122,6 +122,20 @@ describe('detectProviderError safeMessage redaction', () => {
     )
   })
 
+  test('maps a Codex unsupported/misspelled-model 400 to an actionable model-config notice, not the generic one', () => {
+    // given: the exact body Codex returns for a model id absent from the account catalog
+    const raw =
+      'Codex error: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.6\' model is not supported when using Codex with a ChatGPT account."}}'
+    // when
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+    // then: the operator sees a model-config hint instead of the generic notice, and the raw model id is not echoed to the channel
+    expect(result?.safeMessage).toMatch(/unsupported or misspelled/i)
+    expect(result?.safeMessage).not.toBe(
+      'The upstream LLM provider failed. Operators can check `typeclaw logs` for details.',
+    )
+    expect(result?.safeMessage).not.toContain('gpt-5.6')
+  })
+
   test('maps a transport/session failure to a transport-safe sentence without echoing the wss URL', () => {
     const raw =
       "WebSocket connection to 'wss://chatgpt.com/backend-api/codex/responses' failed: Expected 101 status code"
@@ -297,6 +311,14 @@ describe('isFailoverWorthy', () => {
     expect(isFailoverWorthy('network unreachable')).toBe(false)
   })
 
+  test('does NOT fail over an unsupported/misspelled model (invalid_request_error) — a config error, not a transient one', () => {
+    expect(
+      isFailoverWorthy(
+        'Codex error: {"error":{"type":"invalid_request_error","message":"The \'gpt-5.6\' model is not supported when using Codex with a ChatGPT account."}}',
+      ),
+    ).toBe(false)
+  })
+
   test('does NOT fail over context overflow even when transport text is also present', () => {
     expect(isFailoverWorthy('context length exceeded')).toBe(false)
     expect(isFailoverWorthy('WebSocket closed 1000: context length exceeded')).toBe(false)
@@ -350,6 +372,14 @@ describe('isRetryableSameRef', () => {
     expect(isRetryableSameRef('server_is_overloaded')).toBe(false)
     expect(isRetryableSameRef('429 too many requests')).toBe(false)
     expect(isRetryableSameRef('503 Service Unavailable')).toBe(false)
+  })
+
+  test('does NOT same-ref retry an unsupported model / invalid_request_error — replaying the same bad model can never clear it', () => {
+    expect(
+      isRetryableSameRef(
+        'Codex error: {"error":{"type":"invalid_request_error","message":"The \'gpt-5.6\' model is not supported when using Codex with a ChatGPT account."}}',
+      ),
+    ).toBe(false)
   })
 
   test('does NOT same-ref retry account-wide faults (auth/billing/quota) — those surface', () => {
