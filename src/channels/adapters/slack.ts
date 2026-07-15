@@ -36,7 +36,7 @@ import { describeError } from './describe-error'
 import { createSlackAuthorResolver } from './slack-author-resolver'
 import { slackTsToMillis } from './slack-bot-time'
 import { createSlackChannelResolver } from './slack-channel-resolver'
-import { classifyInbound, type InboundDropReason } from './slack-classify'
+import { classifyInbound, type InboundDropReason, type SlackConversationType } from './slack-classify'
 import { createSlackUserEditMessageCallback } from './slack-edit'
 import { createSlackReactionCallback, createSlackRemoveReactionCallback } from './slack-reactions'
 
@@ -201,6 +201,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
   let started = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
+  const conversationTypes = new Map<string, SlackConversationType>()
 
   const channelResolver = createSlackChannelResolver({ client, teamNameRef: () => teamName })
   const authorResolver = createSlackAuthorResolver({ client })
@@ -226,6 +227,27 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
   const removeReactionCallback = createSlackRemoveReactionCallback({ client })
   const editMessageCallback = createSlackUserEditMessageCallback({ client })
 
+  const resolveConversationType = async (event: SlackRTMMessageEvent): Promise<SlackConversationType | undefined> => {
+    if (!event.channel.startsWith('G')) return undefined
+    const cached = conversationTypes.get(event.channel)
+    if (cached !== undefined) return cached
+    return await client.listDMs().then(
+      (conversations) => {
+        const type: SlackConversationType = conversations.some(
+          (conversation) => conversation.id === event.channel && conversation.is_mpim,
+        )
+          ? 'mpim'
+          : 'channel'
+        conversationTypes.set(event.channel, type)
+        return type
+      },
+      (error: unknown) => {
+        logger.warn(`[slack] conversation metadata failed channel=${event.channel}: ${describeError(error)}`)
+        return 'channel'
+      },
+    )
+  }
+
   const handleMessage = async (event: SlackRTMMessageEvent): Promise<void> => {
     inflightInbounds++
     try {
@@ -237,6 +259,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): SlackAdapter {
         teamId,
         selfUserId,
         selfAliases: options.selfAliasesRef?.() ?? [],
+        conversationType: await resolveConversationType(event),
       })
       if (verdict.kind === 'drop') {
         logger.info(`[slack] dropped id=${event.ts} reason=${verdict.reason}${dropHint(verdict.reason)}`)

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { SlackListener, SlackRTMMessageEvent } from 'agent-messenger/slack'
 
+import type { MembershipResolver } from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import { channelsSchema } from '@/channels/schema'
 import type { InboundMessage, OutboundCallback } from '@/channels/types'
@@ -72,12 +73,14 @@ function router(): ChannelRouter & {
   registered: string[]
   unregistered: string[]
   outbound?: OutboundCallback
+  membership?: MembershipResolver
 } {
   const routed: InboundMessage[] = []
   const registered: string[] = []
   const unregistered: string[] = []
   const r = {
     outbound: undefined as OutboundCallback | undefined,
+    membership: undefined as MembershipResolver | undefined,
     routed,
     registered,
     unregistered,
@@ -99,7 +102,10 @@ function router(): ChannelRouter & {
     unregisterHistory: (adapter: string) => unregistered.push(`history:${adapter}`),
     registerFetchAttachment: (adapter: string) => registered.push(`fetch:${adapter}`),
     unregisterFetchAttachment: (adapter: string) => unregistered.push(`fetch:${adapter}`),
-    registerMembership: (adapter: string) => registered.push(`membership:${adapter}`),
+    registerMembership: (adapter: string, resolver: MembershipResolver) => {
+      registered.push(`membership:${adapter}`)
+      r.membership = resolver
+    },
     unregisterMembership: (adapter: string) => unregistered.push(`membership:${adapter}`),
     registerReaction: (adapter: string) => registered.push(`reaction:${adapter}`),
     unregisterReaction: (adapter: string) => unregistered.push(`reaction:${adapter}`),
@@ -113,6 +119,7 @@ function router(): ChannelRouter & {
     registered: string[]
     unregistered: string[]
     outbound?: OutboundCallback
+    membership?: MembershipResolver
   }
 }
 
@@ -210,6 +217,52 @@ describe('createSlackAdapter', () => {
     expect(listener.stopped).toBe(true)
     expect(r.unregistered).toContain('outbound:slack')
     expect(r.unregistered).toContain('remove-reaction:slack')
+  })
+
+  test('G-prefixed conversations use Slack metadata to distinguish MPIMs from private channels', async () => {
+    for (const [channel, isMpim, expectedWorkspace] of [
+      ['G0MPIM', true, 'T0123456789'],
+      ['G0PRIVATE', false, 'T0123456789'],
+    ] as const) {
+      const r = router()
+      const listener = new FakeListener()
+      const adapter = createSlackAdapter({
+        router: r,
+        configRef: () => config,
+        logger: logger(),
+        credentialsStore: { getAccount: async () => account() },
+        createClient: () =>
+          fakeClient({
+            listDMs: async () => [{ id: channel, user: 'UUSER', is_mpim: isMpim }],
+            listChannelMembers: async () => ['UUSER', 'UOTHER', 'USELF'],
+          }),
+        createListener: () => listener as unknown as SlackListener,
+      })
+
+      await adapter.start()
+      listener.emit('message', {
+        type: 'message',
+        channel,
+        user: 'UUSER',
+        text: 'private conversation',
+        ts: '1770000000.000100',
+      } satisfies SlackRTMMessageEvent)
+      const membership = isMpim
+        ? await r.membership?.({ adapter: 'slack', workspace: 'T0123456789', chat: channel, thread: null })
+        : undefined
+      await adapter.stop()
+
+      expect(r.routed[0]?.workspace).toBe(expectedWorkspace)
+      if (isMpim) {
+        expect(membership).toEqual({
+          humans: 2,
+          bots: 1,
+          fetchedAt: expect.any(Number),
+          truncated: false,
+          humanMemberIds: ['UUSER', 'UOTHER'],
+        })
+      }
+    }
   })
 
   test('outbound sends messages through SlackClient.sendMessage', async () => {

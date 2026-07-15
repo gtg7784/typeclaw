@@ -7,7 +7,12 @@ import type { InboundMessage } from '@/channels/types'
 import { slackTsToMillis } from './slack-bot-time'
 import { encodeSlackReactionRef } from './slack-reactions'
 
-export type SlackInboundMessageEvent = SlackRTMMessageEvent
+export type SlackInboundMessageEvent = SlackRTMMessageEvent & {
+  channel_type?: string
+  is_mpim?: boolean
+}
+
+export type SlackConversationType = 'im' | 'mpim' | 'channel'
 
 export type InboundDropReason = 'self_author' | 'no_user' | 'slack_system_message' | 'empty_text' | 'pre_connect'
 
@@ -19,6 +24,7 @@ export type SlackInboundContext = {
   teamId: string
   selfUserId: string | null
   selfAliases?: readonly string[]
+  conversationType?: SlackConversationType
 }
 
 export function classifyInbound(
@@ -33,7 +39,8 @@ export function classifyInbound(
   if (context.selfUserId === null) return { kind: 'drop', reason: 'pre_connect' }
 
   const rawText = event.text ?? ''
-  const isDm = event.channel.startsWith('D')
+  const conversationType = classifyConversation(event, context.conversationType)
+  const isDm = conversationType === 'im'
   const workspace = isDm ? '@dm' : context.teamId
   const hasGroupMention = GROUP_MENTION_PATTERN.test(rawText)
   const isBotMention = hasGroupMention || rawText.includes(`<@${context.selfUserId}>`)
@@ -66,6 +73,18 @@ export function classifyInbound(
       ts: slackTsToMillis(event.ts),
     },
   }
+}
+
+function classifyConversation(
+  event: SlackInboundMessageEvent,
+  resolvedType: SlackConversationType | undefined,
+): SlackConversationType {
+  if (event.channel_type === 'im' || event.channel_type === 'mpim' || event.channel_type === 'channel') {
+    return event.channel_type
+  }
+  if (event.is_mpim === true) return 'mpim'
+  if (resolvedType !== undefined) return resolvedType
+  return event.channel.startsWith('D') ? 'im' : 'channel'
 }
 
 export function isRouteableSlackMessageSubtype(subtype: string | undefined): boolean {
