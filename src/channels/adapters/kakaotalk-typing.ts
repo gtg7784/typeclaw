@@ -30,23 +30,24 @@ export type KakaoTypingCallbackHandle = {
 // expiry even with scheduler/network jitter (a 5000ms interval has no margin).
 export const KAKAO_TYPING_HEARTBEAT_MS = 4000
 
-// Per-chat send decision, resolved live at each tick rather than from the
-// (stale) session-key workspace:
-//   send             — an authoritative DM/group chat; emit the ACTION packet.
-//   skip-open        — a confirmed OpenChat; the LOCO ACTION needs a `linkId`
-//                      the resolver does not surface today, so skip (logged once,
-//                      mirroring markReadIfSupported).
-//   skip-unresolved  — unknown or provisional entry: the resolver has not yet
-//                      confirmed the kind (a chat seen on an inbound push but not
-//                      surfaced by getChats is cached as a strict @kakao-group
-//                      GUESS). Skip silently — sending could hit an OpenChat
-//                      without its linkId, and a later refresh upgrades the entry.
+// Per-chat send decision, resolved live at each tick:
+//   send             — authoritative DM/group, OR provisional. Emit the packet.
+//   skip-open        — confirmed OpenChat; the LOCO ACTION needs a `linkId` the
+//                      resolver does not surface today (logged once).
+//   skip-unresolved  — chat unknown to the resolver; skip silently.
+//
+// Provisional entries send on purpose. A chat getChats never surfaces (e.g. a
+// stale sub-device session returns a partial list) stays provisional forever, so
+// skipping it disabled typing for exactly the chats a user actively messages. The
+// inbound push proves the chat is real; the provisional bucket is @kakao-group
+// (never @kakao-open), and a provisional-that-is-actually-OpenChat fails soft —
+// sendTyping throws on non-success and the callback swallows it as a warn.
 export type KakaoTypingChatClass = 'send' | 'skip-open' | 'skip-unresolved'
 
 export function kakaoTypingClassFromLookup(
   lookup: { workspace: string; provisional: boolean } | null,
 ): KakaoTypingChatClass {
-  if (lookup === null || lookup.provisional) return 'skip-unresolved'
+  if (lookup === null) return 'skip-unresolved'
   if (lookup.workspace === '@kakao-open') return 'skip-open'
   return 'send'
 }
@@ -54,9 +55,10 @@ export function kakaoTypingClassFromLookup(
 export function createKakaoTypingCallback(deps: {
   logger: KakaoTypingLogger
   sendTyping: KakaoTypingSender
-  // Live per-chat classifier — consults the channel resolver at send time so a
-  // provisional/unknown room (or one that refreshed into OpenChat after the
-  // session key was minted) is suppressed, not judged by the stale target.
+  // Live per-chat classifier — consults the channel resolver at send time, not
+  // the (stale) session-key target: an unknown room is skipped, a room confirmed
+  // as OpenChat after the session key was minted is skipped, and a provisional or
+  // authoritative DM/group room sends.
   classifyChat: (chatId: string) => KakaoTypingChatClass
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): KakaoTypingCallbackHandle {

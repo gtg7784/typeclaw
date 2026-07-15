@@ -17,9 +17,11 @@ export type KakaoChatLookupValue = {
   isDm: boolean
   // True while the entry is a placeholder from `ingestProvisional` (a chat seen
   // on an inbound push but not yet surfaced by getChats). Its `workspace` is a
-  // strict-bucket guess (@kakao-group), NOT the authoritative kind — callers
-  // that must know the real type (e.g. typing, which skips OpenChat) treat a
-  // provisional entry as unclassified until a real refresh upgrades it.
+  // strict-bucket guess (@kakao-group), NOT the authoritative kind. Callers that
+  // must know the real type decide per-feature: typing sends for provisional
+  // entries (the @kakao-group guess is never @kakao-open, and a mis-guessed
+  // OpenChat's linkless ACTION fails soft), while allow-rule enforcement keeps
+  // treating the strict bucket as authoritative until a real refresh upgrades it.
   provisional: boolean
 }
 
