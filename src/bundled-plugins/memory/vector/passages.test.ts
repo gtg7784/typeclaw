@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { renderReference } from '../references/frontmatter'
-import { referencePassages } from './passages'
-import { TEXT_TOKEN_BUDGET } from './truncation'
+import { referencePassages, topicPassage } from './passages'
+import { fragmentEmbeddableText, TEXT_TOKEN_BUDGET } from './truncation'
 
 const testDirs: string[] = []
 
@@ -28,6 +28,53 @@ describe('referencePassages', () => {
     expect(passages.map((passage) => passage.id)).toEqual(passages.map((_, i) => `reference:ref-a#${i}`))
     expect(passages.every((passage) => passage.source === 'reference')).toBe(true)
     expect(passages.map((passage) => passage.text).join('')).toBe(body)
+  })
+})
+
+describe('provenance exclusion', () => {
+  it('keeps fragment embedding input byte-identical when who and origin metadata change', () => {
+    const base = {
+      type: 'fragment' as const,
+      id: 'fragment-1',
+      ts: '2026-07-01T00:00:00.000Z',
+      source: 'session-1',
+      entry: 'entry-1',
+      topic: 'Build policy',
+      body: 'Use deterministic builds.',
+    }
+    const enriched = {
+      ...base,
+      who: '홍길동',
+      where: {
+        adapter: 'discord',
+        workspace: 'guild-1',
+        workspaceName: 'Example Guild',
+        chat: 'thread-1',
+        chatName: '개발실',
+        thread: null,
+        parentChat: 'room-1',
+        parentChatName: 'general',
+      },
+    }
+
+    expect(fragmentEmbeddableText(enriched)).toBe(fragmentEmbeddableText(base))
+    expect(fragmentEmbeddableText(enriched)).toBe('Build policy\nUse deterministic builds.')
+  })
+
+  it('keeps topic vector passage text byte-identical because citation provenance is stripped', () => {
+    const first = topicPassage(
+      'build-policy',
+      'Build policy',
+      'Use deterministic builds.\nfragments:\n- streams/2026-07-01#fragment-1',
+    )
+    const second = topicPassage(
+      'build-policy',
+      'Build policy',
+      'Use deterministic builds.\nfragments:\n- streams/2026-07-02#fragment-2',
+    )
+
+    expect(second.text).toBe(first.text)
+    expect(second.contentHash).toBe(first.contentHash)
   })
 })
 

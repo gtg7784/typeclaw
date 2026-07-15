@@ -7,6 +7,7 @@ import { firstBeliefSentence, isTitleLikeHeading } from './belief-sentence'
 import { buildInjectionPlan, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
+import { sanitizeProvenanceName } from './provenance-sanitize'
 import { slugIsHeadingEcho } from './slug'
 import type { FragmentProvenance } from './stream-events'
 import type { DedupedRetrievedItem } from './turn-dedup'
@@ -68,9 +69,13 @@ export type RetrievedMemoryItem = {
 // parts that exist are shown; an undreamed fragment with none renders nothing.
 export function renderProvenanceLine(item: Pick<RetrievedMemoryItem, 'who' | 'when' | 'where'>): string | null {
   const parts: string[] = []
-  if (item.who !== undefined) parts.push(item.who)
-  const room = item.where?.chatName ?? item.where?.chat
-  if (room !== undefined) parts.push(`in ${item.where?.chatName !== undefined ? `#${room}` : room}`)
+  const who = sanitizeProvenanceName(item.who)
+  if (who !== undefined) parts.push(`speaker=<untrusted-name>${who}</untrusted-name>`)
+  const roomName = sanitizeProvenanceName(item.where?.chatName)
+  const room = roomName ?? item.where?.chat
+  if (room !== undefined) {
+    parts.push(roomName === undefined ? `in ${room}` : `in #<untrusted-name>${roomName}</untrusted-name>`)
+  }
   if (item.when !== undefined) parts.push(`on ${item.when.slice(0, 10)}`)
   return parts.length === 0 ? null : `_${parts.join(' ')}_`
 }

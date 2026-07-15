@@ -323,8 +323,15 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const subagentBuiltinNames = resolvedSubagentBuiltins.map((t) => t.name)
   const subagentTypeclawToolDefinitions = resolvedSubagentBuiltins.filter((t) => !isPiCodingBuiltinName(t.name))
   const pluginCustomTools = options.pluginSubagent
-    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin, getAbort, getLoopGuardTurn)
-    : wrapRegistryTools(options.plugins, getOrigin, getAbort, getLoopGuardTurn)
+    ? wrapSubagentCustomTools(
+        options.pluginSubagent,
+        options.plugins,
+        getOrigin,
+        getAbort,
+        getLoopGuardTurn,
+        options.permissions,
+      )
+    : wrapRegistryTools(options.plugins, getOrigin, getAbort, getLoopGuardTurn, options.permissions)
 
   // Per-run budget state for the tool-result byte ceiling. Allocated once per
   // session creation and threaded into every wrapped tool so they share the
@@ -886,6 +893,7 @@ function wrapRegistryTools(
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
   getLoopGuardTurn: () => number | undefined,
+  permissions: PermissionService | undefined,
 ): ToolDefinition[] {
   if (!plugins) return []
   return plugins.registry.tools.map((t: PluginRegisteredTool) =>
@@ -899,6 +907,7 @@ function wrapRegistryTools(
       getOrigin,
       getAbort,
       getLoopGuardTurn,
+      ...(permissions !== undefined ? { permissions } : {}),
     }),
   )
 }
@@ -928,12 +937,13 @@ function hasToolHooks(plugins: PluginSessionWiring | undefined): plugins is Plug
   return plugins.hooks.count('tool.before') > 0 || plugins.hooks.count('tool.after') > 0
 }
 
-function wrapSubagentCustomTools(
+export function wrapSubagentCustomTools(
   selection: PluginSubagentSelection,
   plugins: PluginSessionWiring | undefined,
   getOrigin: () => SessionOrigin | undefined,
   getAbort: () => ((reason?: string) => void) | undefined,
   getLoopGuardTurn: () => number | undefined,
+  permissions: PermissionService | undefined,
 ): ToolDefinition[] {
   if (!selection.customTools || !plugins) return []
   const logger = makePluginLogger(selection.pluginName)
@@ -948,6 +958,7 @@ function wrapSubagentCustomTools(
       getOrigin,
       getAbort,
       getLoopGuardTurn,
+      ...(permissions !== undefined ? { permissions } : {}),
     }),
   )
 }

@@ -5,10 +5,17 @@ import { z } from 'zod'
 import { defineTool } from '@/plugin'
 
 import { loadAllShards, loadShard, type TopicShard } from './load-shards'
+import {
+  buildProvenanceIndex,
+  buildProvenanceIndexFrom,
+  type MemoryScope,
+  type ProvenanceChild,
+} from './provenance-index'
+import { sanitizeProvenanceName } from './provenance-sanitize'
 import { renderReference } from './references/frontmatter'
 import { loadAllReferences, loadReference, type Reference } from './references/load-references'
 import type { FragmentEvent, FragmentProvenance, LegacyProseEvent, StreamEvent } from './stream-events'
-import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
+import { filterUndreamedEvents, readAllStreamDays, type UndreamedStreamDay } from './stream-io'
 
 const DEFAULT_MAX_RESULTS = 10
 const EXCERPT_CONTEXT_LINES = 3
@@ -21,6 +28,7 @@ export type TopicMatch = {
   heading: string
   excerpt: string
   fullBody?: string
+  provenance?: ProvenanceChild[]
 }
 
 export type StreamMatch = {
@@ -54,7 +62,7 @@ export type Matcher = (haystack: string) => boolean
 export function createMemorySearchTool() {
   return defineTool({
     description:
-      'Search the agent\'s long-term memory, or look up one topic shard by exact slug. Covers topic shards under memory/topics/ (consolidated facts), references under memory/references/ (verbatim artifacts), and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Pass `query` for search OR `topic` for an exact slug lookup, not both. Search is case-insensitive substring by default: tries the whole query as one phrase first, and if that finds nothing, falls back to OR-matching the individual words (ranked by how many words each hit contains) — so a multi-word query still returns results even when no entry contains the exact phrase. asRegex=true treats query as a JavaScript regex (no word fallback). `topic` skips search entirely and returns that one shard (or reference) with its full body — use it to read a topic OR reference whose slug you already have (e.g. a heading shown in injected memory); it resolves the topic shard first and falls back to a reference of the same slug. Returns matches discriminated by `source: "topic" | "reference" | "stream"`, each with line-context excerpts; full=true includes complete bodies (topic lookups always include the full body). Ordering depends on mode: exact-phrase (and regex) results list all topic matches first (alphabetical by slug), then reference matches, then stream matches (newest day first); word-fallback results are ranked by matched-word count, with that same topic-then-reference-then-stream-newest order as the tiebreak within each score band, so a higher-scoring stream match can precede a lower-scoring topic match. Pass `where` (a channel/room name like "#incidents" or its raw chat id) to scope the search to one room — use it for questions like "what did we discuss in #incidents"; it matches a stream fragment by its captured room id or human-readable name (case-insensitive, leading "#" optional) and, because room is fragment-only provenance, returns ONLY stream matches (topic shards and references carry no room).',
+      'Search long-term memory and recent undreamed fragments, or look up one exact topic/reference slug. Plain search is case-insensitive phrase-first with token-OR fallback; regex mode has no token fallback. Runtime-owned provenance from active topic citations is searchable but never embedded. `workspace`, `chat`, and `thread` scope both topics and recent fragments to matching captured origin IDs or names; legacy `where` remains an alias for `chat`. Scoped topic eligibility, lexical matching, and returned provenance use the same eligible active cited children. Unresolved citations remain explicit in unscoped results and never gain invented metadata.',
     parameters: z.object({
       query: z.string().optional(),
       topic: z.string().optional(),
@@ -64,53 +72,102 @@ export function createMemorySearchTool() {
       since: z.string().optional(),
       before: z.string().optional(),
       where: z.string().optional(),
+      workspace: z.string().optional(),
+      chat: z.string().optional(),
+      thread: z.string().optional(),
     }),
-    async execute({ query, topic, asRegex, full, maxResults, since, before, where }, ctx) {
+    async execute({ query, topic, asRegex, full, maxResults, since, before, where, workspace, chat, thread }, ctx) {
       if ((query === undefined) === (topic === undefined)) {
         return resultToToolResult({ error: 'provide exactly one of `query` or `topic`' })
       }
 
+      const chatScope = chat ?? where
+      const requestedScope: MemoryScope = {
+        ...(workspace === undefined ? {} : { workspace }),
+        ...(chatScope === undefined ? {} : { chat: chatScope }),
+        ...(thread === undefined ? {} : { thread }),
+      }
+      const scope = requestedScope
+
       if (topic !== undefined) {
-        return resultToToolResult(await lookupTopic(ctx.agentDir, topic, ctx.logger))
+        return resultToToolResult(await lookupTopic(ctx.agentDir, topic, scope, ctx.logger))
       }
 
       const matcherOrError = buildMatcher(query!, asRegex)
       if (typeof matcherOrError === 'string') {
         return resultToToolResult({ error: matcherOrError })
       }
-
-      const [shards, streamDays, allReferences] = await Promise.all([
+      const [shards, allStreamDays, allReferences] = await Promise.all([
         loadAllShards(ctx.agentDir, { logger: ctx.logger }),
-        readAllUndreamedStreamDays(ctx.agentDir),
+        readAllStreamDays(ctx.agentDir),
         loadAllReferences(ctx.agentDir, { logger: ctx.logger }),
       ])
+      const provenanceIndex = await buildProvenanceIndexFrom(ctx.agentDir, shards, allStreamDays)
+      const scoped = hasMemoryScope(scope)
+      const streamDays: UndreamedStreamDay[] = allStreamDays.flatMap((day) => {
+        const events: StreamEvent[] = []
+        for (const event of filterUndreamedEvents(day.events, day.dreamedIds)) {
+          if (event.type !== 'fragment') {
+            if (!scoped) events.push(event)
+            continue
+          }
+          const citation = `streams/${day.date}#${event.id}`
+          if (provenanceIndex.isActivelyCited(citation) || provenanceIndex.isSuperseded(citation)) continue
+          const child = provenanceIndex.undreamedChild(citation, scope)
+          if (child !== undefined) events.push(safeStreamEvent(event, child))
+        }
+        return events.length === 0 ? [] : [{ date: day.date, path: day.path, name: day.name, events }]
+      })
       const dateFilter = parseReferenceDateFilter(since, before)
       if ('error' in dateFilter) return resultToToolResult(dateFilter)
 
-      // A `where` filter scopes the search to ONE room. `where` is fragment-only
-      // provenance, so a room query excludes topic shards and references (they
-      // carry no room) and keeps only stream fragments whose `where` matches.
-      const roomFilteredDays = where === undefined ? streamDays : filterStreamDaysByRoom(streamDays, where)
-      const scopedShards = where === undefined ? shards : []
-      const references =
-        where === undefined ? allReferences.filter((r) => referenceCandidateAllowed(r, dateFilter)) : []
+      const roomFilteredDays = streamDays
+      const scopedShards = shards.filter((shard) => provenanceIndex.topicEligible(shard.slug, scope))
+      const references = !scoped ? allReferences.filter((r) => referenceCandidateAllowed(r, dateFilter)) : []
+      const topicDocuments = new Map(
+        scopedShards.map((shard) => [
+          shard.slug,
+          `${shardSearchText(shard)}\n${provenanceIndex.lexicalTextForTopic(shard.slug, scope)}`,
+        ]),
+      )
+      const topicProvenance = new Map(
+        scopedShards.map((shard) => [shard.slug, provenanceIndex.childrenForTopic(shard.slug, scope)]),
+      )
+      const streamDocuments = new Map<string, string>()
+      for (const day of roomFilteredDays) {
+        for (const event of day.events) {
+          if (event.type !== 'fragment') continue
+          const citation = `streams/${day.date}#${event.id}`
+          streamDocuments.set(
+            citation,
+            `${eventSearchText(event)}\n${provenanceIndex.lexicalTextForUndreamed(citation, scope)}`,
+          )
+        }
+      }
 
       if (scopedShards.length === 0 && roomFilteredDays.length === 0 && references.length === 0) {
         return resultToToolResult({ matches: [], truncatedAt: 0 })
       }
 
-      let result = searchAll(scopedShards, roomFilteredDays, matcherOrError, { full, maxResults, references })
+      const searchOptions = { full, maxResults, references, topicDocuments, topicProvenance, streamDocuments }
+      let result = searchAll(scopedShards, roomFilteredDays, matcherOrError, searchOptions)
       if ('matches' in result && result.matches.length === 0) {
-        const fallback = tokenFallback(query!, asRegex, scopedShards, roomFilteredDays, references, {
-          full,
-          maxResults,
-        })
+        const fallback = tokenFallback(query!, asRegex, scopedShards, roomFilteredDays, references, searchOptions)
         if (fallback !== null) result = fallback
       }
       if ('matches' in result) await bumpReturnedReferences(allReferences, result.matches)
       return resultToToolResult(result)
     },
   })
+}
+
+function safeStreamEvent(event: FragmentEvent, child: ProvenanceChild): FragmentEvent {
+  const safe = { ...event }
+  delete safe.who
+  delete safe.where
+  if (child.who !== undefined) safe.who = child.who
+  if (child.where !== undefined) safe.where = child.where
+  return safe
 }
 
 export const memorySearchTool = createMemorySearchTool()
@@ -127,6 +184,7 @@ export const memorySearchTool = createMemorySearchTool()
 async function lookupTopic(
   agentDir: string,
   slug: string,
+  scope: MemoryScope,
   logger?: { warn(message: string): void },
 ): Promise<MemorySearchResult> {
   const loaderOptions = logger === undefined ? {} : { logger }
@@ -136,8 +194,14 @@ async function lookupTopic(
   } catch (err) {
     return { error: `invalid topic slug: ${err instanceof Error ? err.message : String(err)}` }
   }
-  if (shard !== null) return { matches: [topicMatchWithFullBody(shard)] }
+  if (shard !== null) {
+    const index = await buildProvenanceIndex(agentDir)
+    if (!index.topicEligible(shard.slug, scope)) return { matches: [] }
+    const provenance = index.childrenForTopic(shard.slug, scope)
+    return { matches: [topicMatchWithFullBody(shard, provenance)] }
+  }
 
+  if (hasMemoryScope(scope)) return { matches: [] }
   const reference = await loadReference(agentDir, slug, loaderOptions)
   if (reference !== null) {
     const match = referenceMatchWithFullBody(reference)
@@ -151,7 +215,11 @@ async function lookupTopic(
   return { matches: [] }
 }
 
-function topicMatchWithFullBody(shard: TopicShard): TopicMatch {
+function hasMemoryScope(scope: MemoryScope): boolean {
+  return scope.workspace !== undefined || scope.chat !== undefined || scope.thread !== undefined
+}
+
+function topicMatchWithFullBody(shard: TopicShard, provenance: ProvenanceChild[] = []): TopicMatch {
   return {
     source: 'topic',
     shardPath: shard.path,
@@ -159,6 +227,7 @@ function topicMatchWithFullBody(shard: TopicShard): TopicMatch {
     heading: shard.frontmatter.heading,
     excerpt: excerpt(shard.body),
     fullBody: shard.body,
+    ...(provenance.length > 0 ? { provenance } : {}),
   }
 }
 
@@ -193,7 +262,13 @@ function tokenFallback(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   references: Reference[],
-  options: { full: boolean; maxResults: number },
+  options: {
+    full: boolean
+    maxResults: number
+    topicDocuments?: Map<string, string>
+    topicProvenance?: Map<string, ProvenanceChild[]>
+    streamDocuments?: Map<string, string>
+  },
 ): MemorySearchResult | null {
   if (asRegex) return null
   const tokens = distinctTokens(query)
@@ -238,7 +313,14 @@ export function searchAll(
   shards: TopicShard[],
   streamDays: UndreamedStreamDay[],
   matcher: Matcher,
-  options: { full: boolean; maxResults: number; references?: Reference[] },
+  options: {
+    full: boolean
+    maxResults: number
+    references?: Reference[]
+    topicDocuments?: Map<string, string>
+    topicProvenance?: Map<string, ProvenanceChild[]>
+    streamDocuments?: Map<string, string>
+  },
 ): MemorySearchResult {
   const matches: MemorySearchMatch[] = []
   let truncatedAt: number | undefined
@@ -253,7 +335,13 @@ export function searchAll(
   }
 
   for (const shard of shards) {
-    const match = matchShard(shard, matcher, options.full)
+    const match = matchShard(
+      shard,
+      matcher,
+      options.full,
+      options.topicDocuments?.get(shard.slug),
+      options.topicProvenance?.get(shard.slug),
+    )
     if (match === null) continue
     if (!push(match)) return { matches, truncatedAt: truncatedAt! }
   }
@@ -267,7 +355,7 @@ export function searchAll(
   for (let i = streamDays.length - 1; i >= 0; i--) {
     const day = streamDays[i]!
     for (const event of day.events) {
-      const match = matchStreamEvent(day, event, matcher, options.full)
+      const match = matchStreamEvent(day, event, matcher, options.full, options.streamDocuments)
       if (match === null) continue
       if (!push(match)) return { matches, truncatedAt: truncatedAt! }
     }
@@ -299,6 +387,9 @@ export function searchAllRanked(
     maxResults: number
     references?: Reference[]
     tokenMatchMode?: 'substring' | 'ascii-boundary'
+    topicDocuments?: Map<string, string>
+    topicProvenance?: Map<string, ProvenanceChild[]>
+    streamDocuments?: Map<string, string>
   },
 ): MemorySearchResult {
   const tokenMatchers = tokens.map((t) => buildTokenMatcher(t, options.tokenMatchMode ?? 'substring'))
@@ -315,9 +406,19 @@ export function searchAllRanked(
   let order = 0
 
   for (const shard of shards) {
-    const match = matchShard(shard, anyToken, options.full)
+    const match = matchShard(
+      shard,
+      anyToken,
+      options.full,
+      options.topicDocuments?.get(shard.slug),
+      options.topicProvenance?.get(shard.slug),
+    )
     if (match === null) continue
-    scored.push({ match, score: scoreOf(shardSearchText(shard)), order: order++ })
+    scored.push({
+      match,
+      score: scoreOf(options.topicDocuments?.get(shard.slug) ?? shardSearchText(shard)),
+      order: order++,
+    })
   }
 
   for (const reference of options.references ?? []) {
@@ -329,9 +430,16 @@ export function searchAllRanked(
   for (let i = streamDays.length - 1; i >= 0; i--) {
     const day = streamDays[i]!
     for (const event of day.events) {
-      const match = matchStreamEvent(day, event, anyToken, options.full)
+      const match = matchStreamEvent(day, event, anyToken, options.full, options.streamDocuments)
       if (match === null) continue
-      scored.push({ match, score: scoreOf(eventSearchText(event)), order: order++ })
+      const citation = event.type === 'fragment' ? `streams/${day.date}#${event.id}` : undefined
+      scored.push({
+        match,
+        score: scoreOf(
+          (citation === undefined ? undefined : options.streamDocuments?.get(citation)) ?? eventSearchText(event),
+        ),
+        order: order++,
+      })
     }
   }
 
@@ -378,7 +486,13 @@ function referenceSearchText(reference: Reference): string {
   return [reference.slug, reference.frontmatter.title, ...reference.frontmatter.tags, reference.body].join('\n')
 }
 
-function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMatch | null {
+function matchShard(
+  shard: TopicShard,
+  matcher: Matcher,
+  full: boolean,
+  searchText = shardSearchText(shard),
+  provenance?: ProvenanceChild[],
+): TopicMatch | null {
   const bodyLines = splitBodyLines(shard.body)
   const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
 
@@ -386,7 +500,8 @@ function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMa
     matcher(shard.slug) ||
     matcher(shard.frontmatter.heading) ||
     (shard.frontmatter.tags?.some((tag) => matcher(tag)) ?? false) ||
-    firstBodyLineIndex !== -1
+    firstBodyLineIndex !== -1 ||
+    matcher(searchText)
   if (!matched) return null
 
   const match: TopicMatch = {
@@ -398,6 +513,7 @@ function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMa
       firstBodyLineIndex === -1 ? fallbackExcerpt(shard, matcher) : excerptForLine(bodyLines, firstBodyLineIndex),
   }
   if (full) match.fullBody = shard.body
+  if (provenance !== undefined && provenance.length > 0) match.provenance = provenance
   return match
 }
 
@@ -439,9 +555,12 @@ function matchStreamEvent(
   event: StreamEvent,
   matcher: Matcher,
   full: boolean,
+  streamDocuments?: Map<string, string>,
 ): StreamMatch | null {
   if (event.type === 'watermark') return null
-  if (event.type === 'fragment') return matchFragmentEvent(day, event, matcher, full)
+  if (event.type === 'fragment') {
+    return matchFragmentEvent(day, event, matcher, full, streamDocuments?.get(`streams/${day.date}#${event.id}`))
+  }
   return matchLegacyProseEvent(day, event, matcher, full)
 }
 
@@ -450,10 +569,11 @@ function matchFragmentEvent(
   event: FragmentEvent,
   matcher: Matcher,
   full: boolean,
+  searchText = eventSearchText(event),
 ): StreamMatch | null {
   const bodyLines = splitBodyLines(event.body)
   const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
-  const matched = matcher(event.topic) || firstBodyLineIndex !== -1
+  const matched = matcher(event.topic) || firstBodyLineIndex !== -1 || matcher(searchText)
   if (!matched) return null
 
   const match: StreamMatch = {
@@ -465,7 +585,8 @@ function matchFragmentEvent(
     excerpt: firstBodyLineIndex === -1 ? event.topic : excerptForLine(bodyLines, firstBodyLineIndex),
     when: event.ts,
   }
-  if (event.who !== undefined) match.who = event.who
+  const who = sanitizeProvenanceName(event.who)
+  if (who !== undefined) match.who = who
   if (event.where !== undefined) match.where = event.where
   if (full) match.fullBody = event.body
   return match
@@ -528,32 +649,6 @@ function parseDateParam(name: string, value: string): Date | string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return `invalid ${name}: expected ISO 8601 datetime string`
   return date
-}
-
-// Keep only fragments whose `where` names this room, by raw `chat` id (canonical)
-// or `chatName` (convenience, case-insensitive — the agent often knows only
-// "#incidents"). The `#` prefix is stripped so "#incidents" and "incidents"
-// both match. Non-fragment events (watermarks, legacy prose) have no `where` and
-// are dropped under a room filter; days that end up empty are removed.
-function filterStreamDaysByRoom(days: UndreamedStreamDay[], room: string): UndreamedStreamDay[] {
-  const normalizedKey = normalizeRoomKey(room)
-  return days.flatMap((day) => {
-    const events = day.events.filter(
-      (event) => event.type === 'fragment' && fragmentMatchesRoom(event, room, normalizedKey),
-    )
-    return events.length === 0 ? [] : [{ ...day, events }]
-  })
-}
-
-function fragmentMatchesRoom(event: FragmentEvent, rawRoom: string, normalizedKey: string): boolean {
-  const where = event.where
-  if (where === undefined) return false
-  if (where.chat === rawRoom) return true
-  return where.chatName !== undefined && normalizeRoomKey(where.chatName) === normalizedKey
-}
-
-function normalizeRoomKey(value: string): string {
-  return value.replace(/^#/, '').toLocaleLowerCase()
 }
 
 function referenceCandidateAllowed(reference: Reference, filter: ReferenceDateFilter): boolean {

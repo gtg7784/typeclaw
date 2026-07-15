@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -8,7 +8,11 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, CreateSessionOptions } from '@/agent'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
+import { renderShard } from '@/bundled-plugins/memory/frontmatter'
+import { topicShardPath, topicsDir } from '@/bundled-plugins/memory/paths'
+import { createMemorySearchTool } from '@/bundled-plugins/memory/search-tool'
 import type { CronJob } from '@/cron'
+import { createPermissionService } from '@/permissions'
 import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -1128,6 +1132,59 @@ describe('createServer TUI subagent orchestration wiring', () => {
     expect(observed[0]?.subagentRegistry).toBe(firstSubagents)
 
     ws.close()
+  })
+})
+
+describe('createServer TUI permission wiring', () => {
+  test('lets an owner TUI search memory without a memory-specific permission gate', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-server-memory-permissions-'))
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await writeFile(
+      topicShardPath(agentDir, 'tui-memory-access'),
+      renderShard(
+        { heading: 'The launch phrase is aurora compass.', cites: 0, days: 1, lastReinforced: '2026-07-14' },
+        'The launch phrase is aurora compass.\nfragments:',
+      ),
+      'utf8',
+    )
+    const permissions = createPermissionService()
+    const session = createFakeSession()
+    let queryResult: unknown
+    let topicResult: unknown
+    const built = createServer({
+      port: 0,
+      agentDir,
+      permissions,
+      createSession: async (options = {}) => {
+        const origin = options.origin
+        const sessionPermissions = options.permissions
+        if (origin?.kind !== 'tui' || sessionPermissions === undefined) {
+          throw new Error('missing TUI permission wiring')
+        }
+        const tool = createMemorySearchTool()
+        const context = {
+          signal: undefined,
+          sessionId: origin.sessionId,
+          agentDir,
+          logger: { info: () => {}, warn: () => {}, error: () => {} },
+        }
+        queryResult = (await tool.execute(tool.parameters.parse({ query: 'aurora compass' }), context)).details
+        topicResult = (await tool.execute(tool.parameters.parse({ topic: 'tui-memory-access' }), context)).details
+        return session
+      },
+    }).start()
+    server = built
+
+    try {
+      const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+      await waitFor((message) => message.type === 'connected')
+
+      expect(queryResult).toMatchObject({ matches: [{ source: 'topic', slug: 'tui-memory-access' }] })
+      expect(topicResult).toMatchObject({ matches: [{ source: 'topic', slug: 'tui-memory-access' }] })
+      ws.close()
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 })
 

@@ -38,6 +38,7 @@ import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel } from '@/config'
 import { aggregateCronList, type CronJob, type CronListEntry, loadCron } from '@/cron'
 import type { McpManager } from '@/mcp'
+import type { PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
@@ -83,6 +84,7 @@ export type ServerOptions = {
   mcpManager?: McpManager
   agentDir?: string
   pluginRuntime?: PluginRuntime
+  permissions?: PermissionService
   // Durable cron fire-progress lookup so `cron list` marks count-exhausted jobs
   // as retired instead of showing a stale future fire time. Omit in tests/dev.
   getFiredCount?: (job: CronJob) => number
@@ -280,6 +282,7 @@ export function createServer({
   mcpManager,
   agentDir,
   pluginRuntime,
+  permissions,
   getFiredCount,
   containerName,
   runtimeVersion,
@@ -531,6 +534,7 @@ export function createServer({
               ...(channelRouter ? { channelRouter } : {}),
               ...(mcpManager ? { mcpManager } : {}),
               ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
+              ...(permissions !== undefined ? { permissions } : {}),
               ...(containerName !== undefined ? { containerName } : {}),
               ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
               ...(liveSubagentRegistry !== undefined ? { liveSubagentRegistry } : {}),
