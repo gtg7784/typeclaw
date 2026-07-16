@@ -237,6 +237,11 @@ function fileTargets(
     return targets
   }
   if (tool === 'channel_fetch_attachment') return targets
+  // post_github_review has no local file operands: `comments[].path` are remote
+  // GitHub diff anchors and the `body` fields are markdown. Scanning them as
+  // generic operands either pins a real-repo anchor into a /tmp file:// path that
+  // leaks into the posted review, or throws "ambiguous local file operand".
+  if (tool === 'post_github_review') return targets
   if (genericInputs) collectGenericFileTargets(args, targets, maxCount, fileOperands, agentDir)
   return targets
 }
