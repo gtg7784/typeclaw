@@ -12,6 +12,7 @@ import { LiveSubagentRegistry } from './live-subagents'
 import {
   createSubagentConsumer,
   defaultCreateSessionForSubagent,
+  INCOMPLETE_REVIEW_VERDICT,
   invokeSubagent,
   startSubagent,
   type Subagent,
@@ -1403,6 +1404,118 @@ describe('startSubagent', () => {
     const withReport = 'Here is my answer.\n<report>\n<summary>x</summary>\n</report>'
     const final = await captureFinal([{ role: 'assistant', content: withReport }])
     expect(final).toBe(withReport)
+  })
+
+  async function runReviewer(turns: { role?: string; content: unknown }[][]) {
+    const { session, prompts } = scriptedResearcherSession(turns)
+    const registry = { reviewer: { systemPrompt: 'X' } satisfies Subagent }
+    const { completion } = startSubagent('reviewer', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_reviewer',
+    })
+    const result = await completion
+    return { result, prompts }
+  }
+
+  test('reviewer: a <review> on the first turn is returned with no recovery nudge', async () => {
+    const review = '<review>\n<verdict>approve</verdict>\n</review>'
+    const { result, prompts } = await runReviewer([[{ role: 'assistant', content: `Looking now.\n${review}\nDone.` }]])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(review)
+    expect(prompts).toHaveLength(1)
+  })
+
+  test('reviewer: ends with prose but no <review> → recovers on the nudge (guard, not silent drop)', async () => {
+    const review = '<review>\n<verdict>request-changes</verdict>\n</review>'
+    const { result, prompts } = await runReviewer([
+      [{ role: 'assistant', content: 'I read the diff and have concerns.' }],
+      [{ role: 'assistant', content: review }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    expect(result.finalMessage).toBe(review)
+    expect(prompts).toHaveLength(2)
+  })
+
+  test('reviewer: the recovery nudge asks for the <review> as text and forbids tools/gh, not write_report', async () => {
+    const { prompts } = await runReviewer([
+      [{ role: 'assistant', content: 'still analyzing' }],
+      [{ role: 'assistant', content: '<review>\n<verdict>comment</verdict>\n</review>' }],
+    ])
+    expect(prompts[1]).toContain('<review>')
+    expect(prompts[1]).toContain('Do NOT call any tools')
+    expect(prompts[1]).toContain('<verdict>')
+    expect(prompts[1]).not.toContain('write_report')
+  })
+
+  test('reviewer: the recovery nudge steers an undecided review to the sentinel, not a real comment verdict', async () => {
+    // given: a reviewer that gets nudged (first turn has no block)
+    const { prompts } = await runReviewer([
+      [{ role: 'assistant', content: 'still analyzing' }],
+      [{ role: 'assistant', content: '<review>\n<verdict>approve</verdict>\n</review>' }],
+    ])
+    // then: the "could not decide" branch routes through the non-verdict sentinel —
+    // a real <verdict>comment</verdict> here would be upgradeable on re-review
+    expect(prompts[1]).toContain(INCOMPLETE_REVIEW_VERDICT)
+    expect(prompts[1]).not.toContain('<verdict>comment</verdict>')
+  })
+
+  test('reviewer: exhausting the nudge budget installs an honest fallback <review> with a non-verdict sentinel (never a decisive verdict)', async () => {
+    const { result, prompts } = await runReviewer([
+      [{ role: 'assistant', content: 'reading the files' }],
+      [{ role: 'assistant', content: 'still no verdict' }],
+      [{ role: 'assistant', content: 'still nothing' }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true (guard, not silent drop), got error: ${result.error}`)
+    expect(prompts).toHaveLength(3)
+    expect(result.finalMessage).toContain('<review>')
+    expect(result.finalMessage).toContain('could not complete')
+    expect(result.finalMessage).toContain(`<verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict>`)
+  })
+
+  test('reviewer: the incomplete-review fallback can never carry a decisive verdict (re-review upgrade safety)', async () => {
+    // given: a reviewer that exhausts its retries without reaching a verdict
+    const { result } = await runReviewer([
+      [{ role: 'assistant', content: 'reading the files' }],
+      [{ role: 'assistant', content: 'still nothing' }],
+      [{ role: 'assistant', content: 'still nothing' }],
+    ])
+    if (!result.ok) throw new Error(`expected ok=true, got error: ${result.error}`)
+    // then: the ONLY verdict token in the fallback is the non-verdict sentinel —
+    // so the parent's re-review override cannot upgrade it to APPROVE/REQUEST_CHANGES
+    const verdict = result.finalMessage?.match(/<verdict>([\s\S]*?)<\/verdict>/)?.[1]
+    expect(verdict).toBe(INCOMPLETE_REVIEW_VERDICT)
+    expect(INCOMPLETE_REVIEW_VERDICT).not.toBe('approve')
+    expect(INCOMPLETE_REVIEW_VERDICT).not.toBe('request-changes')
+    expect(INCOMPLETE_REVIEW_VERDICT).not.toBe('comment')
+  })
+
+  test('reviewer: a timeout after a <review> was captured rides the review along (recoverable near-miss)', async () => {
+    const review = '<review>\n<verdict>approve</verdict>\n</review>'
+    const registry = { reviewer: { systemPrompt: 'X', timeoutMs: 20 } satisfies Subagent }
+    const { completion } = startSubagent('reviewer', {
+      registry,
+      createSessionForSubagent: async () => wedgeAfterEmitting(review),
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_reviewer_timeout',
+    })
+    const result = await completion
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain('timed out')
+      expect(result.finalMessage).toBe(review)
+    }
+  })
+
+  test('reviewer: a run that ends with no assistant text at all still gets an honest fallback (the stranded-review bug)', async () => {
+    const { result, prompts } = await runReviewer([[{ role: 'assistant', content: '' }], [], []])
+    if (!result.ok) throw new Error(`expected ok=true (guard converts the silent drop), got error: ${result.error}`)
+    expect(result.finalMessage).toContain('<review>')
+    expect(result.finalMessage).toContain(`<verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict>`)
+    expect(prompts).toHaveLength(3)
   })
 
   test('without timeoutMs a slow prompt keeps completion pending (legacy unbounded behavior preserved)', async () => {
