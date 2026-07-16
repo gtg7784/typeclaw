@@ -1059,6 +1059,92 @@ describe('wrapSystemTool', () => {
     await rm(agentDir, { recursive: true, force: true })
   })
 
+  test.each(['channel_send', 'channel_reply'] as const)(
+    '%s text-only message with slashes is never treated as a file operand',
+    async (tool) => {
+      const slashyMessages = [
+        '☀️ 사당동 날씨 (7/16 목) 27°C 맑음 | 강수확률 30%',
+        'S&P 500 up 2/3 of a point today',
+        'See https://example.com/report for details',
+        'ratio 16/9 and path-like word src/index.ts in prose',
+      ]
+      for (const text of slashyMessages) {
+        const pinned = await enforceAndPinToolFiles({
+          tool,
+          args: { adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHAN', text },
+          agentDir: '/agent',
+          genericInputs: true,
+        })
+        const result: ToolResult = { content: [{ type: 'text', text }], details: { echoed: text } }
+        expect(pinned.restoreResult(result)).toEqual(result)
+        await pinned.cleanup()
+      }
+    },
+  )
+
+  test('channel_send text-only send with a slash reaches the tool unchanged through the wrapper', async () => {
+    const text = '뉴스 요약 (7/16): S&P +2/3, https://example.com/a'
+    let received: string | undefined
+    const tool = definePiTool({
+      name: 'channel_send',
+      label: 'channel_send',
+      description: '',
+      parameters: Type.Any(),
+      async execute(_id, params) {
+        received = (params as { text: string }).text
+        return { content: [{ type: 'text' as const, text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'slash-text', hooks: createHookBus() })
+    const result = await wrapped.execute(
+      'c',
+      { adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHAN', text },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(received).toBe(text)
+    expect(textOfFirstContent(result)).toBe('ok')
+  })
+
+  test('channel_send with slash-bearing text still pins the attachment path', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-channel-text-attach-'))
+    const file = path.join(agentDir, 'report.txt')
+    await writeFile(file, 'report body')
+    try {
+      let seenAttachmentPath: string | undefined
+      const tool = definePiTool({
+        name: 'channel_send',
+        label: 'channel_send',
+        description: '',
+        parameters: Type.Any(),
+        async execute(_id, params) {
+          seenAttachmentPath = (params as { attachments: Array<{ path: string }> }).attachments[0]?.path
+          const body = await readFile(seenAttachmentPath as string, 'utf8')
+          return { content: [{ type: 'text' as const, text: body }], details: undefined }
+        },
+      })
+      const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 'text-attach', hooks: createHookBus() })
+      const result = await wrapped.execute(
+        'c',
+        {
+          adapter: 'slack-bot',
+          workspace: 'T0ACME',
+          chat: 'C0CHAN',
+          text: 'here (7/16)',
+          attachments: [{ path: file }],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      )
+      expect(seenAttachmentPath).not.toBe(file)
+      expect(textOfFirstContent(result)).toBe('report body')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-pinned-read-'))
     const safe = path.join(agentDir, 'safe.txt')
