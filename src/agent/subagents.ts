@@ -630,16 +630,18 @@ function lastTaggedBlock(text: string, tag: FinalBlockTag): string | null {
 }
 
 // Subagents whose result IS a REQUIRED tagged block — the parent must receive
-// that block or a loud failure, never a stale earlier turn. The researcher's
-// contract (src/bundled-plugins/researcher/researcher.ts) mandates a closing
-// `<report>` block; when an upstream provider retry loop ends the run on
-// unexecuted `write_report` tool calls, the researcher never emits it, and
-// without this gate the capture would silently return its earlier `<analysis>`
-// preamble as a "successful" result — the production regression this guards.
-// Keyed by the stable bundled-subagent registry name. This is STRICTER than the
-// reviewer's `<review>` (preferred, but falls back to free-form text): only the
-// subagents listed here fail loud when their block is absent.
-const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { researcher: 'report' }
+// that block or a structured "could not complete" fallback, never a stale
+// earlier turn and never a silent empty completion. Keyed by registry name.
+//
+// Both entries share one failure mode on the `deep`/openai-codex profile: a run
+// that ends on tool-call-only turns emits no closing block, so `finalMessage`
+// stays undefined and `spawn_subagent`/`subagent_output` synthesize "completed …
+// with no final message" as an `ok: true` success. For the researcher that
+// surfaced the earlier `<analysis>` preamble as findings (guarded by ae5014e5);
+// for the reviewer the GitHub flow has no `<review>` to post and silently
+// `skip_response`s — the stranded-review bug. This gate gives both a bounded
+// re-prompt then an honest low-confidence fallback instead of the silent drop.
+const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { researcher: 'report', reviewer: 'review' }
 
 // Bounded re-prompt budget for the required-block guard, mirroring the channel
 // empty-response guard's MAX_EMPTY_TURN_RETRIES. A subagent that owes a result
@@ -648,24 +650,37 @@ const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { research
 const MAX_REQUIRED_BLOCK_RETRIES = 2
 
 // The recovery nudge. It MUST forbid tools: the known failure mode is a provider
-// retry loop on the report-writing tool call, so re-driving the tool path would
+// retry loop on a block-producing tool call, so re-driving the tool path would
 // just re-trigger the loop. Asking for the block as plain text is the repair.
+// The tail is tag-specific: each block has different mandatory child fields.
 function renderRequiredBlockRetryNudge(tag: FinalBlockTag): string {
+  const tail =
+    tag === 'report'
+      ? 'in particular do NOT call write_report. Do NOT continue researching or spawn more subagents.\n\nIf the report file was not successfully written, still emit the block: set <report_file>none</report_file>, <confidence>low</confidence> (explain the report artifact was not completed), and note in <open_questions> that the run should be retried.'
+      : `Do NOT re-run gh, diff reads, or spawn more subagents.\n\nEmit the block from the analysis you have already done: include your <summary>, whatever <finding> items you can support with evidence, and a <verdict> (approve | request-changes | comment). Only use a real verdict if you actually reached one. If you could NOT analyze enough to decide, do NOT invent a verdict — set <verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict> exactly (this signals an incomplete review; the parent will not treat it as approve/request-changes/comment, even on a re-review).`
   return `---
 **[SYSTEM MESSAGE — not from a human]**
 
 Your previous turn ended without the required <${tag}> block. This is an automated runtime recovery signal, not a human message.
 
-Emit the final <${tag}>...</${tag}> block NOW as plain assistant text. Do NOT call any tools — in particular do NOT call write_report. Do NOT continue researching or spawn more subagents.
-
-If the report file was not successfully written, still emit the block: set <report_file>none</report_file>, <confidence>low</confidence> (explain the report artifact was not completed), and note in <open_questions> that the run should be retried.
+Emit the final <${tag}>...</${tag}> block NOW as plain assistant text. Do NOT call any tools — ${tail}
 
 Output exactly one <${tag}> block and nothing else.`
 }
 
+// Unambiguous marker on a synthesized incomplete-review fallback. The parent's
+// GitHub re-review flow overrides a `comment` verdict into a decisive APPROVE /
+// REQUEST_CHANGES when prior blockers look resolved — which would let a review
+// that NEVER RAN post a formal verdict. So the fallback carries no real verdict:
+// it uses this sentinel in place of approve|request-changes|comment, and the
+// GitHub skill keys off it to post only an honest failure comment and leave
+// review state untouched. Kept in sync with the exemption in
+// src/skills/typeclaw-channel-github/SKILL.md.
+export const INCOMPLETE_REVIEW_VERDICT = 'incomplete-review-not-a-verdict'
+
 // The terminal graceful fallback when the nudges are exhausted. It fabricates NO
-// findings — only a structured, low-confidence "could not complete" notice — so
-// the parent gets a usable result instead of stale `<analysis>` or a hard error.
+// findings — only a structured "could not complete" notice — so the parent gets
+// a usable result instead of stale `<analysis>` or a hard error.
 function renderMissingRequiredBlockFallback(name: string, tag: FinalBlockTag): string {
   if (tag === 'report') {
     return `<report>
@@ -682,6 +697,16 @@ low — no complete research report artifact was produced.
 The original research request remains unresolved; rerun the ${name} subagent or gather the sources directly.
 </open_questions>
 </report>`
+  }
+  if (tag === 'review') {
+    return `<review>
+<summary>
+INCOMPLETE REVIEW — NOT A VERDICT. The ${name} subagent could not complete a review in this run: it ended without emitting the required <review> block. No findings were produced and no verdict was reached — do not treat any earlier text as a verdict, and do NOT map this to APPROVE/REQUEST_CHANGES/COMMENT (including on a re-review). Re-request the review; if it still cannot complete, post an honest "review could not be completed" note and leave existing review state unchanged.
+</summary>
+<findings>
+</findings>
+<verdict>${INCOMPLETE_REVIEW_VERDICT}</verdict>
+</review>`
   }
   return `<${tag}>\nThe ${name} subagent ended without emitting the required <${tag}> block and could not recover; rerun it or inspect the transcript.\n</${tag}>`
 }
