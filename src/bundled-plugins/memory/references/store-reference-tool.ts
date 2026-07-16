@@ -23,6 +23,10 @@ export function createStoreReferenceTool(onReferenceStored?: ReferenceStoredHook
       origin: z.enum(['episode', 'curated', 'external']),
       tags: z.array(z.string()).optional(),
     }),
+    // title/body/tags are prose the tool writes under a runtime-computed slug
+    // path; none is a caller-supplied file path. Declared so a title like
+    // "README.md" or a body carrying "/" is not misread as a file operand.
+    fileOperands: { nonFile: ['title', 'body', 'tags'] },
     async execute({ title, body, origin, tags }, ctx) {
       const existingSlugs = new Set(await listReferenceSlugs(ctx.agentDir))
       const slug = headingToSlug(title, existingSlugs)
