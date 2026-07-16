@@ -41,7 +41,7 @@ import { runDiscordBootstrap } from '@/init/discord-auth'
 import { runInstagramBootstrap, type InstagramLoginCallbacks } from '@/init/instagram-auth'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { runLineBootstrap } from '@/init/line-auth'
-import { runSlackBootstrap } from '@/init/slack-auth'
+import { runSlackConfirmationBootstrap } from '@/init/slack-auth'
 import { runTeamsBootstrap, type TeamsDeviceCodeCallbacks } from '@/init/teams-auth'
 import { runWebexBootstrap } from '@/init/webex-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
@@ -1061,10 +1061,18 @@ async function collectCredentials(
     }
     case 'slack': {
       const qrDataUrl = await promptSlackQrDataUrl()
+      const email = await promptSlackEmail()
+      const spinnerControl = lineSpinnerHolder ? holderSpinnerControl(lineSpinnerHolder) : undefined
       return {
         channel,
         slackQrDataUrl: qrDataUrl,
-        runSlackAuth: ({ cwd: agentDir, qrDataUrl }) => runSlackBootstrap({ qrDataUrl, agentDir }),
+        runSlackAuth: ({ cwd: agentDir, qrDataUrl }) =>
+          runSlackConfirmationBootstrap({
+            qrDataUrl,
+            agentDir,
+            email,
+            requestCode: () => promptSlackConfirmationCode(spinnerControl),
+          }),
       }
     }
     case 'telegram-bot':
@@ -1466,6 +1474,9 @@ async function promptSlackQrDataUrl(): Promise<string> {
       '3. Paste it below (a long data:image/png;base64,... string).',
       '',
       'Generate a fresh QR each time — the sign-in link expires quickly.',
+      '',
+      'If your workspace requires a confirmation code, you will be asked for',
+      'your email next, then for the code Slack sends to your phone.',
     ].join('\n'),
     'Sign in to Slack (user account)',
   )
@@ -1479,6 +1490,33 @@ async function promptSlackQrDataUrl(): Promise<string> {
     process.exit(0)
   }
   return qrDataUrl
+}
+
+async function promptSlackEmail(): Promise<string> {
+  const email = await text({
+    message: 'Slack account email (used to request the confirmation code)',
+    validate: (value) =>
+      value && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value) ? undefined : 'Enter a valid email address',
+  })
+  if (isCancel(email)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return email
+}
+
+async function promptSlackConfirmationCode(spinnerControl?: LineAuthSpinnerControl): Promise<string> {
+  spinnerControl?.pause()
+  const code = await text({
+    message: 'Enter the Slack confirmation code sent to your phone',
+    validate: (value) => (value && value.trim().length > 0 ? undefined : 'Confirmation code is required'),
+  })
+  if (isCancel(code)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  spinnerControl?.resume('Confirming Slack sign-in...')
+  return code.trim()
 }
 
 async function promptSlackBotToken(): Promise<string> {
@@ -1874,7 +1912,10 @@ function reportProgress(
       const s = spinner()
       s.start(START_MESSAGES[event.step])
       spinners[event.step] = s
-      if ((event.step === 'line-auth' || event.step === 'instagram-auth') && lineSpinnerHolder) {
+      if (
+        (event.step === 'line-auth' || event.step === 'instagram-auth' || event.step === 'slack-auth') &&
+        lineSpinnerHolder
+      ) {
         lineSpinnerHolder.current = s
       }
       return
@@ -1905,6 +1946,7 @@ function reportProgress(
         s.stop(reportDiscordAuth(event.result))
         break
       case 'slack-auth':
+        if (lineSpinnerHolder) lineSpinnerHolder.current = null
         s.stop(reportSlackAuth(event.result))
         break
       case 'config':
