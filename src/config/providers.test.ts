@@ -170,6 +170,83 @@ describe('KNOWN_PROVIDERS', () => {
     }
   })
 
+  test('upstage is a single api-key provider on the OpenAI-compatible /v1 base url', () => {
+    const upstage = KNOWN_PROVIDERS.upstage
+    expect(upstage.baseUrl).toBe('https://api.upstage.ai/v1')
+    expect(upstage.apiKeyEnv).toBe('UPSTAGE_API_KEY')
+    expect(supportsApiKey(upstage)).toBe(true)
+    expect(supportsOAuth(upstage)).toBe(false)
+  })
+
+  test('every upstage model uses the openai-completions api so pi-ai routes correctly', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.upstage.models)) {
+      expect(model.api, `upstage/${modelId} api drift`).toBe('openai-completions')
+    }
+  })
+
+  test('upstage ships the Solar chat lineup plus the open-weight solar-open2, text-only, syn-pro omitted', () => {
+    const models = KNOWN_PROVIDERS.upstage.models
+    expect(Object.keys(models)).toEqual(['solar-open2', 'solar-pro3', 'solar-pro2', 'solar-mini'])
+    expect(Object.keys(models)).not.toContain('syn-pro')
+    for (const [modelId, model] of Object.entries(models)) {
+      expect((model.input as ReadonlyArray<string>).includes('image'), `upstage/${modelId} should be text-only`).toBe(
+        false,
+      )
+    }
+  })
+
+  test('solar-open2 carries no published price yet (partner-program access)', () => {
+    const cost = KNOWN_PROVIDERS.upstage.models['solar-open2']!.cost as {
+      input: number
+      output: number
+      cacheRead: number
+      cacheWrite: number
+    }
+    expect(cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+  })
+
+  test('every upstage model pins compat to Upstage\u2019s documented openai-completions surface', () => {
+    // pi-ai does not auto-detect api.upstage.ai, so each model must carry compat
+    // that disables the OpenAI-native fields Upstage does not document: the
+    // `developer` role, `store`, `max_completion_tokens`, and streaming usage.
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.upstage.models)) {
+      const compat = (model as { compat?: Record<string, unknown> }).compat
+      expect(compat, `upstage/${modelId} missing compat`).toBeDefined()
+      expect(compat!.supportsDeveloperRole, `upstage/${modelId} must not use the developer role`).toBe(false)
+      expect(compat!.supportsStore, `upstage/${modelId} must not send store`).toBe(false)
+      expect(compat!.maxTokensField, `upstage/${modelId} must send max_tokens`).toBe('max_tokens')
+      expect(compat!.supportsUsageInStreaming, `upstage/${modelId} streaming usage is undocumented`).toBe(false)
+      expect(compat!.supportsStrictMode, `upstage/${modelId} must not send strict on tool defs`).toBe(false)
+    }
+  })
+
+  test('upstage reasoning_effort support tracks each model\u2019s documented behavior', () => {
+    const models = KNOWN_PROVIDERS.upstage.models
+    const compatFor = (id: keyof typeof models) =>
+      (models[id] as { compat?: { supportsReasoningEffort?: boolean } }).compat
+    // solar-pro3/pro2 and the solar-open2 template document reasoning_effort; solar-mini ignores it.
+    expect(compatFor('solar-open2')!.supportsReasoningEffort).toBe(true)
+    expect(compatFor('solar-pro3')!.supportsReasoningEffort).toBe(true)
+    expect(compatFor('solar-pro2')!.supportsReasoningEffort).toBe(true)
+    expect(compatFor('solar-mini')!.supportsReasoningEffort).toBe(false)
+    expect(models['solar-mini']!.reasoning, 'solar-mini does not reason').toBe(false)
+  })
+
+  test('reasoning upstage models clamp pi\u2019s xhigh to Upstage\u2019s documented reasoning_effort=high', () => {
+    const models = KNOWN_PROVIDERS.upstage.models
+    for (const id of ['solar-open2', 'solar-pro3', 'solar-pro2'] as const) {
+      const map = (models[id] as { thinkingLevelMap?: Record<string, string | null> }).thinkingLevelMap
+      expect(map, `upstage/${id} missing thinkingLevelMap`).toBeDefined()
+      // Upstage documents minimal/low/medium/high only; xhigh must not leak through.
+      expect(map!.xhigh, `upstage/${id} must clamp xhigh -> high`).toBe('high')
+      expect(map!.off, `upstage/${id} must omit reasoning_effort when off`).toBeNull()
+    }
+    expect(
+      (models['solar-mini'] as { thinkingLevelMap?: unknown }).thinkingLevelMap,
+      'solar-mini needs no map (never sends reasoning_effort)',
+    ).toBeUndefined()
+  })
+
   test('anthropic supports both api-key and oauth on the same provider id', () => {
     const anthropic = KNOWN_PROVIDERS.anthropic
     expect(anthropic.baseUrl).toBe('https://api.anthropic.com')
@@ -331,6 +408,11 @@ describe('KNOWN_PROVIDER_VENDORS', () => {
     expect(vendorForProviderId('deepseek')).toBe('deepseek')
   })
 
+  test('Upstage is a single-provider vendor (no variant step)', () => {
+    expect(providerIdsForVendor('upstage')).toEqual(['upstage'])
+    expect(vendorForProviderId('upstage')).toBe('upstage')
+  })
+
   test('Moonshot vendor splits paygo (moonshot) from Coding Plan (moonshot-coding)', () => {
     expect(providerIdsForVendor('moonshot')).toEqual(['moonshot', 'moonshot-coding'])
     expect(variantLabel('moonshot', 'moonshot')).toBe('Pay-as-you-go')
@@ -394,6 +476,14 @@ describe('listKnownModelRefs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('deepseek/deepseek-v4-flash')
     expect(refs).toContain('deepseek/deepseek-v4-pro')
+  })
+
+  test('includes upstage Solar model refs', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('upstage/solar-open2')
+    expect(refs).toContain('upstage/solar-pro3')
+    expect(refs).toContain('upstage/solar-pro2')
+    expect(refs).toContain('upstage/solar-mini')
   })
 
   test('includes both moonshot and moonshot-coding model refs', () => {

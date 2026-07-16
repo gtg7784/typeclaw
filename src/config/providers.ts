@@ -400,6 +400,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai',
         baseUrl: 'https://api.z.ai/api/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.2, output: 1.1, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128000,
@@ -412,6 +413,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai',
         baseUrl: 'https://api.z.ai/api/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -424,6 +426,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai',
         baseUrl: 'https://api.z.ai/api/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -455,6 +458,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai-coding',
         baseUrl: 'https://api.z.ai/api/coding/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.2, output: 1.1, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128000,
@@ -467,6 +471,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai-coding',
         baseUrl: 'https://api.z.ai/api/coding/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -482,6 +487,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai-coding',
         baseUrl: 'https://api.z.ai/api/coding/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 1.0, output: 3.2, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -494,6 +500,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai-coding',
         baseUrl: 'https://api.z.ai/api/coding/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 1.2, output: 4.0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -506,6 +513,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'zai-coding',
         baseUrl: 'https://api.z.ai/api/coding/paas/v4',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 1.4, output: 4.4, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
@@ -653,6 +661,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'minimax',
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
         contextWindow: 204800,
@@ -665,6 +674,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'minimax',
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
@@ -677,6 +687,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'minimax',
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
@@ -689,6 +700,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'minimax',
         baseUrl: 'https://api.minimax.io/v1',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
         contextWindow: 204800,
@@ -734,6 +746,7 @@ export const KNOWN_PROVIDERS = {
         provider: 'deepseek',
         baseUrl: 'https://api.deepseek.com',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
         contextWindow: 1000000,
@@ -746,10 +759,168 @@ export const KNOWN_PROVIDERS = {
         provider: 'deepseek',
         baseUrl: 'https://api.deepseek.com',
         reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
         input: ['text'],
         cost: { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
         contextWindow: 1000000,
         maxTokens: 384000,
+      },
+    },
+  },
+  // Upstage (Solar) — console.upstage.ai pay-as-you-go API. OpenAI-compatible
+  // (Bearer auth + /chat/completions shape), so models go through pi-ai's
+  // `openai-completions` adapter with a custom baseUrl — same trick as
+  // Fireworks, Z.AI, MiniMax, DeepSeek, and Moonshot. api-key only; Upstage
+  // ships no OAuth flow. Keys are prefixed `up_`.
+  //
+  // baseUrl is `https://api.upstage.ai/v1` (the OpenAI-style `/v1` convention,
+  // like OpenAI/xAI/Moonshot — NOT the bare Anthropic/DeepSeek form). The SDK
+  // appends `/chat/completions`; `validate-api-key.ts` probes `${baseUrl}/models`.
+  // Some older third-party integrations (LangChain community, VoltAgent) point
+  // at the legacy `https://api.upstage.ai/v1/solar` path — that is deprecated;
+  // the console, the OpenAI-SDK example, and the agent docs all use bare `/v1`.
+  //
+  // Model lineup spans two families on the same Console API + key:
+  //   * Closed chat models from the official agent API reference
+  //     (console.upstage.ai/api/docs/for-agents) as of 2026-03-23:
+  //     solar-pro3 (102B MoE / 12B active, 128K, flagship), solar-pro2
+  //     (31B, 65K), solar-mini (10.7B, 32K, cheap/fast).
+  //   * The open-weight Solar Open family: solar-open2 (Solar Open 2), a 102B
+  //     MoE / 12B active model with a 128K context. It launched on the Console
+  //     API for the Solar Agent Partner program (Stage 1, from 2026-07-17) —
+  //     newer than the public docs snapshot above, so it is not yet in the
+  //     public model-alias table; the model id is per Upstage's partner
+  //     onboarding notice (docs: console.upstage.ai/api/chat).
+  // Every model here supports OpenAI-style function calling (required for agent
+  // use) and is text-only (Upstage's chat API exposes no image input). The
+  // `syn-pro` synthetic-data model is intentionally omitted: it does NOT
+  // support function calling and is useless as an agent model. Aliases (not the
+  // dated `-260323` suffixes) are used so they auto-forward to the latest
+  // versioned release.
+  //
+  // Costs are USD per 1M tokens from upstage.ai/pricing/api (VAT-exclusive).
+  // solar-pro3/pro2 publish an "Input(Cached)" cache-read rate ($0.015); no
+  // cache-write surcharge is published, so cacheWrite is 0. solar-mini
+  // publishes a single flat $0.15 rate with no cache line, so cacheRead and
+  // cacheWrite are both 0 (no published discount). solar-open2 has no published
+  // price yet (partner-program access, rate-limited rather than billed), so all
+  // four cost fields are 0 until Upstage publishes a Solar Open rate card.
+  //
+  // `compat` pins pi-ai's openai-completions adapter to Upstage's DOCUMENTED
+  // request surface. pi-ai only auto-detects compat for a known set of baseUrls
+  // (Cerebras, xAI, DeepSeek, …); api.upstage.ai is not among them, so without
+  // this it would default to OpenAI-native fields Upstage does not document and
+  // could reject. Per the Upstage Console API reference
+  // (console.upstage.ai/api/docs/for-agents): messages use system/user/assistant
+  // roles only (no `developer` role), output length is `max_tokens` (not
+  // `max_completion_tokens`), and `store` is not a documented field — so
+  // supportsDeveloperRole/supportsStore are false and maxTokensField is
+  // `max_tokens`. `stream_options.include_usage` and the `strict` field on tool
+  // definitions are both undocumented, so supportsUsageInStreaming and
+  // supportsStrictMode are false (both conservative — pi-ai defaults them to
+  // true, and Upstage only documents `strict` inside response_format.json_schema,
+  // never on tool defs). `reasoning_effort` IS documented for solar-pro3/pro2
+  // (and the solar-open2 chat template), so supportsReasoningEffort stays true
+  // there; solar-mini ignores it, so it is false and reasoning is off.
+  //
+  // Upstage documents reasoning_effort values minimal/low/medium/high only. pi
+  // adds an `xhigh` level that typeclaw's attention escalation can select
+  // (src/agent/attention-escalation.ts), and pi-ai passes the pi level straight
+  // through as reasoning_effort when no map is set — which would send the
+  // unsupported `xhigh`. `thinkingLevelMap` clamps xhigh -> high (and maps off ->
+  // null so nothing is sent) on the reasoning models so every emitted
+  // reasoning_effort is a value Upstage accepts. solar-mini needs no map (it
+  // never sends reasoning_effort).
+  upstage: {
+    id: 'upstage',
+    name: 'Upstage (Solar)',
+    baseUrl: 'https://api.upstage.ai/v1',
+    auth: ['api-key'],
+    apiKeyEnv: 'UPSTAGE_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'solar-open2': {
+        id: 'solar-open2',
+        name: 'Solar Open 2',
+        api: 'openai-completions',
+        provider: 'upstage',
+        baseUrl: 'https://api.upstage.ai/v1',
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 32000,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true,
+          supportsUsageInStreaming: false,
+          supportsStrictMode: false,
+          maxTokensField: 'max_tokens',
+        },
+      },
+      'solar-pro3': {
+        id: 'solar-pro3',
+        name: 'Solar Pro 3',
+        api: 'openai-completions',
+        provider: 'upstage',
+        baseUrl: 'https://api.upstage.ai/v1',
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
+        input: ['text'],
+        cost: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 32000,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true,
+          supportsUsageInStreaming: false,
+          supportsStrictMode: false,
+          maxTokensField: 'max_tokens',
+        },
+      },
+      'solar-pro2': {
+        id: 'solar-pro2',
+        name: 'Solar Pro 2',
+        api: 'openai-completions',
+        provider: 'upstage',
+        baseUrl: 'https://api.upstage.ai/v1',
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'high' },
+        input: ['text'],
+        cost: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
+        contextWindow: 65000,
+        maxTokens: 16000,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true,
+          supportsUsageInStreaming: false,
+          supportsStrictMode: false,
+          maxTokensField: 'max_tokens',
+        },
+      },
+      'solar-mini': {
+        id: 'solar-mini',
+        name: 'Solar Mini',
+        api: 'openai-completions',
+        provider: 'upstage',
+        baseUrl: 'https://api.upstage.ai/v1',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0.15, output: 0.15, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32000,
+        maxTokens: 8000,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: false,
+          supportsUsageInStreaming: false,
+          supportsStrictMode: false,
+          maxTokensField: 'max_tokens',
+        },
       },
     },
   },
@@ -937,6 +1108,11 @@ export const KNOWN_PROVIDER_VENDORS = {
     id: 'deepseek',
     name: 'DeepSeek',
     providers: ['deepseek'],
+  },
+  upstage: {
+    id: 'upstage',
+    name: 'Upstage (Solar)',
+    providers: ['upstage'],
   },
   moonshot: {
     id: 'moonshot',
