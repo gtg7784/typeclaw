@@ -246,8 +246,37 @@ function fileTargets(
   // generic operands either pins a real-repo anchor into a /tmp file:// path that
   // leaks into the posted review, or throws "ambiguous local file operand".
   if (tool === 'post_github_review') return targets
-  if (genericInputs) collectGenericFileTargets(args, targets, maxCount, fileOperands, agentDir)
+  if (genericInputs) collectGenericFileTargets(tool, args, targets, maxCount, fileOperands, agentDir)
   return targets
+}
+
+// Exact tool + operand-path pairs whose string values are first-party PROSE
+// (message bodies, prompts, queries, regex/CSS/jq strings) — never a local file,
+// so the generic path scan must skip them. Scoped per full operand path, NOT by
+// key name: an undeclared plugin/MCP reader that happens to use `content` or
+// `prompt` must still fail closed. `url` is deliberately absent (web_fetch.url is
+// a real reference — an explicit file: URI there still pins). channel_send/
+// _reply/_fetch_attachment and post_github_review are exempt via earlier returns.
+const PROSE_OPERANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  spawn_subagent: new Set(['prompt', 'description']),
+  skip_response: new Set(['reason']),
+  web_search: new Set(['query']),
+  web_fetch: new Set(['query', 'selector', 'pattern']),
+  todo_write: new Set(['todos.content']),
+  channel_edit: new Set(['text']),
+}
+
+function isProseOperand(tool: string, operandPath: string): boolean {
+  return PROSE_OPERANDS[tool]?.has(operandPath) === true
+}
+
+// Detection trims first: a leading-whitespace `  file://…` is still a file
+// reference to any consumer that trims before parsing, so it must be pinned or
+// denied, never passed through untouched. The original untrimmed string is
+// preserved on the target for result restoration; the trimmed URI is what gets
+// normalized and snapshotted.
+function isFileUri(value: string): boolean {
+  return value.trim().toLocaleLowerCase().startsWith('file:')
 }
 
 function propertyTarget(object: Record<string, unknown>, key: string): FileTarget {
@@ -258,7 +287,7 @@ function propertyTarget(object: Record<string, unknown>, key: string): FileTarge
     set: (value) => {
       object[key] = value
     },
-    uri: raw.toLocaleLowerCase().startsWith('file:'),
+    uri: isFileUri(raw),
   }
 }
 
@@ -270,7 +299,7 @@ function arrayTarget(array: unknown[], index: number): FileTarget {
     set: (value) => {
       array[index] = value
     },
-    uri: raw.toLocaleLowerCase().startsWith('file:'),
+    uri: isFileUri(raw),
   }
 }
 
@@ -321,6 +350,7 @@ function collectDeclaredOutputTargets(
 }
 
 function collectGenericFileTargets(
+  tool: string,
   value: unknown,
   out: FileTarget[],
   maxCount: number,
@@ -333,10 +363,16 @@ function collectGenericFileTargets(
     const nonInput =
       operands?.output?.includes(parentPath) === true || operands?.destructive?.includes(parentPath) === true
     const key = parentPath.split('.').at(-1) ?? parentPath
+    // Precedence: declared input pins; declared output/destructive is not an
+    // input; a first-party prose operand is opaque (skipped, even a file: URI);
+    // otherwise an explicit file: URI pins and an undeclared path-shaped value
+    // fails closed. `isProseOperand` is tool+operand-path scoped, so an unknown
+    // tool never inherits an exemption from a common key name.
+    const prose = !declaredInput && isProseOperand(tool, parentPath)
     for (const [index, item] of value.entries()) {
       if (typeof item === 'string') {
-        const fileUrl = item.toLocaleLowerCase().startsWith('file:')
-        if (!nonInput && (fileUrl || declaredInput)) {
+        if (prose) continue
+        if (!nonInput && (isFileUri(item) || declaredInput)) {
           out.push(arrayTarget(value, index))
           if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         } else if (
@@ -350,7 +386,7 @@ function collectGenericFileTargets(
         }
         continue
       }
-      collectGenericFileTargets(item, out, maxCount, operands, agentDir, parentPath)
+      collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, parentPath)
     }
     return
   }
@@ -358,11 +394,16 @@ function collectGenericFileTargets(
   for (const [childKey, item] of Object.entries(value)) {
     const operandPath = parentPath === '' ? childKey : `${parentPath}.${childKey}`
     if (typeof item === 'string') {
-      const fileUrl = item.toLocaleLowerCase().startsWith('file:')
       const declaredInput = operands?.input?.includes(operandPath) === true
       const nonInput =
         operands?.output?.includes(operandPath) === true || operands?.destructive?.includes(operandPath) === true
-      if (!nonInput && (fileUrl || declaredInput)) {
+      // Declared input wins; a first-party prose operand (spawn_subagent.prompt,
+      // web_search.query, channel_edit.text, …) is opaque and skipped even when
+      // its value is a file: URI; everything else falls to the file:/heuristic
+      // scan below. Scoped by exact tool+operand-path so an undeclared plugin
+      // reader using `content`/`prompt` still fails closed.
+      if (!declaredInput && isProseOperand(tool, operandPath)) continue
+      if (!nonInput && (isFileUri(item) || declaredInput)) {
         out.push(propertyTarget(value, childKey))
         if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         continue
@@ -377,7 +418,7 @@ function collectGenericFileTargets(
         )
       }
     }
-    collectGenericFileTargets(item, out, maxCount, operands, agentDir, operandPath)
+    collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, operandPath)
   }
 }
 
@@ -798,10 +839,14 @@ function isSemanticGenericString(key: string, value: string): boolean {
 }
 
 function isExplicitNonFileUrl(value: string): boolean {
-  if (/^[A-Za-z]:[\\/]/.test(value)) return false
-  if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) || value.toLocaleLowerCase().startsWith('file:')) return false
+  // Trim to match the file:/URL detection elsewhere: a leading-whitespace
+  // "  https://…" is still a non-file URL, and a "  file://…" must NOT be
+  // treated as one (it pins). Windows-drive and file: exclusions run on trimmed.
+  const trimmed = value.trim()
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) return false
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed) || trimmed.toLocaleLowerCase().startsWith('file:')) return false
   try {
-    return new URL(value).protocol !== 'file:'
+    return new URL(trimmed).protocol !== 'file:'
   } catch {
     return false
   }
@@ -845,9 +890,10 @@ function isDeniedSnapshotPath(
 }
 
 function normalizeFileReference(value: string): string {
-  if (!value.toLocaleLowerCase().startsWith('file:')) return value
+  const trimmed = value.trim()
+  if (!trimmed.toLocaleLowerCase().startsWith('file:')) return value
   try {
-    return fileURLToPath(value)
+    return fileURLToPath(trimmed)
   } catch {
     throw new Error(`invalid file URI: ${value}`)
   }

@@ -148,6 +148,15 @@ const FREE_TEXT_KEYS_BY_TOOL: Record<string, ReadonlySet<string>> = {
   channel_fetch_attachment: new Set(['filename']),
 }
 
+// Trim before the `file:` test: an exempt prose key otherwise lets a
+// leading-whitespace `file:  file://…/memory` URI slip past the scan (the value
+// is not path-shaped and `isFileUrl` misses it), reaching a fetcher that trims
+// before parsing. Returns the trimmed URI so callers scan the real target.
+function trimmedFileUri(value: string): string | undefined {
+  const trimmed = value.trim()
+  return trimmed.toLocaleLowerCase().startsWith('file:') ? trimmed : undefined
+}
+
 // Recursively collects strings that could be paths, skipping values under a
 // universally-free-text key or a tool-scoped free-text key. Explicit path-like
 // keys still win, and file:// values are normalized before matching. matchHidden then
@@ -165,7 +174,7 @@ function collectPathCandidates(value: unknown, tool: string): string[] {
 
 function walk(value: unknown, out: string[], tool: string, underExempt: boolean, key?: string): void {
   if (typeof value === 'string') {
-    const isFileUrl = value.toLocaleLowerCase().startsWith('file:')
+    const isFileUrl = trimmedFileUri(value) !== undefined
     if (underExempt && !isPathKey(key) && !isFileUrl) return
     const normalized = normalizeCandidate(value)
     if (normalized !== undefined) out.push(normalized)
@@ -312,16 +321,17 @@ function isPathKey(key: string | undefined): boolean {
 }
 
 function normalizeCandidate(value: string): string | undefined {
-  if (!value.toLocaleLowerCase().startsWith('file:')) return value
+  const uri = trimmedFileUri(value)
+  if (uri === undefined) return value
   try {
-    const url = new URL(value)
+    const url = new URL(uri)
     const pathname = decodeURIComponent(url.pathname)
     if (url.hostname !== '') return `//${url.hostname}${pathname}`
     if (/^\/[A-Za-z]:\//.test(pathname)) return pathname.slice(1)
     // Keep synthetic POSIX container paths platform-independent. fileURLToPath
     // would reinterpret file:///agent/... through the Windows host grammar.
     if (pathname.startsWith('/agent/') || pathname === '/agent') return pathname
-    return fileURLToPath(value)
+    return fileURLToPath(uri)
   } catch {
     return value
   }
