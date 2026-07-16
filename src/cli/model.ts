@@ -65,7 +65,7 @@ const setSub = defineCommand({
   async run({ args }) {
     const cwd = ensureAgentDir()
     const profile = args.profile ?? (await pickProfileName())
-    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
+    const picked = await resolvePickedRef(args.ref, cwd)
 
     intro(`Setting model profile: ${profile} → ${picked.ref}`)
 
@@ -173,7 +173,7 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const picked = args.ref !== undefined ? await resolveExplicitRef(args.ref) : await pickModelRef(cwd)
+    const picked = await resolvePickedRef(args.ref, cwd)
 
     intro(`Adding model profile: ${args.profile} → ${picked.ref}`)
 
@@ -435,6 +435,14 @@ export async function resolveExplicitRef(
   loadCatalog: () => Promise<{ options: ModelOption[] }> = fetchModelOptions,
 ): Promise<PickedModelRef> {
   if (isKnownModelRef(ref)) return { ref }
+  // Intentionally NOT rejecting refs that miss our shipped registry — not even
+  // for a closed-set provider like openai-codex. The registry is a snapshot, not
+  // an authoritative catalog: OpenAI ships new Codex models (e.g. the gpt-5.6
+  // line) before we can update it, and a definite "this model doesn't exist" is
+  // only knowable from the backend's own 400, which the runtime path now
+  // classifies (see provider-error.ts). Blocking here would instead stop users
+  // from selecting a real, newly-shipped model. So an unknown closed-provider ref
+  // takes the same forward-compatible warning path as any other non-curated ref.
   const { options } = await loadCatalog()
   const option = options.find((candidate) => candidate.ref === ref)
   if (option === undefined) {
@@ -446,6 +454,21 @@ export async function resolveExplicitRef(
   }
   const meta = customModelMetaFromOption(option)
   return { ref, ...(meta !== undefined ? { meta } : {}) }
+}
+
+// Resolve the model ref for `set`/`add`: an explicit `<ref>` arg is resolved
+// (and enriched with catalog metadata) by `resolveExplicitRef`, while a bare
+// invocation opens the interactive picker. Any resolution error surfaces via the
+// standard CLI error line + non-zero exit instead of an unhandled-rejection
+// stack trace. (Ref *shape*/support is validated downstream by set/addProfile.)
+async function resolvePickedRef(ref: string | undefined, cwd: string): Promise<PickedModelRef> {
+  if (ref === undefined) return pickModelRef(cwd)
+  try {
+    return await resolveExplicitRef(ref)
+  } catch (e) {
+    console.error(errorLine(e instanceof Error ? e.message : String(e)))
+    process.exit(1)
+  }
 }
 
 export type { PickedModelRef }
