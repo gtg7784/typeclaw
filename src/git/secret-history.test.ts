@@ -90,14 +90,177 @@ describe('canonical Git secret history guard', () => {
     await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(/workspace\/\.agent-messenger/i)
   })
 
-  test('detects a canonical credential commit reachable only through a reflog as unreachable object contamination', async () => {
+  test('detects a canonical credential commit left unreachable by a hard reset by its path', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     await commitFile(repo, 'workspace/.agent-messenger/session.json', '{"credential":"placeholder"}')
     await git(repo, 'reset', '--hard', 'HEAD^')
 
     const result = await scanCanonicalSecretsInGit(repo)
-    expect(result).toEqual({ ok: false, paths: ['dangling or unreachable Git objects'] })
+    expect(result).toEqual({ ok: false, paths: ['workspace/.agent-messenger/session.json'] })
+  })
+
+  test('detects a canonical credential in an unreachable commit after its reflog is expired', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'workspace/.agent-messenger/session.json', '{"credential":"placeholder"}')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['workspace/.agent-messenger/session.json'] })
+  })
+
+  test('allows benign unreachable commits left by an amend', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await writeFile(join(repo, 'README.md'), 'safer')
+    await git(repo, 'add', 'README.md')
+    await git(repo, 'commit', '--amend', '-m', 'safe amended')
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
+  test('allows benign unreachable commits and reflog remnants left by a hard reset', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'docs/guide.md', 'more safe content')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
+  test('rejects an orphan tree whose only entry is an innocuous name as unattributable', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, '{"credential":"placeholder"}', 'hash-object', '-w', '--stdin')
+    await gitStdin(repo, `100644 blob ${blob}\trandom-session-id\n`, 'mktree')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+  })
+
+  test('rejects an orphan tree even when it carries a canonical secret filename', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, '{"credential":"placeholder"}', 'hash-object', '-w', '--stdin')
+    await gitStdin(repo, `100644 blob ${blob}\tsecrets.json\n`, 'mktree')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+  })
+
+  test('rejects a bare dangling blob as unattributable', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await gitStdin(repo, 'bare secret bytes with no referencing tree', 'hash-object', '-w', '--stdin')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+  })
+
+  test('attributes a canonical secret through an unreachable tag that peels to a commit', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'workspace/.agent-messenger/session.json', '{"credential":"placeholder"}')
+    await git(repo, 'tag', '-a', 'snapshot', '-m', 'snapshot')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    await git(repo, 'tag', '-d', 'snapshot')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['workspace/.agent-messenger/session.json'] })
+  })
+
+  test('allows an unreachable tag that peels to a benign commit', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'docs/guide.md', 'more safe content')
+    await git(repo, 'tag', '-a', 'snapshot', '-m', 'snapshot')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    await git(repo, 'tag', '-d', 'snapshot')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
+  test('rejects an unreachable tag pointing directly at a tree as unattributable', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, 'notes', 'hash-object', '-w', '--stdin')
+    const tree = await gitStdin(repo, `100644 blob ${blob}\tNOTES.md\n`, 'mktree')
+    await git(repo, 'tag', '-a', 'treetag', '-m', 'tree tag', tree)
+    await git(repo, 'tag', '-d', 'treetag')
+
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+  })
+
+  test('rejects a canonical blob a reflog conceals from unreachable fsck', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await writeFile(join(repo, '.env'), 'EXAMPLE_TOKEN=placeholder')
+    await git(repo, 'add', '.env')
+    const blob = await gitOutput(repo, 'rev-parse', ':.env')
+    await git(repo, 'reset', '--', '.env')
+    await rm(join(repo, '.env'))
+    await git(repo, 'update-ref', '--create-reflog', 'refs/test/reflog-root', blob)
+    await git(repo, 'update-ref', 'refs/test/reflog-root', 'HEAD')
+
+    const honored = await gitOutput(repo, 'fsck', '--unreachable', '--no-progress')
+    expect(honored).not.toContain(blob)
+    const bare = await gitOutput(repo, 'fsck', '--unreachable', '--no-reflogs', '--no-progress')
+    expect(bare).toContain(`unreachable blob ${blob}`)
+
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+  })
+
+  test('detects a canonical path in an unexpired reflog-only commit via the reflog scan', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'workspace/.agent-messenger/session.json', '{"credential":"placeholder"}')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+
+    const honored = await gitOutput(repo, 'fsck', '--unreachable', '--no-progress')
+    expect(honored.trim()).toBe('')
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['workspace/.agent-messenger/session.json'] })
+  })
+
+  test('allows a benign reflog-only commit left by a reset', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'docs/guide.md', 'more safe content')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
+  test('rejects live refs that point at or peel to a non-commit', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, '{"credential":"placeholder"}', 'hash-object', '-w', '--stdin')
+    const tree = await gitStdin(repo, `100644 blob ${blob}\tNOTES.md\n`, 'mktree')
+
+    for (const [ref, oid] of [
+      ['refs/test/blob', blob],
+      ['refs/test/tree', tree],
+    ] as const) {
+      await git(repo, 'update-ref', ref, oid)
+      expect(await scanCanonicalSecretsInGit(repo)).toEqual({
+        ok: false,
+        paths: ['unattributable dangling Git objects'],
+      })
+      await git(repo, 'update-ref', '-d', ref)
+    }
+
+    await git(repo, 'tag', '-a', 'blobtag', '-m', 'x', blob)
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({
+      ok: false,
+      paths: ['unattributable dangling Git objects'],
+    })
+    await git(repo, 'tag', '-d', 'blobtag')
   })
 
   test('handles linked worktrees whose .git entry is a file', async () => {
@@ -156,6 +319,18 @@ async function git(repo: string, ...args: string[]): Promise<void> {
 
 async function gitOutput(repo: string, ...args: string[]): Promise<string> {
   const proc = Bun.spawn(['git', '-c', 'core.hooksPath=/dev/null', '-C', repo, ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+  const exitCode = await proc.exited
+  if (exitCode !== 0) throw new Error(`git ${args[0] ?? ''} failed: ${stderr}`)
+  return stdout.trim()
+}
+
+async function gitStdin(repo: string, stdin: string, ...args: string[]): Promise<string> {
+  const proc = Bun.spawn(['git', '-c', 'core.hooksPath=/dev/null', '-C', repo, ...args], {
+    stdin: new TextEncoder().encode(stdin),
     stdout: 'pipe',
     stderr: 'pipe',
   })
