@@ -92,6 +92,13 @@ export function createReviewerCheckoutTool(resolveTokenForRepo: ResolveGithubTok
     description:
       'Prepare a runtime-owned token-safe scratch checkout of one allowlisted GitHub repository at an exact full commit SHA.',
     parameters: z.object({ repoSlug: z.string(), headSha: z.string() }),
+    // `repoSlug` ("owner/repo") and `headSha` (40-hex) are remote GitHub
+    // coordinates, never local paths — repoSlug is only ever interpolated into
+    // `https://github.com/<slug>.git` and prepareReviewerCheckout rejects
+    // anything not matching /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/. Declared so the
+    // required "/" in a slug isn't misread as a path separator. Scoped to THIS
+    // tool: an undeclared reader passing a slug-shaped value still fails closed.
+    fileOperands: { nonFile: ['repoSlug', 'headSha'] },
     async execute(args, ctx) {
       try {
         const receipt = await prepareReviewerCheckout({
