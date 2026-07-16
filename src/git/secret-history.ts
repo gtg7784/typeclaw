@@ -107,6 +107,11 @@ async function scanNonCommitRefRoots(agentDir: string, gitArgs: readonly string[
   )
 
   for (const root of roots) {
+    // A pruning `git gc` deletes the object a reset/rebase left in a pseudoref (ORIG_HEAD, etc.) but
+    // never rewrites the ref, so it dangles at an oid that is now absent from the object DB. A gone
+    // object cannot conceal a secret, so skip it rather than failing the whole scan closed on the
+    // peel error. Only a root whose object still EXISTS and is a non-commit remains blocking.
+    if (!(await objectExists(agentDir, gitArgs, root))) continue
     const target = await peelTag(agentDir, gitArgs, root)
     if (target.type !== 'commit') return { ok: false, paths: ['unattributable dangling Git objects'] }
   }
@@ -199,6 +204,16 @@ async function scanUnreachableObjects(agentDir: string, gitArgs: readonly string
   }
 
   return matches.length > 0 ? { ok: false, paths: [...new Set(matches)].sort() } : { ok: true, paths: [] }
+}
+
+// `cat-file -e` exits 0 when the object is present and exactly 1 when it is absent. Any other exit
+// code is an operational Git error (corruption, bad invocation), which must fail closed like every
+// other scan step rather than being misread as a benign "object gone".
+async function objectExists(agentDir: string, gitArgs: readonly string[], oid: string): Promise<boolean> {
+  const { exitCode, stderr } = await spawnGit(agentDir, gitArgs, ['cat-file', '-e', oid])
+  if (exitCode === 0) return true
+  if (exitCode === 1) return false
+  throw new GitSecretHistoryError([`Git metadata scan failed (cat-file): ${redactGitError(stderr)}`])
 }
 
 type PeeledTag = { type: 'commit' | 'tree' | 'blob' | 'unknown'; oid: string }
@@ -317,6 +332,12 @@ async function spawnGit(
       GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_SYSTEM: '/dev/null',
       GIT_NO_REPLACE_OBJECTS: '1',
+      // Keep the scan strictly local. GIT_NO_LAZY_FETCH stops a promisor/partial-clone fetch on
+      // Git >=2.45 (and backported maints), but is silently ignored on older Git; the empty
+      // GIT_ALLOW_PROTOCOL whitelist (a since-2.20 control) denies every transport, so even the
+      // internal lazy `git fetch` those versions still attempt fails closed before touching a remote.
+      GIT_NO_LAZY_FETCH: '1',
+      GIT_ALLOW_PROTOCOL: '',
     },
   })
   const [stdout, stderr, exitCode] = await Promise.all([

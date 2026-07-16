@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
+
+import { isWindows } from '@/shared'
 
 import {
   GitSecretHistoryError,
@@ -299,6 +301,35 @@ describe('canonical Git secret history guard', () => {
     await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
   })
 
+  test('allows an ORIG_HEAD left dangling by garbage collection', async () => {
+    // Real-world regression: `git gc --prune=now` deletes the object a reset/rebase left in
+    // ORIG_HEAD but never rewrites the pseudoref, so ORIG_HEAD points at an object that is now
+    // absent from the object DB. peeling it (`rev-parse <gone>^{}`) exits non-zero — the object
+    // is gone, so it cannot conceal a secret and must not fail the whole scan closed.
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await commitFile(repo, 'docs/guide.md', 'more safe content')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    const origHead = await gitOutput(repo, 'rev-parse', 'ORIG_HEAD')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+    await git(repo, 'gc', '--prune=now')
+
+    await expect(gitOutput(repo, 'cat-file', '-t', origHead)).rejects.toThrow()
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
+  test('allows a single-oid root ref that points at a missing object', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    // A nonzero absent oid: the all-zero oid is filtered before the object probe, so it would not
+    // exercise the missing-object path.
+    const missing = '1'.repeat(40)
+    const origHeadPath = await gitOutput(repo, 'rev-parse', '--git-path', 'ORIG_HEAD')
+    await writeFile(join(repo, origHeadPath), `${missing}\n`)
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
   test('handles linked worktrees whose .git entry is a file', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'auth.json', '{"credential":"placeholder"}')
@@ -395,7 +426,64 @@ describe('canonical Git secret history guard', () => {
 
     await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(GitSecretHistoryError)
   })
+
+  // Skipped on Windows: the old-Git emulation relies on a POSIX `/bin/sh` shim shadowing `git`.
+  test.skipIf(isWindows())('denies every transport so a promisor probe never reaches the network', async () => {
+    // Emulate unpatched Git <2.45 (silently ignores GIT_NO_LAZY_FETCH) with a `git` shim on PATH
+    // that strips the var and routes GIT_TRACE to a file before exec'ing the real git. Probing the
+    // missing ORIG_HEAD object on this promisor-configured repo would lazy-fetch the remote; the
+    // scan's GIT_ALLOW_PROTOCOL='' fence must deny the `file` transport so `git upload-pack` against
+    // the remote never runs. The trace is the observable proof the network stayed untouched.
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+
+    const promisor = join(repo, 'promisor.git')
+    roots.push(promisor)
+    await git(repo, 'init', '--bare', promisor)
+    await appendFile(
+      join(repo, '.git', 'config'),
+      `[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\turl = file://${promisor}\n\tpromisor = true\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+    )
+    const missing = '1'.repeat(40)
+    const origHeadPath = await gitOutput(repo, 'rev-parse', '--git-path', 'ORIG_HEAD')
+    await writeFile(join(repo, origHeadPath), `${missing}\n`)
+
+    // Resolve the real git absolutely: the shim shadows `git` on PATH, so it must exec the real
+    // binary by full path or it would re-invoke itself forever.
+    const realGit = await resolveGitBinary()
+    const shimDir = await mkdtemp(join(tmpdir(), 'typeclaw-git-shim-'))
+    roots.push(shimDir)
+    const trace = join(shimDir, 'git-trace.log')
+    const shim = join(shimDir, 'git')
+    await writeFile(
+      shim,
+      `#!/bin/sh\nunset GIT_NO_LAZY_FETCH\nexport GIT_TRACE=${JSON.stringify(trace)}\nexec ${realGit} "$@"\n`,
+    )
+    await chmod(shim, 0o755)
+
+    const originalPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${originalPath ?? ''}`
+    try {
+      await assertNoCanonicalSecretsInGit(repo).catch(() => undefined)
+    } finally {
+      process.env.PATH = originalPath
+    }
+
+    const traceLog = (await Bun.file(trace).exists()) ? await Bun.file(trace).text() : ''
+    // The lazy fetch is attempted (proves the promisor path is exercised) but the transport fence
+    // denies it before `git upload-pack` ever contacts the remote. Without GIT_ALLOW_PROTOCOL=''
+    // this same trace contains upload-pack.
+    expect(traceLog).toContain('fetch origin')
+    expect(traceLog).not.toContain('upload-pack')
+  })
 })
+
+async function resolveGitBinary(): Promise<string> {
+  const proc = Bun.spawn(['sh', '-c', 'command -v git'], { stdout: 'pipe', stderr: 'pipe' })
+  const stdout = await new Response(proc.stdout).text()
+  if ((await proc.exited) !== 0) throw new Error('git binary not found')
+  return stdout.trim()
+}
 
 async function makeRepo(): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), 'typeclaw-git-secret-history-'))
