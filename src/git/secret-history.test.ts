@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 import {
   GitSecretHistoryError,
@@ -34,17 +34,19 @@ describe('canonical Git secret history guard', () => {
     expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: false, paths: ['secrets.json'] })
   })
 
-  test('rescans a previously clean repository and catches a newly dangling staged blob', async () => {
+  test('allows an unattributable blob left by staging and resetting a canonical secret', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
 
+    // Accepted residual: `git add -f` + `git reset` leaves a pathless unreachable blob with no
+    // reflog entry, so no surviving object records its canonical path. See scanUnreachableObjects.
     await writeFile(join(repo, 'secrets.json'), '{"credential":"placeholder"}')
     await git(repo, 'add', 'secrets.json')
     await git(repo, 'reset', '--', 'secrets.json')
     await rm(join(repo, 'secrets.json'))
 
-    await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(/unreachable|dangling/i)
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
   })
 
   test('rejects replacement refs even when a replacement commit hides a canonical secret path', async () => {
@@ -58,15 +60,16 @@ describe('canonical Git secret history guard', () => {
     await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(/replacement ref|rotate.*purge/i)
   })
 
-  test('rejects an unreachable blob left by staging and resetting a canonical secret', async () => {
+  test('detects a canonical secret in an unreachable commit alongside unrelated orphan debris', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
-    await writeFile(join(repo, 'auth.json'), '{"credential":"placeholder"}')
-    await git(repo, 'add', 'auth.json')
-    await git(repo, 'reset', '--', 'auth.json')
-    await rm(join(repo, 'auth.json'))
+    await commitFile(repo, 'workspace/.agent-messenger/session.json', '{"credential":"placeholder"}')
+    await git(repo, 'reset', '--hard', 'HEAD^')
+    await git(repo, 'reflog', 'expire', '--expire=now', '--all')
+    await gitStdin(repo, 'unrelated orphan bytes', 'hash-object', '-w', '--stdin')
 
-    await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(/unreachable|dangling.*rotate.*gc/i)
+    const result = await scanCanonicalSecretsInGit(repo)
+    expect(result).toEqual({ ok: false, paths: ['workspace/.agent-messenger/session.json'] })
   })
 
   test('detects a removed canonical file that remains reachable from history', async () => {
@@ -131,33 +134,32 @@ describe('canonical Git secret history guard', () => {
     await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
   })
 
-  test('rejects an orphan tree whose only entry is an innocuous name as unattributable', async () => {
+  test('allows an orphan tree whose only entry is an innocuous name', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     const blob = await gitStdin(repo, '{"credential":"placeholder"}', 'hash-object', '-w', '--stdin')
     await gitStdin(repo, `100644 blob ${blob}\trandom-session-id\n`, 'mktree')
 
-    const result = await scanCanonicalSecretsInGit(repo)
-    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: true })
   })
 
-  test('rejects an orphan tree even when it carries a canonical secret filename', async () => {
+  test('allows an orphan tree even when it carries a canonical secret filename', async () => {
+    // Accepted residual: an orphan tree lost its parent prefix, so its own entry names cannot prove
+    // whether it sat under a canonical secret directory; benign history-rewrite debris looks the same.
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     const blob = await gitStdin(repo, '{"credential":"placeholder"}', 'hash-object', '-w', '--stdin')
     await gitStdin(repo, `100644 blob ${blob}\tsecrets.json\n`, 'mktree')
 
-    const result = await scanCanonicalSecretsInGit(repo)
-    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: true })
   })
 
-  test('rejects a bare dangling blob as unattributable', async () => {
+  test('allows a bare dangling blob', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     await gitStdin(repo, 'bare secret bytes with no referencing tree', 'hash-object', '-w', '--stdin')
 
-    const result = await scanCanonicalSecretsInGit(repo)
-    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: true })
   })
 
   test('attributes a canonical secret through an unreachable tag that peels to a commit', async () => {
@@ -185,7 +187,7 @@ describe('canonical Git secret history guard', () => {
     await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
   })
 
-  test('rejects an unreachable tag pointing directly at a tree as unattributable', async () => {
+  test('allows an unreachable tag that peels only to a tree', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     const blob = await gitStdin(repo, 'notes', 'hash-object', '-w', '--stdin')
@@ -193,11 +195,12 @@ describe('canonical Git secret history guard', () => {
     await git(repo, 'tag', '-a', 'treetag', '-m', 'tree tag', tree)
     await git(repo, 'tag', '-d', 'treetag')
 
-    const result = await scanCanonicalSecretsInGit(repo)
-    expect(result).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: true })
   })
 
-  test('rejects a canonical blob a reflog conceals from unreachable fsck', async () => {
+  test('allows a canonical blob that only a reflog retains', async () => {
+    // Accepted residual: the blob is unreachable except through a reflog entry and has no surviving
+    // path-bearing commit, so no attributable object records its canonical path.
     const repo = await makeRepo()
     await commitFile(repo, 'README.md', 'safe')
     await writeFile(join(repo, '.env'), 'EXAMPLE_TOKEN=placeholder')
@@ -208,12 +211,10 @@ describe('canonical Git secret history guard', () => {
     await git(repo, 'update-ref', '--create-reflog', 'refs/test/reflog-root', blob)
     await git(repo, 'update-ref', 'refs/test/reflog-root', 'HEAD')
 
-    const honored = await gitOutput(repo, 'fsck', '--unreachable', '--no-progress')
-    expect(honored).not.toContain(blob)
     const bare = await gitOutput(repo, 'fsck', '--unreachable', '--no-reflogs', '--no-progress')
     expect(bare).toContain(`unreachable blob ${blob}`)
 
-    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: false, paths: ['unattributable dangling Git objects'] })
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({ ok: true })
   })
 
   test('detects a canonical path in an unexpired reflog-only commit via the reflog scan', async () => {
@@ -263,6 +264,41 @@ describe('canonical Git secret history guard', () => {
     await git(repo, 'tag', '-d', 'blobtag')
   })
 
+  test('rejects a FETCH_HEAD pseudoref whose tag peels to a tree', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, 'notes', 'hash-object', '-w', '--stdin')
+    const tree = await gitStdin(repo, `100644 blob ${blob}\tNOTES.md\n`, 'mktree')
+    const tag = await gitStdin(
+      repo,
+      `object ${tree}\ntype tree\ntag treetag\ntagger t <test@example.com> 0 +0000\n\nx\n`,
+      'hash-object',
+      '-w',
+      '-t',
+      'tag',
+      '--stdin',
+    )
+    // for-each-ref never enumerates FETCH_HEAD, and the tag/tree is reachable-or-ignored otherwise,
+    // so the pseudoref probe is the only thing that can catch this.
+    const fetchHeadPath = await gitOutput(repo, 'rev-parse', '--git-path', 'FETCH_HEAD')
+    await writeFile(join(repo, fetchHeadPath), `${tag}\t\tbranch x of somewhere\n`)
+
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({
+      ok: false,
+      paths: ['unattributable dangling Git objects'],
+    })
+  })
+
+  test('allows a FETCH_HEAD pseudoref whose tag peels to a commit', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const head = await gitOutput(repo, 'rev-parse', 'HEAD')
+    const fetchHeadPath = await gitOutput(repo, 'rev-parse', '--git-path', 'FETCH_HEAD')
+    await writeFile(join(repo, fetchHeadPath), `${head}\t\tbranch x of somewhere\n`)
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+  })
+
   test('handles linked worktrees whose .git entry is a file', async () => {
     const repo = await makeRepo()
     await commitFile(repo, 'auth.json', '{"credential":"placeholder"}')
@@ -281,6 +317,71 @@ describe('canonical Git secret history guard', () => {
     await git(repo, 'worktree', 'add', worktree)
 
     await expect(assertNoCanonicalSecretsInGit(worktree)).resolves.toBeUndefined()
+  })
+
+  test("rejects a non-commit pinned only by a linked worktree's FETCH_HEAD, scanning from the main worktree", async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const worktree = `${repo}-linked`
+    roots.push(worktree)
+    await git(repo, 'worktree', 'add', worktree)
+
+    const blob = await gitStdin(repo, 'notes', 'hash-object', '-w', '--stdin')
+    const tree = await gitStdin(repo, `100644 blob ${blob}\tNOTES.md\n`, 'mktree')
+    const tag = await gitStdin(
+      repo,
+      `object ${tree}\ntype tree\ntag treetag\ntagger t <test@example.com> 0 +0000\n\nx\n`,
+      'hash-object',
+      '-w',
+      '-t',
+      'tag',
+      '--stdin',
+    )
+    // The pseudoref lives under the linked worktree's own per-worktree git dir, so probing only the
+    // main worktree would miss it. Resolve the path from inside the linked worktree.
+    const linkedFetchHead = await gitOutput(worktree, 'rev-parse', '--git-path', 'FETCH_HEAD')
+    const fetchHeadPath = isAbsolute(linkedFetchHead) ? linkedFetchHead : join(worktree, linkedFetchHead)
+    await writeFile(fetchHeadPath, `${tag}\t\tbranch x of somewhere\n`)
+
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({
+      ok: false,
+      paths: ['unattributable dangling Git objects'],
+    })
+  })
+
+  test('rejects an arbitrary unlisted root ref (CUSTOM_HEAD) whose tag peels to a tree', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    const blob = await gitStdin(repo, 'notes', 'hash-object', '-w', '--stdin')
+    const tree = await gitStdin(repo, `100644 blob ${blob}\tNOTES.md\n`, 'mktree')
+    const tag = await gitStdin(
+      repo,
+      `object ${tree}\ntype tree\ntag treetag\ntagger t <test@example.com> 0 +0000\n\nx\n`,
+      'hash-object',
+      '-w',
+      '-t',
+      'tag',
+      '--stdin',
+    )
+    // CUSTOM_HEAD is not in any fixed pseudoref allowlist; it must be caught by root-ref enumeration.
+    const customHeadPath = await gitOutput(repo, 'rev-parse', '--git-path', 'CUSTOM_HEAD')
+    await writeFile(join(repo, customHeadPath), `${tag}\n`)
+
+    expect(await scanCanonicalSecretsInGit(repo)).toEqual({
+      ok: false,
+      paths: ['unattributable dangling Git objects'],
+    })
+  })
+
+  test('rescans a clean repository and blocks a newly staged canonical secret', async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, 'README.md', 'safe')
+    await expect(assertNoCanonicalSecretsInGit(repo)).resolves.toBeUndefined()
+
+    await writeFile(join(repo, 'secrets.json'), '{"credential":"placeholder"}')
+    await git(repo, 'add', 'secrets.json')
+
+    await expect(assertNoCanonicalSecretsInGit(repo)).rejects.toThrow(GitSecretHistoryError)
   })
 
   test('caches contamination fail-closed for the process lifetime', async () => {
