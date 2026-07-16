@@ -477,6 +477,37 @@ link_configured_symlinks() {
   ' || true
 }
 
+# seed_runtime_home copies the image-baked Claude Code / Codex CLI settings from
+# the build-time HOME (/root) into the managed runtime HOME the non-root re-exec
+# switches to. The Dockerfile writes ~/.claude.json, ~/.claude/settings.json,
+# and ~/.codex/hooks.json against /root during \`docker build\`; once the runtime
+# runs under HOME=$runtime_home those files would be invisible, silently
+# disabling Claude onboarding state and both CLIs' completion hooks for
+# claudeCode/codexCli users. link_persistent_home_files only links CREDENTIALS,
+# not this config, so we seed it here.
+#
+# Runs in the root setup phase (HOME is still /root), BEFORE the chown so the
+# copies inherit the host ownership. \`cp -n\` never clobbers a file the operator
+# already persisted into the runtime home (the bind-mounted persist root survives
+# restarts), so seeding is idempotent and one-way: image defaults fill only what
+# is missing.
+seed_runtime_home() {
+  _src="\${1:-/root}"
+  _dst="$2"
+  [ "$_src" = "$_dst" ] && return 0
+  mkdir -p "$_dst"
+  [ -f "$_src/.claude.json" ] && cp -n "$_src/.claude.json" "$_dst/.claude.json" 2>/dev/null || true
+  if [ -f "$_src/.claude/settings.json" ]; then
+    mkdir -p "$_dst/.claude"
+    cp -n "$_src/.claude/settings.json" "$_dst/.claude/settings.json" 2>/dev/null || true
+  fi
+  if [ -f "$_src/.codex/hooks.json" ]; then
+    mkdir -p "$_dst/.codex"
+    cp -n "$_src/.codex/hooks.json" "$_dst/.codex/hooks.json" 2>/dev/null || true
+  fi
+  unset _src _dst
+}
+
 start_xvfb() {
   if ! command -v Xvfb >/dev/null 2>&1; then
     return 0
@@ -549,6 +580,7 @@ persist_root="\${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"
 runtime_home="$persist_root/runtime"
 if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
   mkdir -p "$runtime_home"
+  seed_runtime_home "$HOME" "$runtime_home"
   chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$persist_root"
 fi
 

@@ -1443,6 +1443,23 @@ describe('network egress entrypoint shim', () => {
     expect(executable).not.toMatch(/chown -R [^\n]*\/agent(?:\s|$)/)
   })
 
+  test('seeds the managed runtime HOME with image-baked Claude/Codex settings, before the chown, without clobbering persisted files', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('seed_runtime_home() {')
+    // The image bakes these three files against /root at build time; the helper
+    // copies them into the runtime HOME so onboarding + hooks survive the switch.
+    expect(shim).toContain('.claude.json')
+    expect(shim).toContain('.claude/settings.json')
+    expect(shim).toContain('.codex/hooks.json')
+    // cp -n → never overwrite a file the operator already persisted.
+    expect(shim).toMatch(/cp -n "\$_src\/\.claude\.json"/)
+    // Seeding must run BEFORE the chown so copied files inherit host ownership.
+    const seedCallIdx = shim.indexOf('seed_runtime_home "$HOME" "$runtime_home"')
+    const chownIdx = shim.indexOf('chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$persist_root"')
+    expect(seedCallIdx).toBeGreaterThan(-1)
+    expect(chownIdx).toBeGreaterThan(seedCallIdx)
+  })
+
   test('runs persistent-home links, configured symlinks, Xvfb, and bun only in the non-root runtime phase', () => {
     // given
     const shim = buildEntrypointShim()
@@ -2032,6 +2049,68 @@ exec "$@"
     expect(dumped).toContain('TYPECLAW_ENTRYPOINT_RUNTIME=1')
     expect(dumped.split('\n')).toContain(`HOME=${expectedRuntimeHome}`)
     rmSync(envWorkdir, { recursive: true, force: true })
+  })
+
+  test('host UID/GID re-exec: image-baked Claude/Codex settings are seeded into the effective non-root runtime HOME', async () => {
+    const seedWorkdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-seed-'))
+    const seedBin = join(seedWorkdir, 'bin')
+    await mkdir(seedBin, { recursive: true })
+    await symlinkHostBinaries(seedBin, ['mkdir', 'ln', 'readlink', 'env', 'sh', 'chown', 'rm', 'sleep', 'cp', 'cat'])
+    await writeShellScript(
+      join(seedBin, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+    // Fake bun records the effective runtime HOME and the settings visible under
+    // it — this is the "inspect the effective non-root HOME" the review asks for.
+    const seedDump = join(seedWorkdir, 'seed.log')
+    await writeShellScript(
+      join(seedBin, 'bun'),
+      `#!/bin/sh
+{
+  echo "HOME=$HOME"
+  echo "claude_json=$(cat "$HOME/.claude.json" 2>/dev/null)"
+  echo "claude_settings=$(cat "$HOME/.claude/settings.json" 2>/dev/null)"
+  echo "codex_hooks=$(cat "$HOME/.codex/hooks.json" 2>/dev/null)"
+} > "${seedDump}"
+exit 0
+`,
+    )
+
+    // The build-time HOME (/root) where the Dockerfile writes the baked settings.
+    const bakedHome = join(seedWorkdir, 'root')
+    await mkdir(join(bakedHome, '.claude'), { recursive: true })
+    await mkdir(join(bakedHome, '.codex'), { recursive: true })
+    await writeFile(join(bakedHome, '.claude.json'), '{"onboarded":true}')
+    await writeFile(join(bakedHome, '.claude', 'settings.json'), '{"hooks":"cc"}')
+    await writeFile(join(bakedHome, '.codex', 'hooks.json'), '{"hooks":"cx"}')
+
+    const seedShimPath = join(seedWorkdir, 'shim-seed.sh')
+    await writeShellScript(seedShimPath, buildEntrypointShim())
+
+    const proc = Bun.spawn(['/bin/sh', seedShimPath, 'run'], {
+      env: {
+        PATH: seedBin,
+        HOME: bakedHome,
+        TYPECLAW_PERSIST_HOME_ROOT: join(seedWorkdir, 'persist'),
+        TYPECLAW_HOST_UID: String(process.getuid?.() ?? 1000),
+        TYPECLAW_HOST_GID: String(process.getgid?.() ?? 1000),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    expect(exitCode).toBe(0)
+
+    const dumped = readFileSync(seedDump, 'utf8')
+    const expectedRuntimeHome = join(seedWorkdir, 'persist', 'runtime')
+    expect(dumped).toContain(`HOME=${expectedRuntimeHome}`)
+    expect(dumped).toContain('claude_json={"onboarded":true}')
+    expect(dumped).toContain('claude_settings={"hooks":"cc"}')
+    expect(dumped).toContain('codex_hooks={"hooks":"cx"}')
+    rmSync(seedWorkdir, { recursive: true, force: true })
   })
 
   test('off-path: link_persistent_home_files creates a dangling symlink (~/.codex/auth.json → persist root) even when no credential exists yet, so the first codex login write lands at the persistent location', async () => {
