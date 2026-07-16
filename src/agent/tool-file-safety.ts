@@ -228,12 +228,16 @@ function fileTargets(
     targets.push(propertyTarget(value, 'path'))
     if (targets.length > maxCount) throw inputCountTooLarge(targets.length, maxCount)
   }
-  if (tool === 'look_at' && Array.isArray(args.images)) {
-    for (const image of args.images) addPath(image)
+  if (tool === 'look_at') {
+    if (Array.isArray(args.images)) for (const image of args.images) addPath(image)
     return targets
   }
-  if ((tool === 'channel_send' || tool === 'channel_reply') && Array.isArray(args.attachments)) {
-    for (const attachment of args.attachments) addPath(attachment)
+  // The only file operand for these tools is `attachments[].path`; `text` is free-form
+  // prose (dates like "7/16", URLs, fractions) that must never reach the generic scan,
+  // which rejects any value carrying a `/` or `\`. Return early even without attachments
+  // so a text-only message is never misread as a path. Attachment pinning is unchanged.
+  if (tool === 'channel_send' || tool === 'channel_reply') {
+    if (Array.isArray(args.attachments)) for (const attachment of args.attachments) addPath(attachment)
     return targets
   }
   if (tool === 'channel_fetch_attachment') return targets
