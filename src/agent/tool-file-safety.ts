@@ -6,7 +6,10 @@ import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { checkPrivateSurfaceReadGuard } from '@/bundled-plugins/security/policies/private-surface-read'
+import {
+  checkPrivateSurfaceReadGuard,
+  classifyFreeTextField,
+} from '@/bundled-plugins/security/policies/private-surface-read'
 import type { ToolFileOperands, ToolResult } from '@/plugin'
 import { CANONICAL_AGENT_SECRET_FILES } from '@/sandbox/canonical-secrets'
 import type { HiddenPaths } from '@/sandbox/hidden-paths'
@@ -246,7 +249,7 @@ function fileTargets(
   // generic operands either pins a real-repo anchor into a /tmp file:// path that
   // leaks into the posted review, or throws "ambiguous local file operand".
   if (tool === 'post_github_review') return targets
-  if (genericInputs) collectGenericFileTargets(args, targets, maxCount, fileOperands, agentDir)
+  if (genericInputs) collectGenericFileTargets(tool, args, targets, maxCount, fileOperands, agentDir)
   return targets
 }
 
@@ -321,6 +324,7 @@ function collectDeclaredOutputTargets(
 }
 
 function collectGenericFileTargets(
+  tool: string,
   value: unknown,
   out: FileTarget[],
   maxCount: number,
@@ -333,13 +337,20 @@ function collectGenericFileTargets(
     const nonInput =
       operands?.output?.includes(parentPath) === true || operands?.destructive?.includes(parentPath) === true
     const key = parentPath.split('.').at(-1) ?? parentPath
+    // Declared inputs win over any naming convention; otherwise a known free-text
+    // field suppresses inference: 'opaque' skips even a file: URI (message/prose
+    // payload), 'file-uri' skips only the path-shape heuristic but still pins a
+    // real file: URI (e.g. a url the tool dereferences).
+    const freeText = declaredInput ? undefined : classifyFreeTextField(tool, key)
     for (const [index, item] of value.entries()) {
       if (typeof item === 'string') {
+        if (freeText === 'opaque') continue
         const fileUrl = item.toLocaleLowerCase().startsWith('file:')
         if (!nonInput && (fileUrl || declaredInput)) {
           out.push(arrayTarget(value, index))
           if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         } else if (
+          freeText === undefined &&
           !nonInput &&
           !isSemanticGenericString(key, item) &&
           isAmbiguousUndeclaredLocalOperand(item, agentDir, key)
@@ -350,7 +361,7 @@ function collectGenericFileTargets(
         }
         continue
       }
-      collectGenericFileTargets(item, out, maxCount, operands, agentDir, parentPath)
+      collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, parentPath)
     }
     return
   }
@@ -358,16 +369,23 @@ function collectGenericFileTargets(
   for (const [childKey, item] of Object.entries(value)) {
     const operandPath = parentPath === '' ? childKey : `${parentPath}.${childKey}`
     if (typeof item === 'string') {
-      const fileUrl = item.toLocaleLowerCase().startsWith('file:')
       const declaredInput = operands?.input?.includes(operandPath) === true
       const nonInput =
         operands?.output?.includes(operandPath) === true || operands?.destructive?.includes(operandPath) === true
+      // Declared inputs win; an 'opaque' prose field (text/body/prompt/query/…)
+      // is left untouched even when its value is a file: URI, so a message body
+      // or subagent prompt is never pinned or rejected. A 'file-uri' field (url)
+      // still pins a real file: URI below but skips the path-shape heuristic.
+      const freeText = declaredInput ? undefined : classifyFreeTextField(tool, childKey)
+      if (freeText === 'opaque') continue
+      const fileUrl = item.toLocaleLowerCase().startsWith('file:')
       if (!nonInput && (fileUrl || declaredInput)) {
         out.push(propertyTarget(value, childKey))
         if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
         continue
       }
       if (
+        freeText === undefined &&
         !nonInput &&
         !isSemanticGenericString(childKey, item) &&
         isAmbiguousUndeclaredLocalOperand(item, agentDir, childKey)
@@ -377,7 +395,7 @@ function collectGenericFileTargets(
         )
       }
     }
-    collectGenericFileTargets(item, out, maxCount, operands, agentDir, operandPath)
+    collectGenericFileTargets(tool, item, out, maxCount, operands, agentDir, operandPath)
   }
 }
 

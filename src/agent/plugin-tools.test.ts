@@ -1145,6 +1145,48 @@ describe('wrapSystemTool', () => {
     }
   })
 
+  test('free-text prose fields with path-shaped values are never pinned or rejected', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-freetext-'))
+    await mkdir(path.join(agentDir, 'src'), { recursive: true })
+    await writeFile(path.join(agentDir, 'src', 'router.ts'), 'x')
+    await writeFile(path.join(agentDir, 'status.txt'), 'done')
+    const bodyUrl = pathToFileURL(path.join(agentDir, 'status.txt')).href
+
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['spawn_subagent', { subagent_type: 'explore', prompt: 'Look at src/router.ts and summarize.' }],
+      ['spawn_subagent', { subagent_type: 'explore', prompt: bodyUrl }],
+      ['skip_response', { reason: 'nothing to do, see notes.md' }],
+      ['web_search', { query: 'how to configure vite.config.ts' }],
+      ['todo_write', { todos: [{ content: 'edit src/router.ts', status: 'pending', priority: 'high' }] }],
+    ]
+    for (const [tool, args] of cases) {
+      const before = JSON.stringify(args)
+      const pinned = await enforceAndPinToolFiles({ tool, args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(JSON.stringify(args)).toBe(before)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a url field still pins an explicit file: URI (symlink-swap defense preserved)', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-url-pin-'))
+    await writeFile(path.join(agentDir, 'src.txt'), 'real')
+    const args: Record<string, unknown> = { url: pathToFileURL(path.join(agentDir, 'src.txt')).href }
+    const pinned = await enforceAndPinToolFiles({ tool: 'custom_reader', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(String(args.url)).toContain('typeclaw-tool-input')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('undeclared path-shaped operand on an unknown key still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-failclosed-'))
+    await writeFile(path.join(agentDir, 'data.bin'), 'd')
+    await expect(
+      enforceAndPinToolFiles({ tool: 'some_plugin_tool', args: { value: 'data.bin' }, agentDir, genericInputs: true }),
+    ).rejects.toThrow(/ambiguous local file operand/)
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
   test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-pinned-read-'))
     const safe = path.join(agentDir, 'safe.txt')
