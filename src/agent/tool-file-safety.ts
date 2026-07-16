@@ -250,24 +250,38 @@ function fileTargets(
   return targets
 }
 
-// Exact tool + operand-path pairs whose string values are first-party PROSE
-// (message bodies, prompts, queries, regex/CSS/jq strings) — never a local file,
-// so the generic path scan must skip them. Scoped per full operand path, NOT by
-// key name: an undeclared plugin/MCP reader that happens to use `content` or
-// `prompt` must still fail closed. `url` is deliberately absent (web_fetch.url is
-// a real reference — an explicit file: URI there still pins). channel_send/
-// _reply/_fetch_attachment and post_github_review are exempt via earlier returns.
-const PROSE_OPERANDS: Readonly<Record<string, ReadonlySet<string>>> = {
+// Exact tool + operand-path pairs whose string values are first-party operands
+// statically known never to reference a local file, so the generic path scan
+// must skip them. Two families: PROSE (message bodies, prompts, queries, regex/
+// CSS/jq) and CONTROL/API tokens (reload scope, role capability, stream filter
+// kind) consumed as registry keys or remote identifiers, never as a path.
+//
+// Scoped by full operand path, NOT key name — this is the fail-closed invariant:
+// an undeclared plugin/MCP reader that reuses `content`/`prompt`/`scope` must
+// still hit the scan. `url` is deliberately absent (web_fetch.url is a real
+// reference; a file: URI there still pins). channel_send/_reply/
+// _fetch_attachment and post_github_review are exempt via earlier returns.
+//
+// The control-token entries are here because the classifier's fs-existence probe
+// and `word.ext` rule promote bare words to operands: `reload`/`stream_snapshot`
+// "cron" collides with an agent-root `cron/` dir, and grant_role's
+// "channel.respond" matches `word.ext` unconditionally. The probe is load-bearing
+// (catches extensionless files/dirs under non-file keys), so it stays; these
+// provably-non-FS operands are exempted at the source instead.
+const NON_FILE_OPERANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   spawn_subagent: new Set(['prompt', 'description']),
   skip_response: new Set(['reason']),
   web_search: new Set(['query']),
   web_fetch: new Set(['query', 'selector', 'pattern']),
   todo_write: new Set(['todos.content']),
   channel_edit: new Set(['text']),
+  reload: new Set(['scope']),
+  grant_role: new Set(['permission']),
+  stream_snapshot: new Set(['target_kind']),
 }
 
-function isProseOperand(tool: string, operandPath: string): boolean {
-  return PROSE_OPERANDS[tool]?.has(operandPath) === true
+function isKnownNonFileOperand(tool: string, operandPath: string): boolean {
+  return NON_FILE_OPERANDS[tool]?.has(operandPath) === true
 }
 
 // Detection trims first: a leading-whitespace `  file://…` is still a file
@@ -364,14 +378,14 @@ function collectGenericFileTargets(
       operands?.output?.includes(parentPath) === true || operands?.destructive?.includes(parentPath) === true
     const key = parentPath.split('.').at(-1) ?? parentPath
     // Precedence: declared input pins; declared output/destructive is not an
-    // input; a first-party prose operand is opaque (skipped, even a file: URI);
+    // input; a known non-file operand is opaque (skipped, even a file: URI);
     // otherwise an explicit file: URI pins and an undeclared path-shaped value
-    // fails closed. `isProseOperand` is tool+operand-path scoped, so an unknown
-    // tool never inherits an exemption from a common key name.
-    const prose = !declaredInput && isProseOperand(tool, parentPath)
+    // fails closed. `isKnownNonFileOperand` is tool+operand-path scoped, so an
+    // unknown tool never inherits an exemption from a common key name.
+    const knownNonFile = !declaredInput && isKnownNonFileOperand(tool, parentPath)
     for (const [index, item] of value.entries()) {
       if (typeof item === 'string') {
-        if (prose) continue
+        if (knownNonFile) continue
         if (!nonInput && (isFileUri(item) || declaredInput)) {
           out.push(arrayTarget(value, index))
           if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
@@ -397,12 +411,12 @@ function collectGenericFileTargets(
       const declaredInput = operands?.input?.includes(operandPath) === true
       const nonInput =
         operands?.output?.includes(operandPath) === true || operands?.destructive?.includes(operandPath) === true
-      // Declared input wins; a first-party prose operand (spawn_subagent.prompt,
-      // web_search.query, channel_edit.text, …) is opaque and skipped even when
-      // its value is a file: URI; everything else falls to the file:/heuristic
-      // scan below. Scoped by exact tool+operand-path so an undeclared plugin
-      // reader using `content`/`prompt` still fails closed.
-      if (!declaredInput && isProseOperand(tool, operandPath)) continue
+      // Declared input wins; a known non-file operand (spawn_subagent.prompt,
+      // web_search.query, channel_edit.text, reload.scope, …) is opaque and
+      // skipped even when its value is a file: URI; everything else falls to the
+      // file:/heuristic scan below. Scoped by exact tool+operand-path so an
+      // undeclared plugin reader using `content`/`prompt` still fails closed.
+      if (!declaredInput && isKnownNonFileOperand(tool, operandPath)) continue
       if (!nonInput && (isFileUri(item) || declaredInput)) {
         out.push(propertyTarget(value, childKey))
         if (out.length > maxCount) throw inputCountTooLarge(out.length, maxCount)
