@@ -554,8 +554,15 @@ fi
 
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
   if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
+    # NOTE: no \`--reset-env\`. setpriv --reset-env clears every non-terminal
+    # variable, which would wipe the runtime's own configuration: --env-file
+    # values (provider credentials, etc.) plus TYPECLAW_SANDBOX_SYMLINKS,
+    # TYPECLAW_TUI_TOKEN, TYPECLAW_CONTAINER_NAME, TYPECLAW_HOSTD_URL,
+    # TYPECLAW_MODEL_CACHE, and TZ — all injected by start.ts and read after the
+    # re-exec. We only need to OVERRIDE two variables for the runtime phase, and
+    # the trailing \`env HOME=… TYPECLAW_ENTRYPOINT_RUNTIME=1\` does exactly that
+    # while forwarding everything else unchanged.
     exec setpriv --reuid="$TYPECLAW_HOST_UID" --regid="$TYPECLAW_HOST_GID" --clear-groups \\
-      --reset-env \\
       --bounding-set=-all --inh-caps=-all --ambient-caps=-all \\
       -- env HOME="$runtime_home" TYPECLAW_ENTRYPOINT_RUNTIME=1 "$0" "$@"
   fi
@@ -607,8 +614,10 @@ ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
 if [ -n "\${TYPECLAW_HOST_UID:-}" ] && [ -n "\${TYPECLAW_HOST_GID:-}" ]; then
+  # No \`--reset-env\` — see the network-off handoff above: it would strip the
+  # --env-file values and the TypeClaw-injected runtime variables. The trailing
+  # \`env\` overrides only HOME + TYPECLAW_ENTRYPOINT_RUNTIME and forwards the rest.
   exec setpriv --reuid="$TYPECLAW_HOST_UID" --regid="$TYPECLAW_HOST_GID" --clear-groups \\
-    --reset-env \\
     --bounding-set=-all --inh-caps=-all --ambient-caps=-all \\
     -- env HOME="$runtime_home" TYPECLAW_ENTRYPOINT_RUNTIME=1 "$0" "$@"
 fi

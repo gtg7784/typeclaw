@@ -1434,7 +1434,11 @@ describe('network egress entrypoint shim', () => {
 
     // then
     expect(shim).toContain('runtime_home="$persist_root/runtime"')
-    expect(shim.match(/--reset-env/g)?.length).toBe(2)
+    // The privilege-drop handoffs must NOT use --reset-env: it would wipe the
+    // --env-file values and the TypeClaw-injected runtime variables. HOME is
+    // overridden via the trailing `env`; everything else is forwarded.
+    expect(executable).not.toContain('--reset-env')
+    expect(shim.match(/-- env HOME="\$runtime_home" TYPECLAW_ENTRYPOINT_RUNTIME=1 "\$0" "\$@"/g)?.length).toBe(2)
     expect(shim).toContain('chown -R "$TYPECLAW_HOST_UID:$TYPECLAW_HOST_GID" "$persist_root"')
     expect(executable).not.toMatch(/chown -R [^\n]*\/agent(?:\s|$)/)
   })
@@ -1976,6 +1980,58 @@ exit 0
     const log = readFileSync(logfileRuntime, 'utf8')
     expect(log).toContain('DISPLAY: :99')
     rmSync(runWorkdir, { recursive: true, force: true })
+  })
+
+  test('host UID/GID re-exec forwards env-file values and TypeClaw-injected vars (no --reset-env), overriding only HOME + RUNTIME', async () => {
+    const envWorkdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-env-'))
+    const envBin = join(envWorkdir, 'bin')
+    await mkdir(envBin, { recursive: true })
+    await symlinkHostBinaries(envBin, ['mkdir', 'ln', 'readlink', 'env', 'sh', 'chown', 'rm', 'sleep'])
+    await writeShellScript(
+      join(envBin, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+    // No Xvfb on PATH → start_xvfb is a no-op, keeping this test focused on env.
+    // Fake bun dumps the runtime env so we can assert what survived the re-exec.
+    const envDump = join(envWorkdir, 'env.log')
+    await writeShellScript(join(envBin, 'bun'), `#!/bin/sh\nenv > "${envDump}"\nexit 0\n`)
+
+    const envShimPath = join(envWorkdir, 'shim-env.sh')
+    await writeShellScript(envShimPath, buildEntrypointShim())
+
+    const envFakeHome = join(envWorkdir, 'host-home')
+    await mkdir(envFakeHome, { recursive: true })
+    const expectedRuntimeHome = join(envWorkdir, 'persist', 'runtime')
+    const proc = Bun.spawn(['/bin/sh', envShimPath, 'run'], {
+      env: {
+        PATH: envBin,
+        HOME: envFakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: join(envWorkdir, 'persist'),
+        TYPECLAW_HOST_UID: String(process.getuid?.() ?? 1000),
+        TYPECLAW_HOST_GID: String(process.getgid?.() ?? 1000),
+        // Stand-ins for an --env-file credential and TypeClaw-injected vars.
+        OPENAI_API_KEY: 'sk-env-file-value',
+        TYPECLAW_TUI_TOKEN: 'tui-tok-123',
+        TZ: 'Europe/Berlin',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    expect(exitCode).toBe(0)
+
+    const dumped = readFileSync(envDump, 'utf8')
+    // Forwarded, not wiped:
+    expect(dumped).toContain('OPENAI_API_KEY=sk-env-file-value')
+    expect(dumped).toContain('TYPECLAW_TUI_TOKEN=tui-tok-123')
+    expect(dumped).toContain('TZ=Europe/Berlin')
+    // Overridden for the runtime phase:
+    expect(dumped).toContain('TYPECLAW_ENTRYPOINT_RUNTIME=1')
+    expect(dumped.split('\n')).toContain(`HOME=${expectedRuntimeHome}`)
+    rmSync(envWorkdir, { recursive: true, force: true })
   })
 
   test('off-path: link_persistent_home_files creates a dangling symlink (~/.codex/auth.json → persist root) even when no credential exists yet, so the first codex login write lands at the persistent location', async () => {
