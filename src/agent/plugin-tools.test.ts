@@ -1040,6 +1040,25 @@ describe('wrapSystemTool', () => {
     ).rejects.toThrow(/virtual|process-backed|not available/i)
   })
 
+  test('post_github_review args are not scanned as local file operands', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-review-operands-'))
+    await mkdir(path.join(agentDir, 'src'), { recursive: true })
+    await writeFile(path.join(agentDir, 'src', 'router.ts'), 'export const x = 1\n')
+
+    const args: Record<string, unknown> = {
+      event: 'REQUEST_CHANGES',
+      body: 'router.ts introduces a risky path.',
+      comments: [{ path: 'src/router.ts', line: 10, body: 'Anchored at a real repo file.' }],
+    }
+
+    const pinned = await enforceAndPinToolFiles({ tool: 'post_github_review', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+
+    expect(args.body).toBe('router.ts introduces a risky path.')
+    expect((args.comments as Array<{ path: string }>)[0]?.path).toBe('src/router.ts')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
   test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-pinned-read-'))
     const safe = path.join(agentDir, 'safe.txt')
