@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 
 import { composeStop, type ComposeStopEvent } from './stop'
 
@@ -12,7 +14,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await rm(root, { recursive: true, force: true })
+  await rmTempDir(root)
 })
 
 // Malformed JSON so validateConfig short-circuits before real Docker calls;
