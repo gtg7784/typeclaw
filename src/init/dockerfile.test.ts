@@ -1579,11 +1579,18 @@ describe('network egress entrypoint shim', () => {
     expect(networkOnTail.indexOf('start_xvfb\n')).toBeLessThan(networkOnTail.indexOf(`exec setpriv --bounding-set`))
   })
 
-  test('Xvfb runs under the same setpriv capability-drop as the agent so it never holds NET_ADMIN on the network-block path', () => {
+  test('Xvfb drops NET_ADMIN via setpriv ONLY on the root/fallback path; in the non-root runtime phase it launches directly (CAP_SETPCAP is already gone, so a second bounding-set drop would fail)', () => {
     const shim = buildEntrypointShim()
+    // Root/fallback path: the nested capability drop is retained.
     expect(shim).toMatch(
       /setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\\s+-- Xvfb :99/,
     )
+    // Runtime phase: Xvfb is launched directly, guarded on TYPECLAW_ENTRYPOINT_RUNTIME.
+    const fnStart = shim.indexOf('start_xvfb() {')
+    const fnEnd = shim.indexOf('\n}\n', fnStart)
+    const fnBody = shim.slice(fnStart, fnEnd)
+    expect(fnBody).toContain('if [ "${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then')
+    expect(fnBody).toMatch(/then\s+Xvfb :99 -screen 0 1920x1080x24 -ac \+extension RANDR -nolisten tcp/)
   })
 
   test('Xvfb startup failure is loud: helper detects an early exit via a status-file handshake (NOT kill -0, which reports zombies as alive) and exits non-zero with a stderr line on early exit or socket timeout', () => {
@@ -1893,6 +1900,82 @@ exit 1
 
     expect(exitCode).not.toBe(0)
     expect(stderr).toContain('typeclaw-entrypoint: Xvfb exited immediately')
+  })
+
+  test('host UID/GID + Xvfb: after the non-root re-exec, Xvfb starts DIRECTLY — a nested bounding-set setpriv would fail (CAP_SETPCAP gone) so it must not be attempted in the runtime phase', async () => {
+    const runWorkdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-runtime-xvfb-'))
+    const runBin = join(runWorkdir, 'bin')
+    await mkdir(runBin, { recursive: true })
+    await symlinkHostBinaries(runBin, ['mkdir', 'ln', 'readlink', 'env', 'sh', 'chown', 'rm', 'sleep'])
+
+    // Fake setpriv: exec the outer --reuid handoff normally, but REFUSE any
+    // bounding-set drop once we're in the runtime phase — that is exactly the
+    // CAP_SETPCAP-gone 127 the real setpriv returns. If start_xvfb still tried
+    // the nested drop here, Xvfb would never launch and the shim would fail.
+    await writeShellScript(
+      join(runBin, 'setpriv'),
+      `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--bounding-set" ] && [ "\${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then
+    echo "setpriv: cannot modify bounding set: Operation not permitted" >&2
+    exit 127
+  fi
+done
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+
+    const socketPath = join(runWorkdir, 'x11-X99')
+    // Fake Xvfb: create the socket the poll loop waits on, then idle briefly
+    // (long enough for the poll loop to observe the socket, short enough not to
+    // hang the test if left orphaned after the shim exec's bun).
+    await writeShellScript(
+      join(runBin, 'Xvfb'),
+      `#!/bin/sh
+: > "${socketPath}"
+sleep 2
+`,
+    )
+    const logfileRuntime = join(runWorkdir, 'agent-args.log')
+    await writeShellScript(
+      join(runBin, 'bun'),
+      `#!/bin/sh
+{
+  echo "argv: $*"
+  echo "DISPLAY: \${DISPLAY:-<unset>}"
+} > "${logfileRuntime}"
+exit 0
+`,
+    )
+
+    const shim = buildEntrypointShim()
+      .replaceAll('/tmp/.X11-unix/X99', socketPath)
+      .replace('[ -S ' + socketPath + ' ]', '[ -e ' + socketPath + ' ]')
+    const shimPath = join(runWorkdir, 'shim-runtime-xvfb.sh')
+    await writeShellScript(shimPath, shim)
+
+    const fakeHome = join(runWorkdir, 'home')
+    await mkdir(fakeHome, { recursive: true })
+    const proc = Bun.spawn(['/bin/sh', shimPath, 'run'], {
+      env: {
+        PATH: runBin,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: join(runWorkdir, 'persist'),
+        TYPECLAW_HOST_UID: String(process.getuid?.() ?? 1000),
+        TYPECLAW_HOST_GID: String(process.getgid?.() ?? 1000),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    const stderr = await new Response(proc.stderr).text()
+
+    expect(stderr).not.toContain('Xvfb exited immediately')
+    expect(exitCode).toBe(0)
+    const log = readFileSync(logfileRuntime, 'utf8')
+    expect(log).toContain('DISPLAY: :99')
+    rmSync(runWorkdir, { recursive: true, force: true })
   })
 
   test('off-path: link_persistent_home_files creates a dangling symlink (~/.codex/auth.json → persist root) even when no credential exists yet, so the first codex login write lands at the persistent location', async () => {

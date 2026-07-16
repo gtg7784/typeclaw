@@ -491,9 +491,23 @@ start_xvfb() {
   rm -f "$xvfb_status"
   (
     set +e
-    setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
-      -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
-      >/dev/null 2>&1
+    # The nested setpriv strips NET_ADMIN so Xvfb never inherits it (invariant
+    # 1). But when we've ALREADY re-exec'd into the non-root runtime phase
+    # (TYPECLAW_ENTRYPOINT_RUNTIME=1), the outer handoff emptied the bounding
+    # set and dropped CAP_SETPCAP — so a second \`setpriv --bounding-set\` here
+    # can no longer modify the bounding set and exits non-zero (127), which the
+    # liveness probe would misreport as "Xvfb exited immediately". There is also
+    # nothing left to strip: NET_ADMIN is already gone. So in the runtime phase
+    # launch Xvfb DIRECTLY; keep the nested drop only for the root fallback
+    # paths (where this shim is still PID 1 with the full capability set).
+    if [ "\${TYPECLAW_ENTRYPOINT_RUNTIME:-0}" = "1" ]; then
+      Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
+        >/dev/null 2>&1
+    else
+      setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
+        -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
+        >/dev/null 2>&1
+    fi
     printf '%s\\n' "$?" > "$xvfb_status"
   ) &
   xvfb_pid=$!
