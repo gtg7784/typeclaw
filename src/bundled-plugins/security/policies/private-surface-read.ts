@@ -148,25 +148,13 @@ const FREE_TEXT_KEYS_BY_TOOL: Record<string, ReadonlySet<string>> = {
   channel_fetch_attachment: new Set(['filename']),
 }
 
-// `url` is free text for THIS policy (a web_fetch/web_search URL is not a local
-// path to block) but is NOT pure prose: an explicit `file:` URI under `url` is a
-// real file the tool dereferences, so the pinning scanner must still snapshot it
-// (symlink-swap TOCTOU defense). Everything else in NON_PATH_KEYS is payload the
-// tool logs/sends/searches and never opens.
-const FILE_URI_CAPABLE_KEYS = new Set(['url'])
-
-// Field classification shared with the file-operand pinning scanner
-// (tool-file-safety.ts) so both guards agree on which arg values are prose.
-// Without this the two disagreed: this policy skipped `text`/`prompt` while the
-// pinning scanner treated the same values as paths, rejecting a subagent prompt
-// that named a file or pinning a query into a /tmp/typeclaw-tool-input path.
-//   - 'opaque'   : pure payload; never a file, even a whole-string file: URI.
-//   - 'file-uri' : suppresses path-shape heuristics but a file: URI still pins.
-//   - undefined  : unknown key; fall through to the value heuristic.
-export function classifyFreeTextField(tool: string, key: string): 'opaque' | 'file-uri' | undefined {
-  const known = NON_PATH_KEYS.has(key) || (FREE_TEXT_KEYS_BY_TOOL[tool]?.has(key) ?? false)
-  if (!known) return undefined
-  return FILE_URI_CAPABLE_KEYS.has(key) ? 'file-uri' : 'opaque'
+// Trim before the `file:` test: an exempt prose key otherwise lets a
+// leading-whitespace `file:  file://…/memory` URI slip past the scan (the value
+// is not path-shaped and `isFileUrl` misses it), reaching a fetcher that trims
+// before parsing. Returns the trimmed URI so callers scan the real target.
+function trimmedFileUri(value: string): string | undefined {
+  const trimmed = value.trim()
+  return trimmed.toLocaleLowerCase().startsWith('file:') ? trimmed : undefined
 }
 
 // Recursively collects strings that could be paths, skipping values under a
@@ -186,7 +174,7 @@ function collectPathCandidates(value: unknown, tool: string): string[] {
 
 function walk(value: unknown, out: string[], tool: string, underExempt: boolean, key?: string): void {
   if (typeof value === 'string') {
-    const isFileUrl = value.toLocaleLowerCase().startsWith('file:')
+    const isFileUrl = trimmedFileUri(value) !== undefined
     if (underExempt && !isPathKey(key) && !isFileUrl) return
     const normalized = normalizeCandidate(value)
     if (normalized !== undefined) out.push(normalized)
@@ -333,16 +321,17 @@ function isPathKey(key: string | undefined): boolean {
 }
 
 function normalizeCandidate(value: string): string | undefined {
-  if (!value.toLocaleLowerCase().startsWith('file:')) return value
+  const uri = trimmedFileUri(value)
+  if (uri === undefined) return value
   try {
-    const url = new URL(value)
+    const url = new URL(uri)
     const pathname = decodeURIComponent(url.pathname)
     if (url.hostname !== '') return `//${url.hostname}${pathname}`
     if (/^\/[A-Za-z]:\//.test(pathname)) return pathname.slice(1)
     // Keep synthetic POSIX container paths platform-independent. fileURLToPath
     // would reinterpret file:///agent/... through the Windows host grammar.
     if (pathname.startsWith('/agent/') || pathname === '/agent') return pathname
-    return fileURLToPath(value)
+    return fileURLToPath(uri)
   } catch {
     return value
   }
