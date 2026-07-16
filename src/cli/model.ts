@@ -456,11 +456,11 @@ export async function resolveExplicitRef(
   return { ref, ...(meta !== undefined ? { meta } : {}) }
 }
 
-// Resolve the model ref for `set`/`add`: an explicit `<ref>` arg goes through
-// validation (`resolveExplicitRef`, which throws on a definitely-invalid ref such
-// as an unsupported openai-codex model), while a bare invocation opens the
-// interactive picker. A validation error surfaces via the standard CLI error line
-// + non-zero exit instead of an unhandled-rejection stack trace.
+// Resolve the model ref for `set`/`add`: an explicit `<ref>` arg is resolved
+// (and enriched with catalog metadata) by `resolveExplicitRef`, while a bare
+// invocation opens the interactive picker. Any resolution error surfaces via the
+// standard CLI error line + non-zero exit instead of an unhandled-rejection
+// stack trace. (Ref *shape*/support is validated downstream by set/addProfile.)
 async function resolvePickedRef(ref: string | undefined, cwd: string): Promise<PickedModelRef> {
   if (ref === undefined) return pickModelRef(cwd)
   try {

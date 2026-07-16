@@ -72,6 +72,60 @@ describe('resolveExplicitRef carries catalog metadata for non-interactive set/ad
   })
 })
 
+describe('typeclaw model set/add reject a definitely-invalid ref via the real CLI without mutating config', () => {
+  let cwd: string
+  const ORIGINAL_REF = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+  // Shape-invalid for a closed OAuth provider — `isModelRef` rejects it, so the
+  // mutation is refused BEFORE any write. Exercises the real set/add command
+  // paths (exit code, stderr, on-disk config) the direct resolveExplicitRef unit
+  // tests can't cover.
+  const INVALID_REF = 'openai-codex/'
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-model-invalid-ref-'))
+    await scaffold(cwd, { model: ORIGINAL_REF })
+    await writeSecrets(cwd, { model: ORIGINAL_REF, apiKey: 'fw_test' })
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  async function runModel(args: string[]): Promise<{ exitCode: number; stderr: string }> {
+    const proc = Bun.spawn({
+      cmd: ['bun', CLI_ENTRY, 'model', ...args, '--force'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+    return { exitCode, stderr }
+  }
+
+  async function readRawConfig(): Promise<string> {
+    return readFile(join(cwd, 'typeclaw.json'), 'utf8')
+  }
+
+  test('`model set` exits non-zero, prints an actionable line, and leaves typeclaw.json unchanged', async () => {
+    const before = await readRawConfig()
+    const { exitCode, stderr } = await runModel(['set', 'default', INVALID_REF])
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toMatch(/Unknown model/)
+    expect(stderr).toContain('model list --available')
+    expect(await readRawConfig()).toBe(before)
+  })
+
+  test('`model add` exits non-zero, prints an actionable line, and leaves typeclaw.json unchanged', async () => {
+    const before = await readRawConfig()
+    const { exitCode, stderr } = await runModel(['add', 'fast', INVALID_REF])
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toMatch(/Unknown model/)
+    expect(await readRawConfig()).toBe(before)
+  })
+})
+
 describe('parseThinkingArg', () => {
   test('accepts every supported level, case-insensitively', () => {
     for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const) {
