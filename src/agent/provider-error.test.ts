@@ -136,6 +136,18 @@ describe('detectProviderError safeMessage redaction', () => {
     expect(result?.safeMessage).not.toContain('gpt-5.6')
   })
 
+  test('maps a NON-model invalid_request_error to the generic invalid-request notice, not the model-config one', () => {
+    // given: an invalid_request_error that is NOT about the model (a missing param)
+    const raw =
+      'Codex error: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Missing required parameter: \'input\'."}}'
+    // when
+    const result = detectProviderError({ role: 'assistant', stopReason: 'error', errorMessage: raw })
+    // then: it is classified as invalid, but NOT blamed on the models setting
+    expect(result?.safeMessage).toMatch(/rejected the request as invalid/i)
+    expect(result?.safeMessage).not.toMatch(/unsupported or misspelled/i)
+    expect(result?.safeMessage).not.toMatch(/models` setting/i)
+  })
+
   test('maps a transport/session failure to a transport-safe sentence without echoing the wss URL', () => {
     const raw =
       "WebSocket connection to 'wss://chatgpt.com/backend-api/codex/responses' failed: Expected 101 status code"
