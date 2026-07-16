@@ -32,6 +32,10 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   xai: 'xai',
   minimax: 'minimax',
   deepseek: 'deepseek',
+  // Upstage is not listed on models.dev (checked api.json — no `upstage` lab
+  // entry, only HuggingFace open-model ids). Mapping to `upstage` is harmless:
+  // the upstream lookup misses and the curated Solar entries surface anyway.
+  upstage: 'upstage',
   moonshot: 'moonshot',
   // moonshot-coding (Kimi Code subscription) is a billing surface, not a
   // separate model catalog. models.dev tracks the underlying Kimi model

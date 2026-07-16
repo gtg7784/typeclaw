@@ -47,6 +47,7 @@ These env vars override a stored API-key credential in `secrets.json` (env-wins)
 | `XAI_API_KEY`        | `xai`        | xAI (Grok). OAuth credential on disk wins over this env var (dual-auth provider).                        |
 | `MINIMAX_API_KEY`    | `minimax`    | Accepts either a pay-as-you-go API key or a Token Plan Subscription Key (`sk-cp-…`) — same slot.         |
 | `DEEPSEEK_API_KEY`   | `deepseek`   | DeepSeek pay-as-you-go.                                                                                  |
+| `UPSTAGE_API_KEY`    | `upstage`    | Upstage (Solar) pay-as-you-go. Keys are prefixed `up_`.                                                  |
 | (others)             |              | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
 
 Custom env-var names are supported via the `Secret`'s `env` field — `{ "key": { "env": "MY_OPENAI" } }`. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for resolution order.
