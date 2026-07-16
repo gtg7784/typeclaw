@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { scaffold, writeSecrets } from '@/init'
 import type { ModelOption } from '@/init/models-dev'
 
-import { parseThinkingArg, resolveExplicitRef } from './model'
+import { parseThinkingArg, resolveExplicitRef, resolveShorthandRef, shouldPromptThinkingLevel } from './model'
 
 const CLI_ENTRY = join(import.meta.dir, 'index.ts')
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
@@ -73,6 +73,47 @@ describe('parseThinkingArg', () => {
     const result = parseThinkingArg('turbo')
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/off, minimal, low, medium, high, xhigh/)
+  })
+})
+
+describe('resolveShorthandRef', () => {
+  test('treats a single ref-shaped positional as the default-profile shorthand', () => {
+    expect(resolveShorthandRef('openai/gpt-5.4-nano', undefined)).toBe('openai/gpt-5.4-nano')
+  })
+
+  test('a named profile that is not a ref is NOT shorthand', () => {
+    expect(resolveShorthandRef('fast', undefined)).toBeUndefined()
+    expect(resolveShorthandRef('default', undefined)).toBeUndefined()
+  })
+
+  test('an explicit two-positional `<profile> <ref>` is not shorthand', () => {
+    expect(resolveShorthandRef('fast', 'openai/gpt-5.4-nano')).toBeUndefined()
+  })
+})
+
+describe('shouldPromptThinkingLevel', () => {
+  test('`model set fast` (named profile, ref picked interactively) still offers the prompt', () => {
+    // given: `fast` is a named profile, not shorthand, and no ref/flag was supplied
+    const shorthandRef = resolveShorthandRef('fast', undefined)
+    // then: the interactive ref pick must keep offering the thinking prompt
+    expect(shouldPromptThinkingLevel(shorthandRef, undefined, undefined)).toBe(true)
+  })
+
+  test('bare `model set` (fully interactive) offers the prompt', () => {
+    expect(shouldPromptThinkingLevel(undefined, undefined, undefined)).toBe(true)
+  })
+
+  test('the `model set <ref>` shorthand does NOT prompt (ref came from the command line)', () => {
+    const shorthandRef = resolveShorthandRef('openai/gpt-5.4-nano', undefined)
+    expect(shouldPromptThinkingLevel(shorthandRef, undefined, undefined)).toBe(false)
+  })
+
+  test('an explicit `<profile> <ref>` does NOT prompt', () => {
+    expect(shouldPromptThinkingLevel(undefined, 'openai/gpt-5.4-nano', undefined)).toBe(false)
+  })
+
+  test('an explicit --thinking flag does NOT prompt (level came from the flag)', () => {
+    expect(shouldPromptThinkingLevel(undefined, undefined, 'high')).toBe(false)
   })
 })
 

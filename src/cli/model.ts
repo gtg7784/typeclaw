@@ -65,8 +65,7 @@ const setSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const shorthandRef =
-      args.ref === undefined && args.profile !== undefined && isModelRef(args.profile) ? args.profile : undefined
+    const shorthandRef = resolveShorthandRef(args.profile, args.ref)
     const profile = shorthandRef !== undefined ? 'default' : (args.profile ?? (await pickProfileName()))
     const picked =
       shorthandRef !== undefined
@@ -79,10 +78,8 @@ const setSub = defineCommand({
 
     // Gather every interactive/flag input BEFORE any write, so cancelling a
     // later prompt (e.g. the thinking-level select) aborts the whole command
-    // without having already mutated typeclaw.json. Non-interactive (`--thinking`)
-    // resolves the level from the flag; an interactive run (no flag, no explicit
-    // ref) offers the prompt; explicit-ref scripted calls leave the level alone.
-    const interactive = args.profile === undefined && args.ref === undefined && args.thinking === undefined
+    // without having already mutated typeclaw.json.
+    const interactive = shouldPromptThinkingLevel(shorthandRef, args.ref, args.thinking)
     let thinking: { level: ThinkingLevel | undefined } | undefined
     if (args.thinking !== undefined) {
       const parsed = parseThinkingArg(args.thinking)
@@ -431,6 +428,30 @@ async function pickModelRef(cwd: string): Promise<PickedModelRef> {
       process.exit(1)
     }
   }
+}
+
+// One-positional shorthand for `set`: `typeclaw model set <ref>` targets the
+// `default` profile without repeating its name. It's shorthand ONLY when a
+// single positional was given (no `<ref>` arg) and that positional parses as a
+// model ref — so `model set fast` (a NAMED profile, not a ref) is NOT shorthand
+// and still selects the `fast` profile interactively. Returns the ref when the
+// invocation is shorthand, else undefined.
+export function resolveShorthandRef(profile: string | undefined, ref: string | undefined): string | undefined {
+  return ref === undefined && profile !== undefined && isModelRef(profile) ? profile : undefined
+}
+
+// Whether `set` should OFFER the interactive thinking-level prompt. It should
+// only when the ref itself was chosen interactively — i.e. no ref came from the
+// command line (neither the explicit `<ref>` arg nor the shorthand) and no
+// `--thinking` flag pinned the level. A named profile with no ref (e.g.
+// `model set fast`) picks its ref interactively, so it MUST still prompt; keying
+// this on `args.profile` instead of `shorthandRef` would wrongly suppress it.
+export function shouldPromptThinkingLevel(
+  shorthandRef: string | undefined,
+  ref: string | undefined,
+  thinking: string | undefined,
+): boolean {
+  return shorthandRef === undefined && ref === undefined && thinking === undefined
 }
 
 // Non-interactive `<ref>` path. Curated refs resolve from KNOWN_PROVIDERS, so
