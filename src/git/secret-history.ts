@@ -1,3 +1,5 @@
+import { isAbsolute, join } from 'node:path'
+
 import { CANONICAL_AGENT_SECRET_DIRS, CANONICAL_AGENT_SECRET_FILES } from '@/sandbox/canonical-secrets'
 
 import { hooklessGitArgs } from './hookless'
@@ -14,7 +16,7 @@ export class GitSecretHistoryError extends Error {
         `Model-driven Git/bash is disabled because Git metadata is contaminated or can conceal objects: ${paths.join(', ')}.`,
         'Assume credentials in the repository were exposed and rotate them first. Purge canonical secret paths and every refs/replace entry, expire all reflogs, and run Git garbage collection to remove unreachable objects before retrying.',
         'Suggested operator sequence: rewrite/purge the affected history and replacement refs, run `git reflog expire --expire=now --all`, then `git gc --prune=now`, and restart TypeClaw before retrying.',
-        'TypeClaw inspects path names and object reachability without reading blob contents. Only unreachable commits are path-attributable (via their root tree); any other dangling tree or blob has lost the parent that carried its path and blocks model-driven Git until Git garbage collection removes it.',
+        'TypeClaw inspects path names and object reachability without reading blob contents. Reachable, reflog-referenced, and unreachable commits are path-attributable via their root tree and block only when a canonical secret path is present; standalone dangling trees and blobs are not path-attributable and are ignored; a live ref, worktree HEAD, or pseudoref (including FETCH_HEAD) pointing at a non-commit still fails closed.',
       ].join(' '),
     )
     this.name = 'GitSecretHistoryError'
@@ -65,18 +67,42 @@ export async function scanCanonicalSecretsInGit(agentDir: string): Promise<ScanR
 
 type UnreachableScan = { ok: false; paths: string[] } | { ok: true; paths: string[] }
 
-// A ref or worktree HEAD pointing at (or a tag peeling to) a non-commit makes that tree/blob
-// reachable, so neither fsck mode reports it and rev-list cannot root-anchor its path. Such a live
-// root has no repository path prefix, so it fails closed exactly like an orphan tree. Ordinary
-// commit-ish roots are handled by the reachable/reflog path scans.
+// FETCH_HEAD and MERGE_HEAD are the two root refs `for-each-ref --include-root-refs` deliberately
+// omits (Git classifies them as pseudorefs). They are filesystem-only and multi-line (one oid per
+// line), so they are always read from their files directly rather than enumerated.
+const GIT_MULTILINE_PSEUDOREFS = ['FETCH_HEAD', 'MERGE_HEAD'] as const
+
+// Single-oid root-ref fallback for Git < 2.45, which lacks `for-each-ref --include-root-refs`. Not
+// exhaustive by design — any all-caps `*_HEAD`-style root ref (e.g. a custom one) is caught by the
+// flag on modern Git; this list only backstops the ones Git itself commonly writes on old versions.
+const GIT_FALLBACK_ROOT_REFS = [
+  'HEAD',
+  'ORIG_HEAD',
+  'CHERRY_PICK_HEAD',
+  'REVERT_HEAD',
+  'REBASE_HEAD',
+  'BISECT_HEAD',
+  'AUTO_MERGE',
+] as const
+
+// A ref, worktree HEAD, or root ref/pseudoref pointing at (or a tag peeling to) a non-commit makes
+// that tree/blob live, so neither fsck mode reports it and rev-list cannot root-anchor its path.
+// Such a live root has no repository path prefix, so it fails closed exactly like an orphan tree.
+// Ordinary commit-ish roots are handled by the reachable/reflog path scans.
 async function scanNonCommitRefRoots(agentDir: string, gitArgs: readonly string[]): Promise<UnreachableScan> {
-  const heads = await runGit(agentDir, gitArgs, ['worktree', 'list', '--porcelain'])
-  const headRefs = heads
-    .split('\n')
-    .filter((line) => line.startsWith('HEAD '))
-    .map((line) => line.slice('HEAD '.length).trim())
+  const listing = await runGit(agentDir, gitArgs, ['worktree', 'list', '--porcelain'])
+  const headRefs: string[] = []
+  const linkedWorktrees: string[] = []
+  for (const line of listing.split('\n')) {
+    if (line.startsWith('HEAD ')) headRefs.push(line.slice('HEAD '.length).trim())
+    else if (line.startsWith('worktree ')) {
+      const path = line.slice('worktree '.length).trim()
+      if (path !== '' && path !== agentDir) linkedWorktrees.push(path)
+    }
+  }
   const refs = await runGit(agentDir, gitArgs, ['for-each-ref', '--format=%(objectname)'])
-  const roots = [...new Set([...headRefs, ...refs.split('\n')].map((oid) => oid.trim()))].filter(
+  const rootRefOids = await collectRootRefOids(agentDir, gitArgs, linkedWorktrees)
+  const roots = [...new Set([...headRefs, ...refs.split('\n'), ...rootRefOids].map((oid) => oid.trim()))].filter(
     (oid) => oid !== '' && !/^0+$/.test(oid),
   )
 
@@ -87,35 +113,79 @@ async function scanNonCommitRefRoots(agentDir: string, gitArgs: readonly string[
   return { ok: true, paths: [] }
 }
 
-// Reachable objects expose their repository paths through rev-list, but unreachable objects do
-// not — fsck only reports their OID and type. Only an unreachable commit is safely attributable:
-// it records a repository root tree, so every descendant path is fully reconstructable and matched
-// root-anchored. Everything else stays unattributable: a bare blob never stored its filename, and
-// an orphan tree (or a tag pointing at a tree/blob) has lost the parent that carried its former
-// prefix — its own entry names cannot reveal whether it used to sit under a canonical secret
-// directory. Such objects remain readable via `git cat-file`, so any unreachable tree or blob not
-// reached from a commit root fails closed until Git garbage collection removes it. Reflogs are
-// excluded (`--no-reflogs`): fsck marks reflog-referenced objects reachable regardless of type, so
-// honoring reflogs would hide a bare blob/tree that a reflog retains — and rev-list cannot recover
-// its path either. The no-reflogs unreachable set is a superset that still routes benign
-// reflog-reachable commits through commit attribution, so it does not reintroduce blanket blocking.
+// Collects every oid pinned by a top-level root ref across the main worktree AND every linked one
+// (each linked worktree owns its own root-ref files under `$GIT_COMMON_DIR/worktrees/<id>/`, so a
+// non-commit pinned only there must be probed too). The main worktree keeps the caller's gitArgs so
+// the .gitstore --git-dir/--work-tree layout still resolves (that layout reports no linked
+// worktrees); linked worktrees are discovered from their own path.
+//
+// Enumeration is exhaustive rather than a fixed allowlist: `for-each-ref --include-root-refs` lists
+// ALL root refs Git recognizes — including arbitrary `*_HEAD`-style ones like CUSTOM_HEAD — so no
+// unlisted root ref can slip a non-commit past the guard. On Git < 2.45 (no flag) we fall back to
+// probing the common single-oid root refs by name. FETCH_HEAD/MERGE_HEAD are always read from their
+// files (multi-line; the flag omits them) via `rev-parse --git-path`. Absent refs are skipped.
+async function collectRootRefOids(
+  agentDir: string,
+  gitArgs: readonly string[],
+  linkedWorktrees: readonly string[],
+): Promise<string[]> {
+  const probes: { cwd: string; args: readonly string[] }[] = [
+    { cwd: agentDir, args: gitArgs },
+    ...linkedWorktrees.map((path) => ({ cwd: path, args: [] as readonly string[] })),
+  ]
+  const oids: string[] = []
+  for (const probe of probes) {
+    const rootRefs = await tryGit(probe.cwd, probe.args, [
+      'for-each-ref',
+      '--include-root-refs',
+      '--format=%(objectname)',
+    ])
+    if (rootRefs.ok) {
+      for (const line of rootRefs.stdout.split('\n')) oids.push(line.trim())
+    } else {
+      for (const name of GIT_FALLBACK_ROOT_REFS) {
+        const resolved = await tryGit(probe.cwd, probe.args, ['rev-parse', '--verify', '--quiet', name])
+        if (resolved.ok) oids.push(resolved.stdout.trim())
+      }
+    }
+    for (const name of GIT_MULTILINE_PSEUDOREFS) {
+      const path = (await runGit(probe.cwd, probe.args, ['rev-parse', '--git-path', name])).trim()
+      if (path === '') continue
+      const file = Bun.file(isAbsolute(path) ? path : join(probe.cwd, path))
+      if (!(await file.exists())) continue
+      for (const line of (await file.text()).split('\n')) {
+        const oid = line.split(/[\s\t]/, 1)[0]?.trim()
+        if (oid !== undefined && /^[0-9a-f]{40,64}$/.test(oid)) oids.push(oid)
+      }
+    }
+  }
+  return oids
+}
+
+// Only an unreachable commit is safely attributable: it records a repository root tree, so we walk
+// it (and tags peeling to a commit) and report the actual canonical secret paths it carries.
+//
+// Standalone unreachable trees/blobs (and tags peeling only to them) are deliberately NOT blocked.
+// A bare blob never stored its filename and an orphan tree lost the parent that carried its prefix,
+// so their names cannot prove they sat under a canonical secret dir. Failing closed on them bricked
+// all model-driven bash on benign debris that TypeClaw's own backup rebase and history rewrites
+// leave behind and never garbage-collect. Accepted residual: a secret surviving ONLY as pathless
+// objects (e.g. `git add -f secrets.json` then `git reset`, which leaves no reflog entry, or a
+// committed secret whose every path-bearing commit has since vanished). While any path-bearing
+// commit survives — reachable, reflog, or unreachable — the caller's `rev-list --all --reflog` scan
+// and this unreachable-commit walk still report the path; `--no-reflogs` keeps this a superset that
+// routes benign reflog-reachable commits through commit attribution instead of double-reporting.
 async function scanUnreachableObjects(agentDir: string, gitArgs: readonly string[]): Promise<UnreachableScan> {
   const fsck = await runGit(agentDir, gitArgs, ['fsck', '--unreachable', '--no-reflogs', '--no-progress'])
   const unreachable = parseUnreachableObjects(fsck)
   if (unreachable.length === 0) return { ok: true, paths: [] }
 
-  const commits: string[] = []
-  const trees = new Set<string>()
-  const blobs = new Set<string>()
+  const commits = new Set<string>()
   for (const object of unreachable) {
-    if (object.type === 'commit') commits.push(object.oid)
-    else if (object.type === 'tree') trees.add(object.oid)
-    else if (object.type === 'blob') blobs.add(object.oid)
+    if (object.type === 'commit') commits.add(object.oid)
     else if (object.type === 'tag') {
       const target = await peelTag(agentDir, gitArgs, object.oid)
-      if (target.type === 'commit') commits.push(target.oid)
-      else if (target.type === 'tree') trees.add(target.oid)
-      else if (target.type === 'blob') blobs.add(target.oid)
+      if (target.type === 'commit') commits.add(target.oid)
     }
   }
 
@@ -127,9 +197,6 @@ async function scanUnreachableObjects(agentDir: string, gitArgs: readonly string
     attributed.add(rootTree)
     matches.push(...collectTreeEntries(entries, attributed))
   }
-
-  const unattributed = [...trees, ...blobs].some((oid) => !attributed.has(oid))
-  if (unattributed) matches.push('unattributable dangling Git objects')
 
   return matches.length > 0 ? { ok: false, paths: [...new Set(matches)].sort() } : { ok: true, paths: [] }
 }
@@ -234,7 +301,11 @@ function splitNul(value: string): string[] {
   return value.split('\0').filter((entry) => entry !== '')
 }
 
-async function runGit(agentDir: string, gitArgs: readonly string[], args: readonly string[]): Promise<string> {
+async function spawnGit(
+  agentDir: string,
+  gitArgs: readonly string[],
+  args: readonly string[],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(['git', ...hooklessGitArgs(['-C', agentDir, ...gitArgs, ...args])], {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -253,8 +324,24 @@ async function runGit(agentDir: string, gitArgs: readonly string[], args: readon
     new Response(proc.stderr).text(),
     proc.exited,
   ])
+  return { stdout, stderr, exitCode }
+}
+
+async function runGit(agentDir: string, gitArgs: readonly string[], args: readonly string[]): Promise<string> {
+  const { stdout, stderr, exitCode } = await spawnGit(agentDir, gitArgs, args)
   if (exitCode === 0) return stdout
   throw new GitSecretHistoryError([`Git metadata scan failed (${args[0] ?? 'unknown'}): ${redactGitError(stderr)}`])
+}
+
+// Non-throwing variant for probes whose failure is a valid signal (an absent root ref, or an
+// `--include-root-refs` flag unsupported on old Git) rather than a contamination error.
+async function tryGit(
+  agentDir: string,
+  gitArgs: readonly string[],
+  args: readonly string[],
+): Promise<{ ok: true; stdout: string } | { ok: false }> {
+  const { stdout, exitCode } = await spawnGit(agentDir, gitArgs, args)
+  return exitCode === 0 ? { ok: true, stdout } : { ok: false }
 }
 
 function redactGitError(stderr: string): string {
