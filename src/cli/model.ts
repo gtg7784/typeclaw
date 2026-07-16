@@ -15,11 +15,8 @@ import {
 } from '@/config/models-mutation'
 import {
   isKnownModelRef,
-  isModelRef,
   KNOWN_PROVIDERS,
-  listKnownModelRefs,
   providerForModelRef,
-  providerHasClosedModelSet,
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
@@ -438,16 +435,14 @@ export async function resolveExplicitRef(
   loadCatalog: () => Promise<{ options: ModelOption[] }> = fetchModelOptions,
 ): Promise<PickedModelRef> {
   if (isKnownModelRef(ref)) return { ref }
-  // A closed-model-set provider (e.g. openai-codex) accepts only the ids we ship;
-  // anything else 400s at request time and would otherwise be persisted as a ref
-  // that silently breaks every turn. Reject it here — before the catalog lookup,
-  // which doesn't cover these providers anyway — and name the valid ids so the
-  // fix is obvious.
-  const closedProvider = isModelRef(ref) ? providerForModelRef(ref) : null
-  if (closedProvider !== null && providerHasClosedModelSet(closedProvider)) {
-    const valid = listKnownModelRefs().filter((known) => known.startsWith(`${closedProvider}/`))
-    throw new Error(`"${ref}" isn't a supported model for ${closedProvider}. Choose one of: ${valid.join(', ')}.`)
-  }
+  // Intentionally NOT rejecting refs that miss our shipped registry — not even
+  // for a closed-set provider like openai-codex. The registry is a snapshot, not
+  // an authoritative catalog: OpenAI ships new Codex models (e.g. the gpt-5.6
+  // line) before we can update it, and a definite "this model doesn't exist" is
+  // only knowable from the backend's own 400, which the runtime path now
+  // classifies (see provider-error.ts). Blocking here would instead stop users
+  // from selecting a real, newly-shipped model. So an unknown closed-provider ref
+  // takes the same forward-compatible warning path as any other non-curated ref.
   const { options } = await loadCatalog()
   const option = options.find((candidate) => candidate.ref === ref)
   if (option === undefined) {

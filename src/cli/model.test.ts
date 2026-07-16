@@ -55,21 +55,17 @@ describe('resolveExplicitRef carries catalog metadata for non-interactive set/ad
     expect(picked.meta).toBeUndefined()
   })
 
-  test('rejects an unsupported model for a closed-set provider (openai-codex), naming the valid ids', async () => {
-    // given: a Codex ref whose model id is not in the shipped lineup (the gpt-5.6 incident)
-    let error: Error | undefined
-    // when: resolving it for a non-interactive set/add
-    try {
-      await resolveExplicitRef('openai-codex/gpt-5.6', catalogWith(liveOption))
-    } catch (e) {
-      error = e as Error
-    }
-    // then: it throws (so the bad ref is never persisted) and names a valid alternative
-    expect(error?.message).toMatch(/isn't a supported model for openai-codex/)
-    expect(error?.message).toContain('openai-codex/gpt-5.5')
+  test('an unknown closed-provider (openai-codex) ref is forward-compatible: persisted via the warning path, not rejected', async () => {
+    // given: a Codex ref that misses our shipped registry but may be a real, newly-shipped model
+    // when: resolving it for a non-interactive set/add (catalog miss, like any non-curated ref)
+    const picked = await resolveExplicitRef('openai-codex/gpt-5.6-sol', catalogWith(liveOption))
+    // then: it resolves (no throw) so the registry snapshot can't block a real model; the
+    // backend's own 400 is what classifies a truly-unsupported id at runtime
+    expect(picked.ref).toBe('openai-codex/gpt-5.6-sol')
+    expect(picked.meta).toBeUndefined()
   })
 
-  test('a valid closed-set provider ref resolves from KNOWN_PROVIDERS (no catalog, no metadata)', async () => {
+  test('a curated closed-provider ref resolves from KNOWN_PROVIDERS (no catalog, no metadata)', async () => {
     const picked = await resolveExplicitRef('openai-codex/gpt-5.5', catalogWith(liveOption))
     expect(picked.ref).toBe('openai-codex/gpt-5.5')
     expect(picked.meta).toBeUndefined()
