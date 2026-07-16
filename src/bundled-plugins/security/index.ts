@@ -209,6 +209,7 @@ export default definePlugin({
             args: event.args,
             agentDir: ctx.agentDir,
             hidden: resolveHiddenPaths(ctx.permissions, event.origin, ctx.agentDir),
+            ...(event.fileOperands !== undefined ? { fileOperands: event.fileOperands } : {}),
           }),
           canBypass(GUARD_SSRF_SEVERITY, SECURITY_PERMISSIONS.bypassSsrf)
             ? undefined

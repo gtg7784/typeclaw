@@ -156,6 +156,55 @@ describe('wrapPluginTool', () => {
     expect(result).toMatchObject({ isError: true })
   })
 
+  test('a nonFile-declared identifier colliding with a hidden dir passes the private-surface guard, undeclared still blocks', async () => {
+    // Reproduces the guard-ordering the runtime uses: private-surface-read runs
+    // in tool.before, BEFORE the file-operand scanner, and must honor the tool's
+    // trusted `fileOperands.nonFile` (threaded through the event) or a declared
+    // identifier equal to a hidden dir name is wrongly blocked.
+    const seen: Array<Record<string, unknown>> = []
+    const makeTool = () =>
+      defineTool({
+        description: '',
+        parameters: z.object({ tenant: z.string(), region: z.string() }),
+        fileOperands: { nonFile: ['tenant'] },
+        async execute(args) {
+          seen.push(args)
+          return { content: [{ type: 'text', text: 'ok' }] }
+        },
+      })
+    const hooks = createHookBus()
+    hooks.registerAll('security', '/agent', noopLogger, {
+      'tool.before': (event) =>
+        checkPrivateSurfaceReadGuard({
+          tool: event.tool,
+          args: event.args,
+          agentDir: '/agent',
+          hidden: { dirs: ['/agent/memory'], files: [] },
+          ...(event.fileOperands !== undefined ? { fileOperands: event.fileOperands } : {}),
+        }),
+    })
+    const wrap = () =>
+      wrapPluginTool(makeTool(), {
+        pluginName: 'multi',
+        toolName: 'tenant_status',
+        agentDir: '/agent',
+        sessionId: 's',
+        logger: noopLogger,
+        hooks,
+      })
+
+    // Declared nonFile operand equal to a hidden dir → allowed through the guard.
+    const ok = await wrap().execute('c', { tenant: 'memory', region: 'us' }, undefined, undefined, {} as never)
+    expect(textOfFirstContent(ok)).toBe('ok')
+    expect(seen).toEqual([{ tenant: 'memory', region: 'us' }])
+
+    // Undeclared operand equal to a hidden dir → still blocked (fail-closed).
+    seen.length = 0
+    const blocked = await wrap().execute('c', { tenant: 'ok', region: 'memory' }, undefined, undefined, {} as never)
+    expect(blocked).toMatchObject({ isError: true })
+    expect(seen).toEqual([])
+  })
+
   test('passes parsed args to plugin execute and exposes ToolContext', async () => {
     const seen: { args: unknown; ctx: { sessionId: string; agentDir: string } }[] = []
     const tool = defineTool({
@@ -1279,6 +1328,138 @@ describe('wrapSystemTool', () => {
         enforceAndPinToolFiles({ tool: 'some_plugin_tool', args: { source: value }, agentDir, genericInputs: true }),
       ).rejects.toThrow(/ambiguous local file operand/)
     }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('identifier-only system tools accept remote ids that trip the word.ext, cursor, and fs-probe rules', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-whole-tool-'))
+    for (const dir of ['memory', 'channels', 'sessions', 'workspace']) {
+      await mkdir(path.join(agentDir, dir), { recursive: true })
+    }
+
+    // Slack message/thread ids are always epoch.micros (word.ext); cursors carry
+    // "/"; workspace/target_id/subagent_type/task_id can equal an agent-root dir.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [
+        'channel_read',
+        { mode: 'message', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', message_id: '1699999999.000100' },
+      ],
+      [
+        'channel_read',
+        { mode: 'history', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1699999999.000100' },
+      ],
+      [
+        'channel_read',
+        { mode: 'history', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', cursor: 'dGVhbTpU/bmV4dA==' },
+      ],
+      ['channel_read', { mode: 'list', adapter: 'slack-bot', workspace: 'memory' }],
+      ['channel_history', { cursor: '1699999999.000100', scope: 'channel' }],
+      [
+        'channel_edit',
+        { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', message_id: '1699999999.000100', text: 'x' },
+      ],
+      ['channel_react', { emoji: 'party.parrot' }],
+      ['stream_snapshot', { target_kind: 'session', target_id: 'memory' }],
+      ['grant_role', { role: 'guest', permission: 'channel.respond' }],
+      ['spawn_subagent', { subagent_type: 'memory', prompt: 'hi' }],
+      ['subagent_output', { task_id: 'sessions' }],
+      ['subagent_cancel', { task_id: 'sessions' }],
+      ['look_at_channel_attachment', { attachment_id: 1, prompt: 'describe /agent/workspace' }],
+    ]
+    for (const [tool, args] of cases) {
+      const before = JSON.stringify(args)
+      const pinned = await enforceAndPinToolFiles({ tool, args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(JSON.stringify(args)).toBe(before)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('whole-tool exemption is scoped: an unknown tool with the same id-shaped args still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-wholetool-scoped-'))
+    await mkdir(path.join(agentDir, 'memory'), { recursive: true })
+    for (const args of [{ message_id: '1699999999.000100' }, { workspace: 'memory' }, { cursor: 'a/b/c' }]) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'plugin_channel_like', args, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('reviewer_checkout repoSlug passes via its own nonFile declaration, not a global key exemption', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-reposlug-'))
+    const declared = { nonFile: ['repoSlug', 'headSha'] } as const
+
+    // The tool declares repoSlug/headSha as non-file; the "/" in owner/repo is
+    // then not misread as a path separator. (The tool's own REPO_SLUG regex
+    // rejects traversal downstream — the scanner no longer second-guesses it.)
+    const ok: Record<string, unknown> = { repoSlug: 'typeclaw/typeclaw', headSha: 'a'.repeat(40) }
+    const pinned = await enforceAndPinToolFiles({
+      tool: 'reviewer_checkout',
+      args: ok,
+      agentDir,
+      genericInputs: true,
+      fileOperands: declared,
+    })
+    await pinned.cleanup()
+    expect(ok.repoSlug).toBe('typeclaw/typeclaw')
+
+    // An UNDECLARED tool passing a valid-looking repoSlug must STILL fail closed:
+    // repoSlug is no longer exempt globally by key name.
+    for (const value of ['typeclaw/typeclaw', 'public/notes', '../etc/passwd']) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'unknown_plugin', args: { repoSlug: value }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a plugin fileOperands.nonFile declaration exempts its operands but stays tool+path scoped', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-nonfile-decl-'))
+    await mkdir(path.join(agentDir, 'sessions'), { recursive: true })
+
+    // Runtime prefixes subagent custom-tool names, so a static in-scanner table
+    // keyed by "memory_append" would miss it; the declaration travels with the tool.
+    const operands = { nonFile: ['topic', 'body'] } as const
+    const ok: Record<string, unknown> = { topic: 'sessions', body: 'see a/b/c for detail' }
+    const pinned = await enforceAndPinToolFiles({
+      tool: '__plugin_memory_memory-logger_3',
+      args: ok,
+      agentDir,
+      genericInputs: true,
+      fileOperands: operands,
+    })
+    await pinned.cleanup()
+    expect(ok).toEqual({ topic: 'sessions', body: 'see a/b/c for detail' })
+
+    // An UNDECLARED operand on the same tool must still fail closed.
+    await expect(
+      enforceAndPinToolFiles({
+        tool: '__plugin_memory_memory-logger_3',
+        args: { topic: 'ok', attachment: 'sessions' },
+        agentDir,
+        genericInputs: true,
+        fileOperands: operands,
+      }),
+    ).rejects.toThrow(/ambiguous local file operand/)
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('a declared real-file input is pinned to an immutable snapshot, not rejected', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-input-pin-'))
+    await mkdir(path.join(agentDir, 'sessions'), { recursive: true })
+    await writeFile(path.join(agentDir, 'sessions', 'ses_x.jsonl'), '{"id":"e1"}\n')
+
+    const args: Record<string, unknown> = { path: 'sessions/ses_x.jsonl', entryId: 'e1' }
+    const pinned = await enforceAndPinToolFiles({
+      tool: '__plugin_memory_find_0',
+      args,
+      agentDir,
+      genericInputs: true,
+      fileOperands: { input: ['path'] },
+    })
+    expect(String(args.path)).toContain('typeclaw-tool-input')
+    await pinned.cleanup()
     await rm(agentDir, { recursive: true, force: true })
   })
 

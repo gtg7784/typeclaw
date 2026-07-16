@@ -310,6 +310,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         callId: toolCallId,
         args: mutableArgs,
         ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
+        ...(tool.fileOperands !== undefined ? { fileOperands: tool.fileOperands } : {}),
       }
       const blockResult = await opts.hooks.runToolBefore(before)
       if (blockResult !== undefined) {

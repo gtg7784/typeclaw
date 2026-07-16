@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
+import { TOOLS_WITHOUT_LOCAL_FILE_OPERANDS } from '@/agent/tools-without-local-file-operands'
 import type { HiddenPaths } from '@/sandbox'
 
 import { checkPrivateSurfaceReadGuard } from './private-surface-read'
@@ -65,6 +66,23 @@ describe('private-surface-read guard — free-text field scoping (no false posit
     expect(check('web_search', { query: 'workspace' })).toBeUndefined()
     expect(check('grep', { pattern: 'sessions', path: 'public' })).toBeUndefined()
     expect(check('look_at_channel_attachment', { prompt: 'sessions' })).toBeUndefined()
+  })
+
+  test('does not block an identifier-only tool whose remote id equals a hidden dir name', () => {
+    // These tools read no local path (shared TOOLS_WITHOUT_LOCAL_FILE_OPERANDS
+    // set); an id like workspace/target_id/task_id="memory" must not resolve to
+    // /agent/memory and get blocked, mirroring the file-operand scanner's skip.
+    expect(check('channel_read', { mode: 'list', adapter: 'slack-bot', workspace: 'memory' })).toBeUndefined()
+    expect(
+      check('channel_read', { mode: 'history', adapter: 'slack-bot', workspace: 'T0', chat: 'sessions' }),
+    ).toBeUndefined()
+    expect(check('stream_snapshot', { target_kind: 'session', target_id: 'workspace' })).toBeUndefined()
+    expect(check('subagent_output', { task_id: 'memory' })).toBeUndefined()
+    expect(check('spawn_subagent', { subagent_type: 'memory', prompt: 'x' })).toBeUndefined()
+  })
+
+  test('the shared exemption is tool-scoped: an unknown tool with the same key still fails closed', () => {
+    expect(check('plugin_reader', { workspace: 'memory' })?.block).toBe(true)
   })
 
   test('does not block a path-LIKE value in a free-text field', () => {
@@ -395,5 +413,58 @@ describe('private-surface-read guard — symlink bypass defense', () => {
     writeFileSync(path.join(agentDir, 'public', 'real.md'), 'shareable')
     const result = checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: 'public/real.md' }, agentDir, hidden })
     expect(result).toBeUndefined()
+  })
+})
+
+describe('private-surface-read guard — honors a tool author fileOperands.nonFile declaration', () => {
+  test('skips a declared nonFile operand colliding with a hidden dir', () => {
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'plugin_reader',
+        args: { tenant: 'memory' },
+        agentDir: AGENT,
+        hidden: guestHidden,
+        fileOperands: { nonFile: ['tenant'] },
+      }),
+    ).toBeUndefined()
+  })
+
+  test('is scoped by exact operand path: an undeclared key still blocks', () => {
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'plugin_reader',
+        args: { tenant: 'ok', region: 'memory' },
+        agentDir: AGENT,
+        hidden: guestHidden,
+        fileOperands: { nonFile: ['tenant'] },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('never exempts input/output/destructive: a declared real-file input under a hidden dir still blocks', () => {
+    // nonFile skips the scan; input is a REAL file that must still be blocked
+    // when it resolves into the private surface — otherwise a declared input
+    // becomes a read-back channel for exactly what the bash masks deny.
+    expect(
+      checkPrivateSurfaceReadGuard({
+        tool: 'plugin_reader',
+        args: { path: 'memory/secret.md' },
+        agentDir: AGENT,
+        hidden: guestHidden,
+        fileOperands: { input: ['path'], nonFile: ['tenant'] },
+      })?.block,
+    ).toBe(true)
+  })
+})
+
+describe('private-surface-read guard — shared exemption set stays in sync with the file-operand scanner', () => {
+  test('every TOOLS_WITHOUT_LOCAL_FILE_OPERANDS tool is skipped here too', () => {
+    // Drift fence: the two enforcement points share one set. If a tool is added
+    // to the scanner's exempt set but this guard still resolved its id args as
+    // paths, a value equal to a hidden dir would be blocked here — the exact
+    // divergence this coupling prevents.
+    for (const tool of TOOLS_WITHOUT_LOCAL_FILE_OPERANDS) {
+      expect(check(tool, { workspace: 'memory', target_id: 'sessions', task_id: 'workspace' })).toBeUndefined()
+    }
   })
 })
