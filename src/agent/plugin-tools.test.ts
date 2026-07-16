@@ -1219,6 +1219,69 @@ describe('wrapSystemTool', () => {
     await rm(agentDir, { recursive: true, force: true })
   })
 
+  test('reload scope collides with a real agent-dir directory but is not scanned as a file operand', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-reload-scope-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+    await mkdir(path.join(agentDir, 'channels'), { recursive: true })
+
+    for (const scope of ['cron', 'channels', 'config', 'plugins', 'skills']) {
+      const args: Record<string, unknown> = { scope }
+      const pinned = await enforceAndPinToolFiles({ tool: 'reload', args, agentDir, genericInputs: true })
+      await pinned.cleanup()
+      expect(args.scope).toBe(scope)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('stream_snapshot target_kind "cron" is not scanned as a file operand despite a cron/ directory', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-stream-kind-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+
+    const args: Record<string, unknown> = { target_kind: 'cron' }
+    const pinned = await enforceAndPinToolFiles({ tool: 'stream_snapshot', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(args.target_kind).toBe('cron')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('grant_role permission "channel.respond" is not scanned as a file operand (word.ext shape)', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-grant-perm-'))
+
+    const args: Record<string, unknown> = { role: 'guest', permission: 'channel.respond' }
+    const pinned = await enforceAndPinToolFiles({ tool: 'grant_role', args, agentDir, genericInputs: true })
+    await pinned.cleanup()
+    expect(args.permission).toBe('channel.respond')
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('non-file exemption is tool-scoped: an unknown tool reusing scope/target_kind still fails closed', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-nonfile-scoped-'))
+    await mkdir(path.join(agentDir, 'cron'), { recursive: true })
+
+    for (const [tool, key] of [
+      ['plugin_reloader', 'scope'],
+      ['plugin_streamer', 'target_kind'],
+    ] as const) {
+      await expect(
+        enforceAndPinToolFiles({ tool, args: { [key]: 'cron' }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('the fs-existence probe still rejects an extensionless file or directory under a non-file key', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-probe-preserved-'))
+    await writeFile(path.join(agentDir, 'credentials'), 'SECRET')
+    await mkdir(path.join(agentDir, 'memory'), { recursive: true })
+
+    for (const value of ['credentials', 'memory']) {
+      await expect(
+        enforceAndPinToolFiles({ tool: 'some_plugin_tool', args: { source: value }, agentDir, genericInputs: true }),
+      ).rejects.toThrow(/ambiguous local file operand/)
+    }
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
   test('parallel read, look_at, and channel upload calls consume pinned bytes across symlink swaps', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-pinned-read-'))
     const safe = path.join(agentDir, 'safe.txt')
