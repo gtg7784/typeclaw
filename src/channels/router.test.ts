@@ -5026,6 +5026,49 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
+  test('suppresses a fenced JSON-object skip_response leak instead of posting it (solar-open2 shape)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        '```json\n{\n  "method": "skip_response",\n  "params": {\n    "reason": "not addressed to me"\n  }\n}\n```',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_tool_call_leak (silent)'))).toBe(true)
+  })
+
+  test('recovers the user text from a JSON-object channel_reply leak', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('{"method":"channel_reply","params":{"text":"hi there"}}')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('hi there')
+    expect(sent[0]!.text).not.toContain('method')
+  })
+
   test('posts only the prose when a real reply is followed by a trailing skip_response leak', async () => {
     const dir = await tempDir()
     const logs: string[] = []
@@ -5214,6 +5257,79 @@ describe('ChannelRouter channel-turn protocol', () => {
       expect(getPlainTextChannelToolCallKind('read({ path: "x" }) loads a file for you')).toBeNull()
       expect(getPlainTextChannelToolCallKind('You can use bash("ls") to list files')).toBeNull()
       expect(getPlainTextChannelToolCallKind('channel_disengagement is the noun')).toBeNull()
+    })
+
+    // The JSON-RPC-object serialization shape observed against `solar-open2`
+    // (Upstage): the whole message is `{"method":"<tool>","params":{...}}`,
+    // not a `tool(...)` call expression, so it slips past the call-expression
+    // parser. It routes through the SAME name->kind disposition.
+    test('suppresses a bare JSON-object skip_response leak SILENTLY', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{"reason":"not for me"}}')).toBe(
+        'suppress-silent',
+      )
+    })
+
+    test('suppresses a FENCED JSON-object skip_response leak SILENTLY (the reported shape)', () => {
+      const leak =
+        '```json\n{\n  "method": "skip_response",\n  "params": {\n    "reason": "not addressed to me"\n  }\n}\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('suppresses a plain-fenced JSON-object skip_response leak SILENTLY', () => {
+      const leak = '```\n{"method":"skip_response","params":{"reason":"x"}}\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('recovers JSON-object channel_reply/channel_send serializations', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_reply","params":{"text":"hi"}}')).toBe('reply')
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_send","params":{"text":"hi"}}')).toBe('send')
+    })
+
+    test('suppresses every OTHER JSON-object tool call with a WARN', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"channel_react","params":{"emoji":"eyes"}}')).toBe(
+        'suppress-warn',
+      )
+      expect(getPlainTextChannelToolCallKind('{"method":"bash","params":{"cmd":"ls -la"}}')).toBe('suppress-warn')
+    })
+
+    test('requires EXACTLY method + params keys (a real JSON reply the user asked for is delivered)', () => {
+      // A canonical JSON-RPC frame carries extra keys (`jsonrpc`, `id`); a
+      // user-requested JSON document has arbitrary keys. Neither is the leak
+      // shape, so both reach the user.
+      expect(
+        getPlainTextChannelToolCallKind('{"jsonrpc":"2.0","method":"skip_response","params":{"reason":"x"},"id":1}'),
+      ).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{},"extra":true}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response"}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"name":"skip_response","arguments":{}}')).toBeNull()
+    })
+
+    test('requires an object-shaped params and identifier-shaped method', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":null}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":[1,2]}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"","params":{}}')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('{"method":"has space","params":{}}')).toBeNull()
+    })
+
+    test('leaves malformed JSON and JSON embedded in prose untouched', () => {
+      expect(getPlainTextChannelToolCallKind('{"method":"skip_response","params":{')).toBeNull()
+      expect(
+        getPlainTextChannelToolCallKind('here is one: {"method":"skip_response","params":{"reason":"x"}}'),
+      ).toBeNull()
+      expect(
+        getPlainTextChannelToolCallKind('{"method":"skip_response","params":{"reason":"x"}} is the shape'),
+      ).toBeNull()
+    })
+
+    test('handles a CRLF-newline fenced JSON leak', () => {
+      const leak = '```json\r\n{"method":"skip_response","params":{"reason":"x"}}\r\n```'
+      expect(getPlainTextChannelToolCallKind(leak)).toBe('suppress-silent')
+    })
+
+    test('does NOT unwrap tilde fences, 4+ backtick runs, or foreign language tags', () => {
+      expect(getPlainTextChannelToolCallKind('~~~\n{"method":"skip_response","params":{}}\n~~~')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('````\n{"method":"skip_response","params":{}}\n````')).toBeNull()
+      expect(getPlainTextChannelToolCallKind('```python\n{"method":"skip_response","params":{}}\n```')).toBeNull()
     })
   })
 
@@ -5508,6 +5624,43 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     test('returns null when "text" exists only inside a nested object', () => {
       expect(extractPlainTextChannelToolCallText('channel_reply({ meta: { text: "only nested" } })')).toBeNull()
+    })
+
+    test('recovers params.text from a bare JSON-object reply/send serialization', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"hi there"}}')).toBe(
+        'hi there',
+      )
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_send","params":{"chat":"c1","text":"hi"}}')).toBe(
+        'hi',
+      )
+    })
+
+    test('recovers params.text from a FENCED JSON-object reply serialization', () => {
+      const leak = '```json\n{\n  "method": "channel_reply",\n  "params": {\n    "text": "hello world"\n  }\n}\n```'
+      expect(extractPlainTextChannelToolCallText(leak)).toBe('hello world')
+    })
+
+    test('recovers a non-Latin params.text (multi-language)', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"확인해볼게요"}}')).toBe(
+        '확인해볼게요',
+      )
+    })
+
+    test('returns null for a JSON reply/send whose params carries no usable text', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"reason":"nope"}}')).toBeNull()
+      expect(extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"text":"  "}}')).toBeNull()
+    })
+
+    test('returns null for a JSON skip_response (no salvageable user text)', () => {
+      expect(extractPlainTextChannelToolCallText('{"method":"skip_response","params":{"reason":"x"}}')).toBeNull()
+    })
+
+    test('ignores an inherited (non-own) text property on the JSON params', () => {
+      // A `__proto__` payload must not surface `Object.prototype.text` as recovered
+      // channel output — only an OWN `text` property is recoverable.
+      expect(
+        extractPlainTextChannelToolCallText('{"method":"channel_reply","params":{"__proto__":{"text":"pollution"}}}'),
+      ).toBeNull()
     })
   })
 
