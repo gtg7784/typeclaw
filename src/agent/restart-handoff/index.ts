@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
@@ -8,6 +9,39 @@ import { restartHandoffPath } from './paths'
 export { restartHandoffPath } from './paths'
 
 export const RESTART_HANDOFF_TTL_MS = 60_000
+
+// Process-local serialization of the two same-process handoff producers that
+// race during a restart: the in-session `/restart` tool (which writes the
+// originating handoff post-ACK) and the SIGTERM writer (which peek-augments it).
+// hostd fires `docker stop` → SIGTERM before its ACK reaches the container, so
+// without this the SIGTERM read-modify-write can interleave with `/restart`'s
+// write and drop the originating session's origin/author or its interrupted
+// children. This is NOT a cross-process lock — both producers live in this one
+// container process; the event loop yields at every await, so a promise-chain
+// mutex is all that's needed. Keyed by handoff path so distinct agent dirs
+// (tests) never contend.
+const handoffLocks = new Map<string, Promise<void>>()
+
+export async function acquireRestartHandoffLock(agentDir: string): Promise<() => void> {
+  const key = restartHandoffPath(agentDir)
+  const prior = handoffLocks.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const chained = prior.then(() => held)
+  handoffLocks.set(key, chained)
+  await prior
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    // Drop the map entry only if we are still the tail, so a later waiter that
+    // already chained onto `chained` is not orphaned.
+    if (handoffLocks.get(key) === chained) handoffLocks.delete(key)
+    release()
+  }
+}
 
 // The channel coordinates needed to reopen and wake the originating session
 // on the channel side after a restart. Mirrors ChannelKey (src/channels/types)
@@ -42,6 +76,12 @@ export type RestartHandoff = {
   // whatever bare-channel rule matches on every "I'm back" turn. Optional and
   // additive: pre-field v2 handoffs and tui handoffs omit it.
   triggeringAuthorId?: string
+  // Names of background subagents still running when the restart fired, so the
+  // resumed session can tell the thread its promised result was lost. Absent
+  // (never an empty array) when nothing was in flight. Rides the handoff's 60s
+  // TTL, so a stop→idle-for-hours→start drops it instead of replaying a stale
+  // notice into a moved-on conversation.
+  interruptedSubagents?: string[]
 }
 
 // Atomic write via `.tmp` + rename so a crash mid-write never leaves the
@@ -50,16 +90,36 @@ export type RestartHandoff = {
 // half-written one. Errors are swallowed: handoff is best-effort. A failed
 // write means the next boot cold-starts (no greeting), which is the same
 // graceful degradation as the dying container being SIGKILL'd before the
-// write could run.
-export async function writeRestartHandoff(agentDir: string, handoff: RestartHandoff): Promise<void> {
+// write could run. Returns whether the file was actually written, so a caller
+// whose contract depends on the write landing can react to the swallowed
+// failure instead of assuming success.
+export async function writeRestartHandoff(agentDir: string, handoff: RestartHandoff): Promise<boolean> {
   const path = restartHandoffPath(agentDir)
+  // Per-write unique tmp name so two producers staging concurrently never share
+  // a staging file or race a rename against a tmp the other already renamed
+  // away. The final rename stays atomic; last rename wins, ordered by the lock.
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
-    const tmp = `${path}.tmp`
     await writeFile(tmp, JSON.stringify(handoff), 'utf8')
     await rename(tmp, path)
+    return true
   } catch {
-    return
+    await rm(tmp, { force: true }).catch(() => undefined)
+    return false
+  }
+}
+
+// Non-consuming read of the pending handoff, for a caller that must decide
+// whether one already exists before writing its own (so an accepted in-session
+// restart's handoff is preserved rather than clobbered). Unlike consumeRestartHandoff
+// this never deletes, never applies the TTL, and never restores — it is a pure
+// peek. Returns null when absent or malformed.
+export async function peekRestartHandoff(agentDir: string): Promise<RestartHandoff | null> {
+  try {
+    return parseHandoff(await readFile(restartHandoffPath(agentDir), 'utf8'))
+  } catch {
+    return null
   }
 }
 
@@ -168,7 +228,16 @@ function parseHandoff(raw: string): RestartHandoff | null {
     ...(typeof obj.triggeringAuthorId === 'string' && obj.triggeringAuthorId !== ''
       ? { triggeringAuthorId: obj.triggeringAuthorId }
       : {}),
+    ...(() => {
+      const names = parseInterruptedSubagents(obj.interruptedSubagents)
+      return names.length > 0 ? { interruptedSubagents: names } : {}
+    })(),
   }
+}
+
+function parseInterruptedSubagents(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
 }
 
 function parseOrigin(raw: unknown): RestartHandoffOrigin | null {
