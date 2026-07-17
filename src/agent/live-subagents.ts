@@ -143,6 +143,24 @@ export class LiveSubagentRegistry {
     entry.status = completion.ok ? 'completed' : 'failed'
   }
 
+  // First-writer-wins settlement, returning whether THIS caller won. A subagent
+  // has two racing settlement producers — its real completion (spawn_subagent's
+  // `completion.then`) and the parent drain's timeout ceiling — and both must
+  // not overwrite each other's terminal state, or the registry/broadcast would
+  // disagree with a reminder already delivered. There is no `await` between the
+  // status check and the mutation, so under JS run-to-completion this compare-
+  // and-set is atomic: a promise `.then` producer that races in on a later
+  // microtask sees `status !== 'running'` and loses. Production settlement paths
+  // MUST use this, not the unconditional `recordCompletion` (which stays for
+  // tests that seed terminal state directly).
+  recordCompletionIfRunning(taskId: string, completion: SubagentCompletion): boolean {
+    const entry = this.entries.get(taskId)
+    if (entry === undefined || entry.status !== 'running') return false
+    entry.completion = completion
+    entry.status = completion.ok ? 'completed' : 'failed'
+    return true
+  }
+
   snapshot(taskId: string, now: number = Date.now()): StatusSnapshot | undefined {
     const entry = this.entries.get(taskId)
     if (entry === undefined) return undefined

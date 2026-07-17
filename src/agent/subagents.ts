@@ -381,6 +381,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
             throwIfLoopGuardAborted(session)
           },
           cancelled: () => aborted,
+          maxChildWaitMs: DRAIN_MAX_CHILD_WAIT_MS,
         })
       }
       throwIfLoopGuardAborted(session)
@@ -641,6 +642,13 @@ function lastTaggedBlock(text: string, tag: FinalBlockTag): string | null {
 // for the reviewer the GitHub flow has no `<review>` to post and silently
 // `skip_response`s — the stranded-review bug. This gate gives both a bounded
 // re-prompt then an honest low-confidence fallback instead of the silent drop.
+// Backstop ceiling for the background drain: a running child that never settles
+// is abandoned after this so the parent can synthesize partial results instead
+// of hanging forever. Deliberately larger than the per-child `timeoutMs`
+// (scout = 5 min) so that a child's own timeout is the primary release and this
+// only catches children that declare none.
+const DRAIN_MAX_CHILD_WAIT_MS = 600_000
+
 const REQUIRED_FINAL_BLOCK: Readonly<Record<string, FinalBlockTag>> = { researcher: 'report', reviewer: 'review' }
 
 // Bounded re-prompt budget for the required-block guard, mirroring the channel

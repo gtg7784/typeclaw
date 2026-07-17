@@ -12,7 +12,7 @@
 // TLS handshake + HTTP/2 settings + header ordering. See that file's header
 // for the full rationale and AGENTS.md §"Web search" for the original story.
 
-import { curlImpersonate } from './curl-impersonate'
+import { CurlImpersonateError, curlImpersonate, isCurlExitTimeout } from './curl-impersonate'
 import { createKeyedSemaphore } from './keyed-semaphore'
 import { type SearchRetryOptions, withSearchRetry } from './search-retry'
 
@@ -61,10 +61,24 @@ export async function ddgSearch(query: string, limit: number, signal?: AbortSign
           }
           return parseDdgHtml(html).slice(0, limit)
         },
-        { ...retryOverride, shouldRetry: (error) => error instanceof DdgCaptchaError, signal },
+        { ...retryOverride, shouldRetry: isTransientSearchError, signal },
       ),
     signal,
   )
+}
+
+// Both a tripped CAPTCHA and a bare connection timeout are transient: DDG's
+// gate lifts after a cooldown, and an egress timeout is almost always a
+// momentary network blip (the incident that motivated this: an agent's egress
+// timed out for a few minutes, then recovered). Retrying both under the bounded
+// `withSearchRetry` backoff turns an otherwise-unbounded model-driven retry
+// loop into at most `attempts` code-level tries that then surface a single
+// terminal error. A hard network failure (DNS, refused, TLS) is NOT retried —
+// it won't fix itself on a re-run and would just burn the budget.
+export function isTransientSearchError(error: unknown): boolean {
+  if (error instanceof DdgCaptchaError) return true
+  if (error instanceof CurlImpersonateError && isCurlExitTimeout(error)) return true
+  return false
 }
 
 export class DdgCaptchaError extends Error {

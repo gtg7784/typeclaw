@@ -109,16 +109,33 @@ printf '%s' "$RENDERED"
     expect(details.count).toBe(1)
   })
 
-  test('returns a clear error when DuckDuckGo serves a CAPTCHA page', async () => {
-    // given: stdout contains the challenge-form marker isCaptcha checks for
+  test('an exhausted CAPTCHA returns the terminal "do not retry" contract (no "try again")', async () => {
+    // given: every attempt serves the challenge-form CAPTCHA marker
     installFakePrintingBinary('<form id="challenge-form">Please verify you are a human</form>')
 
     // when
     const result = await webSearchTool.execute('id', { query: 'spam' }, undefined, undefined, ctx)
 
+    // then: unified terminal contract — tells the model to stop, not to vary queries
+    const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
+    expect(text).toContain('Do not retry this tool now')
+    expect(text).toContain('report what you already have')
+    expect(text).not.toMatch(/try again/i)
+    expect((result.details as { error?: boolean }).error).toBe(true)
+  })
+
+  test('an exhausted connection timeout (curl exit 28) returns the same terminal contract', async () => {
+    // given: every attempt times out at the curl layer
+    installFakeBinary('echo "curl: (28) Connection timed out after 30000 milliseconds" >&2; exit 28')
+
+    // when
+    const result = await webSearchTool.execute('id', { query: 'x' }, undefined, undefined, ctx)
+
     // then
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
-    expect(text).toMatch(/CAPTCHA/i)
+    expect(text).toContain('Do not retry this tool now')
+    expect(text).toContain('report what you already have')
+    expect(text).not.toMatch(/try again/i)
     expect((result.details as { error?: boolean }).error).toBe(true)
   })
 

@@ -176,24 +176,27 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
 
       void completion.then((c) => {
         const durationMs = now() - startedAt
-        liveRegistry.recordCompletion(taskId, completionToFinalShape(c, durationMs))
-        if (stream && background) {
-          const hasRecoverableOutput = !c.ok && c.finalMessage !== undefined
-          stream.publish({
-            target: { kind: 'broadcast' },
-            payload: {
-              kind: 'subagent.completed',
-              taskId,
-              subagent: subagentName,
-              parentSessionId,
-              ok: c.ok,
-              durationMs,
-              ...(c.ok ? {} : { error: c.error }),
-              ...(hasRecoverableOutput ? { hasRecoverableOutput: true } : {}),
-              ...(channelKey !== undefined ? { channelKey } : {}),
-            },
-          })
-        }
+        // First-writer-wins: if the parent drain already settled this child by
+        // timeout, our real completion lost — skip both the overwrite and the
+        // broadcast so exactly one canonical completed-event is emitted (the
+        // winner's).
+        const won = liveRegistry.recordCompletionIfRunning(taskId, completionToFinalShape(c, durationMs))
+        if (!won || !stream || !background) return
+        const hasRecoverableOutput = !c.ok && c.finalMessage !== undefined
+        stream.publish({
+          target: { kind: 'broadcast' },
+          payload: {
+            kind: 'subagent.completed',
+            taskId,
+            subagent: subagentName,
+            parentSessionId,
+            ok: c.ok,
+            durationMs,
+            ...(c.ok ? {} : { error: c.error }),
+            ...(hasRecoverableOutput ? { hasRecoverableOutput: true } : {}),
+            ...(channelKey !== undefined ? { channelKey } : {}),
+          },
+        })
       })
 
       if (background) {

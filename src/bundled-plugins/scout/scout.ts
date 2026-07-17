@@ -83,10 +83,18 @@ export const scoutPayloadSchema = z
 
 export type ScoutPayload = z.infer<typeof scoutPayloadSchema>
 
+// Ceiling for a wedged scout run. `startSubagent`'s timeout guard only engages
+// when `timeoutMs` is set, so without this a scout whose `session.prompt` never
+// settles (e.g. the model looping on a transient network error) blocks its
+// parent — the researcher especially — forever. 5 min is generous headroom over
+// the normal seconds-to-low-minutes path while still bounding the hang.
+export const SCOUT_TIMEOUT_MS = 300_000
+
 export function createScoutSubagent(): Subagent<ScoutPayload> {
   return {
     systemPrompt: SCOUT_SYSTEM_PROMPT,
     profile: 'fast',
+    timeoutMs: SCOUT_TIMEOUT_MS,
     tools: [webSearchTool, webFetchTool],
     payloadSchema: scoutPayloadSchema,
     visibility: 'public',
