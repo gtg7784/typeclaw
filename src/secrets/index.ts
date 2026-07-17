@@ -21,3 +21,11 @@ export {
   exportClaudeCredentialsFileIfApplicable,
   resolveClaudeCredentialsPath,
 } from './export-claude-credentials-file'
+
+export {
+  type ProviderRefreshEntry,
+  type ProviderRefreshOutcome,
+  type RefreshProviderOAuthResult,
+  refreshProviderOAuthCredentials,
+  refreshProviderOAuthForAgent,
+} from './refresh-provider-oauth'
