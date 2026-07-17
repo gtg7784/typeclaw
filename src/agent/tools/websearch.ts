@@ -1,6 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { CurlImpersonateError, isCurlExitTimeout } from './curl-impersonate'
 import { ddgSearch, DdgCaptchaError, type DdgResult } from './ddg'
 import { wikipediaSearch, type WikipediaResult } from './wikipedia'
 
@@ -51,14 +52,34 @@ export const webSearchTool = defineTool({
         source === 'wikipedia' ? await wikipediaSearch(query, limit, signal) : await ddgSearch(query, limit, signal)
       return successResult(query, source, results)
     } catch (error) {
-      if (error instanceof DdgCaptchaError) {
-        return errorResult(error.message)
+      // Both a CAPTCHA and a connection timeout are transient failures that
+      // ddgSearch already retried under a bounded backoff. The model has no
+      // visibility into those spent retries, so any message that hints "try
+      // again" (the old CAPTCHA text did) invites it to loop the tool with
+      // varied queries — the exact churn this change removes. Give both the same
+      // terminal "do not retry now" contract so an exhausted transient failure
+      // ends the turn with partial results instead.
+      if (isExhaustedTransientSearchError(error)) {
+        return errorResult(
+          `Search unavailable for "${query}" after retries (${transientReason(error)}). Do not retry this tool now — report what you already have and note the search was unreachable.`,
+        )
       }
       const message = error instanceof Error ? error.message : String(error)
       return errorResult(`Search failed: ${message}`)
     }
   },
 })
+
+function isExhaustedTransientSearchError(error: unknown): boolean {
+  if (error instanceof DdgCaptchaError) return true
+  if (error instanceof CurlImpersonateError && isCurlExitTimeout(error)) return true
+  return false
+}
+
+function transientReason(error: unknown): string {
+  if (error instanceof DdgCaptchaError) return 'rate-limited'
+  return 'network timeout'
+}
 
 function clampLimit(value: number | undefined): number {
   if (value === undefined) return DEFAULT_LIMIT
