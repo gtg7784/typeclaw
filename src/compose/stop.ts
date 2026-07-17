@@ -1,4 +1,4 @@
-import { resolveController, type StopResult } from '@/container'
+import { type Controller, resolveController, type StopResult } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
 import type { AgentResult } from './start'
@@ -14,17 +14,29 @@ export type ComposeStopOptions = {
   onProgress?: (event: ComposeStopEvent) => void
 }
 
+// Injectable so tests drive orchestration without real Docker. Note the
+// deliberate absence of the validateConfig guard that composeStart/Restart
+// have: container identity derives from cwd, not a valid typeclaw.json, so a
+// corrupted config must never block cleanup or a broken config strands a
+// container that can only be removed by hand.
+export type ComposeStopDeps = {
+  stop?: Controller['stop']
+}
+
 export type ComposeStopResult = {
   agents: AgentEntry[]
   results: AgentResult<StopSuccess>[]
 }
 
-export async function composeStop({ rootCwd, onProgress }: ComposeStopOptions): Promise<ComposeStopResult> {
+export async function composeStop(
+  { rootCwd, onProgress }: ComposeStopOptions,
+  { stop = (options) => resolveController().stop(options) }: ComposeStopDeps = {},
+): Promise<ComposeStopResult> {
   const agents = discoverAgents(rootCwd)
   const results = await Promise.all(
     agents.map(async (agent): Promise<AgentResult<StopSuccess>> => {
       onProgress?.({ kind: 'agent-start', name: agent.name })
-      const result = await runOne(agent.name, agent.cwd)
+      const result = await runOne(agent.name, agent.cwd, stop)
       onProgress?.({ kind: 'agent-done', name: agent.name, result })
       return result
     }),
@@ -32,9 +44,9 @@ export async function composeStop({ rootCwd, onProgress }: ComposeStopOptions): 
   return { agents, results }
 }
 
-async function runOne(name: string, cwd: string): Promise<AgentResult<StopSuccess>> {
+async function runOne(name: string, cwd: string, stop: Controller['stop']): Promise<AgentResult<StopSuccess>> {
   try {
-    const data = await resolveController().stop({ cwd })
+    const data = await stop({ cwd })
     if (!data.ok) return { name, ok: false, reason: data.reason }
     return { name, ok: true, data }
   } catch (error) {
