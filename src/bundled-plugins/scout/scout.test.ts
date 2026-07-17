@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { SCOUT_SYSTEM_PROMPT, createScoutSubagent, scoutPayloadSchema } from './scout'
+import { SCOUT_SYSTEM_PROMPT, SCOUT_TIMEOUT_MS, createScoutSubagent, scoutPayloadSchema } from './scout'
 
 describe('scout subagent — load-bearing prompt phrases', () => {
   test.each(
@@ -69,6 +69,14 @@ describe('scout subagent declaration', () => {
   test('uses the fast model profile (cheap and parallelizable for read-only research)', () => {
     const sub = createScoutSubagent()
     expect(sub.profile).toBe('fast')
+  })
+
+  test('declares a timeoutMs so a wedged run cannot block its parent forever', () => {
+    // startSubagent only arms its timeout guard when timeoutMs is set; a scout
+    // without one deadlocks a researcher that spawned it (the incident this fixes).
+    const sub = createScoutSubagent()
+    expect(sub.timeoutMs).toBe(SCOUT_TIMEOUT_MS)
+    expect(sub.timeoutMs).toBeGreaterThan(0)
   })
 
   test('tools list is exactly [web_search, web_fetch] and NO filesystem tools', () => {
