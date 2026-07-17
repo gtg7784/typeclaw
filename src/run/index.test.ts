@@ -8,6 +8,7 @@ import { __resetForwardRequestForTesting as resetDashboardForwardRequest } from 
 import { createChannelRouter, type ChannelManager, type ChannelManagerOptions } from '@/channels'
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
+import { SecretsBackend } from '@/secrets'
 import type { SessionFactory } from '@/sessions'
 import { rmTempDir } from '@/test-helpers/rm-temp-dir'
 import type { TuiOptions } from '@/tui'
@@ -68,6 +69,70 @@ describe('startAgent', () => {
     const res = await fetch(`http://localhost:${running.server.port}`)
     expect(res.status).toBe(200)
     expect(await res.text()).toBe('typeclaw agent')
+  })
+
+  test('awaits provider-OAuth refresh before any session consumer starts, so a lock-holding refresh cannot ELOCKED a boot auth read', async () => {
+    // given a refresh that acquires the REAL secrets lock and blocks on a gate,
+    // and a channel manager whose start() does a real synchronous secrets read
+    // (the same lock path getAuthFor() uses; it ELOCKEDs if the lock is held)
+    const order: string[] = []
+    let releaseGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    let lockAcquired: () => void = () => {}
+    const lockAcquiredSignal = new Promise<void>((resolve) => {
+      lockAcquired = resolve
+    })
+
+    const refreshProviderOAuth = async ({ agentDir }: { agentDir: string }): Promise<unknown> => {
+      const backend = new SecretsBackend(join(agentDir, 'secrets.json'))
+      return backend.withLockAsync(async () => {
+        order.push('refresh:lock-acquired')
+        lockAcquired()
+        await gate
+        order.push('refresh:lock-released')
+        return { result: undefined }
+      })
+    }
+
+    const createChannelManagerFor = (): ChannelManager => ({
+      router: createChannelRouter({ agentDir: testCwd, configForAdapter: () => undefined }),
+      start: async () => {
+        // A real sync read on the same lock — throws ELOCKED if the refresh
+        // still owns the lock, which is exactly the boot race under test.
+        new SecretsBackend(join(testCwd, 'secrets.json')).tryReadProvidersSync()
+        order.push('channel:start')
+        order.push('auth:sync-read')
+      },
+      stop: async () => {},
+      reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+      restartAdapter: async () => {},
+    })
+
+    // when startAgent boots WITHOUT being awaited yet
+    const booting = startAgent({
+      port: 0,
+      attachTui: false,
+      cwd: testCwd,
+      loadCron: noCron,
+      createChannelManager: createChannelManagerFor,
+      refreshProviderOAuth,
+    })
+
+    await lockAcquiredSignal
+
+    // then the refresh owns the lock and NO consumer has started
+    expect(order).toEqual(['refresh:lock-acquired'])
+    expect(order).not.toContain('channel:start')
+
+    // when the gate releases, boot completes with the lock free
+    releaseGate()
+    running = await booting
+
+    // then ordering is exact: refresh settles fully before the channel start
+    // (and its synchronous auth read, which did not ELOCKED)
+    expect(order).toEqual(['refresh:lock-acquired', 'refresh:lock-released', 'channel:start', 'auth:sync-read'])
   })
 
   test('installs a process crash guard so an escaped channel rejection does not crash', async () => {
