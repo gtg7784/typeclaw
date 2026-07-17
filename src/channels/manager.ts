@@ -134,6 +134,10 @@ export type ChannelManagerOptions = {
   // otherwise spawn a duplicate child). Production wiring (src/run/index.ts)
   // supplies it from the LiveSubagentRegistry; tests omit it.
   newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
+  // Forwarded to the router so the graceful-restart handoff can name the
+  // background subagents a session was still awaiting. Same wiring shape as
+  // newestRunningChildSubagentStartedAt; tests omit it.
+  listRunningBackgroundSubagentNames?: (sessionId: string) => string[]
   // Persistent messenger SDKs usually reconnect themselves, but a host sleep/offline
   // cycle can leave a socket half-dead forever. The manager watches live adapters
   // and restarts one that stays disconnected past this grace period. Test seams are
@@ -199,6 +203,9 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.onRestart ? { onRestart: options.onRestart } : {}),
     ...(options.newestRunningChildSubagentStartedAt
       ? { newestRunningChildSubagentStartedAt: options.newestRunningChildSubagentStartedAt }
+      : {}),
+    ...(options.listRunningBackgroundSubagentNames
+      ? { listRunningBackgroundSubagentNames: options.listRunningBackgroundSubagentNames }
       : {}),
   })
   const createDiscordBot = options.createDiscordAdapter ?? createDiscordBotAdapter

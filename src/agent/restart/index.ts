@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 
-import { type RestartHandoffOrigin, writeRestartHandoff } from '@/agent/restart-handoff'
+import { acquireRestartHandoffLock, type RestartHandoffOrigin, writeRestartHandoff } from '@/agent/restart-handoff'
 import { sendHttp } from '@/hostd/client'
 import type { Stream } from '@/stream'
 
@@ -77,52 +77,73 @@ export async function requestContainerRestart({
         'host daemon control endpoint unavailable (TYPECLAW_HOSTD_URL/TYPECLAW_HOSTD_TOKEN not set); cannot request restart',
     }
   }
-  const reply = await sendHttp(request, { timeoutMs: ackBudget, url: httpUrl, token: httpToken })
+  const url = httpUrl
+  const token = httpToken
 
-  if (!reply.ok) return { ok: false, containerName, reason: reply.reason }
-
-  const restartTimestamp = restartedAt ?? new Date().toISOString()
-
-  // Fan out the restart notice to every live session BEFORE writing the handoff.
-  // The originating session's subscribeRestartNotice appends the
-  // typeclaw.restart-self entry synchronously (broker delivery + the JSONL
-  // append are both synchronous), so the handoff below points at a JSONL that
-  // already carries the "I'm back" instruction the rebooted container hydrates.
-  // Only after an accepted ACK, never on a failed/timed-out restart.
-  if (stream !== undefined && originatingSessionId !== undefined) {
-    const broadcast: ContainerRestartingBroadcast = {
-      kind: 'container-restarting',
-      restartedAt: restartTimestamp,
-      originatingSessionId,
-    }
-    stream.publish({ target: { kind: 'broadcast' }, payload: broadcast })
-  }
-
-  // Post-ACK: hostd has committed the restart, so a handoff-write failure must
-  // never demote it to a failure — that would render a false error in the TUI
-  // and swallow the accepted response. The handoff is a best-effort resume hint
-  // only; a missing one just cold-starts the rebooted container without the
-  // "I'm back" greeting. writeRestartHandoff swallows its own errors today, but
-  // guard here too so this contract survives the writer being changed later.
-  if (
+  const handoffTarget =
     agentDir !== undefined &&
     originatingSessionId !== undefined &&
     originatingSessionFile !== undefined &&
     handoffOrigin !== undefined
-  ) {
-    try {
-      await writeRestartHandoff(agentDir, {
-        schemaVersion: 2,
-        restartedAt: restartTimestamp,
-        originatingSessionId,
-        originatingSessionFile: basename(originatingSessionFile),
-        origin: handoffOrigin,
-        ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
-      })
-    } catch {
-      // intentional swallow — see the post-ACK rationale above
-    }
+      ? { agentDir, originatingSessionId, originatingSessionFile, handoffOrigin }
+      : undefined
+
+  // Hold the handoff lock from BEFORE the ACK through our post-ACK write. hostd
+  // fires `docker stop` → SIGTERM the instant it accepts, so the container's
+  // SIGTERM writer can run while we are still mid-flight; the lock makes it wait
+  // and then augment the exact handoff we commit here, instead of synthesizing
+  // one for another session in the gap before our write lands.
+  const releaseHandoffLock =
+    handoffTarget !== undefined ? await acquireRestartHandoffLock(handoffTarget.agentDir) : undefined
+  try {
+    return await performRestart()
+  } finally {
+    releaseHandoffLock?.()
   }
 
-  return { ok: true, containerName, restartedAt: restartTimestamp }
+  async function performRestart(): Promise<RequestContainerRestartResult> {
+    const reply = await sendHttp(request, { timeoutMs: ackBudget, url, token })
+
+    if (!reply.ok) return { ok: false, containerName, reason: reply.reason }
+
+    const restartTimestamp = restartedAt ?? new Date().toISOString()
+
+    // Fan out the restart notice to every live session BEFORE writing the handoff.
+    // The originating session's subscribeRestartNotice appends the
+    // typeclaw.restart-self entry synchronously (broker delivery + the JSONL
+    // append are both synchronous), so the handoff below points at a JSONL that
+    // already carries the "I'm back" instruction the rebooted container hydrates.
+    // Only after an accepted ACK, never on a failed/timed-out restart.
+    if (stream !== undefined && originatingSessionId !== undefined) {
+      const broadcast: ContainerRestartingBroadcast = {
+        kind: 'container-restarting',
+        restartedAt: restartTimestamp,
+        originatingSessionId,
+      }
+      stream.publish({ target: { kind: 'broadcast' }, payload: broadcast })
+    }
+
+    // Post-ACK: hostd has committed the restart, so a handoff-write failure must
+    // never demote it to a failure — that would render a false error in the TUI
+    // and swallow the accepted response. The handoff is a best-effort resume hint
+    // only; a missing one just cold-starts the rebooted container without the
+    // "I'm back" greeting. writeRestartHandoff swallows its own errors today, but
+    // guard here too so this contract survives the writer being changed later.
+    if (handoffTarget !== undefined) {
+      try {
+        await writeRestartHandoff(handoffTarget.agentDir, {
+          schemaVersion: 2,
+          restartedAt: restartTimestamp,
+          originatingSessionId: handoffTarget.originatingSessionId,
+          originatingSessionFile: basename(handoffTarget.originatingSessionFile),
+          origin: handoffTarget.handoffOrigin,
+          ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
+        })
+      } catch {
+        // intentional swallow — see the post-ACK rationale above
+      }
+    }
+
+    return { ok: true, containerName, restartedAt: restartTimestamp }
+  }
 }

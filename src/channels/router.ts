@@ -5257,16 +5257,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // still running, record their names in the restart handoff so the boot resume
   // can tell that thread its promised result was lost. Only one handoff exists
   // on disk, so the FIRST session with running background children wins; the
-  // rare "two threads mid-research at once" case notifies one.
-  //
-  // An accepted in-session restart may have ALREADY written a handoff (with its
-  // own origin, session, and triggeringAuthorId). We must not clobber it, and we
-  // must attach the names of ITS session's children — not some other live
-  // conversation's — or the resumed thread is told about work it never asked
-  // for. So peek first: when a handoff exists, augment it with the interrupted
-  // children of exactly `existing.originatingSessionId`. Only when no handoff
-  // exists do we scan live sessions and write a fresh channel handoff for the
-  // first one with running background children.
+  // rare "two threads mid-research at once" case notifies one. The fresh/stale
+  // and augment-vs-fresh-write decision is documented inline below.
   //
   // Returns whether the handoff now carries interrupted names, propagated from
   // the writer's real result so a swallowed filesystem failure reports false.

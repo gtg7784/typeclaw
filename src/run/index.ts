@@ -430,6 +430,11 @@ async function startAgentRuntime(
             child.status === 'running' && (newest === null || child.startedAt > newest) ? child.startedAt : newest,
           null,
         ),
+    listRunningBackgroundSubagentNames: (sessionId) =>
+      liveSubagentRegistry
+        .list({ parentSessionId: sessionId })
+        .filter((child) => child.status === 'running' && child.background === true)
+        .map((child) => child.subagentName),
     onReload: async () => {
       const { results } = await reloadRegistry.reloadAll()
       return formatChannelReloadSummary(results)
@@ -1040,6 +1045,10 @@ async function startAgentRuntime(
     forceExit.unref()
     void (async () => {
       if (containerName !== undefined) {
+        // Persist the interrupted-subagent handoff BEFORE markRestartAbortForAllLive
+        // aborts the sessions and stop() tears them down — both read the same live
+        // set this write depends on.
+        await channelManager.router.writeInterruptedSubagentHandoff().catch(() => undefined)
         await markRestartAbortPendingForOrigin(cwd, { kind: 'tui', sessionId: 'tui' }).catch(() => undefined)
         await channelManager.router.markRestartAbortForAllLive().catch(() => undefined)
       }
