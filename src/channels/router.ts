@@ -10,7 +10,13 @@ import { resolveFallbackChain } from '@/agent/model-fallback'
 import { applyModelRuntimeOverrides } from '@/agent/model-overrides'
 import { forgetSharedLoopGuardTool } from '@/agent/plugin-tools'
 import { detectHardProviderError, isFailoverWorthy, subscribeProviderErrors } from '@/agent/provider-error'
-import type { RestartHandoff } from '@/agent/restart-handoff'
+import {
+  acquireRestartHandoffLock,
+  peekRestartHandoff,
+  RESTART_HANDOFF_TTL_MS,
+  type RestartHandoff,
+  writeRestartHandoff,
+} from '@/agent/restart-handoff'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import {
@@ -215,6 +221,38 @@ export const RESTART_RESUME_WAKE_REMINDER = [
   '',
   '---',
 ].join('\n')
+
+// The lost-work directive: names the interrupted subagents and tells the model
+// to inform the thread, in the audience's language, that the result was lost —
+// never to re-run it automatically (the human decides whether to re-ask). Used
+// standalone when a racing inbound already provides the wake turn, and embedded
+// in the fuller resume reminder when the synthetic wake fires. Rendered as plain
+// text so a non-Latin subagent name survives intact.
+export function buildInterruptedSubagentNotice(interruptedSubagents: readonly string[]): string {
+  const names = interruptedSubagents.join(', ')
+  return [
+    '---',
+    '**[SYSTEM MESSAGE — not from a human]**',
+    '',
+    `A background task you had promised a result for was lost when the container`,
+    `restarted (interrupted subagent(s): ${names}). Briefly tell the people in`,
+    `this conversation, in their own language, that the result was lost to a`,
+    `restart and they can ask again if they still want it. Do not silently`,
+    `re-run it. Do not acknowledge or reply to this notice itself.`,
+    '',
+    '---',
+  ].join('\n')
+}
+
+// The synthetic "I'm back" wake, optionally carrying the lost-work directive
+// when the restart interrupted background subagents this session had promised
+// results for. With none, it is the plain wake reminder unchanged.
+export function buildRestartResumeWakeReminder(interruptedSubagents?: readonly string[]): string {
+  if (interruptedSubagents === undefined || interruptedSubagents.length === 0) {
+    return RESTART_RESUME_WAKE_REMINDER
+  }
+  return `${RESTART_RESUME_WAKE_REMINDER}\n\n${buildInterruptedSubagentNotice(interruptedSubagents)}`
+}
 // Ceiling on tool-source channel sends that a same-turn router policy DENIED
 // without delivering — `skip-locked`, `turn-cap`, or `duplicate`. Such denials
 // return a soft error and do NOT increment `consecutiveSends`, so a model that
@@ -1388,6 +1426,10 @@ export type ChannelRouter = {
   // Graceful-restart shutdown: mark + abort every live channel session so each
   // scope's incomplete todos auto-continue on the next boot. See the impl.
   markRestartAbortForAllLive: () => Promise<void>
+  // Graceful-restart shutdown: persist a channel handoff naming the background
+  // subagents a live session was still awaiting, so the resume greeting can tell
+  // that thread the promised result was lost. Resolves true iff one was written.
+  writeInterruptedSubagentHandoff: () => Promise<boolean>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
@@ -1521,6 +1563,11 @@ export type CreateChannelRouterOptions = {
   // spawned child is still inside its window. Production wiring forwards the
   // LiveSubagentRegistry; omitted (tests, no-subagent setups) means no pin.
   newestRunningChildSubagentStartedAt?: (sessionId: string) => number | null
+  // Names of the still-running BACKGROUND subagents for a parent session, used
+  // by writeInterruptedSubagentHandoff on graceful restart to name the lost
+  // work in the resume greeting. Background-only: a foreground child returns its
+  // result inline, so it is not orphaned by the bounce. Omitted means none.
+  listRunningBackgroundSubagentNames?: (sessionId: string) => string[]
 }
 
 export type RestartCommandContext = {
@@ -5206,6 +5253,81 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // Graceful-restart hint: if a live channel session has background subagents
+  // still running, record their names in the restart handoff so the boot resume
+  // can tell that thread its promised result was lost. Only one handoff exists
+  // on disk, so the FIRST session with running background children wins; the
+  // rare "two threads mid-research at once" case notifies one.
+  //
+  // An accepted in-session restart may have ALREADY written a handoff (with its
+  // own origin, session, and triggeringAuthorId). We must not clobber it, and we
+  // must attach the names of ITS session's children — not some other live
+  // conversation's — or the resumed thread is told about work it never asked
+  // for. So peek first: when a handoff exists, augment it with the interrupted
+  // children of exactly `existing.originatingSessionId`. Only when no handoff
+  // exists do we scan live sessions and write a fresh channel handoff for the
+  // first one with running background children.
+  //
+  // Returns whether the handoff now carries interrupted names, propagated from
+  // the writer's real result so a swallowed filesystem failure reports false.
+  const writeInterruptedSubagentHandoff = async (): Promise<boolean> => {
+    const listNames = options.listRunningBackgroundSubagentNames
+    if (listNames === undefined) return false
+
+    // Take the same lock `/restart` holds so our peek→select→write is atomic
+    // relative to its post-ACK write: either it commits first and we augment the
+    // exact handoff, or we commit first and it overwrites with its own origin —
+    // never an interleaved read-modify-write that drops one producer's data.
+    const release = await acquireRestartHandoffLock(options.agentDir)
+    try {
+      // A FRESH existing handoff is authoritative: it is the accepted in-session
+      // restart's, so we augment it (never clobber its origin/author with a
+      // different live session's) — or, if its own session has no running
+      // children, leave it untouched and record nothing. A STALE handoff is not
+      // authoritative: peekRestartHandoff applies no TTL, so an unclaimed TUI
+      // handoff left on disk by kind-aware consume can surface here; honoring it
+      // would suppress THIS restart's note or preserve its old restartedAt so the
+      // next boot discards the note as stale — so we ignore it and write fresh
+      // from the current live sessions. When we augment, stamp restartedAt=now()
+      // so the note survives the boot TTL.
+      const existing = await peekRestartHandoff(options.agentDir)
+      const existingIsFresh = existing !== null && now() - Date.parse(existing.restartedAt) <= RESTART_HANDOFF_TTL_MS
+      if (existing !== null && existingIsFresh) {
+        const names = listNames(existing.originatingSessionId)
+        if (names.length === 0) return false
+        return await writeRestartHandoff(options.agentDir, {
+          ...existing,
+          restartedAt: new Date(now()).toISOString(),
+          interruptedSubagents: names,
+        })
+      }
+
+      for (const live of Array.from(liveSessions.values())) {
+        const names = listNames(live.sessionId)
+        if (names.length === 0) continue
+        const sessionFile = live.getTranscriptPath?.()
+        if (sessionFile === undefined) continue
+        // Carry the session's author (same precedence as buildRestartCommandContext)
+        // so boot re-seeds lastTurnAuthorId. Without it an author-scoped role demotes
+        // on resume and the reminder-only turn can lose channel.send — i.e. fail to
+        // deliver the very lost-work notice this handoff exists for.
+        const triggeringAuthorId = live.currentTurnAuthorId ?? live.lastTurnAuthorId ?? undefined
+        return await writeRestartHandoff(options.agentDir, {
+          schemaVersion: 2,
+          restartedAt: new Date(now()).toISOString(),
+          originatingSessionId: live.sessionId,
+          origin: { kind: 'channel', key: live.key },
+          originatingSessionFile: basename(sessionFile),
+          interruptedSubagents: names,
+          ...(triggeringAuthorId !== undefined ? { triggeringAuthorId } : {}),
+        })
+      }
+      return false
+    } finally {
+      release()
+    }
+  }
+
   // Boot-time resume for a restart that originated from a channel session, in
   // two phases to close the race with adapters that begin receiving inbounds.
   //
@@ -5299,8 +5421,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // A real inbound coalesced onto the reservation during boot: it is the
         // wake. Adding the synthetic "I'm back" turn on top would duplicate
         // work / stack a spurious turn, so skip it and let the inbound drain.
+        // The interrupted-subagent directive is NOT part of that generic wake,
+        // though: it is the only signal that a promised result was lost, and the
+        // boot already consumed the handoff, so if we drop it here no later turn
+        // re-delivers it. Queue it AND drain ourselves: `sawInbound` is set
+        // before engagement is decided, so an observe-only inbound returns
+        // without draining and would strand the reminder. drain() is guarded
+        // (`draining || destroyed` no-ops) so if the inbound WILL engage this is
+        // a harmless second call, and its loop consumes pendingSystemReminders
+        // either way. Still skip the generic synthetic wake.
         if (reservation.sawInbound) {
-          logger.info(`[channels] ${keyId}: restart-resume coalesced with a real inbound; skipping synthetic wake`)
+          if (handoff.interruptedSubagents !== undefined && handoff.interruptedSubagents.length > 0) {
+            live.pendingSystemReminders.push(buildInterruptedSubagentNotice(handoff.interruptedSubagents))
+            logger.info(
+              `[channels] ${keyId}: restart-resume coalesced with a real inbound; delivering interrupted-subagent notice`,
+            )
+            void drain(live)
+          } else {
+            logger.info(`[channels] ${keyId}: restart-resume coalesced with a real inbound; skipping synthetic wake`)
+          }
           return
         }
 
@@ -5314,7 +5453,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.error(`[channels] ${keyId}: restart-resume clear abort suppression failed: ${describe(err)}`),
         )
 
-        live.pendingSystemReminders.push(RESTART_RESUME_WAKE_REMINDER)
+        live.pendingSystemReminders.push(buildRestartResumeWakeReminder(handoff.interruptedSubagents))
         logger.info(`[channels] ${keyId}: restart-resume waking session ${live.sessionId}`)
         void drain(live)
       },
@@ -5741,6 +5880,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     stop,
     tearDownAllLive,
     markRestartAbortForAllLive,
+    writeInterruptedSubagentHandoff,
     liveCount: () => liveSessions.size,
     __testing: {
       flushDebounce: async (key: ChannelKey) => {
