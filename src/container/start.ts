@@ -969,13 +969,13 @@ async function inspectContainer(exec: DockerExec, name: string): Promise<Inspect
 // removal needs the user to act (`docker rm -f <name>` manually, or restart
 // Docker) instead of looping forever.
 //
-// A small bounded backoff (100/200/400ms) follows each cleanup before the
+// A bounded backoff (100/200/400/800/1200ms) follows each cleanup before the
 // next `docker run`. waitForRemoval polls `docker inspect`, which can
 // report the container gone BEFORE Docker's internal name-reservation
-// table has fully released the name. Without the backoff, the three
-// retries can all fire inside the same daemon drain window and exhaust
-// uselessly. The cumulative ~700ms is small next to the docker run RTT
-// itself and dwarfed by the user-visible cost of a failed start.
+// table has fully released the name. Without the backoff, the retries can
+// all fire inside the same daemon drain window and exhaust uselessly. The
+// cumulative ~2.7s is small next to the docker run RTT itself and dwarfed by
+// the user-visible cost of a failed start.
 //
 // Only the name-conflict path engages this destructive retry. Any other
 // non-zero exit (port-allocated, image-not-found, permission-denied) is
@@ -999,7 +999,7 @@ async function execRunWithConflictRetry(
   return last
 }
 
-const CONFLICT_RETRY_BACKOFFS_MS = [100, 200, 400] as const
+const CONFLICT_RETRY_BACKOFFS_MS = [100, 200, 400, 800, 1200] as const
 
 // Idempotent path for `start()`: the named container is already up. Reflect
 // the live container's identity (id) and host port in the result so callers

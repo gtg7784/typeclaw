@@ -3426,12 +3426,12 @@ describe('start (composition)', () => {
     // `docker inspect`. cleanupRunCorpse's probe returns 'gone' (inspect
     // says the corpse is removed), but the very next `docker run --name`
     // still hits a Conflict because the reservation hasn't released. The
-    // production fix's bounded backoff (100/200/400ms) covers exactly
-    // this residual race — without it, three rapid-fire retries all
-    // happen inside the same drain window and exhaust uselessly.
+    // production fix's bounded backoff (100/200/400/800/1200ms, cumulative
+    // ~2.7s) covers exactly this residual race — without it, rapid-fire
+    // retries all happen inside the same drain window and exhaust uselessly.
     //
     // Mutation check: delete the `await setTimeout(backoffMs)` from
-    // execRunWithConflictRetry and this test fails — runAttempts hits 4
+    // execRunWithConflictRetry and this test fails — runAttempts hits 4+
     // immediately and result.ok is false because the drain never
     // completes between attempts.
     await writeDockerfile(root)
@@ -3442,7 +3442,7 @@ describe('start (composition)', () => {
     // drainMs on slow filesystems (Windows CI), which would let the very
     // first run land after the window and skip the retry path entirely.
     let drainStart: number | null = null
-    const drainMs = 150
+    const drainMs = 1300
     const conflictStderr =
       'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
     const exec: DockerExec = async (args) => {
