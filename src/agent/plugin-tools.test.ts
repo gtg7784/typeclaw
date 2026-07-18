@@ -2479,6 +2479,53 @@ describe('wrapBuiltinToolDefinition (hook + guard pipeline)', () => {
     }
   })
 
+  test('missing-path builtin file tool: rethrown error and tool.after both carry the recovery hint', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-missing-path-'))
+    const missing = path.join(agentDir, 'does-not-exist.txt')
+    const afterResults: unknown[] = []
+    let executed = false
+    const tool = {
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute() {
+        executed = true
+        return { content: [{ type: 'text' as const, text: 'unreachable' }], details: {} }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.after': (event) => {
+        afterResults.push(event.result)
+      },
+    })
+
+    const wrapped = wrapBuiltinToolDefinition(tool, { agentDir, sessionId: 's', hooks })
+
+    try {
+      // enforceAndPinToolFiles throws the authorization error BEFORE execute
+      const thrown = await wrapped
+        .execute('c', { path: missing } as never, undefined, undefined, {} as never)
+        .then(() => undefined)
+        .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+
+      expect(executed).toBe(false)
+      expect(thrown?.message).toContain('tool input did not exist while being authorized')
+      expect(thrown?.message).toContain('the path does not exist')
+
+      expect(afterResults).toHaveLength(1)
+      const afterText = ((afterResults[0] as ToolResult).content as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+      expect(afterText).toContain('tool input did not exist while being authorized')
+      expect(afterText).toContain('the path does not exist')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test.skipIf(lacksInodeAnchoring)(
     'edit built-in agent tool exposes and strips guard acknowledgements before execution',
     async () => {

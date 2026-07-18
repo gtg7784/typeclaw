@@ -70,6 +70,7 @@ import { createLoopGuard, type LoopGuard, type LoopGuardDecision } from './loop-
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import { enforceSubagentBashPolicy, type SubagentBashPolicy } from './reviewer-bash-policy'
 import type { SessionOrigin } from './session-origin'
+import { remediateToolErrorMessage } from './tool-error-remediation'
 import { enforceAndPinToolFiles, writeToolOutputNoFollow } from './tool-file-safety'
 import { SUBAGENT_OUTPUT_TOOL_NAME, type SubagentOutputToolDetails } from './tools/subagent-output'
 import { webFetchTool } from './tools/webfetch'
@@ -625,6 +626,15 @@ export function wrapBuiltinToolDefinition<TParams extends TSchema, TDetails = un
         const outcomes = await Promise.allSettled(cleanup)
         const failed = outcomes.find((outcome) => outcome.status === 'rejected')
         if (failed?.status === 'rejected') cleanupError = failed.reason
+      }
+      // Decorate genuine, user-correctable builtin file-tool failures with a
+      // recovery hint so weaker models retry correctly. Only executionError (not
+      // cleanupError) and only non-aborted Error instances; remediation is a
+      // no-op for every message/tool outside the allowlist, so abort, sandbox,
+      // and policy errors pass through untouched. Mutating the message in place
+      // preserves the error's subclass and stack for the rethrow.
+      if (executionError instanceof Error && signal?.aborted !== true) {
+        executionError.message = remediateToolErrorMessage(tool.name, executionError.message)
       }
       const finalError = executionError ?? cleanupError
       if (finalError !== undefined) {
