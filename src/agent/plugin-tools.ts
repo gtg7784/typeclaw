@@ -814,6 +814,17 @@ export function buildSandboxEnvPolicy(
   // out of the rendered bwrap argv. Sandbox-integrity names were already dropped
   // in resolveExposableEnvNames — these are the survivors.
   for (const key of exposableEnvNames) pushInherit(key)
+  // Pass the entrypoint-exported Xvfb display (start_xvfb: `export DISPLAY=:99`)
+  // through --clearenv, else sandboxed `agent-browser --headed` dies with
+  // "Missing X server or $DISPLAY". Passing the runtime's OWN value (not a fixed
+  // ":99") keeps `docker.file.xvfb=false` advertising no display. Rendered via
+  // `set` (a display number is neither a credential nor shell-injectable), and no
+  // /tmp/.X11-unix bind is needed: Chrome reaches Xvfb over the netns-scoped
+  // abstract X11 socket while bash keeps network:'inherit'.
+  const display = process.env['DISPLAY']
+  if (display !== undefined && display !== '' && !Object.hasOwn(set, 'DISPLAY') && !inheritSeen.has('DISPLAY')) {
+    set['DISPLAY'] = display
+  }
   return {
     ...(inherit.length > 0 ? { inherit } : {}),
     ...(Object.keys(set).length > 0 ? { set } : {}),
