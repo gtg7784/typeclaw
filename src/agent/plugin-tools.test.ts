@@ -3601,6 +3601,39 @@ describe('buildSandboxEnvPolicy exposable .env names', () => {
   })
 })
 
+describe('buildSandboxEnvPolicy DISPLAY passthrough (agent-browser --headed)', () => {
+  const originalDisplay = process.env['DISPLAY']
+
+  afterEach(() => {
+    if (originalDisplay === undefined) delete process.env['DISPLAY']
+    else process.env['DISPLAY'] = originalDisplay
+  })
+
+  test('passes the runtime DISPLAY into set so sandboxed Chrome finds the X server', () => {
+    process.env['DISPLAY'] = ':99'
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBe(':99')
+  })
+
+  test('omits DISPLAY when the runtime has none (docker.file.xvfb=false)', () => {
+    delete process.env['DISPLAY']
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBeUndefined()
+  })
+
+  test('omits DISPLAY when set to an empty string', () => {
+    process.env['DISPLAY'] = ''
+    const policy = buildSandboxEnvPolicy(undefined, undefined, [])
+    expect(policy.set?.DISPLAY).toBeUndefined()
+  })
+
+  test('does not overwrite a DISPLAY already provided by the privileged runtime set', () => {
+    process.env['DISPLAY'] = ':99'
+    const policy = buildSandboxEnvPolicy(undefined, { DISPLAY: ':1' }, [])
+    expect(policy.set?.DISPLAY).toBe(':1')
+  })
+})
+
 describe('wrapBuiltinToolDefinition subagent bash policy (capability fence, role-independent)', () => {
   function fakeBash(record: { command?: string }) {
     return {
